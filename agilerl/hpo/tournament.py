@@ -39,8 +39,7 @@ class TournamentSelection:
         self.language_model = None
 
     def _tournament(self, fitness_values: list[float]) -> int:
-        """
-        Perform tournament selection given a list of fitness values.
+        """Perform tournament selection given a list of fitness values.
 
         :param fitness_values: List of fitness values
         :type fitness_values: list[float]
@@ -49,14 +48,13 @@ class TournamentSelection:
         """
         selection = np.random.randint(0, len(fitness_values), size=self.tournament_size)
         selection_values = [fitness_values[i] for i in selection]
-        winner = selection[np.argmax(selection_values)]
-        return winner
+        return selection[np.argmax(selection_values)]
 
     def _elitism(
-        self, population: PopulationType
+        self,
+        population: PopulationType,
     ) -> tuple[EvolvableAlgorithm, np.ndarray, int]:
-        """
-        Perform elitism selection given a population of agents.
+        """Perform elitism selection given a population of agents.
 
         :param population: Population of agents
         :type population: PopulationType
@@ -71,10 +69,10 @@ class TournamentSelection:
         return elite, rank, max_id
 
     def select(
-        self, population: PopulationType
+        self,
+        population: PopulationType,
     ) -> tuple[EvolvableAlgorithm, PopulationType]:
-        """
-        Select the best agent and new population of agents following tournament selection.
+        """Select the best agent and new population of agents following tournament selection.
 
         :param population: Population of agents
         :type population: PopulationType
@@ -91,10 +89,10 @@ class TournamentSelection:
         )
 
     def _select_standard_agents(
-        self, population: PopulationType
+        self,
+        population: PopulationType,
     ) -> tuple[EvolvableAlgorithm, PopulationType]:
-        """
-        Returns best agent and new population of agents following tournament selection. Used for
+        """Return best agent and new population of agents following tournament selection. Used for
         a population of :class:`EvolvableAlgorithm <agilerl.algorithms.core.RLAlgorithm>` or
         :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.MultiAgentRLAlgorithm>` agents.
 
@@ -112,7 +110,7 @@ class TournamentSelection:
             selection_size = self.population_size
 
         # Select parents of next gen using tournament selection
-        for idx in range(selection_size):
+        for _idx in range(selection_size):
             max_id += 1
             actor_parent = population[self._tournament(rank)]
             new_individual = actor_parent.clone(max_id, wrap=False)
@@ -121,10 +119,10 @@ class TournamentSelection:
         return elite, new_population
 
     def _select_llm_agents(
-        self, population: PopulationType
+        self,
+        population: PopulationType,
     ) -> tuple[EvolvableAlgorithm, PopulationType]:
-        """
-        Returns best agent and new population of agents following tournament selection. Used for
+        """Return best agent and new population of agents following tournament selection. Used for
         a population of :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param population: Population of agents
@@ -152,7 +150,7 @@ class TournamentSelection:
                 max_id += 1
                 actor_parent_idx = old_population_idxs[self._tournament(rank)]
                 new_population_idxs.append(
-                    (actor_parent_idx, max_id, False)
+                    (actor_parent_idx, max_id, False),
                 )  # (old_idx_to_clone, new_labelled_idx, is_elite)
 
             # Isolate any agents that are not in the new population to be deleted

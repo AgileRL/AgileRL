@@ -61,8 +61,7 @@ if __name__ == "__main__":
         env = ss.color_reduction_v0(env, mode="B")
         env = ss.resize_v1(env, x_size=84, y_size=84)
         env = ss.frame_stack_v1(env, 4)
-        env = ss.reshape_v0(env, (4, 84, 84))
-        return env
+        return ss.reshape_v0(env, (4, 84, 84))
 
     # Environment processing for image based observations
     env = make_multi_agent_vect_envs(env=make_env, num_envs=num_envs)
@@ -162,7 +161,7 @@ if __name__ == "__main__":
             reset_noise_indices = []
             term_array = np.array(list(termination.values())).transpose()
             trunc_array = np.array(list(truncation.values())).transpose()
-            for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
+            for idx, (d, t) in enumerate(zip(term_array, trunc_array, strict=False)):
                 if np.any(d) or np.any(t):
                     completed_episode_scores.append(scores[idx])
                     agent.scores.append(scores[idx])
@@ -188,7 +187,7 @@ if __name__ == "__main__":
             f"Steps {agent.steps[-1]}\n"
             f"Scores: {np.mean(mean_scores)}\n"
             f"Fitnesses: {np.mean(fitness)}\n"
-            f"5 fitness avgs: {np.mean(agent.fitness[-5:])}"
+            f"5 fitness avgs: {np.mean(agent.fitness[-5:])}",
         )
 
         # Update step counter

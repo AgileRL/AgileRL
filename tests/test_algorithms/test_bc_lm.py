@@ -20,7 +20,7 @@ class MockTokenizer:
         self.eod_token_id = 5
         self.vocab = ["<pad>", "</a>", "</s>", "<s>", "<a>", "</eod>", "a", "b", "c"]
         self.t2i = {token: i for i, token in enumerate(self.vocab)}
-        self.i2t = {i: token for i, token in enumerate(self.vocab)}
+        self.i2t = dict(enumerate(self.vocab))
 
     def decode(self, tokens, clean_up_tokenization_spaces=False):
         return " ".join([self.i2t.get(t, "<unk>") for t in tokens])
@@ -46,6 +46,22 @@ class MockDataset(RL_Dataset):
         token_reward = MockTokenReward()
         super().__init__(tokenizer, token_reward, max_len)
 
+    def __iter__(self):
+        # Yield a minimal DataPoint so the dataset is iterable
+        yield DataPoint(
+            raw_str="",
+            tokens=[1, 2, 3, 4, 5],
+            state_idxs=[0, 1],
+            action_idxs=[0, 1],
+            rewards=[0.1, 0.1],
+            terminals=[0, 1],
+            utterance_state_idxs=[0, 1],
+            utterance_action_idxs=[0, 1],
+            utterance_rewards=[0.1, 0.1],
+            utterance_terminals=[0, 1],
+            meta=None,
+        )
+
     def collate(self, items, device):
         if isinstance(items, dict):
             return items
@@ -66,6 +82,21 @@ class MockDatasetNoneMaxLen(RL_Dataset):
         tokenizer = MockTokenizer()
         token_reward = MockTokenReward()
         super().__init__(tokenizer, token_reward, max_len=None)
+
+    def __iter__(self):
+        yield DataPoint(
+            raw_str="",
+            tokens=[1, 2, 3, 4, 5],
+            state_idxs=[0, 1],
+            action_idxs=[0, 1],
+            rewards=[0.1, 0.1],
+            terminals=[0, 1],
+            utterance_state_idxs=[0, 1],
+            utterance_action_idxs=[0, 1],
+            utterance_rewards=[0.1, 0.1],
+            utterance_terminals=[0, 1],
+            meta=None,
+        )
 
     def collate(self, items, device):
         if isinstance(items, dict):
@@ -181,7 +212,10 @@ class TestBC_LM:
         prefix_attn_mask = torch.ones(2, 3)
 
         logits, past_key_values = bc_lm(
-            tokens, attn_mask, prefix_embs, prefix_attn_mask
+            tokens,
+            attn_mask,
+            prefix_embs,
+            prefix_attn_mask,
         )
 
         assert logits.shape == (2, 5, 9)
@@ -196,7 +230,10 @@ class TestBC_LM:
         prefix_attn_mask = torch.ones(2, 3)
 
         logits, past_key_values = bc_lm(
-            tokens, attn_mask, prefix_embs, prefix_attn_mask
+            tokens,
+            attn_mask,
+            prefix_embs,
+            prefix_attn_mask,
         )
 
         assert logits.shape == (2, 5, 9)
@@ -240,7 +277,8 @@ class TestBC_LM:
         except Exception as e:
             # Accept any exception due to model internals, but ensure code is executed
             assert "position" in str(e) or isinstance(
-                e, (RuntimeError, TypeError, AssertionError)
+                e,
+                (RuntimeError, TypeError, AssertionError),
             )
 
     def test_get_weights_scatter(self, bc_lm):
@@ -270,7 +308,7 @@ class TestBC_LM:
         assert weights[1, 0] == 0.1  # Position 0 should be transition_weight
         assert torch.all(weights[1, 1:3] == 1.0)  # Positions 1, 2 should be 1.0
         assert torch.all(
-            weights[1, 3:] == 0.1
+            weights[1, 3:] == 0.1,
         )  # Remaining positions should be transition_weight
 
     def test_get_weights_scatter_line_231(self, bc_lm):
@@ -388,13 +426,16 @@ class TestBC_LM:
         tokens = torch.randint(0, 9, (2,))
         # Create proper past_key_values structure for 2 layers
         obs = tuple(
-            [(torch.randn(2, 4, 3, 16), torch.randn(2, 4, 3, 16)) for _ in range(2)]
+            [(torch.randn(2, 4, 3, 16), torch.randn(2, 4, 3, 16)) for _ in range(2)],
         )
 
         # The current implementation has a bug where it tries to access past_key_values
         # from logits tensor. Let's test the basic functionality without the buggy part.
         scores, logits = bc_lm.score(
-            (tokens.unsqueeze(1), None), {"past_key_values": obs}, temp=0.5, top_k=3
+            (tokens.unsqueeze(1), None),
+            {"past_key_values": obs},
+            temp=0.5,
+            top_k=3,
         )
 
         assert isinstance(scores, torch.Tensor)
@@ -410,7 +451,7 @@ class TestBC_LM:
     def test_next_score_attribute_error(self, bc_lm):
         tokens = torch.randint(0, 9, (2,))
         obs = tuple(
-            [(torch.randn(2, 4, 3, 16), torch.randn(2, 4, 3, 16)) for _ in range(2)]
+            [(torch.randn(2, 4, 3, 16), torch.randn(2, 4, 3, 16)) for _ in range(2)],
         )
         with pytest.raises(AttributeError):
             bc_lm.next_score(tokens, obs)
@@ -456,7 +497,10 @@ class TestBC_Policy:
             return "end" in text
 
         generations, log_probs = bc_policy.sample_raw(
-            tokens, attn_mask, termination_condition, num_generations=2
+            tokens,
+            attn_mask,
+            termination_condition,
+            num_generations=2,
         )
 
         assert isinstance(generations, list)
@@ -498,7 +542,10 @@ class TestBC_Policy:
             return "end" in text
 
         generations, scores = bc_policy.beam_raw(
-            tokens, attn_mask, termination_condition, beam_width=2
+            tokens,
+            attn_mask,
+            termination_condition,
+            beam_width=2,
         )
 
         assert isinstance(generations, list)
@@ -542,7 +589,9 @@ class TestBC_Policy:
             return "end" in text
 
         generations, probs = bc_policy.generate(
-            items, termination_condition, num_generations=2
+            items,
+            termination_condition,
+            num_generations=2,
         )
 
         assert isinstance(generations, list)
@@ -613,7 +662,11 @@ class TestBC_Policy:
 
         # Use max_generation_len > 1 to ensure the while loop runs
         bc_policy.sample_raw(
-            tokens, attn_mask, term, num_generations=1, max_generation_len=2
+            tokens,
+            attn_mask,
+            term,
+            num_generations=1,
+            max_generation_len=2,
         )
 
     def test_generate_invalid_kind_raises(self, bc_lm):
@@ -652,7 +705,11 @@ class TestBC_Policy:
             return False
 
         bc_policy.sample_raw(
-            tokens, attn_mask, term, num_generations=1, max_generation_len=2
+            tokens,
+            attn_mask,
+            term,
+            num_generations=1,
+            max_generation_len=2,
         )
 
     def test_beam_raw_termination_mask_update(self, bc_policy):
@@ -677,7 +734,11 @@ class TestBC_Policy:
 
         # This should hit the if max_length is None: max_length = self.bc_lm.model.block_size
         policy.sample_raw(
-            tokens, attn_mask, term, num_generations=1, max_generation_len=2
+            tokens,
+            attn_mask,
+            term,
+            num_generations=1,
+            max_generation_len=2,
         )
 
     def test_beam_raw_none_max_len(self, bc_lm_none_max_len):
@@ -700,7 +761,8 @@ class TestBC_Policy:
             return True
 
         generations, probs = bc_policy.generate(
-            {"tokens": tokens, "attn_mask": attn_mask}, term
+            {"tokens": tokens, "attn_mask": attn_mask},
+            term,
         )
         assert isinstance(generations, list)
         assert probs is not None
@@ -729,7 +791,8 @@ class TestBC_Policy:
 
         # This should hit the return statement in generate
         generations, probs = bc_policy.generate(
-            {"tokens": tokens, "attn_mask": attn_mask}, term
+            {"tokens": tokens, "attn_mask": attn_mask},
+            term,
         )
         assert isinstance(generations, list)
         assert probs is not None
@@ -745,7 +808,8 @@ class TestBC_Policy:
 
         # This should hit the return statement in generate for beam kind
         generations, probs = policy.generate(
-            {"tokens": tokens, "attn_mask": attn_mask}, term
+            {"tokens": tokens, "attn_mask": attn_mask},
+            term,
         )
         assert isinstance(generations, list)
         assert probs is not None
@@ -773,7 +837,8 @@ class TestBC_Policy:
 
         # This should hit the return statement in generate for sample kind
         generations, probs = bc_policy.generate(
-            {"tokens": tokens, "attn_mask": attn_mask}, term
+            {"tokens": tokens, "attn_mask": attn_mask},
+            term,
         )
         assert isinstance(generations, list)
         assert probs is not None
@@ -789,7 +854,8 @@ class TestBC_Policy:
 
         # This should hit the return statement in generate for beam kind
         generations, probs = policy.generate(
-            {"tokens": tokens, "attn_mask": attn_mask}, term
+            {"tokens": tokens, "attn_mask": attn_mask},
+            term,
         )
         assert isinstance(generations, list)
         assert probs is not None
@@ -827,7 +893,7 @@ class TestBC_Evaluator:
                 utterance_action_idxs=[1, 2],
                 utterance_rewards=[0.1, 0.2],
                 utterance_terminals=[0, 1],
-            )
+            ),
         ]
 
         results = bc_evaluator.evaluate(bc_lm, items)
@@ -857,7 +923,7 @@ class TestBC_Evaluator:
                 utterance_action_idxs=[1, 2],
                 utterance_rewards=[0.1, 0.2],
                 utterance_terminals=[0, 1],
-            )
+            ),
         ]
 
         # This should not raise an error even with verbose=True
@@ -1005,7 +1071,9 @@ class TestIntegration:
 
         # Generate
         generations, log_probs = policy.generate(
-            items, termination_condition, num_generations=2
+            items,
+            termination_condition,
+            num_generations=2,
         )
 
         assert isinstance(generations, list)
@@ -1030,7 +1098,7 @@ class TestIntegration:
                 utterance_action_idxs=[1, 2],
                 utterance_rewards=[0.1, 0.2],
                 utterance_terminals=[0, 1],
-            )
+            ),
         ]
 
         # Evaluate

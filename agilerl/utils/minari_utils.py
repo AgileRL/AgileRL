@@ -1,5 +1,4 @@
-import os
-from typing import Optional
+from pathlib import Path
 
 import h5py
 import minari
@@ -14,53 +13,54 @@ from agilerl.components.replay_buffer import ReplayBuffer
 
 
 def load_minari_dataset(
-    dataset_id: str, accelerator: Optional[Accelerator] = None, remote: bool = False
+    dataset_id: str,
+    accelerator: Accelerator | None = None,
+    remote: bool = False,
 ) -> minari.MinariDataset:
     """Load a Minari dataset either from local storage or remote repository.
 
     :param dataset_id: The ID of the Minari dataset to load
+    :type dataset_id: str
     :param accelerator: Optional accelerator for distributed training
+    :type accelerator: Accelerator | None
     :param remote: Whether to load from remote repository. Defaults to False.
     :return: The loaded Minari dataset
     :raises KeyError: If remote=True and dataset_id is not a valid remote dataset
     :raises FileNotFoundError: If remote=False and dataset not found locally
     """
-    if remote:
-        if dataset_id not in list(minari.list_remote_datasets().keys()):
-            raise KeyError(
-                "Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ for more details."
-            )
+    if remote and dataset_id not in list(minari.list_remote_datasets().keys()):
+        msg = "Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ for more details."
+        raise KeyError(msg)
 
     file_path = get_dataset_path(dataset_id)
 
-    if not os.path.exists(file_path):
+    if not Path(file_path).exists():
         if remote:
             if accelerator is not None:
                 accelerator.wait_for_everyone()
                 if accelerator.is_main_process:
-                    print("download dataset: ", dataset_id)
                     download_dataset(dataset_id)
                 accelerator.wait_for_everyone()
             else:
-                print("download dataset: ", dataset_id)
                 download_dataset(dataset_id)
         else:
-            raise FileNotFoundError(
+            msg = (
                 f"No local Dataset found for dataset id {dataset_id}. check https://minari.farama.org/ for "
                 "more details on remote dataset. For loading a remote dataset assign remote=True"
             )
+            raise FileNotFoundError(
+                msg,
+            )
 
-    minari_dataset = load_dataset(dataset_id)
-
-    return minari_dataset
+    return load_dataset(dataset_id)
 
 
 def minari_to_agile_buffer(
     dataset_id: str,
     memory: ReplayBuffer,
-    accelerator: Optional[Accelerator] = None,
+    accelerator: Accelerator | None = None,
     remote: bool = False,
-):
+) -> ReplayBuffer:
     """Convert a Minari dataset to an agile buffer.
 
     :param dataset_id: The ID of the Minari dataset to load
@@ -71,7 +71,7 @@ def minari_to_agile_buffer(
     """
     minari_dataset = load_minari_dataset(dataset_id, accelerator, remote)
     for episode in minari_dataset.iterate_episodes():
-        for num_steps in range(0, len(episode.rewards)):
+        for num_steps in range(len(episode.rewards)):
             observation = episode.observations[num_steps]
             next_observation = episode.observations[num_steps + 1]
             action = episode.actions[num_steps]
@@ -120,9 +120,9 @@ def minari_to_agile_dataset(dataset_id: str, remote: bool = False) -> h5py.File:
 
     agile_file_path = get_dataset_path(agile_dataset_id)
 
-    agile_dataset_path = os.path.join(agile_file_path, "data")
-    os.makedirs(agile_dataset_path, exist_ok=True)
-    data_path = os.path.join(agile_dataset_path, "main_data.hdf5")
+    agile_dataset_path = Path(agile_file_path) / "data"
+    agile_dataset_path.mkdir(parents=True, exist_ok=True)
+    data_path = agile_dataset_path / "main_data.hdf5"
 
     # with h5py.File(os.path.join(agile_file_path, "data", "main_data.hdf5"), "w") as f:
     f = h5py.File(data_path, "w")

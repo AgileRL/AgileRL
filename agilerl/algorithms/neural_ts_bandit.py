@@ -1,10 +1,9 @@
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from gymnasium import spaces
+from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -61,8 +60,8 @@ class NeuralTS(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
-        hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[dict[str, Any]] = None,
+        hp_config: HyperparameterConfig | None = None,
+        net_config: dict[str, Any] | None = None,
         gamma: float = 1.0,
         lamb: float = 1.0,
         reg: float = 0.000625,
@@ -70,12 +69,12 @@ class NeuralTS(RLAlgorithm):
         lr: float = 3e-3,
         normalize_images: bool = True,
         learn_step: int = 2,
-        mut: Optional[str] = None,
-        actor_network: Optional[EvolvableModule] = None,
+        mut: str | None = None,
+        actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
+        accelerator: Any | None = None,
         wrap: bool = True,
-    ):
+    ) -> None:
         super().__init__(
             observation_space,
             action_space,
@@ -90,11 +89,13 @@ class NeuralTS(RLAlgorithm):
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert isinstance(
-            gamma, (float, int)
+            gamma,
+            (float, int),
         ), "Scaling factor must be a float or integer."
         assert gamma > 0, "Scaling factor must be positive."
         assert isinstance(
-            lamb, (float, int)
+            lamb,
+            (float, int),
         ), "Regularization parameter lambda must be a float or integer."
         assert lamb > 0, "Regularization parameter lambda must be greater than zero."
         assert isinstance(reg, float), "Loss regularization parameter must be a float."
@@ -104,7 +105,8 @@ class NeuralTS(RLAlgorithm):
         assert isinstance(lr, float), "Learning rate must be a float."
         assert lr > 0, "Learning rate must be greater than zero."
         assert isinstance(
-            wrap, bool
+            wrap,
+            bool,
         ), "Wrap models flag must be boolean value True or False."
 
         self.gamma = gamma
@@ -119,8 +121,9 @@ class NeuralTS(RLAlgorithm):
 
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
+                msg = f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+                    msg,
                 )
 
             # Need to make deepcopies for target and detached networks
@@ -135,7 +138,8 @@ class NeuralTS(RLAlgorithm):
             )
 
             if not simba and not isinstance(
-                observation_space, (spaces.Dict, spaces.Tuple)
+                observation_space,
+                (spaces.Dict, spaces.Tuple),
             ):
                 # Layer norm is not used in the original implementation
                 encoder_config["layer_norm"] = False
@@ -143,7 +147,9 @@ class NeuralTS(RLAlgorithm):
             net_config["encoder_config"] = encoder_config
 
             self.actor = ValueNetwork(
-                observation_space=observation_space, device=self.device, **net_config
+                observation_space=observation_space,
+                device=self.device,
+                **net_config,
             )
 
         self.optimizer = OptimizerWrapper(optim.Adam, networks=self.actor, lr=self.lr)
@@ -160,11 +166,11 @@ class NeuralTS(RLAlgorithm):
         # Register network groups for mutations
         self.register_mutation_hook(self.init_params)
         self.register_network_group(
-            NetworkGroup(eval_network=self.actor, shared_networks=None, policy=True)
+            NetworkGroup(eval_network=self.actor, shared_networks=None, policy=True),
         )
 
     def init_params(self) -> None:
-        """Initializes parameters for the agent network."""
+        """Initialize parameters for the agent network."""
         self.exp_layer = self.actor.get_output_dense()
 
         self.numel = sum(
@@ -172,13 +178,15 @@ class NeuralTS(RLAlgorithm):
         )
         self.sigma_inv = self.lamb * torch.eye(self.numel).to(self.device)
         self.theta_0 = torch.cat(
-            [w.flatten() for w in self.exp_layer.parameters() if w.requires_grad]
+            [w.flatten() for w in self.exp_layer.parameters() if w.requires_grad],
         )
 
     def get_action(
-        self, obs: ObservationType, action_mask: Optional[np.ndarray] = None
+        self,
+        obs: ObservationType,
+        action_mask: np.ndarray | None = None,
     ) -> int:
-        """Returns the next action to take in the environment.
+        """Return the next action to take in the environment.
 
         :param obs: State observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
@@ -199,7 +207,7 @@ class NeuralTS(RLAlgorithm):
                     w.grad.detach().flatten() / np.sqrt(self.exp_layer.weight.size(0))
                     for w in self.exp_layer.parameters()
                     if w.requires_grad
-                ]
+                ],
             )
 
         with torch.no_grad():
@@ -208,8 +216,9 @@ class NeuralTS(RLAlgorithm):
                 std=self.gamma
                 * torch.sqrt(
                     torch.matmul(
-                        torch.matmul(g[:, None, :], self.sigma_inv), g[:, :, None]
-                    )[:, 0, :]
+                        torch.matmul(g[:, None, :], self.sigma_inv),
+                        g[:, :, None],
+                    )[:, 0, :],
                 ),
             )
 
@@ -230,7 +239,7 @@ class NeuralTS(RLAlgorithm):
         return action
 
     def learn(self, experiences: ExperiencesType) -> float:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param experiences: Batched states, rewards in that order.
         :type experiences: dict[str, torch.Tensor[float]]
@@ -250,9 +259,9 @@ class NeuralTS(RLAlgorithm):
                         w.flatten()
                         for w in self.exp_layer.parameters()
                         if w.requires_grad
-                    ]
+                    ],
                 )
-                - self.theta_0
+                - self.theta_0,
             )
             ** 2
         )
@@ -273,7 +282,7 @@ class NeuralTS(RLAlgorithm):
         max_steps: int = 100,
         loop: int = 1,
     ) -> float:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
@@ -287,7 +296,7 @@ class NeuralTS(RLAlgorithm):
         self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
-            for i in range(loop):
+            for _i in range(loop):
                 obs = env.reset()
                 score = 0
                 for _ in range(max_steps):

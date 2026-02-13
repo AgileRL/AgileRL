@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -15,7 +18,7 @@ class TokenReward(ABC):
 
 
 class ConstantTokenReward(TokenReward):
-    def __init__(self, c: float = 0.0):
+    def __init__(self, c: float = 0.0) -> None:
         self.c = c
 
     def get_token_reward(self, tokens: list[int]) -> list[float]:
@@ -24,8 +27,11 @@ class ConstantTokenReward(TokenReward):
 
 class SpecifiedTokenReward(TokenReward):
     def __init__(
-        self, token_data: dict[int, float], scale: float = 1.0, shift: float = 0.0
-    ):
+        self,
+        token_data: dict[int, float],
+        scale: float = 1.0,
+        shift: float = 0.0,
+    ) -> None:
         self.token_data = token_data
         self.scale = scale
         self.shift = shift
@@ -53,9 +59,13 @@ class DataPoint:
     utterance_action_idxs: list[int]
     utterance_rewards: list[float]
     utterance_terminals: list[int]
-    meta: Optional[dict[str, Any]] = None
+    meta: dict[str, Any] | None = None
 
-    def to_tensors(self, device, max_length: Optional[int]):
+    def to_tensors(
+        self,
+        device: torch.device | str,
+        max_length: int | None,
+    ) -> tuple[torch.Tensor, ...]:
         tok = torch.tensor(self.tokens).to(device)
         s = torch.tensor(self.state_idxs).long().to(device)
         a = torch.tensor(self.action_idxs).long().to(device)
@@ -85,8 +95,8 @@ class DataPoint:
         obs: Language_Observation,
         tokenizer: Tokenizer,
         token_reward: TokenReward,
-        meta: Optional[dict[str, Any]] = None,
-    ):
+        meta: dict[str, Any] | None = None,
+    ) -> DataPoint:
         sequence, terminal = obs.to_sequence()
         obs_meta = obs.metadata()
         if meta is not None and obs_meta is not None:
@@ -129,7 +139,7 @@ class DataPoint:
                 utterance_state_idxs.append(curr_idx)
                 utterance_rewards.append(
                     action_rewards[curr_action_idx]
-                    + sum([token_rewards[x] for x in range(curr_idx, i)])
+                    + sum([token_rewards[x] for x in range(curr_idx, i)]),
                 )
                 curr_idx = i
                 curr_action_idx += 1
@@ -153,21 +163,37 @@ class DataPoint:
 
     @staticmethod
     def get_token_reward(
-        obs: Language_Observation, tokenizer: Tokenizer, token_reward: TokenReward
-    ):
+        obs: Language_Observation,
+        tokenizer: Tokenizer,
+        token_reward: TokenReward,
+    ) -> list[float]:
         return DataPoint.from_obs(obs, tokenizer, token_reward).rewards
 
 
 class RL_Dataset(ABC):
+    """Abstract base for RL datasets; subclasses must implement dataset iteration."""
+
+    @abstractmethod
+    def __iter__(self) -> Iterator[DataPoint]:
+        """Return an iterator over data points. Implemented by subclasses."""
+        ...
+
     def __init__(
-        self, tokenizer: Tokenizer, token_reward: TokenReward, max_len: Optional[int]
+        self,
+        tokenizer: Tokenizer,
+        token_reward: TokenReward,
+        max_len: int | None,
     ) -> None:
         super().__init__()
         self.tokenizer = tokenizer
         self.token_reward = token_reward
         self.max_len = max_len
 
-    def collate(self, items: list[DataPoint], device):
+    def collate(
+        self,
+        items: list[DataPoint],
+        device: torch.device | str,
+    ) -> dict[str, torch.Tensor]:
         (
             tokens,
             state_idxs,
@@ -178,34 +204,52 @@ class RL_Dataset(ABC):
             u_action_idxs,
             u_rewards,
             u_terminals,
-        ) = zip(*map(lambda x: x.to_tensors(device, self.max_len), items))
+        ) = zip(*(x.to_tensors(device, self.max_len) for x in items), strict=False)
         tokens = torch.nn.utils.rnn.pad_sequence(
-            tokens, batch_first=True, padding_value=self.tokenizer.pad_token_id
+            tokens,
+            batch_first=True,
+            padding_value=self.tokenizer.pad_token_id,
         )
         attn_mask = (tokens != self.tokenizer.pad_token_id).float()
         state_idxs = torch.nn.utils.rnn.pad_sequence(
-            state_idxs, batch_first=True, padding_value=0
+            state_idxs,
+            batch_first=True,
+            padding_value=0,
         )
         action_idxs = torch.nn.utils.rnn.pad_sequence(
-            action_idxs, batch_first=True, padding_value=0
+            action_idxs,
+            batch_first=True,
+            padding_value=0,
         )
         terminals = torch.nn.utils.rnn.pad_sequence(
-            terminals, batch_first=True, padding_value=1
+            terminals,
+            batch_first=True,
+            padding_value=1,
         )
         rewards = torch.nn.utils.rnn.pad_sequence(
-            rewards, batch_first=True, padding_value=0.0
+            rewards,
+            batch_first=True,
+            padding_value=0.0,
         )
         u_state_idxs = torch.nn.utils.rnn.pad_sequence(
-            u_state_idxs, batch_first=True, padding_value=0
+            u_state_idxs,
+            batch_first=True,
+            padding_value=0,
         )
         u_action_idxs = torch.nn.utils.rnn.pad_sequence(
-            u_action_idxs, batch_first=True, padding_value=0
+            u_action_idxs,
+            batch_first=True,
+            padding_value=0,
         )
         u_terminals = torch.nn.utils.rnn.pad_sequence(
-            u_terminals, batch_first=True, padding_value=1
+            u_terminals,
+            batch_first=True,
+            padding_value=1,
         )
         u_rewards = torch.nn.utils.rnn.pad_sequence(
-            u_rewards, batch_first=True, padding_value=0.0
+            u_rewards,
+            batch_first=True,
+            padding_value=0.0,
         )
         return {
             "tokens": tokens,
@@ -230,8 +274,16 @@ class List_RL_Dataset(RL_Dataset):
     def size(self) -> int:
         pass
 
+    def __iter__(self) -> Iterator[DataPoint]:
+        for i in range(self.size()):
+            yield self.get_item(i)
+
 
 class Iterable_RL_Dataset(RL_Dataset):
     @abstractmethod
     def sample_item(self) -> DataPoint:
         pass
+
+    def __iter__(self) -> Iterator[DataPoint]:
+        while True:
+            yield self.sample_item()

@@ -1,7 +1,7 @@
 import json
 import pickle as pkl
 import random
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -23,8 +23,8 @@ from wordle.wordle_tokenizer import WordleTokenizer
 class WordleListDataset(List_RL_Dataset):
     def __init__(
         self,
-        items: list[tuple[WordleObservation, Optional[dict[str, Any]]]],
-        max_len: Optional[int],
+        items: list[tuple[WordleObservation, dict[str, Any] | None]],
+        max_len: int | None,
         token_reward: TokenReward,
     ) -> None:
         tokenizer = WordleTokenizer()
@@ -33,7 +33,10 @@ class WordleListDataset(List_RL_Dataset):
 
     def get_item(self, idx: int):
         return DataPoint.from_obs(
-            self.items[idx][0], self.tokenizer, self.token_reward, self.items[idx][1]
+            self.items[idx][0],
+            self.tokenizer,
+            self.token_reward,
+            self.items[idx][1],
         )
 
     def size(self):
@@ -43,8 +46,8 @@ class WordleListDataset(List_RL_Dataset):
     def from_file(
         cls,
         file_path: str,
-        max_len: Optional[int],
-        vocab: Optional[Vocabulary],
+        max_len: int | None,
+        vocab: Vocabulary | None,
         token_reward: TokenReward,
     ):
         with open(file_path, "rb") as f:
@@ -56,8 +59,10 @@ class WordleListDataset(List_RL_Dataset):
         wordle_items = [
             WordleObservation(
                 WordleGame(
-                    item["state"], vocab.update_vocab(item["state"]), item["actions"]
-                )
+                    item["state"],
+                    vocab.update_vocab(item["state"]),
+                    item["actions"],
+                ),
             )
             for item in tqdm(d["state_actions"])
         ]
@@ -69,7 +74,11 @@ class WordleListDataset(List_RL_Dataset):
             )
             for i, item in enumerate(d["state_actions"])
         ]
-        return WordleListDataset(list(zip(wordle_items, meta)), max_len, token_reward)
+        return WordleListDataset(
+            list(zip(wordle_items, meta, strict=False)),
+            max_len,
+            token_reward,
+        )
 
 
 class WordleIterableDataset(Iterable_RL_Dataset):
@@ -77,7 +86,7 @@ class WordleIterableDataset(Iterable_RL_Dataset):
         self,
         policy: Policy,
         vocab: Vocabulary,
-        max_len: Optional[int],
+        max_len: int | None,
         token_reward: TokenReward,
     ) -> None:
         tokenizer = WordleTokenizer()
@@ -100,10 +109,10 @@ class WordleHumanDataset(Iterable_RL_Dataset):
         games: list[tuple[str, list[str]]],
         transitions: dict[str, dict[str, list[str]]],
         use_true_word: bool,
-        max_len: Optional[int],
+        max_len: int | None,
         token_reward: TokenReward,
-        game_indexes: Optional[list[int]],
-        top_p: Optional[float],
+        game_indexes: list[int] | None,
+        top_p: float | None,
     ) -> None:
         tokenizer = WordleTokenizer()
         super().__init__(tokenizer, token_reward, max_len)
@@ -130,12 +139,11 @@ class WordleHumanDataset(Iterable_RL_Dataset):
                     ):
                         break
                     actions.append(
-                        random.choice(self.transitions[true_word][transition])
+                        random.choice(self.transitions[true_word][transition]),
                     )
                 if len(actions) == len(game):
                     break
-                else:
-                    true_word, game = random.choice(self.games)
+                true_word, game = random.choice(self.games)
         else:
             word_choices = list(self.transitions.keys())
             while True:
@@ -148,12 +156,11 @@ class WordleHumanDataset(Iterable_RL_Dataset):
                     ):
                         break
                     actions.append(
-                        random.choice(self.transitions[true_word][transition])
+                        random.choice(self.transitions[true_word][transition]),
                     )
                 if len(actions) == len(game):
                     break
-                else:
-                    true_word, game = random.choice(self.games)
+                true_word, game = random.choice(self.games)
         state = WordleState.initial_state()
         for action in actions:
             state = state.transition_state(action, true_word)
@@ -166,10 +173,10 @@ class WordleHumanDataset(Iterable_RL_Dataset):
         cls,
         file_path: str,
         use_true_word: bool = False,
-        max_len: Optional[int] = None,
-        token_reward: Optional[TokenReward] = None,
-        game_indexes: Optional[list[int]] = None,
-        top_p: Optional[float] = None,
+        max_len: int | None = None,
+        token_reward: TokenReward | None = None,
+        game_indexes: list[int] | None = None,
+        top_p: float | None = None,
     ):
         if token_reward is None:
             token_reward = ConstantTokenReward(0.0)

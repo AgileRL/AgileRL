@@ -6,7 +6,8 @@
 # using a population and a simple evolutionary loop.
 import os
 import shutil
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import imageio
@@ -15,18 +16,19 @@ import imageio
 import numpy as np
 import torch
 
-from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.rollouts.on_policy import collect_rollouts, collect_rollouts_recurrent
 from agilerl.typing import BPTTSequenceType
 from agilerl.utils.utils import create_population, default_progress_bar
 
+if TYPE_CHECKING:
+    from agilerl.algorithms import PPO
+
 
 # --- Define the MiniGrid Observation Wrapper ---
 class MiniGridObsWrapper(gym.ObservationWrapper):
-    """
-    Extracts and flattens the 'image' observation from MiniGrid, normalizes to [0, 1],
+    """Extracts and flattens the 'image' observation from MiniGrid, normalizes to [0, 1],
     and concatenates a one-hot encoding of the 'direction' field.
     """
 
@@ -36,7 +38,10 @@ class MiniGridObsWrapper(gym.ObservationWrapper):
         flat_img_dim = np.prod(img_shape)
         # The new observation space is flattened image + 4 for direction one-hot
         self.observation_space = gym.spaces.Box(
-            low=0.0, high=1.0, shape=(flat_img_dim + 4,), dtype=np.float32
+            low=0.0,
+            high=1.0,
+            shape=(flat_img_dim + 4,),
+            dtype=np.float32,
         )
 
     def reset(self, **kwargs: Any) -> tuple[np.ndarray, dict[str, Any]]:
@@ -49,8 +54,7 @@ class MiniGridObsWrapper(gym.ObservationWrapper):
         direction = obs["direction"]
         direction_onehot = np.zeros(4, dtype=np.float32)
         direction_onehot[direction] = 1.0
-        concat_obs = np.concatenate([flat_img, direction_onehot], axis=0)
-        return concat_obs
+        return np.concatenate([flat_img, direction_onehot], axis=0)
 
 
 def run_demo():
@@ -103,10 +107,9 @@ def run_demo():
     }
 
     # --- Create Environment and Population ---
-    def make_env(render_mode: Optional[str] = None) -> Callable[[], gym.Env]:
+    def make_env(render_mode: str | None = None) -> Callable[[], gym.Env]:
         env = gym.make("MiniGrid-DoorKey-8x8-v0", render_mode=render_mode)
-        env = MiniGridObsWrapper(env)
-        return env
+        return MiniGridObsWrapper(env)
 
     env = gym.vector.SyncVectorEnv([make_env for _ in range(num_envs)])
     single_test_env = gym.vector.SyncVectorEnv([make_env])
@@ -192,9 +195,11 @@ def run_demo():
                 pbar.write(f"Completed scores: {round(np.mean(episode_scores), 2)}")
 
             pop_episode_scores.append(
-                np.mean(completed_episodes)
-                if len(completed_episodes) > 0
-                else "0 completed episodes"
+                (
+                    np.mean(completed_episodes)
+                    if len(completed_episodes) > 0
+                    else "0 completed episodes"
+                ),
             )
             pbar.update(steps // len(pop))
 
@@ -211,14 +216,14 @@ def run_demo():
             f"--- Global steps {total_steps} ---\n"
             f"Steps: {[agent.steps[-1] for agent in pop]}\n"
             f"Scores: {pop_episode_scores}\n"
-            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
-            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
-            f"Mutations: {[agent.mut for agent in pop]}\n"
+            f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n"
+            f"Mutations: {[agent.mut for agent in pop]}\n",
         )
 
         if any(score >= required_score for score in pop_episode_scores):
             print(
-                f"\nAgent achieved required score {required_score}. Stopping training."
+                f"\nAgent achieved required score {required_score}. Stopping training.",
             )
             elite, _ = tournament.select(pop)
             training_complete = True
@@ -252,7 +257,9 @@ def run_demo():
         elite, _ = tournament.select(pop)
 
     render_env = gym.wrappers.RecordVideo(
-        env_to_wrap, video_folder="temp_video", disable_logger=True
+        env_to_wrap,
+        video_folder="temp_video",
+        disable_logger=True,
     )
 
     total_steps = 0
@@ -272,7 +279,8 @@ def run_demo():
             episode_frames.append(frame)
             if recurrent:
                 action, _, _, _, hidden_state = elite.get_action(
-                    obs, hidden_state=hidden_state
+                    obs,
+                    hidden_state=hidden_state,
                 )
             else:
                 action, _, _, _, _ = elite.get_action(obs)
@@ -292,7 +300,7 @@ def run_demo():
         total_steps += episode_steps
         episode_rewards.append(episode_reward)
         print(
-            f"Recorded Episode {episode + 1} Reward: {episode_reward}, Steps: {episode_steps}"
+            f"Recorded Episode {episode + 1} Reward: {episode_reward}, Steps: {episode_steps}",
         )
 
     avg_reward = sum(episode_rewards) / len(episode_rewards)

@@ -36,7 +36,7 @@ if __name__ == "__main__":
     NET_CONFIG = {
         "encoder_config": {
             "hidden_size": [32, 32],  # Actor hidden size
-        }
+        },
     }
 
     INIT_HP = {
@@ -97,7 +97,9 @@ if __name__ == "__main__":
     replay_dataloader = DataLoader(replay_dataset, batch_size=None)
     replay_dataloader = accelerator.prepare(replay_dataloader)
     sampler = Sampler(
-        distributed=True, dataset=replay_dataset, dataloader=replay_dataloader
+        distributed=True,
+        dataset=replay_dataset,
+        dataloader=replay_dataloader,
     )
 
     tournament = TournamentSelection(
@@ -130,9 +132,8 @@ if __name__ == "__main__":
     total_steps = 0
 
     accel_temp_models_path = "models/{}".format("CartPole-v1")
-    if accelerator.is_main_process:
-        if not os.path.exists(accel_temp_models_path):
-            os.makedirs(accel_temp_models_path)
+    if accelerator.is_main_process and not os.path.exists(accel_temp_models_path):
+        os.makedirs(accel_temp_models_path)
 
     print(f"\nDistributed training on {accelerator.device}...")
 
@@ -143,7 +144,7 @@ if __name__ == "__main__":
         if accelerator is not None:
             accelerator.wait_for_everyone()
         for agent in pop:  # Loop through population
-            for idx_step in range(evo_steps):
+            for _idx_step in range(evo_steps):
                 # Sample dataloader
                 experiences = sampler.sample(agent.batch_size)
                 # Learn according to agent's RL algorithm
@@ -166,8 +167,8 @@ if __name__ == "__main__":
             pbar.write(
                 f"--- Global steps {total_steps} ---\n"
                 f"Steps: {[agent.steps[-1] for agent in pop]}\n"
-                f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
-                f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+                f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
+                f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n",
             )
 
         # Tournament selection and population mutation

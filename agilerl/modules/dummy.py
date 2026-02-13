@@ -1,7 +1,8 @@
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from agilerl.modules import EvolvableModule
 from agilerl.typing import DeviceType
@@ -37,11 +38,12 @@ class DummyEvolvable(EvolvableModule):
         device: DeviceType,
         module: nn.Module | None = None,
         module_fn: Callable[[], nn.Module] | None = None,
-        module_kwargs: Optional[dict[str, Any]] | None = None,
+        module_kwargs: dict[str, Any] | None = None,
     ) -> None:
 
         if module is None and module_fn is None:
-            raise ValueError("Either module or module_fn must be provided.")
+            msg = "Either module or module_fn must be provided."
+            raise ValueError(msg)
 
         if module_fn is not None and module_kwargs is None:
             module_kwargs = {}
@@ -59,7 +61,7 @@ class DummyEvolvable(EvolvableModule):
     def change_activation(self, activation: str, output: bool) -> None:
         return
 
-    def forward(self, *args, **kwargs) -> torch.Tensor:
+    def forward(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         return self.module(*args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:

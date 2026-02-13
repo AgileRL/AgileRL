@@ -1,9 +1,9 @@
-from typing import Any, Optional
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.typing import ArrayOrTensor
@@ -125,10 +125,16 @@ class SimpleCNNActor(nn.Module):
 
         # Define the convolutional layers
         self.conv1 = nn.Conv2d(
-            in_channels=4, out_channels=16, kernel_size=8, stride=4
+            in_channels=4,
+            out_channels=16,
+            kernel_size=8,
+            stride=4,
         )  # W: 160, H: 210
         self.conv2 = nn.Conv2d(
-            in_channels=16, out_channels=32, kernel_size=4, stride=2
+            in_channels=16,
+            out_channels=32,
+            kernel_size=4,
+            stride=2,
         )  # W:
 
         # Define the max-pooling layers
@@ -156,8 +162,7 @@ class SimpleCNNActor(nn.Module):
         # Forward pass through fully connected layers
         x = self.relu(self.fc1(x))
         x = self.fc2(x)
-        x = self.softmax(x)
-        return x
+        return self.softmax(x)
 
 
 class SimpleCNNCritic(nn.Module):
@@ -166,10 +171,16 @@ class SimpleCNNCritic(nn.Module):
 
         # Define the convolutional layers
         self.conv1 = nn.Conv2d(
-            in_channels=4, out_channels=16, kernel_size=8, stride=4
+            in_channels=4,
+            out_channels=16,
+            kernel_size=8,
+            stride=4,
         )  # W: 160, H: 210
         self.conv2 = nn.Conv2d(
-            in_channels=16, out_channels=32, kernel_size=4, stride=2
+            in_channels=16,
+            out_channels=32,
+            kernel_size=4,
+            stride=2,
         )  # W:
 
         # Define the max-pooling layers
@@ -199,9 +210,7 @@ class SimpleCNNCritic(nn.Module):
         x = self.fc2(x)
 
         # Apply softmax for classification
-        x = self.softmax(x)
-
-        return x
+        return self.softmax(x)
 
 
 class MultiCNNActor(nn.Module):
@@ -209,10 +218,16 @@ class MultiCNNActor(nn.Module):
         super().__init__()
         # Define the convolutional layers
         self.conv1 = nn.Conv3d(
-            in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
+            in_channels=4,
+            out_channels=16,
+            kernel_size=(1, 3, 3),
+            stride=4,
         )  # W: 160, H: 210
         self.conv2 = nn.Conv3d(
-            in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
+            in_channels=16,
+            out_channels=32,
+            kernel_size=(1, 3, 3),
+            stride=2,
         )
 
         # Define the max-pooling layers
@@ -240,8 +255,7 @@ class MultiCNNActor(nn.Module):
         # Forward pass through fully connected layers
         x = self.relu(self.fc1(x))
         x = self.fc2(x)
-        x = self.softmax(x)
-        return x
+        return self.softmax(x)
 
 
 class MultiCNNCritic(nn.Module):
@@ -250,10 +264,16 @@ class MultiCNNCritic(nn.Module):
 
         # Define the convolutional layers
         self.conv1 = nn.Conv3d(
-            in_channels=4, out_channels=16, kernel_size=(2, 3, 3), stride=4
+            in_channels=4,
+            out_channels=16,
+            kernel_size=(2, 3, 3),
+            stride=4,
         )  # W: 160, H: 210
         self.conv2 = nn.Conv3d(
-            in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
+            in_channels=16,
+            out_channels=32,
+            kernel_size=(1, 3, 3),
+            stride=2,
         )  # W:
 
         # Define the max-pooling layers
@@ -285,9 +305,7 @@ class MultiCNNCritic(nn.Module):
         x = self.fc2(x)
 
         # Apply softmax for classification
-        x = self.softmax(x)
-
-        return x
+        return self.softmax(x)
 
 
 class SimpleCritic(EvolvableModule):
@@ -313,23 +331,23 @@ class SimpleCritic(EvolvableModule):
     ):
         super().__init__(device)
 
-        assert (
-            num_inputs > 0
-        ), "'num_inputs' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            num_outputs > 0
-        ), "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
+        assert num_inputs > 0, (
+            "'num_inputs' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert num_outputs > 0, (
+            "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
+        )
         for num in hidden_size:
-            assert (
-                num > 0
-            ), "'hidden_size' cannot contain zero, please enter a valid integer."
+            assert num > 0, (
+                "'hidden_size' cannot contain zero, please enter a valid integer."
+            )
         assert len(hidden_size) != 0, "MLP must contain at least one hidden layer."
-        assert (
-            min_hidden_layers < max_hidden_layers
-        ), "'min_hidden_layers' must be less than 'max_hidden_layers."
-        assert (
-            min_mlp_nodes < max_mlp_nodes
-        ), "'min_mlp_nodes' must be less than 'max_mlp_nodes."
+        assert min_hidden_layers < max_hidden_layers, (
+            "'min_hidden_layers' must be less than 'max_hidden_layers."
+        )
+        assert min_mlp_nodes < max_mlp_nodes, (
+            "'min_mlp_nodes' must be less than 'max_mlp_nodes."
+        )
 
         self.name = name
         self.num_inputs = num_inputs
@@ -385,7 +403,9 @@ class SimpleCritic(EvolvableModule):
         self._activation = activation
 
     def init_weights_gaussian(
-        self, std_coeff: float = 4, output_coeff: float = 4
+        self,
+        std_coeff: float = 4,
+        output_coeff: float = 4,
     ) -> None:
         """Initialise weights of neural network using Gaussian distribution."""
         EvolvableModule.init_weights_gaussian(self.model, std_coeff=std_coeff)
@@ -395,7 +415,9 @@ class SimpleCritic(EvolvableModule):
         EvolvableModule.init_weights_gaussian(output_layer, std_coeff=output_coeff)
 
     def forward(
-        self, obs: dict[str, ArrayOrTensor], actions: ArrayOrTensor
+        self,
+        obs: dict[str, ArrayOrTensor],
+        actions: ArrayOrTensor,
     ) -> torch.Tensor:
         """Returns output of neural network.
 
@@ -444,25 +466,31 @@ class SimpleCritic(EvolvableModule):
     @mutation(MutationType.LAYER)
     def add_layer(self) -> None:
         """Adds a hidden layer to neural network. Falls back on ``add_node()`` if
-        max hidden layers reached."""
+        max hidden layers reached.
+        """
         # add layer to hyper params
         if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
         else:
             return self.add_node()
+        return None
 
     @mutation(MutationType.LAYER)
     def remove_layer(self) -> None:
         """Removes a hidden layer from neural network. Falls back on ``add_node()`` if
-        min hidden layers reached."""
+        min hidden layers reached.
+        """
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]
         else:
             return self.add_node()
+        return None
 
     @mutation(MutationType.NODE)
     def add_node(
-        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+        self,
+        hidden_layer: int | None = None,
+        numb_new_nodes: int | None = None,
     ) -> dict[str, int]:
         """Adds nodes to hidden layer of neural network.
 
@@ -488,7 +516,9 @@ class SimpleCritic(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def remove_node(
-        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+        self,
+        hidden_layer: int | None = None,
+        numb_new_nodes: int | None = None,
     ) -> dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
@@ -534,5 +564,6 @@ class SimpleCritic(EvolvableModule):
         )
 
         self.model = EvolvableModule.preserve_parameters(
-            old_net=self.model, new_net=model
+            old_net=self.model,
+            new_net=model,
         )

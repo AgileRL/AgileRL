@@ -1,6 +1,6 @@
 import warnings
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
@@ -23,7 +23,7 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = Optional[dict[str, Any]]
+InitDictType = dict[str, Any] | None
 PopulationType = list[RLAlgorithm]
 
 
@@ -39,24 +39,24 @@ def train_offline(
     swap_channels: bool = False,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
-    eval_steps: Optional[int] = None,
+    eval_steps: int | None = None,
     eval_loop: int = 1,
-    target: Optional[float] = None,
-    tournament: Optional[TournamentSelection] = None,
-    mutation: Optional[Mutations] = None,
-    checkpoint: Optional[int] = None,
-    checkpoint_path: Optional[str] = None,
+    target: float | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    checkpoint: int | None = None,
+    checkpoint_path: str | None = None,
     overwrite_checkpoints: bool = False,
     save_elite: bool = False,
-    elite_path: Optional[str] = None,
+    elite_path: str | None = None,
     wb: bool = False,
     verbose: bool = True,
-    accelerator: Optional[Accelerator] = None,
-    minari_dataset_id: Optional[str] = None,
+    accelerator: Accelerator | None = None,
+    minari_dataset_id: str | None = None,
     remote: bool = False,
-    wandb_api_key: Optional[str] = None,
+    wandb_api_key: str | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
-    """The general offline RL training function. Returns trained population of agents and their fitnesses.
+    """Run the general offline RL training; returns trained population of agents and their fitnesses.
 
     :param env: The environment to train in
     :type env: Gym-style environment
@@ -113,29 +113,34 @@ def train_offline(
     :type wandb_api_key: str, optional
     """
     assert isinstance(
-        algo, str
+        algo,
+        str,
     ), "'algo' must be the name of the algorithm as a string."
     assert isinstance(max_steps, int), "Number of steps must be an integer."
     assert isinstance(evo_steps, int), "Evolution frequency must be an integer."
     if target is not None:
         assert isinstance(
-            target, (float, int)
+            target,
+            (float, int),
         ), "Target score must be a float or an integer."
     if checkpoint is not None:
         assert isinstance(checkpoint, int), "Checkpoint must be an integer."
     assert isinstance(
-        wb, bool
+        wb,
+        bool,
     ), "'wb' must be a boolean flag, indicating whether to record run with W&B"
     assert isinstance(verbose, bool), "Verbose must be a boolean."
     if save_elite is False and elite_path is not None:
         warnings.warn(
             "'save_elite' set to False but 'elite_path' has been defined, elite will not\
-                      be saved unless 'save_elite' is set to True."
+                      be saved unless 'save_elite' is set to True.",
+            stacklevel=2,
         )
     if checkpoint is None and checkpoint_path is not None:
         warnings.warn(
             "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
-                      be saved unless 'checkpoint' is defined."
+                      be saved unless 'checkpoint' is defined.",
+            stacklevel=2,
         )
 
     if wb:
@@ -152,7 +157,9 @@ def train_offline(
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
         else "{}-EvoHPO-{}-{}".format(
-            env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+            env_name,
+            algo,
+            datetime.now().strftime("%m%d%Y%H%M%S"),
         )
     )
 
@@ -164,14 +171,9 @@ def train_offline(
         print("Filling replay buffer with dataset...")
 
     if minari_dataset_id:
-        print(f"Loading Minari Dataset with dataset_id {minari_dataset_id} in Buffer")
-
         memory = minari_to_agile_buffer(minari_dataset_id, memory, accelerator, remote)
 
-        print(f"Minari Dataset with dataset_id {minari_dataset_id} loaded in Buffer")
-
     else:
-        print("Loading buffer...")
         dataset_length = dataset["rewards"].shape[0]
         for i in range(dataset_length - 1):
             state = dataset["observations"][i]
@@ -200,10 +202,10 @@ def train_offline(
 
         if accelerator is not None:
             if accelerator.is_main_process:
-                print("Loaded buffer.")
+                pass
             accelerator.wait_for_everyone()
         else:
-            print("Loaded buffer.")
+            pass
 
     if accelerator is not None:
         # Create dataloader from replay buffer
@@ -215,9 +217,9 @@ def train_offline(
         sampler = Sampler(memory=memory)
 
     if accelerator is not None:
-        print(f"\nDistributed training on {accelerator.device}...")
+        pass
     else:
-        print("\nTraining...")
+        pass
 
     # Format progress bar
     pbar = default_progress_bar(max_steps, accelerator)
@@ -229,9 +231,8 @@ def train_offline(
     checkpoint_count = 0
 
     # Pre-training mutation
-    if accelerator is None:
-        if mutation is not None:
-            pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None and mutation is not None:
+        pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
@@ -240,7 +241,7 @@ def train_offline(
 
         for agent_idx, agent in enumerate(pop):  # Loop through population
             losses = []
-            for idx_step in range(evo_steps):
+            for _idx_step in range(evo_steps):
                 experiences = sampler.sample(agent.batch_size)  # Sample replay buffer
                 # Learn according to agent's RL algorithm
                 loss = agent.learn(experiences)
@@ -255,7 +256,10 @@ def train_offline(
         # Evaluate population
         fitnesses = [
             agent.test(
-                env, swap_channels=swap_channels, max_steps=eval_steps, loop=eval_loop
+                env,
+                swap_channels=swap_channels,
+                max_steps=eval_steps,
+                loop=eval_loop,
             )
             for agent in pop
         ]
@@ -292,16 +296,15 @@ def train_offline(
             agent.steps.append(agent.steps[-1])
 
         # Early stop if consistently reaches target
-        if target is not None:
-            if (
-                np.all(
-                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target)
-                )
-                and len(pop[0].steps) >= 100
-            ):
-                if wb:
-                    wandb.finish()
-                return pop, pop_fitnesses
+        if target is not None and (
+            np.all(
+                np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
+            )
+            and len(pop[0].steps) >= 100
+        ):
+            if wb:
+                wandb.finish()
+            return pop, pop_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -317,8 +320,8 @@ def train_offline(
             )
 
         if verbose:
-            fitness = ["%.2f" % fitness for fitness in fitnesses]
-            avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
+            fitness = [f"{fitness:.2f}" for fitness in fitnesses]
+            avg_fitness = [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]
@@ -335,7 +338,7 @@ def train_offline(
                 f"5 fitness avgs:\t{avg_fitness}\n"
                 f"Agents:\t\t{agents}\n"
                 f"Steps:\t\t{num_steps}\n"
-                f"Mutations:\t\t{muts}"
+                f"Mutations:\t\t{muts}",
             )
 
         if checkpoint is not None:

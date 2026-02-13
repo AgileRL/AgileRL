@@ -43,7 +43,7 @@ def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
 
     observation, info = env.reset()
     episode_buffer = EpisodeBuffer(observations=observation, infos=info)
-    for episode in range(num_episodes):
+    for _episode in range(num_episodes):
         terminated = False
         truncated = False
 
@@ -59,7 +59,7 @@ def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
                     "termination": terminated,
                     "truncation": truncated,
                     "info": info,
-                }
+                },
             )
 
         buffer.append(episode_buffer)
@@ -87,7 +87,6 @@ def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
 )
 def test_minari_to_agile_dataset(dataset_id: str, env_id: str) -> None:
     """Test create agile dataset from minari dataset."""
-
     total_timesteps = create_dataset_return_timesteps(dataset_id, env_id)
     dataset = minari_utils.minari_to_agile_dataset(dataset_id)
     assert len(dataset["rewards"][:]) == total_timesteps
@@ -161,7 +160,9 @@ def test_load_remote_minari_dataset_accelerator(dataset_id: str) -> None:
 
     try:
         dataset = minari_utils.load_minari_dataset(
-            dataset_id, accelerator=accelerator, remote=True
+            dataset_id,
+            accelerator=accelerator,
+            remote=True,
         )
     except HTTPError as e:
         pytest.skip(f"Skipping test due to remote dataset not being available: {e}")

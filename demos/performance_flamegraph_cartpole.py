@@ -177,7 +177,9 @@ testing_env_single = gym.make("CartPole-v1", render_mode="rgb_array")
 # Wrap the environment for recording
 # Record only the first episode (episode_trigger=lambda x: x == 0)
 recorded_env = gym.wrappers.RecordVideo(
-    testing_env_single, video_folder=video_folder, episode_trigger=lambda x: x == 0
+    testing_env_single,
+    video_folder=video_folder,
+    episode_trigger=lambda x: x == 0,
 )
 
 # Test the agent using the recorded environment
@@ -199,7 +201,7 @@ if video_files:
 else:
     print(f"No video found in {video_folder}. Recording might have failed.")
     print(
-        "Ensure ffmpeg is installed (`conda install ffmpeg` or `apt-get install ffmpeg`)."
+        "Ensure ffmpeg is installed (`conda install ffmpeg` or `apt-get install ffmpeg`).",
     )
     print("If running headless, ensure necessary libraries (e.g., xvfb) are installed.")
 
@@ -208,12 +210,16 @@ else:
 # =====================================================================
 print("\n--- Profiling with PyTorch Profiler ---")
 # PyTorch profiler example
-with profile(
-    activities=[ProfilerActivity.CPU], record_shapes=True, with_stack=True
-) as prof:
-    with record_function("training_step"):
-        collect_rollouts(agent, env)
-        agent.learn()
+with (
+    profile(
+        activities=[ProfilerActivity.CPU],
+        record_shapes=True,
+        with_stack=True,
+    ) as prof,
+    record_function("training_step"),
+):
+    collect_rollouts(agent, env)
+    agent.learn()
 
 # Export trace that can be loaded in chrome://tracing
 prof.export_chrome_trace("pytorch_trace.json")

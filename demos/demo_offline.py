@@ -28,7 +28,7 @@ if __name__ == "__main__":
     NET_CONFIG = {
         "encoder_config": {
             "hidden_size": [32, 32],  # Actor hidden size
-        }
+        },
     }
 
     INIT_HP = {
@@ -115,7 +115,7 @@ if __name__ == "__main__":
     pbar = default_progress_bar(max_steps)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         for agent in pop:  # Loop through population
-            for idx_step in range(evo_steps):
+            for _idx_step in range(evo_steps):
                 experiences = memory.sample(agent.batch_size)  # Sample replay buffer
                 agent.learn(experiences)  # Learn according to agent's RL algorithm
             total_steps += evo_steps
@@ -135,8 +135,8 @@ if __name__ == "__main__":
         pbar.write(
             f"--- Global steps {total_steps} ---\n"
             f"Steps: {[agent.steps[-1] for agent in pop]}\n"
-            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
-            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+            f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n",
         )
 
         # Tournament selection and population mutation

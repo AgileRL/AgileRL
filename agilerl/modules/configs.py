@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 import torch
 import yaml
@@ -56,7 +56,7 @@ class NetConfig:
 class MlpNetConfig(NetConfig):
     hidden_size: list[int]
     activation: str = field(default="ReLU")
-    output_activation: Optional[str] = field(default=None)
+    output_activation: str | None = field(default=None)
     min_hidden_layers: int = field(default=1)
     max_hidden_layers: int = field(default=3)
     min_mlp_nodes: int = field(default=16)
@@ -68,20 +68,18 @@ class MlpNetConfig(NetConfig):
     noisy: bool = field(default=False)
     noise_std: float = field(default=0.5)
 
-    def __post_init__(self):
-        assert (
-            len(self.hidden_size) >= self.min_hidden_layers
-        ), "Hidden layers must be greater than min_hidden_layers."
+    def __post_init__(self) -> None:
+        assert len(self.hidden_size) >= self.min_hidden_layers, (
+            "Hidden layers must be greater than min_hidden_layers."
+        )
 
-        assert (
-            len(self.hidden_size) <= self.max_hidden_layers
-        ), "Hidden layers must be less than max_hidden_layers."
+        assert len(self.hidden_size) <= self.max_hidden_layers, (
+            "Hidden layers must be less than max_hidden_layers."
+        )
 
         assert all(
-            [
-                self.min_mlp_nodes <= nodes and nodes <= self.max_mlp_nodes
-                for nodes in self.hidden_size
-            ]
+            self.min_mlp_nodes <= nodes <= self.max_mlp_nodes
+            for nodes in self.hidden_size
         ), "Nodes must be within min_nodes and max_nodes."
 
 
@@ -89,35 +87,37 @@ class MlpNetConfig(NetConfig):
 class SimBaNetConfig(NetConfig):
     hidden_size: int
     num_blocks: int
-    output_activation: Optional[str] = field(default=None)
+    output_activation: str | None = field(default=None)
     min_blocks: int = field(default=1)
     max_blocks: int = field(default=4)
     min_mlp_nodes: int = field(default=16)
     max_mlp_nodes: int = field(default=500)
 
-    def __post_init__(self):
-        assert (
-            self.num_blocks >= self.min_blocks
-        ), "Number of residual blocks must be greater than min_blocks."
+    def __post_init__(self) -> None:
+        assert self.num_blocks >= self.min_blocks, (
+            "Number of residual blocks must be greater than min_blocks."
+        )
 
-        assert (
-            self.num_blocks <= self.max_blocks
-        ), "Number of residual blocks must be less than max_blocks."
+        assert self.num_blocks <= self.max_blocks, (
+            "Number of residual blocks must be less than max_blocks."
+        )
 
-        assert (
-            self.min_mlp_nodes <= self.hidden_size
-            and self.hidden_size <= self.max_mlp_nodes
-        ), "Nodes must be within min_nodes and max_nodes."
+        assert self.min_mlp_nodes <= self.hidden_size, (
+            "Nodes must be within min_nodes and max_nodes."
+        )
+        assert self.hidden_size <= self.max_mlp_nodes, (
+            "Nodes must be within min_nodes and max_nodes."
+        )
 
 
 @dataclass
 class CnnNetConfig(NetConfig):
     channel_size: list[int]
-    kernel_size: list[Union[int, tuple[int, ...]]]
+    kernel_size: list[int | tuple[int, ...]]
     stride_size: list[int]
-    sample_input: Optional[torch.Tensor] = field(default=None)
+    sample_input: torch.Tensor | None = field(default=None)
     activation: str = field(default="ReLU")
-    output_activation: Optional[str] = field(default=None)
+    output_activation: str | None = field(default=None)
     block_type: Literal["Conv2d", "Conv3d"] = field(default="Conv2d")
     min_hidden_layers: int = field(default=1)
     max_hidden_layers: int = field(default=6)
@@ -135,7 +135,7 @@ class LstmNetConfig(NetConfig):
     max_hidden_state_size: int = field(default=500)
     min_layers: int = field(default=1)
     max_layers: int = field(default=4)
-    output_activation: Optional[str] = field(default=None)
+    output_activation: str | None = field(default=None)
     dropout: float = field(default=0.0)
 
 
@@ -151,29 +151,30 @@ class MultiInputNetConfig(NetConfig):
     min_latent_dim: int = 8
     max_latent_dim: int = 128
     vector_space_mlp: bool = False
-    output_activation: Optional[str] = field(default=None)
+    output_activation: str | None = field(default=None)
 
     # Network configurations
-    cnn_config: Optional[NetConfigType] = field(default=None)
-    mlp_config: Optional[NetConfigType] = field(default=None)
+    cnn_config: NetConfigType | None = field(default=None)
+    mlp_config: NetConfigType | None = field(default=None)
 
     # Additional settings
     init_dicts: dict[str, dict[str, Any]] = field(default_factory=dict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
         # Validate latent dimension
-        assert (
-            self.latent_dim >= self.min_latent_dim
-        ), f"Latent dimension {self.latent_dim} must be >= {self.min_latent_dim}"
-        assert (
-            self.latent_dim <= self.max_latent_dim
-        ), f"Latent dimension {self.latent_dim} must be <= {self.max_latent_dim}"
+        assert self.latent_dim >= self.min_latent_dim, (
+            f"Latent dimension {self.latent_dim} must be >= {self.min_latent_dim}"
+        )
+        assert self.latent_dim <= self.max_latent_dim, (
+            f"Latent dimension {self.latent_dim} must be <= {self.max_latent_dim}"
+        )
 
         # Validate network configurations if provided
         if self.cnn_config is not None:
             assert isinstance(
-                self.cnn_config, (dict, CnnNetConfig)
+                self.cnn_config,
+                (dict, CnnNetConfig),
             ), "CNN config must be an instance of CnnNetConfig"
         else:
             self.cnn_config = CnnNetConfig(
@@ -185,7 +186,8 @@ class MultiInputNetConfig(NetConfig):
             )
         if self.mlp_config is not None:
             assert isinstance(
-                self.mlp_config, (dict, MlpNetConfig)
+                self.mlp_config,
+                (dict, MlpNetConfig),
             ), "MLP config must be an instance of MlpNetConfig"
         else:
             self.mlp_config = MlpNetConfig(

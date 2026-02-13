@@ -1,13 +1,12 @@
+from collections.abc import Callable
 from enum import Enum
 from numbers import Number
 from typing import (
     Any,
-    Callable,
     ClassVar,
     Protocol,
     TypedDict,
     TypeVar,
-    Union,
 )
 
 import gymnasium as gym
@@ -22,14 +21,14 @@ from torch.nn import Module
 from torch.optim import Optimizer
 
 from agilerl.protocols import (
-    EvolvableAlgorithm,
-    EvolvableModule,
-    EvolvableNetwork,
-    ModuleDict,
+    EvolvableAlgorithmProtocol,
+    EvolvableModuleProtocol,
+    EvolvableNetworkProtocol,
+    ModuleDictProtocol,
 )
 
 # Type variable for module types - bound to Module to ensure all types inherit from it
-T = TypeVar("T", bound=Union[Module, OptimizedModule])
+T = TypeVar("T", bound=Module | OptimizedModule)
 
 
 class IsDataclass(Protocol):
@@ -72,68 +71,72 @@ class ModuleType(Enum):
     MULTI_INPUT = "multi_input"
 
 
-SupportedObsSpaces = Union[
-    spaces.Box,
-    spaces.Discrete,
-    spaces.MultiDiscrete,
-    spaces.Dict,
-    spaces.Tuple,
-    spaces.MultiBinary,
-]
+SupportedObsSpaces = (
+    spaces.Box
+    | spaces.Discrete
+    | spaces.MultiDiscrete
+    | spaces.Dict
+    | spaces.Tuple
+    | spaces.MultiBinary
+)
+SupportedActionSpaces = (
+    spaces.Discrete | spaces.MultiDiscrete | spaces.MultiBinary | spaces.Box
+)
 
-SupportedActionSpaces = Union[
-    spaces.Discrete,
-    spaces.MultiDiscrete,
-    spaces.MultiBinary,
-    spaces.Box,
-]
-
-ArrayOrTensor = Union[np.ndarray, torch.Tensor]
+ArrayOrTensor = np.ndarray | torch.Tensor
 StandardTensorDict = dict[str, torch.Tensor]
 TensorTuple = tuple[torch.Tensor, ...]
 ArrayDict = dict[str, np.ndarray]
 ArrayTuple = tuple[np.ndarray, ...]
-NetConfigType = dict[str, Union[dict[str, Any], Any]]
-KernelSizeType = Union[int, tuple[int, ...]]
-GymSpaceType = Union[SupportedObsSpaces, list[SupportedObsSpaces]]
-GymEnvType = Union[str, gym.Env, gym.vector.VectorEnv, gym.vector.AsyncVectorEnv]
-PzEnvType = Union[str, ParallelEnv]
+NetConfigType = dict[str, dict[str, Any] | Any]
+KernelSizeType = int | tuple[int, ...]
+GymSpaceType = SupportedObsSpaces | list[SupportedObsSpaces]
+GymEnvType = str | gym.Env | gym.vector.VectorEnv | gym.vector.AsyncVectorEnv
+PzEnvType = str | ParallelEnv
 LLMObsType = list[ReasoningPrompts]
 
-NumpyObsType = Union[np.ndarray, ArrayDict, ArrayTuple]
-TorchObsType = Union[torch.Tensor, TensorDict, TensorTuple, StandardTensorDict]
-ObservationType = Union[NumpyObsType, TorchObsType, Number, LLMObsType]
+NumpyObsType = np.ndarray | ArrayDict | ArrayTuple
+TorchObsType = torch.Tensor | TensorDict | TensorTuple | StandardTensorDict
+ObservationType = NumpyObsType | TorchObsType | Number | LLMObsType
 MultiAgentObservationType = dict[str, ObservationType]
-ActionType = Union[int, float, np.ndarray, torch.Tensor]
+ActionType = int | float | np.ndarray | torch.Tensor
 InfosDict = dict[str, dict[str, Any]]
-MaybeObsList = Union[list[ObservationType], ObservationType]
-ExperiencesType = Union[dict[str, ObservationType], tuple[ObservationType, ...]]
-ActionReturnType = Union[tuple[Union[ActionType, Any], ...], ActionType, Any]
+MaybeObsList = list[ObservationType] | ObservationType
+ExperiencesType = dict[str, ObservationType] | tuple[ObservationType, ...]
+ActionReturnType = tuple[ActionType | Any, ...] | ActionType | Any
 GymStepReturn = tuple[NumpyObsType, ActionType, float, MaybeObsList, InfosDict]
 PzStepReturn = tuple[
-    dict[str, NumpyObsType], ArrayDict, ArrayDict, ArrayDict, dict[str, Any]
+    dict[str, NumpyObsType],
+    ArrayDict,
+    ArrayDict,
+    ArrayDict,
+    dict[str, Any],
 ]
 
-SingleAgentModule = Union[T, EvolvableModule, OptimizedModule, EvolvableNetwork]
-MultiAgentModule = ModuleDict[SingleAgentModule[T]]
-NetworkType = Union[SingleAgentModule[T], MultiAgentModule[T]]
-EvolvableNetworkType = Union[EvolvableModule, ModuleDict[EvolvableModule]]
-DeviceType = Union[str, torch.device]
-OptimizerType = Union[Optimizer, AcceleratedOptimizer]
-ConfigType = Union[IsDataclass, NetConfigType]
-StateDict = Union[dict[str, Any], dict[str, dict[str, Any]]]
+SingleAgentModule = (
+    T | EvolvableModuleProtocol | OptimizedModule | EvolvableNetworkProtocol
+)
+MultiAgentModule = ModuleDictProtocol[SingleAgentModule[T]]
+NetworkType = SingleAgentModule[T] | MultiAgentModule[T]
+EvolvableNetworkType = (
+    EvolvableModuleProtocol | ModuleDictProtocol[EvolvableModuleProtocol]
+)
+DeviceType = str | torch.device
+OptimizerType = Optimizer | AcceleratedOptimizer
+ConfigType = IsDataclass | NetConfigType
+StateDict = dict[str, Any] | dict[str, dict[str, Any]]
 
 SingleAgentMutReturnType = dict[str, Any]
 MultiAgentMutReturnType = dict[str, dict[str, Any]]
-MutationReturnType = Union[SingleAgentMutReturnType, MultiAgentMutReturnType]
-PopulationType = list[EvolvableAlgorithm]
-MutationMethod = Callable[[EvolvableAlgorithm], EvolvableAlgorithm]
-ConfigType = Union[IsDataclass, dict[str, Any]]
-StateDict = Union[dict[str, Any], list[dict[str, Any]]]
+MutationReturnType = SingleAgentMutReturnType | MultiAgentMutReturnType
+PopulationType = list[EvolvableAlgorithmProtocol]
+MutationMethod = Callable[[EvolvableAlgorithmProtocol], EvolvableAlgorithmProtocol]
+ConfigType = IsDataclass | dict[str, Any]
+StateDict = dict[str, Any] | list[dict[str, Any]]
 
 
 class BatchDimension:
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "BatchDimension"
 
 

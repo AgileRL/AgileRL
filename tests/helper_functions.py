@@ -1,12 +1,12 @@
 import random
 from numbers import Number
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
 from gymnasium import spaces
 from tensordict import TensorDict
+from torch import nn
 
 from agilerl.components.data import Transition
 from agilerl.modules import EvolvableModule
@@ -19,8 +19,7 @@ def assert_state_dicts_equal(
     rtol: float = 1e-5,
     atol: float = 1e-8,
 ) -> None:
-    """
-    Compare two PyTorch state dictionaries using torch.allclose for efficient comparison.
+    """Compare two PyTorch state dictionaries using torch.allclose for efficient comparison.
 
     :param state_dict1: First state dictionary
     :type state_dict1: dict[str, torch.Tensor]
@@ -33,12 +32,13 @@ def assert_state_dicts_equal(
     """
     # First check that they have the same keys
     assert set(state_dict1.keys()) == set(
-        state_dict2.keys()
-    ), f"State dict keys don't match: {set(state_dict1.keys())} vs {set(state_dict2.keys())}"
+        state_dict2.keys(),
+    ), (
+        f"State dict keys don't match: {set(state_dict1.keys())} vs {set(state_dict2.keys())}"
+    )
 
     # Then check each tensor
-    for key in state_dict1:
-        tensor1 = state_dict1[key]
+    for key, tensor1 in state_dict1.items():
         tensor2 = state_dict2[key]
 
         if isinstance(tensor1, torch.Tensor) and isinstance(tensor2, torch.Tensor):
@@ -46,11 +46,14 @@ def assert_state_dicts_equal(
                 tensor1 = tensor1.cpu()
                 tensor2 = tensor2.cpu()
 
-            assert (
-                tensor1.shape == tensor2.shape
-            ), f"Tensors for key '{key}' have different shapes: {tensor1.shape} != {tensor2.shape}"
+            assert tensor1.shape == tensor2.shape, (
+                f"Tensors for key '{key}' have different shapes: {tensor1.shape} != {tensor2.shape}"
+            )
             assert torch.allclose(
-                tensor1, tensor2, rtol=rtol, atol=atol
+                tensor1,
+                tensor2,
+                rtol=rtol,
+                atol=atol,
             ), f"Tensors for key '{key}' are not close enough"
 
 
@@ -60,8 +63,7 @@ def assert_not_equal_state_dict(
     rtol: float = 1e-5,
     atol: float = 1e-8,
 ) -> None:
-    """
-    Compare two PyTorch state dictionaries using torch.allclose for efficient comparison.
+    """Compare two PyTorch state dictionaries using torch.allclose for efficient comparison.
 
     :param state_dict1: First state dictionary
     :type state_dict1: dict[str, torch.Tensor]
@@ -77,12 +79,13 @@ def assert_not_equal_state_dict(
     except AssertionError:
         return
 
-    raise AssertionError(f"State dicts are equal: {state_dict1} == {state_dict2}")
+    msg = f"State dicts are equal: {state_dict1} == {state_dict2}"
+    raise AssertionError(msg)
 
 
 def check_equal_params_ind(
-    before_ind: Union[nn.Module, EvolvableModule],
-    mutated_ind: Union[nn.Module, EvolvableModule],
+    before_ind: nn.Module | EvolvableModule,
+    mutated_ind: nn.Module | EvolvableModule,
 ) -> None:
     before_dict = dict(before_ind.named_parameters())
     after_dict = mutated_ind.named_parameters()
@@ -97,11 +100,14 @@ def check_equal_params_ind(
             elif "norm" not in key:
                 # Create a slicing index to handle tensors with varying sizes
                 slice_index = tuple(
-                    slice(0, min(o, n)) for o, n in zip(old_size, new_size)
+                    slice(0, min(o, n))
+                    for o, n in zip(old_size, new_size, strict=False)
                 )
                 assert torch.all(
-                    torch.eq(param.data[slice_index], old_param.data[slice_index])
-                ), f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
+                    torch.eq(param.data[slice_index], old_param.data[slice_index]),
+                ), (
+                    f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
+                )
 
 
 def unpack_network(model: nn.Sequential) -> list[nn.Module]:
@@ -111,24 +117,25 @@ def unpack_network(model: nn.Sequential) -> list[nn.Module]:
         if isinstance(layer, nn.Sequential):
             # If it's an nn.Sequential, recursively unpack its children
             layer_list.extend(unpack_network(layer))
+        elif isinstance(layer, nn.Flatten):
+            pass
         else:
-            if isinstance(layer, nn.Flatten):
-                pass
-            else:
-                layer_list.append(layer)
+            layer_list.append(layer)
 
     return layer_list
 
 
 def check_models_same(model1: nn.Module, model2: nn.Module) -> bool:
-    for p1, p2 in zip(model1.parameters(), model2.parameters()):
+    for p1, p2 in zip(model1.parameters(), model2.parameters(), strict=False):
         if p1.data.ne(p2.data).sum() > 0:
             return False
     return True
 
 
 def generate_random_box_space(
-    shape: tuple[int, ...], low: Optional[Number] = None, high: Optional[Number] = None
+    shape: tuple[int, ...],
+    low: Number | None = None,
+    high: Number | None = None,
 ) -> spaces.Box:
     return spaces.Box(
         low=random.randint(0, 5) if low is None else low,
@@ -151,11 +158,11 @@ def generate_dict_or_tuple_space(
     n_vector: int,
     image_shape: tuple[int, ...] = (3, 32, 32),
     vector_shape: tuple[int] = (4,),
-    dict_space: Optional[bool] = True,
-) -> Union[spaces.Dict, spaces.Tuple]:
+    dict_space: bool | None = True,
+) -> spaces.Dict | spaces.Tuple:
 
     if dict_space is None:
-        dict_space = True if random.random() < 0.5 else False
+        dict_space = random.random() < 0.5
 
     image_spaces = [
         generate_random_box_space(image_shape, low=0, high=255) for _ in range(n_image)
@@ -175,8 +182,8 @@ def generate_dict_or_tuple_space(
 def generate_multi_agent_box_spaces(
     n_agents: int,
     shape: tuple[int, ...],
-    low: Optional[Union[Number, list[Number]]] = -1,
-    high: Optional[Union[Number, list[Number]]] = 1,
+    low: Number | list[Number] | None = -1,
+    high: Number | list[Number] | None = 1,
 ) -> list[spaces.Box]:
     if isinstance(low, list):
         assert len(low) == n_agents
@@ -185,14 +192,8 @@ def generate_multi_agent_box_spaces(
 
     spaces = []
     for i in range(n_agents):
-        if isinstance(low, list):
-            _low = low[i]
-        else:
-            _low = low
-        if isinstance(high, list):
-            _high = high[i]
-        else:
-            _high = high
+        _low = low[i] if isinstance(low, list) else low
+        _high = high[i] if isinstance(high, list) else high
 
         spaces.append(generate_random_box_space(shape, _low, _high))
 
@@ -200,13 +201,15 @@ def generate_multi_agent_box_spaces(
 
 
 def generate_multi_agent_discrete_spaces(
-    n_agents: int, m: int
+    n_agents: int,
+    m: int,
 ) -> list[spaces.Discrete]:
     return [generate_discrete_space(m) for _ in range(n_agents)]
 
 
 def generate_multi_agent_multidiscrete_spaces(
-    n_agents: int, m: int
+    n_agents: int,
+    m: int,
 ) -> list[spaces.MultiDiscrete]:
     return [generate_multidiscrete_space(m, m) for _ in range(n_agents)]
 
@@ -217,11 +220,15 @@ def gen_multi_agent_dict_or_tuple_spaces(
     n_vector: int,
     image_shape: tuple[int, ...] = (3, 16, 16),
     vector_shape: tuple[int] = (4,),
-    dict_space: Optional[bool] = False,
-) -> list[Union[spaces.Dict, spaces.Tuple]]:
+    dict_space: bool | None = False,
+) -> list[spaces.Dict | spaces.Tuple]:
     return [
         generate_dict_or_tuple_space(
-            n_image, n_vector, image_shape, vector_shape, dict_space
+            n_image,
+            n_vector,
+            image_shape,
+            vector_shape,
+            dict_space,
         )
         for _ in range(n_agents)
     ]
@@ -229,11 +236,10 @@ def gen_multi_agent_dict_or_tuple_spaces(
 
 def get_sample_from_space(
     space: spaces.Space,
-    batch_size: Optional[int] = None,
-    device: Optional[torch.device] = None,
+    batch_size: int | None = None,
+    device: torch.device | None = None,
 ) -> NumpyObsType:
-    """
-    Generate a sample from the given space.
+    """Generate a sample from the given space.
 
     :param space: The space to generate a sample from.
     :type space: spaces.Space
@@ -245,29 +251,28 @@ def get_sample_from_space(
     if isinstance(space, spaces.Box):
         if batch_size is None:
             return np.random.uniform(low=space.low, high=space.high, size=space.shape)
-        else:
-            return np.random.uniform(
-                low=space.low, high=space.high, size=(batch_size, *space.shape)
-            )
-    elif isinstance(space, spaces.Discrete):
+        return np.random.uniform(
+            low=space.low,
+            high=space.high,
+            size=(batch_size, *space.shape),
+        )
+    if isinstance(space, spaces.Discrete):
         if batch_size is None:
             return np.random.randint(space.n, size=(1,))
-        else:
-            return np.random.randint(space.n, size=(batch_size, 1))
-    elif isinstance(space, spaces.MultiDiscrete):
+        return np.random.randint(space.n, size=(batch_size, 1))
+    if isinstance(space, spaces.MultiDiscrete):
         if batch_size is None:
             return np.random.randint(space.nvec, size=(len(space.nvec),))
-        else:
-            return np.random.randint(space.nvec, size=(batch_size, len(space.nvec)))
-    elif isinstance(space, spaces.Dict):
+        return np.random.randint(space.nvec, size=(batch_size, len(space.nvec)))
+    if isinstance(space, spaces.Dict):
         return {
             key: get_sample_from_space(value, batch_size)
             for key, value in space.items()
         }
-    elif isinstance(space, spaces.Tuple):
+    if isinstance(space, spaces.Tuple):
         return tuple(get_sample_from_space(value, batch_size) for value in space)
-    else:
-        raise ValueError(f"Unsupported space type: {type(space)}")
+    msg = f"Unsupported space type: {type(space)}"
+    raise ValueError(msg)
 
 
 def is_processed_observation(observation: TorchObsType, space: spaces.Space) -> bool:
@@ -276,34 +281,32 @@ def is_processed_observation(observation: TorchObsType, space: spaces.Space) -> 
             isinstance(observation, torch.Tensor)
             and observation.shape[1:] == space.shape
         )
-    elif isinstance(space, spaces.Discrete):
+    if isinstance(space, spaces.Discrete):
         return isinstance(observation, torch.Tensor) and observation.shape[1:] == (1,)
-    elif isinstance(space, spaces.MultiDiscrete):
+    if isinstance(space, spaces.MultiDiscrete):
         return isinstance(observation, torch.Tensor) and observation.shape[1:] == (
             len(space.nvec),
         )
-    elif isinstance(space, spaces.Dict):
+    if isinstance(space, spaces.Dict):
         return isinstance(observation, dict) and all(
-            is_processed_observation(observation[key], space[key])
-            for key in space.keys()
+            is_processed_observation(observation[key], space[key]) for key in space
         )
-    elif isinstance(space, spaces.Tuple):
+    if isinstance(space, spaces.Tuple):
         return isinstance(observation, tuple) and all(
             is_processed_observation(value, space[i])
             for i, value in enumerate(observation)
         )
-    else:
-        raise ValueError(f"Unsupported space type: {type(space)}")
+    msg = f"Unsupported space type: {type(space)}"
+    raise ValueError(msg)
 
 
 def get_experiences_batch(
     observation_space: spaces.Space,
     action_space: spaces.Space,
     batch_size: int,
-    device: Optional[torch.device] = None,
+    device: torch.device | None = None,
 ) -> TensorDict:
-    """
-    Generate a batch of experiences from the observation and action spaces.
+    """Generate a batch of experiences from the observation and action spaces.
 
     :param observation_space: The observation space.
     :type observation_space: spaces.Space
@@ -339,7 +342,8 @@ def assert_close_dict(before: dict[str, Any], after: dict[str, Any]) -> None:
             assert_close_dict(value, after[key])
         elif isinstance(value, torch.Tensor):
             assert torch.allclose(
-                value, after[key]
+                value,
+                after[key],
             ), f"Value not close: {value} != {after[key]}"
         else:
             assert value == after[key], f"Value not equal: {value} != {after[key]}"

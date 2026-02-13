@@ -749,7 +749,7 @@ def test_prioritized_buffer_update_priorities():
     buffer.update_priorities(indices, new_priorities)
 
     # Verify priorities were updated
-    for idx, priority in zip(indices, new_priorities):
+    for idx, priority in zip(indices, new_priorities, strict=False):
         assert buffer.sum_tree[idx.item()] == priority.item() ** buffer.alpha, (
             priority.item() ** buffer.alpha
         )

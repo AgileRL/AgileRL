@@ -1,7 +1,7 @@
-from typing import Any, Optional
+from typing import Any
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.typing import ArrayOrTensor, BatchDimension
@@ -36,7 +36,7 @@ class EvolvableLSTM(EvolvableModule):
     :param name: Name of the network, defaults to 'lstm'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
@@ -45,7 +45,7 @@ class EvolvableLSTM(EvolvableModule):
         hidden_state_size: int,
         num_outputs: int,
         num_layers: int = 1,
-        output_activation: str = None,
+        output_activation: str | None = None,
         min_hidden_state_size: int = 32,
         max_hidden_state_size: int = 512,
         min_layers: int = 1,
@@ -53,25 +53,25 @@ class EvolvableLSTM(EvolvableModule):
         dropout: float = 0.0,
         device: str = "cpu",
         name: str = "lstm",
-        random_seed: Optional[int] = None,
-    ):
+        random_seed: int | None = None,
+    ) -> None:
         super().__init__(device, random_seed)
 
-        assert (
-            input_size > 0
-        ), "'input_size' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            hidden_state_size > 0
-        ), "'hidden_state_size' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            num_outputs > 0
-        ), "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            num_layers > 0
-        ), "'num_layers' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            min_hidden_state_size < max_hidden_state_size
-        ), "'min_hidden_state_size' must be less than 'max_hidden_state_size'."
+        assert input_size > 0, (
+            "'input_size' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert hidden_state_size > 0, (
+            "'hidden_state_size' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert num_outputs > 0, (
+            "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert num_layers > 0, (
+            "'num_layers' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert min_hidden_state_size < max_hidden_state_size, (
+            "'min_hidden_state_size' must be less than 'max_hidden_state_size'."
+        )
         assert min_layers < max_layers, "'min_layers' must be less than 'max_layers'."
         assert 0 <= dropout < 1, "'dropout' must be between 0 and 1."
 
@@ -92,7 +92,7 @@ class EvolvableLSTM(EvolvableModule):
 
     @property
     def hidden_state_architecture(self) -> dict[str, tuple[int, ...]]:
-        """Returns the hidden state architecture."""
+        """Return the hidden state architecture."""
         # For LSTM, hidden state and cell state have shape (num_layers * num_directions, batch_size, hidden_size)
         # Assuming unidirectional LSTM (num_directions=1) !TODO: SHOULD WE HAVE A DIRECTIONAL LSTM IN THE FUTURE?
         return {
@@ -101,7 +101,7 @@ class EvolvableLSTM(EvolvableModule):
         }
 
     def create_lstm(self) -> nn.ModuleDict:
-        """Creates and returns an LSTM network with the current configuration.
+        """Create and returns an LSTM network with the current configuration.
 
         :return: LSTM network
         :rtype: nn.ModuleDict
@@ -121,17 +121,19 @@ class EvolvableLSTM(EvolvableModule):
 
         # Add activation if specified
         model_dict[f"{self.name}_lstm_output"] = nn.Linear(
-            features_dim, self.num_outputs, device=self.device
+            features_dim,
+            self.num_outputs,
+            device=self.device,
         )
         model_dict[f"{self.name}_output_activation"] = get_activation(
-            self.output_activation
+            self.output_activation,
         )
 
         return model_dict
 
     @property
     def net_config(self) -> dict[str, Any]:
-        """Returns model configuration in dictionary format."""
+        """Return model configuration in dictionary format."""
         net_config = self.init_dict.copy()
         for attr in ["input_size", "num_outputs", "device", "name"]:
             if attr in net_config:
@@ -141,13 +143,12 @@ class EvolvableLSTM(EvolvableModule):
 
     @property
     def activation(self) -> str:
-        """Returns activation function."""
+        """Return activation function."""
         return
 
     @activation.setter
     def activation(self, activation: str) -> None:
         """Set activation function."""
-        pass
 
     @mutation(MutationType.ACTIVATION)
     def change_activation(self, activation: str, output: bool = False) -> None:
@@ -164,14 +165,14 @@ class EvolvableLSTM(EvolvableModule):
     def forward(
         self,
         x: ArrayOrTensor,
-        hidden_state: Optional[dict[str, ArrayOrTensor]] = None,
+        hidden_state: dict[str, ArrayOrTensor] | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Forward pass of the network.
 
         :param x: Input tensor
         :type x: ArrayOrTensor
         :param hidden_state: Dict containing hidden and cell states, defaults to None
-        :type hidden_state: Optional[dict[str, torch.Tensor]]
+        :type hidden_state: dict[str, torch.Tensor] | None
         :return: Output tensor and next hidden state
         :rtype: tuple[torch.Tensor, dict[str, torch.Tensor]]
         """
@@ -183,9 +184,12 @@ class EvolvableLSTM(EvolvableModule):
         if x.dim() == 2:
             x = x.unsqueeze(1)
         elif x.dim() != 3:
-            raise ValueError(
+            msg = (
                 f"Expected 2D (batch_size, features) or 3D "
                 f"(batch_size, seq_len, features) input, but got {x.dim()}D"
+            )
+            raise ValueError(
+                msg,
             )
 
         # Use provided hidden state if available
@@ -206,12 +210,14 @@ class EvolvableLSTM(EvolvableModule):
             if sequence_input:
                 out_shape = lstm_output.shape
                 lstm_output = lstm_output.reshape(
-                    out_shape[0] * out_shape[1], out_shape[2]
+                    out_shape[0] * out_shape[1],
+                    out_shape[2],
                 )
             else:
                 lstm_output = lstm_output.squeeze(1)
         else:
-            raise ValueError("Hidden state is required for LSTM forward pass.")
+            msg = "Hidden state is required for LSTM forward pass."
+            raise ValueError(msg)
 
         # Process output
         lstm_output = self.model[f"{self.name}_lstm_output"](lstm_output)
@@ -226,29 +232,33 @@ class EvolvableLSTM(EvolvableModule):
         return lstm_output, next_hidden
 
     def get_output_dense(self) -> torch.nn.Module:
-        """Returns output layer of neural network."""
+        """Return output layer of neural network."""
         return self.model[f"{self.name}_linear_output"]
 
     @mutation(MutationType.LAYER)
     def add_layer(self) -> None:
-        """Adds an LSTM layer to the network. Falls back on `add_node()` if
-        max layers reached."""
+        """Add an LSTM layer to the network. Falls back on `add_node()` if
+        max layers reached.
+        """
         if self.num_layers < self.max_layers:  # HARD LIMIT
             self.num_layers += 1
         else:
             return self.add_node()
+        return None
 
     @mutation(MutationType.LAYER)
     def remove_layer(self) -> None:
-        """Removes an LSTM layer from the network. Falls back on `add_node()` if
-        min layers reached."""
+        """Remove an LSTM layer from the network. Falls back on `add_node()` if
+        min layers reached.
+        """
         if self.num_layers > self.min_layers:  # HARD LIMIT
             self.num_layers -= 1
         else:
             return self.add_node()
+        return None
 
     @mutation(MutationType.NODE)
-    def add_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, int]:
+    def add_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
         """Increases hidden size of the LSTM.
 
         :param numb_new_nodes: Number of nodes to add to hidden size, defaults to None
@@ -267,7 +277,7 @@ class EvolvableLSTM(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, int]:
+    def remove_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
         """Decreases hidden size of the LSTM.
 
         :param numb_new_nodes: Number of nodes to remove from hidden size, defaults to None
@@ -291,5 +301,6 @@ class EvolvableLSTM(EvolvableModule):
 
         # Preserve parameters where possible
         self.model = EvolvableModule.preserve_parameters(
-            old_net=self.model, new_net=model
+            old_net=self.model,
+            new_net=model,
         )

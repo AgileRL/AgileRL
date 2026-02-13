@@ -3,9 +3,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-import torch.optim as optim
 from accelerate import Accelerator
 from gymnasium import spaces
+from torch import optim
 from torch._dynamo.eval_frame import OptimizedModule
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
@@ -128,10 +128,16 @@ def mixed_agent():
         spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32),  # Group 1 (vector)
         spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32),  # Group 1 (vector)
         spaces.Box(
-            low=0, high=255, shape=(3, 32, 32), dtype=np.uint8
+            low=0,
+            high=255,
+            shape=(3, 32, 32),
+            dtype=np.uint8,
         ),  # Group 2 (image)
         spaces.Box(
-            low=0, high=255, shape=(3, 32, 32), dtype=np.uint8
+            low=0,
+            high=255,
+            shape=(3, 32, 32),
+            dtype=np.uint8,
         ),  # Group 2 (image)
     ]
     action_spaces = [
@@ -156,7 +162,7 @@ def heterogeneous_agent():
             {  # Dict space
                 "position": spaces.Box(low=-10, high=10, shape=(2,), dtype=np.float32),
                 "velocity": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
-            }
+            },
         ),
     ]
     action_spaces = [spaces.Discrete(2), spaces.Discrete(2), spaces.Discrete(2)]
@@ -166,11 +172,21 @@ def heterogeneous_agent():
 
 class DummyRLAlgorithm(RLAlgorithm):
     def __init__(
-        self, observation_space, action_space, index, lr=True, device="cpu", **kwargs
+        self,
+        observation_space,
+        action_space,
+        index,
+        lr=True,
+        device="cpu",
+        **kwargs,
     ):
         kwargs.pop("wrap", None)
         super().__init__(
-            observation_space, action_space, index, device=device, **kwargs
+            observation_space,
+            action_space,
+            index,
+            device=device,
+            **kwargs,
         )
 
         num_outputs = (
@@ -194,13 +210,19 @@ class DummyRLAlgorithm(RLAlgorithm):
                 else self.observation_space.n
             )
             self.dummy_actor = EvolvableMLP(
-                num_inputs, num_outputs, hidden_size=[8], device=self.device
+                num_inputs,
+                num_outputs,
+                hidden_size=[8],
+                device=self.device,
             )
         elif isinstance(self.observation_space, spaces.MultiDiscrete):
             # Handle MultiDiscrete spaces
             num_inputs = len(self.observation_space.nvec)
             self.dummy_actor = EvolvableMLP(
-                num_inputs, num_outputs, hidden_size=[8], device=self.device
+                num_inputs,
+                num_outputs,
+                hidden_size=[8],
+                device=self.device,
             )
         elif isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
             config = {
@@ -212,7 +234,10 @@ class DummyRLAlgorithm(RLAlgorithm):
                 },
             }
             self.dummy_actor = EvolvableMultiInput(
-                self.observation_space, num_outputs, **config, device=self.device
+                self.observation_space,
+                num_outputs,
+                **config,
+                device=self.device,
             )
 
         self.lr = 0.1
@@ -220,11 +245,58 @@ class DummyRLAlgorithm(RLAlgorithm):
         self.dummy_attribute = "test_value"
 
         self.register_network_group(
-            NetworkGroup(eval_network=self.dummy_actor, policy=True)
+            NetworkGroup(eval_network=self.dummy_actor, policy=True),
         )
 
         if self.accelerator is not None:
             self.wrap_models()
+
+    def get_action(self, *args, **kwargs):
+        return
+
+    def learn(self, *args, **kwargs):
+        return
+
+    def test(self, *args, **kwargs):
+        return
+
+
+class DummyRLAlgorithmNoPolicy(RLAlgorithm):
+    """Algorithm that has a policy group but we clear policy flag so get_policy() raises."""
+
+    def __init__(self, observation_space, action_space, index=0):
+        super().__init__(
+            observation_space=observation_space,
+            action_space=action_space,
+            index=index,
+        )
+        num_outputs = (
+            action_space.n
+            if hasattr(action_space, "n")
+            else int(np.prod(action_space.shape))
+        )
+        num_inputs = (
+            observation_space.shape[0]
+            if hasattr(observation_space, "shape")
+            else observation_space.n
+        )
+        self.dummy_actor = EvolvableMLP(
+            num_inputs,
+            num_outputs,
+            hidden_size=[8],
+            device=self.device,
+        )
+        self.lr = 0.01
+        self.dummy_optimizer = OptimizerWrapper(
+            torch.optim.Adam,
+            self.dummy_actor,
+            self.lr,
+            network_names=["dummy_actor"],
+            lr_name="lr",
+        )
+        self.register_network_group(
+            NetworkGroup(eval_network=self.dummy_actor, policy=True),
+        )
 
     def get_action(self, *args, **kwargs):
         return
@@ -248,7 +320,12 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
     ):
         kwargs.pop("wrap", None)
         super().__init__(
-            observation_spaces, action_spaces, index, agent_ids, device=device, **kwargs
+            observation_spaces,
+            action_spaces,
+            index,
+            agent_ids,
+            device=device,
+            **kwargs,
         )
 
         def create_actor(idx):
@@ -268,16 +345,19 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
                     stride_size=[1],
                     device=self.device,
                 )
-            elif isinstance(obs_space, (spaces.Box, spaces.Discrete)):
+            if isinstance(obs_space, (spaces.Box, spaces.Discrete)):
                 num_inputs = (
                     obs_space.shape[0]
                     if isinstance(obs_space, spaces.Box)
                     else obs_space.n
                 )
                 return EvolvableMLP(
-                    num_inputs, num_outputs, hidden_size=[8], device=self.device
+                    num_inputs,
+                    num_outputs,
+                    hidden_size=[8],
+                    device=self.device,
                 )
-            elif isinstance(obs_space, (spaces.Dict, spaces.Tuple)):
+            if isinstance(obs_space, (spaces.Dict, spaces.Tuple)):
                 config = {
                     "mlp_config": {"hidden_size": [8]},
                     "cnn_config": {
@@ -287,20 +367,24 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
                     },
                 }
                 return EvolvableMultiInput(
-                    obs_space, num_outputs, **config, device=self.device
+                    obs_space,
+                    num_outputs,
+                    **config,
+                    device=self.device,
                 )
+            return None
 
         self.dummy_actors = ModuleDict(
             {
                 agent_id: create_actor(idx)
                 for idx, agent_id in enumerate(self.possible_observation_spaces.keys())
-            }
+            },
         )
         self.lr = 0.1
         self.dummy_optimizer = OptimizerWrapper(optim.Adam, self.dummy_actors, self.lr)
 
         self.register_network_group(
-            NetworkGroup(eval_network=self.dummy_actors, policy=True)
+            NetworkGroup(eval_network=self.dummy_actors, policy=True),
         )
 
         if self.accelerator is not None:
@@ -370,6 +454,36 @@ def test_initialise_multi_agent(observation_space, action_space, agent_ids, requ
     assert agent is not None
 
 
+@pytest.mark.parametrize(
+    "observation_spaces, action_spaces, error_match",
+    [
+        (42, 42, "Observation spaces must be a list or dictionary"),
+        ("not_a_list", "not_a_list", "Observation spaces must be a list or dictionary"),
+    ],
+)
+def test_multi_agent_algorithm_observation_spaces_type_error(
+    observation_spaces, action_spaces, error_match
+):
+    """MultiAgentRLAlgorithm raises TypeError when observation_spaces is not list or dict."""
+    agent_ids = ["agent_0", "agent_1"]
+    with pytest.raises(TypeError, match=error_match):
+        DummyMARLAlgorithm(
+            observation_spaces,
+            action_spaces,
+            agent_ids=agent_ids,
+            index=0,
+        )
+
+
+def test_get_policy_raises_when_no_policy_registered(vector_space, discrete_space):
+    """get_policy() raises AttributeError when no policy network has been registered."""
+    agent = DummyRLAlgorithmNoPolicy(vector_space, discrete_space, index=0)
+    # Remove policy group so get_policy() has nothing to return
+    agent.registry.groups = [g for g in agent.registry.groups if not g.policy]
+    with pytest.raises(AttributeError, match="No policy network has been registered"):
+        agent.get_policy()
+
+
 def test_population_single_agent(vector_space, discrete_space):
     population = DummyRLAlgorithm.population(10, vector_space, discrete_space)
     assert len(population) == 10
@@ -397,7 +511,8 @@ def test_population_multi_agent(ma_vector_space, ma_discrete_space):
 
 
 @pytest.mark.parametrize(
-    "observation_space", ["vector_space", "image_space", "dict_space"]
+    "observation_space",
+    ["vector_space", "image_space", "dict_space"],
 )
 def test_preprocess_observation(observation_space, discrete_space, request):
     obs_space = request.getfixturevalue(observation_space)
@@ -475,7 +590,7 @@ def test_unwrap_models_multi_agent(compile_mode, ma_vector_space, ma_discrete_sp
 
     agent.unwrap_models()
 
-    for _, actor in agent.dummy_actors.items():
+    for actor in agent.dummy_actors.values():
         assert isinstance(actor, torch.nn.Module)
 
     # Reset torch compilation state if compilation was used
@@ -486,7 +601,10 @@ def test_unwrap_models_multi_agent(compile_mode, ma_vector_space, ma_discrete_sp
 def test_unwrap_models_single_agent(vector_space, discrete_space):
     accelerator = Accelerator()
     agent = DummyRLAlgorithm(
-        vector_space, discrete_space, index=0, accelerator=accelerator
+        vector_space,
+        discrete_space,
+        index=0,
+        accelerator=accelerator,
     )
     agent.unwrap_models()
     assert isinstance(agent.dummy_actor, torch.nn.Module)
@@ -498,7 +616,11 @@ def test_unwrap_models_single_agent(vector_space, discrete_space):
     ["vector_space", "discrete_space", "dict_space", "multidiscrete_space"],
 )
 def test_save_load_checkpoint_single_agent(
-    tmpdir, with_hp_config, observation_space, discrete_space, request
+    tmpdir,
+    with_hp_config,
+    observation_space,
+    discrete_space,
+    request,
 ):
     obs_space = request.getfixturevalue(observation_space)
     action_space = discrete_space
@@ -540,11 +662,13 @@ def test_save_load_checkpoint_single_agent(
 
     # Check if properties and weights are loaded correctly
     assert isinstance(
-        new_agent.dummy_actor, (EvolvableMLP, EvolvableCNN, EvolvableMultiInput)
+        new_agent.dummy_actor,
+        (EvolvableMLP, EvolvableCNN, EvolvableMultiInput),
     )
     assert new_agent.lr == agent.lr
     assert_state_dicts_equal(
-        new_agent.dummy_actor.state_dict(), agent.dummy_actor.state_dict()
+        new_agent.dummy_actor.state_dict(),
+        agent.dummy_actor.state_dict(),
     )
     assert new_agent.index == agent.index
     assert new_agent.scores == agent.scores
@@ -689,7 +813,8 @@ def test_load_from_pretrained_single_agent(
     assert isinstance(new_agent.dummy_actor, encoder_cls)
     assert new_agent.lr == agent.lr
     assert_state_dicts_equal(
-        new_agent.dummy_actor.to("cpu").state_dict(), agent.dummy_actor.state_dict()
+        new_agent.dummy_actor.to("cpu").state_dict(),
+        agent.dummy_actor.state_dict(),
     )
     assert new_agent.index == agent.index
     assert new_agent.scores == agent.scores
@@ -746,11 +871,13 @@ def test_load_from_pretrained_multi_agent(
 
     # Create new agent object using the class method
     new_agent = DummyMARLAlgorithm.load(
-        checkpoint_path, device=device, accelerator=accelerator
+        checkpoint_path,
+        device=device,
+        accelerator=accelerator,
     )
 
     # Check if properties and weights are loaded correctly
-    for i, agent_id in enumerate(agent_ids):
+    for _i, agent_id in enumerate(agent_ids):
         assert (
             new_agent.possible_observation_spaces[agent_id]
             == agent.possible_observation_spaces[agent_id]
@@ -833,7 +960,11 @@ print("SUCCESS: GPU-saved checkpoint loaded successfully in no-CUDA environment"
     env["CUDA_VISIBLE_DEVICES"] = ""
 
     result = subprocess.run(
-        [sys.executable, str(script_path)], env=env, capture_output=True, text=True
+        [sys.executable, str(script_path)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
     # Check that the subprocess succeeded
@@ -907,7 +1038,11 @@ print("SUCCESS: GPU-saved checkpoint loaded via load_checkpoint in no-CUDA envir
     env["CUDA_VISIBLE_DEVICES"] = ""
 
     result = subprocess.run(
-        [sys.executable, str(script_path)], env=env, capture_output=True, text=True
+        [sys.executable, str(script_path)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
     # Check that the subprocess succeeded
@@ -930,7 +1065,11 @@ def test_gpu_to_no_cuda_transfer_multi_agent(tmpdir, ma_vector_space):
     observation_spaces = ma_vector_space
     action_spaces = ma_vector_space
     agent = DummyMARLAlgorithm(
-        observation_spaces, action_spaces, agent_ids=agent_ids, index=0, device="cuda"
+        observation_spaces,
+        action_spaces,
+        agent_ids=agent_ids,
+        index=0,
+        device="cuda",
     )
 
     # Verify agents are on GPU
@@ -973,7 +1112,11 @@ print("SUCCESS: GPU-saved multi-agent checkpoint loaded successfully in no-CUDA 
     env["CUDA_VISIBLE_DEVICES"] = ""
 
     result = subprocess.run(
-        [sys.executable, str(script_path)], env=env, capture_output=True, text=True
+        [sys.executable, str(script_path)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
     # Check that the subprocess succeeded
@@ -996,7 +1139,11 @@ def test_gpu_to_no_cuda_load_checkpoint_multi_agent(tmpdir, ma_vector_space):
     observation_spaces = ma_vector_space
     action_spaces = ma_vector_space
     agent = DummyMARLAlgorithm(
-        observation_spaces, action_spaces, agent_ids=agent_ids, index=0, device="cuda"
+        observation_spaces,
+        action_spaces,
+        agent_ids=agent_ids,
+        index=0,
+        device="cuda",
     )
 
     # Verify agents are on GPU
@@ -1052,7 +1199,11 @@ print("SUCCESS: GPU-saved multi-agent checkpoint loaded via load_checkpoint in n
     env["CUDA_VISIBLE_DEVICES"] = ""
 
     result = subprocess.run(
-        [sys.executable, str(script_path)], env=env, capture_output=True, text=True
+        [sys.executable, str(script_path)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
     # Check that the subprocess succeeded
@@ -1079,7 +1230,8 @@ def test_missing_attribute_warning(tmpdir, vector_space):
 
     # Load the modified checkpoint and check if a warning is raised
     with pytest.warns(
-        UserWarning, match="Attribute dummy_attribute not found in checkpoint"
+        UserWarning,
+        match="Attribute dummy_attribute not found in checkpoint",
     ):
         new_agent = DummyRLAlgorithm.load(modified_path, device="cpu")
 
@@ -1089,11 +1241,14 @@ def test_missing_attribute_warning(tmpdir, vector_space):
 
 @pytest.mark.parametrize("flatten", [True, False])
 def test_build_net_config_homogeneous_single_level(
-    homogeneous_agent, single_level_net_config, flatten
+    homogeneous_agent,
+    single_level_net_config,
+    flatten,
 ):
     """Test build_net_config with homogeneous setup and single-level config."""
     result = homogeneous_agent.build_net_config(
-        single_level_net_config, flatten=flatten
+        single_level_net_config,
+        flatten=flatten,
     )
 
     # Should have entries for all agents
@@ -1109,11 +1264,14 @@ def test_build_net_config_homogeneous_single_level(
 
 @pytest.mark.parametrize("flatten", [True, False])
 def test_build_net_config_homogeneous_group_level(
-    homogeneous_agent, homogeneous_group_net_config, flatten
+    homogeneous_agent,
+    homogeneous_group_net_config,
+    flatten,
 ):
     """Test build_net_config with homogeneous setup and group-level config."""
     result = homogeneous_agent.build_net_config(
-        homogeneous_group_net_config, flatten=flatten
+        homogeneous_group_net_config,
+        flatten=flatten,
     )
 
     # Should have entries for all agents
@@ -1128,11 +1286,14 @@ def test_build_net_config_homogeneous_group_level(
 
 @pytest.mark.parametrize("flatten", [True, False])
 def test_build_net_config_homogeneous_agent_level(
-    homogeneous_agent, homogeneous_agent_net_config, flatten
+    homogeneous_agent,
+    homogeneous_agent_net_config,
+    flatten,
 ):
     """Test build_net_config with homogeneous setup and agent-level config."""
     result = homogeneous_agent.build_net_config(
-        homogeneous_agent_net_config, flatten=flatten
+        homogeneous_agent_net_config,
+        flatten=flatten,
     )
 
     # Should have entries for all agents
@@ -1156,7 +1317,9 @@ def test_build_net_config_mixed_single_level(mixed_agent, single_level_net_confi
 
 @pytest.mark.parametrize("flatten", [True, False])
 def test_build_net_config_mixed_group_level(
-    mixed_agent, mixed_group_net_config, flatten
+    mixed_agent,
+    mixed_group_net_config,
+    flatten,
 ):
     """Test build_net_config with mixed setup and group-level config."""
     result = mixed_agent.build_net_config(mixed_group_net_config, flatten=flatten)
@@ -1177,7 +1340,9 @@ def test_build_net_config_mixed_group_level(
 
 @pytest.mark.parametrize("flatten", [True, False])
 def test_build_net_config_mixed_agent_level(
-    mixed_agent, mixed_agent_net_config, flatten
+    mixed_agent,
+    mixed_agent_net_config,
+    flatten,
 ):
     """Test build_net_config with mixed setup and agent-level config."""
     if not flatten:
@@ -1199,7 +1364,8 @@ def test_build_net_config_mixed_agent_level(
 
 
 def test_build_net_config_heterogeneous_single_level(
-    heterogeneous_agent, single_level_net_config
+    heterogeneous_agent,
+    single_level_net_config,
 ):
     """Test build_net_config with heterogeneous setup and single-level config."""
     # This should raise an assertion error because we can't use single-level config with non-homogeneous setup
@@ -1208,7 +1374,8 @@ def test_build_net_config_heterogeneous_single_level(
 
 
 def test_build_net_config_heterogeneous_agent_level(
-    heterogeneous_agent, heterogeneous_agent_net_config
+    heterogeneous_agent,
+    heterogeneous_agent_net_config,
 ):
     """Test build_net_config with heterogeneous setup and agent-level config."""
     result = heterogeneous_agent.build_net_config(heterogeneous_agent_net_config)
@@ -1245,7 +1412,8 @@ def test_build_net_config_return_encoders(request, setup):
         setup_net_config = request.getfixturevalue("mixed_agent_net_config")
 
     result, unique_configs = agent.build_net_config(
-        setup_net_config, return_encoders=True
+        setup_net_config,
+        return_encoders=True,
     )
 
     # Check that the result contains configs for all agents

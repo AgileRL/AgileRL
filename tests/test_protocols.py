@@ -1,5 +1,3 @@
-from typing import Optional
-
 import gymnasium as gym
 import pytest
 import torch
@@ -35,10 +33,12 @@ from agilerl.networks import (
     ValueNetwork,
 )
 from agilerl.protocols import (
-    EvolvableAlgorithm,
-    EvolvableModule,
-    EvolvableNetwork,
-    MutationMethod,
+    EvolvableAlgorithmProtocol,
+    EvolvableModuleProtocol,
+    EvolvableNetworkProtocol,
+    MutationMethodProtocol,
+    PeftModelProtocol,
+    PreTrainedModelProtocol,
 )
 from tests.helper_functions import (
     generate_dict_or_tuple_space,
@@ -49,15 +49,15 @@ from tests.helper_functions import (
 
 
 @pytest.fixture
-def action_space(network_cls: type[EvolvableNetwork]) -> Optional[gym.Space]:
+def action_space(network_cls: type[EvolvableNetworkProtocol]) -> gym.Space | None:
     if issubclass(
-        network_cls, (DeterministicActor, StochasticActor, ContinuousQNetwork)
+        network_cls,
+        (DeterministicActor, StochasticActor, ContinuousQNetwork),
     ):
         return generate_random_box_space(shape=(2,))
-    elif issubclass(network_cls, (RainbowQNetwork, QNetwork)):
+    if issubclass(network_cls, (RainbowQNetwork, QNetwork)):
         return generate_discrete_space(2)
-    else:
-        return None
+    return None
 
 
 class TestProtocols:
@@ -94,7 +94,10 @@ class TestProtocols:
         ],
     )
     def test_algorithm_instances_implement_evolvable_algorithm_protocol(
-        self, algorithm_cls, algo_action_space, observation_space
+        self,
+        algorithm_cls,
+        algo_action_space,
+        observation_space,
     ):
         """Test that algorithm instances implement the EvolvableAlgorithm protocol."""
         # Skip actual instantiation, just check the class definitions
@@ -107,7 +110,7 @@ class TestProtocols:
         else:
             instance = algorithm_cls(observation_space, algo_action_space)
 
-        assert isinstance(instance, EvolvableAlgorithm)
+        assert isinstance(instance, EvolvableAlgorithmProtocol)
 
     @pytest.mark.parametrize(
         "network_cls",
@@ -131,7 +134,10 @@ class TestProtocols:
         ],
     )
     def test_network_instances_implement_evolvable_network_protocol(
-        self, network_cls, observation_space, action_space
+        self,
+        network_cls,
+        observation_space,
+        action_space,
     ):
         """Test that network instances implement the EvolvableNetwork protocol."""
         kwargs = {}
@@ -140,7 +146,7 @@ class TestProtocols:
 
         # Create network instance
         network = network_cls(observation_space, action_space, **kwargs)
-        assert isinstance(network, EvolvableNetwork)
+        assert isinstance(network, EvolvableNetworkProtocol)
 
     @pytest.mark.parametrize(
         "module_cls",
@@ -180,10 +186,53 @@ class TestProtocols:
                 kwargs["hidden_size"] = 16
 
         instance = module_cls(**kwargs)
-        assert isinstance(instance, EvolvableModule)
+        assert isinstance(instance, EvolvableModuleProtocol)
 
         mutation_methods = instance.get_mutation_methods()
         for method_name, method in mutation_methods.items():
             assert isinstance(
-                method, MutationMethod
-            ), f"Mutation method {method_name} does not implement MutationMethod protocol"
+                method,
+                MutationMethodProtocol,
+            ), (
+                f"Mutation method {method_name} does not implement MutationMethod protocol"
+            )
+
+    def test_pretrained_model_instances_implement_pretrained_model_protocol(self):
+        """Test that HuggingFace PreTrainedModel instances satisfy PreTrainedModelProtocol."""
+        pytest.importorskip("transformers")
+        from transformers import GPT2Config, GPT2LMHeadModel
+
+        config = GPT2Config(
+            vocab_size=100,
+            n_positions=64,
+            n_embd=32,
+            n_layer=1,
+            n_head=2,
+        )
+        model = GPT2LMHeadModel(config)
+        assert isinstance(model, PreTrainedModelProtocol)
+
+    def test_peft_model_instances_implement_peft_model_protocol(self):
+        """Test that PEFT PeftModel instances satisfy PeftModelProtocol."""
+        pytest.importorskip("transformers")
+        pytest.importorskip("peft")
+        from peft import LoraConfig, get_peft_model
+        from transformers import GPT2Config, GPT2LMHeadModel
+
+        config = GPT2Config(
+            vocab_size=100,
+            n_positions=64,
+            n_embd=32,
+            n_layer=1,
+            n_head=2,
+        )
+        base_model = GPT2LMHeadModel(config)
+        lora_config = LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=["c_attn"],
+            lora_dropout=0.0,
+            task_type="CAUSAL_LM",
+        )
+        peft_model = get_peft_model(base_model, lora_config)
+        assert isinstance(peft_model, PeftModelProtocol)

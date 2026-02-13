@@ -1,14 +1,13 @@
 import time
 import warnings
 from datetime import datetime
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import numpy as np
 import torch
 import wandb
 from accelerate import Accelerator
-from tensordict import TensorDictBase
 from torch.utils.data import DataLoader
 
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
@@ -31,9 +30,12 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = Optional[dict[str, Any]]
+if TYPE_CHECKING:
+    from tensordict import TensorDictBase
+
+InitDictType = dict[str, Any] | None
 PopulationType = list[RLAlgorithm]
-BufferType = Union[ReplayBuffer, PrioritizedReplayBuffer, MultiStepReplayBuffer]
+BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer
 
 
 def train_off_policy(
@@ -47,30 +49,30 @@ def train_off_policy(
     swap_channels: bool = False,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
-    eval_steps: Optional[int] = None,
+    eval_steps: int | None = None,
     eval_loop: int = 1,
     learning_delay: int = 0,
     eps_start: float = 1.0,
     eps_end: float = 0.1,
     eps_decay: float = 0.995,
-    target: Optional[float] = None,
+    target: float | None = None,
     n_step: bool = False,
     per: bool = False,
-    n_step_memory: Optional[MultiStepReplayBuffer] = None,
-    tournament: Optional[TournamentSelection] = None,
-    mutation: Optional[Mutations] = None,
-    checkpoint: Optional[int] = None,
-    checkpoint_path: Optional[str] = None,
+    n_step_memory: MultiStepReplayBuffer | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    checkpoint: int | None = None,
+    checkpoint_path: str | None = None,
     overwrite_checkpoints: bool = False,
     save_elite: bool = False,
-    elite_path: Optional[str] = None,
+    elite_path: str | None = None,
     wb: bool = False,
     verbose: bool = True,
-    accelerator: Optional[Accelerator] = None,
-    wandb_api_key: Optional[str] = None,
-    wandb_kwargs: Optional[dict[str, Any]] = None,
+    accelerator: Accelerator | None = None,
+    wandb_api_key: str | None = None,
+    wandb_kwargs: dict[str, Any] | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
-    """The general online RL training function. Returns trained population of agents
+    """Run the general online RL training; returns trained population of agents
     and their fitnesses.
 
     :param env: The environment to train in. Can be vectorized.
@@ -142,7 +144,8 @@ def train_off_policy(
     :type wand_kwargs: dict, optional
     """
     assert isinstance(
-        algo, str
+        algo,
+        str,
     ), "'algo' must be the name of the algorithm as a string."
     assert isinstance(max_steps, int), "Number of steps must be an integer."
     assert isinstance(evo_steps, int), "Evolution frequency must be an integer."
@@ -151,25 +154,29 @@ def train_off_policy(
     assert isinstance(eps_decay, float), "Epsilon decay rate must be a float."
     if target is not None:
         assert isinstance(
-            target, (float, int)
+            target,
+            (float, int),
         ), "Target score must be a float or an integer."
     assert isinstance(n_step, bool), "'n_step' must be a boolean."
     assert isinstance(per, bool), "'per' must be a boolean."
     if checkpoint is not None:
         assert isinstance(checkpoint, int), "Checkpoint must be an integer."
     assert isinstance(
-        wb, bool
+        wb,
+        bool,
     ), "'wb' must be a boolean flag, indicating whether to record run with W&B"
     assert isinstance(verbose, bool), "Verbose must be a boolean."
     if save_elite is False and elite_path is not None:
         warnings.warn(
             "'save_elite' set to False but 'elite_path' has been defined, elite will not\
-                      be saved unless 'save_elite' is set to True."
+                      be saved unless 'save_elite' is set to True.",
+            stacklevel=2,
         )
     if checkpoint is None and checkpoint_path is not None:
         warnings.warn(
             "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
-                      be saved unless 'checkpoint' is defined."
+                      be saved unless 'checkpoint' is defined.",
+            stacklevel=2,
         )
 
     if wb:
@@ -197,7 +204,9 @@ def train_off_policy(
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
         else "{}-EvoHPO-{}-{}".format(
-            env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+            env_name,
+            algo,
+            datetime.now().strftime("%m%d%Y%H%M%S"),
         )
     )
 
@@ -293,7 +302,7 @@ def train_off_policy(
                     trunc = np.array([trunc])
 
                 reset_noise_indices = []
-                for idx, (d, t) in enumerate(zip(done, trunc)):
+                for idx, (d, t) in enumerate(zip(done, trunc, strict=False)):
                     if d or t:
                         completed_episode_scores.append(scores[idx])
                         agent.scores.append(scores[idx])
@@ -336,7 +345,8 @@ def train_off_policy(
                     memory.add(transition)
                 if per:
                     fraction = min(
-                        ((agent.steps[-1] + idx_step + 1) * num_envs / max_steps), 1.0
+                        ((agent.steps[-1] + idx_step + 1) * num_envs / max_steps),
+                        1.0,
                     )
                     agent.beta += fraction * (1.0 - agent.beta)
 
@@ -353,26 +363,29 @@ def train_off_policy(
                             experiences = sampler.sample(agent.batch_size, agent.beta)
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
-                                    experiences["idxs"]
+                                    experiences["idxs"],
                                 )
                             else:
                                 n_step_experiences = None
 
                             loss, idxs, priorities = agent.learn(
-                                experiences, n_experiences=n_step_experiences, per=per
+                                experiences,
+                                n_experiences=n_step_experiences,
+                                per=per,
                             )
                             memory.update_priorities(idxs, priorities)
                         else:
                             experiences = sampler.sample(
                                 agent.batch_size,
-                                return_idx=True if n_step_memory is not None else False,
+                                return_idx=n_step_memory is not None,
                             )
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
-                                    experiences["idxs"]
+                                    experiences["idxs"],
                                 )
                                 loss, *_ = agent.learn(
-                                    experiences, n_experiences=n_step_experiences
+                                    experiences,
+                                    n_experiences=n_step_experiences,
                                 )
                             else:
                                 loss = agent.learn(experiences)
@@ -387,25 +400,28 @@ def train_off_policy(
                             experiences = sampler.sample(agent.batch_size, agent.beta)
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
-                                    experiences["idxs"]
+                                    experiences["idxs"],
                                 )
                             else:
                                 n_step_experiences = None
                             loss, idxs, priorities = agent.learn(
-                                experiences, n_experiences=n_step_experiences, per=per
+                                experiences,
+                                n_experiences=n_step_experiences,
+                                per=per,
                             )
                             memory.update_priorities(idxs, priorities)
                         else:
                             experiences = sampler.sample(
                                 agent.batch_size,
-                                return_idx=True if n_step_memory is not None else False,
+                                return_idx=n_step_memory is not None,
                             )
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
-                                    experiences["idxs"]
+                                    experiences["idxs"],
                                 )
                                 loss, *_ = agent.learn(
-                                    experiences, n_experiences=n_step_experiences
+                                    experiences,
+                                    n_experiences=n_step_experiences,
                                 )
                             else:
                                 loss = agent.learn(experiences)
@@ -426,10 +442,13 @@ def train_off_policy(
 
             if len(losses) > 0:
                 if isinstance(losses[-1], tuple):
-                    actor_losses, critic_losses = list(zip(*losses))
-                    mean_loss = np.mean(
-                        [loss for loss in actor_losses if loss is not None]
-                    ), np.mean(critic_losses)
+                    actor_losses, critic_losses = list(zip(*losses, strict=False))
+                    mean_loss = (
+                        np.mean(
+                            [loss for loss in actor_losses if loss is not None],
+                        ),
+                        np.mean(critic_losses),
+                    )
                 else:
                     mean_loss = np.mean(losses)
 
@@ -442,7 +461,10 @@ def train_off_policy(
         # Evaluate population
         fitnesses = [
             agent.test(
-                env, swap_channels=swap_channels, max_steps=eval_steps, loop=eval_loop
+                env,
+                swap_channels=swap_channels,
+                max_steps=eval_steps,
+                loop=eval_loop,
             )
             for agent in pop
         ]
@@ -469,7 +491,7 @@ def train_off_policy(
                         mean_score
                         for mean_score in mean_scores
                         if not isinstance(mean_score, str)
-                    ]
+                    ],
                 ),
                 "eval/mean_fitness": np.mean(fitnesses),
                 "eval/best_fitness": np.max(fitnesses),
@@ -485,13 +507,13 @@ def train_off_policy(
             elif isinstance(agent, (DDPG, TD3)):
                 actor_loss_dict = {
                     f"train/agent_{index}_actor_loss": np.mean(
-                        list(zip(*loss_list))[0][-10:]
+                        next(zip(*loss_list, strict=False))[-10:],
                     )
                     for index, loss_list in enumerate(pop_loss)
                 }
                 critic_loss_dict = {
                     f"train/agent_{index}_critic_loss": np.mean(
-                        list(zip(*loss_list))[-1][-10:]
+                        list(zip(*loss_list, strict=False))[-1][-10:],
                     )
                     for index, loss_list in enumerate(pop_loss)
                 }
@@ -521,16 +543,15 @@ def train_off_policy(
             agent.steps.append(agent.steps[-1])
 
         # Early stop if consistently reaches target
-        if target is not None:
-            if (
-                np.all(
-                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target)
-                )
-                and len(pop[0].steps) >= 100
-            ):
-                if wb:
-                    wandb.finish()
-                return pop, pop_fitnesses
+        if target is not None and (
+            np.all(
+                np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
+            )
+            and len(pop[0].steps) >= 100
+        ):
+            if wb:
+                wandb.finish()
+            return pop, pop_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -546,9 +567,9 @@ def train_off_policy(
             )
 
         if verbose:
-            fitness = ["%.2f" % fitness for fitness in fitnesses]
-            avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
-            avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+            fitness = [f"{fitness:.2f}" for fitness in fitnesses]
+            avg_fitness = [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
+            avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]
@@ -567,7 +588,7 @@ def train_off_policy(
                 f"10 score avgs:\t{avg_score}\n"
                 f"Agents:\t\t{agents}\n"
                 f"Steps:\t\t{num_steps}\n"
-                f"Mutations:\t\t{muts}"
+                f"Mutations:\t\t{muts}",
             )
 
         # Save model checkpoint

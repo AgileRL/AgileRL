@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 import torch
 import wandb
@@ -10,7 +11,7 @@ class DistributeCombineLogs:
     count_tag = "__count__"
 
     def __init__(self, accelerator: Accelerator, use_wandb: bool = False) -> None:
-        """Initializes the DistributeCombineLogs object.
+        """Initialize the DistributeCombineLogs object.
 
         :param accelerator: Accelerator object.
         :type accelerator: Accelerator
@@ -18,15 +19,17 @@ class DistributeCombineLogs:
         :type use_wandb: bool
         """
         if not isinstance(accelerator, Accelerator):
-            raise ValueError("accelerator must be an instance of Accelerator")
+            msg = "accelerator must be an instance of Accelerator"
+            raise TypeError(msg)
         if not isinstance(use_wandb, bool):
-            raise ValueError("use_wandb must be a boolean")
+            msg = "use_wandb must be a boolean"
+            raise TypeError(msg)
         self.totals: dict[tuple[str, ...], torch.Tensor] = {}
         self.accelerator = accelerator
         self.use_wandb = use_wandb
 
     def convert_key(self, k: tuple[str, ...]) -> tuple[str, ...]:
-        """Converts a key to a tuple.
+        """Convert a key to a tuple.
 
         :param k: Key to convert.
         :type k: tuple
@@ -34,10 +37,10 @@ class DistributeCombineLogs:
         :return: Converted key.
         :rtype: tuple
         """
-        return (self.count_tag,) + k
+        return (self.count_tag, *k)
 
     def key_is_count(self, k: tuple[str, ...]) -> bool:
-        """Checks if a key is a count key.
+        """Check if a key is a count key.
 
         :param k: Key to check.
         :type k: tuple
@@ -47,8 +50,8 @@ class DistributeCombineLogs:
         """
         return k[0] == self.count_tag
 
-    def log(self, *postproc_funcs, **additional_items) -> dict:
-        """Logs the results.
+    def log(self, *postproc_funcs: Any, **additional_items: Any) -> dict:
+        """Log the results.
 
         :param postproc_funcs: Post-processing functions.
         :type postproc_funcs: list
@@ -60,10 +63,8 @@ class DistributeCombineLogs:
         """
         self.accelerator.wait_for_everyone()
         total_logs = self.gather_logs(*postproc_funcs, **additional_items)
-        if self.accelerator.is_main_process:
-            if self.use_wandb:
-                wandb.log(total_logs)
-            print(total_logs)
+        if self.accelerator.is_main_process and self.use_wandb:
+            wandb.log(total_logs)
         self.accelerator.wait_for_everyone()
         return total_logs
 
@@ -84,7 +85,7 @@ class DistributeCombineLogs:
                 self.totals[k] = new_item * count_item
                 self.totals[self.convert_key(k)] = count_item
 
-    def gather_logs(self, *postproc_funcs, **additional_items) -> dict:
+    def gather_logs(self, *postproc_funcs: Any, **additional_items: Any) -> dict:
         """Gathers the logs.
 
         :param postproc_funcs: Post-processing functions.
@@ -112,11 +113,10 @@ class DistributeCombineLogs:
             result = f(final_logs)
             if result is not None:
                 final_logs = result
-        final_logs = {**final_logs, **additional_items}
-        return final_logs
+        return {**final_logs, **additional_items}
 
     def reset_logs(self) -> None:
-        """Resets the logs.
+        """Reset the logs.
 
         :return: Total logs.
         :rtype: dict

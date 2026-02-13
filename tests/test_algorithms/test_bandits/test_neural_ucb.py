@@ -3,12 +3,11 @@ import copy
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from tensordict import TensorDict
+from torch import nn, optim
 
 from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
@@ -26,10 +25,10 @@ class DummyNeuralUCB(NeuralUCB):
         **kwargs,
     ):
         super().__init__(
+            *args,
             observation_space=observation_space,
             action_space=action_space,
             net_config=net_config,
-            *args,
             **kwargs,
         )
 
@@ -100,7 +99,11 @@ def test_initialize_bandit(observation_space, encoder_cls, accelerator, request)
     ],
 )
 def test_initialize_bandit_with_actor_network(
-    observation_space, discrete_space, actor_network, input_tensor, request
+    observation_space,
+    discrete_space,
+    actor_network,
+    input_tensor,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     actor_network = request.getfixturevalue(actor_network)
@@ -169,7 +172,8 @@ def test_initialize_bandit_with_evo_nets(vector_space, discrete_space):
 
 
 def test_initialize_neuralucb_with_incorrect_actor_net_type(
-    vector_space, discrete_space
+    vector_space,
+    discrete_space,
 ):
     actor_network = "dummy"
     with pytest.raises(TypeError) as a:
@@ -215,7 +219,10 @@ def test_returns_expected_action_mask(vector_space, discrete_space):
 @pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 def test_learns_from_experiences(
-    observation_space, discrete_space, accelerator, request
+    observation_space,
+    discrete_space,
+    accelerator,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     batch_size = 64
@@ -285,7 +292,8 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.accelerator == bandit.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), bandit.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(), bandit.optimizer.state_dict()
+        clone_agent.optimizer.state_dict(),
+        bandit.optimizer.state_dict(),
     )
     assert clone_agent.fitness == bandit.fitness
     assert clone_agent.steps == bandit.steps
@@ -312,7 +320,8 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.accelerator == bandit.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), bandit.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(), bandit.optimizer.state_dict()
+        clone_agent.optimizer.state_dict(),
+        bandit.optimizer.state_dict(),
     )
     assert clone_agent.fitness == bandit.fitness
     assert clone_agent.steps == bandit.steps
@@ -322,7 +331,10 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
 
     accelerator = Accelerator()
     bandit = NeuralUCB(
-        observation_space, discrete_space, accelerator=accelerator, wrap=False
+        observation_space,
+        discrete_space,
+        accelerator=accelerator,
+        wrap=False,
     )
     clone_agent = bandit.clone(wrap=False)
 
@@ -337,7 +349,8 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.accelerator == bandit.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), bandit.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(), bandit.optimizer.state_dict()
+        clone_agent.optimizer.state_dict(),
+        bandit.optimizer.state_dict(),
     )
     assert clone_agent.fitness == bandit.fitness
     assert clone_agent.steps == bandit.steps
@@ -377,7 +390,8 @@ def test_clone_after_learning(vector_space, discrete_space):
     assert clone_agent.accelerator == bandit.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), bandit.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(), bandit.optimizer.state_dict()
+        clone_agent.optimizer.state_dict(),
+        bandit.optimizer.state_dict(),
     )
     assert clone_agent.fitness == bandit.fitness
     assert clone_agent.steps == bandit.steps
@@ -394,7 +408,11 @@ def test_clone_after_learning(vector_space, discrete_space):
     ],
 )
 def test_clone_with_make_evo(
-    observation_space, discrete_space, actor_network, input_tensor, request
+    observation_space,
+    discrete_space,
+    actor_network,
+    input_tensor,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     actor_network = request.getfixturevalue(actor_network)
@@ -414,7 +432,8 @@ def test_clone_with_make_evo(
     assert clone_agent.accelerator == bandit.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), bandit.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(), bandit.optimizer.state_dict()
+        clone_agent.optimizer.state_dict(),
+        bandit.optimizer.state_dict(),
     )
     assert clone_agent.fitness == bandit.fitness
     assert clone_agent.steps == bandit.steps

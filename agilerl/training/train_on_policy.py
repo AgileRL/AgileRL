@@ -1,7 +1,8 @@
 import time
 import warnings
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
@@ -21,7 +22,7 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = Optional[dict[str, Any]]
+InitDictType = dict[str, Any] | None
 OnPolicyAlgorithms = PPO
 PopulationType = list[OnPolicyAlgorithms]
 
@@ -36,26 +37,26 @@ def train_on_policy(
     swap_channels: bool = False,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
-    eval_steps: Optional[int] = None,
+    eval_steps: int | None = None,
     eval_loop: int = 1,
-    target: Optional[float] = None,
-    tournament: Optional[TournamentSelection] = None,
-    mutation: Optional[Mutations] = None,
-    checkpoint: Optional[int] = None,
-    checkpoint_path: Optional[str] = None,
+    target: float | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    checkpoint: int | None = None,
+    checkpoint_path: str | None = None,
     overwrite_checkpoints: bool = False,
     save_elite: bool = False,
-    elite_path: Optional[str] = None,
+    elite_path: str | None = None,
     wb: bool = False,
     verbose: bool = True,
-    accelerator: Optional[Accelerator] = None,
-    wandb_api_key: Optional[str] = None,
-    wandb_kwargs: Optional[dict[str, Any]] = None,
-    collect_rollouts_fn: Optional[
-        Callable[[OnPolicyAlgorithms, gym.Env, int], None]
-    ] = None,
+    accelerator: Accelerator | None = None,
+    wandb_api_key: str | None = None,
+    wandb_kwargs: dict[str, Any] | None = None,
+    collect_rollouts_fn: (
+        Callable[[OnPolicyAlgorithms, gym.Env, int], None] | None
+    ) = None,
 ) -> tuple[PopulationType, list[list[float]]]:
-    """The general on-policy RL training function. Returns trained population of agents
+    """Run the general on-policy RL training; returns trained population of agents
     and their fitnesses.
 
     :param env: The environment to train in. Can be vectorized.
@@ -118,29 +119,34 @@ def train_on_policy(
     :rtype: list[RLAlgorithm], list[list[float]]
     """
     assert isinstance(
-        algo, str
+        algo,
+        str,
     ), "'algo' must be the name of the algorithm as a string."
     assert isinstance(max_steps, int), "Number of steps must be an integer."
     assert isinstance(evo_steps, int), "Evolution frequency must be an integer."
     if target is not None:
         assert isinstance(
-            target, (float, int)
+            target,
+            (float, int),
         ), "Target score must be a float or an integer."
     if checkpoint is not None:
         assert isinstance(checkpoint, int), "Checkpoint must be an integer."
     assert isinstance(
-        wb, bool
+        wb,
+        bool,
     ), "'wb' must be a boolean flag, indicating whether to record run with W&B"
     assert isinstance(verbose, bool), "Verbose must be a boolean."
     if save_elite is False and elite_path is not None:
         warnings.warn(
             "'save_elite' set to False but 'elite_path' has been defined, elite will not\
-                      be saved unless 'save_elite' is set to True."
+                      be saved unless 'save_elite' is set to True.",
+            stacklevel=2,
         )
     if checkpoint is None and checkpoint_path is not None:
         warnings.warn(
             "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
-                      be saved unless 'checkpoint' is defined."
+                      be saved unless 'checkpoint' is defined.",
+            stacklevel=2,
         )
 
     if wb:
@@ -169,7 +175,9 @@ def train_on_policy(
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
         else "{}-EvoHPO-{}-{}".format(
-            env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+            env_name,
+            algo,
+            datetime.now().strftime("%m%d%Y%H%M%S"),
         )
     )
 
@@ -247,7 +255,6 @@ def train_on_policy(
                 obs, info = env.reset()
                 scores = np.zeros(num_envs)
                 for _ in range(-(evo_steps // -agent.learn_step)):
-
                     observations = []
                     actions = []
                     log_probs = []
@@ -262,7 +269,8 @@ def train_on_policy(
 
                         action_mask = info.get("action_mask", None)
                         action, log_prob, entropy, value = agent.get_action(
-                            obs, action_mask=action_mask
+                            obs,
+                            action_mask=action_mask,
                         )
 
                         if not is_vectorised:
@@ -278,7 +286,8 @@ def train_on_policy(
                         # Clip action to action space
                         policy = getattr(agent, agent.registry.policy())
                         if isinstance(policy, StochasticActor) and isinstance(
-                            agent.action_space, spaces.Box
+                            agent.action_space,
+                            spaces.Box,
                         ):
                             if policy.squash_output:
                                 clipped_action = policy.scale_action(action)
@@ -383,7 +392,7 @@ def train_on_policy(
                         mean_score
                         for mean_score in mean_scores
                         if not isinstance(mean_score, str)
-                    ]
+                    ],
                 ),
                 "eval/mean_fitness": np.mean(fitnesses),
                 "eval/best_fitness": np.max(fitnesses),
@@ -425,16 +434,15 @@ def train_on_policy(
             agent.steps.append(agent.steps[-1])
 
         # Early stop if consistently reaches target
-        if target is not None:
-            if (
-                np.all(
-                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target)
-                )
-                and len(pop[0].steps) >= 100
-            ):
-                if wb:
-                    wandb.finish()
-                return pop, pop_fitnesses
+        if target is not None and (
+            np.all(
+                np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
+            )
+            and len(pop[0].steps) >= 100
+        ):
+            if wb:
+                wandb.finish()
+            return pop, pop_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -450,11 +458,11 @@ def train_on_policy(
             )
 
         if verbose:
-            fitness = ["%.2f" % fitness for fitness in fitnesses]
-            avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
-            avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+            fitness = [f"{fitness:.2f}" for fitness in fitnesses]
+            avg_fitness = [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
+            avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
             mean_scores = [
-                "%.2f" % mean_score if not isinstance(mean_score, str) else mean_score
+                f"{mean_score:.2f}" if not isinstance(mean_score, str) else mean_score
                 for mean_score in mean_scores
             ]
             agents = [agent.index for agent in pop]
@@ -475,7 +483,7 @@ def train_on_policy(
                 f"10 score avgs:\t{avg_score}\n"
                 f"Agents:\t\t{agents}\n"
                 f"Steps:\t\t{num_steps}\n"
-                f"Mutations:\t{muts}"
+                f"Mutations:\t{muts}",
             )
 
         # Save model checkpoint

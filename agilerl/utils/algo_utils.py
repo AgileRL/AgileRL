@@ -3,18 +3,19 @@ import os
 import shutil
 import warnings
 from collections import OrderedDict, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
-from typing import Any, ForwardRef, Optional, Union
+from typing import Any, ForwardRef, NoReturn, Union
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from gymnasium import spaces
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
+from torch import nn
 from torch._dynamo import OptimizedModule
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
@@ -23,10 +24,8 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     EvolvableAttributeType,
-    EvolvableModule,
-    EvolvableNetwork,
-    ModuleDict,
-    OptimizerWrapper,
+    EvolvableModuleProtocol,
+    EvolvableNetworkProtocol,
 )
 from agilerl.typing import (
     ArrayOrTensor,
@@ -48,35 +47,43 @@ if HAS_LLM_DEPENDENCIES:
 
     from agilerl.utils.llm_utils import gather_if_zero3
 
-    PreTrainedModelType = Union[PeftModel, PreTrainedModel]
+    PreTrainedModelType = PeftModel | PreTrainedModel
 else:
-    PreTrainedModelType = Union[ForwardRef("PeftModel"), ForwardRef("PreTrainedModel")]
+    # Union[] required: ForwardRef does not support | in Python 3.10
+    PreTrainedModelType = Union[
+        ForwardRef("PeftModel"),
+        ForwardRef("PreTrainedModel"),
+    ]
 
 
 def check_supported_space(observation_space: GymSpaceType) -> None:
-    """Checks if the observation space is supported by AgileRL.
+    """Check if the observation space is supported by AgileRL.
 
     :param observation_space: The observation space to check.
     :type observation_space: GymSpaceType
     """
     assert isinstance(
-        observation_space, spaces.Space
+        observation_space,
+        spaces.Space,
     ), "Observation space must be an instance of gymnasium.spaces.Space."
 
     assert not isinstance(
-        observation_space, (spaces.Graph, spaces.Sequence, spaces.OneOf)
+        observation_space,
+        (spaces.Graph, spaces.Sequence, spaces.OneOf),
     ), "AgileRL does not support Graph, Sequence, and OneOf spaces."
 
     if isinstance(observation_space, spaces.Dict):
         for subspace in observation_space.spaces.values():
             assert not isinstance(
-                subspace, (spaces.Tuple, spaces.Dict)
+                subspace,
+                (spaces.Tuple, spaces.Dict),
             ), "AgileRL does not support nested Tuple and Dict spaces in Dict spaces."
             check_supported_space(subspace)
     elif isinstance(observation_space, spaces.Tuple):
         for subspace in observation_space.spaces:
             assert not isinstance(
-                subspace, (spaces.Tuple, spaces.Dict)
+                subspace,
+                (spaces.Tuple, spaces.Dict),
             ), "AgileRL does not support nested Tuple and Dict spaces in Tuple spaces."
             check_supported_space(subspace)
     elif isinstance(observation_space, spaces.MultiDiscrete):
@@ -88,85 +95,86 @@ def check_supported_space(observation_space: GymSpaceType) -> None:
 
 def get_input_size_from_space(
     observation_space: GymSpaceType,
-) -> Union[int, dict[str, int], tuple[int, ...]]:
-    """Returns the dimension of the state space as it pertains to the underlying
+) -> int | dict[str, int] | tuple[int, ...]:
+    """Return the dimension of the state space as it pertains to the underlying
     networks (i.e. the input size of the networks).
 
     :param observation_space: The observation space of the environment.
     :type observation_space: spaces.Space or list[spaces.Space] or dict[str, spaces.Space].
 
     :return: The dimension of the state space.
-    :rtype: Union[int, dict[str, int], tuple[int, ...]]
+    :rtype: int | dict[str, int] | tuple[int, ...]
     """
     if isinstance(observation_space, (list, tuple, spaces.Tuple)):
         return tuple(get_input_size_from_space(space) for space in observation_space)
-    elif isinstance(observation_space, (spaces.Dict, dict)):
+    if isinstance(observation_space, (spaces.Dict, dict)):
         return {
             key: get_input_size_from_space(subspace)
             for key, subspace in observation_space.items()
         }
-    elif isinstance(observation_space, spaces.Discrete):
+    if isinstance(observation_space, spaces.Discrete):
         return (observation_space.n,)
-    elif isinstance(observation_space, spaces.MultiDiscrete):
+    if isinstance(observation_space, spaces.MultiDiscrete):
         return (sum(observation_space.nvec),)
-    elif isinstance(observation_space, spaces.Box):
+    if isinstance(observation_space, spaces.Box):
         return observation_space.shape
-    elif isinstance(observation_space, spaces.MultiBinary):
+    if isinstance(observation_space, spaces.MultiBinary):
         return (observation_space.n,)
-    else:
-        raise AttributeError(
-            f"Can't access state dimensions for {type(observation_space)} spaces."
-        )
+    msg = f"Can't access state dimensions for {type(observation_space)} spaces."
+    raise AttributeError(
+        msg,
+    )
 
 
 def get_output_size_from_space(
     action_space: GymSpaceType,
-) -> Union[int, dict[str, int], tuple[int, ...]]:
-    """Returns the dimension of the action space as it pertains to the underlying
+) -> int | dict[str, int] | tuple[int, ...]:
+    """Return the dimension of the action space as it pertains to the underlying
     networks (i.e. the output size of the networks).
 
     :param action_space: The action space of the environment.
     :type action_space: spaces.Space or list[spaces.Space] or dict[str, spaces.Space].
 
     :return: The dimension of the action space.
-    :rtype: Union[int, dict[str, int], tuple[int, ...]]
+    :rtype: int | dict[str, int] | tuple[int, ...]
     """
     if isinstance(action_space, (list, tuple)):
         return tuple(get_output_size_from_space(space) for space in action_space)
-    elif isinstance(action_space, (spaces.Dict, dict)):
+    if isinstance(action_space, (spaces.Dict, dict)):
         return {
             key: get_output_size_from_space(subspace)
             for key, subspace in action_space.items()
         }
-    elif isinstance(action_space, spaces.MultiBinary):
+    if isinstance(action_space, (spaces.MultiBinary, spaces.Discrete)):
         return action_space.n
-    elif isinstance(action_space, spaces.Discrete):
-        return action_space.n
-    elif isinstance(action_space, spaces.MultiDiscrete):
+    if isinstance(action_space, spaces.MultiDiscrete):
         return sum(action_space.nvec)
-    elif isinstance(action_space, spaces.Box):
+    if isinstance(action_space, spaces.Box):
         # NOTE: Assume continuous actions are always one-dimensional
         return action_space.shape[0]
-    else:
-        raise AttributeError(
-            f"Can't access action dimensions for {type(action_space)} spaces."
-        )
+    msg = f"Can't access action dimensions for {type(action_space)} spaces."
+    raise AttributeError(
+        msg,
+    )
 
 
 def share_encoder_parameters(
-    policy: EvolvableNetwork, *others: EvolvableNetwork
+    policy: EvolvableNetworkProtocol,
+    *others: EvolvableNetworkProtocol,
 ) -> None:
     """Shares the encoder parameters between the policy and any number of other networks.
 
     :param policy: The policy network whose encoder parameters will be used.
-    :type policy: EvolvableNetwork
+    :type policy: EvolvableNetworkProtocol
     :param others: The other networks whose encoder parameters will be pinned to the policy.
-    :type others: EvolvableNetwork
+    :type others: EvolvableNetworkProtocol
     """
+    from agilerl.networks.base import EvolvableNetwork
+
     assert isinstance(policy, EvolvableNetwork), "Policy must be an EvolvableNetwork"
-    assert all(
-        isinstance(other, EvolvableNetwork) for other in others
-    ), "All others must be EvolvableNetwork"
+    assert all(isinstance(other, EvolvableNetwork) for other in others), (
+        "All others must be EvolvableNetwork"
+    )
 
     # detaching encoder parameters from computation graph reduces
     # memory overhead and speeds up training
@@ -194,7 +202,7 @@ def get_hidden_states_shape_from_model(model: nn.Module) -> dict[str, int]:
                 {
                     f"{module.name}_{k}": v
                     for k, v in module.hidden_state_architecture.items()
-                }
+                },
             )
 
     return hidden_state_architecture
@@ -226,7 +234,7 @@ def extract_sequences_from_episode(
     assert max_seq_len > 0, "max_seq_len must be greater than 0"
     assert len(episode) > 0, "episode must be non-empty"
     assert max_seq_len <= len(
-        episode
+        episode,
     ), "max_seq_len must be less than or equal to the length of the episode"
 
     if sequence_type == BPTTSequenceType.CHUNKED:
@@ -238,7 +246,7 @@ def extract_sequences_from_episode(
     elif sequence_type == BPTTSequenceType.MAXIMUM:
         sequences = [
             episode[start : start + max_seq_len]
-            for start in range(0, len(episode) - max_seq_len + 1)
+            for start in range(len(episode) - max_seq_len + 1)
         ]
     elif sequence_type == BPTTSequenceType.FIFTY_PERCENT_OVERLAP:
         step_size = max_seq_len // 2
@@ -247,34 +255,37 @@ def extract_sequences_from_episode(
             for start in range(0, len(episode) - max_seq_len + 1, step_size)
         ]
     else:
+        msg = f"Received unrecognized sequence type: {sequence_type}"
         raise NotImplementedError(
-            f"Received unrecognized sequence type: {sequence_type}"
+            msg,
         )
     return sequences
 
 
 def multi_dim_clamp(
-    min: float | torch.Tensor, max: float | torch.Tensor, input: torch.Tensor
+    min_val: float | torch.Tensor,
+    max_val: float | torch.Tensor,
+    input_tensor: torch.Tensor,
 ) -> torch.Tensor:
-    """Multi-dimensional clamp function
+    """Multi-dimensional clamp function.
 
-    :param min: Minimum value or array of minimum values
-    :type min: float | torch.Tensor
-    :param max: Maximum value or array of maximum values
-    :type max: float | torch.Tensor
-    :param input: Input tensor to be clamped
-    :type input: torch.Tensor
+    :param min_val: Minimum value or array of minimum values
+    :type min_val: float | torch.Tensor
+    :param max_val: Maximum value or array of maximum values
+    :type max_val: float | torch.Tensor
+    :param input_tensor: Input tensor to be clamped
+    :type input_tensor: torch.Tensor
     :return: Clamped tensor
     :rtype: torch.Tensor
     """
-    if not isinstance(min, torch.Tensor) and not isinstance(max, torch.Tensor):
-        return torch.clamp(input, min, max)
-    elif (min.device != input.device) and (max.device != input.device):
-        min = min.to(input.device)
-        max = max.to(input.device)
+    if not isinstance(min_val, torch.Tensor) and not isinstance(max_val, torch.Tensor):
+        return torch.clamp(input_tensor, min_val, max_val)
+    if input_tensor.device not in (min_val.device, max_val.device):
+        min_val = min_val.to(input_tensor.device)
+        max_val = max_val.to(input_tensor.device)
 
-    clamped: torch.Tensor = torch.max(torch.min(input, max), min)
-    return clamped.to(input.dtype)
+    clamped: torch.Tensor = torch.max(torch.min(input_tensor, max_val), min_val)
+    return clamped.to(input_tensor.dtype)
 
 
 def is_image_space(space: spaces.Space) -> bool:
@@ -291,7 +302,7 @@ def is_image_space(space: spaces.Space) -> bool:
 
 
 def get_obs_shape(space: spaces.Space) -> tuple[int, ...] | dict[str, tuple[int, ...]]:
-    """Returns the shape of the observation space.
+    """Return the shape of the observation space.
 
     :param space: Observation space
     :type space: spaces.Space
@@ -300,24 +311,24 @@ def get_obs_shape(space: spaces.Space) -> tuple[int, ...] | dict[str, tuple[int,
     """
     if isinstance(space, spaces.Box):
         return space.shape
-    elif isinstance(space, spaces.Discrete):
+    if isinstance(space, spaces.Discrete):
         return (1,)
-    elif isinstance(space, spaces.MultiDiscrete):
+    if isinstance(space, spaces.MultiDiscrete):
         return (len(space.nvec),)
-    elif isinstance(space, spaces.MultiBinary):
+    if isinstance(space, spaces.MultiBinary):
         return space.shape
-    elif isinstance(space, spaces.Dict):
+    if isinstance(space, spaces.Dict):
         return {
             key: get_obs_shape(subspace) for (key, subspace) in space.spaces.items()
         }
-    elif isinstance(space, spaces.Tuple):
+    if isinstance(space, spaces.Tuple):
         return tuple(get_obs_shape(subspace) for subspace in space)
-    else:
-        raise NotImplementedError(f"{space} observation space is not supported")
+    msg = f"{space} observation space is not supported"
+    raise NotImplementedError(msg)
 
 
 def get_num_actions(space: spaces.Space) -> int:
-    """Returns the number of actions.
+    """Return the number of actions.
 
     :param space: Action space
     :type space: spaces.Space
@@ -326,26 +337,26 @@ def get_num_actions(space: spaces.Space) -> int:
     """
     if isinstance(space, spaces.Box):
         return spaces.flatdim(space)
-    elif isinstance(space, spaces.Discrete):
+    if isinstance(space, spaces.Discrete):
         return 1
-    elif isinstance(space, spaces.MultiDiscrete):
+    if isinstance(space, spaces.MultiDiscrete):
         return len(space.nvec)
-    elif isinstance(space, spaces.MultiBinary):
+    if isinstance(space, spaces.MultiBinary):
         return space.n
-    else:
-        raise NotImplementedError(f"{space} action space is not supported by AgileRL.")
+    msg = f"{space} action space is not supported by AgileRL."
+    raise NotImplementedError(msg)
 
 
 def make_safe_deepcopies(
-    *args: Union[EvolvableModule, list[EvolvableModule]],
-) -> list[EvolvableModule]:
-    """Makes deep copies of EvolvableModule objects and their attributes.
+    *args: EvolvableModuleProtocol | list[EvolvableModuleProtocol],
+) -> list[EvolvableModuleProtocol]:
+    """Make deep copies of EvolvableModule objects and their attributes.
 
-    :param args: EvolvableModule or lists of EvolvableModule objects to copy.
-    :type args: Union[EvolvableModule, list[EvolvableModule]].
+    :param args: EvolvableModuleProtocol or lists of EvolvableModuleProtocol objects to copy.
+    :type args: EvolvableModuleProtocol | list[EvolvableModuleProtocol].
 
     :return: Deep copies of the EvolvableModule objects and their attributes.
-    :rtype: list[EvolvableModule].
+    :rtype: list[EvolvableModuleProtocol].
     """
     copies = []
     for arg in args:
@@ -360,7 +371,7 @@ def make_safe_deepcopies(
 
 
 def isroutine(obj: object) -> bool:
-    """Checks if an attribute is a routine, considering also methods wrapped by
+    """Check if an attribute is a routine, considering also methods wrapped by
     CudaGraphModule.
 
     :param attr: The attribute to check.
@@ -376,17 +387,20 @@ def isroutine(obj: object) -> bool:
 
 
 def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
-    """Recursively check if the object has any attributes that are EvolvableModule objects or Optimizer's,
+    """Recursively check if the object has any attributes that are EvolvableModuleProtocol objects or Optimizer's,
     excluding metaclasses.
 
-    :param obj: The object to check for EvolvableModule objects or Optimizer's.
+    :param obj: The object to check for EvolvableModuleProtocol objects or Optimizer's.
     :type obj: Any
     :param networks_only: If True, only check for EvolvableModule objects, defaults to False
     :type networks_only: bool, optional
 
-    :return: True if the object has any attributes that are EvolvableModule objects or Optimizer's, False otherwise.
+    :return: True if the object has any attributes that are EvolvableModuleProtocol objects or Optimizer's, False otherwise.
     :rtype: bool
     """
+    from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
+    from agilerl.modules.base import EvolvableModule
+
     check_types = (OptimizedModule, EvolvableModule)
     if not networks_only:
         check_types += (OptimizerWrapper,)
@@ -397,8 +411,9 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
 
     if isinstance(obj, check_types):
         return True
-    elif isinstance(obj, Optimizer):
-        raise TypeError("Optimizer objects should be wrapped by OptimizerWrapper.")
+    if isinstance(obj, Optimizer):
+        msg = "Optimizer objects should be wrapped by OptimizerWrapper."
+        raise TypeError(msg)
     if isinstance(obj, dict):
         return any(
             recursive_check_module_attrs(v, networks_only=networks_only)
@@ -412,7 +427,8 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
 
 
 def chkpt_attribute_to_device(
-    chkpt_dict: dict[str, torch.Tensor], device: str
+    chkpt_dict: dict[str, torch.Tensor],
+    device: str,
 ) -> dict[str, Any]:
     """Place checkpoint attributes on device. Used when loading saved agents.
 
@@ -437,7 +453,7 @@ def chkpt_attribute_to_device(
 
 
 def key_in_nested_dict(nested_dict: dict[str, Any], target: str) -> bool:
-    """Helper function to determine if key is in nested dictionary
+    """Determine if key is in nested dictionary.
 
     :param nested_dict: Nested dictionary
     :type nested_dict: dict[str, dict[str, ...]]
@@ -456,7 +472,7 @@ def key_in_nested_dict(nested_dict: dict[str, Any], target: str) -> bool:
 
 
 def remove_compile_prefix(state_dict: dict[str, Any]) -> dict[str, Any]:
-    """Removes _orig_mod prefix on state dict created by torch compile
+    """Remove _orig_mod prefix on state dict created by torch compile.
 
     :param state_dict: model state dict
     :type state_dict: dict
@@ -467,12 +483,12 @@ def remove_compile_prefix(state_dict: dict[str, Any]) -> dict[str, Any]:
         [
             (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
             for k, v in state_dict.items()
-        ]
+        ],
     )
 
 
 def module_checkpoint_dict(module: EvolvableAttributeType, name: str) -> dict[str, Any]:
-    """Returns a dictionary containing the module's class, init dict, and state dict.
+    """Return a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
     :type module: EvolvableAttributeType
@@ -482,17 +498,22 @@ def module_checkpoint_dict(module: EvolvableAttributeType, name: str) -> dict[st
     :return: A dictionary containing the module's class, init dict, and state dict.
     :rtype: dict[str, Any]
     """
+    from agilerl.modules.base import ModuleDict
+
     if isinstance(module, ModuleDict):
         return module_checkpoint_multiagent(module, name)
 
     return module_checkpoint_single(module, name)
 
 
-def module_checkpoint_single(module: EvolvableModule, name: str) -> dict[str, Any]:
-    """Returns a dictionary containing the module's class, init dict, and state dict.
+def module_checkpoint_single(
+    module: EvolvableModuleProtocol,
+    name: str,
+) -> dict[str, Any]:
+    """Return a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
-    :type module: EvolvableModule
+    :type module: EvolvableModuleProtocol
     :param name: The name of the attribute to checkpoint.
     :type name: str
     :return: A dictionary containing the module's class, init dict, and state dict.
@@ -514,10 +535,10 @@ def module_checkpoint_single(module: EvolvableModule, name: str) -> dict[str, An
 
 
 def module_checkpoint_multiagent(module: MultiAgentModule, name: str) -> dict[str, Any]:
-    """Returns a dictionary containing the module's class, init dict, and state dict.
+    """Return a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
-    :type module: ModuleDict
+    :type module: ModuleDictProtocol
     :param name: The name of the attribute to checkpoint.
     :type name: str
     :return: A dictionary containing the module's class, init dict, and state dict.
@@ -545,7 +566,7 @@ def module_checkpoint_multiagent(module: MultiAgentModule, name: str) -> dict[st
 
 
 def format_shared_critic_encoder(encoder_configs: NetConfigType) -> dict[str, Any]:
-    """Formats the shared critic  (i.e. `EvolvableMultiInput`) config from the available
+    """Format the shared critic  (i.e. `EvolvableMultiInput`) config from the available
     encoder configs from all of the sub-agents. This dictionary is built when extracting the net
     config passed by the user in `MultiAgentAlgorithm.extract_net_config`.
 
@@ -570,9 +591,10 @@ def format_shared_critic_encoder(encoder_configs: NetConfigType) -> dict[str, An
 
 
 def get_deepest_head_config(
-    net_config: NetConfigType, agent_ids: list[str]
+    net_config: NetConfigType,
+    agent_ids: list[str],
 ) -> NetConfigType:
-    """Returns the deepest head config from the nested net config.
+    """Return the deepest head config from the nested net config.
 
     :param net_config: Network configuration
     :type net_config: NetConfigType
@@ -580,22 +602,23 @@ def get_deepest_head_config(
     :type agent_ids: list[str]
     :return: Largest head config
     """
-    assert all(
-        agent_id in net_config.keys() for agent_id in agent_ids
-    ), "All passed agent IDs must be present in the net config."
+    assert all(agent_id in net_config for agent_id in agent_ids), (
+        "All passed agent IDs must be present in the net config."
+    )
 
     deepest = None
     for agent_id in agent_ids:
         agent_config = net_config[agent_id]
         agent_head_config = agent_config.get("head_config", None)
         if agent_head_config is not None:
-            if deepest is None:
-                deepest = agent_head_config
-            elif len(agent_head_config["hidden_size"]) > len(deepest["hidden_size"]):
+            if deepest is None or len(agent_head_config["hidden_size"]) > len(
+                deepest["hidden_size"],
+            ):
                 deepest = agent_head_config
 
     if deepest is None:
-        raise ValueError("No head config found in the passed net config.")
+        msg = "No head config found in the passed net config."
+        raise ValueError(msg)
 
     return deepest
 
@@ -614,24 +637,24 @@ def concatenate_spaces(space_list: list[SupportedObsSpaces]) -> spaces.Space:
         return spaces.Dict(
             {
                 key: concatenate_spaces([space[key] for space in space_list])
-                for key in space_list[0].spaces.keys()
-            }
+                for key in space_list[0].spaces
+            },
         )
 
-    elif all(isinstance(space, spaces.Tuple) for space in space_list):
+    if all(isinstance(space, spaces.Tuple) for space in space_list):
         return spaces.Tuple(
             [
                 concatenate_spaces([space[i] for space in space_list])
                 for i in range(len(space_list[0]))
-            ]
+            ],
         )
 
-    elif all(isinstance(space, spaces.Box) for space in space_list):
+    if all(isinstance(space, spaces.Box) for space in space_list):
         # Require image spaces to have the same shape in order to concatenate
         if all(is_image_space(space) for space in space_list):
-            assert all(
-                space.shape == space_list[0].shape for space in space_list
-            ), "Cannot concatenate image spaces with different CxHxW dimensions."
+            assert all(space.shape == space_list[0].shape for space in space_list), (
+                "Cannot concatenate image spaces with different CxHxW dimensions."
+            )
 
             return space_list[0]
 
@@ -639,81 +662,79 @@ def concatenate_spaces(space_list: list[SupportedObsSpaces]) -> spaces.Space:
         high = np.concatenate([space.high for space in space_list], axis=0)
         return spaces.Box(low=low, high=high, dtype=space_list[0].dtype)
 
-    elif all(isinstance(space, spaces.Discrete) for space in space_list):
+    if all(isinstance(space, spaces.Discrete) for space in space_list):
         n = sum(space.n for space in space_list)
         return spaces.Discrete(n)
 
-    elif all(isinstance(space, spaces.MultiDiscrete) for space in space_list):
+    if all(isinstance(space, spaces.MultiDiscrete) for space in space_list):
         nvec = np.concatenate([space.nvec for space in space_list], axis=0)
         return spaces.MultiDiscrete(nvec)
 
-    else:
-        raise TypeError(
-            f"Unsupported space types: {set(type(space) for space in spaces)}"
-        )
+    msg = f"Unsupported space types: { {type(space) for space in spaces} }"
+    raise TypeError(
+        msg,
+    )
 
 
 def obs_channels_to_first(
-    observation: NumpyObsType, expand_dims: bool = False
+    observation: NumpyObsType,
+    expand_dims: bool = False,
 ) -> NumpyObsType:
-    """Converts observation space from channels last to channels first format.
+    """Convert observation space from channels last to channels first format.
 
     :param observation_space: Observation space
-    :type observation_space: Union[spaces.Box, spaces.Dict]
+    :type observation_space: spaces.Box | spaces.Dict
     :param expand_dims: If True, expand the dimensions of the observation, defaults to False
     :type expand_dims: bool, optional
     :return: Observation space with channels first format
-    :rtype: Union[spaces.Box, spaces.Dict]
+    :rtype: spaces.Box | spaces.Dict
     """
     if isinstance(observation, np.ndarray):
         if expand_dims:
             observation = np.expand_dims(observation, axis=0)
 
-        if observation.ndim == 3 or observation.ndim == 4:
+        if observation.ndim in {3, 4}:
             return np.moveaxis(observation, -1, -3)
-        else:
-            return observation
+        return observation
 
-    elif isinstance(observation, dict):
+    if isinstance(observation, dict):
         return {key: obs_channels_to_first(obs) for key, obs in observation.items()}
-    else:
-        raise TypeError(f"Expected np.ndarray or dict, got {type(observation)}")
+    msg = f"Expected np.ndarray or dict, got {type(observation)}"
+    raise TypeError(msg)
 
 
-def obs_to_tensor(
-    obs: ObservationType, device: Union[str, torch.device]
-) -> TorchObsType:
-    """
-    Moves the observation to the given device as a PyTorch tensor.
+def obs_to_tensor(obs: ObservationType, device: str | torch.device) -> TorchObsType:
+    """Move the observation to the given device as a PyTorch tensor.
 
     :param obs:
     :type obs: NumpyObsType
     :param device: PyTorch device
-    :type device: Union[str, torch.device]
+    :type device: str | torch.device
     :return: PyTorch tensor of the observation on a desired device.
     :rtype: TorchObsType
     """
     if isinstance(obs, TensorDict):
         return obs if obs.device == device else obs.to(device)
-    elif isinstance(obs, torch.Tensor):
+    if isinstance(obs, torch.Tensor):
         return obs.float().to(device)
-    elif isinstance(obs, np.ndarray):
+    if isinstance(obs, np.ndarray):
         return torch.as_tensor(obs, device=device).float()
-    elif isinstance(obs, dict):
+    if isinstance(obs, dict):
         return {
             key: torch.as_tensor(_obs, device=device).float()
             for (key, _obs) in obs.items()
         }
-    elif isinstance(obs, tuple):
+    if isinstance(obs, tuple):
         return tuple(torch.as_tensor(_obs, device=device).float() for _obs in obs)
-    elif isinstance(obs, (list, Number)):
+    if isinstance(obs, (list, Number)):
         return torch.tensor(obs, device=device).float()
 
-    raise TypeError(f"Unrecognized type of observation {type(obs)}")
+    msg = f"Unrecognized type of observation {type(obs)}"
+    raise TypeError(msg)
 
 
 def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> int:
-    """Returns the number of vectorized environments given an observation and
+    """Return the number of vectorized environments given an observation and
     its corresponding space.
 
     :param observation: Observation
@@ -725,9 +746,9 @@ def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> 
     if isinstance(observation_space, spaces.Dict):
         first_key, first_obs = next(iter(observation.items()))
         return get_vect_dim(first_obs, observation_space[first_key])
-    elif isinstance(observation_space, spaces.Tuple):
+    if isinstance(observation_space, spaces.Tuple):
         return get_vect_dim(observation[0], observation_space[0])
-    elif isinstance(observation_space, spaces.MultiBinary):
+    if isinstance(observation_space, spaces.MultiBinary):
         observation = (
             observation
             if isinstance(observation, np.ndarray)
@@ -738,18 +759,15 @@ def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> 
             if len(observation.shape) > observation_space.shape
             else 1
         )
-    else:
-        observation = (
-            observation
-            if isinstance(observation, np.ndarray)
-            else np.array(observation)
-        )
-        array_shape = observation.shape
-        return array_shape[0] if len(array_shape) > len(observation_space.shape) else 1
+    observation = (
+        observation if isinstance(observation, np.ndarray) else np.array(observation)
+    )
+    array_shape = observation.shape
+    return array_shape[0] if len(array_shape) > len(observation_space.shape) else 1
 
 
 def add_placeholder_value(obs: torch.Tensor, placeholder_value: float) -> torch.Tensor:
-    """Adds placeholder value to observation.
+    """Add placeholder value to observation.
 
     :param obs: Observation
     :type obs: torch.Tensor
@@ -767,9 +785,11 @@ def add_placeholder_value(obs: torch.Tensor, placeholder_value: float) -> torch.
 
 @singledispatch
 def maybe_add_batch_dim(
-    array_like: ObservationType, space: spaces.Space, actions: bool = False
+    array_like: ObservationType,
+    space: spaces.Space,
+    actions: bool = False,
 ) -> ObservationType:
-    """Adds batch dimension if necessary.
+    """Add batch dimension if necessary.
 
     :param array_like: Array or tensor
     :type array_like: ObservationType
@@ -780,12 +800,15 @@ def maybe_add_batch_dim(
     :return: Observation tensor with batch dimension
     :rtype: ObservationType
     """
-    raise TypeError(f"Cannot add batch dimension for {type(array_like)}.")
+    msg = f"Cannot add batch dimension for {type(array_like)}."
+    raise TypeError(msg)
 
 
 @maybe_add_batch_dim.register(np.ndarray)
 def maybe_add_batch_dim_np(
-    array_like: np.ndarray, space: spaces.Space, actions: bool = False
+    array_like: np.ndarray,
+    space: spaces.Space,
+    actions: bool = False,
 ) -> np.ndarray:
     space_shape = (
         get_input_size_from_space(space) if not actions else (get_num_actions(space),)
@@ -795,8 +818,9 @@ def maybe_add_batch_dim_np(
     elif len(array_like.shape) == len(space_shape) + 2:
         array_like = array_like.reshape(-1, *space_shape)
     elif len(array_like.shape) != len(space_shape) + 1:
+        msg = f"Expected observation to have {len(space_shape) + 1} dimensions, got {len(array_like.shape)}."
         raise ValueError(
-            f"Expected observation to have {len(space_shape) + 1} dimensions, got {len(array_like.shape)}."
+            msg,
         )
 
     return array_like
@@ -804,7 +828,9 @@ def maybe_add_batch_dim_np(
 
 @maybe_add_batch_dim.register(torch.Tensor)
 def maybe_add_batch_dim_torch(
-    array_like: torch.Tensor, space: spaces.Space, actions: bool = False
+    array_like: torch.Tensor,
+    space: spaces.Space,
+    actions: bool = False,
 ) -> torch.Tensor:
     space_shape = (
         get_input_size_from_space(space) if not actions else (get_num_actions(space),)
@@ -814,8 +840,9 @@ def maybe_add_batch_dim_torch(
     elif array_like.ndim == len(space_shape) + 2:
         array_like = array_like.view(-1, *space_shape)
     elif array_like.ndim != len(space_shape) + 1:
+        msg = f"Expected observation to have {len(space_shape) + 1} dimensions, got {len(array_like.shape)}."
         raise ValueError(
-            f"Expected observation to have {len(space_shape) + 1} dimensions, got {len(array_like.shape)}."
+            msg,
         )
 
     return array_like
@@ -825,9 +852,9 @@ def maybe_add_batch_dim_torch(
 def preprocess_observation(
     observation_space: spaces.Space,
     observation: ObservationType,
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> TorchObsType:
     """Preprocesses observations for forward pass through neural network.
 
@@ -836,17 +863,18 @@ def preprocess_observation(
     :param observation: Observations of environment
     :type observation: ObservationType
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to "cpu"
-    :type device: Union[str, torch.device], optional
+    :type device: str | torch.device, optional
     :param normalize_images: Normalize images from [0. 255] to [0, 1], defaults to True
     :type normalize_images: bool, optional
     :param placeholder_value: The value to use as placeholder for missing observations, defaults to None.
-    :type placeholder_value: Optional[Any], optional
+    :type placeholder_value: Any | None, optional
 
     :return: Preprocessed observations
     :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
     """
+    msg = f"AgileRL currently doesn't support {type(observation_space)} spaces."
     raise TypeError(
-        f"AgileRL currently doesn't support {type(observation_space)} spaces."
+        msg,
     )
 
 
@@ -854,9 +882,9 @@ def preprocess_observation(
 def preprocess_dict_observation(
     observation_space: spaces.Dict,
     observation: dict[str, np.ndarray | torch.Tensor],
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> dict[str, TorchObsType]:
     """Preprocess dictionary observations.
 
@@ -868,7 +896,8 @@ def preprocess_dict_observation(
     :return: Preprocessed dictionary observation
     """
     assert isinstance(
-        observation, (dict, TensorDict)
+        observation,
+        (dict, TensorDict),
     ), f"Expected dict, got {type(observation)}"
 
     preprocessed_obs = OrderedDict()
@@ -888,9 +917,9 @@ def preprocess_dict_observation(
 def preprocess_tuple_observation(
     observation_space: spaces.Tuple,
     observation: tuple[np.ndarray | torch.Tensor, ...],
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> tuple[TorchObsType, ...]:
     """Preprocess tuple observations.
 
@@ -908,7 +937,8 @@ def preprocess_tuple_observation(
         observation = tuple(observation[key] for key in dict_keys)
 
     assert isinstance(
-        observation, tuple
+        observation,
+        tuple,
     ), f"Expected tuple observation, got {type(observation)}"
 
     return tuple(
@@ -919,7 +949,7 @@ def preprocess_tuple_observation(
             normalize_images=normalize_images,
             placeholder_value=placeholder_value,
         )
-        for _obs, _space in zip(observation, observation_space.spaces)
+        for _obs, _space in zip(observation, observation_space.spaces, strict=False)
     )
 
 
@@ -927,9 +957,9 @@ def preprocess_tuple_observation(
 def preprocess_box_observation(
     observation_space: spaces.Box,
     observation: np.ndarray | torch.Tensor,
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> torch.Tensor:
     """Preprocess box observations (continuous spaces).
 
@@ -952,18 +982,16 @@ def preprocess_box_observation(
         observation = apply_image_normalization(observation, observation_space)
 
     # Check add batch dimension if necessary
-    observation = maybe_add_batch_dim(observation, observation_space)
-
-    return observation
+    return maybe_add_batch_dim(observation, observation_space)
 
 
 @preprocess_observation.register(spaces.Discrete)
 def preprocess_discrete_observation(
     observation_space: spaces.Discrete,
     observation: np.ndarray | torch.Tensor,
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> torch.Tensor:
     """Preprocess discrete observations.
 
@@ -983,25 +1011,24 @@ def preprocess_discrete_observation(
 
     # One hot encoding of discrete observation
     observation = F.one_hot(
-        observation.long(), num_classes=int(observation_space.n)
+        observation.long(),
+        num_classes=int(observation_space.n),
     ).float()
 
     if observation_space.n > 1:
         observation = observation.squeeze()  # If n == 1 then squeeze removes obs dim
 
     # Check add batch dimension if necessary
-    observation = maybe_add_batch_dim(observation, observation_space)
-
-    return observation
+    return maybe_add_batch_dim(observation, observation_space)
 
 
 @preprocess_observation.register(spaces.MultiDiscrete)
 def preprocess_multidiscrete_observation(
     observation_space: spaces.MultiDiscrete,
     observation: np.ndarray | torch.Tensor,
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> torch.Tensor:
     """Preprocess multi-discrete observations.
 
@@ -1038,9 +1065,9 @@ def preprocess_multidiscrete_observation(
 def preprocess_multibinary_observation(
     observation_space: spaces.MultiBinary,
     observation: np.ndarray | torch.Tensor,
-    device: Union[str, torch.device] = "cpu",
+    device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Optional[Any] = None,
+    placeholder_value: Any | None = None,
 ) -> torch.Tensor:
     """Preprocess multi-binary observations.
 
@@ -1061,15 +1088,14 @@ def preprocess_multibinary_observation(
     observation = observation.float()
 
     # Check add batch dimension if necessary
-    observation = maybe_add_batch_dim(observation, observation_space)
-
-    return observation
+    return maybe_add_batch_dim(observation, observation_space)
 
 
 def apply_image_normalization(
-    observation: ArrayOrTensor, observation_space: spaces.Box
+    observation: ArrayOrTensor,
+    observation_space: spaces.Box,
 ) -> ArrayOrTensor:
-    """Normalize images using minmax scaling
+    """Normalize images using minmax scaling.
 
     :param observation: Observation
     :type observation: ArrayOrTensor
@@ -1079,17 +1105,20 @@ def apply_image_normalization(
     :rtype: ArrayOrTensor
     """
     if not isinstance(observation_space, spaces.Box):
-        raise TypeError(f"Expected spaces.Box, got {type(observation_space)}")
+        msg = f"Expected spaces.Box, got {type(observation_space)}"
+        raise TypeError(msg)
 
     if np.inf in observation_space.high:
         warnings.warn(
-            "np.inf detected in observation_space.high, bypassing normalization."
+            "np.inf detected in observation_space.high, bypassing normalization.",
+            stacklevel=2,
         )
         return observation
 
     if -np.inf in observation_space.low:
         warnings.warn(
-            "-np.inf detected in observation_space.low, bypassing normalization."
+            "-np.inf detected in observation_space.low, bypassing normalization.",
+            stacklevel=2,
         )
         return observation
 
@@ -1098,10 +1127,14 @@ def apply_image_normalization(
 
     if isinstance(observation, torch.Tensor):
         low = torch.tensor(
-            observation_space.low, device=observation.device, dtype=observation.dtype
+            observation_space.low,
+            device=observation.device,
+            dtype=observation.dtype,
         )
         high = torch.tensor(
-            observation_space.high, device=observation.device, dtype=observation.dtype
+            observation_space.high,
+            device=observation.device,
+            dtype=observation.dtype,
         )
     else:
         low = observation_space.low
@@ -1113,9 +1146,10 @@ def apply_image_normalization(
 # TODO: The following functions are currently used in PPO (on-policy) as a means of handling
 # experiences in the absence of a rollout buffer -> This will not be needed in the future.
 def get_experiences_samples(
-    minibatch_indices: np.ndarray, *experiences: TorchObsType
+    minibatch_indices: np.ndarray,
+    *experiences: TorchObsType,
 ) -> tuple[TorchObsType, ...]:
-    """Samples experiences given minibatch indices.
+    """Sample experiences given minibatch indices.
 
     :param minibatch_indices: Minibatch indices
     :type minibatch_indices: numpy.ndarray[int]
@@ -1134,7 +1168,8 @@ def get_experiences_samples(
         elif isinstance(exp, torch.Tensor):
             sampled_exp = exp[minibatch_indices]
         else:
-            raise TypeError(f"Unsupported experience type: {type(exp)}")
+            msg = f"Unsupported experience type: {type(exp)}"
+            raise TypeError(msg)
 
         sampled_experiences.append(sampled_exp)
 
@@ -1142,7 +1177,8 @@ def get_experiences_samples(
 
 
 def stack_experiences(
-    *experiences: MaybeObsList, to_torch: bool = True
+    *experiences: MaybeObsList,
+    to_torch: bool = True,
 ) -> tuple[ObservationType, ...]:
     """Stacks experiences into a single array or tensor.
 
@@ -1197,7 +1233,8 @@ def stack_experiences(
             stacked_exp = torch.stack(exp)
 
         else:
-            raise TypeError(f"Unsupported experience type: {type(exp[0])}")
+            msg = f"Unsupported experience type: {type(exp[0])}"
+            raise TypeError(msg)
 
         stacked_experiences.append(stacked_exp)
 
@@ -1206,9 +1243,9 @@ def stack_experiences(
 
 def stack_and_pad_experiences(
     *experiences: MaybeObsList,
-    padding_values: list[Union[int, float, bool]],
+    padding_values: list[int | float | bool],
     padding_side: str = "right",
-    device: Optional[str] = None,
+    device: str | None = None,
 ) -> tuple[ArrayOrTensor, ...]:
     """Stacks experiences into a single tensor, padding them to the maximum length.
 
@@ -1223,7 +1260,7 @@ def stack_and_pad_experiences(
     :rtype: tuple[ArrayOrTensor, ...]
     """
     stacked_experiences = []
-    for exp, padding in zip(experiences, padding_values):
+    for exp, padding in zip(experiences, padding_values, strict=False):
         if not isinstance(exp, list):
             stacked_exp = exp
         elif isinstance(exp[0], torch.Tensor):
@@ -1232,7 +1269,8 @@ def stack_and_pad_experiences(
             exp = [torch.tensor(e).unsqueeze(0) for e in exp]
             stacked_exp = _stack_and_pad_tensor_list(exp, padding, padding_side)
         else:
-            raise TypeError(f"Unsupported experience type: {type(exp[0])}")
+            msg = f"Unsupported experience type: {type(exp[0])}"
+            raise TypeError(msg)
         if device is not None:
             stacked_exp = stacked_exp.to(device)
         stacked_experiences.append(stacked_exp)
@@ -1240,10 +1278,11 @@ def stack_and_pad_experiences(
 
 
 def _stack_and_pad_tensor_list(
-    exp: list[torch.Tensor], padding: int, padding_side: str = "right"
+    exp: list[torch.Tensor],
+    padding: int,
+    padding_side: str = "right",
 ) -> torch.Tensor:
-    """
-    Stack and pad a list of tensors.
+    """Stack and pad a list of tensors.
 
     :param exp: List of tensors to stack and pad
     :type exp: list[torch.Tensor]
@@ -1261,7 +1300,7 @@ def _stack_and_pad_tensor_list(
                 ((0, padding_size) if padding_side == "right" else (padding_size, 0)),
                 value=padding,
             )
-            for e, padding_size in zip(exp, padding_sizes)
+            for e, padding_size in zip(exp, padding_sizes, strict=False)
         ]
     return torch.cat(exp, dim=0)
 
@@ -1282,8 +1321,7 @@ def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, .
         if len(shape) < 3:
             shape = (*shape, 1)
 
-        arr = arr.swapaxes(0, 1).reshape(shape[0] * shape[1], *shape[2:])
-        return arr
+        return arr.swapaxes(0, 1).reshape(shape[0] * shape[1], *shape[2:])
 
     flattened_experiences = []
     for exp in experiences:
@@ -1294,7 +1332,8 @@ def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, .
         elif isinstance(exp, (torch.Tensor, np.ndarray)):
             flattened_exp = flatten(exp)
         else:
-            raise TypeError(f"Unsupported experience type: {type(exp)}")
+            msg = f"Unsupported experience type: {type(exp)}"
+            raise TypeError(msg)
 
         flattened_experiences.append(flattened_exp)
 
@@ -1302,7 +1341,7 @@ def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, .
 
 
 def is_vectorized_experiences(*experiences: ObservationType) -> bool:
-    """Checks if experiences are vectorised.
+    """Check if experiences are vectorised.
 
     :param experiences: Experiences to check
     :type experiences: tuple[numpy.ndarray[float], ...] or tuple[torch.Tensor[float], ...]
@@ -1339,7 +1378,7 @@ class VLLMConfig:
     Note: has the same defaults as the VLLMClient class from trl library.
 
     :param base_url: Base URL of the VLLM server, defaults to None
-    :type base_url: Optional[str], optional
+    :type base_url: str | None, optional
     :param host: Host of the VLLM server, defaults to "0.0.0.0"
     :type host: str, optional
     :param server_port: Server port of the VLLM server, defaults to 8000
@@ -1354,11 +1393,12 @@ class VLLMConfig:
     max_num_seqs: int = 8
     sleep_mode: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.sleep_mode:
             warnings.warn(
                 """VLLM sleep mode cannot be used with populations of agents on a single device. To use sleep mode, ensure,
-                you are training a single agent or, alternatively, use a different device for each agent."""
+                you are training a single agent or, alternatively, use a different device for each agent.""",
+                stacklevel=2,
             )
 
 
@@ -1368,7 +1408,7 @@ def create_warmup_cosine_scheduler(
     min_lr: float,
     max_lr: float,
 ) -> SequentialLR:
-    """Helper function to create cosine annealing lr scheduler with warm-up
+    """Create cosine annealing lr scheduler with warm-up.
 
     :param optimizer: Optimizer
     :type optimizer: torch.optim.Optimizer
@@ -1400,12 +1440,11 @@ def create_warmup_cosine_scheduler(
         T_max=remaining_epochs * 2,  # Doubled to ensure strictly decreasing LR
         eta_min=min_lr,
     )
-    scheduler = SequentialLR(
+    return SequentialLR(
         optimizer,
         schedulers=[warmup_scheduler, cosine_scheduler],
         milestones=[warmup_epochs],
     )
-    return scheduler
 
 
 def remove_nested_files(files: list[str]) -> None:
@@ -1424,9 +1463,10 @@ def remove_nested_files(files: list[str]) -> None:
 
 
 def vectorize_experiences_by_agent(
-    experiences: ExperiencesType, dim: int = 1
-) -> Union[torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor, ...]]:
-    """Reorganizes experiences into a tensor, vectorized by time step
+    experiences: ExperiencesType,
+    dim: int = 1,
+) -> torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]:
+    """Reorganizes experiences into a tensor, vectorized by time step.
 
     Example input:
     {'agent_0': [[1, 2, 3, 4]], 'agent_1': [[5, 6, 7, 8]]}
@@ -1438,7 +1478,7 @@ def vectorize_experiences_by_agent(
     :param dim: New dimension to stack along
     :type dim: int
     :return: Tensor, dict of tensors, or tuple of tensors of experiences, stacked along provided dimension
-    :rtype: Union[torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor, ...]]
+    :rtype: torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]
     """
     if not experiences:
         return torch.tensor([])
@@ -1456,7 +1496,7 @@ def vectorize_experiences_by_agent(
             )
             for k in keys
         }
-    elif isinstance(sample_value, tuple):
+    if isinstance(sample_value, tuple):
         # Handle tuple observations
         tuple_length = len(sample_value)
         return tuple(
@@ -1466,28 +1506,29 @@ def vectorize_experiences_by_agent(
             )
             for i in range(tuple_length)
         )
+    # Original implementation for array/tensor observations
+    tensors: list[torch.Tensor] = []
+    for experience in experiences.values():
+        if experience is None:
+            continue
+        tensors.append(torch.Tensor(np.array(experience)))
+
+    # Check if all tensors have the same shape
+    if all(t.shape == tensors[0].shape for t in tensors):
+        stacked_tensor = torch.stack(tensors, dim=dim)
     else:
-        # Original implementation for array/tensor observations
-        tensors: list[torch.Tensor] = []
-        for experience in experiences.values():
-            if experience is None:
-                continue
-            tensors.append(torch.Tensor(np.array(experience)))
+        # Concatenate along the specified dimension
+        stacked_tensor = torch.cat(tensors)
 
-        # Check if all tensors have the same shape
-        if all(t.shape == tensors[0].shape for t in tensors):
-            stacked_tensor = torch.stack(tensors, dim=dim)
-        else:
-            # Concatenate along the specified dimension
-            stacked_tensor = torch.cat(tensors)
-
-        return stacked_tensor
+    return stacked_tensor
 
 
 def experience_to_tensors(
-    experience: dict | tuple | np.ndarray, space: spaces.Space, actions: bool = False
+    experience: dict | tuple | np.ndarray,
+    space: spaces.Space,
+    actions: bool = False,
 ) -> TorchObsType:
-    """Convert experience to numpy array
+    """Convert experience to numpy array.
 
     :param experience: Experience to convert
     :type experience: dict | tuple | np.ndarray
@@ -1503,20 +1544,19 @@ def experience_to_tensors(
             key: experience_to_tensors(value, space[key])
             for key, value in experience.items()
         }
-    elif isinstance(experience, tuple):
+    if isinstance(experience, tuple):
         return tuple(
             experience_to_tensors(exp, space[i]) for i, exp in enumerate(experience)
         )
-    else:
-        array = np.array(experience)
+    array = np.array(experience)
 
-        # Ensure experience has a batch dimension
-        array = maybe_add_batch_dim(array, space, actions)
-        return torch.from_numpy(array)
+    # Ensure experience has a batch dimension
+    array = maybe_add_batch_dim(array, space, actions)
+    return torch.from_numpy(array)
 
 
 def concatenate_tensors(tensors: list[TorchObsType]) -> TorchObsType:
-    """Concatenate tensors along first dimension
+    """Concatenate tensors along first dimension.
 
     :param tensors: List of tensors to concatenate
     :type tensors: list[TorchObsType]
@@ -1525,19 +1565,17 @@ def concatenate_tensors(tensors: list[TorchObsType]) -> TorchObsType:
     """
     if isinstance(tensors[0], dict):
         return {
-            key: concatenate_tensors([t[key] for t in tensors])
-            for key in tensors[0].keys()
+            key: concatenate_tensors([t[key] for t in tensors]) for key in tensors[0]
         }
-    elif isinstance(tensors[0], tuple):
+    if isinstance(tensors[0], tuple):
         return tuple(
             concatenate_tensors([t[i] for t in tensors]) for i in range(len(tensors[0]))
         )
-    else:
-        return torch.cat(tensors, dim=0)
+    return torch.cat(tensors, dim=0)
 
 
 def reshape_from_space(tensor: TorchObsType, space: spaces.Space) -> TorchObsType:
-    """Reshape tensor from space
+    """Reshape tensor from space.
 
     :param tensor: Tensor to reshape
     :type tensor: TorchObsType
@@ -1550,7 +1588,7 @@ def reshape_from_space(tensor: TorchObsType, space: spaces.Space) -> TorchObsTyp
         return {
             key: reshape_from_space(value, space[key]) for key, value in tensor.items()
         }
-    elif isinstance(tensor, tuple):
+    if isinstance(tensor, tuple):
         return tuple(
             reshape_from_space(value, space[i]) for i, value in enumerate(tensor)
         )
@@ -1564,9 +1602,11 @@ def reshape_from_space(tensor: TorchObsType, space: spaces.Space) -> TorchObsTyp
 
 
 def concatenate_experiences_into_batches(
-    experiences: ExperiencesType, space: spaces.Space, actions: bool = False
+    experiences: ExperiencesType,
+    space: spaces.Space,
+    actions: bool = False,
 ) -> TorchObsType:
-    """Reorganizes experiences into a batched tensor
+    """Reorganizes experiences into a batched tensor.
 
     Example input:
     {'agent_0': [[[...1], [...2]], [[...5], [...6]]],
@@ -1582,10 +1622,10 @@ def concatenate_experiences_into_batches(
     :param actions: Whether the experiences are actions, defaults to False
     :type actions: bool, optional
     :return: Tensor, dict of tensors, or tuple of tensors of experiences, stacked along first dimension, with shape (num_experiences, *shape)
-    :rtype: Union[torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor, ...]]
+    :rtype: torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]
     """
     tensors = []
-    for agent_id in experiences.keys():
+    for agent_id in experiences:
         exp = experience_to_tensors(experiences[agent_id], space, actions)
         tensors.append(exp)
 
@@ -1607,7 +1647,7 @@ def is_peft_model(model: nn.Module) -> bool:
 def clone_llm(
     original_model: PreTrainedModelType | DummyEvolvable,
     zero_stage: int,
-    state_dict: Optional[dict[str, torch.Tensor]] = None,
+    state_dict: dict[str, torch.Tensor] | None = None,
 ) -> PreTrainedModelType:
     """Clone the actor.
 
@@ -1616,7 +1656,7 @@ def clone_llm(
     :param zero_stage: Zero stage to use, defaults to 0
     :type zero_stage: int, optional
     :param state_dict: State dict to load, defaults to None
-    :type state_dict: Optional[dict[str, torch.Tensor]], optional
+    :type state_dict: dict[str, torch.Tensor] | None, optional
     :return: Cloned model
     """
     match original_model:
@@ -1627,7 +1667,8 @@ def clone_llm(
         case DummyEvolvable():
             original_model = original_model.module
         case _:
-            raise ValueError(f"Invalid 'original_model' type: {type(original_model)}")
+            msg = f"Invalid 'original_model' type: {type(original_model)}"
+            raise ValueError(msg)
     with gather_if_zero3(zero_stage, list(original_model.parameters())):
         model_config = original_model.config
         base_model = original_model.model
@@ -1639,7 +1680,8 @@ def clone_llm(
 
             if len(adapter_names) > 1:
                 warnings.warn(
-                    "Multiple adapters detected. Only the first adapter will be used for RL finetuning."
+                    "Multiple adapters detected. Only the first adapter will be used for RL finetuning.",
+                    stacklevel=2,
                 )
             # Add first adapter using get_peft_model
             first_adapter = adapter_names[0]
@@ -1658,41 +1700,49 @@ def clone_llm(
 
 
 class DummyOptimizer:
-    """
-    Placeholder optimizer class to pass to the OptimizerWrapper when the optimizer is defined in the deepspeed config.
-    """
+    """Placeholder optimizer class to pass to the OptimizerWrapper when the optimizer is defined in the deepspeed config."""
 
     def __init__(self, params: list[torch.Tensor], lr: float, **kwargs) -> None:
-        """
-        Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
+        """Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
 
         :param params: Parameters to optimize.
         :type params: list[torch.Tensor]
         :param lr: Learning rate.
         :type lr: float
         """
-        pass
 
-    def step(self, closure=None):
-        raise RuntimeError(
+    def step(self, closure: Callable[[], torch.Tensor] | None = None) -> NoReturn:
+        msg = (
             "DummyOptimizer is a placeholder optimizer and should not be used."
             "Please ensure you are calling accelerator.prepare() on the optimizer."
         )
-
-    def zero_grad(self):
         raise RuntimeError(
+            msg,
+        )
+
+    def zero_grad(self) -> NoReturn:
+        msg = (
             "DummyOptimizer is a placeholder optimizer and should not be used."
             "Please ensure you are calling accelerator.prepare() on the optimizer."
         )
-
-    def state_dict(self):
         raise RuntimeError(
+            msg,
+        )
+
+    def state_dict(self) -> NoReturn:
+        msg = (
             "DummyOptimizer is a placeholder optimizer and should not be used."
             "Please ensure you are calling accelerator.prepare() on the optimizer."
         )
-
-    def load_state_dict(self, state_dict):
         raise RuntimeError(
+            msg,
+        )
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> NoReturn:
+        msg = (
             "DummyOptimizer is a placeholder optimizer and should not be used."
             "Please ensure you are calling accelerator.prepare() on the optimizer."
+        )
+        raise RuntimeError(
+            msg,
         )

@@ -1,8 +1,13 @@
-import pandas as pd
+from typing import TYPE_CHECKING
+
 import torch
 import yaml
 from gymnasium import spaces
-from ucimlrepo import fetch_ucirepo
+
+from tutorials.utils import require_package
+
+with require_package():
+    from ucimlrepo import fetch_ucirepo
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import ReplayBuffer
@@ -12,6 +17,9 @@ from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_bandits import train_bandits
 from agilerl.utils.utils import create_population, print_hyperparams
 from agilerl.wrappers.learning import BanditEnv
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -87,7 +95,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     )
 
     observation_space = spaces.Box(
-        low=features.values.min(), high=features.values.max()
+        low=features.to_numpy().min(),
+        high=features.to_numpy().max(),
     )
     action_space = spaces.Discrete(env.arms)
     agent_pop = create_population(

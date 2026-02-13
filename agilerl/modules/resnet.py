@@ -1,7 +1,7 @@
-from typing import Any, Optional
+from typing import Any
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from agilerl.modules import EvolvableCNN
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
@@ -45,7 +45,7 @@ class EvolvableResNet(EvolvableModule):
     :param name: Name of the network, defaults to 'resnet'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
@@ -56,7 +56,7 @@ class EvolvableResNet(EvolvableModule):
         kernel_size: int,
         stride_size: int,
         num_blocks: int,
-        output_activation: str = None,
+        output_activation: str | None = None,
         scale_factor: int = 4,
         min_blocks: int = 1,
         max_blocks: int = 4,
@@ -64,7 +64,7 @@ class EvolvableResNet(EvolvableModule):
         max_channel_size: int = 256,
         device: DeviceType = "cpu",
         name: str = "resnet",
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
     ) -> None:
         super().__init__(device, random_seed)
 
@@ -99,7 +99,7 @@ class EvolvableResNet(EvolvableModule):
 
     @property
     def net_config(self) -> dict[str, Any]:
-        """Returns model configuration in dictionary."""
+        """Return model configuration in dictionary."""
         net_config = self.init_dict.copy()
         for attr in ["num_inputs", "num_outputs", "device", "name"]:
             if attr in net_config:
@@ -126,8 +126,7 @@ class EvolvableResNet(EvolvableModule):
         num_blocks: int,
         scale_factor: int,
     ) -> nn.Sequential:
-        """
-        Creates and returns a convolutional neural network.
+        """Create and returns a convolutional neural network.
 
         :param in_channels: The number of input channels.
         :type in_channels: int
@@ -166,10 +165,12 @@ class EvolvableResNet(EvolvableModule):
             flattened_size = cnn_output.shape[1]
 
         net_dict[f"{self.name}_linear_output"] = nn.Linear(
-            flattened_size, self.num_outputs, device=self.device
+            flattened_size,
+            self.num_outputs,
+            device=self.device,
         )
         net_dict[f"{self.name}_output_activation"] = get_activation(
-            self.output_activation
+            self.output_activation,
         )
 
         self.cnn_output_size = pre_flatten_output.shape
@@ -177,7 +178,7 @@ class EvolvableResNet(EvolvableModule):
         return nn.Sequential(net_dict)
 
     def forward(self, x: ObservationType) -> torch.Tensor:
-        """Returns output of neural network.
+        """Return output of neural network.
 
         :param x: Neural network input
         :type x: torch.Tensor
@@ -194,34 +195,38 @@ class EvolvableResNet(EvolvableModule):
 
     @mutation(MutationType.LAYER)
     def add_block(self) -> None:
-        """Adds a hidden layer to neural network. Falls back on ``add_channel()`` if
-        max hidden layers reached."""
+        """Add a hidden layer to neural network. Falls back on ``add_channel()`` if
+        max hidden layers reached.
+        """
         # add layer to hyper params
         if self.num_blocks < self.max_blocks:  # HARD LIMIT
             self.num_blocks += 1
         else:
             return self.add_channel()
+        return None
 
     @mutation(MutationType.LAYER, shrink_params=True)
     def remove_block(self) -> None:
-        """Removes a hidden layer from neural network. Falls back on ``add_channel()`` if
-        min hidden layers reached."""
+        """Remove a hidden layer from neural network. Falls back on ``add_channel()`` if
+        min hidden layers reached.
+        """
         if self.num_blocks > self.min_blocks:  # HARD LIMIT
             self.num_blocks -= 1
         else:
             return self.add_channel()
+        return None
 
     @mutation(MutationType.NODE)
     def add_channel(
         self,
-        numb_new_channels: Optional[int] = None,
+        numb_new_channels: int | None = None,
     ) -> dict[str, int]:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
         :type numb_new_channels: int, optional
         :return: Dictionary containing the hidden layer and number of new channels
-        :rtype: dict[str, Union[int, None]]
+        :rtype: dict[str, int | None]
         """
         if numb_new_channels is None:
             numb_new_channels = self.rng.choice([8, 16, 32])
@@ -235,14 +240,14 @@ class EvolvableResNet(EvolvableModule):
     @mutation(MutationType.NODE, shrink_params=True)
     def remove_channel(
         self,
-        numb_new_channels: Optional[int] = None,
+        numb_new_channels: int | None = None,
     ) -> dict[str, int]:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
         :type numb_new_channels: int, optional
         :return: Dictionary containing the hidden layer and number of new channels
-        :rtype: dict[str, Union[int, None]]
+        :rtype: dict[str, int | None]
         """
         if numb_new_channels is None:
             numb_new_channels = self.rng.choice([8, 16, 32])

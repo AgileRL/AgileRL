@@ -59,7 +59,12 @@ from agilerl.utils.probe_envs_ma import (
     ],
 )
 def test_constant_reward_envs(
-    env_class, exp_states, exp_rewards, exp_terminateds, exp_truncateds, exp_infos
+    env_class,
+    exp_states,
+    exp_rewards,
+    exp_terminateds,
+    exp_truncateds,
+    exp_infos,
 ):
     env = env_class()
     states, infos = env.reset()
@@ -92,8 +97,8 @@ def test_constant_reward_envs(
             exp_terminateds,
             exp_truncateds,
             exp_infos,
+            strict=False,
         ):
-
             assert int(np.mean(np.array(state))) == exp_state
             assert reward == exp_reward
             assert terminated == exp_terminated
@@ -146,7 +151,12 @@ def test_constant_reward_envs(
     ],
 )
 def test_observation_dependent_reward_envs(
-    env_class, exp_states, exp_rewards, exp_terminateds, exp_truncateds, exp_infos
+    env_class,
+    exp_states,
+    exp_rewards,
+    exp_terminateds,
+    exp_truncateds,
+    exp_infos,
 ):
     env = env_class()
     states, info = env.reset()
@@ -179,6 +189,7 @@ def test_observation_dependent_reward_envs(
             exp_terminateds,
             exp_truncateds,
             exp_infos,
+            strict=False,
         ):
             if int(np.mean(np.array(state))) == exp_state:
                 assert reward == exp_reward
@@ -204,7 +215,11 @@ def test_observation_dependent_reward_envs(
     ],
 )
 def test_discounted_reward_envs(
-    env_class, exp_states, exp_rewards, exp_truncateds, exp_infos
+    env_class,
+    exp_states,
+    exp_rewards,
+    exp_truncateds,
+    exp_infos,
 ):
     env = env_class()
     states, info = env.reset()
@@ -235,6 +250,7 @@ def test_discounted_reward_envs(
             exp_rewards,
             exp_truncateds,
             exp_infos,
+            strict=False,
         ):
             if int(np.mean(np.array(state))) == exp_state:
                 assert reward == exp_reward
@@ -317,6 +333,7 @@ def test_discrete_actions_fixed_observation_policy_reward_envs(
             exp_terminateds,
             exp_truncateds,
             exp_infos,
+            strict=False,
         ):
             assert int(np.mean(np.array(state))) == exp_state
             if action == exp_action:
@@ -351,7 +368,12 @@ def test_discrete_actions_fixed_observation_policy_reward_envs(
     ],
 )
 def test_continuous_actions_fixed_observation_policy_reward_envs(
-    env_class, exp_states, exp_actions, exp_terminateds, exp_truncateds, exp_infos
+    env_class,
+    exp_states,
+    exp_actions,
+    exp_terminateds,
+    exp_truncateds,
+    exp_infos,
 ):
     env = env_class()
     states, info = env.reset()
@@ -386,6 +408,7 @@ def test_continuous_actions_fixed_observation_policy_reward_envs(
             exp_terminateds,
             exp_truncateds,
             exp_infos,
+            strict=False,
         ):
             assert int(np.mean(np.array(state))) == exp_state
             assert reward == -((exp_action - action[0]) ** 2)
@@ -405,7 +428,12 @@ def test_continuous_actions_fixed_observation_policy_reward_envs(
     ],
 )
 def test_discrete_actions_policy_envs(
-    env_class, same_rewards, diff_rewards, exp_terminateds, exp_truncateds, exp_infos
+    env_class,
+    same_rewards,
+    diff_rewards,
+    exp_terminateds,
+    exp_truncateds,
+    exp_infos,
 ):
     env = env_class()
     states, info = env.reset()
@@ -440,6 +468,7 @@ def test_discrete_actions_policy_envs(
             exp_terminateds,
             exp_truncateds,
             exp_infos,
+            strict=False,
         ):
             if int(np.mean(np.array(state))) == action:
                 assert reward == same_reward
@@ -501,6 +530,7 @@ def test_continuous_actions_policy_envs(
             exp_terminateds,
             exp_truncateds,
             exp_infos,
+            strict=False,
         ):
             if int(np.mean(np.array(state))):
                 assert (
@@ -530,7 +560,12 @@ def test_continuous_actions_policy_envs(
     ],
 )
 def test_discrete_actions_multi_policy_envs(
-    env_class, same_rewards, diff_rewards, exp_terminateds, exp_truncateds, exp_infos
+    env_class,
+    same_rewards,
+    diff_rewards,
+    exp_terminateds,
+    exp_truncateds,
+    exp_infos,
 ):
     env = env_class()
     states, info = env.reset()
@@ -565,6 +600,7 @@ def test_discrete_actions_multi_policy_envs(
             exp_terminateds,
             exp_truncateds,
             exp_infos,
+            strict=False,
         ):
             if int(np.mean(np.array(state))) == action:
                 assert reward == same_reward
@@ -598,7 +634,12 @@ def test_policy_q_learning_with_probe_env():
     )
 
     check_policy_q_learning_with_probe_env(
-        env, MADDPG, algo_args, memory, learn_steps, device
+        env,
+        MADDPG,
+        algo_args,
+        memory,
+        learn_steps,
+        device,
     )
 
 
@@ -622,7 +663,12 @@ def test_policy_q_learning_with_probe_env_mlp():
     )
 
     check_policy_q_learning_with_probe_env(
-        env, MADDPG, algo_args, memory, learn_steps, device
+        env,
+        MADDPG,
+        algo_args,
+        memory,
+        learn_steps,
+        device,
     )
     gc.collect()
 
@@ -663,7 +709,12 @@ def test_policy_q_learning_with_probe_env_cnn():
     )
 
     check_policy_q_learning_with_probe_env(
-        env, MADDPG, algo_args, memory, learn_steps, device
+        env,
+        MADDPG,
+        algo_args,
+        memory,
+        learn_steps,
+        device,
     )
     gc.collect()
 
@@ -682,8 +733,8 @@ def test_on_policy_learning_with_probe_env_mlp(Env, discrete):
     env = Env()
     learn_steps = 20
     algo_args = {
-        "observation_spaces": [space for space in env.observation_space.values()],
-        "action_spaces": [space for space in env.action_space.values()],
+        "observation_spaces": list(env.observation_space.values()),
+        "action_spaces": list(env.action_space.values()),
         "agent_ids": env.agents,
         "lr": 1e-2,
         "net_config": {
@@ -693,7 +744,12 @@ def test_on_policy_learning_with_probe_env_mlp(Env, discrete):
     }
 
     check_on_policy_learning_with_probe_env(
-        env, IPPO, algo_args, learn_steps, device, discrete=discrete
+        env,
+        IPPO,
+        algo_args,
+        learn_steps,
+        device,
+        discrete=discrete,
     )
     gc.collect()
 
@@ -710,8 +766,8 @@ def test_on_policy_learning_with_probe_env_cnn(Env, discrete):
     env = Env()
     learn_steps = 30
     algo_args = {
-        "observation_spaces": [space for space in env.observation_space.values()],
-        "action_spaces": [space for space in env.action_space.values()],
+        "observation_spaces": list(env.observation_space.values()),
+        "action_spaces": list(env.action_space.values()),
         "agent_ids": env.agents,
         "lr": 1e-2,
         "net_config": {
@@ -726,7 +782,12 @@ def test_on_policy_learning_with_probe_env_cnn(Env, discrete):
     }
 
     check_on_policy_learning_with_probe_env(
-        env, IPPO, algo_args, learn_steps, device, discrete=discrete
+        env,
+        IPPO,
+        algo_args,
+        learn_steps,
+        device,
+        discrete=discrete,
     )
     gc.collect()
     torch.cuda.empty_cache()

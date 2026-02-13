@@ -7,8 +7,7 @@ import copy
 import os
 import random
 from collections import deque
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timezone
 
 import numpy as np
 import torch
@@ -43,7 +42,9 @@ class CurriculumEnv:
         self.lesson = lesson
 
     def fill_replay_buffer(
-        self, memory: ReplayBuffer, opponent: "Opponent"
+        self,
+        memory: ReplayBuffer,
+        opponent: "Opponent",
     ) -> ReplayBuffer:
         """Fill the replay buffer with experiences collected by taking random actions in the environment.
 
@@ -80,27 +81,29 @@ class CurriculumEnv:
                 p0_state, p0_state_flipped = transform_and_flip(observation, player=0)
                 if opponent_first:
                     p0_action = self.env.action_space("player_0").sample(p0_action_mask)
+                elif self.lesson["warm_up_opponent"] == "random":
+                    p0_action = opponent.get_action(
+                        p0_action_mask,
+                        p1_action,
+                        self.lesson["block_vert_coef"],
+                    )
                 else:
-                    if self.lesson["warm_up_opponent"] == "random":
-                        p0_action = opponent.get_action(
-                            p0_action_mask, p1_action, self.lesson["block_vert_coef"]
-                        )
-                    else:
-                        p0_action = opponent.get_action(player=0)
+                    p0_action = opponent.get_action(player=0)
                 self.step(p0_action)  # Act in environment
                 observation, env_reward, done, truncation, _ = self.last()
                 p0_next_state, p0_next_state_flipped = transform_and_flip(
-                    observation, player=0
+                    observation,
+                    player=0,
                 )
 
                 if done or truncation:
                     reward = self.reward(done=True, player=0)
                     transition = Transition(
                         obs=np.concatenate(
-                            (p0_state, p1_state, p0_state_flipped, p1_state_flipped)
+                            (p0_state, p1_state, p0_state_flipped, p1_state_flipped),
                         ),
                         action=np.array(
-                            [p0_action, p1_action, 6 - p0_action, 6 - p1_action]
+                            [p0_action, p1_action, 6 - p0_action, 6 - p1_action],
                         ),
                         reward=np.array(
                             [
@@ -108,7 +111,7 @@ class CurriculumEnv:
                                 LESSON["rewards"]["lose"],
                                 reward,
                                 LESSON["rewards"]["lose"],
-                            ]
+                            ],
                         ),
                         next_obs=np.concatenate(
                             (
@@ -116,7 +119,7 @@ class CurriculumEnv:
                                 p1_next_state,
                                 p0_next_state_flipped,
                                 p1_next_state_flipped,
-                            )
+                            ),
                         ),
                         done=np.array([done, done, done, done]),
                         batch_size=[4],
@@ -130,7 +133,7 @@ class CurriculumEnv:
                             action=np.array([p1_action, 6 - p1_action]),
                             reward=np.array([reward, reward]),
                             next_obs=np.concatenate(
-                                (p1_next_state, p1_next_state_flipped)
+                                (p1_next_state, p1_next_state_flipped),
                             ),
                             done=np.array([done, done]),
                             batch_size=[2],
@@ -140,33 +143,41 @@ class CurriculumEnv:
                     # Player 1's turn
                     p1_action_mask = observation["action_mask"]
                     p1_state, p1_state_flipped = transform_and_flip(
-                        observation, player=1
+                        observation,
+                        player=1,
                     )
                     if not opponent_first:
                         p1_action = self.env.action_space("player_1").sample(
-                            p1_action_mask
+                            p1_action_mask,
+                        )
+                    elif self.lesson["warm_up_opponent"] == "random":
+                        p1_action = opponent.get_action(
+                            p1_action_mask,
+                            p0_action,
+                            LESSON["block_vert_coef"],
                         )
                     else:
-                        if self.lesson["warm_up_opponent"] == "random":
-                            p1_action = opponent.get_action(
-                                p1_action_mask, p0_action, LESSON["block_vert_coef"]
-                            )
-                        else:
-                            p1_action = opponent.get_action(player=1)
+                        p1_action = opponent.get_action(player=1)
                     self.step(p1_action)  # Act in environment
                     observation, env_reward, done, truncation, _ = self.last()
                     p1_next_state, p1_next_state_flipped = transform_and_flip(
-                        observation, player=1
+                        observation,
+                        player=1,
                     )
 
                     if done or truncation:
                         reward = self.reward(done=True, player=1)
                         transition = Transition(
                             obs=np.concatenate(
-                                (p0_state, p1_state, p0_state_flipped, p1_state_flipped)
+                                (
+                                    p0_state,
+                                    p1_state,
+                                    p0_state_flipped,
+                                    p1_state_flipped,
+                                ),
                             ),
                             action=np.array(
-                                [p0_action, p1_action, 6 - p0_action, 6 - p1_action]
+                                [p0_action, p1_action, 6 - p0_action, 6 - p1_action],
                             ),
                             reward=np.array(
                                 [
@@ -174,7 +185,7 @@ class CurriculumEnv:
                                     reward,
                                     LESSON["rewards"]["lose"],
                                     reward,
-                                ]
+                                ],
                             ),
                             next_obs=np.concatenate(
                                 (
@@ -182,7 +193,7 @@ class CurriculumEnv:
                                     p1_next_state,
                                     p0_next_state_flipped,
                                     p1_next_state_flipped,
-                                )
+                                ),
                             ),
                             done=np.array([done, done, done, done]),
                             batch_size=[4],
@@ -195,7 +206,7 @@ class CurriculumEnv:
                             action=np.array([p0_action, 6 - p0_action]),
                             reward=np.array([reward, reward]),
                             next_obs=np.concatenate(
-                                (p0_next_state, p0_next_state_flipped)
+                                (p0_next_state, p0_next_state_flipped),
                             ),
                             done=np.array([done, done]),
                             batch_size=[2],
@@ -378,7 +389,7 @@ class Opponent:
     def random_opponent(
         self,
         action_mask: list[int],
-        last_opp_move: Optional[int] = None,
+        last_opp_move: int | None = None,
         block_vert_coef: float = 1,
     ) -> int:
         """Takes move for random opponent. If the lesson aims to randomly block vertical
@@ -393,8 +404,7 @@ class Opponent:
         """
         if last_opp_move is not None:
             action_mask[last_opp_move] *= block_vert_coef
-        action = random.choices(list(range(self.num_cols)), action_mask)[0]
-        return action
+        return random.choices(list(range(self.num_cols)), action_mask)[0]
 
     def weak_rule_based_opponent(self, player: int) -> int:
         """Takes move for weak rule-based opponent.
@@ -407,15 +417,16 @@ class Opponent:
         best_actions = []
         for action in range(self.num_cols):
             possible, reward, ended, lengths = self.outcome(
-                action, player, return_length=True
+                action,
+                player,
+                return_length=True,
             )
             if possible and lengths.sum() > max_length:
                 best_actions = []
                 max_length = lengths.sum()
             if possible and lengths.sum() == max_length:
                 best_actions.append(action)
-        best_action = random.choice(best_actions)
-        return best_action
+        return random.choice(best_actions)
 
     def strong_rule_based_opponent(self, player: int) -> int:
         """Takes move for strong rule-based opponent.
@@ -431,8 +442,7 @@ class Opponent:
             if possible and ended:
                 winning_actions.append(action)
         if len(winning_actions) > 0:
-            winning_action = random.choice(winning_actions)
-            return winning_action
+            return random.choice(winning_actions)
 
         opp = 1 if player == 0 else 0
         loss_avoiding_actions = []
@@ -441,14 +451,16 @@ class Opponent:
             if possible and ended:
                 loss_avoiding_actions.append(action)
         if len(loss_avoiding_actions) > 0:
-            loss_avoiding_action = random.choice(loss_avoiding_actions)
-            return loss_avoiding_action
+            return random.choice(loss_avoiding_actions)
 
         return self.weak_rule_based_opponent(player)  # take best possible move
 
     def outcome(
-        self, action: int, player: int, return_length: bool = False
-    ) -> tuple[bool, Optional[float], bool, Optional[np.ndarray]]:
+        self,
+        action: int,
+        player: int,
+        return_length: bool = False,
+    ) -> tuple[bool, float | None, bool, np.ndarray | None]:
         """Takes move for weak rule-based opponent.
 
         :param action: Action to take in environment
@@ -471,20 +483,26 @@ class Opponent:
                 [[0, -1], [0, 1]],
                 [[-1, -1], [1, 1]],
                 [[-1, 1], [1, -1]],
-            ]
+            ],
         )  # |4x2x2|
 
         positions = np.array([row, col]).reshape(1, 1, 1, -1) + np.expand_dims(
-            directions, -2
+            directions,
+            -2,
         ) * np.arange(1, self.length).reshape(
-            1, 1, -1, 1
+            1,
+            1,
+            -1,
+            1,
         )  # |4x2x3x2|
         valid_positions = np.logical_and(
             np.logical_and(
-                positions[:, :, :, 0] >= 0, positions[:, :, :, 0] < self.num_rows
+                positions[:, :, :, 0] >= 0,
+                positions[:, :, :, 0] < self.num_rows,
             ),
             np.logical_and(
-                positions[:, :, :, 1] >= 0, positions[:, :, :, 1] < self.num_cols
+                positions[:, :, :, 1] >= 0,
+                positions[:, :, :, 1] < self.num_cols,
             ),
         )  # |4x2x3|
         d0 = np.where(valid_positions, positions[:, :, :, 0], 0)
@@ -493,7 +511,8 @@ class Opponent:
         board_values = np.where(valid_positions, board[d0, d1], 0)
         a = (board_values == piece).astype(int)
         b = np.concatenate(
-            (a, np.zeros_like(a[:, :, :1])), axis=-1
+            (a, np.zeros_like(a[:, :, :1])),
+            axis=-1,
         )  # padding with zeros to compute length
         lengths = np.argmin(b, -1)
 
@@ -595,7 +614,7 @@ if __name__ == "__main__":
         # We only need to worry about the state dim of a single agent
         # We flatten the 6x7x2 observation as input to the agent"s neural network
         observation_space = observation_space_channels_to_first(
-            observation_spaces[0]["observation"]
+            observation_spaces[0]["observation"],
         )
         action_space = action_spaces[0]
 
@@ -604,7 +623,11 @@ if __name__ == "__main__":
             lr=RLParameter(min=1e-4, max=1e-2),
             batch_size=RLParameter(min=8, max=64, dtype=int),
             learn_step=RLParameter(
-                min=1, max=120, dtype=int, grow_factor=1.5, shrink_factor=0.75
+                min=1,
+                max=120,
+                dtype=int,
+                grow_factor=1.5,
+                shrink_factor=0.75,
             ),
         )
 
@@ -687,13 +710,14 @@ if __name__ == "__main__":
         if LESSON["buffer_warm_up"]:
             warm_up_opponent = Opponent(env, difficulty=LESSON["warm_up_opponent"])
             memory = env.fill_replay_buffer(
-                memory, warm_up_opponent
+                memory,
+                warm_up_opponent,
             )  # Fill replay buffer with transitions
             if LESSON["agent_warm_up"] > 0:
                 print("Warming up agents ...")
                 agent = pop[0]
                 # Train on randomly collected samples
-                for epoch in trange(LESSON["agent_warm_up"]):
+                for _epoch in trange(LESSON["agent_warm_up"]):
                     experiences = memory.sample(agent.batch_size)
                     agent.learn(experiences)
 
@@ -709,7 +733,7 @@ if __name__ == "__main__":
                     "connect_four_v3",
                     INIT_HP["ALGO"],
                     LESSON["opponent"],
-                    datetime.now().strftime("%m%d%Y%H%M%S"),
+                    datetime.now(tz=timezone.utc).strftime("%m%d%Y%H%M%S"),
                 ),
                 # track hyperparameters and run metadata
                 config={
@@ -729,7 +753,7 @@ if __name__ == "__main__":
             turns_per_episode = []
             train_actions_hist = [0] * action_spaces[0].n
             for agent in pop:  # Loop through population
-                for episode in range(episodes_per_epoch):
+                for _episode in range(episodes_per_epoch):
                     env.reset()  # Reset environment at start of episode
                     observation, cumulative_reward, done, truncation, _ = env.last()
 
@@ -753,36 +777,42 @@ if __name__ == "__main__":
 
                     score = 0
                     turns = 0  # Number of turns counter
-                    for idx_step in range(max_steps):
+                    for _idx_step in range(max_steps):
                         # Player 0"s turn
                         p0_action_mask = observation["action_mask"]
                         p0_state, p0_state_flipped = transform_and_flip(
-                            observation, player=0
+                            observation,
+                            player=0,
                         )
 
                         if opponent_first:
                             if LESSON["opponent"] == "self":
                                 p0_action = opponent.get_action(
-                                    p0_state, 0, p0_action_mask
+                                    p0_state,
+                                    0,
+                                    p0_action_mask,
                                 )[0]
                             elif LESSON["opponent"] == "random":
                                 p0_action = opponent.get_action(
-                                    p0_action_mask, p1_action, LESSON["block_vert_coef"]
+                                    p0_action_mask,
+                                    p1_action,
+                                    LESSON["block_vert_coef"],
                                 )
                             else:
                                 p0_action = opponent.get_action(player=0)
                         else:
                             p0_action = agent.get_action(
-                                p0_state, epsilon, p0_action_mask
-                            )[
-                                0
-                            ]  # Get next action from agent
+                                p0_state,
+                                epsilon,
+                                p0_action_mask,
+                            )[0]  # Get next action from agent
                             train_actions_hist[p0_action] += 1
 
                         env.step(p0_action)  # Act in environment
                         observation, cumulative_reward, done, truncation, _ = env.last()
                         p0_next_state, p0_next_state_flipped = transform_and_flip(
-                            observation, player=0
+                            observation,
+                            player=0,
                         )
                         if not opponent_first:
                             score = cumulative_reward
@@ -798,10 +828,15 @@ if __name__ == "__main__":
                                         p1_state,
                                         p0_state_flipped,
                                         p1_state_flipped,
-                                    )
+                                    ),
                                 ),
                                 action=np.array(
-                                    [p0_action, p1_action, 6 - p0_action, 6 - p1_action]
+                                    [
+                                        p0_action,
+                                        p1_action,
+                                        6 - p0_action,
+                                        6 - p1_action,
+                                    ],
                                 ),
                                 reward=np.array(
                                     [
@@ -809,7 +844,7 @@ if __name__ == "__main__":
                                         LESSON["rewards"]["lose"],
                                         reward,
                                         LESSON["rewards"]["lose"],
-                                    ]
+                                    ],
                                 ),
                                 next_obs=np.concatenate(
                                     (
@@ -817,7 +852,7 @@ if __name__ == "__main__":
                                         p1_next_state,
                                         p0_next_state_flipped,
                                         p1_next_state_flipped,
-                                    )
+                                    ),
                                 ),
                                 done=np.array([done, done, done, done]),
                                 batch_size=[4],
@@ -831,7 +866,7 @@ if __name__ == "__main__":
                                     action=np.array([p1_action, 6 - p1_action]),
                                     reward=np.array([reward, reward]),
                                     next_obs=np.concatenate(
-                                        (p1_next_state, p1_next_state_flipped)
+                                        (p1_next_state, p1_next_state_flipped),
                                     ),
                                     done=np.array([done, done]),
                                     batch_size=[2],
@@ -841,13 +876,16 @@ if __name__ == "__main__":
                             # Player 1"s turn
                             p1_action_mask = observation["action_mask"]
                             p1_state, p1_state_flipped = transform_and_flip(
-                                observation, player=1
+                                observation,
+                                player=1,
                             )
 
                             if not opponent_first:
                                 if LESSON["opponent"] == "self":
                                     p1_action = opponent.get_action(
-                                        p1_state, 0, p1_action_mask
+                                        p1_state,
+                                        0,
+                                        p1_action_mask,
                                     )[0]
                                 elif LESSON["opponent"] == "random":
                                     p1_action = opponent.get_action(
@@ -859,10 +897,10 @@ if __name__ == "__main__":
                                     p1_action = opponent.get_action(player=1)
                             else:
                                 p1_action = agent.get_action(
-                                    p1_state, epsilon, p1_action_mask
-                                )[
-                                    0
-                                ]  # Get next action from agent
+                                    p1_state,
+                                    epsilon,
+                                    p1_action_mask,
+                                )[0]  # Get next action from agent
                                 train_actions_hist[p1_action] += 1
 
                             env.step(p1_action)  # Act in environment
@@ -870,7 +908,8 @@ if __name__ == "__main__":
                                 env.last()
                             )
                             p1_next_state, p1_next_state_flipped = transform_and_flip(
-                                observation, player=1
+                                observation,
+                                player=1,
                             )
 
                             if opponent_first:
@@ -887,7 +926,7 @@ if __name__ == "__main__":
                                             p1_state,
                                             p0_state_flipped,
                                             p1_state_flipped,
-                                        )
+                                        ),
                                     ),
                                     action=np.array(
                                         [
@@ -895,7 +934,7 @@ if __name__ == "__main__":
                                             p1_action,
                                             6 - p0_action,
                                             6 - p1_action,
-                                        ]
+                                        ],
                                     ),
                                     reward=np.array(
                                         [
@@ -903,7 +942,7 @@ if __name__ == "__main__":
                                             LESSON["rewards"]["lose"],
                                             reward,
                                             LESSON["rewards"]["lose"],
-                                        ]
+                                        ],
                                     ),
                                     next_obs=np.concatenate(
                                         (
@@ -911,7 +950,7 @@ if __name__ == "__main__":
                                             p1_next_state,
                                             p0_next_state_flipped,
                                             p1_next_state_flipped,
-                                        )
+                                        ),
                                     ),
                                     done=np.array([done, done, done, done]),
                                     batch_size=[4],
@@ -924,7 +963,7 @@ if __name__ == "__main__":
                                     action=np.array([p0_action, 6 - p0_action]),
                                     reward=np.array([reward, reward]),
                                     next_obs=np.concatenate(
-                                        (p0_next_state, p0_next_state_flipped)
+                                        (p0_next_state, p0_next_state_flipped),
                                     ),
                                     done=np.array([done, done]),
                                     batch_size=[2],
@@ -944,20 +983,21 @@ if __name__ == "__main__":
                         if done or truncation:
                             break
 
-                    total_steps += idx_step + 1
+                    total_steps += _idx_step + 1
                     total_episodes += 1
                     turns_per_episode.append(turns)
                     # Save the total episode reward
                     agent.scores.append(score)
 
-                    if LESSON["opponent"] == "self":
-                        if (total_episodes % LESSON["opponent_upgrade"] == 0) and (
-                            (idx_epi + 1) > evo_epochs
-                        ):
-                            elite_opp, _, _ = tournament._elitism(pop)
-                            elite_opp.actor.eval()
-                            opponent_pool.append(elite_opp)
-                            opp_update_counter += 1
+                    if (
+                        LESSON["opponent"] == "self"
+                        and (total_episodes % LESSON["opponent_upgrade"] == 0)
+                        and ((idx_epi + 1) > evo_epochs)
+                    ):
+                        elite_opp, _, _ = tournament._elitism(pop)
+                        elite_opp.actor.eval()
+                        opponent_pool.append(elite_opp)
+                        opp_update_counter += 1
 
                 # Update epsilon for exploration
                 epsilon = max(eps_end, epsilon * eps_decay)
@@ -974,7 +1014,7 @@ if __name__ == "__main__":
                 for agent in pop:
                     with torch.no_grad():
                         rewards = []
-                        for i in range(evo_loop):
+                        for _i in range(evo_loop):
                             env.reset()  # Reset environment at start of episode
                             observation, cumulative_reward, done, truncation, _ = (
                                 env.last()
@@ -986,14 +1026,11 @@ if __name__ == "__main__":
                             opponent = Opponent(env, difficulty=LESSON["eval_opponent"])
 
                             # Randomly decide whether agent will go first or second
-                            if random.random() > 0.5:
-                                opponent_first = False
-                            else:
-                                opponent_first = True
+                            opponent_first = not random.random() > 0.5
 
                             score = 0
 
-                            for idx_step in range(max_steps):
+                            for _idx_step in range(max_steps):
                                 action_mask = observation["action_mask"]
                                 if player < 0:
                                     if opponent_first:
@@ -1003,14 +1040,16 @@ if __name__ == "__main__":
                                             action = opponent.get_action(player=0)
                                     else:
                                         state = np.moveaxis(
-                                            observation["observation"], [-1], [-3]
+                                            observation["observation"],
+                                            [-1],
+                                            [-3],
                                         )
                                         state = np.expand_dims(state, 0)
                                         action = agent.get_action(
-                                            state, 0, action_mask
-                                        )[
-                                            0
-                                        ]  # Get next action from agent
+                                            state,
+                                            0,
+                                            action_mask,
+                                        )[0]  # Get next action from agent
                                         eval_actions_hist[action] += 1
                                 if player > 0:
                                     if not opponent_first:
@@ -1020,15 +1059,17 @@ if __name__ == "__main__":
                                             action = opponent.get_action(player=1)
                                     else:
                                         state = np.moveaxis(
-                                            observation["observation"], [-1], [-3]
+                                            observation["observation"],
+                                            [-1],
+                                            [-3],
                                         )
                                         state[[0, 1], :, :] = state[[1, 0], :, :]
                                         state = np.expand_dims(state, 0)
                                         action = agent.get_action(
-                                            state, 0, action_mask
-                                        )[
-                                            0
-                                        ]  # Get next action from agent
+                                            state,
+                                            0,
+                                            action_mask,
+                                        )[0]  # Get next action from agent
                                         eval_actions_hist[action] += 1
 
                                 env.step(action)  # Act in environment
@@ -1061,7 +1102,7 @@ if __name__ == "__main__":
                     f"Eval Mean Fitness: {np.mean(fitnesses)} "
                     f"Eval Best Fitness: {np.max(fitnesses)} "
                     f"Eval Mean Turns: {eval_turns} "
-                    f"Total Steps: {total_steps}"
+                    f"Total Steps: {total_steps}",
                 )
                 pbar.update(0)
 

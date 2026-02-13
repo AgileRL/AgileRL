@@ -1,3 +1,4 @@
+import pytest
 from unittest.mock import Mock
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper, ModuleDict, mutation
@@ -91,6 +92,43 @@ def test_evolvable_module_sample_mutation_method():
     module = DummyEvolvableModule(device="cpu")
     sampled_method = module.sample_mutation_method(new_layer_prob=0.5)
     assert sampled_method == "dummy_mutation"
+
+
+def test_evolvable_module_sample_mutation_method_raises_when_no_methods():
+    """sample_mutation_method raises ValueError when no mutation methods are registered."""
+
+    class NoMutationModule(EvolvableModule):
+        def forward(self, x):
+            pass
+
+        def recreate_network(self):
+            pass
+
+    module = NoMutationModule(device="cpu")
+    with pytest.raises(ValueError, match="No mutation methods available"):
+        module.sample_mutation_method(new_layer_prob=0.5)
+
+
+@pytest.mark.parametrize(
+    "mut_type, expect_error", [(99, ValueError), ("invalid", ValueError)]
+)
+def test_evolvable_module_disable_mutations_invalid_type(mut_type, expect_error):
+    """disable_mutations raises ValueError for invalid mutation type."""
+
+    class DummyEvolvableModule(EvolvableModule):
+        @mutation(MutationType.NODE)
+        def dummy_mutation(self):
+            return {"mutation": "dummy"}
+
+        def forward(self, x):
+            pass
+
+        def recreate_network(self):
+            pass
+
+    module = DummyEvolvableModule(device="cpu")
+    with pytest.raises(expect_error, match="Invalid mutation type"):
+        module.disable_mutations(mut_type)
 
 
 def test_inherited_evolvable_module_mutation_methods():
@@ -221,6 +259,26 @@ def test_mutation_with_args_kwargs():
 
 
 ######### Test ModuleDict #########
+def test_evolvable_wrapper_duplicate_mutation_method_raises():
+    """EvolvableWrapper raises AttributeError when wrapped module has same method name in both layer and node lists."""
+
+    class ModuleWithDuplicateMethodName(EvolvableModule):
+        @mutation(MutationType.NODE)
+        def dummy_mutation(self):
+            return {}
+
+        def forward(self, x):
+            pass
+
+        def recreate_network(self):
+            pass
+
+    mod = ModuleWithDuplicateMethodName(device="cpu")
+    mod._layer_mutation_methods.append("dummy_mutation")  # same name in both lists
+    with pytest.raises(AttributeError, match="Duplicate mutation method"):
+        EvolvableWrapper(mod)
+
+
 def test_module_dict_initialization():
     """Test ModuleDict initialization with evolvable modules."""
 

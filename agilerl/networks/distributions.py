@@ -1,4 +1,4 @@
-from typing import Optional, Protocol, Union
+from typing import ClassVar, Protocol
 
 import numpy as np
 import torch
@@ -9,7 +9,7 @@ from agilerl.modules.base import EvolvableModule, EvolvableWrapper
 from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType
 from agilerl.utils.algo_utils import get_output_size_from_space
 
-DistributionType = Union[Distribution, list[Distribution]]
+DistributionType = Distribution | list[Distribution]
 
 
 def sum_independent_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -25,7 +25,8 @@ def sum_independent_tensor(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def apply_action_mask_discrete(
-    logits: torch.Tensor, mask: torch.Tensor
+    logits: torch.Tensor,
+    mask: torch.Tensor,
 ) -> torch.Tensor:
     """Apply a mask to the logits.
 
@@ -47,12 +48,14 @@ class DistributionHandler(Protocol):
         ...
 
     def log_prob(
-        self, distribution: DistributionType, action: torch.Tensor
+        self,
+        distribution: DistributionType,
+        action: torch.Tensor,
     ) -> torch.Tensor:
         """Get the log probability of the action."""
         ...
 
-    def entropy(self, distribution: DistributionType) -> Optional[torch.Tensor]:
+    def entropy(self, distribution: DistributionType) -> torch.Tensor | None:
         """Get the entropy of the action distribution."""
         ...
 
@@ -173,7 +176,9 @@ class MultiCategoricalHandler:
         return torch.stack([dist.sample() for dist in distribution], dim=1)
 
     def log_prob(
-        self, distribution: list[Categorical], action: torch.Tensor
+        self,
+        distribution: list[Categorical],
+        action: torch.Tensor,
     ) -> torch.Tensor:
         """Get the log probability of the action.
 
@@ -184,7 +189,8 @@ class MultiCategoricalHandler:
         """
         unbinded_actions = torch.unbind(action, dim=1)
         multi_log_prob = [
-            dist.log_prob(act) for dist, act in zip(distribution, unbinded_actions)
+            dist.log_prob(act)
+            for dist, act in zip(distribution, unbinded_actions, strict=False)
         ]
         return torch.stack(multi_log_prob, dim=1).sum(dim=1)
 
@@ -205,13 +211,13 @@ class TorchDistribution:
     PPO, A2C, TRPO.
 
     :param distribution: Distribution to wrap.
-    :type distribution: Union[Distribution, list[Distribution]]
+    :type distribution: Distribution | list[Distribution]
     :param squash_output: Whether to squash the output to the action space.
     :type squash_output: bool
     """
 
     # Map distribution types to their handlers
-    _handlers: dict[type, DistributionHandler] = {
+    _handlers: ClassVar[dict[type, DistributionHandler]] = {
         Normal: NormalHandler(),
         Bernoulli: BernoulliHandler(),
         Categorical: CategoricalHandler(),
@@ -224,9 +230,9 @@ class TorchDistribution:
         squash_output: bool = False,
     ) -> None:
         if isinstance(distribution, list):
-            assert all(
-                isinstance(d, Categorical) for d in distribution
-            ), "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
+            assert all(isinstance(d, Categorical) for d in distribution), (
+                "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
+            )
 
         self.distribution = distribution
         self.squash_output = squash_output
@@ -248,7 +254,8 @@ class TorchDistribution:
             if isinstance(distribution, dist_type) and dist_type is not list:
                 return handler
 
-        raise NotImplementedError(f"Distribution {type(distribution)} not supported.")
+        msg = f"Distribution {type(distribution)} not supported."
+        raise NotImplementedError(msg)
 
     def sample(self) -> torch.Tensor:
         """Sample an action from the distribution.
@@ -282,7 +289,7 @@ class TorchDistribution:
 
         return log_prob
 
-    def entropy(self) -> Optional[torch.Tensor]:
+    def entropy(self) -> torch.Tensor | None:
         """Get the entropy of the action distribution.
 
         :return: Entropy of the action distribution.
@@ -314,9 +321,9 @@ class EvolvableDistribution(EvolvableWrapper):
     """
 
     wrapped: EvolvableModule
-    dist: Optional[TorchDistribution]
-    mask: Optional[ArrayOrTensor]
-    log_std: Optional[torch.nn.Parameter]
+    dist: TorchDistribution | None
+    mask: ArrayOrTensor | None
+    log_std: torch.nn.Parameter | None
 
     def __init__(
         self,
@@ -325,7 +332,7 @@ class EvolvableDistribution(EvolvableWrapper):
         action_std_init: float = 0.0,
         squash_output: bool = False,
         device: DeviceType = "cpu",
-    ):
+    ) -> None:
         super().__init__(network)
 
         self.action_space = action_space
@@ -341,7 +348,7 @@ class EvolvableDistribution(EvolvableWrapper):
         if isinstance(action_space, spaces.Box):
             self.log_std = torch.nn.Parameter(
                 torch.ones(1, np.prod(action_space.shape), device=device)
-                * action_std_init
+                * action_std_init,
             )
 
     @property
@@ -382,8 +389,9 @@ class EvolvableDistribution(EvolvableWrapper):
         elif isinstance(self.action_space, spaces.MultiBinary):
             dist = Bernoulli(logits=logits)
         else:
+            msg = f"Action space {self.action_space} not supported."
             raise NotImplementedError(
-                f"Action space {self.action_space} not supported."
+                msg,
             )
 
         return TorchDistribution(dist, self.squash_output)
@@ -397,7 +405,8 @@ class EvolvableDistribution(EvolvableWrapper):
         :rtype: torch.Tensor
         """
         if self.dist is None:
-            raise ValueError("Distribution not initialized. Call forward first.")
+            msg = "Distribution not initialized. Call forward first."
+            raise ValueError(msg)
 
         return self.dist.log_prob(action)
 
@@ -408,7 +417,8 @@ class EvolvableDistribution(EvolvableWrapper):
         :rtype: torch.Tensor
         """
         if self.dist is None:
-            raise ValueError("Distribution not initialized. Call forward first.")
+            msg = "Distribution not initialized. Call forward first."
+            raise ValueError(msg)
 
         return self.dist.entropy()
 
@@ -424,7 +434,7 @@ class EvolvableDistribution(EvolvableWrapper):
         """
         # Convert mask to tensor and reshape to match logits shape
         mask = torch.as_tensor(mask, dtype=torch.bool, device=self.device).view(
-            logits.shape
+            logits.shape,
         )
 
         if isinstance(self.action_space, spaces.Discrete):
@@ -441,15 +451,20 @@ class EvolvableDistribution(EvolvableWrapper):
 
             # Apply mask to each split
             masked_logits = []
-            for split_logits, split_mask in zip(split_logits, split_masks):
+            for logits_part, mask_part in zip(
+                split_logits,
+                split_masks,
+                strict=False,
+            ):
                 masked_logits.append(
-                    apply_action_mask_discrete(split_logits, split_mask)
+                    apply_action_mask_discrete(logits_part, mask_part),
                 )
 
             masked_logits = torch.cat(masked_logits, dim=1)
         else:
+            msg = f"Action space {self.action_space} not supported."
             raise NotImplementedError(
-                f"Action space {self.action_space} not supported."
+                msg,
             )
 
         return masked_logits
@@ -457,17 +472,18 @@ class EvolvableDistribution(EvolvableWrapper):
     def forward(
         self,
         latent: torch.Tensor,
-        action_mask: Optional[ArrayOrTensor] = None,
+        action_mask: ArrayOrTensor | None = None,
         sample: bool = True,
-    ) -> Union[
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor], tuple[None, None, torch.Tensor]
-    ]:
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[None, None, torch.Tensor]
+    ):
         """Forward pass of the network.
 
         :param latent: Latent space representation.
         :type latent: torch.Tensor
         :param action_mask: Mask to apply to the logits. Defaults to None.
-        :type action_mask: Optional[ArrayOrTensor]
+        :type action_mask: ArrayOrTensor | None
         :return: Action and log probability of the action.
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
@@ -477,7 +493,7 @@ class EvolvableDistribution(EvolvableWrapper):
             if isinstance(action_mask, (np.ndarray, list)):
                 action_mask = (
                     np.stack(action_mask)
-                    if action_mask.dtype == np.object_ or isinstance(action_mask, list)
+                    if action_mask.dtype == object or isinstance(action_mask, list)
                     else action_mask
                 )
 
@@ -498,7 +514,7 @@ class EvolvableDistribution(EvolvableWrapper):
         return action, log_prob, entropy
 
     def clone(self) -> "EvolvableDistribution":
-        """Clones the distribution.
+        """Clone the distribution.
 
         :return: Cloned distribution.
         :rtype: EvolvableDistribution

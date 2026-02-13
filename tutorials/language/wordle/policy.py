@@ -1,7 +1,6 @@
 import math
 import random
 from collections import defaultdict
-from typing import Optional, Union
 
 from tqdm.auto import tqdm
 
@@ -12,9 +11,7 @@ from wordle.wordle_game import Vocabulary
 
 
 class UserPolicy(Policy):
-    def __init__(
-        self, hint_policy: Optional[Policy], vocab: Optional[Union[str, Vocabulary]]
-    ):
+    def __init__(self, hint_policy: Policy | None, vocab: str | Vocabulary | None):
         super().__init__()
         self.vocab = vocab
         if isinstance(self.vocab, str):
@@ -42,7 +39,7 @@ class UserPolicy(Policy):
 
 
 class StartWordPolicy(Policy):
-    def __init__(self, start_words: Optional[list[str]] = None):
+    def __init__(self, start_words: list[str] | None = None):
         super().__init__()
         self.start_words = start_words
         if self.start_words is None:
@@ -81,7 +78,7 @@ class StartWordPolicy(Policy):
 
     def act(self, obs: WordleObservation) -> str:
         filtered_start_words = list(
-            filter(lambda x: x in obs.game.vocab.filtered_vocab, self.start_words)
+            filter(lambda x: x in obs.game.vocab.filtered_vocab, self.start_words),
         )
         if len(filtered_start_words) == 0:
             filtered_start_words = obs.game.vocab.filtered_vocab
@@ -90,7 +87,9 @@ class StartWordPolicy(Policy):
 
 class OptimalPolicy(Policy):
     def __init__(
-        self, start_word_policy: Optional[Policy] = None, progress_bar: bool = False
+        self,
+        start_word_policy: Policy | None = None,
+        progress_bar: bool = False,
     ):
         super().__init__()
         self.start_word_policy = start_word_policy
@@ -128,7 +127,7 @@ class OptimalPolicy(Policy):
 
 
 class RepeatPolicy(Policy):
-    def __init__(self, start_word_policy: Optional[Policy], first_n: Optional[int]):
+    def __init__(self, start_word_policy: Policy | None, first_n: int | None):
         super().__init__()
         self.first_n = first_n
         self.start_word_policy = start_word_policy
@@ -144,7 +143,7 @@ class RepeatPolicy(Policy):
 
 
 class RandomMixturePolicy(Policy):
-    def __init__(self, prob_smart: float, vocab: Optional[Union[str, Vocabulary]]):
+    def __init__(self, prob_smart: float, vocab: str | Vocabulary | None):
         super().__init__()
         self.vocab = vocab
         if isinstance(self.vocab, str):
@@ -152,10 +151,7 @@ class RandomMixturePolicy(Policy):
         self.prob_smart = prob_smart
 
     def act(self, obs: WordleObservation) -> str:
-        if self.vocab is None:
-            v = obs.game.vocab
-        else:
-            v = self.vocab
+        v = obs.game.vocab if self.vocab is None else self.vocab
         if random.random() < self.prob_smart:
             if self.vocab is not None:
                 v = v.update_vocab(obs.game.state)
@@ -164,7 +160,7 @@ class RandomMixturePolicy(Policy):
 
 
 class WrongPolicy(Policy):
-    def __init__(self, vocab: Union[str, Vocabulary]):
+    def __init__(self, vocab: str | Vocabulary):
         super().__init__()
         self.vocab = vocab
         if isinstance(self.vocab, str):
@@ -207,6 +203,6 @@ class MonteCarloPolicy(Policy):
                 curr_obs, r, _ = curr_obs.game.next(word_choice)
                 total_reward += r
             action_scores[curr_obs.action_history[len(obs.game.action_history)]].append(
-                total_reward
+                total_reward,
             )
         return max(action_scores.items(), key=lambda x: sum(x[1]) / len(x[1]))[0]

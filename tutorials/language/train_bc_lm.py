@@ -8,7 +8,7 @@ import wandb
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import IterableDataset
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from wordle.load_objects import load_item
 
 from agilerl.data.rl_data import Iterable_RL_Dataset
@@ -19,7 +19,6 @@ from agilerl.utils.torch_utils import to
 
 
 def train(cfg):
-    """The ILQL training function."""
     print("using config:", cfg)
     train_cfg = cfg["train"]
     train_cfg["save_checkpoint_dir"] = convert_path(train_cfg["save_checkpoint_dir"])
@@ -53,7 +52,7 @@ def train(cfg):
         dataset_eval = GeneralDataset(raw_dataset_eval, "cpu")
     train_data_loader_kwargs = {
         "num_workers": train_cfg["dataloader_workers"],
-        "batch_size": cfg["model"]["batch_size"],
+        "batch_size": train_cfg["bsize"],
         "collate_fn": dataset_train.collate,
     }
     eval_data_loader_kwargs = {
@@ -78,73 +77,71 @@ def train(cfg):
     if hasattr(model, "param_groups"):
         params = [
             {
-                "params": frozenset().union(*list(map(lambda x: x.parameters(), p))),
+                "params": frozenset().union(*[x.parameters() for x in p]),
                 **f(train_cfg),
             }
             for p, f in model.param_groups
         ]
-        model.optimizer = torch.optim.AdamW(
-            params, lr=model.lr, weight_decay=model.weight_decay
-        )
-    optim = model.optimizer
-
+    else:
+        params = model.parameters()
+    optim = torch.optim.AdamW(
+        params,
+        lr=train_cfg["lr"],
+        weight_decay=train_cfg["weight_decay"],
+    )
     if train_cfg["optim_state_path"] is not None and os.path.exists(
-        train_cfg["optim_state_path"]
+        train_cfg["optim_state_path"],
     ):
-        print(f'loading optimizer state from: {train_cfg["optim_state_path"]}')
+        print(f"loading optimizer state from: {train_cfg['optim_state_path']}")
         optim.load_state_dict(
             torch.load(
                 train_cfg["optim_state_path"],
                 map_location=system_cfg["device"],
                 weights_only=False,
-            )
+            ),
         )
         print("loaded.")
     if isinstance(dataset_train, IterableDataset) and isinstance(
-        dataset_eval, IterableDataset
+        dataset_eval,
+        IterableDataset,
     ):
         model, optim = accelerator.prepare(model, optim)
     elif isinstance(dataset_train, IterableDataset):
         model, optim, eval_data_loader = accelerator.prepare(
-            model, optim, eval_data_loader
+            model,
+            optim,
+            eval_data_loader,
         )
     elif isinstance(dataset_eval, IterableDataset):
         model, optim, data_loader = accelerator.prepare(model, optim, data_loader)
     else:
         model, optim, data_loader, eval_data_loader = accelerator.prepare(
-            model, optim, data_loader, eval_data_loader
+            model,
+            optim,
+            data_loader,
+            eval_data_loader,
         )
 
     train_logs = DistributeCombineLogs(accelerator, use_wandb=wandb_cfg["use_wandb"])
     eval_logs = DistributeCombineLogs(accelerator, use_wandb=wandb_cfg["use_wandb"])
     step = 0
     best_loss = float("inf")
-    saved_checkpoints = deque([])
-
-    # bar_format = '{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]'
-    # pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
-
-    # RL training loop
-    for epoch in range(train_cfg["epochs"]):
+    saved_checkpoints = deque()
+    for epoch in tqdm(
+        range(train_cfg["epochs"]),
+        disable=not accelerator.is_local_main_process,
+    ):
         for items in tqdm(data_loader, disable=not accelerator.is_local_main_process):
             items = to(items, system_cfg["device"])
             loss, logs, postproc_fs = accelerator.unwrap_model(model).get_loss(
-                items, **train_cfg["loss"]
+                items,
+                **train_cfg["loss"],
             )
             accelerator.backward(loss / train_cfg["grad_accum_steps"])
             train_logs.accum_logs(logs)
             if (step + 1) % train_cfg["grad_accum_steps"] == 0:
                 optim.step()
                 optim.zero_grad()
-                if (
-                    train_cfg["loss"]["q_loss_weight"] != 0.0
-                    or train_cfg["loss"]["v_loss_weight"] != 0.0
-                ):
-                    accelerator.unwrap_model(model).soft_update()
-            if (train_cfg["hard_update_every"] is not None) and (
-                (step + 1) % train_cfg["hard_update_every"] == 0
-            ):
-                accelerator.unwrap_model(model).hardUpdate()
             if (step + 1) % train_cfg["log_every"] == 0:
                 train_logs.log(
                     *postproc_fs,
@@ -163,11 +160,13 @@ def train(cfg):
                         if i >= train_cfg["eval_batches"]:
                             break
                         _, logs, postproc_fs = accelerator.unwrap_model(model).get_loss(
-                            eval_items, **train_cfg["loss"]
+                            eval_items,
+                            **train_cfg["loss"],
                         )
                         if evaluator is not None:
                             evaluator_logs = evaluator.evaluate(
-                                accelerator.unwrap_model(model), eval_items
+                                accelerator.unwrap_model(model),
+                                eval_items,
                             )
                             if evaluator_logs is not None:
                                 logs["evaluation"] = evaluator_logs
@@ -180,21 +179,23 @@ def train(cfg):
                     epoch=epoch,
                 )
                 accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    if eval_total_logs[eval_label]["loss"] < best_loss:
-                        print("new best eval loss! Saving ...")
-                        if not os.path.exists(train_cfg["save_checkpoint_dir"]):
-                            os.makedirs(train_cfg["save_checkpoint_dir"])
-                        torch.save(
-                            accelerator.unwrap_model(model).state_dict(),
-                            os.path.join(train_cfg["save_checkpoint_dir"], "model.pkl"),
-                        )
-                        torch.save(
-                            optim.state_dict(),
-                            os.path.join(train_cfg["save_checkpoint_dir"], "optim.pkl"),
-                        )
-                        print("saved.")
-                        best_loss = eval_total_logs[eval_label]["loss"]
+                if (
+                    accelerator.is_main_process
+                    and eval_total_logs[eval_label]["loss"] < best_loss
+                ):
+                    print("new best eval loss! Saving ...")
+                    if not os.path.exists(train_cfg["save_checkpoint_dir"]):
+                        os.makedirs(train_cfg["save_checkpoint_dir"])
+                    torch.save(
+                        accelerator.unwrap_model(model).state_dict(),
+                        os.path.join(train_cfg["save_checkpoint_dir"], "model.pkl"),
+                    )
+                    torch.save(
+                        optim.state_dict(),
+                        os.path.join(train_cfg["save_checkpoint_dir"], "optim.pkl"),
+                    )
+                    print("saved.")
+                    best_loss = eval_total_logs[eval_label]["loss"]
                 accelerator.wait_for_everyone()
                 model.train()
             if (
@@ -209,17 +210,19 @@ def train(cfg):
                     if (train_cfg["max_checkpoints"] is not None) and (
                         len(saved_checkpoints) >= train_cfg["max_checkpoints"]
                     ):
-                        os.system("rm -rf %s" % (saved_checkpoints.popleft()))
+                        os.system(f"rm -rf {saved_checkpoints.popleft()}")
                     torch.save(
                         accelerator.unwrap_model(model).state_dict(),
                         os.path.join(
-                            train_cfg["save_checkpoint_dir"], "model_%d.pkl" % (step)
+                            train_cfg["save_checkpoint_dir"],
+                            f"model_{step}.pkl",
                         ),
                     )
                     saved_checkpoints.append(
                         os.path.join(
-                            train_cfg["save_checkpoint_dir"], "model_%d.pkl" % (step)
-                        )
+                            train_cfg["save_checkpoint_dir"],
+                            f"model_{step}.pkl",
+                        ),
                     )
                     print("saved.")
                 accelerator.wait_for_everyone()

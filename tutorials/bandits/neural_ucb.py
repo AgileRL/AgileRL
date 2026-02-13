@@ -1,4 +1,4 @@
-"""This tutorial shows how to train an NeuralTS agent on the PenDigits dataset with evolutionary HPO.
+"""This tutorial shows how to train an NeuralUCB agent on the IRIS dataset.
 
 Authors: Nick (https://github.com/nicku-a)
 """
@@ -7,11 +7,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from gymnasium import spaces
-from scipy.ndimage import gaussian_filter1d
 from tensordict import TensorDict
-from ucimlrepo import fetch_ucirepo
 
-from agilerl.algorithms import NeuralTS
+from tutorials.utils import require_package
+
+with require_package():
+    from scipy.ndimage import gaussian_filter1d
+    from ucimlrepo import fetch_ucirepo
+
+from agilerl.algorithms import NeuralUCB
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
@@ -31,17 +35,17 @@ if __name__ == "__main__":
     INIT_HP = {
         "POPULATION_SIZE": 4,  # Population size
         "BATCH_SIZE": 64,  # Batch size
-        "LR": 0.001,  # Learning rate
+        "LR": 1e-3,  # Learning rate
         "GAMMA": 1.0,  # Scaling factor
         "LAMBDA": 1.0,  # Regularization factor
-        "REG": 0.0625,  # Loss regularization factor
+        "REG": 0.000625,  # Loss regularization factor
         "LEARN_STEP": 2,  # Learning frequency
     }
 
     # Fetch data  https://archive.ics.uci.edu/
-    pendigits = fetch_ucirepo(id=81)
-    features = pendigits.data.features
-    targets = pendigits.data.targets
+    iris = fetch_ucirepo(id=53)
+    features = iris.data.features
+    targets = iris.data.targets
 
     env = BanditEnv(features, targets)  # Create environment
     context_dim = env.context_dim
@@ -52,19 +56,22 @@ if __name__ == "__main__":
         lr=RLParameter(min=6.25e-5, max=1e-2),
         batch_size=RLParameter(min=8, max=512, dtype=int),
         learn_step=RLParameter(
-            min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75
+            min=1,
+            max=10,
+            dtype=int,
+            grow_factor=1.5,
+            shrink_factor=0.75,
         ),
     )
 
-    # Define observation and action spaces from dataset
     observation_space = spaces.Box(
-        low=features.values.min(), high=features.values.max(), shape=context_dim
+        low=features.values.min(),
+        high=features.values.max(),
+        shape=context_dim,
     )
     action_space = spaces.Discrete(action_dim)
-
-    # Create population of agents
-    pop: list[NeuralTS] = create_population(
-        algo="NeuralTS",  # Algorithm
+    pop: list[NeuralUCB] = create_population(
+        algo="NeuralUCB",  # Algorithm
         observation_space=observation_space,  # Observation space
         action_space=action_space,  # Action space
         net_config=NET_CONFIG,  # Network configuration
@@ -101,7 +108,7 @@ if __name__ == "__main__":
 
     max_steps = 2500  # Max steps per episode
     episode_steps = 500  # Steps in episode
-    evo_steps = 1000  # Evolution frequency
+    evo_steps = 500  # Evolution frequency
     eval_steps = 500  # Evaluation steps per episode
     eval_loop = 1  # Number of evaluation episodes
     evo_count = 0
@@ -117,11 +124,12 @@ if __name__ == "__main__":
         for i, agent in enumerate(pop):  # Loop through population
             losses = []
             context = env.reset()  # Reset environment at start of episode
-            for idx_step in range(episode_steps):
+            for _idx_step in range(episode_steps):
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment
 
+                # Save experience to replay buffer
                 transition = TensorDict(
                     {
                         "obs": context[action],
@@ -152,6 +160,7 @@ if __name__ == "__main__":
 
         pbar.update(episode_steps)
 
+        # Evaluate population
         fitnesses = [
             agent.test(
                 env,
@@ -165,8 +174,8 @@ if __name__ == "__main__":
             f"--- Global steps {total_steps} ---\n"
             f"Steps {[agent.steps[-1] for agent in pop]}\n"
             f"Regret: {[regret[i][-1] for i in range(len(pop))]}\n"
-            f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}'
-            f"Mutations: {[agent.mut for agent in pop]}"
+            f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
+            f"Mutations: {[agent.mut for agent in pop]}",
         )
 
         if pop[0].steps[-1] // evo_steps > evo_count:
@@ -181,12 +190,13 @@ if __name__ == "__main__":
         plt.plot(
             np.linspace(0, total_steps, len(agent_regret)),
             agent_regret,
-            label=f"NeuralTS: Agent {i}",
+            label=f"NeuralUCB: Agent {i}",
         )
     plt.xlabel("Training Step")
     plt.ylabel("Regret")
     plt.legend()
-    plt.savefig("NeuralTS-PenDigits-regret.png")
+    plt.savefig("NeuralUCB-IRIS-regret.png")
+    plt.close()
 
     plt.figure()
     for i, agent_score in enumerate(score):
@@ -194,9 +204,10 @@ if __name__ == "__main__":
         plt.plot(
             np.linspace(0, total_steps, len(smoothed_score)),
             smoothed_score,
-            label=f"NeuralTS: Agent {i}",
+            label=f"NeuralUCB: Agent {i}",
         )
     plt.xlabel("Training Step")
     plt.ylabel("Reward")
     plt.legend()
-    plt.savefig("NeuralTS-PenDigits-reward.png")
+    plt.savefig("NeuralUCB-IRIS-reward.png")
+    plt.close()

@@ -42,7 +42,11 @@ def test_evolvable_bert_init_no_e2e():
     encoder_layers_list = [[], [4, 4]]
     decoder_layers_list = [[4], [4, 4]]
 
-    for encoder_layers, decoder_layers in zip(encoder_layers_list, decoder_layers_list):
+    for encoder_layers, decoder_layers in zip(
+        encoder_layers_list,
+        decoder_layers_list,
+        strict=False,
+    ):
         BERT = EvolvableBERT(encoder_layers, decoder_layers, end2end=False)
 
         assert BERT.encoder_layers == encoder_layers
@@ -74,8 +78,8 @@ def test_create_mask():
                 [0.0, 0.0, -np.inf, -np.inf],
                 [0.0, 0.0, 0.0, -np.inf],
                 [0.0, 0.0, 0.0, 0.0],
-            ]
-        )
+            ],
+        ),
     )
     assert not torch.all(src_pm)
     assert not torch.all(tgt_pm)
@@ -214,7 +218,9 @@ def test_encode():
     model.eval()
     # Set first layer to eval
     encoder_output, _ = model.encode(
-        src, src_mask=src_mask, src_key_padding_mask=kp_mask
+        src,
+        src_mask=src_mask,
+        src_key_padding_mask=kp_mask,
     )
     assert encoder_output.shape == (1, 4, 512)
 
@@ -275,16 +281,32 @@ def test_check_sparsity_fast_path():
     ],
 )
 def test_canconical_mask_failures(
-    mask, mask_name, other_type, other_name, target_type, check_other, error
+    mask,
+    mask_name,
+    other_type,
+    other_name,
+    target_type,
+    check_other,
+    error,
 ):
     if error is not None:
         with pytest.raises(error):
             _canonical_mask(
-                mask, mask_name, other_type, other_name, target_type, check_other
+                mask,
+                mask_name,
+                other_type,
+                other_name,
+                target_type,
+                check_other,
             )
     else:
         mask = _canonical_mask(
-            mask, mask_name, other_type, other_name, target_type, check_other
+            mask,
+            mask_name,
+            other_type,
+            other_name,
+            target_type,
+            check_other,
         )
 
         assert mask.shape == (4, 1)

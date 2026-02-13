@@ -35,7 +35,7 @@ if __name__ == "__main__":
     NET_CONFIG = {
         "encoder_config": {
             "hidden_size": [32, 32],  # Actor hidden size
-        }
+        },
     }
 
     INIT_HP = {
@@ -106,9 +106,8 @@ if __name__ == "__main__":
     total_steps = 0
 
     accel_temp_models_path = "models/{}".format("LunarLander-v3")
-    if accelerator.is_main_process:
-        if not os.path.exists(accel_temp_models_path):
-            os.makedirs(accel_temp_models_path)
+    if accelerator.is_main_process and not os.path.exists(accel_temp_models_path):
+        os.makedirs(accel_temp_models_path)
 
     print(f"\nDistributed training on {accelerator.device}...")
 
@@ -125,11 +124,12 @@ if __name__ == "__main__":
             steps = 0
             epsilon = eps_start
 
-            for idx_step in range(evo_steps):
+            for _idx_step in range(evo_steps):
                 # Get next action from agent
                 action = agent.get_action(obs, epsilon)
                 epsilon = max(
-                    eps_end, epsilon * eps_decay
+                    eps_end,
+                    epsilon * eps_decay,
                 )  # Decay epsilon for exploration
 
                 # Act in environment
@@ -139,7 +139,7 @@ if __name__ == "__main__":
                 total_steps += num_envs
 
                 # Collect scores for completed episodes
-                for idx, (d, t) in enumerate(zip(terminated, truncated)):
+                for idx, (d, t) in enumerate(zip(terminated, truncated, strict=False)):
                     if d or t:
                         completed_episode_scores.append(scores[idx])
                         agent.scores.append(scores[idx])
@@ -197,8 +197,8 @@ if __name__ == "__main__":
                 f"--- Global steps {total_steps} ---\n"
                 f"Steps: {[agent.steps[-1] for agent in pop]}\n"
                 f"Scores: {mean_scores}\n"
-                f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
-                f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+                f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
+                f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n",
             )
 
         # Tournament selection and population mutation

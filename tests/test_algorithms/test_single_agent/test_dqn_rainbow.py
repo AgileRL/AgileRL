@@ -3,10 +3,10 @@ import copy
 import numpy as np
 import pytest
 import torch
-import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from tensordict import TensorDict
+from torch import optim
 
 from agilerl.algorithms.dqn_rainbow import RainbowDQN
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
@@ -63,7 +63,11 @@ class DummyEnv:
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 def test_initialize_dqn(
-    observation_space, discrete_space, encoder_cls, accelerator, request
+    observation_space,
+    discrete_space,
+    encoder_cls,
+    accelerator,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     dqn = RainbowDQN(observation_space, discrete_space, accelerator=accelerator)
@@ -99,7 +103,11 @@ def test_initialize_dqn(
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 def test_initialize_dqn_with_actor_network_evo_net(
-    observation_space, discrete_space, encoder_cls, accelerator, request
+    observation_space,
+    discrete_space,
+    encoder_cls,
+    accelerator,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     support = torch.linspace(0, 1, 51)
@@ -144,7 +152,9 @@ def test_initialize_dqn_with_actor_network_evo_net(
 
 
 def test_initialize_dqn_with_incorrect_actor_net_type(
-    vector_space, discrete_space, request
+    vector_space,
+    discrete_space,
+    request,
 ):
     actor_network = "dummy"
 
@@ -171,7 +181,11 @@ def test_initialize_dqn_with_incorrect_actor_net_type(
     ],
 )
 def test_initialize_dqn_with_make_evolvable(
-    observation_space, discrete_space, actor_network, input_tensor, request
+    observation_space,
+    discrete_space,
+    actor_network,
+    input_tensor,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     actor_network = request.getfixturevalue(actor_network)
@@ -209,7 +223,10 @@ def test_initialize_dqn_with_make_evolvable(
 )
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 def test_returns_expected_action(
-    accelerator, observation_space, discrete_space, request
+    accelerator,
+    observation_space,
+    discrete_space,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     dqn = RainbowDQN(observation_space, discrete_space, accelerator=accelerator)
@@ -257,7 +274,10 @@ def test_returns_expected_action_mask_vectorized(vector_space, discrete_space):
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 # learns from experiences and updates network parameters
 def test_learns_from_experiences(
-    accelerator, observation_space, discrete_space, request
+    accelerator,
+    observation_space,
+    discrete_space,
+    request,
 ):
     observation_space = request.getfixturevalue(observation_space)
     torch.autograd.set_detect_anomaly(True)
@@ -274,7 +294,10 @@ def test_learns_from_experiences(
     # Create a batch of experiences
     device = accelerator.device if accelerator else "cpu"
     experiences = get_experiences_batch(
-        observation_space, discrete_space, batch_size, device
+        observation_space,
+        discrete_space,
+        batch_size,
+        device,
     )
 
     # Copy state dict before learning - should be different to after updating weights
@@ -293,7 +316,8 @@ def test_learns_from_experiences(
     assert actor_target == dqn.actor_target
     assert_not_equal_state_dict(actor_pre_learn_sd, dqn.actor.state_dict())
     assert_not_equal_state_dict(
-        actor_target_pre_learn_sd, dqn.actor_target.state_dict()
+        actor_target_pre_learn_sd,
+        dqn.actor_target.state_dict(),
     )
     dqn.clean_up()
 
@@ -302,7 +326,10 @@ def test_learns_from_experiences(
 @pytest.mark.parametrize("combined", [True, False])
 # learns from experiences and updates network parameters
 def test_learns_from_experiences_n_step(
-    accelerator, combined, vector_space, discrete_space
+    accelerator,
+    combined,
+    vector_space,
+    discrete_space,
 ):
     batch_size = 64
 
@@ -370,7 +397,8 @@ def test_learns_from_experiences_n_step(
     assert actor_target == dqn.actor_target
     assert_not_equal_state_dict(actor_pre_learn_sd, dqn.actor.state_dict())
     assert_not_equal_state_dict(
-        actor_target_pre_learn_sd, dqn.actor_target.state_dict()
+        actor_target_pre_learn_sd,
+        dqn.actor_target.state_dict(),
     )
     dqn.clean_up()
 
@@ -379,7 +407,10 @@ def test_learns_from_experiences_n_step(
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 @pytest.mark.parametrize("combined", [True, False])
 def test_learns_from_experiences_per(
-    accelerator, combined, vector_space, discrete_space
+    accelerator,
+    combined,
+    vector_space,
+    discrete_space,
 ):
     batch_size = 64
 
@@ -432,7 +463,8 @@ def test_learns_from_experiences_per(
     assert actor_target == dqn.actor_target
     assert_not_equal_state_dict(actor_pre_learn_sd, dqn.actor.state_dict())
     assert_not_equal_state_dict(
-        actor_target_pre_learn_sd, dqn.actor_target.state_dict()
+        actor_target_pre_learn_sd,
+        dqn.actor_target.state_dict(),
     )
     dqn.clean_up()
 
@@ -441,7 +473,10 @@ def test_learns_from_experiences_per(
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 @pytest.mark.parametrize("combined", [True, False])
 def test_learns_from_experiences_per_n_step(
-    accelerator, combined, vector_space, discrete_space
+    accelerator,
+    combined,
+    vector_space,
+    discrete_space,
 ):
     batch_size = 64
 
@@ -511,7 +546,8 @@ def test_learns_from_experiences_per_n_step(
     assert actor_target == dqn.actor_target
     assert_not_equal_state_dict(actor_pre_learn_sd, dqn.actor.state_dict())
     assert_not_equal_state_dict(
-        actor_target_pre_learn_sd, dqn.actor_target.state_dict()
+        actor_target_pre_learn_sd,
+        dqn.actor_target.state_dict(),
     )
     dqn.clean_up()
 
@@ -552,12 +588,16 @@ def test_soft_update(vector_space, discrete_space):
     target_params = list(dqn.actor_target.parameters())
     expected_params = [
         dqn.tau * eval_param + (1.0 - dqn.tau) * target_param
-        for eval_param, target_param in zip(eval_params, target_params)
+        for eval_param, target_param in zip(eval_params, target_params, strict=False)
     ]
 
     assert all(
         torch.allclose(expected_param, target_param)
-        for expected_param, target_param in zip(expected_params, target_params)
+        for expected_param, target_param in zip(
+            expected_params,
+            target_params,
+            strict=False,
+        )
     )
     dqn.clean_up()
 
@@ -599,10 +639,12 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.accelerator == dqn.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), dqn.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        dqn.actor_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(), dqn.optimizer.state_dict()
+        clone_agent.optimizer.state_dict(),
+        dqn.optimizer.state_dict(),
     )
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
@@ -628,10 +670,12 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.accelerator == dqn.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), dqn.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        dqn.actor_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(), dqn.optimizer.state_dict()
+        clone_agent.optimizer.state_dict(),
+        dqn.optimizer.state_dict(),
     )
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
@@ -641,7 +685,10 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
 
     accelerator = Accelerator()
     dqn = RainbowDQN(
-        observation_space, discrete_space, accelerator=accelerator, wrap=False
+        observation_space,
+        discrete_space,
+        accelerator=accelerator,
+        wrap=False,
     )
     clone_agent = dqn.clone(wrap=False)
 
@@ -658,10 +705,12 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     assert clone_agent.accelerator == dqn.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), dqn.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        dqn.actor_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(), dqn.optimizer.state_dict()
+        clone_agent.optimizer.state_dict(),
+        dqn.optimizer.state_dict(),
     )
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
@@ -699,13 +748,16 @@ def test_clone_after_learning(vector_space, discrete_space):
     assert clone_agent.device == rainbow_dqn.device
     assert clone_agent.accelerator == rainbow_dqn.accelerator
     assert_state_dicts_equal(
-        clone_agent.actor.state_dict(), rainbow_dqn.actor.state_dict()
+        clone_agent.actor.state_dict(),
+        rainbow_dqn.actor.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), rainbow_dqn.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        rainbow_dqn.actor_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(), rainbow_dqn.optimizer.state_dict()
+        clone_agent.optimizer.state_dict(),
+        rainbow_dqn.optimizer.state_dict(),
     )
     assert clone_agent.fitness == rainbow_dqn.fitness
     assert clone_agent.steps == rainbow_dqn.steps

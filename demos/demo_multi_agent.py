@@ -24,7 +24,7 @@ if __name__ == "__main__":
     NET_CONFIG = {
         "encoder_config": {
             "hidden_size": [32, 32],  # Actor hidden size
-        }
+        },
     }
 
     # Define the initial hyperparameters
@@ -53,7 +53,7 @@ if __name__ == "__main__":
         [
             lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=True)
             for _ in range(num_envs)
-        ]
+        ],
     )
     env.reset()
 
@@ -146,10 +146,11 @@ if __name__ == "__main__":
                 }
 
             for idx_step in range(evo_steps // num_envs):
-
                 # Get next action from agent
                 action, raw_action = agent.get_action(
-                    states=state, training=True, infos=info
+                    states=state,
+                    training=True,
+                    infos=info,
                 )
 
                 # Act in environment
@@ -205,7 +206,9 @@ if __name__ == "__main__":
                 reset_noise_indices = []
                 term_array = np.array(list(termination.values())).transpose()
                 trunc_array = np.array(list(truncation.values())).transpose()
-                for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
+                for idx, (d, t) in enumerate(
+                    zip(term_array, trunc_array, strict=False),
+                ):
                     if np.any(d) or np.any(t):
                         completed_episode_scores.append(scores[idx])
                         agent.scores.append(scores[idx])
@@ -240,9 +243,9 @@ if __name__ == "__main__":
         print(f"--- Global steps {total_steps} ---")
         print(f"Steps {[agent.steps[-1] for agent in pop]}")
         print(f"Scores: {mean_scores}")
-        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+        print(f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}")
         print(
-            f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+            f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}",
         )
 
         # Tournament selection and population mutation

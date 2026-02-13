@@ -1,15 +1,14 @@
-"""An async vector pettingzoo environment"""
-
 import multiprocessing as mp
 import sys
 import time
 import traceback
 from collections import OrderedDict, defaultdict
+from collections.abc import Callable
 from copy import deepcopy
 from enum import Enum
 from multiprocessing.connection import Connection
 from multiprocessing.sharedctypes import RawArray
-from typing import Any, Callable, Optional, TypeAlias, TypeVar, Union
+from typing import Any, TypeAlias, TypeVar, Union
 
 import numpy as np
 from gymnasium import logger, spaces
@@ -26,12 +25,14 @@ from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 AgentID = TypeVar("AgentID")
 ObsType = TypeVar("ObsType")
-PzEnvType = Union[PettingZooVecEnv, ParallelEnv]
+PzEnvType = PettingZooVecEnv | ParallelEnv
 SharedMemoryType: TypeAlias = Union[RawArray, tuple[RawArray, ...], dict[str, RawArray]]
 
 
 def reshape_observation(
-    raw_data: NumpyObsType, space: spaces.Space, num_envs: int
+    raw_data: NumpyObsType,
+    space: spaces.Space,
+    num_envs: int,
 ) -> Any:
     """Reshape the raw data to the correct shape for the observation space.
 
@@ -75,7 +76,7 @@ class AsyncState(Enum):
 
 
 class AsyncPettingZooVecEnv(PettingZooVecEnv):
-    """Vectorized PettingZoo environment that runs multiple environments in parallel
+    """Vectorized PettingZoo environment that runs multiple environments in parallel.
 
     :param env_fns: Functions that create the environment
     :type env_fns: list[Callable]
@@ -94,8 +95,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self,
         env_fns: list[Callable[[], PzEnvType]],
         copy: bool = True,
-        context: Optional[str] = None,
-    ):
+        context: str | None = None,
+    ) -> None:
         # Core class attributes
         ctx = mp.get_context(context)
         self.env_fns = env_fns
@@ -174,11 +175,10 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     def reset(
         self,
         *,
-        seed: Optional[int] = None,
-        options: Optional[dict[str, Any]] = None,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
     ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
-        """
-        Reset all the environments and return two dictionaries of batched observations and infos.
+        """Reset all the environments and return two dictionaries of batched observations and infos.
 
         :param seed: Random seed, defaults to None
         :type seed: None | int, optional
@@ -190,8 +190,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
     def reset_async(
         self,
-        seed: Optional[int] = None,
-        options: Optional[dict[str, Any]] = None,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
     ) -> None:
         """Send calls to the :obj:`reset` methods of the sub-environments.
 
@@ -207,16 +207,17 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             seed = [None for _ in range(self.num_envs)]
         elif isinstance(seed, int):
             seed = [seed + i for i in range(self.num_envs)]
-        assert (
-            len(seed) == self.num_envs
-        ), f"If seeds are passed as a list the length must match num_envs={self.num_envs} but got length={len(seed)}."
+        assert len(seed) == self.num_envs, (
+            f"If seeds are passed as a list the length must match num_envs={self.num_envs} but got length={len(seed)}."
+        )
 
         if self._state != AsyncState.DEFAULT:
+            msg = f"Calling `reset_async` while waiting for a pending call to `{self._state.value}` to complete"
             raise AlreadyPendingCallError(
-                f"Calling `reset_async` while waiting for a pending call to `{self._state.value}` to complete",
+                msg,
                 str(self._state.value),
             )
-        for pipe, env_seed in zip(self.parent_pipes, seed):
+        for pipe, env_seed in zip(self.parent_pipes, seed, strict=False):
             env_kwargs = {"seed": env_seed, "options": options}
             pipe.send(("reset", env_kwargs))
 
@@ -238,9 +239,10 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         )
 
     def reset_wait(
-        self, timeout: Optional[float] = None
+        self,
+        timeout: float | None = None,
     ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
-        """Waits for the calls triggered by :meth:`reset_async` to finish and returns the results.
+        """Wait for the calls triggered by :meth:`reset_async` to finish and return the results.
 
         :param timeout: Number of seconds before the call to ``reset_wait`` times out. If `None`, the call to
         ``reset_wait`` never times out, defaults to 0
@@ -251,18 +253,22 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_RESET:
+            msg = "Calling `reset_wait` without any prior call to `reset_async`."
             raise NoAsyncCallError(
-                "Calling `reset_wait` without any prior " "call to `reset_async`.",
+                msg,
                 AsyncState.WAITING_RESET.value,
             )
 
         if not self._poll_pipe_envs(timeout):
             self._state = AsyncState.DEFAULT
+            msg = f"The call to `reset_wait` has timed out after {timeout} second(s)."
             raise mp.TimeoutError(
-                f"The call to `reset_wait` has timed out after {timeout} second(s)."
+                msg,
             )
 
-        info_data, successes = zip(*[pipe.recv() for pipe in self.parent_pipes])
+        info_data, successes = zip(
+            *[pipe.recv() for pipe in self.parent_pipes], strict=False
+        )
         self._raise_if_errors(successes)
 
         infos = {}
@@ -278,8 +284,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         )
 
     def step_async(self, actions: list[list[ActionType]]) -> None:
-        """
-        Tell all the environments to start taking a step with the given actions.
+        """Tell all the environments to start taking a step with the given actions.
         Call step_wait() to get the results of the step.
         You should not call this if a step_async run is already pending.
 
@@ -288,18 +293,18 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         """
         self._assert_is_running()
         if self._state != AsyncState.DEFAULT:
+            msg = f"Calling `step_async` while waiting for a pending call to `{self._state.value}` to complete."
             raise AlreadyPendingCallError(
-                f"Calling `step_async` while waiting for a pending call to `{self._state.value}` to complete.",
+                msg,
                 str(self._state.value),
             )
-        for pipe, action in zip(self.parent_pipes, actions):
+        for pipe, action in zip(self.parent_pipes, actions, strict=False):
             pipe.send(("step", action))
 
         self._state = AsyncState.WAITING_STEP
 
-    def step_wait(self, timeout: Optional[float] = None) -> PzStepReturn:
-        """
-        Wait for the calls to :obj:`step` in each sub-environment to finish.
+    def step_wait(self, timeout: float | None = None) -> PzStepReturn:
+        """Wait for the calls to :obj:`step` in each sub-environment to finish.
 
         :param timeout: Number of seconds before the call to ``step_wait`` times out. If `None`, the call to ``step_wait`` never times out, defaults to 0
         :type timeout: int | float | None, optional
@@ -307,18 +312,19 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         :return: Tuple of observations, rewards, dones, and infos
         :rtype: tuple[dict[str, NumpyObsType], dict[str, np.ndarray], dict[str, np.ndarray], dict[str, Any]]
         """
-
         self._assert_is_running()
         if self._state != AsyncState.WAITING_STEP:
+            msg = "Calling `step_wait` without any prior call to `step_async`."
             raise NoAsyncCallError(
-                "Calling `step_wait` without any prior call " "to `step_async`.",
+                msg,
                 AsyncState.WAITING_STEP.value,
             )
 
         if not self._poll_pipe_envs(timeout):
             self._state = AsyncState.DEFAULT
+            msg = f"The call to `step_wait` has timed out after {timeout} second(s)."
             raise mp.TimeoutError(
-                f"The call to `step_wait` has timed out after {timeout} second(s)."
+                msg,
             )
 
         rewards, terminations, truncations, infos = (
@@ -354,15 +360,11 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         )
 
     def render(self) -> Any:
-        """
-        Returns the rendered frames from the parallel environments.
-
-        """
+        """Return the rendered frames from the parallel environments."""
         return self.call("render")
 
     def call(self, name: str, *args: Any, **kwargs: Any) -> Any:
-        """
-        Call a method from each parallel environment with args and kwargs.
+        """Call a method from each parallel environment with args and kwargs.
 
         :param name: Name of the method or property to call
         :type name: str
@@ -375,8 +377,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         return self.call_wait()
 
     def call_async(self, name: str, *args: Any, **kwargs: Any) -> None:
-        """
-        Calls the method with name asynchronously and apply args and kwargs to the method.
+        """Call the method with name asynchronously and apply args and kwargs to the method.
 
         :param name: Name of the method or property to call
         :type name: str
@@ -387,8 +388,9 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         """
         self._assert_is_running()
         if self._state != AsyncState.DEFAULT:
+            msg = f"Calling `call_async` while waiting for a pending call to `{self._state.value}` to complete."
             raise AlreadyPendingCallError(
-                f"Calling `call_async` while waiting for a pending call to `{self._state.value}` to complete.",
+                msg,
                 str(self._state.value),
             )
 
@@ -397,8 +399,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         self._state = AsyncState.WAITING_CALL
 
-    def call_wait(self, timeout: Optional[float] = None) -> Any:
-        """Calls all parent pipes and waits for the results.
+    def call_wait(self, timeout: float | None = None) -> Any:
+        """Call all parent pipes and waits for the results.
 
         :param timeout: Number of seconds before the call to :meth:`call_wait` times out. If ``None`` (default),
         the call to :meth:`call_wait` never times out, defaults to 0
@@ -406,25 +408,28 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_CALL:
+            msg = "Calling `call_wait` without any prior call to `call_async`."
             raise NoAsyncCallError(
-                "Calling `call_wait` without any prior call to `call_async`.",
+                msg,
                 AsyncState.WAITING_CALL.value,
             )
 
         if not self._poll_pipe_envs(timeout):
             self._state = AsyncState.DEFAULT
+            msg = f"The call to `call_wait` has timed out after {timeout} second(s)."
             raise mp.TimeoutError(
-                f"The call to `call_wait` has timed out after {timeout} second(s)."
+                msg,
             )
 
-        results, successes = zip(*[pipe.recv() for pipe in self.parent_pipes])
+        results, successes = zip(
+            *[pipe.recv() for pipe in self.parent_pipes], strict=False
+        )
         self._raise_if_errors(successes)
         self._state = AsyncState.DEFAULT
         return results
 
     def get_attr(self, name: str) -> Any:
-        """
-        Get a property from each parallel environment.
+        """Get a property from each parallel environment.
 
         :param name: Name of property to get from each individual environment
         :type name: str
@@ -432,7 +437,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         return self.call(name)
 
     def set_attr(self, name: str, values: Any) -> None:
-        """Sets an attribute of the sub-environments.
+        """Set an attribute of the sub-environments.
 
         :param name: Name of the property to be set in each individual environment.
         :type name: str
@@ -445,27 +450,32 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         if not isinstance(values, (list, tuple)):
             values = [values for _ in range(self.num_envs)]
         if len(values) != self.num_envs:
-            raise ValueError(
+            msg = (
                 "Values must be a list or tuple with length equal to the number of environments. "
                 f"Got `{len(values)}` values for {self.num_envs} environments."
             )
+            raise ValueError(
+                msg,
+            )
 
         if self._state != AsyncState.DEFAULT:
+            msg = f"Calling `set_attr` while waiting for a pending call to `{self._state.value}` to complete."
             raise AlreadyPendingCallError(
-                f"Calling `set_attr` while waiting for a pending call to `{self._state.value}` to complete.",
+                msg,
                 str(self._state.value),
             )
 
-        for pipe, value in zip(self.parent_pipes, values):
+        for pipe, value in zip(self.parent_pipes, values, strict=False):
             pipe.send(("_setattr", (name, value)))
-        _, successes = zip(*[pipe.recv() for pipe in self.parent_pipes])
+        _, successes = zip(*[pipe.recv() for pipe in self.parent_pipes], strict=False)
         self._raise_if_errors(successes)
 
     def close_extras(
-        self, timeout: Optional[float] = None, terminate: bool = False
+        self,
+        timeout: float | None = None,
+        terminate: bool = False,
     ) -> None:
-        """
-        Close the environments & clean up the extra resources (processes and pipes).
+        """Close the environments & clean up the extra resources (processes and pipes).
 
         :param timeout: Number of seconds before the call to :meth:`close` times out. If ``None``,
                 the call to :meth:`close` never times out. If the call to :meth:`close`
@@ -479,7 +489,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         try:
             if self._state != AsyncState.DEFAULT:
                 logger.warn(
-                    f"Calling `close` while waiting for a pending call to `{self._state.value}` to complete."
+                    f"Calling `close` while waiting for a pending call to `{self._state.value}` to complete.",
                 )
                 function = getattr(self, f"{self._state.value}_wait")
                 function(timeout)
@@ -505,7 +515,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         for process in self.processes:
             process.join()
 
-    def _poll_pipe_envs(self, timeout: Optional[float] = None) -> bool:
+    def _poll_pipe_envs(self, timeout: float | None = None) -> bool:
         self._assert_is_running()
 
         if timeout is None:
@@ -531,7 +541,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             index, exctype, value, trace = self.error_queue.get()
 
             logger.error(
-                f"Received the following error from Worker-{index} - Shutting it down"
+                f"Received the following error from Worker-{index} - Shutting it down",
             )
             logger.error(f"{trace}")
 
@@ -545,17 +555,18 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
     def _assert_is_running(self) -> None:
         if self.closed:
+            msg = f"Trying to operate on `{type(self).__name__}`, after a call to `close()`."
             raise ClosedEnvironmentError(
-                f"Trying to operate on `{type(self).__name__}`, after a call to `close()`."
+                msg,
             )
 
     def _add_info(
-        self, vector_infos: dict[str, Any], env_info: dict[str, Any], env_num: int
+        self,
+        vector_infos: dict[str, Any],
+        env_info: dict[str, Any],
+        env_num: int,
     ) -> dict[str, Any]:
-        """
-        Compile a vectorized information dictionary
-        """
-
+        """Compile a vectorized information dictionary."""
         for key, value in env_info.items():
             # If value is a dictionary, then we apply the `_add_info` recursively.
             if isinstance(value, dict):
@@ -565,17 +576,21 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                 # If the key doesn't exist in the vector infos, then we can create an array of that batch type
                 if key not in vector_infos:
                     if type(value) in [int, float, bool] or issubclass(
-                        type(value), np.number
+                        type(value),
+                        np.number,
                     ):
                         array = np.zeros(self.num_envs, dtype=type(value))
                     elif isinstance(value, np.ndarray):
                         # We assume that all instances of the np.array info are of the same shape
                         array = np.zeros(
-                            (self.num_envs, *value.shape), dtype=value.dtype
+                            (self.num_envs, *value.shape),
+                            dtype=value.dtype,
                         )
                     elif value is None:
                         array = np.full(
-                            self.num_envs, fill_value=np.nan, dtype=np.float32
+                            self.num_envs,
+                            fill_value=np.nan,
+                            dtype=np.float32,
                         )
                     else:
                         # For unknown objects, we use a Numpy object array
@@ -591,7 +606,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
             # Get the array mask and if it doesn't already exist then create a zero bool array
             array_mask = vector_infos.get(
-                f"_{key}", np.zeros(self.num_envs, dtype=np.bool_)
+                f"_{key}",
+                np.zeros(self.num_envs, dtype=bool),
             )
             array_mask[env_num] = True
 
@@ -611,8 +627,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
 
 class Observations:
-    """
-    Class for storing observations with a dictionary interface
+    """Class for storing observations with a dictionary interface.
 
     :param shared_memory: A RawArray that all envs write observations to.
     :type shared_memory: multiprocessing.RawArray
@@ -629,7 +644,7 @@ class Observations:
         shared_memory: dict[str, SharedMemoryType],
         obs_spaces: dict[str, spaces.Space],
         num_envs: int,
-    ):
+    ) -> None:
         self.num_envs = num_envs
         self.shared_memory = shared_memory
         self.obs_view = {}
@@ -641,7 +656,8 @@ class Observations:
                 obs_view = OrderedDict()
                 for key, subspace in agent_space.spaces.items():
                     obs_view[key] = np.frombuffer(
-                        shm[key].get_obj(), dtype=subspace.dtype
+                        shm[key].get_obj(),
+                        dtype=subspace.dtype,
                     )
                 self.obs_view[agent] = obs_view
             elif isinstance(agent_space, spaces.Tuple):
@@ -655,11 +671,11 @@ class Observations:
             self.obs_view[agent] = obs_view
 
     def __getitem__(self, agent: str) -> NumpyObsType:
-        """
-        Get agent observation given a key (agent_id)
-        """
+        """Get agent observation given a key (agent_id)."""
         return reshape_observation(
-            self.obs_view[agent], self.obs_spaces[agent], self.num_envs
+            self.obs_view[agent],
+            self.obs_spaces[agent],
+            self.num_envs,
         )
 
     def __str__(self) -> str:
@@ -669,7 +685,7 @@ class Observations:
         return self.__str__()
 
     def __contains__(self, key: str) -> bool:
-        return key in self.obs_view.keys()
+        return key in self.obs_view
 
     def __len__(self) -> int:
         return len(self.agents)
@@ -692,7 +708,7 @@ class Observations:
     def items(self) -> Any:
         return self.__iterate_kv()
 
-    def get(self, key: str) -> Optional[np.ndarray]:
+    def get(self, key: str) -> np.ndarray | None:
         try:
             return self.__getitem__(key)
         except KeyError:
@@ -700,7 +716,9 @@ class Observations:
 
 
 def _create_memory_array(
-    num_envs: int, obs_space: spaces.Space, context: Any
+    num_envs: int,
+    obs_space: spaces.Space,
+    context: Any,
 ) -> RawArray:
     """Create a shared memory array for a given observation space.
 
@@ -715,10 +733,11 @@ def _create_memory_array(
 
 
 def create_shared_memory(
-    num_envs: int, obs_spaces: dict[str, spaces.Space], context: Any
+    num_envs: int,
+    obs_spaces: dict[str, spaces.Space],
+    context: Any,
 ) -> dict[str, RawArray]:
-    """
-    Create shared memory for multi-agent observations.
+    """Create shared memory for multi-agent observations.
 
     :param num_envs: Number of environments
     :type num_envs: int
@@ -749,9 +768,9 @@ def create_shared_memory(
 def get_placeholder_value(
     agent: str,
     transition_name: str,
-    obs_spaces: Optional[dict[str, spaces.Space]] = None,
+    obs_spaces: dict[str, spaces.Space] | None = None,
 ) -> Any:
-    """Used to obtain a placeholder value to return for associated experience when an
+    """Obtain a placeholder value to return for associated experience when an
     agent is killed or is inactive for the current step.
 
     :param agent: Agent ID
@@ -781,12 +800,11 @@ def get_placeholder_value(
             if isinstance(agent_space, spaces.Dict):
                 # For Dict spaces, create a dictionary of -1 arrays
                 return {k: np.full(v.shape, np.nan) for k, v in agent_space.items()}
-            elif isinstance(agent_space, spaces.Tuple):
+            if isinstance(agent_space, spaces.Tuple):
                 # For Tuple spaces, create a tuple of -1 arrays
                 return tuple(np.full(s.shape, np.nan) for s in agent_space)
-            else:
-                # For normal spaces
-                return np.full(agent_space.shape, np.nan)
+            # For normal spaces
+            return np.full(agent_space.shape, np.nan)
 
 
 def process_transition(
@@ -807,11 +825,11 @@ def process_transition(
     :type agents: list[str]
     """
     transition_list = []
-    for transition, name in zip(list(transitions), transition_names):
+    for transition, name in zip(list(transitions), transition_names, strict=False):
         transition = {
             agent: (
                 transition[agent]
-                if agent in transition.keys()
+                if agent in transition
                 else get_placeholder_value(agent, name, obs_spaces)
             )
             for agent in agents
@@ -863,22 +881,28 @@ def write_to_shared_memory(
     :param obs_space: Observation space dictionary
     :type obs_space: dict[str, gymnasium.spaces.Space]
     """
-    for agent in shared_memory.keys():
+    for agent, agent_shared in shared_memory.items():
         agent_space = obs_space[agent]
         obs = observation[agent]
         if isinstance(agent_space, spaces.Dict):
             for key, subspace in agent_space.spaces.items():
                 write_vector_observation(
-                    index, obs[key], shared_memory[agent][key], subspace
+                    index,
+                    obs[key],
+                    agent_shared[key],
+                    subspace,
                 )
 
         elif isinstance(agent_space, spaces.Tuple):
             for i, subspace in enumerate(agent_space.spaces):
                 write_vector_observation(
-                    index, obs[i], shared_memory[agent][i], subspace
+                    index,
+                    obs[i],
+                    agent_shared[i],
+                    subspace,
                 )
         else:
-            write_vector_observation(index, obs, shared_memory[agent], agent_space)
+            write_vector_observation(index, obs, agent_shared, agent_space)
 
 
 def _async_worker(
@@ -890,8 +914,7 @@ def _async_worker(
     error_queue: mp.Queue,
     agents: list[str],
 ) -> None:
-    """
-    Worker function to run the environment in a subprocess.
+    """Worker function to run the environment in a subprocess.
 
     :param index: Subprocess index
     :type index: int
@@ -933,7 +956,10 @@ def _async_worker(
                     agents,
                 )
                 write_to_shared_memory(
-                    index, observation, shared_memory, observation_space
+                    index,
+                    observation,
+                    shared_memory,
+                    observation_space,
                 )
                 pipe.send((info, True))
             elif command == "step":
@@ -947,10 +973,10 @@ def _async_worker(
                 }
                 observation, reward, terminated, truncated, info = env.step(data)
                 if all(
-                    [
-                        term | trunc
-                        for term, trunc in zip(terminated.values(), truncated.values())
-                    ]
+                    term | trunc
+                    for term, trunc in zip(
+                        terminated.values(), truncated.values(), strict=False
+                    )
                 ):
                     observation, info = env.reset()
 
@@ -968,7 +994,10 @@ def _async_worker(
                     agents,
                 )
                 write_to_shared_memory(
-                    index, observation, shared_memory, observation_space
+                    index,
+                    observation,
+                    shared_memory,
+                    observation_space,
                 )
                 pipe.send(((reward, terminated, truncated, info), True))
 
@@ -978,8 +1007,9 @@ def _async_worker(
             elif command == "_call":
                 name, args, kwargs = data
                 if name in ["reset", "step", "close", "_setattr", "_check_spaces"]:
+                    msg = f"Trying to call function `{name}` with `call`, use `{name}` directly instead."
                     raise ValueError(
-                        f"Trying to call function `{name}` with `call`, use `{name}` directly instead."
+                        msg,
                     )
                 attr = getattr(env, name)
                 if callable(attr):
@@ -991,8 +1021,9 @@ def _async_worker(
                 setattr(env, name, value)
                 pipe.send((None, True))
             else:
+                msg = f"Received unknown command `{command}`. Must be one of [`reset`, `step`, `close`, `_call`, `_setattr`, `_check_spaces`]."
                 raise RuntimeError(
-                    f"Received unknown command `{command}`. Must be one of [`reset`, `step`, `close`, `_call`, `_setattr`, `_check_spaces`]."
+                    msg,
                 )
 
     except (KeyboardInterrupt, Exception):

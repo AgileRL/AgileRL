@@ -1,11 +1,11 @@
 import inspect
 import math
 from collections import OrderedDict
-from typing import Optional
+from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.nn import functional as F
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
@@ -43,7 +43,7 @@ class EvolvableGPT(EvolvableModule):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
@@ -61,8 +61,8 @@ class EvolvableGPT(EvolvableModule):
         max_layers: int = 16,
         bias: bool = True,
         device: str = "cpu",
-        random_seed: Optional[int] = None,
-    ):
+        random_seed: int | None = None,
+    ) -> None:
         super().__init__(device, random_seed)
 
         assert isinstance(n_layer, int), "Number of layers must be an integer."
@@ -72,15 +72,16 @@ class EvolvableGPT(EvolvableModule):
         assert isinstance(n_embd, int), "Embedding dimension must be an integer."
         assert n_embd >= 1, "Embedding dimension must be greater than or equal to one."
         assert isinstance(n_head, int), "Number of attention heads must be an integer."
-        assert (
-            n_head >= 1
-        ), "Number of attention heads must be greater than or equal to one."
+        assert n_head >= 1, (
+            "Number of attention heads must be greater than or equal to one."
+        )
         assert isinstance(
-            dim_feedfwd, int
+            dim_feedfwd,
+            int,
         ), "Feed forward dimension must be an integer."
-        assert (
-            dim_feedfwd >= 1
-        ), "Feed forward dimension must be greater than or equal to one."
+        assert dim_feedfwd >= 1, (
+            "Feed forward dimension must be greater than or equal to one."
+        )
         assert isinstance(block_size, int), "Block size must be an integer."
         assert block_size >= 1, "Block size must be greater than or equal to one."
         assert isinstance(dropout, (float, int)), "Dropout must be a float."
@@ -88,20 +89,22 @@ class EvolvableGPT(EvolvableModule):
         assert isinstance(layer_norm_eps, float), "Layer norm epsilon must be a float."
         assert layer_norm_eps > 0, "Layer norm epsilon must be greater than zero."
         assert isinstance(
-            min_layers, int
+            min_layers,
+            int,
         ), "Minimum number of layers must be an integer."
-        assert (
-            min_layers >= 1
-        ), "Minimum number of layers must be greater than or equal to one."
+        assert min_layers >= 1, (
+            "Minimum number of layers must be greater than or equal to one."
+        )
         assert isinstance(
-            max_layers, int
+            max_layers,
+            int,
         ), "Maximum number of layers must be an integer."
-        assert (
-            max_layers >= 1
-        ), "Maximum number of layers must be greater than or equal to one."
-        assert (
-            max_layers >= min_layers
-        ), "Maximum number of layers must be greater than or equal to minimum number of layers."
+        assert max_layers >= 1, (
+            "Maximum number of layers must be greater than or equal to one."
+        )
+        assert max_layers >= min_layers, (
+            "Maximum number of layers must be greater than or equal to minimum number of layers."
+        )
         assert isinstance(bias, bool), "Bias flag must be boolean value True or False."
 
         self.n_layer = n_layer
@@ -121,7 +124,10 @@ class EvolvableGPT(EvolvableModule):
         self.transformer_keys = list(self.transformer.keys())
 
         self.lm_head = nn.Linear(
-            self.n_embd, self.vocab_size, bias=False, device=self.device
+            self.n_embd,
+            self.vocab_size,
+            bias=False,
+            device=self.device,
         )
 
         self.transformer.wte.weight = self.lm_head.weight
@@ -132,7 +138,9 @@ class EvolvableGPT(EvolvableModule):
         for pn, p in self.named_parameters():
             if pn.endswith("c_proj.weight"):
                 torch.nn.init.normal_(
-                    p, mean=0.0, std=0.02 / math.sqrt(2 * self.n_layer)
+                    p,
+                    mean=0.0,
+                    std=0.02 / math.sqrt(2 * self.n_layer),
                 )
 
         # report number of parameters
@@ -175,7 +183,7 @@ class EvolvableGPT(EvolvableModule):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def build_networks(self) -> nn.ModuleDict:
-        """Creates and returns transformer neural network.
+        """Create and returns transformer neural network.
 
         :return: Transformer neural network as a ModuleDict
         :rtype: nn.ModuleDict
@@ -198,22 +206,25 @@ class EvolvableGPT(EvolvableModule):
                     device=self.device,
                 )
                 for _ in range(self.n_layer)
-            ]
+            ],
         )
         net_dict["ln_f"] = LayerNorm(self.n_embd, bias=self.bias, device=self.device)
         return nn.ModuleDict(net_dict)
 
     def forward(
         self,
-        idx: Optional[torch.Tensor] = None,
-        tok_emb: Optional[torch.Tensor] = None,
-        targets: Optional[torch.Tensor] = None,
-        attn_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[tuple[torch.Tensor]] = None,
-        pos: Optional[torch.Tensor] = None,
+        idx: torch.Tensor | None = None,
+        tok_emb: torch.Tensor | None = None,
+        targets: torch.Tensor | None = None,
+        attn_mask: torch.Tensor | None = None,
+        past_key_values: tuple[torch.Tensor] | None = None,
+        pos: torch.Tensor | None = None,
         is_causal: bool = True,
     ) -> tuple[
-        torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor], Optional[torch.Tensor]
+        torch.Tensor,
+        tuple[torch.Tensor],
+        tuple[torch.Tensor],
+        torch.Tensor | None,
     ]:
         """Forward pass through evolvable GPT model.
 
@@ -232,7 +243,7 @@ class EvolvableGPT(EvolvableModule):
         :param is_causal: Whether to apply causal mask
         :type is_causal: bool, optional
         :return: Tuple containing logits, all hidden states, presents, and loss
-        :rtype: tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor], Optional[torch.Tensor]]
+        :rtype: tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor], torch.Tensor | None]
         """
         if idx is not None:
             device = idx.device
@@ -241,9 +252,9 @@ class EvolvableGPT(EvolvableModule):
             device = tok_emb.device
             t = tok_emb.size(-2)
 
-        assert (
-            t <= self.block_size
-        ), f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
+        assert t <= self.block_size, (
+            f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
+        )
 
         presents = ()
         all_hidden_states = ()
@@ -257,9 +268,12 @@ class EvolvableGPT(EvolvableModule):
             pos = pos.view(-1, t)
         else:
             pos = torch.arange(
-                past_length, t + past_length, dtype=torch.long, device=device
+                past_length,
+                t + past_length,
+                dtype=torch.long,
+                device=device,
             ).unsqueeze(
-                0
+                0,
             )  # shape (1, t)
 
         # forward the GPT model itself
@@ -270,17 +284,17 @@ class EvolvableGPT(EvolvableModule):
         # position embeddings of shape (1, t, n_embd)
         pos_emb = self.transformer.wpe(pos)
         x = self.transformer.drop(tok_emb + pos_emb)
-        all_hidden_states = all_hidden_states + (x,)
-        for block, layer_past in zip(self.transformer.h, past_key_values):
+        all_hidden_states = (*all_hidden_states, x)
+        for block, layer_past in zip(self.transformer.h, past_key_values, strict=False):
             # torch.cuda.set_device(x.device)
             # Ensure layer_past is on same device as hidden_states (might not be correct)
             if layer_past is not None:
                 layer_past = tuple(past_state.to(x.device) for past_state in layer_past)
             x, pres = block(x, attn_mask, layer_past, is_causal)
-            all_hidden_states = all_hidden_states + (x,)
-            presents = presents + (pres,)
+            all_hidden_states = (*all_hidden_states, x)
+            presents = (*presents, pres)
         x = self.transformer.ln_f(x)
-        all_hidden_states = all_hidden_states + (x,)
+        all_hidden_states = (*all_hidden_states, x)
 
         logits = self.lm_head(x)
         if targets is not None:
@@ -301,8 +315,7 @@ class EvolvableGPT(EvolvableModule):
         return logits, all_hidden_states, presents, loss
 
     def crop_block_size(self, block_size: int) -> None:
-        """
-        Adjust the block size of the model.
+        """Adjust the block size of the model.
 
         This method performs model surgery to decrease the block size if necessary.
         For example, we may load the GPT2 pretrained model checkpoint (block size 1024)
@@ -315,30 +328,32 @@ class EvolvableGPT(EvolvableModule):
         assert block_size <= self.block_size
         self.block_size = block_size
         self.transformer.wpe.weight = nn.Parameter(
-            self.transformer.wpe.weight[:block_size]
+            self.transformer.wpe.weight[:block_size],
         )
         for block in self.transformer.h:
             if hasattr(block.attn, "attention_bias"):
                 block.attn.attention_bias = block.attn.attention_bias[
-                    :, :, :block_size, :block_size
+                    :,
+                    :,
+                    :block_size,
+                    :block_size,
                 ]
 
     @classmethod
     def from_pretrained(
         cls,
         model_type: str,
-        override_args: Optional[dict] = None,
-        custom_sd: Optional[str] = None,
+        override_args: dict | None = None,
+        custom_sd: str | None = None,
     ) -> "EvolvableGPT":
-        """
-        Load a pretrained GPT model with the option to override certain configuration parameters or use a custom state dictionary.
+        """Load a pretrained GPT model with the option to override certain configuration parameters or use a custom state dictionary.
 
         :param model_type: The type of GPT model to load. Must be one of {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}.
         :type model_type: str
         :param override_args: A dictionary of arguments to override the default configuration. Defaults to None.
-        :type override_args: Optional[dict]
+        :type override_args: dict | None
         :param custom_sd: Path to a custom state dictionary to load. If None, the default pretrained weights are used. Defaults to None.
-        :type custom_sd: Optional[str]
+        :type custom_sd: str | None
         :return: An instance of the EvolvableGPT model with the specified configuration and weights.
         :rtype: EvolvableGPT
         """
@@ -346,24 +361,21 @@ class EvolvableGPT(EvolvableModule):
         override_args = override_args or {}  # default to empty dict
         from transformers import GPT2Config, GPT2LMHeadModel
 
-        print("loading weights from pretrained gpt: %s" % model_type)
         config_args = {
-            "gpt2": dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
-            "gpt2-medium": dict(n_layer=24, n_head=16, n_embd=1024),  # 350M params
-            "gpt2-large": dict(n_layer=36, n_head=20, n_embd=1280),  # 774M params
-            "gpt2-xl": dict(n_layer=48, n_head=25, n_embd=1600),  # 1558M params
+            "gpt2": {"n_layer": 12, "n_head": 12, "n_embd": 768},  # 124M params
+            "gpt2-medium": {"n_layer": 24, "n_head": 16, "n_embd": 1024},  # 350M params
+            "gpt2-large": {"n_layer": 36, "n_head": 20, "n_embd": 1280},  # 774M params
+            "gpt2-xl": {"n_layer": 48, "n_head": 25, "n_embd": 1600},  # 1558M params
         }[model_type]
         config_args["vocab_size"] = 50257  # always 50257 for GPT model checkpoints
         config_args["block_size"] = 1024  # always 1024 for GPT model checkpoints
         config_args["bias"] = True  # always True for GPT model checkpoints
         # we can override the dropout rate, if desired
         if "dropout" in override_args:
-            print(f"overriding dropout rate to {override_args['dropout']}")
             config_args["dropout"] = override_args["dropout"]
 
         if custom_sd is not None:
             if "vocab_size" in override_args:
-                print(f"overriding vocab_size to {override_args['vocab_size']}")
                 config_args["vocab_size"] = override_args["vocab_size"]
             model = EvolvableGPT(**config_args)
             sd_hf = torch.load(custom_sd, weights_only=False)
@@ -401,9 +413,9 @@ class EvolvableGPT(EvolvableModule):
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
         assert len(sd_keys_hf) == len(
-            sd_keys
+            sd_keys,
         ), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
-        for khf, k in zip(sd_keys_hf, sd_keys):
+        for khf, k in zip(sd_keys_hf, sd_keys, strict=False):
             if any(khf.endswith(w) for w in transposed):
                 # special treatment for the Conv1D weights we need to transpose
                 assert sd_hf[khf].shape[::-1] == sd[k].shape
@@ -417,10 +429,13 @@ class EvolvableGPT(EvolvableModule):
         return model
 
     def configure_optimizers(
-        self, weight_decay: float, learning_rate: float, betas: tuple, device_type: str
+        self,
+        weight_decay: float,
+        learning_rate: float,
+        betas: tuple,
+        device_type: str,
     ) -> torch.optim.Optimizer:
-        """
-        Configures the optimizer for the model by separating parameters into those that will and won't experience weight decay.
+        """Configure the optimizer for the model by separating parameters into those that will and won't experience weight decay.
 
         This function separates all parameters of the model into two buckets: those that will experience weight decay for
         regularization and those that won't (biases, and layernorm/embedding weights). It then returns the PyTorch optimizer object.
@@ -444,7 +459,7 @@ class EvolvableGPT(EvolvableModule):
         whitelist_weight_modules = (torch.nn.Linear,)
         blacklist_weight_modules = (torch.nn.LayerNorm, LayerNorm, torch.nn.Embedding)
         for mn, m in self.named_modules():
-            for pn, p in m.named_parameters():
+            for pn, _p in m.named_parameters():
                 fpn = f"{mn}.{pn}" if mn else pn  # full param name
                 # random note: because named_modules and named_parameters are recursive
                 # we will see the same tensors p many many times. but doing it this way
@@ -469,28 +484,24 @@ class EvolvableGPT(EvolvableModule):
         decay.remove("lm_head.weight")
 
         # validate that we considered every parameter
-        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = dict(self.named_parameters())
         inter_params = decay & no_decay
         union_params = decay | no_decay
-        assert (
-            len(inter_params) == 0
-        ), "parameters {} made it into both decay/no_decay sets!".format(
-            str(inter_params)
+        assert len(inter_params) == 0, (
+            f"parameters {inter_params!s} made it into both decay/no_decay sets!"
         )
-        assert (
-            len(param_dict.keys() - union_params) == 0
-        ), "parameters {} were not separated into either decay/no_decay set!".format(
-            str(param_dict.keys() - union_params),
+        assert len(param_dict.keys() - union_params) == 0, (
+            f"parameters {param_dict.keys() - union_params!s} were not separated into either decay/no_decay set!"
         )
 
         # create the pytorch optimizer object
         optim_groups = [
             {
-                "params": [param_dict[pn] for pn in sorted(list(decay))],
+                "params": [param_dict[pn] for pn in sorted(decay)],
                 "weight_decay": weight_decay,
             },
             {
-                "params": [param_dict[pn] for pn in sorted(list(no_decay))],
+                "params": [param_dict[pn] for pn in sorted(no_decay)],
                 "weight_decay": 0.0,
             },
         ]
@@ -498,16 +509,12 @@ class EvolvableGPT(EvolvableModule):
         use_fused = (device_type == "cuda") and (
             "fused" in inspect.signature(torch.optim.AdamW).parameters
         )
-        print(f"using fused AdamW: {use_fused}")
-        extra_args = dict(fused=True) if use_fused else dict()
+        extra_args = {"fused": True} if use_fused else {}
         lr = torch.tensor(learning_rate, device=self.device)
-        optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=betas, **extra_args)
-
-        return optimizer
+        return torch.optim.AdamW(optim_groups, lr=lr, betas=betas, **extra_args)
 
     def estimate_mfu(self, fwdbwd_per_iter: int, dt: float) -> float:
-        """
-        Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS.
+        """Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS.
 
         :param fwdbwd_per_iter: Number of forward-backward passes per iteration.
         :type fwdbwd_per_iter: int
@@ -531,8 +538,7 @@ class EvolvableGPT(EvolvableModule):
         # express our flops throughput as ratio of A100 bfloat16 peak flops
         flops_achieved = flops_per_iter * (1.0 / dt)  # per second
         flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
-        mfu = flops_achieved / flops_promised
-        return mfu
+        return flops_achieved / flops_promised
 
     @torch.no_grad()
     def generate(
@@ -540,10 +546,9 @@ class EvolvableGPT(EvolvableModule):
         idx: torch.Tensor,
         max_new_tokens: int,
         temperature: float = 1.0,
-        top_k: Optional[int] = None,
+        top_k: int | None = None,
     ) -> torch.Tensor:
-        """
-        Generate a sequence of tokens.
+        """Generate a sequence of tokens.
 
         This method takes a conditioning sequence of indices `idx` (LongTensor of shape (b, t))
         and completes the sequence `max_new_tokens` times, feeding the predictions back into the
@@ -557,7 +562,7 @@ class EvolvableGPT(EvolvableModule):
         :param temperature: Sampling temperature. Higher values mean more random samples, defaults to 1.0.
         :type temperature: float, optional
         :param top_k: If specified, only consider the top k tokens for sampling, defaults to None.
-        :type top_k: Optional[int], optional
+        :type top_k: int | None, optional
         :return: Generated sequence of indices.
         :rtype: torch.Tensor
         """
@@ -584,24 +589,24 @@ class EvolvableGPT(EvolvableModule):
         return idx
 
     @mutation(MutationType.LAYER)
-    def add_layer(self):
-        """Adds a block layer to transformer."""
+    def add_layer(self) -> None:
+        """Add a block layer to transformer."""
         if self.n_layer < self.max_layers:
             self.n_layer += 1
         # else:
         #     self.add_node()
 
     @mutation(MutationType.LAYER)
-    def remove_layer(self):
-        """Removes a block layer from transformer."""
+    def remove_layer(self) -> None:
+        """Remove a block layer from transformer."""
         if self.n_layer > self.min_layers:
             self.n_layer -= 1
         # else:
         #     self.add_node()
 
     @mutation(MutationType.NODE)
-    def add_node(self, numb_new_nodes=None):
-        """Adds nodes to hidden layers of transformer.
+    def add_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
+        """Add nodes to hidden layers of transformer.
 
         :param numb_new_nodes: Number of nodes to add to hidden layers, defaults to None
         :type numb_new_nodes: int, optional
@@ -613,8 +618,8 @@ class EvolvableGPT(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_node(self, numb_new_nodes=None):
-        """Removes nodes from hidden layers of transformer.
+    def remove_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
+        """Remove nodes from hidden layers of transformer.
 
         :param numb_new_nodes: Number of nodes to remove from hidden layers, defaults to None
         :type numb_new_nodes: int, optional
@@ -631,13 +636,13 @@ class EvolvableGPT(EvolvableModule):
         new_transformer = self.build_networks()
 
         self.transformer = EvolvableModule.preserve_parameters(
-            old_net=self.transformer, new_net=new_transformer
+            old_net=self.transformer,
+            new_net=new_transformer,
         )
 
 
 class LayerNorm(nn.Module):
-    """
-    LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False.
+    """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False.
 
     :param int ndim: The number of dimensions in the input tensor.
     :param bool bias: If True, adds a learnable bias to the normalization.
@@ -659,7 +664,7 @@ class LayerNorm(nn.Module):
         bias: bool,
         layer_norm_eps: float = 1e-5,
         device: DeviceType = "cpu",
-    ):
+    ) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.ones(ndim, device=device))
         self.bias = nn.Parameter(torch.zeros(ndim, device=device)) if bias else None
@@ -667,13 +672,16 @@ class LayerNorm(nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.layer_norm(
-            input, self.weight.shape, self.weight, self.bias, self.layer_norm_eps
+            input,
+            self.weight.shape,
+            self.weight,
+            self.bias,
+            self.layer_norm_eps,
         )
 
 
 class CausalSelfAttention(nn.Module):
-    """
-    Causal Self-Attention module for transformer models.
+    """Causal Self-Attention module for transformer models.
 
     This module implements a causal self-attention mechanism, ensuring that each position in the sequence
     can only attend to previous positions.
@@ -718,34 +726,33 @@ class CausalSelfAttention(nn.Module):
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
         if not self.flash:
-            print(
-                "WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0"
-            )
             # causal mask to ensure that attention is only applied to the left in the
             # input sequence
             self.register_buffer(
                 "attention_bias",
                 torch.tril(torch.ones(block_size, block_size, device=device)).view(
-                    1, 1, block_size, block_size
+                    1,
+                    1,
+                    block_size,
+                    block_size,
                 ),
             )
 
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
-        layer_past: Optional[tuple[torch.Tensor]] = None,
+        attn_mask: torch.Tensor | None = None,
+        layer_past: tuple[torch.Tensor] | None = None,
         is_causal: bool = True,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
-        """
-        Forward pass through the CausalSelfAttention module.
+        """Forward pass through the CausalSelfAttention module.
 
         :param x: Input tensor of shape (batch_size, sequence_length, embedding_dim).
         :type x: torch.Tensor
         :param attn_mask: Optional attention mask tensor.
-        :type attn_mask: Optional[torch.Tensor]
+        :type attn_mask: torch.Tensor | None
         :param layer_past: Optional tuple of past key and value tensors for caching.
-        :type layer_past: Optional[tuple[torch.Tensor]]
+        :type layer_past: tuple[torch.Tensor] | None
         :param is_causal: Whether to apply causal mask.
         :type is_causal: bool
         :return: Tuple containing the output tensor and the present key and value tensors.
@@ -759,13 +766,16 @@ class CausalSelfAttention(nn.Module):
         # forward to be the batch dim
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
+            1,
+            2,
         )  # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
+            1,
+            2,
         )  # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
+            1,
+            2,
         )  # (B, nh, T, hs)
 
         if layer_past is not None:
@@ -806,8 +816,7 @@ class CausalSelfAttention(nn.Module):
 
 
 class Block(nn.Module):
-    """
-    Transformer block consisting of layer normalization, causal self-attention, and MLP.
+    """Transformer block consisting of layer normalization, causal self-attention, and MLP.
 
     :param n_embd: The embedding dimensionality.
     :type n_embd: int
@@ -838,36 +847,46 @@ class Block(nn.Module):
         activation: str = "GELU",
         layer_norm_eps: float = 1e-5,
         device: DeviceType = "cpu",
-    ):
+    ) -> None:
         super().__init__()
         self.device = device
         self.ln_1 = LayerNorm(
-            n_embd, bias=bias, layer_norm_eps=layer_norm_eps, device=device
+            n_embd,
+            bias=bias,
+            layer_norm_eps=layer_norm_eps,
+            device=device,
         )
         self.attn = CausalSelfAttention(
-            n_embd, n_head, bias, dropout, block_size, device=device
+            n_embd,
+            n_head,
+            bias,
+            dropout,
+            block_size,
+            device=device,
         )
         self.ln_2 = LayerNorm(
-            n_embd, bias=bias, layer_norm_eps=layer_norm_eps, device=device
+            n_embd,
+            bias=bias,
+            layer_norm_eps=layer_norm_eps,
+            device=device,
         )
         self.mlp = MLP(n_embd, dropout, hidden_size, activation, device=device)
 
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
-        layer_past: Optional[tuple[torch.Tensor]] = None,
+        attn_mask: torch.Tensor | None = None,
+        layer_past: tuple[torch.Tensor] | None = None,
         is_causal: bool = True,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
-        """
-        Forward pass through the transformer block.
+        """Forward pass through the transformer block.
 
         :param x: Input tensor of shape (batch_size, sequence_length, embedding_dim).
         :type x: torch.Tensor
         :param attn_mask: Optional attention mask tensor.
-        :type attn_mask: Optional[torch.Tensor]
+        :type attn_mask: torch.Tensor | None
         :param layer_past: Optional tuple of past key and value tensors for caching.
-        :type layer_past: Optional[tuple[torch.Tensor]]
+        :type layer_past: tuple[torch.Tensor] | None
         :param is_causal: Whether to apply causal mask.
         :type is_causal: bool
         :return: Tuple containing the output tensor and the present key and value tensors.
@@ -885,7 +904,14 @@ class Block(nn.Module):
 
 
 class MLP(EvolvableMLP):
-    def __init__(self, n_embd, dropout, hidden_size, activation="GELU", **kwargs):
+    def __init__(
+        self,
+        n_embd: int,
+        dropout: float,
+        hidden_size: int,
+        activation: str = "GELU",
+        **kwargs: Any,
+    ) -> None:
         super().__init__(
             num_inputs=n_embd,
             num_outputs=n_embd,
@@ -897,8 +923,8 @@ class MLP(EvolvableMLP):
         )
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
-        """Returns output of neural network.
+    def forward(self, x: torch.Tensor | np.ndarray) -> torch.Tensor:
+        """Return output of neural network.
 
         :param x: Neural network input
         :type x: torch.Tensor() or np.array
@@ -910,8 +936,7 @@ class MLP(EvolvableMLP):
         # forward pass through the network
         for value in self.model:
             x = value(x)
-        x = self.dropout(x)
-        return x
+        return self.dropout(x)
 
 
 class PositionalEncoding(nn.Module):
@@ -919,16 +944,18 @@ class PositionalEncoding(nn.Module):
     Converts tensor of input indices into corresponding tensor of position embeddings.
     """
 
-    def __init__(self, max_positions: int, emb_size: int, device: DeviceType = "cpu"):
+    def __init__(
+        self, max_positions: int, emb_size: int, device: DeviceType = "cpu"
+    ) -> None:
         super().__init__()
         self.device = device
         self.embedding = nn.Embedding(max_positions, emb_size, device=device)
         self.emb_size = emb_size
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         """Forward pass through position embedding module.
         :param tokens: Tokens to embed
-        :type tokens: torch.Tensor
+        :type tokens: torch.Tensor.
         """
         return self.embedding(tokens)
 
@@ -936,16 +963,18 @@ class PositionalEncoding(nn.Module):
 class TokenEmbedding(nn.Module):
     """The token embedding class. Converts tensor of input indices into corresponding tensor of token embeddings."""
 
-    def __init__(self, vocab_size: int, emb_size: int, device: DeviceType = "cpu"):
+    def __init__(
+        self, vocab_size: int, emb_size: int, device: DeviceType = "cpu"
+    ) -> None:
         super().__init__()
         self.device = device
         self.embedding = nn.Embedding(vocab_size, emb_size, device=device)
         self.emb_size = emb_size
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         """Forward pass through token embedding module.
         :param tokens: Tokens to embed
-        :type tokens: torch.Tensor
+        :type tokens: torch.Tensor.
         """
         # return self.embedding(tokens.long()) * math.sqrt(self.emb_size)
         return self.embedding(tokens)

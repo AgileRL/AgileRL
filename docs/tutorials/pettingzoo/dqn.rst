@@ -140,7 +140,6 @@ to alter the reward to guide the training of our agent. This uses the configs th
    .. code-block:: python
 
       import random
-      from typing import List, Tuple, Optional
 
       from pettingzoo.parallel import ParallelEnv
 
@@ -325,11 +324,11 @@ to alter the reward to guide the training of our agent. This uses the configs th
             print("Replay buffer warmed up.")
             return memory
 
-         def check_winnable(self, lst: List[int], piece: int) -> bool:
+         def check_winnable(self, lst: list[int], piece: int) -> bool:
             """Checks if four pieces in a row represent a winnable opportunity, e.g. [1, 1, 1, 0] or [2, 0, 2, 2].
 
             :param lst: List of pieces in row
-            :type lst: List
+            :type lst: list
             :param piece: Player piece we are checking (1 or 2)
             :type piece: int
             """
@@ -441,7 +440,7 @@ to alter the reward to guide the training of our agent. This uses the configs th
                      )
             return reward
 
-         def last(self) -> Tuple[dict, float, bool, bool, dict]:
+         def last(self) -> tuple[dict, float, bool, bool, dict]:
             """Wrapper around PettingZoo env last method."""
             return self.env.last()
 
@@ -505,15 +504,15 @@ levels of difficulty for training our agent.
 
          def random_opponent(
             self,
-            action_mask: List[int],
-            last_opp_move: Optional[int] = None,
+            action_mask: list[int],
+            last_opp_move: int | None = None,
             block_vert_coef: float = 1,
          ) -> int:
             """Takes move for random opponent. If the lesson aims to randomly block vertical
             wins with a higher probability, this is done here too.
 
             :param action_mask: Mask of legal actions: 1=legal, 0=illegal
-            :type action_mask: List
+            :type action_mask: list
             :param last_opp_move: Most recent action taken by agent against this opponent
             :type last_opp_move: int
             :param block_vert_coef: How many times more likely to block vertically
@@ -576,7 +575,7 @@ levels of difficulty for training our agent.
 
          def outcome(
             self, action: int, player: int, return_length: bool = False
-         ) -> Tuple[bool, Optional[float], bool, Optional[np.ndarray]]:
+         ) -> tuple[bool, float | None, bool, np.ndarray | None]:
             """Takes move for weak rule-based opponent.
 
             :param action: Action to take in environment
@@ -584,7 +583,9 @@ levels of difficulty for training our agent.
             :param player: Player who we are checking, 0 or 1
             :type player: int
             :param return_length: Return length of outcomes, defaults to False
-            :type player: bool, optional
+            :type return_length: bool, optional
+            :return: Tuple containing whether the action is possible, the reward for the action, whether the game has ended, and the length of the outcome
+            :rtype: tuple[bool, float | None, bool, np.ndarray | None]
             """
             if not (self.top[action] < self.num_rows):  # action column is full
                   return (False, None, None) + ((None,) if return_length else ())

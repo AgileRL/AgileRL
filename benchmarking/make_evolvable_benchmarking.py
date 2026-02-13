@@ -102,7 +102,9 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                     critic = None
                 if INIT_HP["ALGO"] == "DDPG":
                     network_actor_ddpg = BasicNetActor(
-                        state_dims[0], [64, 64], action_dims
+                        state_dims[0],
+                        [64, 64],
+                        action_dims,
                     )
                     actor = MakeEvolvable(
                         network_actor_ddpg,
@@ -110,7 +112,9 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                         device=device,
                     )
                     network_critic = BasicNetCritic(
-                        state_dims[0] + action_dims, [64, 64], 1
+                        state_dims[0] + action_dims,
+                        [64, 64],
+                        1,
                     )
                     critic = MakeEvolvable(
                         network_critic,
@@ -137,7 +141,9 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
 
                 elif INIT_HP["ALGO"] == "TD3":
                     network_actor_td3 = BasicNetActor(
-                        state_dims[0], [64, 64], action_dims
+                        state_dims[0],
+                        [64, 64],
+                        action_dims,
                     )
                     actor = MakeEvolvable(
                         network_actor_td3,
@@ -145,7 +151,9 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                         device=device,
                     )
                     network_critic = BasicNetCritic(
-                        state_dims[0] + action_dims, [64, 64], 1
+                        state_dims[0] + action_dims,
+                        [64, 64],
+                        1,
                     )
                     critic_1 = MakeEvolvable(
                         network_critic,
@@ -160,7 +168,9 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                     critic = [critic_1, critic_2]
                 elif INIT_HP["ALGO"] == "PPO":
                     network_actor_dqn = SoftmaxActor(
-                        state_dims[0], [64, 64], action_dims
+                        state_dims[0],
+                        [64, 64],
+                        action_dims,
                     )
                     actor = MakeEvolvable(
                         network_actor_dqn,
@@ -169,7 +179,9 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                     )
                     network_critic = BasicNetCritic(state_dims[0], [32, 32], 1)
                     critic = MakeEvolvable(
-                        network_critic, torch.ones(state_dims[0]), device=device
+                        network_critic,
+                        torch.ones(state_dims[0]),
+                        device=device,
                     )
 
         if INIT_HP["ALGO"] != "PPO":
@@ -188,7 +200,8 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             env = ss.frame_stack_v1(env, 4)
         else:
             env = simple_speaker_listener_v4.parallel_env(
-                continuous_actions=True, max_cycles=25
+                continuous_actions=True,
+                max_cycles=25,
             )
 
         env.reset()
@@ -202,7 +215,7 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             ]
 
         INIT_HP["N_AGENTS"] = env.num_agents
-        INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
+        INIT_HP["AGENT_IDS"] = list(env.agents)
         if not atari:
             # MLPs
             state_dims = get_input_size_from_space(observation_space)
@@ -215,7 +228,7 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                     input_tensor=torch.ones(state_dim[0]),
                     device=device,
                 )
-                for action_dim, state_dim in zip(action_dims, state_dims)
+                for action_dim, state_dim in zip(action_dims, state_dims, strict=False)
             ]
             if INIT_HP["ALGO"] == "MADDPG":
                 critic = [
@@ -338,9 +351,9 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             eval_steps=INIT_HP["EVAL_STEPS"],
             eval_loop=INIT_HP["EVAL_LOOP"],
             learning_delay=INIT_HP["LEARNING_DELAY"],
-            eps_start=INIT_HP["EPS_START"] if "EPS_START" in INIT_HP else 1.0,
-            eps_end=INIT_HP["EPS_END"] if "EPS_END" in INIT_HP else 0.01,
-            eps_decay=INIT_HP["EPS_DECAY"] if "EPS_DECAY" in INIT_HP else 0.999,
+            eps_start=INIT_HP.get("EPS_START", 1.0),
+            eps_end=INIT_HP.get("EPS_END", 0.01),
+            eps_decay=INIT_HP.get("EPS_DECAY", 0.999),
             target=INIT_HP["TARGET_SCORE"],
             tournament=tournament,
             mutation=mutations,
@@ -467,7 +480,9 @@ if __name__ == "__main__":
         net_config_mlp = matd3_config["MLP"]
         if standard:
             print(
-                "-" * 20, "MATD3 simple speaker listener using make evolvable", "-" * 20
+                "-" * 20,
+                "MATD3 simple speaker listener using make evolvable",
+                "-" * 20,
             )
             main(INIT_HP, MUTATION_PARAMS, atari=False, multi=True, NET_CONFIG=None)
             print("-" * 20, "MATD3 simple speaker listener using net_config", "-" * 20)

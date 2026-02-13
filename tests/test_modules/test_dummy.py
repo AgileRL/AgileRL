@@ -1,5 +1,5 @@
 import pytest
-import torch.nn as nn
+from torch import nn
 
 from agilerl.modules.dummy import DummyEvolvable
 
@@ -26,7 +26,9 @@ def test_dummy_evolvable_raises():
 
 def test_dummy_evolvable_from_module_fn_and_kwargs():
     module = DummyEvolvable(
-        module_fn=lambda: nn.Linear(10, 10), module_kwargs={}, device="cpu"
+        module_fn=lambda: nn.Linear(10, 10),
+        module_kwargs={},
+        device="cpu",
     )
     assert module.device == "cpu"
     assert module.module.weight.shape == (10, 10)

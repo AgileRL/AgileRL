@@ -1,8 +1,9 @@
 import logging
-import os
 import warnings
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable, Optional, Union
+from pathlib import Path
+from typing import Any
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
@@ -40,20 +41,18 @@ from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clo
 from agilerl.utils.llm_utils import get_state_dict
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
-SupportedObservationSpace = Union[
-    spaces.Box, spaces.Discrete, spaces.Dict, spaces.Tuple
-]
+SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
 
 
 def make_vect_envs(
-    env_name: Optional[str] = None,
-    num_envs=1,
+    env_name: str | None = None,
+    num_envs: int = 1,
     *,
-    make_env: Optional[Callable] = None,
+    make_env: Callable[..., Any] | None = None,
     should_async_vector: bool = True,
-    **env_kwargs,
-):
-    """Returns async-vectorized gym environments.
+    **env_kwargs: Any,
+) -> Any:
+    """Return async-vectorized gym environments.
 
     :param env_name: Gym environment name
     :type env_name: str
@@ -65,13 +64,14 @@ def make_vect_envs(
     :type should_async_vector: bool, optional
     """
     if env_name is None and make_env is None:
-        raise ValueError("Either env_name or make_env must be provided")
+        msg = "Either env_name or make_env must be provided"
+        raise ValueError(msg)
 
     vectorize = (
         gym.vector.AsyncVectorEnv if should_async_vector else gym.vector.SyncVectorEnv
     )
 
-    def default_make_env():
+    def default_make_env() -> gym.Env:
         return gym.make(env_name, **env_kwargs)
 
     make_env = make_env or default_make_env
@@ -84,7 +84,7 @@ def make_multi_agent_vect_envs(
     num_envs: int = 1,
     **env_kwargs: Any,
 ) -> AsyncPettingZooVecEnv:
-    """Returns async-vectorized PettingZoo parallel environments.
+    """Return async-vectorized PettingZoo parallel environments.
 
     :param env: PettingZoo parallel environment object
     :type env: pettingzoo.utils.env.ParallelEnv
@@ -99,9 +99,11 @@ def make_multi_agent_vect_envs(
 
 
 def make_skill_vect_envs(
-    env_name: str, skill: Any, num_envs: int = 1
+    env_name: str,
+    skill: Any,
+    num_envs: int = 1,
 ) -> gym.vector.AsyncVectorEnv:
-    """Returns async-vectorized gym environments.
+    """Return async-vectorized gym environments.
 
     :param env_name: Gym environment name
     :type env_name: str
@@ -111,14 +113,14 @@ def make_skill_vect_envs(
     :type num_envs: int, optional
     """
     return gym.vector.AsyncVectorEnv(
-        [lambda: skill(gym.make(env_name)) for i in range(num_envs)]
+        [lambda: skill(gym.make(env_name)) for i in range(num_envs)],
     )
 
 
 def observation_space_channels_to_first(
     observation_space: SupportedObservationSpace,
 ) -> SupportedObservationSpace:
-    """Swaps the channel order of an observation space from [H, W, C] -> [C, H, W].
+    """Swap the channel order of an observation space from [H, W, C] -> [C, H, W].
 
     :param observation_space: Observation space
     :type observation_space: spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete
@@ -126,13 +128,13 @@ def observation_space_channels_to_first(
     :rtype: spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete
     """
     if isinstance(observation_space, spaces.Dict):
-        for key in observation_space.spaces.keys():
+        for key in observation_space.spaces:
             if (
                 isinstance(observation_space[key], spaces.Box)
                 and len(observation_space[key].shape) == 3
             ):
                 observation_space[key] = observation_space_channels_to_first(
-                    observation_space[key]
+                    observation_space[key],
                 )
     elif isinstance(observation_space, spaces.Tuple):
         observation_space = spaces.Tuple(
@@ -143,13 +145,15 @@ def observation_space_channels_to_first(
                     else space
                 )
                 for space in observation_space.spaces
-            ]
+            ],
         )
     elif isinstance(observation_space, spaces.Box):
         low = observation_space.low.transpose(2, 0, 1)
         high = observation_space.high.transpose(2, 0, 1)
         observation_space = spaces.Box(
-            low=low, high=high, dtype=observation_space.dtype
+            low=low,
+            high=high,
+            dtype=observation_space.dtype,
         )
 
     return observation_space
@@ -177,9 +181,9 @@ def suppress_verbose_logging() -> None:
 
 def default_progress_bar(
     max_steps: int,
-    accelerator: Optional[Accelerator] = None,
+    accelerator: Accelerator | None = None,
 ) -> tqdm.tqdm:
-    """Returns a default progress bar.
+    """Return a default progress bar.
 
     :param max_steps: Maximum number of steps
     :type max_steps: int
@@ -213,23 +217,23 @@ def default_progress_bar(
 
 def create_population(
     algo: str,
-    net_config: Optional[dict[str, Any]],
+    net_config: dict[str, Any] | None,
     INIT_HP: dict[str, Any],
     observation_space: GymSpaceType | None = None,
     action_space: GymSpaceType | None = None,
-    hp_config: Optional[HyperparameterConfig] = None,
-    actor_network: Optional[EvolvableModule] = None,
-    critic_network: Optional[EvolvableModule] = None,
-    agent_wrapper: Optional[Callable] = None,
-    wrapper_kwargs: Optional[dict[str, Any]] = None,
+    hp_config: HyperparameterConfig | None = None,
+    actor_network: EvolvableModule | None = None,
+    critic_network: EvolvableModule | None = None,
+    agent_wrapper: Callable | None = None,
+    wrapper_kwargs: dict[str, Any] | None = None,
     population_size: int = 1,
     num_envs: int = 1,
     device: str = "cpu",
-    accelerator: Optional[Any] = None,
-    torch_compiler: Optional[Any] = None,
-    algo_kwargs: Optional[dict[str, Any]] = {},
+    accelerator: Any | None = None,
+    torch_compiler: Any | None = None,
+    algo_kwargs: dict[str, Any] | None = None,
 ) -> PopulationType:
-    """Returns population of identical agents.
+    """Return population of identical agents.
 
     :param algo: RL algorithm
     :type algo: str
@@ -262,7 +266,8 @@ def create_population(
     :param algo_kwargs: Additional keyword arguments for the algorithm
     :type algo_kwargs: dict, optional
     """
-
+    if algo_kwargs is None:
+        algo_kwargs = {}
     population = []
     if algo == "DQN":
         for idx in range(population_size):
@@ -372,9 +377,10 @@ def create_population(
                 recurrent=INIT_HP.get("RECURRENT", False),
                 use_rollout_buffer=INIT_HP.get("USE_ROLLOUT_BUFFER", False),
                 bptt_sequence_type=INIT_HP.get(
-                    "BPTT_SEQUENCE_TYPE", BPTTSequenceType.CHUNKED
+                    "BPTT_SEQUENCE_TYPE",
+                    BPTTSequenceType.CHUNKED,
                 ),
-                max_seq_len=INIT_HP.get("MAX_SEQ_LEN", None),
+                max_seq_len=INIT_HP.get("MAX_SEQ_LEN"),
                 actor_network=actor_network,
                 critic_network=critic_network,
                 device=device,
@@ -519,7 +525,7 @@ def create_population(
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 4),
                 actor_networks=actor_network,
                 critic_networks=critic_network,
-                action_batch_size=INIT_HP.get("ACTION_BATCH_SIZE", None),
+                action_batch_size=INIT_HP.get("ACTION_BATCH_SIZE"),
                 device=device,
                 accelerator=accelerator,
                 torch_compiler=torch_compiler,
@@ -601,16 +607,16 @@ def create_population(
                 temperature=INIT_HP.get("TEMPERATURE", 0.9),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
                 reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
-                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", None),
-                min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS", None),
+                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
+                min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
                 cosine_lr_schedule_config=(
-                    CosineLRScheduleConfig(**INIT_HP.get("COSINE_lR_SCHEDULER", None))
-                    if INIT_HP.get("COSINE_lR_SCHEDULER", None) is not None
+                    CosineLRScheduleConfig(**INIT_HP.get("COSINE_lR_SCHEDULER"))
+                    if INIT_HP.get("COSINE_lR_SCHEDULER") is not None
                     else None
                 ),
                 accelerator=Accelerator() if accelerator else None,
                 device=device,
-                max_model_len=INIT_HP.get("MAX_MODEL_LEN", None),
+                max_model_len=INIT_HP.get("MAX_MODEL_LEN"),
                 **algo_kwargs,
             )
             population.append(agent)
@@ -651,9 +657,9 @@ def save_population_checkpoint(
     population: PopulationType,
     save_path: str,
     overwrite_checkpoints: bool,
-    accelerator: Optional[Accelerator] = None,
+    accelerator: Accelerator | None = None,
 ) -> None:
-    """Saves checkpoint of population of agents.
+    """Save checkpoint of population of agents.
 
     :param population: Population of agents
     :type population: list[PopulationType]
@@ -702,13 +708,13 @@ def tournament_selection_and_mutation(
     tournament: TournamentSelection,
     mutation: Mutations,
     env_name: str,
-    algo: Optional[str] = None,
-    elite_path: Optional[str] = None,
+    algo: str | None = None,
+    elite_path: str | None = None,
     save_elite: bool = False,
-    accelerator: Optional[Accelerator] = None,
-    language_model: Optional[bool] = False,
+    accelerator: Accelerator | None = None,
+    language_model: bool | None = False,
 ) -> PopulationType:
-    """Performs tournament selection and mutation on a population of agents.
+    """Perform tournament selection and mutation on a population of agents.
 
     :param population: Population of agents
     :type population: list[PopulationType]
@@ -750,8 +756,7 @@ def tournament_selection_and_mutation(
         # Save temporary models for accelerator processes
         accel_temp_models_path = f"models/{env_name}"
         if accelerator.is_main_process:
-            if not os.path.exists(accel_temp_models_path):
-                os.makedirs(accel_temp_models_path)
+            Path(accel_temp_models_path).mkdir(parents=True, exist_ok=True)
         # Need to unwrap models from acccelerator before selecting and mutating
         accelerator.wait_for_everyone()
         for model in population:
@@ -793,14 +798,14 @@ def tournament_selection_and_mutation(
 def init_wandb(
     algo: str,
     env_name: str,
-    init_hyperparams: Optional[dict[str, Any]] = None,
-    mutation_hyperparams: Optional[dict[str, Any]] = None,
-    wandb_api_key: Optional[str] = None,
-    accelerator: Optional[Accelerator] = None,
+    init_hyperparams: dict[str, Any] | None = None,
+    mutation_hyperparams: dict[str, Any] | None = None,
+    wandb_api_key: str | None = None,
+    accelerator: Accelerator | None = None,
     project: str = "AgileRL",
-    addl_args: Optional[dict[str, Any]] = None,
+    addl_args: dict[str, Any] | None = None,
 ) -> None:
-    """Initializes wandb for logging hyperparameters and run metadata.
+    """Initialize wandb for logging hyperparameters and run metadata.
 
     :param algo: RL algorithm
     :type algo: str
@@ -820,7 +825,7 @@ def init_wandb(
         if wandb_api_key is not None:
             wandb.login(key=wandb_api_key)
         else:
-            warnings.warn("Must login to wandb with API key.")
+            warnings.warn("Must login to wandb with API key.", stacklevel=2)
 
     config_dict = {}
     if init_hyperparams is not None:
@@ -834,7 +839,9 @@ def init_wandb(
         # set the wandb project where this run will be logged
         "project": project,
         "name": "{}-EvoHPO-{}-{}".format(
-            env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+            env_name,
+            algo,
+            datetime.now().strftime("%m%d%Y%H%M%S"),
         ),
     }
 
@@ -856,8 +863,7 @@ def calculate_vectorized_scores(
     include_unterminated: bool = False,
     only_first_episode: bool = True,
 ) -> list[float]:
-    """
-    Calculate the vectorized scores for episodes based on rewards and terminations.
+    """Calculate the vectorized scores for episodes based on rewards and terminations.
 
     :param rewards: Array of rewards for each environment.
     :type rewards: np.ndarray
@@ -889,7 +895,7 @@ def calculate_vectorized_scores(
         for termination_index in termination_indices:
             # Sum the rewards for the current episode
             episode_reward = np.sum(
-                rewards[env_index, start_index : termination_index + 1]
+                rewards[env_index, start_index : termination_index + 1],
             )
 
             # Store the episode reward
@@ -915,23 +921,28 @@ def calculate_vectorized_scores(
 
 
 def print_hyperparams(pop: PopulationType) -> None:
-    """Prints current hyperparameters of agents in a population and their fitnesses.
+    """Print current hyperparameters of agents in a population and their fitnesses.
 
     :param pop: Population of agents
     :type pop: list[EvolvableAlgorithm]
     """
     for agent in pop:
-        print(
-            "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
-                agent.index,
-                np.mean(agent.fitness[-5:]),
-                EvolvableAlgorithm.inspect_attributes(agent),
-            )
+        mean_fitness = (
+            np.mean(agent.fitness[-5:]).item()
+            if len(agent.fitness) > 0
+            else float("nan")
         )
+        attrs = EvolvableAlgorithm.inspect_attributes(agent)
+        lines = [
+            f"Agent ID: {agent.index}  |  Mean 5 Fitness: {mean_fitness:.2f}",
+            "Attributes:",
+            *[f"  {k}: {v}" for k, v in sorted(attrs.items())],
+        ]
+        print("\n".join(lines) + "\n")
 
 
 def plot_population_score(pop: PopulationType) -> None:
-    """Plots the fitness scores of agents in a population.
+    """Plot the fitness scores of agents in a population.
 
     :param pop: Population of agents
     :type pop: list[EvolvableAlgorithm]
@@ -947,21 +958,34 @@ def plot_population_score(pop: PopulationType) -> None:
     plt.show()
 
 
-def get_env_defined_actions(info, agents):
+def get_env_defined_actions(
+    info: dict[str, Any],
+    agents: list[str],
+) -> dict[str, Any] | None:
+    """Get the environment-defined actions for a list of agents.
+
+    :param info: Info dictionary
+    :type info: dict[str, Any]
+    :param agents: List of agents
+    :type agents: list[str]
+    :return: Environment-defined actions
+    :rtype: dict[str, Any]
+    """
     env_defined_actions = {
         agent: info[agent].get("env_defined_action", None) for agent in agents
     }
 
     if all(eda is None for eda in env_defined_actions.values()):
-        return
+        return None
 
     return env_defined_actions
 
 
 def gather_tensor(
-    tensor: Union[torch.Tensor, float], accelerator: Accelerator
+    tensor: torch.Tensor | float,
+    accelerator: Accelerator,
 ) -> torch.Tensor:
-    """Gather tensors from gpus
+    """Gather tensors from gpus.
 
     :param tensor: Tensor to gather
     :type tensor: torch.Tensor
@@ -973,14 +997,14 @@ def gather_tensor(
     if not isinstance(tensor, torch.Tensor):
         tensor = torch.tensor(tensor, device=accelerator.device)
     tensor = tensor.to(accelerator.device)
-    gathered_tensors = accelerator.gather(tensor)
-    return gathered_tensors
+    return accelerator.gather(tensor)
 
 
 def aggregate_metrics_across_gpus(
-    accelerator: Accelerator, metric_tensor: Union[torch.Tensor, float]
+    accelerator: Accelerator,
+    metric_tensor: torch.Tensor | float,
 ) -> float:
-    """Aggregate gathered tensors
+    """Aggregate gathered tensors.
 
     :param accelerator: Accelerator object
     :type accelerator: accelerate.Accelerator
@@ -990,14 +1014,15 @@ def aggregate_metrics_across_gpus(
     :rtype: float
     """
     all_metrics = gather_tensor(metric_tensor, accelerator)
-    avg_metrics = all_metrics.mean().item()
-    return avg_metrics
+    return all_metrics.mean().item()
 
 
 def save_llm_checkpoint(
-    agent: LLMAlgorithm, checkpoint_path: str | None, weights_only: bool = False
+    agent: LLMAlgorithm,
+    checkpoint_path: str | None,
+    weights_only: bool = False,
 ) -> None:
-    """Checkpoint the LLM
+    """Checkpoint the LLM.
 
     :param agent: Agent
     :type agent: LLMAlgorithm
@@ -1009,7 +1034,7 @@ def save_llm_checkpoint(
     assert agent.actor is not None, "Actor is not initialized"
     base_path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
     path = base_path + f"/{agent.algo}"
-    os.makedirs(path, exist_ok=True)
+    Path(path).mkdir(parents=True, exist_ok=True)
     if agent.accelerator is not None:
         agent.accelerator.wait_for_everyone()
         agent.save_checkpoint(path, weights_only=weights_only)
@@ -1019,13 +1044,15 @@ def save_llm_checkpoint(
 
 
 def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
-    """Consolidate mutations across processes during LLM fintuning
+    """Consolidate mutations across processes during LLM fintuning.
 
     :param population: Population of agents
     :type population: list[EvolvableAlgorithm]
     """
     if not isinstance(population[0], LLMAlgorithm):
-        warnings.warn("Consolidate mutations is only supported for LLMAlgorithm.")
+        warnings.warn(
+            "Consolidate mutations is only supported for LLMAlgorithm.", stacklevel=2
+        )
         return
     for agent in population:
         assert agent.actor is not None, "Actor is not initialized"

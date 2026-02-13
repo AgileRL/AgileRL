@@ -33,7 +33,7 @@ we show our implementation of the SimBa residual block, as well as the function 
 
     .. code-block:: python
 
-        from typing import Optional, Dict
+        from typing import Any
         from collections import OrderedDict
 
         import torch.nn as nn
@@ -87,7 +87,7 @@ we show our implementation of the SimBa residual block, as well as the function 
             output_size: int,
             hidden_size: int,
             num_blocks: int,
-            output_activation: Optional[str] = None,
+            output_activation: str | None = None,
             scale_factor: float = 4.0,
             device: DeviceType = "cpu",
             name: str = "simba",
@@ -105,7 +105,7 @@ we show our implementation of the SimBa residual block, as well as the function 
             :param num_blocks: Number of residual blocks.
             :type num_blocks: int
             :param output_activation: Activation function for output layer.
-            :type output_activation: Optional[str]
+            :type output_activation: str | None
             :param scale_factor: Scale factor for the hidden layer.
             :type scale_factor: float, optional
             :param device: Device to use. Defaults to "cpu".
@@ -116,7 +116,7 @@ we show our implementation of the SimBa residual block, as well as the function 
             :return: Residual block.
             :rtype: nn.Sequential
             """
-            net_dict: Dict[str, nn.Module] = OrderedDict()
+            net_dict: dict[str, nn.Module] = OrderedDict()
 
             # Initial dense layer
             net_dict[f"{name}_linear_layer_input"] = nn.Linear(
@@ -148,7 +148,7 @@ mutate its hyperparameters through class methods wrapped by the ``@mutation`` de
 
     .. code-block:: python
 
-        from typing import Any, Dict, Optional
+        from typing import Any
 
         import numpy as np
         import torch
@@ -171,7 +171,7 @@ mutate its hyperparameters through class methods wrapped by the ``@mutation`` de
             :param num_outputs: Output layer dimension
             :type num_outputs: int
             :param hidden_size: Hidden layer(s) size
-            :type hidden_size: List[int]
+            :type hidden_size: list[int]
             :param num_blocks: Number of residual blocks that compose the network
             :type num_blocks: int
             :param output_activation: Output activation layer, defaults to None
@@ -198,7 +198,7 @@ mutate its hyperparameters through class methods wrapped by the ``@mutation`` de
                 num_outputs: int,
                 hidden_size: int,
                 num_blocks: int,
-                output_activation: str = None,
+                output_activation: str | None = None,
                 scale_factor: int = 4,
                 min_blocks: int = 1,
                 max_blocks: int = 4,
@@ -235,7 +235,7 @@ mutate its hyperparameters through class methods wrapped by the ``@mutation`` de
                 )
 
             @property
-            def net_config(self) -> Dict[str, Any]:
+            def net_config(self) -> dict[str, Any]:
                 """Returns model configuration in dictionary."""
                 net_config = self.init_dict.copy()
                 for attr in ["num_inputs", "num_outputs", "device", "name"]:
@@ -280,7 +280,7 @@ mutate its hyperparameters through class methods wrapped by the ``@mutation`` de
                     return self.add_node()
 
             @mutation(MutationType.NODE)
-            def add_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, int]:
+            def add_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
                 """Adds nodes to residual blocks of the neural network.
 
                 :param numb_new_nodes: Number of nodes to add, defaults to None
@@ -295,7 +295,7 @@ mutate its hyperparameters through class methods wrapped by the ``@mutation`` de
                 return {"numb_new_nodes": numb_new_nodes}
 
             @mutation(MutationType.NODE)
-            def remove_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, int]:
+            def remove_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
                 """Removes nodes from hidden layer of neural network.
 
                 :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
