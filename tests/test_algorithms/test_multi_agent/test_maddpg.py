@@ -649,21 +649,52 @@ def test_initialize_maddpg_with_evo_networks(
     maddpg.clean_up()
 
 
+@pytest.mark.parametrize(
+    "actor_networks,critic_networks,expected_error,error_match",
+    [
+        (
+            [],
+            [],
+            AssertionError,
+            None,
+        ),
+        (
+            ModuleDict(
+                {
+                    "agent_0": nn.Linear(6, 2),
+                    "agent_1": nn.Linear(6, 2),
+                    "other_agent_0": nn.Linear(6, 2),
+                },
+            ),
+            ModuleDict(
+                {
+                    "agent_0": nn.Linear(8, 1),
+                    "agent_1": nn.Linear(8, 1),
+                    "other_agent_0": nn.Linear(8, 1),
+                },
+            ),
+            TypeError,
+            "All actor networks must be instances of EvolvableModule",
+        ),
+    ],
+)
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_maddpg_with_incorrect_evo_networks(
     compile_mode,
     ma_vector_space,
     ma_discrete_space,
+    actor_networks,
+    critic_networks,
+    expected_error,
+    error_match,
 ):
-    evo_actors = []
-    evo_critics = []
-    with pytest.raises(AssertionError):
+    with pytest.raises(expected_error, match=error_match):
         MADDPG(
             observation_spaces=ma_vector_space,
             action_spaces=ma_discrete_space,
             agent_ids=["agent_0", "agent_1", "other_agent_0"],
-            actor_networks=evo_actors,
-            critic_networks=evo_critics,
+            actor_networks=actor_networks,
+            critic_networks=critic_networks,
             torch_compiler=compile_mode,
         )
 

@@ -30,6 +30,35 @@ def head_config():
 
 
 @pytest.mark.parametrize(
+    "observation_space, action_space, expect_error",
+    [
+        ("vector_space", "discrete_space", None),
+        ("dict_space", "discrete_space", None),
+        ("discrete_space", "discrete_space", None),
+        ("image_space", "discrete_space", None),
+        ("vector_space", "vector_space", ValueError),
+    ],
+)
+def test_q_network_initialization_action_space_validation(
+    observation_space,
+    action_space,
+    expect_error,
+    request,
+):
+    """QNetwork raises ValueError when action_space is not Discrete or MultiDiscrete."""
+    observation_space = request.getfixturevalue(observation_space)
+    action_space = request.getfixturevalue(action_space)
+    if expect_error is not None:
+        with pytest.raises(
+            expect_error, match="Action space must be either Discrete or MultiDiscrete"
+        ):
+            QNetwork(observation_space, action_space)
+    else:
+        network = QNetwork(observation_space, action_space)
+        assert network.observation_space == observation_space
+
+
+@pytest.mark.parametrize(
     "observation_space, encoder_type",
     [
         ("dict_space", "multi_input"),

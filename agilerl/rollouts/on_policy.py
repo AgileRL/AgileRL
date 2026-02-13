@@ -101,14 +101,11 @@ def _collect_rollouts(
             agent.action_space,
             spaces.Box,
         ):
-            if policy.squash_output:
-                clipped_action = policy.scale_action(action)
-            else:
-                clipped_action = np.clip(
-                    action,
-                    agent.action_space.low,
-                    agent.action_space.high,
-                )
+            clipped_action = np.clip(
+                action,
+                agent.action_space.low,
+                agent.action_space.high,
+            )
         else:
             clipped_action = action
 

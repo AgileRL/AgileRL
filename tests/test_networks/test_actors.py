@@ -15,7 +15,11 @@ from agilerl.modules import (
     EvolvableSimBa,
 )
 from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.actors import DeterministicActor, StochasticActor
+from agilerl.networks.actors import (
+    DeterministicActor,
+    StochasticActor,
+    get_output_bounds,
+)
 from agilerl.networks.base import EvolvableNetwork
 from tests.helper_functions import (
     assert_close_dict,
@@ -28,6 +32,52 @@ from tests.helper_functions import (
 @pytest.fixture(scope="module")
 def head_config():
     return asdict(MlpNetConfig(hidden_size=[64, 64]))
+
+
+@pytest.mark.parametrize(
+    "output_activation,expect_success",
+    [
+        ("Tanh", True),
+        ("Sigmoid", True),
+        ("Softmax", True),
+        ("GumbelSoftmax", True),
+        ("Softsign", True),
+        ("InvalidActivation", False),
+    ],
+)
+def test_get_output_bounds(output_activation, expect_success):
+    """get_output_bounds raises ValueError for invalid output_activation."""
+    if expect_success:
+        get_output_bounds(output_activation)
+    else:
+        with pytest.raises(ValueError, match="invalid output activation function"):
+            get_output_bounds(output_activation)
+
+
+def test_evolvable_distribution_experimental_log_prob_entropy_require_forward(
+    vector_space, discrete_space
+):
+    """EvolvableDistribution (experimental) raises ValueError when log_prob or entropy called before forward."""
+    from agilerl.networks.distributions_experimental import EvolvableDistribution
+
+    observation_space = vector_space
+    action_space = discrete_space
+    network = StochasticActor(
+        observation_space,
+        action_space,
+        use_experimental_distribution=True,
+    )
+    # head_net is the EvolvableDistribution; dist is set only after forward()
+    evo_dist = network.head_net
+    assert evo_dist.dist is None
+    with pytest.raises(
+        ValueError, match="Distribution not initialized. Call forward first."
+    ):
+        evo_dist.log_prob(torch.zeros(1, 1, dtype=torch.long))
+    with pytest.raises(
+        ValueError, match="Distribution not initialized. Call forward first."
+    ):
+        evo_dist.entropy()
 
 
 @pytest.mark.parametrize("action_space", ["vector_space"])

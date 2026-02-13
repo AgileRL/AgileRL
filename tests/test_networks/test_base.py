@@ -106,6 +106,57 @@ def test_network_incorrect_initialization(vector_space):
         InvalidCustomNetwork(vector_space)
 
 
+def test_network_encoder_cls_must_be_evolvable_module(vector_space):
+    """EvolvableNetwork raises TypeError when encoder_cls is not a subclass of EvolvableModule."""
+
+    class BadEncoderNetwork(EvolvableNetwork):
+        def __init__(self, observation_space):
+            super().__init__(
+                observation_space,
+                encoder_cls=torch.nn.Linear,
+                encoder_config={"hidden_size": [32]},
+            )
+
+        def build_network_head(self, *args, **kwargs):
+            pass
+
+        def forward(self, x):
+            return x
+
+    with pytest.raises(
+        TypeError, match="Encoder class must be a subclass of EvolvableModule"
+    ):
+        BadEncoderNetwork(vector_space)
+
+
+def test_network_forward_head_raises_without_head_net(vector_space):
+    """EvolvableNetwork.forward_head raises AttributeError when network has no head_net."""
+
+    class NoHeadNet(EvolvableNetwork):
+        def __init__(self, obs_space):
+            super().__init__(obs_space)
+
+        def build_network_head(self, *a, **k):
+            pass
+
+        def forward(self, x):
+            return x
+
+    net_no_head = NoHeadNet(vector_space)
+    latent = torch.zeros(1, net_no_head.latent_dim)
+    with pytest.raises(AttributeError, match="head_net attribute"):
+        net_no_head.forward_head(latent)
+
+
+def test_network_initialize_hidden_state_raises_when_not_recurrent(vector_space):
+    """EvolvableNetwork.initialize_hidden_state raises ValueError for non-recurrent networks."""
+    network = CustomNetwork(vector_space)
+    with pytest.raises(
+        ValueError, match="Cannot initialize hidden state for non-recurrent"
+    ):
+        network.initialize_hidden_state(1)
+
+
 @pytest.mark.parametrize(
     "observation_space, encoder_type",
     [

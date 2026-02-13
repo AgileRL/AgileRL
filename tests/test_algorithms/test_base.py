@@ -261,6 +261,53 @@ class DummyRLAlgorithm(RLAlgorithm):
         return
 
 
+class DummyRLAlgorithmNoPolicy(RLAlgorithm):
+    """Algorithm that has a policy group but we clear policy flag so get_policy() raises."""
+
+    def __init__(self, observation_space, action_space, index=0):
+        super().__init__(
+            observation_space=observation_space,
+            action_space=action_space,
+            index=index,
+        )
+        num_outputs = (
+            action_space.n
+            if hasattr(action_space, "n")
+            else int(np.prod(action_space.shape))
+        )
+        num_inputs = (
+            observation_space.shape[0]
+            if hasattr(observation_space, "shape")
+            else observation_space.n
+        )
+        self.dummy_actor = EvolvableMLP(
+            num_inputs,
+            num_outputs,
+            hidden_size=[8],
+            device=self.device,
+        )
+        self.lr = 0.01
+        self.dummy_optimizer = OptimizerWrapper(
+            torch.optim.Adam,
+            self.dummy_actor,
+            self.lr,
+            network_names=["dummy_actor"],
+            lr_name="lr",
+        )
+        self.register_network_group(
+            NetworkGroup(eval_network=self.dummy_actor, policy=True),
+        )
+
+    def get_action(self, *args, **kwargs):
+        return
+
+    def learn(self, *args, **kwargs):
+        return
+
+    def test(self, *args, **kwargs):
+        return
+
+
 class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
     def __init__(
         self,
@@ -405,6 +452,36 @@ def test_initialise_multi_agent(observation_space, action_space, agent_ids, requ
 
     agent = DummyMARLAlgorithm(obs_spaces, act_spaces, agent_ids=agent_ids, index=0)
     assert agent is not None
+
+
+@pytest.mark.parametrize(
+    "observation_spaces, action_spaces, error_match",
+    [
+        (42, 42, "Observation spaces must be a list or dictionary"),
+        ("not_a_list", "not_a_list", "Observation spaces must be a list or dictionary"),
+    ],
+)
+def test_multi_agent_algorithm_observation_spaces_type_error(
+    observation_spaces, action_spaces, error_match
+):
+    """MultiAgentRLAlgorithm raises TypeError when observation_spaces is not list or dict."""
+    agent_ids = ["agent_0", "agent_1"]
+    with pytest.raises(TypeError, match=error_match):
+        DummyMARLAlgorithm(
+            observation_spaces,
+            action_spaces,
+            agent_ids=agent_ids,
+            index=0,
+        )
+
+
+def test_get_policy_raises_when_no_policy_registered(vector_space, discrete_space):
+    """get_policy() raises AttributeError when no policy network has been registered."""
+    agent = DummyRLAlgorithmNoPolicy(vector_space, discrete_space, index=0)
+    # Remove policy group so get_policy() has nothing to return
+    agent.registry.groups = [g for g in agent.registry.groups if not g.policy]
+    with pytest.raises(AttributeError, match="No policy network has been registered"):
+        agent.get_policy()
 
 
 def test_population_single_agent(vector_space, discrete_space):

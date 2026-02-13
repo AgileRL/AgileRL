@@ -102,6 +102,61 @@ def test_incorrect_instantiation(
 
 
 @pytest.mark.parametrize(
+    "input_shape, channel_size, kernel_size, stride_size, num_outputs, block_type, error_match",
+    [
+        (
+            [1, 16, 16],
+            [32],
+            [(3, 3)],
+            [(1, 1)],
+            10,
+            "InvalidBlock",
+            "Invalid block type",
+        ),
+        (
+            [1, 16, 16],
+            [32],
+            [(3,)],  # Conv2d expects 2D kernel
+            [(1, 1)],
+            10,
+            "Conv2d",
+            "have a length of",
+        ),
+        (
+            [1, 64],
+            [32],
+            [(3, 3)],  # Conv1d expects 1D kernel
+            [1],
+            10,
+            "Conv1d",
+            "have a length of",
+        ),
+    ],
+)
+def test_instantiation_raises_value_error(
+    input_shape,
+    channel_size,
+    kernel_size,
+    stride_size,
+    num_outputs,
+    block_type,
+    error_match,
+    device,
+):
+    """EvolvableCNN raises ValueError for invalid block_type or kernel size mismatch."""
+    with pytest.raises(ValueError, match=error_match):
+        EvolvableCNN(
+            input_shape=input_shape,
+            channel_size=channel_size,
+            kernel_size=kernel_size,
+            stride_size=stride_size,
+            num_outputs=num_outputs,
+            block_type=block_type,
+            device=device,
+        )
+
+
+@pytest.mark.parametrize(
     "input_shape, channel_size, kernel_size, stride_size, num_outputs",
     [([1, 16, 16], [3, 32], [3, 3], [2, 2], 10)],  # input_shape is (C, D, H, W)
 )

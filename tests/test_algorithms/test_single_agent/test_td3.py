@@ -209,6 +209,48 @@ def test_initialize_td3_with_actor_network(
     td3.clean_up()
 
 
+@pytest.mark.parametrize(
+    "invalid_kind, error_match",
+    [
+        ("non_evolvable_actor", "actor network is of type"),
+        ("non_evolvable_critic_0", "critic network at index 0"),
+        ("non_evolvable_critic_1", "critic network at index 1"),
+    ],
+)
+def test_initialize_td3_with_non_evolvable_networks_raises_type_error(
+    vector_space,
+    simple_mlp,
+    simple_mlp_critic,
+    invalid_kind,
+    error_match,
+):
+    """TD3 raises TypeError when actor_network or critic_networks are not EvolvableModule."""
+    observation_space = vector_space
+    evo_actor = MakeEvolvable(simple_mlp, torch.randn(1, 4))
+    evo_critic = MakeEvolvable(simple_mlp_critic, torch.randn(1, 6))
+
+    if invalid_kind == "non_evolvable_actor":
+        actor_network = nn.Linear(4, 2)
+        critic_networks = [
+            evo_critic,
+            MakeEvolvable(simple_mlp_critic, torch.randn(1, 6)),
+        ]
+    elif invalid_kind == "non_evolvable_critic_0":
+        actor_network = evo_actor
+        critic_networks = [nn.Linear(6, 1), evo_critic]
+    else:
+        actor_network = evo_actor
+        critic_networks = [evo_critic, nn.Linear(6, 1)]
+
+    with pytest.raises(TypeError, match=error_match):
+        TD3(
+            observation_space,
+            vector_space,
+            actor_network=actor_network,
+            critic_networks=critic_networks,
+        )
+
+
 # Can initialize td3 with an actor network
 # TODO: This will be deprecated in the future
 @pytest.mark.parametrize(

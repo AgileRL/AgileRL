@@ -158,6 +158,30 @@ class MockMultiAgentAlgorithm(MultiAgentRLAlgorithm):
 
 
 class TestOptimizerWrapper:
+    @pytest.mark.parametrize(
+        "invalid_networks,error_match",
+        [
+            (None, "Expected a single / list of torch.nn.Module objects"),
+            ({}, "Expected a single / list of torch.nn.Module objects"),
+            (
+                [None, MockEvolvableNetwork()],
+                "Expected a single / list of torch.nn.Module objects",
+            ),
+        ],
+    )
+    def test_init_raises_type_error_for_non_module_networks(
+        self, invalid_networks, error_match
+    ):
+        """OptimizerWrapper raises TypeError when networks is not a Module or list of Modules."""
+        with pytest.raises(TypeError, match=error_match):
+            OptimizerWrapper(
+                torch.optim.Adam,
+                invalid_networks,
+                0.001,
+                network_names=["network"],
+                lr_name="lr",
+            )
+
     def test_init_single_network(self):
         """Test initializing with a single network like in DQN."""
         network = MockEvolvableNetwork()
@@ -337,6 +361,29 @@ class TestOptimizerWrapper:
         assert wrapper.optimizer.defaults["betas"] == (0.9, 0.999)
         assert wrapper.optimizer.defaults["eps"] == 1e-8
 
+    @pytest.mark.parametrize(
+        "invalid_access,expected_error",
+        [
+            (lambda w: w["agent_0"], TypeError),
+            (lambda w: w.items(), TypeError),
+            (lambda w: w.values(), TypeError),
+        ],
+    )
+    def test_single_optimizer_raises_on_dict_like_access(
+        self, invalid_access, expected_error
+    ):
+        """Single-agent OptimizerWrapper raises TypeError for __getitem__, items(), values()."""
+        network = MockEvolvableNetwork()
+        wrapper = OptimizerWrapper(
+            torch.optim.Adam,
+            network,
+            0.001,
+            network_names=["network"],
+            lr_name="lr",
+        )
+        with pytest.raises(expected_error, match="Can't"):
+            invalid_access(wrapper)
+
     def test_getitem_in_multiagent(self):
         """Test indexing via __getitem__ in multi-agent setup."""
         with (
@@ -457,6 +504,10 @@ class TestOptimizerWrapper:
         for _agent_name, opt in multi_wrapper.optimizer.items():
             opt.zero_grad = original_methods[_agent_name]
 
+        # Multi-agent wrapper.zero_grad() must not be called; it raises TypeError
+        with pytest.raises(TypeError, match="individual optimizer"):
+            multi_wrapper.zero_grad()
+
     def test_step(self):
         """Test step method across different setups."""
         # Single network case
@@ -507,6 +558,10 @@ class TestOptimizerWrapper:
         # Restore methods
         for _agent_name, opt in multi_wrapper.optimizer.items():
             opt.step = original_methods[_agent_name]
+
+        # Multi-agent wrapper.step() must not be called; it raises TypeError
+        with pytest.raises(TypeError, match="individual optimizer"):
+            multi_wrapper.step()
 
     def test_state_dict_and_load_state_dict(self):
         """Test state_dict and load_state_dict methods."""

@@ -1402,3 +1402,33 @@ def test_ppo_collect_rollouts(
     assert ppo.fitness == ppo.fitness
     assert ppo.steps == ppo.steps
     ppo.clean_up()
+
+
+@pytest.mark.parametrize(
+    "use_rollout_buffer, expect_runtime_error",
+    [
+        (True, False),
+        (False, True),
+    ],
+)
+def test_collect_rollouts_requires_rollout_buffer(
+    vector_space,
+    discrete_space,
+    use_rollout_buffer,
+    expect_runtime_error,
+):
+    """collect_rollouts raises RuntimeError when agent has use_rollout_buffer=False."""
+    ppo = PPO(
+        observation_space=vector_space,
+        action_space=discrete_space,
+        use_rollout_buffer=use_rollout_buffer,
+        learn_step=5,
+        num_envs=1,
+    )
+    env = DummyEnv(state_size=vector_space.shape, vect=True, num_envs=1)
+    if expect_runtime_error:
+        with pytest.raises(RuntimeError, match="use_rollout_buffer=True"):
+            collect_rollouts(ppo, env, n_steps=5)
+    else:
+        collect_rollouts(ppo, env, n_steps=5)
+    ppo.clean_up()

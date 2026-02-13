@@ -12,7 +12,7 @@ from gymnasium import spaces
 from peft import LoraConfig
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.hpo.mutation import MutationError, Mutations
+from agilerl.hpo.mutation import MutationError, Mutations, get_exp_layer
 from agilerl.modules import EvolvableBERT, ModuleDict
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
@@ -716,6 +716,19 @@ def test_mutation_applies_parameter_mutations(
         assert mutation_found, f"Mutation not applied for agent index {old.index}"
 
     del mutations, mutated_population, new_population
+
+
+def test_get_exp_layer_raises_for_non_evolvable_module():
+    """get_exp_layer raises TypeError when offspring is not an EvolvableModule."""
+    with pytest.raises(TypeError, match="Bandit algorithm architecture.*not supported"):
+        get_exp_layer(torch.nn.Linear(2, 2))
+
+
+def test_architecture_mutate_raises_for_unsupported_individual():
+    """Mutations.architecture_mutate raises MutationError when individual is not RLAlgorithm or MultiAgentRLAlgorithm."""
+    mutations = Mutations(0, 1, 0.5, 0, 0, 0, 0.5, device="cpu")
+    with pytest.raises(MutationError, match="Architecture mutations are not supported"):
+        mutations.architecture_mutate("not_an_algorithm")
 
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
