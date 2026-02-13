@@ -3215,7 +3215,7 @@ def test_load_distributed_actor_value_error(
     grpo.accelerator = accelerator
     with pytest.raises(
         TypeError,
-        match="argument should be a str or an os.PathLike object.*not 'NoneType'",
+        match=r"(argument should be a str or an os\.PathLike object|expected str, bytes or os\.PathLike object).*not\s+'?NoneType'?",
     ):
         grpo._load_distributed_actor(None)
     grpo.clean_up()
