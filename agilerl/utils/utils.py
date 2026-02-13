@@ -1,8 +1,8 @@
 import logging
-import os
 import warnings
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
@@ -46,13 +46,13 @@ SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.
 
 def make_vect_envs(
     env_name: str | None = None,
-    num_envs=1,
+    num_envs: int = 1,
     *,
-    make_env: Callable | None = None,
+    make_env: Callable[..., Any] | None = None,
     should_async_vector: bool = True,
-    **env_kwargs,
-):
-    """Returns async-vectorized gym environments.
+    **env_kwargs: Any,
+) -> Any:
+    """Return async-vectorized gym environments.
 
     :param env_name: Gym environment name
     :type env_name: str
@@ -64,13 +64,14 @@ def make_vect_envs(
     :type should_async_vector: bool, optional
     """
     if env_name is None and make_env is None:
-        raise ValueError("Either env_name or make_env must be provided")
+        msg = "Either env_name or make_env must be provided"
+        raise ValueError(msg)
 
     vectorize = (
         gym.vector.AsyncVectorEnv if should_async_vector else gym.vector.SyncVectorEnv
     )
 
-    def default_make_env():
+    def default_make_env() -> gym.Env:
         return gym.make(env_name, **env_kwargs)
 
     make_env = make_env or default_make_env
@@ -83,7 +84,7 @@ def make_multi_agent_vect_envs(
     num_envs: int = 1,
     **env_kwargs: Any,
 ) -> AsyncPettingZooVecEnv:
-    """Returns async-vectorized PettingZoo parallel environments.
+    """Return async-vectorized PettingZoo parallel environments.
 
     :param env: PettingZoo parallel environment object
     :type env: pettingzoo.utils.env.ParallelEnv
@@ -102,7 +103,7 @@ def make_skill_vect_envs(
     skill: Any,
     num_envs: int = 1,
 ) -> gym.vector.AsyncVectorEnv:
-    """Returns async-vectorized gym environments.
+    """Return async-vectorized gym environments.
 
     :param env_name: Gym environment name
     :type env_name: str
@@ -119,7 +120,7 @@ def make_skill_vect_envs(
 def observation_space_channels_to_first(
     observation_space: SupportedObservationSpace,
 ) -> SupportedObservationSpace:
-    """Swaps the channel order of an observation space from [H, W, C] -> [C, H, W].
+    """Swap the channel order of an observation space from [H, W, C] -> [C, H, W].
 
     :param observation_space: Observation space
     :type observation_space: spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete
@@ -127,7 +128,7 @@ def observation_space_channels_to_first(
     :rtype: spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete
     """
     if isinstance(observation_space, spaces.Dict):
-        for key in observation_space.spaces.keys():
+        for key in observation_space.spaces:
             if (
                 isinstance(observation_space[key], spaces.Box)
                 and len(observation_space[key].shape) == 3
@@ -182,7 +183,7 @@ def default_progress_bar(
     max_steps: int,
     accelerator: Accelerator | None = None,
 ) -> tqdm.tqdm:
-    """Returns a default progress bar.
+    """Return a default progress bar.
 
     :param max_steps: Maximum number of steps
     :type max_steps: int
@@ -230,9 +231,9 @@ def create_population(
     device: str = "cpu",
     accelerator: Any | None = None,
     torch_compiler: Any | None = None,
-    algo_kwargs: dict[str, Any] | None = {},
+    algo_kwargs: dict[str, Any] | None = None,
 ) -> PopulationType:
-    """Returns population of identical agents.
+    """Return population of identical agents.
 
     :param algo: RL algorithm
     :type algo: str
@@ -265,6 +266,8 @@ def create_population(
     :param algo_kwargs: Additional keyword arguments for the algorithm
     :type algo_kwargs: dict, optional
     """
+    if algo_kwargs is None:
+        algo_kwargs = {}
     population = []
     if algo == "DQN":
         for idx in range(population_size):
@@ -656,7 +659,7 @@ def save_population_checkpoint(
     overwrite_checkpoints: bool,
     accelerator: Accelerator | None = None,
 ) -> None:
-    """Saves checkpoint of population of agents.
+    """Save checkpoint of population of agents.
 
     :param population: Population of agents
     :type population: list[PopulationType]
@@ -711,7 +714,7 @@ def tournament_selection_and_mutation(
     accelerator: Accelerator | None = None,
     language_model: bool | None = False,
 ) -> PopulationType:
-    """Performs tournament selection and mutation on a population of agents.
+    """Perform tournament selection and mutation on a population of agents.
 
     :param population: Population of agents
     :type population: list[PopulationType]
@@ -753,8 +756,7 @@ def tournament_selection_and_mutation(
         # Save temporary models for accelerator processes
         accel_temp_models_path = f"models/{env_name}"
         if accelerator.is_main_process:
-            if not os.path.exists(accel_temp_models_path):
-                os.makedirs(accel_temp_models_path)
+            Path(accel_temp_models_path).mkdir(parents=True, exist_ok=True)
         # Need to unwrap models from acccelerator before selecting and mutating
         accelerator.wait_for_everyone()
         for model in population:
@@ -803,7 +805,7 @@ def init_wandb(
     project: str = "AgileRL",
     addl_args: dict[str, Any] | None = None,
 ) -> None:
-    """Initializes wandb for logging hyperparameters and run metadata.
+    """Initialize wandb for logging hyperparameters and run metadata.
 
     :param algo: RL algorithm
     :type algo: str
@@ -823,7 +825,7 @@ def init_wandb(
         if wandb_api_key is not None:
             wandb.login(key=wandb_api_key)
         else:
-            warnings.warn("Must login to wandb with API key.")
+            warnings.warn("Must login to wandb with API key.", stacklevel=2)
 
     config_dict = {}
     if init_hyperparams is not None:
@@ -919,19 +921,28 @@ def calculate_vectorized_scores(
 
 
 def print_hyperparams(pop: PopulationType) -> None:
-    """Prints current hyperparameters of agents in a population and their fitnesses.
+    """Print current hyperparameters of agents in a population and their fitnesses.
 
     :param pop: Population of agents
     :type pop: list[EvolvableAlgorithm]
     """
     for agent in pop:
-        print(
-            f"Agent ID: {agent.index}    Mean 5 Fitness: {np.mean(agent.fitness[-5:]):.2f}    Attributes: {EvolvableAlgorithm.inspect_attributes(agent)}",
+        mean_fitness = (
+            np.mean(agent.fitness[-5:]).item()
+            if len(agent.fitness) > 0
+            else float("nan")
         )
+        attrs = EvolvableAlgorithm.inspect_attributes(agent)
+        lines = [
+            f"Agent ID: {agent.index}  |  Mean 5 Fitness: {mean_fitness:.2f}",
+            "Attributes:",
+            *[f"  {k}: {v}" for k, v in sorted(attrs.items())],
+        ]
+        print("\n".join(lines) + "\n")
 
 
 def plot_population_score(pop: PopulationType) -> None:
-    """Plots the fitness scores of agents in a population.
+    """Plot the fitness scores of agents in a population.
 
     :param pop: Population of agents
     :type pop: list[EvolvableAlgorithm]
@@ -947,7 +958,19 @@ def plot_population_score(pop: PopulationType) -> None:
     plt.show()
 
 
-def get_env_defined_actions(info, agents):
+def get_env_defined_actions(
+    info: dict[str, Any],
+    agents: list[str],
+) -> dict[str, Any] | None:
+    """Get the environment-defined actions for a list of agents.
+
+    :param info: Info dictionary
+    :type info: dict[str, Any]
+    :param agents: List of agents
+    :type agents: list[str]
+    :return: Environment-defined actions
+    :rtype: dict[str, Any]
+    """
     env_defined_actions = {
         agent: info[agent].get("env_defined_action", None) for agent in agents
     }
@@ -962,7 +985,7 @@ def gather_tensor(
     tensor: torch.Tensor | float,
     accelerator: Accelerator,
 ) -> torch.Tensor:
-    """Gather tensors from gpus
+    """Gather tensors from gpus.
 
     :param tensor: Tensor to gather
     :type tensor: torch.Tensor
@@ -974,15 +997,14 @@ def gather_tensor(
     if not isinstance(tensor, torch.Tensor):
         tensor = torch.tensor(tensor, device=accelerator.device)
     tensor = tensor.to(accelerator.device)
-    gathered_tensors = accelerator.gather(tensor)
-    return gathered_tensors
+    return accelerator.gather(tensor)
 
 
 def aggregate_metrics_across_gpus(
     accelerator: Accelerator,
     metric_tensor: torch.Tensor | float,
 ) -> float:
-    """Aggregate gathered tensors
+    """Aggregate gathered tensors.
 
     :param accelerator: Accelerator object
     :type accelerator: accelerate.Accelerator
@@ -992,8 +1014,7 @@ def aggregate_metrics_across_gpus(
     :rtype: float
     """
     all_metrics = gather_tensor(metric_tensor, accelerator)
-    avg_metrics = all_metrics.mean().item()
-    return avg_metrics
+    return all_metrics.mean().item()
 
 
 def save_llm_checkpoint(
@@ -1001,7 +1022,7 @@ def save_llm_checkpoint(
     checkpoint_path: str | None,
     weights_only: bool = False,
 ) -> None:
-    """Checkpoint the LLM
+    """Checkpoint the LLM.
 
     :param agent: Agent
     :type agent: LLMAlgorithm
@@ -1013,7 +1034,7 @@ def save_llm_checkpoint(
     assert agent.actor is not None, "Actor is not initialized"
     base_path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
     path = base_path + f"/{agent.algo}"
-    os.makedirs(path, exist_ok=True)
+    Path(path).mkdir(parents=True, exist_ok=True)
     if agent.accelerator is not None:
         agent.accelerator.wait_for_everyone()
         agent.save_checkpoint(path, weights_only=weights_only)
@@ -1023,13 +1044,15 @@ def save_llm_checkpoint(
 
 
 def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
-    """Consolidate mutations across processes during LLM fintuning
+    """Consolidate mutations across processes during LLM fintuning.
 
     :param population: Population of agents
     :type population: list[EvolvableAlgorithm]
     """
     if not isinstance(population[0], LLMAlgorithm):
-        warnings.warn("Consolidate mutations is only supported for LLMAlgorithm.")
+        warnings.warn(
+            "Consolidate mutations is only supported for LLMAlgorithm.", stacklevel=2
+        )
         return
     for agent in population:
         assert agent.actor is not None, "Actor is not initialized"

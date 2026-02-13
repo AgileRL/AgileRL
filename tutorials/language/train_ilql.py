@@ -93,7 +93,7 @@ def train(cfg):
     if train_cfg["optim_state_path"] is not None and os.path.exists(
         train_cfg["optim_state_path"],
     ):
-        print(f'loading optimizer state from: {train_cfg["optim_state_path"]}')
+        print(f"loading optimizer state from: {train_cfg['optim_state_path']}")
         optim.load_state_dict(
             torch.load(
                 train_cfg["optim_state_path"],
@@ -153,7 +153,7 @@ def train(cfg):
             if (train_cfg["hard_update_every"] is not None) and (
                 (step + 1) % train_cfg["hard_update_every"] == 0
             ):
-                accelerator.unwrap_model(model).hardUpdate()
+                accelerator.unwrap_model(model).hard_update()
             if (step + 1) % train_cfg["log_every"] == 0:
                 train_logs.log(
                     *postproc_fs,

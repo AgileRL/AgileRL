@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 from gymnasium.spaces import Space
@@ -8,7 +8,7 @@ from agilerl.typing import ActionType, PzStepReturn
 
 
 class PettingZooVecEnv:
-    """An abstract asynchronous, vectorized environment
+    """An abstract asynchronous, vectorized environment.
 
     References:
         https://github.com/openai/baselines/tree/master/baselines/common/vec_env
@@ -25,9 +25,9 @@ class PettingZooVecEnv:
 
     """
 
-    metadata: dict[str, Any] = {}
-    render_mode: str | None = None
-    closed: bool = False
+    metadata: ClassVar[dict[str, Any]] = {}
+    render_mode: ClassVar[str | None] = None
+    closed: ClassVar[bool] = False
     num_envs: int
     agents: list[str]
     num_agents: int
@@ -38,7 +38,7 @@ class PettingZooVecEnv:
         observation_spaces: dict[str, Space],
         action_spaces: list[Space],
         possible_agents: list[str],
-    ):
+    ) -> None:
         self.num_envs = num_envs
         self.agents = possible_agents
         self.num_agents = len(self.agents)
@@ -86,7 +86,7 @@ class PettingZooVecEnv:
         """Wait for the step taken with step_async()."""
 
     def step(self, actions: dict[str, np.ndarray]) -> PzStepReturn:
-        """Take an action for each parallel environment
+        """Take an action for each parallel environment.
 
         :param actions: Dictionary of vectorized actions for each agent.
         :type actions: dict[str, np.ndarray]
@@ -95,7 +95,7 @@ class PettingZooVecEnv:
         :rtype: tuple[dict[str, np.ndarray], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]
         """
         passed_actions_list = []
-        for env_idx, _ in enumerate(list(actions.values())[0]):
+        for env_idx, _ in enumerate(next(iter(actions.values()))):
             env_actions = {}
             for agent_id, action in actions.items():
                 agent_action = action[env_idx]
@@ -110,17 +110,18 @@ class PettingZooVecEnv:
                 env_actions[agent_id] = agent_action
 
             passed_actions_list.append(env_actions)
-        assert (
-            len(passed_actions_list) == self.num_envs
-        ), "Number of actions passed to the step function must be equal to the number of vectorized environments"
+        assert len(passed_actions_list) == self.num_envs, (
+            "Number of actions passed to the step function must be equal to the number of vectorized environments"
+        )
 
         self.step_async(passed_actions_list)
         return self.step_wait()
 
     def render(self) -> Any:
-        """Returns the rendered frames from the parallel environments."""
+        """Return the rendered frames from the parallel environments."""
+        msg = f"{self.__str__()} render function is not implemented."
         raise NotImplementedError(
-            f"{self.__str__()} render function is not implemented.",
+            msg,
         )
 
     def close(self, **kwargs: Any) -> None:
@@ -139,32 +140,32 @@ class PettingZooVecEnv:
         """Return the base environment."""
         return self
 
-    def _get_single_action_space(self, agent):
-        """Get an agents single action space
+    def _get_single_action_space(self, agent: str) -> Any:
+        """Get an agents single action space.
 
         :param agent: Name of agent
         :type agent: str
         """
         return self._single_action_spaces[agent]
 
-    def _get_action_space(self, agent):
-        """Get an agents action space
+    def _get_action_space(self, agent: str) -> Any:
+        """Get an agents action space.
 
         :param agent: Name of agent
         :type agent: str
         """
         return self._action_spaces[agent]
 
-    def _get_single_observation_space(self, agent):
-        """Get an agents single observation space
+    def _get_single_observation_space(self, agent: str) -> Any:
+        """Get an agents single observation space.
 
         :param agent: Name of agent
         :type agent: str
         """
         return self._single_observation_spaces[agent]
 
-    def _get_observation_space(self, agent):
-        """Get an agents observation space
+    def _get_observation_space(self, agent: str) -> Any:
+        """Get an agents observation space.
 
         :param agent: Name of agent
         :type agent: str

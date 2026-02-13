@@ -151,7 +151,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
                 device=device,
             )
             for state_dim, action_dim in zip(
-                state_dims.values(), action_dims.values(), strict=False
+                state_dims.values(),
+                action_dims.values(),
+                strict=False,
             )
         ]
         NET_CONFIG = None

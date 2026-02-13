@@ -60,14 +60,13 @@ def apply_chat_template(
         tokenize=False,
         continue_final_message=True,
     )
-    tokenized_prompt = tokenizer(
+    return tokenizer(
         [updated_prompt],
         return_tensors="pt",
         padding=True,
         padding_side="left",
         return_attention_mask=True,
     )
-    return tokenized_prompt
 
 
 class HuggingFaceGym(gym.Env, ABC):
@@ -103,7 +102,7 @@ class HuggingFaceGym(gym.Env, ABC):
         conversation_template: list[dict[str, str]],
         data_batch_size_per_gpu: int = 8,
         max_context_length: int | None = None,
-        min_completion_length: int = None,
+        min_completion_length: int | None = None,
         accelerator: Accelerator | None = None,
         seed: int = 42,
     ) -> None:
@@ -191,18 +190,20 @@ class HuggingFaceGym(gym.Env, ABC):
     def create_collate_fn(
         self,
         tokenizer: AutoTokenizer,
-        *args,
-        **kwargs,
+        *args: Any,
+        **kwargs: Any,
     ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
         """Create a collate function that applies the chat template to the batch of questions and answers."""
 
-    def __len__(self):
+    def __len__(self) -> int:
         """Return the length of the dataset."""
         if self.evaluation_mode:
             return len(self.test_dataloader.dataset)
         return len(self.train_dataloader.dataset)
 
-    def _reset_dataloaders(self, reset_train: bool = True, reset_test: bool = True):
+    def _reset_dataloaders(
+        self, reset_train: bool = True, reset_test: bool = True
+    ) -> None:
         """Reset the dataloaders to the beginning of the dataset.
 
         :param reset_train: Whether to reset the train dataloader, defaults to True
@@ -233,23 +234,27 @@ class HuggingFaceGym(gym.Env, ABC):
         :rtype: tuple[Dataset, Dataset]
         """
         dataset_type = "dataset" if dataset_type is None else dataset_type
-        filter_keyword = "prompt" if "prompt" in dataset.features.keys() else "question"
+        filter_keyword = "prompt" if "prompt" in dataset.features else "question"
         if self.max_context_length is None or not isinstance(
             dataset[0][filter_keyword],
             str,
         ):
             return dataset
         filtered_dataset = dataset.filter(
-            lambda x: len(self.tokenizer.encode(x[filter_keyword]))
-            <= self.max_context_length - self.min_completion_length,
+            lambda x: (
+                len(self.tokenizer.encode(x[filter_keyword]))
+                <= self.max_context_length - self.min_completion_length
+            ),
         )
         if len(filtered_dataset) == 0:
+            msg = f"No samples left in the {dataset_type} after filtering by the max context length constraint, use a larger max context length."
             raise ValueError(
-                f"No samples left in the {dataset_type} after filtering by the max context length constraint, use a larger max context length.",
+                msg,
             )
         if (dataset_difference := len(dataset) - len(filtered_dataset)) > 0:
             warnings.warn(
                 f"{dataset_difference} samples were filtered out of the {dataset_type} due to the max context length constraint.",
+                stacklevel=2,
             )
         return filtered_dataset
 
@@ -346,10 +351,12 @@ class ReasoningGym(HuggingFaceGym):
             self._reset_dataloaders()
             warnings.warn(
                 "env.reset() called with reset_dataloaders=True, this will reset the dataloaders to the beginning of the dataset, proceed with caution.",
+                stacklevel=2,
             )
         if self.reset_called:
             warnings.warn(
                 "env.reset() called more than once sequentially, it should typically follow with env.step().",
+                stacklevel=2,
             )
         self.reset_called = True
         new_tokenized_prompts = self._get_next_batch()
@@ -367,7 +374,7 @@ class ReasoningGym(HuggingFaceGym):
         # This is for a batch of completions (prompt_batch x group_size), List of tensors of length batch size, each tensor is a group of answers
         total_rewards = []
         for idx, (group_completion, answer, question) in enumerate(
-            zip(completions, self.answers, self.questions),
+            zip(completions, self.answers, self.questions, strict=False),
         ):
             completion_to_decode = group_completion[
                 :,
@@ -432,14 +439,14 @@ class ReasoningGym(HuggingFaceGym):
         :rtype: Callable[[list[dict[str, Any]]], dict[str, Any]]
         """
 
-        def collate_fn(batch):
+        def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
             questions = [item["question"] for item in batch]
             answers = [item["answer"] for item in batch]
 
             # Apply chat template to all samples
             tokenized_prompts = [
                 apply_chat_template(self.conversation_template, q, a, tokenizer)
-                for q, a in zip(questions, answers)
+                for q, a in zip(questions, answers, strict=False)
             ]
 
             return {
@@ -482,7 +489,7 @@ class PreferenceGym(HuggingFaceGym):
         max_context_length: int | None = None,
         min_completion_length: int | None = None,
         seed: int = 42,
-    ):
+    ) -> None:
         super().__init__(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
@@ -507,10 +514,12 @@ class PreferenceGym(HuggingFaceGym):
             self._reset_dataloaders()
             warnings.warn(
                 "env.reset() called with reset_dataloaders=True, this will reset the dataloaders to the beginning of the dataset, proceed with caution.",
+                stacklevel=2,
             )
         if self.reset_called:
             warnings.warn(
                 "env.reset() called more than once sequentially, it should typically follow with env.step().",
+                stacklevel=2,
             )
         self.reset_called = True
         return self._get_next_batch()
@@ -582,8 +591,8 @@ class PreferenceGym(HuggingFaceGym):
 
             # Compute the joint max length across both
             max_len = max(
-                max(len(ids) for ids in chosen_enc["input_ids"]),
-                max(len(ids) for ids in rejected_enc["input_ids"]),
+                *(len(ids) for ids in chosen_enc["input_ids"]),
+                *(len(ids) for ids in rejected_enc["input_ids"]),
             )
 
             max_len = (
@@ -631,7 +640,7 @@ def gather_if_zero3(
     zero_stage: int,
     params: list[torch.Tensor],
     modifier_rank: int | None = None,
-):
+) -> Generator[None, None, None]:
     """Conditional context manager for setting the zero stage for the model.
 
     :param zero_stage: The zero stage
@@ -681,8 +690,7 @@ def create_model_from_name_or_path(
             "torch_dtype": torch.bfloat16,
             "attn_implementation": "sdpa",
         }
-    model = AutoModelForCausalLM.from_pretrained(
+    return AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=model_name_or_path,
         **model_config,
     )
-    return model

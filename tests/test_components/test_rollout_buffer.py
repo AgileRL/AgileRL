@@ -181,7 +181,9 @@ class TestRolloutBufferDataAddition:
         assert np.array_equal(
             buffer.buffer.get("actions")[current_pos_idx, 0, 0].cpu().numpy(),
             action[0],
-        ), f"Expected action {action[0]} at position {current_pos_idx}, but got {buffer.buffer.get('actions')[current_pos_idx, 0].cpu().numpy()}"
+        ), (
+            f"Expected action {action[0]} at position {current_pos_idx}, but got {buffer.buffer.get('actions')[current_pos_idx, 0].cpu().numpy()}"
+        )
         assert buffer.buffer.get("rewards")[current_pos_idx, 0].item() == reward
         assert buffer.buffer.get("dones")[current_pos_idx, 0].item() == float(done)
         assert buffer.buffer.get("values")[current_pos_idx, 0].item() == value

@@ -190,7 +190,9 @@ def test_init_dpo(
     assert dpo.device == (
         dpo.accelerator.device
         if torch.cuda.is_available() and dpo.accelerator is not None
-        else "cuda" if torch.cuda.is_available() else "cpu"
+        else "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
     )
     assert dpo.index == 0
     assert dpo.scores == []

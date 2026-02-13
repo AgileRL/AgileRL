@@ -16,7 +16,7 @@ from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
 class CQN(RLAlgorithm):
-    """The CQN algorithm class. CQN paper: https://arxiv.org/abs/2006.04779
+    """The CQN algorithm class. CQN paper: https://arxiv.org/abs/2006.04779.
 
     :param observation_space: The observation space of the environment.
     :type observation_space: spaces.Space
@@ -117,8 +117,9 @@ class CQN(RLAlgorithm):
 
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
+                msg = f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule.",
+                    msg,
                 )
 
             # Need to make deepcopies for target and detached networks
@@ -129,7 +130,7 @@ class CQN(RLAlgorithm):
         else:
             net_config = {} if net_config is None else net_config
 
-            def create_actor():
+            def create_actor() -> QNetwork:
                 return QNetwork(
                     observation_space=observation_space,
                     action_space=action_space,
@@ -169,7 +170,7 @@ class CQN(RLAlgorithm):
         epsilon: float = 0,
         action_mask: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Returns the next action to take in the environment. Epsilon is the
+        """Return the next action to take in the environment. Epsilon is the
         probability of taking a random action, used for exploration.
         For greedy behaviour, set epsilon to 0.
 
@@ -213,7 +214,7 @@ class CQN(RLAlgorithm):
         return action
 
     def learn(self, experiences: tuple[torch.Tensor, ...]) -> float:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
         :type obs: list[torch.Tensor[float]]
@@ -268,6 +269,7 @@ class CQN(RLAlgorithm):
         for eval_param, target_param in zip(
             self.actor.parameters(),
             self.actor_target.parameters(),
+            strict=False,
         ):
             target_param.data.copy_(
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
@@ -279,8 +281,8 @@ class CQN(RLAlgorithm):
         swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
-    ):
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+    ) -> float:
+        """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
@@ -296,7 +298,7 @@ class CQN(RLAlgorithm):
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
-            for i in range(loop):
+            for _i in range(loop):
                 obs, info = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
@@ -311,7 +313,7 @@ class CQN(RLAlgorithm):
                     obs, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
-                    for idx, (d, t) in enumerate(zip(done, trunc)):
+                    for idx, (d, t) in enumerate(zip(done, trunc, strict=False)):
                         if (
                             d or t or (max_steps is not None and step == max_steps)
                         ) and not finished[idx]:

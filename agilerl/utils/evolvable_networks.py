@@ -33,7 +33,7 @@ def compile_model(
     model: nn.Module | ModuleDict[EvolvableModule],
     mode: str | None = "default",
 ) -> OptimizedModule | ModuleDict[EvolvableModule]:
-    """Compiles torch model if not already compiled
+    """Compiles torch model if not already compiled.
 
     :param model: torch model
     :type model: nn.Module | ModuleDict[EvolvableModule]
@@ -106,10 +106,8 @@ def is_vector_space(space: spaces.Space) -> bool:
     :return: True if the space is a vector space, False otherwise
     :rtype: bool
     """
-    return (
-        (isinstance(space, spaces.Box) and len(space.shape) in [0, 1])
-        or isinstance(space, spaces.Discrete)
-        or isinstance(space, spaces.MultiDiscrete)
+    return (isinstance(space, spaces.Box) and len(space.shape) in [0, 1]) or isinstance(
+        space, (spaces.Discrete, spaces.MultiDiscrete)
     )
 
 
@@ -131,21 +129,22 @@ def config_from_dict(config_dict: NetConfigType) -> NetConfig:
             config_cls = MlpNetConfig
     elif "channel_size" in config_keys:
         config_cls = CnnNetConfig
-    elif any(
-        key in MultiInputNetConfig.__dataclass_fields__.keys() for key in config_keys
-    ):
+    elif any(key in MultiInputNetConfig.__dataclass_fields__ for key in config_keys):
         config_cls = MultiInputNetConfig
     else:
-        raise ValueError(
+        msg = (
             f"Unable to determine net config class from: {config_dict}. "
-            "Please verify that the keys correspond to the arguments of the net config class.",
+            "Please verify that the keys correspond to the arguments of the net config class."
+        )
+        raise ValueError(
+            msg,
         )
 
     return config_cls.from_dict(config_dict)
 
 
 def tuple_to_dict_space(tuple_space: spaces.Tuple) -> spaces.Dict:
-    """Converts a Tuple observation space to a Dict observation space.
+    """Convert a Tuple observation space to a Dict observation space.
 
     :param tuple_space: Tuple observation space
     :type tuple_space: spaces.Tuple
@@ -156,7 +155,7 @@ def tuple_to_dict_space(tuple_space: spaces.Tuple) -> spaces.Dict:
 
 
 def tuple_to_dict_obs(tuple_obs: tuple) -> dict:
-    """Converts a tuple observation to a Python dictionary
+    """Convert a tuple observation to a Python dictionary.
 
     :param tuple_obs: Tuple observation
     :type tuple_obs: tuple
@@ -227,10 +226,7 @@ def contains_moduledict(module: nn.Module) -> bool:
     :return: True if module contains a ModuleDict, False otherwise
     :rtype: bool
     """
-    for submodule in module.modules():
-        if isinstance(submodule, nn.ModuleDict):
-            return True
-    return False
+    return any(isinstance(submodule, nn.ModuleDict) for submodule in module.modules())
 
 
 def get_module_dict(module: nn.Module) -> nn.ModuleDict:
@@ -300,8 +296,9 @@ def get_conv_layer(
     :rtype: nn.Module
     """
     if conv_layer_name not in ["Conv1d", "Conv2d", "Conv3d"]:
+        msg = f"Invalid convolutional layer {conv_layer_name}. Must be one of 'Conv1d', 'Conv2d', 'Conv3d'."
         raise ValueError(
-            f"Invalid convolutional layer {conv_layer_name}. Must be one of 'Conv1d', 'Conv2d', 'Conv3d'.",
+            msg,
         )
 
     convolutional_layers = {
@@ -327,7 +324,7 @@ def get_normalization(
     layer_size: int,
     device: DeviceType = "cpu",
 ) -> nn.Module:
-    """Returns normalization layer for corresponding normalization name.
+    """Return normalization layer for corresponding normalization name.
 
     :param normalization_names: Normalization layer name
     :type normalization_names: str
@@ -349,7 +346,7 @@ def get_normalization(
 
 
 def get_activation(activation_name: str | None, new_gelu: bool = False) -> nn.Module:
-    """Returns activation function for corresponding activation name.
+    """Return activation function for corresponding activation name.
 
     :param activation_names: Activation function name
     :type activation_names: str
@@ -383,7 +380,7 @@ def get_pooling(
     stride: tuple[int, ...] | int,
     padding: tuple[int, ...] | int,
 ) -> nn.Module:
-    """Returns pooling layer for corresponding activation name.
+    """Return pooling layer for corresponding activation name.
 
     :param pooling_names: Pooling layer name
     :type pooling_names: str
@@ -415,7 +412,7 @@ def layer_init(
     std: float = np.sqrt(2),
     bias_const: float = 0.0,
 ) -> nn.Module:
-    """Initializes the weights and biases of a layer.
+    """Initialize the weights and biases of a layer.
 
     :param layer: The layer to initialize.
     :type layer: nn.Module
@@ -499,7 +496,7 @@ def create_cnn(
     :rtype: dict[str, nn.Module]
     """
     net_dict = OrderedDict()
-    channel_size = [in_channels] + channel_size
+    channel_size = [in_channels, *channel_size]
     for l_no in range(1, len(channel_size)):
         net_dict[f"{name}_conv_layer_{l_no!s}"] = get_conv_layer(
             conv_layer_name=block_type,
@@ -543,7 +540,7 @@ def create_mlp(
     new_gelu: bool = False,
     name: str = "mlp",
 ) -> nn.Sequential:
-    """Creates and returns multi-layer perceptron.
+    """Create and returns multi-layer perceptron.
 
     :param input_size: Number of input features.
     :type input_size: int
@@ -574,7 +571,7 @@ def create_mlp(
     :rtype: nn.Sequential
     """
     net_dict: dict[str, MlpLayer] = OrderedDict()
-    hidden_size = [input_size] + hidden_size
+    hidden_size = [input_size, *hidden_size]
     for l_no in range(1, len(hidden_size)):
         if noisy:  # Add linear layer
             net_dict[f"{name}_linear_layer_{l_no!s}"] = NoisyLinear(
@@ -657,7 +654,7 @@ def create_simba(
     device: DeviceType = "cpu",
     name: str = "simba",
 ) -> nn.Sequential:
-    """Creates a number of SimBa residual blocks.
+    """Create a number of SimBa residual blocks.
 
     Paper: https://arxiv.org/abs/2410.09754.
 
@@ -723,7 +720,7 @@ def create_resnet(
     device: str = "cpu",
     name: str = "resnet",
 ) -> dict[str, nn.Module]:
-    """Creates a number of residual blocks for image-based inputs.
+    """Create a number of residual blocks for image-based inputs.
 
     Paper: https://arxiv.org/abs/1512.03385.
 

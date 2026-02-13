@@ -1,7 +1,10 @@
 import copy
+import functools
 import math
+import operator
 from collections import defaultdict
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -9,11 +12,13 @@ import torch
 from torch import nn, optim
 from torch.nn import functional as F
 from tqdm import tqdm
+from typing_extensions import Self
 
 import wandb
-from agilerl.data.rl_data import DataPoint
+from agilerl.data.rl_data import DataPoint, RL_Dataset
 from agilerl.modules.gpt import EvolvableGPT
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.typing import DeviceType, NetConfigType
 from agilerl.utils.sampling_utils import (
     always_terminate,
     map_all_kvs,
@@ -24,7 +29,7 @@ from agilerl.utils.sampling_utils import (
 
 
 class ILQL(nn.Module):
-    """The Implicit Language Q Learning algorithm class. ILQL paper: https://arxiv.org/pdf/2206.11871.pdf
+    """The Implicit Language Q Learning algorithm class. ILQL paper: https://arxiv.org/pdf/2206.11871.pdf.
 
     :param dataset: Language dataset to perform ILQL on
     :type dataset: torch.utils.data.Dataset
@@ -78,45 +83,47 @@ class ILQL(nn.Module):
 
     def __init__(
         self,
-        dataset,
-        net_config={
-            "arch": "gpt",
-            "vocab_size": 50257,
-            "n_layer": 12,
-            "n_embd": 768,
-            "n_head": 12,
-            "dim_feedfwd": 3072,
-            "block_size": 1024,
-            "activation": "GELU",
-            "dropout": 0.1,
-            "layer_norm_eps": 1e-5,
-            "min_layers": 8,
-            "max_layers": 16,
-            "bias": True,
-        },
-        index=0,
-        batch_size=64,
-        lr=1e-5,
-        alpha=0.005,
-        beta=0.0,
-        gamma=0.99,
-        tau=0.6,
-        mutation=None,
-        transition_weight=0.0,
-        clip_weight=None,
-        value_max=None,
-        value_min=None,
-        detach_v=False,
-        detach_q=False,
-        detach_pi=False,
-        double_q=True,
-        per_token=True,
-        exp_weights=True,
-        dm_margin=0.0,
-        cql_temp=1.0,
-        weight_decay=0.0,
-        device="cpu",
-    ):
+        dataset: RL_Dataset,
+        net_config: NetConfigType | None = None,
+        index: int = 0,
+        batch_size: int = 64,
+        lr: float = 1e-5,
+        alpha: float = 0.005,
+        beta: float = 0.0,
+        gamma: float = 0.99,
+        tau: float = 0.6,
+        mutation: str | None = None,
+        transition_weight: float = 0.0,
+        clip_weight: float | None = None,
+        value_max: float | None = None,
+        value_min: float | None = None,
+        detach_v: bool = False,
+        detach_q: bool = False,
+        detach_pi: bool = False,
+        double_q: bool = True,
+        per_token: bool = True,
+        exp_weights: bool = True,
+        dm_margin: float = 0.0,
+        cql_temp: float = 1.0,
+        weight_decay: float = 0.0,
+        device: DeviceType = "cpu",
+    ) -> None:
+        if net_config is None:
+            net_config = {
+                "arch": "gpt",
+                "vocab_size": 50257,
+                "n_layer": 12,
+                "n_embd": 768,
+                "n_head": 12,
+                "dim_feedfwd": 3072,
+                "block_size": 1024,
+                "activation": "GELU",
+                "dropout": 0.1,
+                "layer_norm_eps": 1e-05,
+                "min_layers": 8,
+                "max_layers": 16,
+                "bias": True,
+            }
         super().__init__()
 
         self.algo = "ILQL"
@@ -249,7 +256,7 @@ class ILQL(nn.Module):
             weight_decay=self.weight_decay,
         )
 
-    def copy_model_to_actor_target(self):
+    def copy_model_to_actor_target(self) -> None:
         self.actor.load_state_dict(self.model.state_dict())
         self.actor_target.load_state_dict(self.model.state_dict())
 
@@ -262,12 +269,12 @@ class ILQL(nn.Module):
         prefix_embs: torch.Tensor | None = None,
         prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
-        qv_kwargs=None,
-        policy_kwargs=None,
-        target_kwargs=None,
+        qv_kwargs: dict[str, Any] | None = None,
+        policy_kwargs: dict[str, Any] | None = None,
+        target_kwargs: dict[str, Any] | None = None,
         skip_policy_on_train: bool = False,
         detach_full_policy: bool = False,
-    ):
+    ) -> dict[str, Any]:
         """Forward pass through transformers.
 
         :param tokens: Tokens to input to model
@@ -331,7 +338,7 @@ class ILQL(nn.Module):
             model_outputs,
             model_hidden_states,
             model_past_key_values,
-            model_loss,
+            _model_loss,
         ) = self.model(
             tok_emb=input_embeddings,
             attn_mask=input_attn_mask,
@@ -342,10 +349,10 @@ class ILQL(nn.Module):
 
         with torch.no_grad():
             (
-                target_outputs,
+                _target_outputs,
                 target_hidden_states,
                 target_past_key_values,
-                target_loss,
+                _target_loss,
             ) = self.actor_target(
                 tok_emb=target_input_embeddings,
                 attn_mask=input_attn_mask,
@@ -356,7 +363,7 @@ class ILQL(nn.Module):
 
         # Prepare policy inputs
         if skip_policy_on_train and self.training:
-            policy_outputs = model_outputs
+            _policy_outputs = model_outputs
             policy_hidden_states = hidden_states
             policy_past_key_values = model_past_key_values
         else:
@@ -371,10 +378,10 @@ class ILQL(nn.Module):
             if detach_full_policy:
                 with torch.no_grad():
                     (
-                        policy_outputs,
+                        _policy_outputs,
                         policy_hidden_states,
                         policy_past_key_values,
-                        policy_loss,
+                        _policy_loss,
                     ) = self.actor(
                         tok_emb=policy_input_embeddings,
                         attn_mask=input_attn_mask,
@@ -383,10 +390,10 @@ class ILQL(nn.Module):
                     )
             else:
                 (
-                    policy_outputs,
+                    _policy_outputs,
                     policy_hidden_states,
                     policy_past_key_values,
-                    policy_loss,
+                    _policy_loss,
                 ) = self.actor(
                     tok_emb=policy_input_embeddings,
                     attn_mask=input_attn_mask,
@@ -484,12 +491,16 @@ class ILQL(nn.Module):
             "logits": logits,
         }
 
-    def clip_values(self, values):
+    def clip_values(self, values: torch.Tensor) -> torch.Tensor:
         if self.value_min is not None or self.value_max is not None:
             return torch.clip(values, self.value_min, self.value_max)
         return values
 
-    def get_downstream_rs(self, rs, gamma):
+    def get_downstream_rs(
+        self,
+        rs: torch.Tensor,
+        gamma: float,
+    ) -> torch.Tensor:
         gamma_row = torch.cumprod(torch.full(rs.shape, gamma).to(self.device), dim=1)
         gamma_tensor = torch.triu(gamma_row.unsqueeze(1) / gamma_row.unsqueeze(2))
         return (gamma_tensor * rs.unsqueeze(1)).sum(dim=2)
@@ -502,7 +513,7 @@ class ILQL(nn.Module):
         state_idxs: torch.Tensor,
         action_idxs: torch.Tensor,
         terminals: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         weights = torch.full(tokens.shape, self.transition_weight).to(self.device)
         if self.exp_weights:
             w_values = torch.exp(self.beta * (qs - vs))
@@ -525,7 +536,13 @@ class ILQL(nn.Module):
             weights = torch.clip(weights, max=self.clip_weight)
         return weights
 
-    def awac_loss(self, tokens, attn_mask, logits, w):
+    def awac_loss(
+        self,
+        tokens: torch.Tensor,
+        attn_mask: torch.Tensor,
+        logits: torch.Tensor,
+        w: torch.Tensor,
+    ) -> torch.Tensor:
         w = w.detach()
         losses = F.cross_entropy(
             logits[:, :-1, :].reshape(-1, logits.shape[-1]),
@@ -535,7 +552,12 @@ class ILQL(nn.Module):
         losses = losses.reshape(tokens.shape[0], tokens.shape[1] - 1)
         return (losses * w[:, :-1] * attn_mask[:, 1:]).sum() / attn_mask[:, 1:].sum()
 
-    def get_v_loss(self, vs, target_qs, terminals):
+    def get_v_loss(
+        self,
+        vs: torch.Tensor,
+        target_qs: torch.Tensor,
+        terminals: torch.Tensor,
+    ) -> torch.Tensor:
         target_qs = target_qs.detach()
         return (
             (
@@ -545,7 +567,14 @@ class ILQL(nn.Module):
             * (1 - terminals[:, :-1])
         ).sum() / max((1 - terminals[:, :-1]).sum().item(), 1.0)
 
-    def get_q_loss(self, vns, qs, rs, gamma, terminals):
+    def get_q_loss(
+        self,
+        vns: torch.Tensor,
+        qs: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        rs: torch.Tensor,
+        gamma: float,
+        terminals: torch.Tensor,
+    ) -> torch.Tensor:
         vns = vns.detach()
         if self.double_q:
             q1, q2 = qs
@@ -563,7 +592,12 @@ class ILQL(nn.Module):
             * (1 - terminals[:, :-1])
         ).sum() / max((1 - terminals[:, :-1]).sum().item(), 1.0)
 
-    def get_cql_loss(self, qs, action_tokens, terminals):
+    def get_cql_loss(
+        self,
+        qs: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        action_tokens: torch.Tensor,
+        terminals: torch.Tensor,
+    ) -> torch.Tensor:
         n = (1 - terminals[:, :-1]).sum()
         if self.double_q:
             q1, q2 = qs
@@ -590,7 +624,13 @@ class ILQL(nn.Module):
             * (1 - terminals[:, :-1])
         ).sum() / max(n.item(), 1.0)
 
-    def get_dm_loss(self, qs, data_qs, terminals, margin):
+    def get_dm_loss(
+        self,
+        qs: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        data_qs: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        terminals: torch.Tensor,
+        margin: float,
+    ) -> torch.Tensor:
         n = (1 - terminals[:, :-1]).sum()
         if self.double_q:
             q1, q2 = qs
@@ -628,22 +668,25 @@ class ILQL(nn.Module):
             * (1 - terminals[:, :-1])
         ).sum() / max(n.item(), 1.0)
 
-    def prepare_inputs(self, items):
+    def prepare_inputs(
+        self,
+        items: list[DataPoint] | dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
         if isinstance(items, dict):
             return items
         return to(self.dataset.collate(items, self.device), self.device)
 
     def get_qvs(
         self,
-        items,
+        items: list[DataPoint] | dict[str, torch.Tensor],
         prefix_embs: torch.Tensor | None = None,
         prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
-        qv_kwargs=None,
-        policy_kwargs=None,
-        target_kwargs=None,
-        **kwargs,
-    ):
+        qv_kwargs: dict[str, Any] | None = None,
+        policy_kwargs: dict[str, Any] | None = None,
+        target_kwargs: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         prepared_inputs = self.prepare_inputs(items)
         tokens, attn_mask = prepared_inputs["tokens"], prepared_inputs["attn_mask"]
         s_idx, a_idx = prepared_inputs["state_idxs"], prepared_inputs["action_idxs"]
@@ -705,14 +748,14 @@ class ILQL(nn.Module):
 
     def get_loss(
         self,
-        items,
-        awac_weight=0.0,
-        v_loss_weight=0.0,
-        q_loss_weight=0.0,
-        cql_loss_weight=0.0,
-        dm_loss_weight=0.0,
-        mc_returns=False,
-    ):
+        items: list[DataPoint] | dict[str, torch.Tensor],
+        awac_weight: float = 0.0,
+        v_loss_weight: float = 0.0,
+        q_loss_weight: float = 0.0,
+        cql_loss_weight: float = 0.0,
+        dm_loss_weight: float = 0.0,
+        mc_returns: bool = False,
+    ) -> tuple[torch.Tensor, dict[str, Any], list[Any]]:
         prepared_inputs = self.prepare_inputs(items)
         a_idx = prepared_inputs["action_idxs"]
         get_qvs_outputs = self.get_qvs(
@@ -771,7 +814,8 @@ class ILQL(nn.Module):
         logs["q_loss"] = (q_loss.item(), n)
         logs["cql_loss"] = (cql_loss.item(), n)
         logs["dm_loss"] = (dm_loss.item(), n)
-        advantages = sum(
+        advantages = functools.reduce(
+            operator.iadd,
             [
                 ((target_qs[i] - vs[i])[: (1 - terminals[i, :-1]).sum().long().item()])
                 .detach()
@@ -829,7 +873,7 @@ class ILQL(nn.Module):
         )
         logs["transformer"] = transformer_logs
 
-        def postproc_f(x):
+        def postproc_f(x: dict[str, Any]) -> None:
             return x.update(
                 {
                     "loss": awac_weight * x["token_loss"]
@@ -840,7 +884,7 @@ class ILQL(nn.Module):
                 },
             )
 
-        def hist_f(x):
+        def hist_f(x: dict[str, Any]) -> None:
             return x.update({"advantage_hist": wandb.Histogram(advantages)})
 
         return loss, logs, [postproc_f, hist_f]
@@ -854,9 +898,9 @@ class ILQL(nn.Module):
         prefix_embs: torch.Tensor | None = None,
         prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
-        qv_kwargs=None,
-        policy_kwargs=None,
-        target_kwargs=None,
+        qv_kwargs: dict[str, Any] | None = None,
+        policy_kwargs: dict[str, Any] | None = None,
+        target_kwargs: dict[str, Any] | None = None,
         beta: float = 1.0,
         exp_weights: bool = False,
         clip_weight: float | None = None,
@@ -866,7 +910,7 @@ class ILQL(nn.Module):
         include_logits: bool = False,
         include_advantage: bool = True,
         action_mask: torch.Tensor | None = None,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         trivial_value_query = False
         if state_idxs is None or action_idxs is None:
             state_idxs = torch.full(
@@ -939,7 +983,7 @@ class ILQL(nn.Module):
 
     def get_scores(
         self,
-        items,
+        items: list[DataPoint] | RL_Dataset,
         beta: float = 1.0,
         exp_weights: bool = False,
         clip_weight: float | None = None,
@@ -970,7 +1014,7 @@ class ILQL(nn.Module):
 
     def initial_score(
         self,
-        items,
+        items: list[DataPoint] | RL_Dataset,
         beta: float = 1.0,
         exp_weights: bool = False,
         clip_weight: float | None = None,
@@ -1031,11 +1075,12 @@ class ILQL(nn.Module):
             action_mask,
         )
 
-    def soft_update(self):
+    def soft_update(self) -> None:
         """Soft updates target networks."""
         for target_param, local_param in zip(
             self.target_q.parameters(),
             self.q.parameters(),
+            strict=False,
         ):
             target_param.data.copy_(
                 self.alpha * local_param.data + (1.0 - self.alpha) * target_param.data,
@@ -1044,6 +1089,7 @@ class ILQL(nn.Module):
             for target_param, local_param in zip(
                 self.target_q2.parameters(),
                 self.q2.parameters(),
+                strict=False,
             ):
                 target_param.data.copy_(
                     self.alpha * local_param.data
@@ -1053,23 +1099,26 @@ class ILQL(nn.Module):
             for target_param, local_param in zip(
                 self.actor_target.parameters(),
                 self.model.parameters(),
+                strict=False,
             ):
                 target_param.data.copy_(
                     self.alpha * local_param.data
                     + (1.0 - self.alpha) * target_param.data,
                 )
 
-    def hardUpdate(self):
-        """Hard updates target networks."""
+    def hard_update(self) -> None:
+        """Hard update target networks."""
         for target_param, local_param in zip(
             self.target_q.parameters(),
             self.q.parameters(),
+            strict=False,
         ):
             target_param.data.copy_(local_param.data)
         if self.double_q:
             for target_param, local_param in zip(
                 self.target_q2.parameters(),
                 self.q2.parameters(),
+                strict=False,
             ):
                 target_param.data.copy_(local_param.data)
         if self.actor_target is not None:
@@ -1077,8 +1126,8 @@ class ILQL(nn.Module):
             self.actor_target = None
             self.actor_target = copy.deepcopy(self.model)
 
-    def clone(self, index=None):
-        """Returns cloned agent identical to self.
+    def clone(self, index: int | None = None) -> Self:
+        """Return cloned agent identical to self.
 
         :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
         :type index: int, optional
@@ -1134,8 +1183,8 @@ class ILQL(nn.Module):
 
         return clone
 
-    def save_checkpoint(self, path):
-        """Saves a checkpoint of agent properties and network weights to path.
+    def save_checkpoint(self, path: str | Path) -> None:
+        """Save a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
         :type path: string
@@ -1195,8 +1244,8 @@ class ILQL(nn.Module):
             path,
         )
 
-    def load_checkpoint(self, path):
-        """Loads saved agent properties and network weights from checkpoint.
+    def load_checkpoint(self, path: str | Path) -> None:
+        """Load saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from
         :type path: string
@@ -1249,7 +1298,7 @@ class ILQL(nn.Module):
         self.steps = checkpoint["steps"]
 
     def clean_up(self) -> None:
-        """Clean up the networks"""
+        """Clean up the networks."""
         del self.model
         del self.actor
         del self.actor_target
@@ -1280,22 +1329,22 @@ class ILQL_Policy:
         state_idxs: torch.Tensor,
         action_idxs: torch.Tensor,
         termination_condition: Callable[[np.ndarray], bool],
-        num_generations=1,
-        max_generation_len=None,
-        temp=1.0,
-        top_k=None,
-        top_p=None,
-        exp_adv=False,
-        adv_weight=0.0,
-        adv_clip=None,
-        include_logits=True,
-        include_adv=True,
+        num_generations: int = 1,
+        max_generation_len: int | None = None,
+        temp: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        exp_adv: bool = False,
+        adv_weight: float = 0.0,
+        adv_clip: float | None = None,
+        include_logits: bool = True,
+        include_adv: bool = True,
         rerank_log_prob_weight: float = 0.0,
         rerank_advantage_weight: float = 0.0,
         prefix_embs: torch.Tensor | None = None,
         prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
-    ):
+    ) -> tuple[list[tuple[str, list[str]]], torch.Tensor, torch.Tensor]:
         assert include_logits or include_adv
 
         tokenizer = self.iql_model.dataset.tokenizer
@@ -1381,32 +1430,44 @@ class ILQL_Policy:
         ).to(device)
         advantages = torch.full((dialogue_lens.shape[0],), 0.0).to(device)
         termination_mask = torch.full((dialogue_lens.shape[0],), 1).to(device)
-        state_idxs_temp, action_idxs_temp = torch.zeros(
-            (
-                dialogue_lens.shape[0],
-                1,
+        state_idxs_temp, action_idxs_temp = (
+            torch.zeros(
+                (
+                    dialogue_lens.shape[0],
+                    1,
+                ),
+            )
+            .long()
+            .to(device),
+            torch.zeros(
+                (
+                    dialogue_lens.shape[0],
+                    1,
+                ),
+            )
+            .long()
+            .to(
+                device,
             ),
-        ).long().to(device), torch.zeros(
-            (
-                dialogue_lens.shape[0],
-                1,
-            ),
-        ).long().to(
-            device,
         )
         t = torch.min(dialogue_lens).int()
         base_logits = torch.full((dialogue_lens.shape[0],), 0.0).to(device)
         while termination_mask.sum() > 0 and (t + prefix_t) < max_length:
             curr_token = tokens[:, t - 1].unsqueeze(1)
+            _t = t
             curr_kvs = map_all_kvs(
-                lambda x: x[:, :, : (t + prefix_t) - 1, :],
+                lambda x, _t=_t: x[:, :, : (_t + prefix_t) - 1, :],
                 kvs["qv"],
             )
             curr_target_kvs, curr_policy_kvs = curr_kvs, curr_kvs
             if "target" in kvs:
-                map_all_kvs(lambda x: x[:, :, : (t + prefix_t) - 1, :], kvs["target"])
+                map_all_kvs(
+                    lambda x, _t=_t: x[:, :, : (_t + prefix_t) - 1, :], kvs["target"]
+                )
             if "policy" in kvs:
-                map_all_kvs(lambda x: x[:, :, : (t + prefix_t) - 1, :], kvs["policy"])
+                map_all_kvs(
+                    lambda x, _t=_t: x[:, :, : (_t + prefix_t) - 1, :], kvs["policy"]
+                )
             iql_outputs = self.iql_model(
                 curr_token,
                 state_idxs_temp,
@@ -1566,7 +1627,7 @@ class ILQL_Policy:
         )
         kls = torch.gather(kls.reshape(-1, num_generations), dim=1, index=order)
         return (
-            list(zip(input_strs, processed_outputs)),
+            list(zip(input_strs, processed_outputs, strict=False)),
             log_probs.reshape(-1, num_generations),
             kls,
         )
@@ -1579,19 +1640,19 @@ class ILQL_Policy:
         action_idxs: torch.Tensor,
         termination_condition: Callable[[np.ndarray], bool],
         max_generation_len: int | None = None,
-        beam_width=1,
-        temp=1.0,
-        top_k=None,
-        top_p=None,
-        exp_adv=False,
-        adv_weight=0.0,
-        adv_clip=None,
-        include_logits=True,
-        include_adv=True,
+        beam_width: int = 1,
+        temp: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        exp_adv: bool = False,
+        adv_weight: float = 0.0,
+        adv_clip: float | None = None,
+        include_logits: bool = True,
+        include_adv: bool = True,
         prefix_embs: torch.Tensor | None = None,
         prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
-    ):
+    ) -> tuple[list[tuple[str, list[str]]], torch.Tensor, torch.Tensor]:
         tokenizer = self.iql_model.dataset.tokenizer
         max_length = self.iql_model.dataset.max_len
         if max_length is None:
@@ -1680,32 +1741,44 @@ class ILQL_Policy:
         curr_scores = torch.zeros(bsize, beam_width).to(device)  # (batch, k)
         logit_scores = torch.zeros(bsize, beam_width).to(device)  # (batch, k)
         termination_mask = torch.full((n,), 1).to(device)
-        state_idxs_temp, action_idxs_temp = torch.zeros(
-            (
-                dialogue_lens.shape[0],
-                1,
+        state_idxs_temp, action_idxs_temp = (
+            torch.zeros(
+                (
+                    dialogue_lens.shape[0],
+                    1,
+                ),
+            )
+            .long()
+            .to(device),
+            torch.zeros(
+                (
+                    dialogue_lens.shape[0],
+                    1,
+                ),
+            )
+            .long()
+            .to(
+                device,
             ),
-        ).long().to(device), torch.zeros(
-            (
-                dialogue_lens.shape[0],
-                1,
-            ),
-        ).long().to(
-            device,
         )
         t = torch.min(dialogue_lens).int()
         base_logits = torch.full((dialogue_lens.shape[0],), 0.0).to(device)
         while termination_mask.sum() > 0 and (t + prefix_t) < max_length:
             curr_token = tokens[:, t - 1].unsqueeze(1)
+            _t = t
             curr_kvs = map_all_kvs(
-                lambda x: x[:, :, : (t + prefix_t) - 1, :],
+                lambda x, _t=_t: x[:, :, : (_t + prefix_t) - 1, :],
                 kvs["qv"],
             )
             curr_target_kvs, curr_policy_kvs = curr_kvs, curr_kvs
             if "target" in kvs:
-                map_all_kvs(lambda x: x[:, :, : (t + prefix_t) - 1, :], kvs["target"])
+                map_all_kvs(
+                    lambda x, _t=_t: x[:, :, : (_t + prefix_t) - 1, :], kvs["target"]
+                )
             if "policy" in kvs:
-                map_all_kvs(lambda x: x[:, :, : (t + prefix_t) - 1, :], kvs["policy"])
+                map_all_kvs(
+                    lambda x, _t=_t: x[:, :, : (_t + prefix_t) - 1, :], kvs["policy"]
+                )
             iql_outputs = self.iql_model(
                 curr_token,
                 state_idxs_temp,
@@ -1815,11 +1888,12 @@ class ILQL_Policy:
                 .reshape(-1, beam_width)
             )
             tokens[:, t] = top_k_.reshape(-1) % vocab_size  # (batch*k,)
+            _top_k = top_k_
             fixed_kvs = map_all_kvs(
-                lambda x: x[
+                lambda x, _top_k=_top_k: x[
                     (
                         batch_indicator * beam_width
-                        + torch.div(top_k_, vocab_size, rounding_mode="trunc")
+                        + torch.div(_top_k, vocab_size, rounding_mode="trunc")
                     ).reshape(-1),
                     :,
                     :,
@@ -1828,10 +1902,10 @@ class ILQL_Policy:
                 model_outputs["qv_model_outputs"]["past_key_values"],
             )
             kvs["qv"] = map_all_kvs(
-                lambda x: x[
+                lambda x, _top_k=_top_k: x[
                     (
                         batch_indicator * beam_width
-                        + torch.div(top_k_, vocab_size, rounding_mode="trunc")
+                        + torch.div(_top_k, vocab_size, rounding_mode="trunc")
                     ).reshape(-1),
                     :,
                     :,
@@ -1847,10 +1921,10 @@ class ILQL_Policy:
             )
             if "target" in kvs:
                 fixed_target_kvs = map_all_kvs(
-                    lambda x: x[
+                    lambda x, _top_k=_top_k: x[
                         (
                             batch_indicator * beam_width
-                            + torch.div(top_k_, vocab_size, rounding_mode="trunc")
+                            + torch.div(_top_k, vocab_size, rounding_mode="trunc")
                         ).reshape(-1),
                         :,
                         :,
@@ -1859,10 +1933,10 @@ class ILQL_Policy:
                     model_outputs["target_model_outputs"]["past_key_values"],
                 )
                 kvs["target"] = map_all_kvs(
-                    lambda x: x[
+                    lambda x, _top_k=_top_k: x[
                         (
                             batch_indicator * beam_width
-                            + torch.div(top_k_, vocab_size, rounding_mode="trunc")
+                            + torch.div(_top_k, vocab_size, rounding_mode="trunc")
                         ).reshape(-1),
                         :,
                         :,
@@ -1878,10 +1952,10 @@ class ILQL_Policy:
                 )
             if "policy" in kvs:
                 fixed_policy_kvs = map_all_kvs(
-                    lambda x: x[
+                    lambda x, _top_k=_top_k: x[
                         (
                             batch_indicator * beam_width
-                            + torch.div(top_k_, vocab_size, rounding_mode="trunc")
+                            + torch.div(_top_k, vocab_size, rounding_mode="trunc")
                         ).reshape(-1),
                         :,
                         :,
@@ -1890,10 +1964,10 @@ class ILQL_Policy:
                     model_outputs["policy_model_outputs"]["past_key_values"],
                 )
                 kvs["policy"] = map_all_kvs(
-                    lambda x: x[
+                    lambda x, _top_k=_top_k: x[
                         (
                             batch_indicator * beam_width
-                            + torch.div(top_k_, vocab_size, rounding_mode="trunc")
+                            + torch.div(_top_k, vocab_size, rounding_mode="trunc")
                         ).reshape(-1),
                         :,
                         :,
@@ -1948,14 +2022,18 @@ class ILQL_Policy:
                     ].strip()
                 temp_outputs.append(processed_str)
             processed_outputs.append(temp_outputs)
-        return list(zip(input_strs, processed_outputs)), curr_scores, -logit_scores
+        return (
+            list(zip(input_strs, processed_outputs, strict=False)),
+            curr_scores,
+            -logit_scores,
+        )
 
     def generate(
         self,
-        items,
+        items: list[DataPoint] | RL_Dataset,
         termination_condition: Callable[[np.ndarray], bool],
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> tuple[list[tuple[str, list[str]]], Any, torch.Tensor]:
         prepared_inputs = self.iql_model.prepare_inputs(items)
         tokens, attn_mask = prepared_inputs["tokens"], prepared_inputs["attn_mask"]
         state_idxs, action_idxs = (
@@ -1978,7 +2056,7 @@ class ILQL_Policy:
         )
         return generations, info, kls
 
-    def act(self, obs):
+    def act(self, obs: Any) -> str:
         item = DataPoint.from_obs(
             obs,
             self.iql_model.dataset.tokenizer,
@@ -1993,15 +2071,21 @@ class ILQL_Policy:
         self.logprobs_all.append(logprobs[0, 0].item())
         return generations[0][1][0]
 
-    def train(self):
+    def train(self) -> None:
         self.iql_model.train()
 
-    def eval(self):
+    def eval(self) -> None:
         self.iql_model.eval()
 
 
 class ILQL_Evaluator:
-    def __init__(self, env, verbose: bool, kind: str, **generation_kwargs) -> None:
+    def __init__(
+        self,
+        env: Any,
+        verbose: bool,
+        kind: str,
+        **generation_kwargs: Any,
+    ) -> None:
         super().__init__()
         self.env = env
         self.verbose = verbose
@@ -2010,12 +2094,16 @@ class ILQL_Evaluator:
         self.all_results = []
         self.all_entropy = []
 
-    def evaluate(self, model: ILQL, items):
+    def evaluate(
+        self,
+        model: ILQL,
+        items: list[DataPoint] | RL_Dataset,
+    ) -> dict[str, tuple[float, int]]:
         policy = ILQL_Policy(model, self.kind, **self.generation_kwargs)
         tokens = model.prepare_inputs(items)["tokens"]
         total_token_reward = 0
         total_env_reward = 0
-        for i in range(tokens.shape[0]):
+        for _i in range(tokens.shape[0]):
             result, sequence = interact_environment(self.env, policy, None)
             self.all_results.append(
                 (
@@ -2023,7 +2111,7 @@ class ILQL_Evaluator:
                     sequence,
                 ),
             )
-            env_reward = sum(map(lambda x: x[2], sequence))
+            env_reward = sum(x[2] for x in sequence)
             token_reward = sum(
                 DataPoint.get_token_reward(
                     result,
@@ -2034,13 +2122,7 @@ class ILQL_Evaluator:
             total_env_reward += env_reward
             total_token_reward += token_reward
             if self.verbose:
-                print(result)
-                print("=" * 25)
-                print("token reward:", token_reward)
-                print("env reward:", env_reward)
-                print("avg token reward:", total_token_reward / (i + 1))
-                print("avg env reward:", total_env_reward / (i + 1))
-                print("=" * 25)
+                pass
         kl_total = sum(policy.kls_all)
         entropy_total = -sum(policy.logprobs_all)
         self.all_entropy.extend(policy.logprobs_all)
@@ -2054,20 +2136,26 @@ class ILQL_Evaluator:
             ),
         }
 
-    def dump(self):
+    def dump(self) -> dict[str, Any]:
         return {"results": self.all_results, "entropies": self.all_entropy}
 
 
 class TopAdvantageNGrams:
-    def __init__(self, data, print_every, print_k, n_gram):
+    def __init__(
+        self,
+        data: Any,
+        print_every: int,
+        print_k: int,
+        n_gram: int,
+    ) -> None:
         self.data = data
         self.print_every = print_every
         self.print_k = print_k
         self.n_gram = n_gram
 
-    def evaluate(self, model, items):
-        top_actions = defaultdict(float)
-        total_actions = defaultdict(int)
+    def evaluate(self, model: ILQL, items: Any) -> None:
+        top_actions: defaultdict[str, float] = defaultdict(float)
+        total_actions: defaultdict[str, int] = defaultdict(int)
         for i in tqdm(range(self.data.size())):
             item = self.data.get_item(i)
             prepared_inputs = model.prepare_inputs([item])
@@ -2106,19 +2194,20 @@ class TopAdvantageNGrams:
                 if token.item() == self.data.tokenizer.eoa_token_id:
                     curr_idx = x + 1
             if i % self.print_every == 0:
-                ranked_actions = sorted(
+                sorted(
                     {
-                        k: top_actions[k] / total_actions[k]
-                        for k in total_actions.keys()
+                        k: top_actions[k] / total_actions[k] for k in total_actions
                     }.items(),
                     key=lambda x: x[1],
                 )
-                print(ranked_actions[-self.print_k :])
-                print(ranked_actions[: self.print_k])
 
 
-def interact_environment(env, policy, obs):
-    obs_sequence = []
+def interact_environment(
+    env: Any,
+    policy: Any,
+    obs: Any,
+) -> tuple[Any, list[tuple[Any, Any, float, bool]]]:
+    obs_sequence: list[tuple[Any, Any, float, bool]] = []
     if obs is None:
         obs = env.reset()
     while not env.is_terminal():
@@ -2130,28 +2219,34 @@ def interact_environment(env, policy, obs):
     return obs, obs_sequence
 
 
-def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any):
+def map_pytree(
+    f: Callable[[np.ndarray | torch.Tensor], Any],
+    item: Any,
+) -> Any:
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
-    if isinstance(item, list) or isinstance(item, set) or isinstance(item, tuple):
+    if isinstance(item, (list, set, tuple)):
         return [map_pytree(f, v) for v in item]
-    if isinstance(item, np.ndarray) or isinstance(item, torch.Tensor):
+    if isinstance(item, (np.ndarray, torch.Tensor)):
         return f(item)
     return item
 
 
-def to(item: Any, device: torch.device):
+def to(item: Any, device: torch.device | str) -> Any:
     return map_pytree(lambda x: torch.tensor(x).to(device), item)
 
 
-def to_decorator(f, device):
-    def new_f(*args, **kwargs):
+def to_decorator(
+    f: Callable[..., Any],
+    device: torch.device | str,
+) -> Callable[..., Any]:
+    def new_f(*args: Any, **kwargs: Any) -> Any:
         return to(f(*args, **kwargs), device)
 
     return new_f
 
 
-def parameter_norm(model: nn.Module):
+def parameter_norm(model: nn.Module) -> float:
     norm = 0.0
     for param in model.parameters():
         norm += (param.norm() ** 2).item()

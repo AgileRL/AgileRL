@@ -29,10 +29,10 @@ def apply_action_mask_discrete(
 
 
 class TorchDistribution:
-    """Lightweight distribution‑like helper.
+    """Lightweight distribution-like helper.
     *   keeps only **raw tensors** (``logits`` or ``mu``/``log_std``)
     *   implements ``sample``, ``log_prob`` and ``entropy`` with pure tensor ops
-        → no Python allocations per call, all kernels run on GPU.
+        -> no Python allocations per call, all kernels run on GPU.
 
     :param action_space: Action space of the environment.
     :type action_space: spaces.Space
@@ -57,14 +57,14 @@ class TorchDistribution:
         mu: torch.Tensor | None = None,  # for Box
         log_std: torch.Tensor | None = None,
         squash_output: bool = False,
-    ):
+    ) -> None:
         self.action_space = action_space
         self.logits, self.mu, self.log_std = logits, mu, log_std
         self.squash_output = squash_output and isinstance(action_space, spaces.Box)
         self._sampled_action: torch.Tensor | None = None
 
     # ------------------------------------------------------------------ #
-    # fast tensor‑only primitives                                        #
+    # fast tensor-only primitives                                        #
     # ------------------------------------------------------------------ #
     def sample(self) -> torch.Tensor:
         if isinstance(self.action_space, spaces.Discrete):
@@ -101,7 +101,8 @@ class TorchDistribution:
             )  # Ensures float tensor, removed .to(torch.int64)
             return self._sampled_action
 
-        raise NotImplementedError("Unsupported action space in fast path.")
+        msg = "Unsupported action space in fast path."
+        raise NotImplementedError(msg)
 
     def log_prob(self, action: torch.Tensor) -> torch.Tensor:
         if isinstance(self.action_space, spaces.Discrete):
@@ -130,15 +131,21 @@ class TorchDistribution:
                         keepdim=True,
                     )  # Converts (B, N_actions) to (B,1)
                 else:
-                    raise ValueError(
+                    msg = (
                         f"Action shape {action.shape} is not compatible with Discrete space. "
                         f"Expected (batch_size,), (batch_size, 1), or (batch_size, num_actions) for argmax case. "
-                        f"Logits shape: {log_p_all.shape}. Action space: {self.action_space}",
+                        f"Logits shape: {log_p_all.shape}. Action space: {self.action_space}"
+                    )
+                    raise ValueError(
+                        msg,
                     )
             else:
-                raise ValueError(
+                msg = (
                     f"Action tensor ndim {action.ndim} is not compatible with Discrete space logits ndim {log_p_all.ndim}. "
-                    f"Expected action ndim to be {log_p_all.ndim-1} or {log_p_all.ndim}.",
+                    f"Expected action ndim to be {log_p_all.ndim - 1} or {log_p_all.ndim}."
+                )
+                raise ValueError(
+                    msg,
                 )
 
             return log_p_all.gather(-1, action_indices_for_gather).squeeze(-1)
@@ -169,7 +176,7 @@ class TorchDistribution:
 
         # -------- MultiBinary --------
         if isinstance(self.action_space, spaces.MultiBinary):
-            # log σ(x)  and log (1‑σ(x))
+            # log sigma(x) and log (1-sigma(x))
             log_p1 = -F.softplus(-self.logits)
             log_p0 = -self.logits + log_p1
             a = (
@@ -240,7 +247,7 @@ class EvolvableDistribution(EvolvableWrapper):
         action_std_init: float = 0.0,
         squash_output: bool = False,
         device: DeviceType = "cpu",
-    ):
+    ) -> None:
         super().__init__(network)
 
         self.action_space = action_space
@@ -288,10 +295,9 @@ class EvolvableDistribution(EvolvableWrapper):
             )
 
         # Categorical distribution for Discrete action spaces
-        if (
-            isinstance(self.action_space, spaces.Discrete)
-            or isinstance(self.action_space, spaces.MultiDiscrete)
-            or isinstance(self.action_space, spaces.MultiBinary)
+        if isinstance(
+            self.action_space,
+            (spaces.Discrete, spaces.MultiDiscrete, spaces.MultiBinary),
         ):
             # Pass logits directly to TorchDistribution
             return TorchDistribution(
@@ -299,8 +305,9 @@ class EvolvableDistribution(EvolvableWrapper):
                 logits=logits,
                 squash_output=self.squash_output,  # squash_output is ignored for discrete
             )
+        msg = f"Action space {self.action_space} not supported."
         raise NotImplementedError(
-            f"Action space {self.action_space} not supported.",
+            msg,
         )
 
     def log_prob(self, action: torch.Tensor) -> torch.Tensor:
@@ -312,7 +319,8 @@ class EvolvableDistribution(EvolvableWrapper):
         :rtype: torch.Tensor
         """
         if self.dist is None:
-            raise ValueError("Distribution not initialized. Call forward first.")
+            msg = "Distribution not initialized. Call forward first."
+            raise ValueError(msg)
 
         # The new TorchDistribution handles squashing correction internally for Box space
         return self.dist.log_prob(action)
@@ -324,7 +332,8 @@ class EvolvableDistribution(EvolvableWrapper):
         :rtype: torch.Tensor
         """
         if self.dist is None:
-            raise ValueError("Distribution not initialized. Call forward first.")
+            msg = "Distribution not initialized. Call forward first."
+            raise ValueError(msg)
 
         # The new TorchDistribution returns analytical entropy for supported spaces
         return self.dist.entropy()
@@ -363,6 +372,7 @@ class EvolvableDistribution(EvolvableWrapper):
             for split_logits_i, split_mask_i in zip(
                 split_logits,
                 split_masks,
+                strict=False,
             ):  # Renamed for clarity
                 masked_logits.append(
                     apply_action_mask_discrete(split_logits_i, split_mask_i),
@@ -372,8 +382,9 @@ class EvolvableDistribution(EvolvableWrapper):
         else:
             # This should ideally not be reached if get_distribution handles the space,
             # but keeping for safety.
+            msg = f"Action space {self.action_space} not supported for masking."
             raise NotImplementedError(
-                f"Action space {self.action_space} not supported for masking.",
+                msg,
             )
 
         return masked_logits
@@ -442,7 +453,7 @@ class EvolvableDistribution(EvolvableWrapper):
         return action, log_prob, entropy
 
     def clone(self) -> "EvolvableDistribution":
-        """Clones the distribution.
+        """Clone the distribution.
 
         :return: Cloned distribution.
         :rtype: EvolvableDistribution

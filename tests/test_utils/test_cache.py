@@ -49,9 +49,9 @@ def test_dump_load(tmpdir):
 def test_dump_makedirs():
     cache = Cache({"key": "value"})
     cache_path = "no"
-    with patch("os.makedirs") as mock_md, patch("pickle.dump") as mock_dump:
+    with patch("pathlib.Path.mkdir") as mock_mkdir, patch("pickle.dump") as mock_dump:
         cache.dump(cache_path)
 
-        mock_md.assert_called()
+        mock_mkdir.assert_called_with(parents=True, exist_ok=True)
         mock_dump.assert_called()
     os.remove(cache_path)

@@ -55,7 +55,7 @@ def train_bandits(
     accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
-    """The general bandit training function. Returns trained population of agents
+    """Run the general bandit training; returns trained population of agents
     and their fitnesses.
 
     :param env: The environment to train in.
@@ -133,11 +133,13 @@ def train_bandits(
         warnings.warn(
             "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True.",
+            stacklevel=2,
         )
     if checkpoint is None and checkpoint_path is not None:
         warnings.warn(
             "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined.",
+            stacklevel=2,
         )
 
     if wb:
@@ -171,9 +173,8 @@ def train_bandits(
         sampler = Sampler(memory=memory)
 
     # Pre-training mutation
-    if accelerator is None:
-        if mutation is not None:
-            pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None and mutation is not None:
+        pop = mutation.mutation(pop, pre_training_mut=True)
 
     if accelerator is not None:
         print(f"\nDistributed training on {accelerator.device}...")
@@ -201,7 +202,7 @@ def train_bandits(
             context = env.reset()  # Reset environment at start of episode
 
             start_time = time.time()
-            for idx_step in range(episode_steps):
+            for _idx_step in range(episode_steps):
                 if swap_channels:
                     context = obs_channels_to_first(context)
                 # Get next action from agent
@@ -285,16 +286,15 @@ def train_bandits(
             agent.steps.append(agent.steps[-1])
 
         # Early stop if consistently reaches target
-        if target is not None:
-            if (
-                np.all(
-                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
-                )
-                and len(pop[0].steps) >= 100
-            ):
-                if wb:
-                    wandb.finish()
-                return pop, pop_fitnesses
+        if target is not None and (
+            np.all(
+                np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
+            )
+            and len(pop[0].steps) >= 100
+        ):
+            if wb:
+                wandb.finish()
+            return pop, pop_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -312,11 +312,11 @@ def train_bandits(
                 evo_count += 1
 
         if verbose:
-            regret = ["%.2f" % regret for regret in regrets]
-            avg_regret = "%.2f" % np.mean(np.array(regrets))
-            fitness = ["%.2f" % fitness for fitness in fitnesses]
-            avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
-            avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+            regret = [f"{float(regret):.2f}" for regret in regrets]
+            avg_regret = f"{np.mean(np.array(regrets)):.2f}"
+            fitness = [f"{fitness:.2f}" for fitness in fitnesses]
+            avg_fitness = [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
+            avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]

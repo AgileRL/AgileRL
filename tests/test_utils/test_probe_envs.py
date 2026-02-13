@@ -340,9 +340,9 @@ def test_discrete_actions_policy_envs(
                 int(np.mean(np.array(state["box"]))) == action[0]
                 and state["discrete"] == action[0]
             ):
-                assert (
-                    reward == same_reward
-                ), f"action: {action}, state: {state} box: {int(np.mean(state['box']))}"
+                assert reward == same_reward, (
+                    f"action: {action}, state: {state} box: {int(np.mean(state['box']))}"
+                )
             else:
                 assert reward == diff_reward
         elif int(np.mean(np.array(state))) == action:

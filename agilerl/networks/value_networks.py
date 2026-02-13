@@ -53,7 +53,7 @@ class ValueNetwork(EvolvableNetwork):
         device: str = "cpu",
         random_seed: int | None = None,
         encoder_name: str = "encoder",
-    ):
+    ) -> None:
 
         super().__init__(
             observation_space,
@@ -77,7 +77,7 @@ class ValueNetwork(EvolvableNetwork):
         self.build_network_head(head_config)
 
     def get_output_dense(self) -> torch.nn.Linear:
-        """Returns the output dense layer of the network.
+        """Return the output dense layer of the network.
 
         :return: Output dense layer.
         :rtype: torch.nn.Linear
@@ -85,7 +85,7 @@ class ValueNetwork(EvolvableNetwork):
         return self.head_net.get_output_dense()
 
     def build_network_head(self, net_config: NetConfigType) -> None:
-        """Builds the head of the network.
+        """Build the head of the network.
 
         :param net_config: Configuration of the head.
         :type net_config: NetConfigType

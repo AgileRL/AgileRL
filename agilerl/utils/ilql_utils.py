@@ -5,7 +5,7 @@ from accelerate import Accelerator
 
 
 def convert_path(path: str | None) -> str | None:
-    """Converts a path to an absolute path.
+    """Convert a path to an absolute path.
 
     :param path: Path to convert.
     :type path: str | None
@@ -19,7 +19,7 @@ def convert_path(path: str | None) -> str | None:
 
 
 def add_system_configs(cfg: dict[str, Any], accelerator: Accelerator) -> dict[str, Any]:
-    """Adds system configurations to the configuration dictionary.
+    """Add system configurations to the configuration dictionary.
 
     :param cfg: Configuration dictionary.
     :type cfg: dict[str, Any]
@@ -37,7 +37,7 @@ def add_system_configs(cfg: dict[str, Any], accelerator: Accelerator) -> dict[st
 
 
 def to_bin(n: int, pad_to_size: int | None = None) -> list[int]:
-    """Converts a number to a binary list.
+    """Convert a number to a binary list.
 
     :param n: Number to convert.
     :type n: int
@@ -47,14 +47,14 @@ def to_bin(n: int, pad_to_size: int | None = None) -> list[int]:
     :return: Binary list.
     :rtype: list[int]
     """
-    bins = to_bin(n // 2) + [n % 2] if n > 1 else [n]
+    bins = [*to_bin(n // 2), n % 2] if n > 1 else [n]
     if pad_to_size is None:
         return bins
     return ([0] * (pad_to_size - len(bins))) + bins
 
 
 def strip_from_end(str_item: str, strip_key: str) -> str:
-    """Strips a string from the end.
+    """Strip a string from the end.
 
     :param str_item: String to strip.
     :type str_item: str
@@ -68,7 +68,7 @@ def strip_from_end(str_item: str, strip_key: str) -> str:
 
 
 def strip_from_beginning(str_item: str, strip_key: str) -> str:
-    """Strips a string from the beginning.
+    """Strip a string from the beginning.
 
     :param str_item: String to strip.
     :type str_item: str

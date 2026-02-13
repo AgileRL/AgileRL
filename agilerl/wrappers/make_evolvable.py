@@ -100,20 +100,20 @@ class MakeEvolvable(EvolvableModule):
         device: str = "cpu",
         accelerator: Accelerator | None = None,
         **kwargs: dict,
-    ):
+    ) -> None:
         super().__init__(device)
-        assert (
-            min_hidden_layers < max_hidden_layers
-        ), "'min_hidden_layers' must be less than 'max_hidden_layers."
-        assert (
-            min_mlp_nodes < max_mlp_nodes
-        ), "'min_mlp_nodes' must be less than 'max_mlp_nodes."
-        assert (
-            min_cnn_hidden_layers < max_cnn_hidden_layers
-        ), "'min_cnn_hidden_layers' must be less than 'max_cnn_hidden_layers."
-        assert (
-            min_channel_size < max_channel_size
-        ), "'min_channel_size' must be less than 'max_channel_size'."
+        assert min_hidden_layers < max_hidden_layers, (
+            "'min_hidden_layers' must be less than 'max_hidden_layers."
+        )
+        assert min_mlp_nodes < max_mlp_nodes, (
+            "'min_mlp_nodes' must be less than 'max_mlp_nodes."
+        )
+        assert min_cnn_hidden_layers < max_cnn_hidden_layers, (
+            "'min_cnn_hidden_layers' must be less than 'max_cnn_hidden_layers."
+        )
+        assert min_channel_size < max_channel_size, (
+            "'min_channel_size' must be less than 'max_channel_size'."
+        )
         if not kwargs:
             assert isinstance(
                 network,
@@ -188,23 +188,25 @@ class MakeEvolvable(EvolvableModule):
 
     @property
     def activation(self) -> str:
-        """Returns the activation function."""
+        """Return the activation function."""
         return self.mlp_activation
 
     @property
     def output_activation(self) -> str:
-        """Returns the output activation function."""
+        """Return the output activation function."""
         return self.mlp_output_activation
 
     def get_output_dense(self) -> nn.Module:
-        """Returns the output dense layer."""
+        """Return the output dense layer."""
         final_layer = self.value_net if self.value_net is not None else self.feature_net
         return getattr(
             final_layer,
             f"{'value' if self.value_net is not None else 'feature'}_linear_layer_output",
         )
 
-    def init_weights_gaussian(self, std_coeff: float = 4.0, output_coeff: float = 2.0):
+    def init_weights_gaussian(
+        self, std_coeff: float = 4.0, output_coeff: float = 2.0
+    ) -> None:
         """Initialise network weights using Gaussian distribution.
 
         :param std_coeff: Standard deviation coefficient, defaults to 4.0
@@ -212,9 +214,9 @@ class MakeEvolvable(EvolvableModule):
         :param output_coeff: Output coefficient, defaults to 2.0
         :type output_coeff: float, optional
         """
-        layers = [module for module in self.feature_net.children()]
+        layers = list(self.feature_net.children())
         if self.arch == "cnn":
-            layers += [module for module in self.value_net.children()]
+            layers += list(self.value_net.children())
 
         # Initialize network layers
         l_no = 0
@@ -226,8 +228,13 @@ class MakeEvolvable(EvolvableModule):
             else:
                 EvolvableModule.init_weights_gaussian(layer, std_coeff=output_coeff)
 
-    def forward(self, x: ArrayOrTensor, xc: ArrayOrTensor = None, q: bool = True):
-        """Returns output of neural network.
+    def forward(
+        self,
+        x: ArrayOrTensor,
+        xc: ArrayOrTensor | None = None,
+        q: bool = True,
+    ) -> torch.Tensor:
+        """Return output of neural network.
 
         :param x: Neural network input
         :type x: torch.Tensor() or np.array
@@ -314,15 +321,15 @@ class MakeEvolvable(EvolvableModule):
         stride_size_list = []
         padding_list = []
 
-        cnn_layer_info = dict()
-        mlp_layer_info = dict()
+        cnn_layer_info = {}
+        mlp_layer_info = {}
 
-        def register_hooks(module):
+        def register_hooks(module: nn.Module) -> None:
             def forward_hook(
                 module: nn.Module,
-                input: torch.Tensor,
+                input_tensor: torch.Tensor,
                 output: torch.Tensor,
-            ):
+            ) -> None:
                 # Convolutional layer detection
                 if isinstance(module, nn.modules.conv._ConvNd):
                     self.has_conv_layers = True
@@ -358,14 +365,14 @@ class MakeEvolvable(EvolvableModule):
                 ):
                     if len(output.shape) <= 2:
                         if "norm_layers" not in mlp_layer_info:
-                            mlp_layer_info["norm_layers"] = dict()
+                            mlp_layer_info["norm_layers"] = {}
 
                         mlp_layer_info["norm_layers"][self.lin_counter] = str(
                             module.__class__.__name__,
                         )
                     else:
                         if "norm_layers" not in cnn_layer_info:
-                            cnn_layer_info["norm_layers"] = dict()
+                            cnn_layer_info["norm_layers"] = {}
 
                         cnn_layer_info["norm_layers"][self.conv_counter] = str(
                             module.__class__.__name__,
@@ -377,20 +384,20 @@ class MakeEvolvable(EvolvableModule):
                     (nn.MaxPool2d, nn.MaxPool3d, nn.AvgPool2d, nn.AvgPool3d),
                 ):
                     if "pooling_layers" not in cnn_layer_info:
-                        cnn_layer_info["pooling_layers"] = dict()
-                    cnn_layer_info["pooling_layers"][self.conv_counter] = dict()
+                        cnn_layer_info["pooling_layers"] = {}
+                    cnn_layer_info["pooling_layers"][self.conv_counter] = {}
                     cnn_layer_info["pooling_layers"][self.conv_counter]["name"] = str(
                         module.__class__.__name__,
                     )
-                    cnn_layer_info["pooling_layers"][self.conv_counter][
-                        "kernel"
-                    ] = module.kernel_size
-                    cnn_layer_info["pooling_layers"][self.conv_counter][
-                        "stride"
-                    ] = module.stride
-                    cnn_layer_info["pooling_layers"][self.conv_counter][
-                        "padding"
-                    ] = module.padding
+                    cnn_layer_info["pooling_layers"][self.conv_counter]["kernel"] = (
+                        module.kernel_size
+                    )
+                    cnn_layer_info["pooling_layers"][self.conv_counter]["stride"] = (
+                        module.stride
+                    )
+                    cnn_layer_info["pooling_layers"][self.conv_counter]["padding"] = (
+                        module.padding
+                    )
 
                 # Skip nn.Flatten layer as this is added when building the CNN to connect
                 # the convolutional layers with the fully-connected layers
@@ -417,20 +424,19 @@ class MakeEvolvable(EvolvableModule):
                 ):
                     if len(output.shape) <= 2:
                         if "activation_layers" not in mlp_layer_info:
-                            mlp_layer_info["activation_layers"] = dict()
+                            mlp_layer_info["activation_layers"] = {}
                         mlp_layer_info["activation_layers"][self.lin_counter] = str(
                             module.__class__.__name__,
                         )
                     else:
                         if "activation_layers" not in cnn_layer_info:
-                            cnn_layer_info["activation_layers"] = dict()
+                            cnn_layer_info["activation_layers"] = {}
                         cnn_layer_info["activation_layers"][self.conv_counter] = str(
                             module.__class__.__name__,
                         )
                 else:
-                    raise Exception(
-                        f"{module} not currently supported, use an alternative layer.",
-                    )
+                    msg = f"{module} not currently supported, use an alternative layer."
+                    raise TypeError(msg)
 
             if (
                 not isinstance(module, nn.Sequential)
@@ -457,11 +463,12 @@ class MakeEvolvable(EvolvableModule):
         self.num_inputs, *self.hidden_size = in_features_list
         *_, self.num_outputs = out_features_list
         if len(self.hidden_size) == 0:
-            raise TypeError("Network must have at least one hidden layer.")
+            msg = "Network must have at least one hidden layer."
+            raise TypeError(msg)
 
         self.mlp_layer_info = mlp_layer_info
 
-        if len(out_features_list) - 1 in mlp_layer_info["activation_layers"].keys():
+        if len(out_features_list) - 1 in mlp_layer_info["activation_layers"]:
             self.mlp_output_activation = mlp_layer_info["activation_layers"][
                 len(out_features_list) - 1
             ]
@@ -473,10 +480,11 @@ class MakeEvolvable(EvolvableModule):
             activation_function_set.remove(self.mlp_output_activation)
 
         if len(activation_function_set) > 1:
+            msg = "All activation functions other than the output layer activation must be the same."
             raise TypeError(
-                "All activation functions other than the output layer activation must be the same.",
+                msg,
             )
-        self.mlp_activation = list(mlp_layer_info["activation_layers"].values())[0]
+        self.mlp_activation = next(iter(mlp_layer_info["activation_layers"].values()))
 
         self.cnn_layer_info = cnn_layer_info
         if self.has_conv_layers is True:
@@ -504,7 +512,7 @@ class MakeEvolvable(EvolvableModule):
         noisy: bool = False,
         rainbow_feature_net: bool = False,
     ) -> nn.Sequential:
-        """Creates and returns multi-layer perceptron.
+        """Create and returns multi-layer perceptron.
 
         :param input_size: Input dimensions to first MLP layer
         :type input_size: int
@@ -534,16 +542,16 @@ class MakeEvolvable(EvolvableModule):
                 net_dict[f"{name}_linear_layer_0"],
             )
 
-        if ("norm_layers" in self.mlp_layer_info.keys()) and (
-            0 in self.mlp_layer_info["norm_layers"].keys()
+        if ("norm_layers" in self.mlp_layer_info) and (
+            0 in self.mlp_layer_info["norm_layers"]
         ):
             net_dict[f"{name}_layer_norm_0"] = get_normalization(
                 self.mlp_layer_info["norm_layers"][0],
                 hidden_size[0],
             )
 
-        if ("activation_layers" in self.mlp_layer_info.keys()) and (
-            0 in self.mlp_layer_info["activation_layers"].keys()
+        if ("activation_layers" in self.mlp_layer_info) and (
+            0 in self.mlp_layer_info["activation_layers"]
         ):
             net_dict[f"{name}_activation_0"] = get_activation(
                 (
@@ -569,14 +577,14 @@ class MakeEvolvable(EvolvableModule):
                     net_dict[f"{name}_linear_layer_{l_no!s}"] = layer_init(
                         net_dict[f"{name}_linear_layer_{l_no!s}"],
                     )
-                if ("norm_layers" in self.mlp_layer_info.keys()) and (
-                    l_no in self.mlp_layer_info["norm_layers"].keys()
+                if ("norm_layers" in self.mlp_layer_info) and (
+                    l_no in self.mlp_layer_info["norm_layers"]
                 ):
                     net_dict[f"{name}_layer_norm_{l_no!s}"] = get_normalization(
                         self.mlp_layer_info["norm_layers"][l_no],
                         hidden_size[l_no],
                     )
-                if l_no in self.mlp_layer_info["activation_layers"].keys():
+                if l_no in self.mlp_layer_info["activation_layers"]:
                     net_dict[f"{name}_activation_{l_no!s}"] = get_activation(
                         (
                             mlp_activation
@@ -613,7 +621,7 @@ class MakeEvolvable(EvolvableModule):
         padding: list[int],
         name: str,
     ) -> nn.Sequential:
-        """Creates and returns convolutional neural network.
+        """Create and returns convolutional neural network.
 
         :param input_size: Channel size of first layer
         :type input_size: int
@@ -644,23 +652,23 @@ class MakeEvolvable(EvolvableModule):
             stride=stride_size[0],
             padding=padding[0],
         )
-        if ("norm_layers" in self.cnn_layer_info.keys()) and (
-            0 in self.cnn_layer_info["norm_layers"].keys()
+        if ("norm_layers" in self.cnn_layer_info) and (
+            0 in self.cnn_layer_info["norm_layers"]
         ):
             net_dict[f"{name}_layer_norm_0"] = get_normalization(
                 self.cnn_layer_info["norm_layers"][0],
                 channel_size[0],
             )
 
-        if ("activation_layers" in self.cnn_layer_info.keys()) and (
-            0 in self.cnn_layer_info["activation_layers"].keys()
+        if ("activation_layers" in self.cnn_layer_info) and (
+            0 in self.cnn_layer_info["activation_layers"]
         ):
             net_dict[f"{name}_activation_0"] = get_activation(
                 self.cnn_layer_info["activation_layers"][0],
             )
 
-        if ("pooling_layers" in self.cnn_layer_info.keys()) and (
-            0 in self.cnn_layer_info["pooling_layers"].keys()
+        if ("pooling_layers" in self.cnn_layer_info) and (
+            0 in self.cnn_layer_info["pooling_layers"]
         ):
             net_dict[f"{name}_pooling_0"] = get_pooling(
                 self.cnn_layer_info["pooling_layers"][0]["name"],
@@ -679,23 +687,23 @@ class MakeEvolvable(EvolvableModule):
                     stride=stride_size[l_no],
                     padding=padding[l_no],
                 )
-                if ("norm_layers" in self.cnn_layer_info.keys()) and (
-                    l_no in self.cnn_layer_info["norm_layers"].keys()
+                if ("norm_layers" in self.cnn_layer_info) and (
+                    l_no in self.cnn_layer_info["norm_layers"]
                 ):
                     net_dict[f"{name}_layer_norm_{l_no!s}"] = get_normalization(
                         self.cnn_layer_info["norm_layers"][l_no],
                         channel_size[l_no],
                     )
 
-                if ("activation_layers" in self.cnn_layer_info.keys()) and (
-                    l_no in self.cnn_layer_info["activation_layers"].keys()
+                if ("activation_layers" in self.cnn_layer_info) and (
+                    l_no in self.cnn_layer_info["activation_layers"]
                 ):
                     net_dict[f"{name}_activation_{l_no!s}"] = get_activation(
                         self.cnn_layer_info["activation_layers"][l_no],
                     )
 
-                if ("pooling_layers" in self.cnn_layer_info.keys()) and (
-                    l_no in self.cnn_layer_info["pooling_layers"].keys()
+                if ("pooling_layers" in self.cnn_layer_info) and (
+                    l_no in self.cnn_layer_info["pooling_layers"]
                 ):
                     net_dict[f"{name}_pooling_{l_no!s}"] = get_pooling(
                         self.cnn_layer_info["pooling_layers"][l_no]["name"],
@@ -707,7 +715,7 @@ class MakeEvolvable(EvolvableModule):
         return nn.Sequential(net_dict)
 
     def build_networks(self) -> tuple[nn.Module, nn.Module, nn.Module | None]:
-        """Creates and returns the feature and value net."""
+        """Create and returns the feature and value net."""
         # Check if any CNN layers otherwise return just a mlp
         if self.cnn_layer_info:
             feature_net = self.create_cnn(
@@ -812,8 +820,8 @@ class MakeEvolvable(EvolvableModule):
         return feature_net, value_net, advantage_net
 
     def get_init_dict(self) -> dict[str, Any]:
-        """Returns model information in dictionary."""
-        init_dict = {
+        """Return model information in dictionary."""
+        return {
             "network": None,
             "input_tensor": self.input_tensor,
             "secondary_input_tensor": self.secondary_input_tensor,
@@ -841,8 +849,6 @@ class MakeEvolvable(EvolvableModule):
             "support": self.support,
         }
 
-        return init_dict
-
     @mutation(MutationType.ACTIVATION)
     def change_activation(self, activation: str, output: bool = False) -> None:
         """Set the activation function for the network.
@@ -862,44 +868,44 @@ class MakeEvolvable(EvolvableModule):
 
     @mutation(MutationType.LAYER)
     def add_mlp_layer(self) -> None:
-        """Adds a hidden layer to value network."""
+        """Add a hidden layer to value network."""
         if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
-            self.mlp_layer_info["activation_layers"][
-                len(self.hidden_size) - 1
-            ] = self.mlp_activation
+            self.mlp_layer_info["activation_layers"][len(self.hidden_size) - 1] = (
+                self.mlp_activation
+            )
             if self.mlp_output_activation is not None:
-                self.mlp_layer_info["activation_layers"][
-                    len(self.hidden_size)
-                ] = self.mlp_output_activation
+                self.mlp_layer_info["activation_layers"][len(self.hidden_size)] = (
+                    self.mlp_output_activation
+                )
         else:
             self.add_mlp_node()
 
     @mutation(MutationType.LAYER)
     def remove_mlp_layer(self) -> None:
-        """Removes a hidden layer from value network."""
+        """Remove a hidden layer from value network."""
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]
-            if len(self.hidden_size) in self.mlp_layer_info["activation_layers"].keys():
+            if len(self.hidden_size) in self.mlp_layer_info["activation_layers"]:
                 if self.mlp_output_activation is None:
                     self.mlp_layer_info["activation_layers"].pop(len(self.hidden_size))
                 else:
                     self.mlp_layer_info["activation_layers"].pop(
                         len(self.hidden_size) + 1,
                     )
-                    self.mlp_layer_info["activation_layers"][
-                        len(self.hidden_size)
-                    ] = self.mlp_output_activation
+                    self.mlp_layer_info["activation_layers"][len(self.hidden_size)] = (
+                        self.mlp_output_activation
+                    )
             elif self.mlp_output_activation is not None:
                 self.mlp_layer_info["activation_layers"].pop(
                     len(self.hidden_size) + 1,
                 )
-                self.mlp_layer_info["activation_layers"][
-                    len(self.hidden_size)
-                ] = self.mlp_output_activation
+                self.mlp_layer_info["activation_layers"][len(self.hidden_size)] = (
+                    self.mlp_output_activation
+                )
 
             if (
-                "norm_layers" in self.mlp_layer_info.keys()
+                "norm_layers" in self.mlp_layer_info
                 and len(self.hidden_size) in self.mlp_layer_info["norm_layers"]
             ):
                 self.mlp_layer_info["norm_layers"].pop(len(self.hidden_size))
@@ -913,7 +919,7 @@ class MakeEvolvable(EvolvableModule):
         hidden_layer: int | None = None,
         numb_new_nodes: int | None = None,
     ) -> dict[str, int]:
-        """Adds nodes to hidden layer of value network.
+        """Add nodes to hidden layer of value network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
         :type hidden_layer: int, optional
@@ -940,7 +946,7 @@ class MakeEvolvable(EvolvableModule):
         hidden_layer: int | None = None,
         numb_new_nodes: int | None = None,
     ) -> dict[str, int]:
-        """Removes nodes from hidden layer of neural network.
+        """Remove nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
         :type hidden_layer: int, optional
@@ -963,7 +969,7 @@ class MakeEvolvable(EvolvableModule):
 
     @mutation(MutationType.LAYER)
     def add_cnn_layer(self) -> None:
-        """Adds a hidden layer to convolutional neural network."""
+        """Add a hidden layer to convolutional neural network."""
         max_kernels = self.calc_max_kernel_sizes()
         stride_size_ranges = self.calc_stride_size_ranges()
         if (
@@ -981,21 +987,22 @@ class MakeEvolvable(EvolvableModule):
                 )
                 for tup in stride_size_ranges
             ]
-            self.stride_size = stride_size_list + [
+            self.stride_size = [
+                *stride_size_list,
                 tuple(1 for _ in self.stride_size[-1]),
             ]
-            if "activation_layers" not in self.cnn_layer_info.keys():
-                self.cnn_layer_info["activation_layers"] = dict()
-            self.cnn_layer_info["activation_layers"][
-                len(self.channel_size) - 1
-            ] = "ReLU"
+            if "activation_layers" not in self.cnn_layer_info:
+                self.cnn_layer_info["activation_layers"] = {}
+            self.cnn_layer_info["activation_layers"][len(self.channel_size) - 1] = (
+                "ReLU"
+            )
 
         else:
             self.add_cnn_channel()
 
     @mutation(MutationType.LAYER)
     def remove_cnn_layer(self) -> None:
-        """Removes a hidden layer from the convolutional neural network."""
+        """Remove a hidden layer from the convolutional neural network."""
         stride_size_ranges = self.calc_stride_size_ranges()
         if len(self.channel_size) > self.min_cnn_hidden_layers:
             self.channel_size = self.channel_size[:-1]
@@ -1009,27 +1016,27 @@ class MakeEvolvable(EvolvableModule):
             ]
             self.stride_size = stride_size_list[:-1]
 
-            if "activation_layers" in self.cnn_layer_info.keys():
+            if "activation_layers" in self.cnn_layer_info:
                 if len(self.channel_size) in self.cnn_layer_info["activation_layers"]:
                     self.cnn_layer_info["activation_layers"].pop(len(self.channel_size))
             else:
-                self.cnn_layer_info["activation_layers"] = dict()
+                self.cnn_layer_info["activation_layers"] = {}
             if (
                 len(self.channel_size) - 1
                 not in self.cnn_layer_info["activation_layers"]
             ):
-                self.cnn_layer_info["activation_layers"][
-                    len(self.channel_size) - 1
-                ] = "ReLU"
+                self.cnn_layer_info["activation_layers"][len(self.channel_size) - 1] = (
+                    "ReLU"
+                )
 
             if (
-                "pooling_layers" in self.cnn_layer_info.keys()
+                "pooling_layers" in self.cnn_layer_info
                 and len(self.channel_size) in self.cnn_layer_info["pooling_layers"]
             ):
                 self.cnn_layer_info["pooling_layers"].pop(len(self.channel_size))
 
             if (
-                "norm_layers" in self.cnn_layer_info.keys()
+                "norm_layers" in self.cnn_layer_info
                 and len(self.channel_size) in self.cnn_layer_info["norm_layers"]
             ):
                 self.cnn_layer_info["norm_layers"].pop(len(self.channel_size))
@@ -1061,7 +1068,7 @@ class MakeEvolvable(EvolvableModule):
         hidden_layer: int | None = None,
         numb_new_channels: int | None = None,
     ) -> dict[str, int]:
-        """Adds channel to hidden layer of Convolutional Neural Network.
+        """Add channel to hidden layer of Convolutional Neural Network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
         :type hidden_layer: int, optional
@@ -1110,23 +1117,31 @@ class MakeEvolvable(EvolvableModule):
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
     def calc_max_kernel_sizes(self) -> list[tuple[int, int]]:
-        """Calculates the max kernel size for each convolutional layer of the feature net."""
+        """Calculate the max kernel size for each convolutional layer of the feature net."""
         max_kernel_list = []
         if self.cnn_layer_info["conv_layer_type"] != "Conv3d":
             height_in, width_in = self.input_tensor.shape[-2:]
             for idx, _ in enumerate(self.channel_size):
-                height_out = 1 + (
-                    height_in
-                    + 2 * self.padding[idx][0]
-                    - 1 * (self.kernel_size[idx][0] - 1)
-                    - 1
-                ) / (self.stride_size[idx][0])
-                width_out = 1 + (
-                    width_in
-                    + 2 * self.padding[idx][0]
-                    - 1 * (self.kernel_size[idx][1] - 1)
-                    - 1
-                ) / (self.stride_size[idx][1])
+                height_out = (
+                    1
+                    + (
+                        height_in
+                        + 2 * self.padding[idx][0]
+                        - 1 * (self.kernel_size[idx][0] - 1)
+                        - 1
+                    )
+                    / (self.stride_size[idx][0])
+                )
+                width_out = (
+                    1
+                    + (
+                        width_in
+                        + 2 * self.padding[idx][0]
+                        - 1 * (self.kernel_size[idx][1] - 1)
+                        - 1
+                    )
+                    / (self.stride_size[idx][1])
+                )
                 max_kernel_sizes = np.array([height_out * 0.2, width_out * 0.2])
                 max_kernel_sizes = np.where(max_kernel_sizes < 0, 0, max_kernel_sizes)
                 max_kernel_sizes = np.where(max_kernel_sizes > 10, 10, max_kernel_sizes)
@@ -1136,24 +1151,36 @@ class MakeEvolvable(EvolvableModule):
         else:
             depth_in, height_in, width_in = self.input_tensor.shape[-3:]
             for idx, _ in enumerate(self.channel_size):
-                depth_out = 1 + (
-                    depth_in
-                    + 2 * self.padding[idx][0]
-                    - 1 * (self.kernel_size[idx][0] - 1)
-                    - 1
-                ) / (self.stride_size[idx][0])
-                height_out = 1 + (
-                    height_in
-                    + 2 * self.padding[idx][1]
-                    - 1 * (self.kernel_size[idx][1] - 1)
-                    - 1
-                ) / (self.stride_size[idx][1])
-                width_out = 1 + (
-                    width_in
-                    + 2 * self.padding[idx][2]
-                    - 1 * (self.kernel_size[idx][2] - 1)
-                    - 1
-                ) / (self.stride_size[idx][2])
+                depth_out = (
+                    1
+                    + (
+                        depth_in
+                        + 2 * self.padding[idx][0]
+                        - 1 * (self.kernel_size[idx][0] - 1)
+                        - 1
+                    )
+                    / (self.stride_size[idx][0])
+                )
+                height_out = (
+                    1
+                    + (
+                        height_in
+                        + 2 * self.padding[idx][1]
+                        - 1 * (self.kernel_size[idx][1] - 1)
+                        - 1
+                    )
+                    / (self.stride_size[idx][1])
+                )
+                width_out = (
+                    1
+                    + (
+                        width_in
+                        + 2 * self.padding[idx][2]
+                        - 1 * (self.kernel_size[idx][2] - 1)
+                        - 1
+                    )
+                    / (self.stride_size[idx][2])
+                )
                 max_kernel_sizes = np.array(
                     [depth_out, height_out * 0.2, width_out * 0.2],
                 )
@@ -1167,23 +1194,31 @@ class MakeEvolvable(EvolvableModule):
         return max_kernel_list
 
     def calc_stride_size_ranges(self) -> list[tuple[int, int]]:
-        """Calculates a range of stride sizes for each convolutional layer of the feature net."""
+        """Calculate a range of stride sizes for each convolutional layer of the feature net."""
         stride_range_list = []
         if self.cnn_layer_info["conv_layer_type"] != "Conv3d":
             height_in, width_in = self.input_tensor.shape[-2:]
             for idx, _ in enumerate(self.channel_size):
-                height_out = 1 + (
-                    height_in
-                    + 2 * self.padding[idx][0]
-                    - 1 * (self.kernel_size[idx][0] - 1)
-                    - 1
-                ) / (self.stride_size[idx][0])
-                width_out = 1 + (
-                    width_in
-                    + 2 * self.padding[idx][0]
-                    - 1 * (self.kernel_size[idx][1] - 1)
-                    - 1
-                ) / (self.stride_size[idx][1])
+                height_out = (
+                    1
+                    + (
+                        height_in
+                        + 2 * self.padding[idx][0]
+                        - 1 * (self.kernel_size[idx][0] - 1)
+                        - 1
+                    )
+                    / (self.stride_size[idx][0])
+                )
+                width_out = (
+                    1
+                    + (
+                        width_in
+                        + 2 * self.padding[idx][0]
+                        - 1 * (self.kernel_size[idx][1] - 1)
+                        - 1
+                    )
+                    / (self.stride_size[idx][1])
+                )
 
                 min_stride = min(-(-height_out // 200), -(-width_out // 200))
                 max_stride = min(-(-height_out // 75), -(-width_out // 75))
@@ -1194,24 +1229,36 @@ class MakeEvolvable(EvolvableModule):
         else:
             depth_in, height_in, width_in = self.input_tensor.shape[-3:]
             for idx, _ in enumerate(self.channel_size):
-                depth_out = 1 + (
-                    depth_in
-                    + 2 * self.padding[idx][0]
-                    - 1 * (self.kernel_size[idx][0] - 1)
-                    - 1
-                ) / (self.stride_size[idx][0])
-                height_out = 1 + (
-                    height_in
-                    + 2 * self.padding[idx][1]
-                    - 1 * (self.kernel_size[idx][1] - 1)
-                    - 1
-                ) / (self.stride_size[idx][1])
-                width_out = 1 + (
-                    width_in
-                    + 2 * self.padding[idx][2]
-                    - 1 * (self.kernel_size[idx][2] - 1)
-                    - 1
-                ) / (self.stride_size[idx][2])
+                depth_out = (
+                    1
+                    + (
+                        depth_in
+                        + 2 * self.padding[idx][0]
+                        - 1 * (self.kernel_size[idx][0] - 1)
+                        - 1
+                    )
+                    / (self.stride_size[idx][0])
+                )
+                height_out = (
+                    1
+                    + (
+                        height_in
+                        + 2 * self.padding[idx][1]
+                        - 1 * (self.kernel_size[idx][1] - 1)
+                        - 1
+                    )
+                    / (self.stride_size[idx][1])
+                )
+                width_out = (
+                    1
+                    + (
+                        width_in
+                        + 2 * self.padding[idx][2]
+                        - 1 * (self.kernel_size[idx][2] - 1)
+                        - 1
+                    )
+                    / (self.stride_size[idx][2])
+                )
 
                 min_stride = min(
                     -(-height_out // 100),

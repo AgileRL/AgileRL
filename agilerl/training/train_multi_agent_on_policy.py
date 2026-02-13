@@ -2,7 +2,7 @@ import time
 import warnings
 from copy import deepcopy
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from accelerate import Accelerator
@@ -14,7 +14,6 @@ from agilerl.algorithms import IPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
-from agilerl.typing import SingleAgentModule
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -23,6 +22,9 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+
+if TYPE_CHECKING:
+    from agilerl.typing import SingleAgentModule
 
 InitDictType = dict[str, Any] | None
 MultiAgentOnPolicyAlgorithms = IPPO
@@ -55,7 +57,7 @@ def train_multi_agent_on_policy(
     accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
-    """The general on-policy multi-agent RL training function. Returns trained population of agents
+    """Run the general on-policy multi-agent RL training; returns trained population of agents
     and their fitnesses.
 
     :param env: The environment to train in. Can be vectorized.
@@ -132,11 +134,13 @@ def train_multi_agent_on_policy(
         warnings.warn(
             "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True.",
+            stacklevel=2,
         )
     if checkpoint is None and checkpoint_path is not None:
         warnings.warn(
             "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined.",
+            stacklevel=2,
         )
 
     start_time = time.time()
@@ -247,7 +251,7 @@ def train_multi_agent_on_policy(
                     for agent_id, agent_action in action.items():
                         network_id = (
                             agent_id
-                            if agent_id in agent.actors.keys()
+                            if agent_id in agent.actors
                             else agent.get_group_id(agent_id)
                         )
                         agent_space = agent.possible_action_spaces[agent_id]
@@ -337,7 +341,9 @@ def train_multi_agent_on_policy(
 
                     obs = next_obs
                     done = next_done
-                    for idx, agent_dones in enumerate(zip(*next_done.values())):
+                    for idx, agent_dones in enumerate(
+                        zip(*next_done.values(), strict=False)
+                    ):
                         if all(agent_dones):
                             completed_score = (
                                 float(scores[idx].item())
@@ -384,7 +390,7 @@ def train_multi_agent_on_policy(
             pop_fps.append(fps)
             pop_episode_scores.append(completed_episode_scores)
             if len(losses[agent_ids[0]]) > 0:
-                if all([losses[a_id] for a_id in agent_ids]):
+                if all(losses[a_id] for a_id in agent_ids):
                     for agent_id in agent_ids:
                         unique_loss = [
                             loss for loss in losses[agent_id] if loss is not None
@@ -469,10 +475,11 @@ def train_multi_agent_on_policy(
             loss_dict = {}
             entropy_dict = {}
 
-            for agent_idx, agent in enumerate(pop):
+            for agent_idx, _ in enumerate(pop):
                 for agent_id, loss in zip(
                     pop_loss[agent_idx].keys(),
                     pop_loss[agent_idx].values(),
+                    strict=False,
                 ):
                     loss_dict[f"train/agent_{agent_idx}_{agent_id}_loss"] = np.mean(
                         loss[-10:],
@@ -482,6 +489,7 @@ def train_multi_agent_on_policy(
                 for agent_id, entropy_values in zip(
                     entropy_hist[agent_idx].keys(),
                     entropy_hist[agent_idx].values(),
+                    strict=False,
                 ):
                     if entropy_values:
                         entropy_dict[f"train/agent_{agent_idx}_{agent_id}_entropy"] = (
@@ -512,16 +520,15 @@ def train_multi_agent_on_policy(
             agent.steps.append(agent.steps[-1])
 
         # Early stop if consistently reaches target
-        if target is not None:
-            if (
-                np.all(
-                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
-                )
-                and len(pop[0].steps) >= 100
-            ):
-                if wb:
-                    wandb.finish()
-                return pop, pop_fitnesses
+        if target is not None and (
+            np.all(
+                np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
+            )
+            and len(pop[0].steps) >= 100
+        ):
+            if wb:
+                wandb.finish()
+            return pop, pop_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -538,19 +545,19 @@ def train_multi_agent_on_policy(
 
         if verbose:
             if sum_scores:
-                fitness = ["%.2f" % fitness for fitness in fitnesses]
-                avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
-                avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+                fitness = [f"{fitness:.2f}" for fitness in fitnesses]
+                avg_fitness = [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
+                avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
                 mean_scores = [
                     (
-                        "%.2f" % mean_score
+                        f"{mean_score:.2f}"
                         if not isinstance(mean_score, str)
                         else mean_score
                     )
                     for mean_score in mean_scores
                 ]
             else:
-                fitness_arr = np.array([fitness for fitness in fitnesses])
+                fitness_arr = np.array(list(fitnesses))
                 avg_fitness_arr = np.array(
                     [np.mean(agent.fitness[-5:], axis=0) for agent in pop],
                 )

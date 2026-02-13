@@ -18,7 +18,7 @@ def _label_with_episode_number(frame, episode_num, frame_no, p):
     font = ImageFont.truetype("arial.ttf", size=45)
     drawer.text(
         (100, 5),
-        f"Episode: {episode_num+1}     Frame: {frame_no}",
+        f"Episode: {episode_num + 1}     Frame: {frame_no}",
         fill=text_color,
         font=font,
     )
@@ -128,9 +128,7 @@ if __name__ == "__main__":
                             state,
                             epsilon=0,
                             action_mask=action_mask,
-                        )[
-                            0
-                        ]  # Get next action from agent
+                        )[0]  # Get next action from agent
                 if player > 0:
                     state, _ = transform_and_flip(observation, player=1)
                     if not opponent_first:
@@ -149,9 +147,7 @@ if __name__ == "__main__":
                             state,
                             epsilon=0,
                             action_mask=action_mask,
-                        )[
-                            0
-                        ]  # Get next action from agent
+                        )[0]  # Get next action from agent
                 env.step(action)  # Act in environment
                 observation, reward, termination, truncation, _ = env.last()
                 # Save the frame for this step and append to frames list
@@ -178,7 +174,7 @@ if __name__ == "__main__":
 
                 player *= -1
 
-            print("-" * 15, f"Episode: {ep+1}", "-" * 15)
+            print("-" * 15, f"Episode: {ep + 1}", "-" * 15)
             print(f"Episode length: {idx_step}")
             print(f"Score: {score}")
 

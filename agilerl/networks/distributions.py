@@ -1,4 +1,4 @@
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 import numpy as np
 import torch
@@ -189,7 +189,8 @@ class MultiCategoricalHandler:
         """
         unbinded_actions = torch.unbind(action, dim=1)
         multi_log_prob = [
-            dist.log_prob(act) for dist, act in zip(distribution, unbinded_actions)
+            dist.log_prob(act)
+            for dist, act in zip(distribution, unbinded_actions, strict=False)
         ]
         return torch.stack(multi_log_prob, dim=1).sum(dim=1)
 
@@ -216,7 +217,7 @@ class TorchDistribution:
     """
 
     # Map distribution types to their handlers
-    _handlers: dict[type, DistributionHandler] = {
+    _handlers: ClassVar[dict[type, DistributionHandler]] = {
         Normal: NormalHandler(),
         Bernoulli: BernoulliHandler(),
         Categorical: CategoricalHandler(),
@@ -229,9 +230,9 @@ class TorchDistribution:
         squash_output: bool = False,
     ) -> None:
         if isinstance(distribution, list):
-            assert all(
-                isinstance(d, Categorical) for d in distribution
-            ), "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
+            assert all(isinstance(d, Categorical) for d in distribution), (
+                "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
+            )
 
         self.distribution = distribution
         self.squash_output = squash_output
@@ -253,7 +254,8 @@ class TorchDistribution:
             if isinstance(distribution, dist_type) and dist_type is not list:
                 return handler
 
-        raise NotImplementedError(f"Distribution {type(distribution)} not supported.")
+        msg = f"Distribution {type(distribution)} not supported."
+        raise NotImplementedError(msg)
 
     def sample(self) -> torch.Tensor:
         """Sample an action from the distribution.
@@ -330,7 +332,7 @@ class EvolvableDistribution(EvolvableWrapper):
         action_std_init: float = 0.0,
         squash_output: bool = False,
         device: DeviceType = "cpu",
-    ):
+    ) -> None:
         super().__init__(network)
 
         self.action_space = action_space
@@ -387,8 +389,9 @@ class EvolvableDistribution(EvolvableWrapper):
         elif isinstance(self.action_space, spaces.MultiBinary):
             dist = Bernoulli(logits=logits)
         else:
+            msg = f"Action space {self.action_space} not supported."
             raise NotImplementedError(
-                f"Action space {self.action_space} not supported.",
+                msg,
             )
 
         return TorchDistribution(dist, self.squash_output)
@@ -402,7 +405,8 @@ class EvolvableDistribution(EvolvableWrapper):
         :rtype: torch.Tensor
         """
         if self.dist is None:
-            raise ValueError("Distribution not initialized. Call forward first.")
+            msg = "Distribution not initialized. Call forward first."
+            raise ValueError(msg)
 
         return self.dist.log_prob(action)
 
@@ -413,7 +417,8 @@ class EvolvableDistribution(EvolvableWrapper):
         :rtype: torch.Tensor
         """
         if self.dist is None:
-            raise ValueError("Distribution not initialized. Call forward first.")
+            msg = "Distribution not initialized. Call forward first."
+            raise ValueError(msg)
 
         return self.dist.entropy()
 
@@ -446,15 +451,20 @@ class EvolvableDistribution(EvolvableWrapper):
 
             # Apply mask to each split
             masked_logits = []
-            for split_logits, split_mask in zip(split_logits, split_masks):
+            for logits_part, mask_part in zip(
+                split_logits,
+                split_masks,
+                strict=False,
+            ):
                 masked_logits.append(
-                    apply_action_mask_discrete(split_logits, split_mask),
+                    apply_action_mask_discrete(logits_part, mask_part),
                 )
 
             masked_logits = torch.cat(masked_logits, dim=1)
         else:
+            msg = f"Action space {self.action_space} not supported."
             raise NotImplementedError(
-                f"Action space {self.action_space} not supported.",
+                msg,
             )
 
         return masked_logits
@@ -504,7 +514,7 @@ class EvolvableDistribution(EvolvableWrapper):
         return action, log_prob, entropy
 
     def clone(self) -> "EvolvableDistribution":
-        """Clones the distribution.
+        """Clone the distribution.
 
         :return: Cloned distribution.
         :rtype: EvolvableDistribution

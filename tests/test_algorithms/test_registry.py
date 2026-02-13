@@ -226,8 +226,8 @@ class TestHyperparameterConfig:
         assert config["batch_size"] == batch_param
 
     def test_hyperparameter_config_invalid_param_raises_error(self):
-        """Test that invalid parameter types raise ValueError."""
-        with pytest.raises(ValueError, match="Expected RLParameter object"):
+        """Test that invalid parameter types raise TypeError."""
+        with pytest.raises(TypeError, match="Expected RLParameter object"):
             HyperparameterConfig(invalid_param="not_an_rlparameter")
 
     def test_hyperparameter_config_iteration(self):

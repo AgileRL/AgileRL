@@ -547,7 +547,9 @@ def test_soft_update(vector_space):
     assert all(
         torch.allclose(expected_param, target_param)
         for expected_param, target_param in zip(
-            expected_params, target_params, strict=False
+            expected_params,
+            target_params,
+            strict=False,
         )
     )
 
@@ -563,7 +565,9 @@ def test_soft_update(vector_space):
     assert all(
         torch.allclose(expected_param, target_param)
         for expected_param, target_param in zip(
-            expected_params, target_params, strict=False
+            expected_params,
+            target_params,
+            strict=False,
         )
     )
 
@@ -579,7 +583,9 @@ def test_soft_update(vector_space):
     assert all(
         torch.allclose(expected_param, target_param)
         for expected_param, target_param in zip(
-            expected_params, target_params, strict=False
+            expected_params,
+            target_params,
+            strict=False,
         )
     )
     td3.clean_up()

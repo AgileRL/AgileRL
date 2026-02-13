@@ -1,5 +1,5 @@
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from numbers import Number
 from typing import Any, Optional
@@ -32,10 +32,11 @@ class NetworkConfig:
     eval_network: bool = field(default=False)
     optimizer: str | None = field(default=None)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.eval_network and self.optimizer is None:
+            msg = "Evaluation network must have an optimizer associated with it."
             raise ValueError(
-                "Evaluation network must have an optimizer associated with it.",
+                msg,
             )
 
 
@@ -64,7 +65,7 @@ class OptimizerConfig:
     optimizer_cls: type[Optimizer] | list[type[Optimizer]]
     optimizer_kwargs: dict[str, Any] | list[dict[str, Any]]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         # Save optimizer_cls as string for serialization
         if isinstance(self.optimizer_cls, dict):
             self.optimizer_cls = {
@@ -191,13 +192,12 @@ class HyperparameterConfig:
     stored, and the range of values that the hyperparameter can take.
     """
 
-    def __init__(self, **kwargs: dict[str, RLParameter]):
+    def __init__(self, **kwargs: dict[str, RLParameter]) -> None:
         self.config = kwargs
         for key, value in kwargs.items():
             if not isinstance(value, RLParameter):
-                raise ValueError(
-                    "Expected RLParameter object for hyperparameter configuration.",
-                )
+                msg = "Expected RLParameter object for hyperparameter configuration."
+                raise TypeError(msg)
 
             setattr(self, key, value)
 
@@ -209,7 +209,7 @@ class HyperparameterConfig:
         )
 
     def __bool__(self) -> bool:
-        """Returns False if the config is empty, True otherwise.
+        """Return False if the config is empty, True otherwise.
 
         :return: Whether the config contains any hyperparameters
         :rtype: bool
@@ -219,7 +219,7 @@ class HyperparameterConfig:
     def __eq__(self, other: "HyperparameterConfig") -> bool:
         return set(self.names()) == set(other.names())
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[str]:
         return iter(self.config)
 
     def __getitem__(self, key: str) -> RLParameter:
@@ -263,7 +263,7 @@ class NetworkGroup:
     shared_networks: NetworkType | None = field(default=None)
     policy: bool = field(default=False)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         # Check that the shared networks are of the same type as the eval network
         if self.shared_networks is not None:
             eval_cls = type(self.eval_network)
@@ -361,8 +361,8 @@ def make_network_group(
 
 @dataclass
 class MutationRegistry:
-    """Registry to keep track of the components of an algorithms that may evolve during training
-    in a structured way to be interpreted by a :class:`Mutations <agilerl.hpo.mutations.Mutations>` object
+    """Registry to keep track of the components of an algorithms that may evolve during training.
+    This is interpreted by a :class:`Mutations <agilerl.hpo.mutations.Mutations>` object
     when performing evolutionary hyperparameter optimization. This includes:
 
     1. The hyperparameter configuration of the algorithm.
@@ -376,7 +376,7 @@ class MutationRegistry:
 
     hp_config: HyperparameterConfig | None = field(default=None)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.groups: list[NetworkGroup] = []
         self.optimizers: list[OptimizerConfig] = []
         self.hooks: list[Callable] = []
@@ -435,7 +435,7 @@ class MutationRegistry:
         return None
 
     def all_registered(self) -> list[str]:
-        """Returns all of the members in the registry.
+        """Return all of the members in the registry.
 
         :return: A list of all the members in the registry.
         :rtype: list[str]

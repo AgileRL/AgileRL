@@ -45,19 +45,25 @@ class Policy(ABC):
     def act(self, obs: Language_Observation) -> str:
         pass
 
-    def train(self):
-        pass
+    @abstractmethod
+    def train(self) -> None:
+        """Set policy to training mode; override in subclasses if needed."""
+        ...
 
-    def eval(self):
-        pass
+    @abstractmethod
+    def eval(self) -> None:
+        """Set policy to eval mode; override in subclasses if needed."""
+        ...
 
 
 def interact_environment(
     env: Language_Environment,
     policy: Policy,
     obs: Language_Observation | None = None,
-):
-    obs_sequence = []
+) -> tuple[
+    Language_Observation, list[tuple[Language_Observation, str | None, float, bool]]
+]:
+    obs_sequence: list[tuple[Language_Observation, str | None, float, bool]] = []
     if obs is None:
         obs = env.reset()
     while not env.is_terminal():

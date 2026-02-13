@@ -57,7 +57,7 @@ def train_multi_agent_off_policy(
     accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
-    """The general off-policy multi-agent RL training function. Returns trained population of agents
+    """Run the general off-policy multi-agent RL training; returns trained population of agents
     and their fitnesses.
 
     :param env: The environment to train in. Can be vectorized.
@@ -138,11 +138,13 @@ def train_multi_agent_off_policy(
         warnings.warn(
             "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True.",
+            stacklevel=2,
         )
     if checkpoint is None and checkpoint_path is not None:
         warnings.warn(
             "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined.",
+            stacklevel=2,
         )
 
     start_time = time.time()
@@ -200,9 +202,8 @@ def train_multi_agent_off_policy(
     checkpoint_count = 0
 
     # Pre-training mutation
-    if accelerator is None:
-        if mutation is not None:
-            pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None and mutation is not None:
+        pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
@@ -341,7 +342,7 @@ def train_multi_agent_off_policy(
                         agent: np.array([dones[agent_id]]) for agent in agent.agent_ids
                     }
 
-                for idx, agent_dones in enumerate(zip(*dones.values())):
+                for idx, agent_dones in enumerate(zip(*dones.values(), strict=False)):
                     if all(agent_dones):
                         completed_score = (
                             float(scores[idx]) if sum_scores else list(scores[idx])
@@ -372,9 +373,11 @@ def train_multi_agent_off_policy(
             pop_fps.append(fps)
             pop_episode_scores.append(completed_episode_scores)
             if len(losses[agent_ids[0]]) > 0:
-                if all([losses[a_id] for a_id in agent_ids]):
+                if all(losses[a_id] for a_id in agent_ids):
                     for agent_id in agent_ids:
-                        actor_losses, critic_losses = list(zip(*losses[agent_id]))
+                        actor_losses, critic_losses = list(
+                            zip(*losses[agent_id], strict=False)
+                        )
                         actor_losses = [
                             loss for loss in actor_losses if loss is not None
                         ]
@@ -465,11 +468,12 @@ def train_multi_agent_off_policy(
             actor_loss_dict = {}
             critic_loss_dict = {}
 
-            for agent_idx, agent in enumerate(pop):
+            for agent_idx, _ in enumerate(pop):
                 for agent_id, actor_loss, critic_loss in zip(
                     pop_actor_loss[agent_idx].keys(),
                     pop_actor_loss[agent_idx].values(),
                     pop_critic_loss[agent_idx].values(),
+                    strict=False,
                 ):
                     if actor_loss:
                         actor_loss_dict[
@@ -505,16 +509,15 @@ def train_multi_agent_off_policy(
             agent.steps.append(agent.steps[-1])
 
         # Early stop if consistently reaches target
-        if target is not None:
-            if (
-                np.all(
-                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
-                )
-                and len(pop[0].steps) >= 100
-            ):
-                if wb:
-                    wandb.finish()
-                return pop, pop_fitnesses
+        if target is not None and (
+            np.all(
+                np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
+            )
+            and len(pop[0].steps) >= 100
+        ):
+            if wb:
+                wandb.finish()
+            return pop, pop_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -533,17 +536,17 @@ def train_multi_agent_off_policy(
             if sum_scores:
                 mean_scores = [
                     (
-                        "%.2f" % mean_score
+                        f"{mean_score:.2f}"
                         if not isinstance(mean_score, str)
                         else mean_score
                     )
                     for mean_score in mean_scores
                 ]
-                fitness = ["%.2f" % fitness for fitness in fitnesses]
-                avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
-                avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+                fitness = [f"{fitness:.2f}" for fitness in fitnesses]
+                avg_fitness = [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
+                avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
             else:
-                fitness_arr = np.array([fitness for fitness in fitnesses])
+                fitness_arr = np.array(list(fitnesses))
                 avg_fitness_arr = np.array(
                     [np.mean(agent.fitness[-5:], axis=0) for agent in pop],
                 )

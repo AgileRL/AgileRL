@@ -701,15 +701,15 @@ def mocked_agent_off_policy(env, algo):
         )
         mock_agent.actor = MagicMock()
         mock_agent.actor.output_activation = "Tanh"
-        mock_agent.get_action.side_effect = (
-            lambda state, *args, **kwargs: np.random.randn(
+        mock_agent.get_action.side_effect = lambda state, *args, **kwargs: (
+            np.random.randn(
                 env.n_envs,
                 mock_agent.action_size,
             ).astype(np.float32)
         )
     else:
-        mock_agent.get_action.side_effect = (
-            lambda state, *args, **kwargs: np.random.randint(
+        mock_agent.get_action.side_effect = lambda state, *args, **kwargs: (
+            np.random.randint(
                 env.action_size,
                 size=(env.n_envs,),
             )
@@ -788,8 +788,8 @@ def mocked_bandit(bandit_env, algo):
     mock_agent.fitness = []
     mock_agent.mut = "mutation"
     mock_agent.index = 1
-    mock_agent.get_action.side_effect = (
-        lambda state, *args, **kwargs: np.random.randint(bandit_env.action_size)
+    mock_agent.get_action.side_effect = lambda state, *args, **kwargs: (
+        np.random.randint(bandit_env.action_size)
     )
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     mock_agent.learn.side_effect = lambda experiences: random.random()
@@ -1571,8 +1571,10 @@ def test_train_off_policy_checkpoint_warning(
     mutations,
     memory,
 ):
-    warning_string = "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+    warning_string = (
+        "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_off_policy(
             env,
@@ -2253,8 +2255,10 @@ def test_train_on_policy_checkpoint_warning(
     tournament,
     mutations,
 ):
-    warning_string = "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+    warning_string = (
+        "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_on_policy(
             env,
@@ -2894,8 +2898,10 @@ def test_train_multi_checkpoint_warning(
     tournament,
     mutations,
 ):
-    warning_string = "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+    warning_string = (
+        "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_multi_agent_off_policy(
             multi_env,
@@ -2926,8 +2932,10 @@ def test_train_multi_checkpoint_warning_on_policy(
     tournament,
     mutations,
 ):
-    warning_string = "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+    warning_string = (
+        "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_multi_agent_on_policy(
             multi_env,
@@ -3748,8 +3756,10 @@ def test_train_offline_save_checkpoint_warning(
     offline_init_hp,
     dummy_h5py_data,
 ):
-    warning_string = "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+    warning_string = (
+        "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitness = train_offline(
             env,
@@ -4222,8 +4232,10 @@ def test_train_bandit_checkpoint_warning(
     mutations,
     bandit_memory,
 ):
-    warning_string = "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+    warning_string = (
+        "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined."
+    )
     with pytest.warns(match=warning_string):
         pop, pop_fitnesses = train_bandits(
             bandit_env,
@@ -4791,8 +4803,8 @@ def test_bandit_train_save_checkpoint(
     )
     for i in range(6):  # iterate through the population indices
         for s in range(5):
-            assert os.path.isfile(f"{checkpoint_path}_{i}_{10*(s+1)}.pt")
-            os.remove(f"{checkpoint_path}_{i}_{10*(s+1)}.pt")
+            assert os.path.isfile(f"{checkpoint_path}_{i}_{10 * (s + 1)}.pt")
+            os.remove(f"{checkpoint_path}_{i}_{10 * (s + 1)}.pt")
 
 
 # LEAVE LAST, TEMPORARY TO DELETE SAVED MODELS

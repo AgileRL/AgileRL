@@ -53,13 +53,13 @@ def load_item(config, *args, verbose=True):
         raise NotImplementedError
     if "cache_id" in config and (name, config["cache_id"]) in cache:
         if verbose:
-            print(f'loading from cache ({name}, {config["cache_id"]})')
+            print(f"loading from cache ({name}, {config['cache_id']})")
         return cache[(name, config["cache_id"])]
     if verbose:
         print(f"loading {name}: {config}")
     item = registry[name](config, *args, verbose=verbose)
     if "cache_id" in config:
-        print(f'saving to cache ({name}, {config["cache_id"]})')
+        print(f"saving to cache ({name}, {config['cache_id']})")
         cache[(name, config["cache_id"])] = item
     return item
 
@@ -70,7 +70,8 @@ def load_model(config, model, device, verbose=True):
         if verbose:
             print(
                 "loading {} state dict from: {}".format(
-                    config["name"], convert_path(config["checkpoint_path"])
+                    config["name"],
+                    convert_path(config["checkpoint_path"]),
                 ),
             )
         chkpt_state_dict = torch.load(
@@ -85,7 +86,8 @@ def load_model(config, model, device, verbose=True):
         if verbose:
             print(
                 "loading {} state dict from: {}".format(
-                    config["name"], convert_path(config["gpt_checkpoint_path"])
+                    config["name"],
+                    convert_path(config["gpt_checkpoint_path"]),
                 ),
             )
         pretrained_state_dict = convert_path(config["gpt_checkpoint_path"])
@@ -190,8 +192,8 @@ def load_vocab(config, verbose=True):
         if verbose:
             print(
                 "loading vocab cache from: {}".format(
-                    convert_path(config["cache_path"])
-                )
+                    convert_path(config["cache_path"]),
+                ),
             )
         vocab.cache.load(convert_path(config["cache_path"]))
         if verbose:
@@ -237,7 +239,7 @@ def load_optimal_policy(config, device, verbose=True):
         if verbose:
             print(
                 "loading optimal policy cache from: {}".format(
-                    convert_path(config["cache_path"])
+                    convert_path(config["cache_path"]),
                 ),
             )
         policy.cache.load(convert_path(config["cache_path"]))

@@ -16,7 +16,7 @@ def to_tensordict(
     data: ObservationType,
     dtype: torch.dtype = torch.float32,
 ) -> TensorDict:
-    """Converts a tuple or dict of torch.Tensor or np.ndarray to a TensorDict.
+    """Convert a tuple or dict of torch.Tensor or np.ndarray to a TensorDict.
 
     :param data: Tuple or dict of torch.Tensor or np.ndarray.
     :type data: ObservationType
@@ -25,9 +25,9 @@ def to_tensordict(
     :return: TensorDict, whether the data was a tuple or not.
     """
     if isinstance(data, tuple):
-        assert all(
-            isinstance(el, (torch.Tensor, np.ndarray, Number)) for el in data
-        ), "Expected all elements of the tuple to be torch.Tensor or np.ndarray."
+        assert all(isinstance(el, (torch.Tensor, np.ndarray, Number)) for el in data), (
+            "Expected all elements of the tuple to be torch.Tensor or np.ndarray."
+        )
 
         new_data = OrderedDict()
         for i, el in enumerate(data):
@@ -45,8 +45,11 @@ def to_tensordict(
     return data.to(dtype=dtype)
 
 
-def to_torch_tensor(data: ArrayOrTensor, dtype=torch.float32) -> torch.Tensor:
-    """Converts a numpy array or Python number to a torch tensor.
+def to_torch_tensor(
+    data: ArrayOrTensor,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Convert a numpy array or Python number to a torch tensor.
 
     :param data: Numpy array or Python number.
     :type data: ArrayOrTensor
@@ -92,7 +95,7 @@ class Transition:
 
 class ReplayDataset(IterableDataset):
     """Iterable Dataset containing the ReplayBuffer which will be updated with new
-    experiences during training
+    experiences during training.
 
     :param buffer: Experience replay buffer
     :type buffer: agilerl.components.replay_buffer.ReplayBuffer()
@@ -102,7 +105,7 @@ class ReplayDataset(IterableDataset):
 
     def __init__(self, buffer: ReplayBuffer, batch_size: int = 256) -> None:
         if not isinstance(buffer, ReplayBuffer):
-            warnings.warn("Buffer is not an agilerl ReplayBuffer.")
+            warnings.warn("Buffer is not an agilerl ReplayBuffer.", stacklevel=2)
 
         assert batch_size > 0, "Batch size must be greater than zero."
         self.buffer = buffer

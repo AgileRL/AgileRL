@@ -49,8 +49,9 @@ def _collect_rollouts(
     :rtype: tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]
     """
     if not agent.use_rollout_buffer:
+        msg = "collect_rollouts can only be used when use_rollout_buffer=True"
         raise RuntimeError(
-            "collect_rollouts can only be used when use_rollout_buffer=True",
+            msg,
         )
 
     if (

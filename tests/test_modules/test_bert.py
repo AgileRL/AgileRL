@@ -43,7 +43,9 @@ def test_evolvable_bert_init_no_e2e():
     decoder_layers_list = [[4], [4, 4]]
 
     for encoder_layers, decoder_layers in zip(
-        encoder_layers_list, decoder_layers_list, strict=False
+        encoder_layers_list,
+        decoder_layers_list,
+        strict=False,
     ):
         BERT = EvolvableBERT(encoder_layers, decoder_layers, end2end=False)
 

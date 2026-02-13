@@ -276,7 +276,9 @@ def test_reasoning_gym_reset_dataloaders(
     env._reset_dataloaders()
     first_data_point_reset = next(env.test_dataloader_iter)
     for key1, _key2 in zip(
-        first_data_point.keys(), first_data_point_reset.keys(), strict=False
+        first_data_point.keys(),
+        first_data_point_reset.keys(),
+        strict=False,
     ):
         if key1 == "tokenized_prompts":
             for item1, item2 in zip(

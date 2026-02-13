@@ -1,4 +1,5 @@
 import random
+from typing import Any
 
 import numpy as np
 import torch
@@ -8,7 +9,7 @@ from tqdm import trange
 
 
 class ConstantRewardEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -40,7 +41,10 @@ class ConstantRewardEnv:
         ]  # Correct V values to learn, s table
         self.policy_values = [None]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {"agent_0": 1, "other_agent_0": 0}  # Constant reward of 1
         terminated = {"agent_0": True, "other_agent_0": True}
@@ -48,14 +52,18 @@ class ConstantRewardEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         info = {}
         return observation, info
 
 
 class ConstantRewardImageEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -90,7 +98,10 @@ class ConstantRewardImageEnv:
         ]  # Correct V values to learn, s table
         self.policy_values = [None]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -101,7 +112,11 @@ class ConstantRewardImageEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -111,7 +126,7 @@ class ConstantRewardImageEnv:
 
 
 class ConstantRewardContActionsEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -140,7 +155,10 @@ class ConstantRewardContActionsEnv:
         ]  # Correct V values to learn, s table
         self.policy_values = [None]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {"agent_0": 1, "other_agent_0": 0}  # Constant reward
         terminated = {"agent_0": True, "other_agent_0": True}
@@ -148,14 +166,18 @@ class ConstantRewardContActionsEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         info = {}
         return observation, info
 
 
 class ConstantRewardContActionsImageEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -187,7 +209,10 @@ class ConstantRewardContActionsImageEnv:
         ]  # Correct V values to learn, s table
         self.policy_values = [None]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -198,7 +223,11 @@ class ConstantRewardContActionsImageEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -208,7 +237,7 @@ class ConstantRewardContActionsImageEnv:
 
 
 class ObsDependentRewardEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -248,7 +277,10 @@ class ObsDependentRewardEnv:
         ]  # Correct V values to learn, s table
         self.policy_values = [None, None]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             {"agent_0": 1, "other_agent_0": 0}
@@ -260,7 +292,11 @@ class ObsDependentRewardEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.array([0]), "other_agent_0": np.array([0])},
@@ -272,7 +308,7 @@ class ObsDependentRewardEnv:
 
 
 class ObsDependentRewardImageEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -318,7 +354,10 @@ class ObsDependentRewardImageEnv:
         ]  # Correct V values to learn, s table
         self.policy_values = [None, None]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             {"agent_0": 1, "other_agent_0": 0}
@@ -330,7 +369,11 @@ class ObsDependentRewardImageEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
@@ -342,7 +385,7 @@ class ObsDependentRewardImageEnv:
 
 
 class ObsDependentRewardContActionsEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -376,7 +419,10 @@ class ObsDependentRewardContActionsEnv:
         ]  # Correct V values to learn, s table
         self.policy_values = [None, None]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             {"agent_0": 1, "other_agent_0": 0}
@@ -388,7 +434,11 @@ class ObsDependentRewardContActionsEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.array([0]), "other_agent_0": np.array([0])},
@@ -400,7 +450,7 @@ class ObsDependentRewardContActionsEnv:
 
 
 class ObsDependentRewardContActionsImageEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -437,7 +487,10 @@ class ObsDependentRewardContActionsImageEnv:
         ]  # Correct V values to learn, s table
         self.policy_values = [None, None]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             {"agent_0": 1, "other_agent_0": 0}
@@ -449,7 +502,11 @@ class ObsDependentRewardContActionsImageEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
@@ -461,7 +518,7 @@ class ObsDependentRewardContActionsImageEnv:
 
 
 class DiscountedRewardEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -501,7 +558,10 @@ class DiscountedRewardEnv:
         ]  # Correct V values to learn, s table
         self.policy_values = [None, None]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([1]), "other_agent_0": np.array([1])}
         reward = (
             {"agent_0": 1, "other_agent_0": 0.5}
@@ -516,14 +576,18 @@ class DiscountedRewardEnv:
         self.last_obs = {"agent_0": np.array([1]), "other_agent_0": np.array([1])}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         info = {}
         return self.last_obs, info
 
 
 class DiscountedRewardImageEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -569,7 +633,10 @@ class DiscountedRewardImageEnv:
         ]  # Correct V values to learn, s table
         self.policy_values = [None, None]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.ones((1, 3, 3)),
             "other_agent_0": np.ones((1, 3, 3)),
@@ -591,7 +658,11 @@ class DiscountedRewardImageEnv:
         }
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -601,7 +672,7 @@ class DiscountedRewardImageEnv:
 
 
 class DiscountedRewardContActionsEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -635,7 +706,10 @@ class DiscountedRewardContActionsEnv:
         ]  # Correct V values to learn, s table
         self.policy_values = [None, None]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([1]), "other_agent_0": np.array([1])}
         reward = (
             {"agent_0": 1, "other_agent_0": 0.5}
@@ -650,14 +724,18 @@ class DiscountedRewardContActionsEnv:
         self.last_obs = {"agent_0": np.array([1]), "other_agent_0": np.array([1])}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         info = {}
         return self.last_obs, info
 
 
 class DiscountedRewardContActionsImageEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -697,7 +775,10 @@ class DiscountedRewardContActionsImageEnv:
         ]  # Correct V values to learn, s table
         self.policy_values = [None, None]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.ones((1, 3, 3)),
             "other_agent_0": np.ones((1, 3, 3)),
@@ -719,7 +800,11 @@ class DiscountedRewardContActionsImageEnv:
         }
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -729,7 +814,7 @@ class DiscountedRewardContActionsImageEnv:
 
 
 class FixedObsPolicyEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -765,7 +850,10 @@ class FixedObsPolicyEnv:
             },
         ]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {
             "agent_0": [1, -1][action["agent_0"]],
@@ -776,14 +864,18 @@ class FixedObsPolicyEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         info = {}
         return observation, info
 
 
 class FixedObsPolicyImageEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -825,7 +917,10 @@ class FixedObsPolicyImageEnv:
             },
         ]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -839,7 +934,11 @@ class FixedObsPolicyImageEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -849,7 +948,7 @@ class FixedObsPolicyImageEnv:
 
 
 class FixedObsPolicyContActionsEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -879,7 +978,10 @@ class FixedObsPolicyContActionsEnv:
             {"agent_0": np.array([1.0]), "other_agent_0": np.array([0.0])},
         ]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {
             "agent_0": -((1 - action["agent_0"]) ** 2),
@@ -890,14 +992,18 @@ class FixedObsPolicyContActionsEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         info = {}
         return observation, info
 
 
 class FixedObsPolicyContActionsImageEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -933,7 +1039,10 @@ class FixedObsPolicyContActionsImageEnv:
             {"agent_0": np.array([1.0]), "other_agent_0": np.array([0.0])},
         ]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -947,7 +1056,11 @@ class FixedObsPolicyContActionsImageEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -957,7 +1070,7 @@ class FixedObsPolicyContActionsImageEnv:
 
 
 class PolicyEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -1022,7 +1135,10 @@ class PolicyEnv:
             },
         ]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
             "agent_0": action["agent_0"] == self.last_obs["agent_0"],
@@ -1033,7 +1149,11 @@ class PolicyEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.array([0]), "other_agent_0": np.array([0])},
@@ -1047,7 +1167,7 @@ class PolicyEnv:
 
 
 class PolicyImageEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -1115,7 +1235,10 @@ class PolicyImageEnv:
             },
         ]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
             "agent_0": action["agent_0"] == np.mean(self.last_obs["agent_0"]),
@@ -1127,7 +1250,11 @@ class PolicyImageEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
@@ -1141,7 +1268,7 @@ class PolicyImageEnv:
 
 
 class PolicyContActionsEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -1226,7 +1353,10 @@ class PolicyContActionsEnv:
             },
         ]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {}
         if self.last_obs["agent_0"]:  # last obs = 1, policy should be [0, 1]
@@ -1250,7 +1380,11 @@ class PolicyContActionsEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.array([0]), "other_agent_0": np.array([0])},
@@ -1264,7 +1398,7 @@ class PolicyContActionsEnv:
 
 
 class PolicyContActionsImageEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -1355,7 +1489,10 @@ class PolicyContActionsImageEnv:
             },
         ]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {}
         # First, deal with agent_0
@@ -1385,7 +1522,11 @@ class PolicyContActionsImageEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
@@ -1399,7 +1540,7 @@ class PolicyContActionsImageEnv:
 
 
 class MultiPolicyEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -1505,7 +1646,10 @@ class MultiPolicyEnv:
             },
         ]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
             "agent_0": 2 * (action["agent_0"] == self.last_obs["agent_0"])
@@ -1519,7 +1663,11 @@ class MultiPolicyEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.array([0]), "other_agent_0": np.array([0])},
@@ -1533,7 +1681,7 @@ class MultiPolicyEnv:
 
 
 class MultiPolicyImageEnv:
-    def __init__(self):
+    def __init__(self) -> None:
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.agents = self.possible_agents
         self.max_num_agents = len(self.possible_agents)
@@ -1642,7 +1790,10 @@ class MultiPolicyImageEnv:
             },
         ]
 
-    def step(self, action):
+    def step(
+        self,
+        action: dict[str, np.ndarray] | np.ndarray,
+    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
             "agent_0": 2
@@ -1663,7 +1814,11 @@ class MultiPolicyImageEnv:
         info = {}
         return observation, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
@@ -1676,8 +1831,12 @@ class MultiPolicyImageEnv:
         return self.last_obs, info
 
 
-def prepare_ma_states(states, observation_space, device="cpu"):
-    processed_states = {}
+def prepare_ma_states(
+    states: dict[str, np.ndarray],
+    observation_space: dict[str, spaces.Space[Any]],
+    device: str = "cpu",
+) -> dict[str, torch.Tensor]:
+    processed_states: dict[str, torch.Tensor] = {}
     for agent_id, state in states.items():
         agent_space = observation_space[agent_id]
         if isinstance(agent_space, spaces.Discrete):
@@ -1695,23 +1854,24 @@ def prepare_ma_states(states, observation_space, device="cpu"):
     return processed_states
 
 
-def prepare_ma_actions(actions, device="cpu"):
-    actions = {
+def prepare_ma_actions(
+    actions: dict[str, np.ndarray],
+    device: str = "cpu",
+) -> dict[str, torch.Tensor]:
+    return {
         agent_id: torch.Tensor(action).to(device)
         for (agent_id, action) in actions.items()
     }
-    return actions
 
 
 def check_policy_q_learning_with_probe_env(
-    env,
-    algo_class,
-    algo_args,
-    memory,
-    learn_steps=1000,
-    device="cpu",
-):
-    print(f"Probe environment: {type(env).__name__}")
+    env: Any,
+    algo_class: type[Any],
+    algo_args: dict[str, Any],
+    memory: Any,
+    learn_steps: int = 1000,
+    device: str = "cpu",
+) -> None:
 
     agent = algo_class(**algo_args, vect_noise_dim=1, device=device)
 
@@ -1760,8 +1920,8 @@ def check_policy_q_learning_with_probe_env(
                 env.sample_actions,
                 env.q_values,
                 env.policy_values,
+                strict=False,
             ):
-
                 state = prepare_ma_states(sample_obs, agent.observation_space, device)
 
                 if q_values is not None:
@@ -1778,7 +1938,7 @@ def check_policy_q_learning_with_probe_env(
                         predicted_q_values,
                         atol=0.1,
                     ):
-                        print(agent_id, "q", q_values[agent_id], predicted_q_values)
+                        pass
 
                 if policy_values is not None:
                     predicted_policy_values = (
@@ -1792,28 +1952,21 @@ def check_policy_q_learning_with_probe_env(
                         predicted_policy_values,
                         atol=0.1,
                     ):
-                        print(
-                            agent_id,
-                            "pol",
-                            policy_values[agent_id],
-                            predicted_policy_values,
-                        )
+                        pass
 
 
 def check_on_policy_learning_with_probe_env(
-    env,
-    algo_class,
-    algo_args,
-    learn_steps=1000,
-    device="cpu",
-    discrete=True,
-):
-    print(f"Probe environment: {type(env).__name__}")
+    env: Any,
+    algo_class: type[Any],
+    algo_args: dict[str, Any],
+    learn_steps: int = 1000,
+    device: str = "cpu",
+    discrete: bool = True,
+) -> None:
 
     agent = algo_class(**algo_args, device=device)
 
-    for i in trange(learn_steps):
-
+    for _i in trange(learn_steps):
         state, _ = env.reset()
         states = {agent_id: [] for agent_id in agent.agent_ids}
         actions = {agent_id: [] for agent_id in agent.agent_ids}
@@ -1834,7 +1987,7 @@ def check_on_policy_learning_with_probe_env(
             log_prob = {agent: lp[0] for agent, lp in log_prob.items()}
             value = {agent: val[0] for agent, val in value.items()}
 
-            next_state, reward, termination, truncation, info = env.step(action)
+            next_state, reward, termination, truncation, _info = env.step(action)
 
             next_done = {}
             for agent_id in agent.agent_ids:
@@ -1877,22 +2030,20 @@ def check_on_policy_learning_with_probe_env(
         #     print("Loss = ", _loss)
 
     with torch.no_grad():
-        for agent_id in agent.observation_space.keys():
+        for agent_id in agent.observation_space:
             actor = agent.actors[agent_id]
             critic = agent.critics[agent_id]
             for sample_obs, v_values, policy_values in zip(
                 env.sample_obs,
                 env.v_values,
                 env.policy_values,
+                strict=False,
             ):
                 state = prepare_ma_states(sample_obs, agent.observation_space, device)
 
                 if v_values is not None:
-                    predicted_v_values = (
-                        critic(state[agent_id]).detach().cpu().numpy()[0]
-                    )
+                    (critic(state[agent_id]).detach().cpu().numpy()[0])
 
-                    print(agent_id, "v", v_values[agent_id], predicted_v_values)
                     # assert np.allclose(v_values[agent_id], predicted_v_values, atol=0.1):
                     # if not np.allclose(
                     #     v_values[agent_id], predicted_v_values, atol=0.1
@@ -1916,22 +2067,10 @@ def check_on_policy_learning_with_probe_env(
                 if policy_values is not None:
                     if discrete:
                         _, _, _ = actor(state[agent_id])
-                        predicted_policy_values = (
-                            actor.head_net.dist.distribution.probs.detach()
-                            .cpu()
-                            .numpy()
-                        )
+                        (actor.head_net.dist.distribution.probs.detach().cpu().numpy())
                     else:
                         _, _, _ = actor(state[agent_id])
-                        predicted_policy_values = (
-                            actor.head_net.dist.distribution.loc.detach().cpu().numpy()
-                        )
-                    print(
-                        agent_id,
-                        "pol",
-                        policy_values[agent_id],
-                        predicted_policy_values,
-                    )
+                        (actor.head_net.dist.distribution.loc.detach().cpu().numpy())
                     # assert np.allclose(policy_values[agent_id], predicted_policy_values, atol=0.1)
                     # if not np.allclose(
                     #     policy_values[agent_id], predicted_policy_values, atol=0.1
@@ -1969,8 +2108,8 @@ if __name__ == "__main__":
 
     for env, learn_steps in vector_envs:
         algo_args = {
-            "observation_spaces": [space for space in env.observation_space.values()],
-            "action_spaces": [space for space in env.action_space.values()],
+            "observation_spaces": list(env.observation_space.values()),
+            "action_spaces": list(env.action_space.values()),
             "agent_ids": env.agents,
             "lr": 1e-2,
             "net_config": {
@@ -1999,8 +2138,8 @@ if __name__ == "__main__":
 
     for env, learn_steps in image_envs:
         algo_args = {
-            "observation_spaces": [space for space in env.observation_space.values()],
-            "action_spaces": [space for space in env.action_space.values()],
+            "observation_spaces": list(env.observation_space.values()),
+            "action_spaces": list(env.action_space.values()),
             "agent_ids": env.agents,
             "lr": 1e-2,
             "net_config": {
@@ -2033,8 +2172,8 @@ if __name__ == "__main__":
 
     for env, learn_steps in cont_vector_envs:
         algo_args = {
-            "observation_spaces": [space for space in env.observation_space.values()],
-            "action_spaces": [space for space in env.action_space.values()],
+            "observation_spaces": list(env.observation_space.values()),
+            "action_spaces": list(env.action_space.values()),
             "agent_ids": env.agents,
             "lr": 1e-2,
             "net_config": {
@@ -2062,8 +2201,8 @@ if __name__ == "__main__":
 
     for env, learn_steps in cont_image_envs:
         algo_args = {
-            "observation_spaces": [space for space in env.observation_space.values()],
-            "action_spaces": [space for space in env.action_space.values()],
+            "observation_spaces": list(env.observation_space.values()),
+            "action_spaces": list(env.action_space.values()),
             "agent_ids": env.agents,
             "lr": 1e-2,
             "net_config": {

@@ -69,7 +69,7 @@ class QNetwork(EvolvableNetwork):
         recurrent: bool = False,
         device: str = "cpu",
         random_seed: int | None = None,
-    ):
+    ) -> None:
         super().__init__(
             observation_space,
             action_space=action_space,
@@ -85,7 +85,8 @@ class QNetwork(EvolvableNetwork):
         )
 
         if not isinstance(action_space, self.supported_spaces):
-            raise ValueError("Action space must be either Discrete or MultiDiscrete")
+            msg = "Action space must be either Discrete or MultiDiscrete"
+            raise ValueError(msg)
 
         if head_config is None:
             head_config = asdict(MlpNetConfig(hidden_size=[16], output_activation=None))
@@ -98,7 +99,7 @@ class QNetwork(EvolvableNetwork):
         self.build_network_head(head_config)
 
     def build_network_head(self, net_config: dict[str, Any]) -> None:
-        """Builds the head of the network based on the passed configuration.
+        """Build the head of the network based on the passed configuration.
 
         :param net_config: Configuration of the network head.
         :type net_config: dict[str, Any]
@@ -123,7 +124,7 @@ class QNetwork(EvolvableNetwork):
         return self.head_net(latent)
 
     def recreate_network(self) -> None:
-        """Recreates the network"""
+        """Recreates the network."""
         self.recreate_encoder()
 
         head_net = self.create_mlp(
@@ -183,7 +184,7 @@ class RainbowQNetwork(EvolvableNetwork):
         latent_dim: int = 32,
         device: str = "cpu",
         random_seed: int | None = None,
-    ):
+    ) -> None:
 
         if isinstance(observation_space, spaces.Box) and not is_image_space(
             observation_space,
@@ -216,7 +217,8 @@ class RainbowQNetwork(EvolvableNetwork):
         )
 
         if not isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
-            raise ValueError("Action space must be either Discrete or MultiDiscrete")
+            msg = "Action space must be either Discrete or MultiDiscrete"
+            raise ValueError(msg)
 
         if head_config is None:
             head_config = asdict(
@@ -246,7 +248,7 @@ class RainbowQNetwork(EvolvableNetwork):
         self.build_network_head(head_config)
 
     def build_network_head(self, net_config: dict[str, Any]) -> None:
-        """Builds the value and advantage heads of the network based on the passed configuration.
+        """Build the value and advantage heads of the network based on the passed configuration.
 
         :param net_config: Configuration of the network head.
         :type net_config: dict[str, Any]
@@ -349,7 +351,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         recurrent: bool = False,
         device: str = "cpu",
         random_seed: int | None = None,
-    ):
+    ) -> None:
         # NOTE: Need to disable layer normalization for the encoder since we're
         # concatenating the actions to the latent space and we don't want to do the same
         # to these so as to not lose scale information
@@ -365,6 +367,7 @@ class ContinuousQNetwork(EvolvableNetwork):
                 warnings.warn(
                     "Layer normalization is not supported for the encoder of DDPG networks. Disabling it. "
                     "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469",
+                    stacklevel=2,
                 )
 
             encoder_config["layer_norm"] = False
@@ -392,7 +395,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         self.build_network_head(head_config)  # Build value network
 
     def build_network_head(self, net_config: NetConfigType) -> None:
-        """Builds the head of the network.
+        """Build the head of the network.
 
         :param head_config: Configuration of the head.
         :type head_config: NetConfigType | None

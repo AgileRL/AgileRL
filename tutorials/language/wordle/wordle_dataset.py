@@ -75,7 +75,9 @@ class WordleListDataset(List_RL_Dataset):
             for i, item in enumerate(d["state_actions"])
         ]
         return WordleListDataset(
-            list(zip(wordle_items, meta, strict=False)), max_len, token_reward
+            list(zip(wordle_items, meta, strict=False)),
+            max_len,
+            token_reward,
         )
 
 

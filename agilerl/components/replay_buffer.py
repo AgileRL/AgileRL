@@ -82,16 +82,16 @@ class ReplayBuffer:
         # Ensure all tensors in data have proper dimensions beyond batch dimension
         # Handles the case of scalar observations that become (batch_size,)
         # instead of (batch_size, 1)
-        for key, value in data.items():
-            if is_tensor_collection(value):
-                value: TensorDictBase = value
-                for k, v in value.items():
+        for key, item in data.items():
+            if is_tensor_collection(item):
+                item: TensorDictBase = item
+                for k, v in item.items():
                     if v.ndim == 1:
-                        value[k] = v.reshape(_n_transitions, 1)
-            elif value.ndim == 1:
-                value = value.reshape(_n_transitions, 1)
+                        item[k] = v.reshape(_n_transitions, 1)
+            elif item.ndim == 1:
+                item = item.reshape(_n_transitions, 1)
 
-            data[key] = value
+            data[key] = item
 
         if self._storage is None:
             self._init(data)
@@ -214,12 +214,12 @@ class MultiStepReplayBuffer(ReplayBuffer):
 
         # Get the reward key based on what's available in the transition
         if not self.initialized:
-            assert (
-                self.reward_key in self.n_step_buffer[0]
-            ), f"Reward key not found in transition. Expected key: {self.reward_key}"
-            assert (
-                self.ns_key in self.n_step_buffer[0]
-            ), f"Next observation key not found in transition. Expected key: {self.ns_key}"
+            assert self.reward_key in self.n_step_buffer[0], (
+                f"Reward key not found in transition. Expected key: {self.reward_key}"
+            )
+            assert self.ns_key in self.n_step_buffer[0], (
+                f"Next observation key not found in transition. Expected key: {self.ns_key}"
+            )
 
             done_key = None
             expected_keys = ["done", "termination", "terminated"]
@@ -228,9 +228,9 @@ class MultiStepReplayBuffer(ReplayBuffer):
                     done_key = key
                     break
 
-            assert (
-                done_key is not None
-            ), f"No done/termination key found in transition. Expected keys: {expected_keys}"
+            assert done_key is not None, (
+                f"No done/termination key found in transition. Expected keys: {expected_keys}"
+            )
             self.done_key = done_key
 
         # Start with reward from first transition
@@ -304,7 +304,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
         # Add max priority for new entries
         n_transitions = data.shape[0]
-        for i in range(n_transitions):
+        for _i in range(n_transitions):
             self._update_priority(self.tree_ptr, self.max_priority)
             self.tree_ptr = (self.tree_ptr + 1) % self.max_size
 
@@ -420,9 +420,9 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         :param priorities: New priorities
         :type priorities: torch.Tensor
         """
-        for idx, priority in zip(indices, priorities):
+        for idx, priority in zip(indices, priorities, strict=False):
             # Handle small priorities
-            priority = max(priority.item(), 1e-5)
+            new_priority = max(priority.item(), 1e-5)
 
             # Update the priority
-            self._update_priority(idx.item(), priority)
+            self._update_priority(idx.item(), new_priority)

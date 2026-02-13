@@ -1,13 +1,12 @@
 import time
 import warnings
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import numpy as np
 import torch
 from accelerate import Accelerator
-from tensordict import TensorDictBase
 from torch.utils.data import DataLoader
 
 import wandb
@@ -30,6 +29,9 @@ from agilerl.utils.utils import (
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
+
+if TYPE_CHECKING:
+    from tensordict import TensorDictBase
 
 InitDictType = dict[str, Any] | None
 PopulationType = list[RLAlgorithm]
@@ -70,7 +72,7 @@ def train_off_policy(
     wandb_api_key: str | None = None,
     wandb_kwargs: dict[str, Any] | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
-    """The general online RL training function. Returns trained population of agents
+    """Run the general online RL training; returns trained population of agents
     and their fitnesses.
 
     :param env: The environment to train in. Can be vectorized.
@@ -168,11 +170,13 @@ def train_off_policy(
         warnings.warn(
             "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True.",
+            stacklevel=2,
         )
     if checkpoint is None and checkpoint_path is not None:
         warnings.warn(
             "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined.",
+            stacklevel=2,
         )
 
     if wb:
@@ -298,7 +302,7 @@ def train_off_policy(
                     trunc = np.array([trunc])
 
                 reset_noise_indices = []
-                for idx, (d, t) in enumerate(zip(done, trunc)):
+                for idx, (d, t) in enumerate(zip(done, trunc, strict=False)):
                     if d or t:
                         completed_episode_scores.append(scores[idx])
                         agent.scores.append(scores[idx])
@@ -373,7 +377,7 @@ def train_off_policy(
                         else:
                             experiences = sampler.sample(
                                 agent.batch_size,
-                                return_idx=True if n_step_memory is not None else False,
+                                return_idx=n_step_memory is not None,
                             )
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
@@ -409,7 +413,7 @@ def train_off_policy(
                         else:
                             experiences = sampler.sample(
                                 agent.batch_size,
-                                return_idx=True if n_step_memory is not None else False,
+                                return_idx=n_step_memory is not None,
                             )
                             if n_step_memory is not None:
                                 n_step_experiences = n_step_sampler.sample(
@@ -438,10 +442,13 @@ def train_off_policy(
 
             if len(losses) > 0:
                 if isinstance(losses[-1], tuple):
-                    actor_losses, critic_losses = list(zip(*losses))
-                    mean_loss = np.mean(
-                        [loss for loss in actor_losses if loss is not None],
-                    ), np.mean(critic_losses)
+                    actor_losses, critic_losses = list(zip(*losses, strict=False))
+                    mean_loss = (
+                        np.mean(
+                            [loss for loss in actor_losses if loss is not None],
+                        ),
+                        np.mean(critic_losses),
+                    )
                 else:
                     mean_loss = np.mean(losses)
 
@@ -500,13 +507,13 @@ def train_off_policy(
             elif isinstance(agent, (DDPG, TD3)):
                 actor_loss_dict = {
                     f"train/agent_{index}_actor_loss": np.mean(
-                        list(zip(*loss_list))[0][-10:],
+                        next(zip(*loss_list, strict=False))[-10:],
                     )
                     for index, loss_list in enumerate(pop_loss)
                 }
                 critic_loss_dict = {
                     f"train/agent_{index}_critic_loss": np.mean(
-                        list(zip(*loss_list))[-1][-10:],
+                        list(zip(*loss_list, strict=False))[-1][-10:],
                     )
                     for index, loss_list in enumerate(pop_loss)
                 }
@@ -536,16 +543,15 @@ def train_off_policy(
             agent.steps.append(agent.steps[-1])
 
         # Early stop if consistently reaches target
-        if target is not None:
-            if (
-                np.all(
-                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
-                )
-                and len(pop[0].steps) >= 100
-            ):
-                if wb:
-                    wandb.finish()
-                return pop, pop_fitnesses
+        if target is not None and (
+            np.all(
+                np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
+            )
+            and len(pop[0].steps) >= 100
+        ):
+            if wb:
+                wandb.finish()
+            return pop, pop_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -561,9 +567,9 @@ def train_off_policy(
             )
 
         if verbose:
-            fitness = ["%.2f" % fitness for fitness in fitnesses]
-            avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
-            avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+            fitness = [f"{fitness:.2f}" for fitness in fitnesses]
+            avg_fitness = [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
+            avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]

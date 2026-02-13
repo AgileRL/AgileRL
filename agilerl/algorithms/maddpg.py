@@ -130,7 +130,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         accelerator: Any | None = None,
         torch_compiler: str | None = None,
         wrap: bool = True,
-    ):
+    ) -> None:
 
         super().__init__(
             observation_spaces,
@@ -163,6 +163,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         if (actor_networks is not None) != (critic_networks is not None):
             warnings.warn(
                 "Actor and critic network must both be supplied to use custom networks. Defaulting to net config.",
+                stacklevel=2,
             )
 
         self.batch_size = batch_size
@@ -212,7 +213,9 @@ class MADDPG(MultiAgentRLAlgorithm):
             if isinstance(actor_networks, list):
                 assert len(actor_networks) == len(
                     self.agent_ids,
-                ), "actor_networks must be a list of the same length as the number of agents"
+                ), (
+                    "actor_networks must be a list of the same length as the number of agents"
+                )
                 actor_networks = ModuleDict(
                     {
                         self.agent_ids[i]: actor_networks[i]
@@ -222,7 +225,9 @@ class MADDPG(MultiAgentRLAlgorithm):
             if isinstance(critic_networks, list):
                 assert len(critic_networks) == len(
                     self.agent_ids,
-                ), "critic_networks must be a list of the same length as the number of agents"
+                ), (
+                    "critic_networks must be a list of the same length as the number of agents"
+                )
 
                 critic_networks = ModuleDict(
                     {
@@ -242,12 +247,14 @@ class MADDPG(MultiAgentRLAlgorithm):
             ), "'critic_networks' must all be the same type"
 
             if not all(isinstance(net, EvolvableModule) for net in actors_list):
+                msg = "All actor networks must be instances of EvolvableModule"
                 raise TypeError(
-                    "All actor networks must be instances of EvolvableModule",
+                    msg,
                 )
             if not all(isinstance(net, EvolvableModule) for net in critics_list):
+                msg = "All critic networks must be instances of EvolvableModule"
                 raise TypeError(
-                    "All critic networks must be instances of EvolvableModule",
+                    msg,
                 )
             self.actors, self.critics = make_safe_deepcopies(
                 actor_networks,
@@ -318,7 +325,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                 return actor
 
             # Critic uses observations + actions of all agents to predict Q-value
-            def create_critic():
+            def create_critic() -> ContinuousQNetwork:
                 return ContinuousQNetwork(
                     observation_space=self.possible_observation_spaces,
                     action_space=concatenate_spaces(
@@ -375,6 +382,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                 warnings.warn(
                     f"{self.torch_compiler} compile mode is not compatible with GumbelSoftmax "
                     "activation, changing to 'default' mode.",
+                    stacklevel=2,
                 )
                 self.torch_compiler = "default"
 
@@ -402,7 +410,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         self,
         infos: InfosDict | None,
     ) -> tuple[ArrayDict, ArrayDict, ArrayDict]:
-        """Process the information, extract env_defined_actions, action_masks and agent_masks
+        """Process the information, extract env_defined_actions, action_masks and agent_masks.
 
         :param infos: Info dict
         :type infos: dict[str, dict[...]]
@@ -421,7 +429,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         obs: dict[str, ObservationType],
         infos: InfosDict | None = None,
     ) -> tuple[ArrayDict, ArrayDict]:
-        """Returns the next action to take in the environment.
+        """Return the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
@@ -443,15 +451,15 @@ class MADDPG(MultiAgentRLAlgorithm):
         preprocessed_states = self.preprocess_observation(obs)
 
         action_dict: dict[str, torch.Tensor] = {}
-        for agent_id, obs in preprocessed_states.items():
+        for agent_id, agent_obs in preprocessed_states.items():
             actor = self.actors[agent_id]
             actor.eval()
             if self.accelerator is not None:
                 with actor.no_sync(), torch.no_grad():
-                    actions = actor(obs)
+                    actions = actor(agent_obs)
             else:
                 with torch.no_grad():
-                    actions = actor(obs)
+                    actions = actor(agent_obs)
 
             actor.train()
             if self.training:
@@ -553,7 +561,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                 self.current_noise[agent_id][idx, :] = 0
 
     def learn(self, experiences: ExperiencesType) -> dict[str, torch.Tensor]:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters from the gathered experiences.
 
         :param experience: Tuple of dictionaries containing batched states, actions,
             rewards, next_states, dones in that order for each individual agent.
@@ -582,10 +590,11 @@ class MADDPG(MultiAgentRLAlgorithm):
         next_states = self.preprocess_observation(next_states)
 
         # Get next actions
-        next_actions = []
         with torch.no_grad():
-            for agent_id in self.agent_ids:
-                next_actions.append(self.actor_targets[agent_id](next_states[agent_id]))
+            next_actions = [
+                self.actor_targets[agent_id](next_states[agent_id])
+                for agent_id in self.agent_ids
+            ]
 
         # Stack actions for critic
         stacked_actions = torch.cat(list(actions.values()), dim=1)
@@ -729,7 +738,9 @@ class MADDPG(MultiAgentRLAlgorithm):
         :param target: Target network
         :type target: nn.Module
         """
-        for eval_param, target_param in zip(net.parameters(), target.parameters()):
+        for eval_param, target_param in zip(
+            net.parameters(), target.parameters(), strict=False
+        ):
             target_param.data.copy_(
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
             )
@@ -742,7 +753,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         loop: int = 3,
         sum_scores: bool = True,
     ) -> float:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
@@ -767,7 +778,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                 num_envs = 1
                 is_vectorised = False
 
-            for i in range(loop):
+            for _i in range(loop):
                 obs, info = env.reset()
                 scores = (
                     np.zeros((num_envs, 1))
@@ -839,7 +850,9 @@ class MADDPG(MultiAgentRLAlgorithm):
                             for agent in self.agent_ids
                         }
 
-                    for idx, agent_dones in enumerate(zip(*dones.values())):
+                    for idx, agent_dones in enumerate(
+                        zip(*dones.values(), strict=False)
+                    ):
                         if (
                             np.all(agent_dones)
                             or (max_steps is not None and step == max_steps)

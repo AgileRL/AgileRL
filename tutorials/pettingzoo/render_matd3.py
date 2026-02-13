@@ -18,7 +18,7 @@ def _label_with_episode_number(frame, episode_num):
     text_color = (255, 255, 255) if np.mean(frame) < 128 else (0, 0, 0)
     drawer.text(
         (im.size[0] / 20, im.size[1] / 18),
-        f"Episode: {episode_num+1}",
+        f"Episode: {episode_num + 1}",
         fill=text_color,
     )
 

@@ -175,7 +175,7 @@ if __name__ == "__main__":
             f"--- Global steps {total_steps} ---\n"
             f"Steps {[agent.steps[-1] for agent in pop]}\n"
             f"Regret: {[regret[i][-1] for i in range(len(pop))]}\n"
-            f'Fitnesses: {[f"{fitness:.2f}" for fitness in fitnesses]}'
+            f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}"
             f"Mutations: {[agent.mut for agent in pop]}",
         )
 

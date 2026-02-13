@@ -627,9 +627,7 @@ def test_grpo_move_model_to_vllm(
     for (
         name,
         param,
-    ) in (
-        grpo.llm.llm_engine.model_executor.driver_worker.model_runner.model.named_parameters()
-    ):
+    ) in grpo.llm.llm_engine.model_executor.driver_worker.model_runner.model.named_parameters():
         name = merged_prefix + name.removeprefix(llm_prefix)
         if name in merged_model_ref.state_dict():
             if param.shape != merged_model_ref.state_dict()[name].shape:

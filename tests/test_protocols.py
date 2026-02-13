@@ -193,7 +193,9 @@ class TestProtocols:
             assert isinstance(
                 method,
                 MutationMethodProtocol,
-            ), f"Mutation method {method_name} does not implement MutationMethod protocol"
+            ), (
+                f"Mutation method {method_name} does not implement MutationMethod protocol"
+            )
 
     def test_pretrained_model_instances_implement_pretrained_model_protocol(self):
         """Test that HuggingFace PreTrainedModel instances satisfy PreTrainedModelProtocol."""

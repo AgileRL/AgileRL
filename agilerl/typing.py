@@ -136,7 +136,7 @@ StateDict = dict[str, Any] | list[dict[str, Any]]
 
 
 class BatchDimension:
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "BatchDimension"
 
 

@@ -1,6 +1,5 @@
 import copy
 import gc
-import glob
 import inspect
 import os
 import re
@@ -12,7 +11,9 @@ from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import asdict
 from importlib.metadata import version
+from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     TypeVar,
     cast,
@@ -94,8 +95,10 @@ from agilerl.utils.evolvable_networks import (
     is_vector_space,
 )
 
-if HAS_LLM_DEPENDENCIES:
+if TYPE_CHECKING:
     from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
+
+if HAS_LLM_DEPENDENCIES:
     from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
     from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
     from safetensors.torch import load_file
@@ -120,8 +123,8 @@ class _RegistryMeta(type):
 
     def __call__(
         cls: type[SelfEvolvableAlgorithm],
-        *args,
-        **kwargs,
+        *args: Any,
+        **kwargs: Any,
     ) -> SelfEvolvableAlgorithm:
         # Create the instance
         instance: SelfEvolvableAlgorithm = super().__call__(*args, **kwargs)
@@ -140,7 +143,7 @@ def get_checkpoint_dict(
     agent: SelfEvolvableAlgorithm,
     using_deepspeed: bool = False,
 ) -> dict[str, Any]:
-    """Returns a dictionary of the agent's attributes to save in a checkpoint.
+    """Return a dictionary of the agent's attributes to save in a checkpoint.
 
     Note: Accelerator is always excluded from the checkpoint as it cannot be serialized.
 
@@ -182,13 +185,14 @@ def get_checkpoint_dict(
             network_info["modules"].update(module_chkpt)
 
         else:
-            raise TypeError(
+            msg = (
                 f"Something went wrong. Identified '{attr}' as an evolvable module or "
-                f"optimizer when it is of type {type(evolvable_obj)}.",
+                f"optimizer when it is of type {type(evolvable_obj)}."
             )
-    network_attr_names = [
-        name for name in agent.evolvable_attributes(networks_only=True)
-    ]
+            raise TypeError(
+                msg,
+            )
+    network_attr_names = list(agent.evolvable_attributes(networks_only=True))
     optimizer_attr_names = [
         name
         for name in agent.evolvable_attributes()
@@ -205,7 +209,7 @@ def get_checkpoint_dict(
 def get_optimizer_cls(
     optimizer_cls: str | dict[str, str],
 ) -> type[torch.optim.Optimizer] | dict[str, type[torch.optim.Optimizer]]:
-    """Returns the optimizer class from the string or dictionary of optimizer classes.
+    """Return the optimizer class from the string or dictionary of optimizer classes.
 
     :param optimizer_cls: The optimizer class or dictionary of optimizer classes.
     :type optimizer_cls: str | dict[str, str]
@@ -215,7 +219,7 @@ def get_optimizer_cls(
     if isinstance(optimizer_cls, dict):
         optimizer_cls = {
             agent_id: getattr(torch.optim, optimizer_cls[agent_id])
-            for agent_id in optimizer_cls.keys()
+            for agent_id in optimizer_cls
         }
     else:
         optimizer_cls = getattr(torch.optim, optimizer_cls)
@@ -262,7 +266,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 "default",
                 "reduce-overhead",
                 "max-autotune",
-            ], "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
+            ], (
+                "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
+            )
 
         self.accelerator = accelerator
         self.device = device if self.accelerator is None else self.accelerator.device
@@ -279,22 +285,22 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     @property
     def index(self) -> int:
-        """Returns the index of the algorithm."""
+        """Return the index of the algorithm."""
         return self._index
 
     @index.setter
     def index(self, value: int) -> None:
-        """Sets the index of the algorithm."""
+        """Set the index of the algorithm."""
         self._index = value
 
     @property
     def mut(self) -> Any:
-        """Returns the mutation object of the algorithm."""
+        """Return the mutation object of the algorithm."""
         return self._mut
 
     @mut.setter
     def mut(self, value: str | None) -> None:
-        """Sets the mutation object of the algorithm."""
+        """Set the mutation object of the algorithm."""
         self._mut = value
 
     @abstractmethod
@@ -318,8 +324,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     def get_action(
         self,
         obs: ObservationType | MultiAgentObservationType,
-        *args,
-        **kwargs,
+        *args: Any,
+        **kwargs: Any,
     ) -> ActionType:
         """Abstract method for getting an action from the algorithm.
 
@@ -334,13 +340,13 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def test(self, *args, **kwargs) -> np.ndarray:
+    def test(self, *args: Any, **kwargs: Any) -> np.ndarray:
         """Abstract method for testing the algorithm."""
         raise NotImplementedError
 
     @staticmethod
     def get_state_dim(observation_space: GymSpaceType) -> tuple[int, ...]:
-        """Returns the dimension of the state space as it pertains to the underlying
+        """Return the dimension of the state space as it pertains to the underlying
         networks (i.e. the input size of the networks).
 
         :param observation_space: The observation space of the environment.
@@ -351,13 +357,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         """
         warnings.warn(
             "This method is deprecated. Use get_input_size_from_space instead.",
+            stacklevel=2,
             category=DeprecationWarning,
         )
         return get_input_size_from_space(observation_space)
 
     @staticmethod
     def get_action_dim(action_space: GymSpaceType) -> tuple[int, ...]:
-        """Returns the dimension of the action space as it pertains to the underlying
+        """Return the dimension of the action space as it pertains to the underlying
         networks (i.e. the output size of the networks).
 
         :param action_space: The action space of the environment.
@@ -368,6 +375,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         """
         warnings.warn(
             "This method is deprecated. Use get_output_size_from_space instead.",
+            stacklevel=2,
             category=DeprecationWarning,
         )
         return get_output_size_from_space(action_space)
@@ -419,7 +427,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         agent: SelfEvolvableAlgorithm,
         clone: SelfEvolvableAlgorithm,
     ) -> SelfEvolvableAlgorithm:
-        """Copies the non-evolvable attributes of the algorithm to a clone.
+        """Copy the non-evolvable attributes of the algorithm to a clone.
 
         :param clone: The clone of the algorithm.
         :type clone: SelfEvolvableAlgorithm
@@ -427,7 +435,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :return: The clone of the algorithm.
         :rtype: SelfEvolvableAlgorithm
         """
-        for attribute in EvolvableAlgorithm.inspect_attributes(agent).keys():
+        for attribute in EvolvableAlgorithm.inspect_attributes(agent):
             if hasattr(agent, attribute) and hasattr(clone, attribute):
                 attr, clone_attr = getattr(agent, attribute), getattr(clone, attribute)
 
@@ -483,10 +491,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         observation_space: GymSpaceType,
         action_space: GymSpaceType,
         wrapper_cls: type[SelfAgentWrapper] | None = None,
-        wrapper_kwargs: dict[str, Any] = {},
+        wrapper_kwargs: dict[str, Any] | None = None,
         **kwargs,
     ) -> list[Self | SelfAgentWrapper]:
-        """Creates a population of algorithms.
+        """Create a population of algorithms.
 
         :param size: The size of the population.
         :type size: int.
@@ -494,6 +502,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :return: A list of algorithms.
         :rtype: list[SelfEvolvableAlgorithm].
         """
+        if wrapper_kwargs is None:
+            wrapper_kwargs = {}
         if wrapper_cls is not None:
             return [
                 wrapper_cls(
@@ -508,7 +518,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         ]
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """Sets the attribute of the algorithm. If the attribute is an OptimizerWrapper,
+        """Set the attribute of the algorithm. If the attribute is an OptimizerWrapper,
         we register the optimizer with the algorithms registry.
 
         :param name: The name of the attribute.
@@ -531,16 +541,19 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         super().__setattr__(name, value)
 
     def _registry_init(self) -> None:
-        """Registers the networks, optimizers, and algorithm hyperparameters in the algorithm with
+        """Register the networks, optimizers, and algorithm hyperparameters in the algorithm with
         the mutations registry. We also check that all of the evolvable networks and their respective
         optimizers have been registered with the algorithm, and that the user-specified hyperparameters
         to mutate have been set as attributes in the algorithm.
         """
         if not self.registry.groups:
-            raise AttributeError(
+            msg = (
                 "No network groups have been registered in the algorithms __init__ method. "
                 "Please register NetworkGroup objects specifying all of the evaluation and "
-                "shared/target networks through the `register_network_group()` method.",
+                "shared/target networks through the `register_network_group()` method."
+            )
+            raise AttributeError(
+                msg,
             )
 
         # Check that all the inspected evolvable attributes can be found in the registry
@@ -549,27 +562,36 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             attr for attr in self.evolvable_attributes() if attr not in all_registered
         ]
         if not_found:
-            raise AttributeError(
+            msg = (
                 f"The following evolvable attributes could not be found in the registry: {not_found}. "
                 "Please check that the defined NetworkGroup objects contain all of the EvolvableModule objects "
-                "in the algorithm.",
+                "in the algorithm."
+            )
+            raise AttributeError(
+                msg,
             )
 
         # Check that one of the network groups relates to a policy
         if not any(group.policy for group in self.registry.groups):
-            raise AttributeError(
+            msg = (
                 "No network group has been registered as a policy (i.e. the network used to "
                 "select actions) in the registry. Please register a NetworkGroup object "
-                "specifying the policy network.",
+                "specifying the policy network."
+            )
+            raise AttributeError(
+                msg,
             )
 
         # Check that all the hyperparameters to mutate have been set as attributes in the algorithm
         if self.registry.hp_config is not None:
             for hp in self.registry.hp_config:
                 if not hasattr(self, hp):
-                    raise AttributeError(
+                    msg = (
                         f"Hyperparameter {hp} was found in the mutations configuration but has "
-                        "not been set as an attribute in the algorithm.",
+                        "not been set as an attribute in the algorithm."
+                    )
+                    raise AttributeError(
+                        msg,
                     )
 
                 # Assign dtype to hyperparameter spec
@@ -577,15 +599,18 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 hp_spec = self.registry.hp_config[hp]
                 dtype = type(hp_value)
                 if dtype not in [int, float, np.ndarray]:
-                    raise TypeError(
+                    msg = (
                         f"Can't mutate hyperparameter {hp} of type {dtype}. AgileRL only supports "
-                        "mutating integer, float, and numpy ndarray hyperparameters.",
+                        "mutating integer, float, and numpy ndarray hyperparameters."
+                    )
+                    raise TypeError(
+                        msg,
                     )
 
                 hp_spec.dtype = dtype
 
     def _wrap_attr(self, attr: EvolvableAttributeType) -> EvolvableAttributeType:
-        """Wraps the model with the accelerator.
+        """Wrap the model with the accelerator.
 
         :param attr: The attribute to wrap.
         :type attr: EvolvableAttributeType
@@ -662,7 +687,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             setattr(self, config.name, offspring_opt)
 
     def set_training_mode(self, training: bool) -> None:
-        """Sets the training mode of the algorithm.
+        """Set the training mode of the algorithm.
 
         :param training: If True, set the algorithm to training mode.
         :type training: bool
@@ -673,11 +698,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 network.train(mode=training)
 
     def get_lr_names(self) -> list[str]:
-        """Returns the learning rates of the algorithm."""
+        """Return the learning rates of the algorithm."""
         return [opt.lr for opt in self.registry.optimizers]
 
     def register_network_group(self, group: NetworkGroup) -> None:
-        """Sets the evaluation network for the algorithm.
+        """Set the evaluation network for the algorithm.
 
         :param name: The name of the evaluation network.
         :type name: str
@@ -685,7 +710,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self.registry.register_group(group)
 
     def register_mutation_hook(self, hook: Callable) -> None:
-        """Registers a hook to be executed after a mutation is performed on
+        """Register a hook to be executed after a mutation is performed on
         the algorithm.
 
         :param hook: The hook to be executed after mutation.
@@ -694,18 +719,19 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self.registry.register_hook(hook)
 
     def mutation_hook(self) -> None:
-        """Executes the hooks registered with the algorithm."""
+        """Execute the hooks registered with the algorithm."""
         for hook in self.registry.hooks:
             getattr(self, hook)()
 
     def get_policy(self) -> EvolvableModuleProtocol:
-        """Returns the policy network of the algorithm."""
+        """Return the policy network of the algorithm."""
         for group in self.registry.groups:
             if group.policy:
                 return getattr(self, group.eval_network)
 
+        msg = "No policy network has been registered with the algorithm."
         raise AttributeError(
-            "No policy network has been registered with the algorithm.",
+            msg,
         )
 
     def reinit_optimizers(
@@ -731,7 +757,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             setattr(self, name, compile_model(obj, self.torch_compiler))
 
     def to_device(self, *experiences: TorchObsType) -> tuple[TorchObsType, ...]:
-        """Moves experiences to the device.
+        """Move experiences to the device.
 
         :param experiences: Experiences to move to device
         :type experiences: tuple[torch.Tensor[float], ...]
@@ -743,13 +769,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         on_device = []
         for exp in experiences:
             if isinstance(exp, dict):
-                exp = {key: val.to(device) for key, val in exp.items()}
+                moved = {key: val.to(device) for key, val in exp.items()}
             elif isinstance(exp, (list, tuple)) and isinstance(exp[0], torch.Tensor):
-                exp = tuple(val.to(device) for val in exp)
+                moved = tuple(val.to(device) for val in exp)
             elif isinstance(exp, torch.Tensor):
-                exp = exp.to(device)
-
-            on_device.append(exp)
+                moved = exp.to(device)
+            else:
+                moved = exp
+            on_device.append(moved)
 
         return on_device
 
@@ -757,7 +784,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self,
         networks_only: bool = False,
     ) -> EvolvableAttributeDict:
-        """Returns the attributes related to the evolvable networks in the algorithm. Includes
+        """Return the attributes related to the evolvable networks in the algorithm. Includes
         attributes that are either EvolvableModule or ModuleDict objects, as well as the optimizers
         associated with the networks.
 
@@ -768,7 +795,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :rtype: dict[str, Any]
         """
 
-        def is_evolvable(attr: str, obj: Any):
+        def is_evolvable(attr: str, obj: Any) -> bool:
             return (
                 recursive_check_module_attrs(obj, networks_only)
                 and not attr.startswith("_")
@@ -785,7 +812,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         return evolvable_attrs
 
     def wrap_models(self) -> None:
-        """Wraps the models in the algorithm with the accelerator."""
+        """Wrap the models in the algorithm with the accelerator."""
         if self.accelerator is None:
             return
 
@@ -803,7 +830,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     def unwrap_models(self) -> None:
         """Unwraps the models in the algorithm from the accelerator."""
         if self.accelerator is None:
-            raise AttributeError("No accelerator has been set for the algorithm.")
+            msg = "No accelerator has been set for the algorithm."
+            raise AttributeError(msg)
 
         for attr in self.evolvable_attributes(networks_only=True):
             obj = getattr(self, attr)
@@ -822,7 +850,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         index: int | None = None,
         wrap: bool = True,
     ) -> Self:
-        """Creates a clone of the algorithm.
+        """Create a clone of the algorithm.
 
         :param index: The index of the clone, defaults to None
         :type index: int | None, optional
@@ -882,7 +910,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         return clone
 
     def save_checkpoint(self, path: str) -> None:
-        """Saves a checkpoint of agent properties and network weights to path.
+        """Save a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
         :type path: string
@@ -894,7 +922,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         )
 
     def load_checkpoint(self, path: str) -> None:
-        """Loads saved agent properties and network weights from checkpoint.
+        """Load saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from
         :type path: string
@@ -985,9 +1013,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Check loaded registry is consistent with the algorithm
         if checkpoint["registry"] != self.registry:
-            raise ValueError(
+            msg = (
                 "Loaded registry does not match the algorithm's registry. Please make "
-                "sure you are loading the checkpoint with the correct algorithm.",
+                "sure you are loading the checkpoint with the correct algorithm."
+            )
+            raise ValueError(
+                msg,
             )
 
         if "lr_scheduler" in checkpoint:
@@ -996,8 +1027,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Load other attributes
         checkpoint.pop("network_info")
-        for attribute in checkpoint:
-            setattr(self, attribute, checkpoint[attribute])
+        for attribute, value in checkpoint.items():
+            setattr(self, attribute, value)
 
         # Wrap models / compile if necessary
         if self.accelerator is not None:
@@ -1013,7 +1044,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         device: DeviceType = "cpu",
         accelerator: Accelerator | None = None,
     ) -> Self:
-        """Loads an algorithm from a checkpoint.
+        """Load an algorithm from a checkpoint.
 
         :param path: Location to load checkpoint from.
         :type path: string
@@ -1037,11 +1068,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Reconstruct evolvable modules in algorithm
         network_info: dict[str, dict[str, Any]] | None = checkpoint.get("network_info")
         if network_info is None:
-            raise ValueError(
+            msg = (
                 "Network info not found in checkpoint. You may be loading a checkpoint from "
                 "an older version of AgileRL. Since v2.0, we require AgileRL algorithms to "
                 "have a specific structure to simplify evolutionary hyperparameter optimization. "
-                "Please downgrade to v1.0.30 to load checkpoints from before this change.",
+                "Please downgrade to v1.0.30 to load checkpoints from before this change."
+            )
+            raise ValueError(
+                msg,
             )
 
         network_names = network_info["network_names"]
@@ -1054,14 +1088,15 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             # Add device to init dict
             init_dict = net_dict.get(f"{name}_init_dict")
             if init_dict is None:
-                raise ValueError(f"Init dict for {name} not found in checkpoint.")
+                msg = f"Init dict for {name} not found in checkpoint."
+                raise ValueError(msg)
 
             init_dict = chkpt_attribute_to_device(init_dict, device)
 
             # Reconstruct the module dict class if necessary
-            ModuleDictCls = net_dict.get(f"{name}_module_dict_cls")
-            if ModuleDictCls is not None:
-                loaded_modules[name] = ModuleDictCls()
+            module_dict_cls = net_dict.get(f"{name}_module_dict_cls")
+            if module_dict_cls is not None:
+                loaded_modules[name] = module_dict_cls()
 
             # Reconstruct the modules
             module_cls: type[EvolvableModule] | dict[str, type[EvolvableModule]] = (
@@ -1153,10 +1188,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             setattr(self, name, optimizer)
 
         # Assign other attributes to the algorithm
-        for attribute in EvolvableAlgorithm.inspect_attributes(self).keys():
+        for attribute in EvolvableAlgorithm.inspect_attributes(self):
             if attribute not in checkpoint:
                 warnings.warn(
                     f"Attribute {attribute} not found in checkpoint. Skipping.",
+                    stacklevel=2,
                 )
                 continue
 
@@ -1318,13 +1354,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             ), "Number of agent IDs must match number of observation spaces."
 
             self.possible_observation_spaces = spaces.Dict(
-                {
-                    agent_id: space
-                    for agent_id, space in zip(agent_ids, observation_spaces)
-                },
+                dict(zip(agent_ids, observation_spaces, strict=False)),
             )
             self.possible_action_spaces = spaces.Dict(
-                {agent_id: space for agent_id, space in zip(agent_ids, action_spaces)},
+                dict(zip(agent_ids, action_spaces, strict=False)),
             )
         elif isinstance(observation_spaces, (spaces.Dict, dict)):
             if isinstance(observation_spaces, dict):
@@ -1334,9 +1367,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             self.possible_observation_spaces = observation_spaces
             self.possible_action_spaces = action_spaces
         else:
-            raise ValueError(
-                f"Observation spaces must be a list or dictionary of spaces.Space objects. Got {type(observation_spaces)}.",
-            )
+            msg = f"Observation spaces must be a list or dictionary of spaces.Space objects. Got {type(observation_spaces)}."
+            raise TypeError(msg)
 
         for obs_space in self.possible_observation_spaces.values():
             check_supported_space(obs_space)
@@ -1391,7 +1423,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             elif isinstance(obs_space, (spaces.Dict, spaces.Tuple)):
                 self.grouped_spaces[ModuleType.MULTI_INPUT].append(agent_id)
             else:
-                raise ValueError(f"Unknown observation space type: {type(obs_space)}")
+                msg = f"Unknown observation space type: {type(obs_space)}"
+                raise ValueError(msg)
 
         self.setup = self.get_setup()
 
@@ -1411,14 +1444,17 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         # Additional check to ensure multi-agent networks are initialized with valid keys
         for name, network in self.evolvable_attributes(networks_only=True).items():
             if isinstance(network, ModuleDict):
-                for key in network.keys():
+                for key in network:
                     if (key not in self.agent_ids) and (
                         key not in self.shared_agent_ids
                     ):
-                        raise ValueError(
+                        msg = (
                             f"Network '{name}' contains key '{key}' which is not present in `self.agent_ids` "
                             f"or `self.shared_agent_ids`. Please initialize multi-agent networks through agilerl.modules.ModuleDict "
-                            "objects with the agent or group/shared IDs as keys.",
+                            "objects with the agent or group/shared IDs as keys."
+                        )
+                        raise ValueError(
+                            msg,
                         )
 
     def has_grouped_agents(self) -> bool:
@@ -1476,7 +1512,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         return preprocessed
 
     def extract_action_masks(self, infos: InfosDict) -> ArrayDict:
-        """Extract action masks from info dictionary
+        """Extract action masks from info dictionary.
 
         :param infos: Info dict
         :type infos: dict[str, dict[...]]
@@ -1485,19 +1521,17 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: dict[str, np.ndarray]
         """
         # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
-        action_masks = {
+        return {
             agent: info.get("action_mask", None) if isinstance(info, dict) else None
             for agent, info in infos.items()
             if agent in self.agent_ids
         }
 
-        return action_masks
-
     def extract_agent_masks(
         self,
         infos: InfosDict | None = None,
     ) -> tuple[ArrayDict, ArrayDict]:
-        """Extract env_defined_actions from info dictionary and determine agent masks
+        """Extract env_defined_actions from info dictionary and determine agent masks.
 
         :param infos: Info dict
         :type infos: dict[str, dict[...]]
@@ -1526,9 +1560,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         agent_masks = None
         if env_defined_actions is not None:
             agent_masks = {}
-            for agent_id in env_defined_actions:
+            for agent_id, action_val in list(env_defined_actions.items()):
+                val = action_val
                 # Handle None if environment isn't vectorized
-                if env_defined_actions[agent_id] is None:
+                if val is None:
                     if not isinstance(
                         self.possible_action_spaces[agent_id],
                         spaces.Discrete,
@@ -1539,23 +1574,24 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                         nan_arr = np.array([[np.nan]])
 
                     env_defined_actions[agent_id] = nan_arr
+                    val = nan_arr
 
                 # Handle discrete actions + env not vectorized
-                if isinstance(env_defined_actions[agent_id], (int, float)):
-                    env_defined_actions[agent_id] = np.array(
-                        [[env_defined_actions[agent_id]]],
-                    )
+                if isinstance(val, (int, float)):
+                    val = np.array([[val]])
+                    env_defined_actions[agent_id] = val
 
                 # Ensure additional dimension is added in so shapes align for masking
-                if len(env_defined_actions[agent_id].shape) == 1:
-                    env_defined_actions[agent_id] = (
-                        env_defined_actions[agent_id][:, np.newaxis]
+                if isinstance(val, np.ndarray) and len(val.shape) == 1:
+                    val = (
+                        val[:, np.newaxis]
                         if isinstance(
                             self.possible_action_spaces[agent_id],
                             spaces.Discrete,
                         )
-                        else env_defined_actions[agent_id][np.newaxis, :]
+                        else val[np.newaxis, :]
                     )
+                    env_defined_actions[agent_id] = val
                 agent_masks[agent_id] = np.where(
                     np.isnan(env_defined_actions[agent_id]),
                     0,
@@ -1619,7 +1655,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         def _has_agent_ids(config: NetConfigType) -> bool:
             return any(
                 (agent_id in self.agent_ids) or (agent_id in self.shared_agent_ids)
-                for agent_id in config.keys()
+                for agent_id in config
             )
 
         # Helper function to get or create encoder config for an agent
@@ -1677,12 +1713,14 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             return full_config
 
         if any(
-            agent_id in self.agent_ids and grouped_config
-            for agent_id in net_config.keys()
+            agent_id in self.agent_ids and grouped_config for agent_id in net_config
         ):
-            raise KeyError(
+            msg = (
                 "Found key in net_config corresponding to an individual sub-agent in a grouped setting. "
-                "Please specify the configuration for groups instead (e.g. {'agent': {...}, ...} rather than {'agent_0': {...}, ...})",
+                "Please specify the configuration for groups instead (e.g. {'agent': {...}, ...} rather than {'agent_0': {...}, ...})"
+            )
+            raise KeyError(
+                msg,
             )
 
         # 2b. Handle nested config with agent/group IDs
@@ -1789,14 +1827,14 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         return output_dict
 
     def sum_shared_rewards(self, rewards: ArrayDict) -> ArrayDict:
-        """Sums the rewards for grouped agents
+        """Sum the rewards for grouped agents.
 
         :param rewards: Reward dictionary from environment
         :type rewards: dict[str, np.ndarray]
         :return: Summed rewards dictionary
         :rtype: dict[str, np.ndarray]
         """
-        reward_shape = list(rewards.values())[0]
+        reward_shape = next(iter(rewards.values()))
         reward_shape = (
             reward_shape.shape if isinstance(reward_shape, np.ndarray) else (1,)
         )
@@ -1826,10 +1864,11 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         group_outputs = {}
         for group_id in self.shared_agent_ids:
             # Get all outputs for agents that share this ID
-            group_agent_outputs = []
-            for group in self.grouped_agents[group_id]:
-                if group in agent_outputs:
-                    group_agent_outputs.append(agent_outputs[group])
+            group_agent_outputs = [
+                agent_outputs[group]
+                for group in self.grouped_agents[group_id]
+                if group in agent_outputs
+            ]
 
             if group_agent_outputs:
                 # Stack outputs along first dimension
@@ -1889,15 +1928,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         name: str | None = None,
         model_config: dict[str, Any] | PretrainedConfigProtocol | None = None,
         gradient_checkpointing: bool = True,
-    ):
+    ) -> None:
         if not HAS_LLM_DEPENDENCIES:
+            msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
             raise ImportError(
-                "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`.",
+                msg,
             )
 
         if model_name is None and actor_network is None:
+            msg = "At least one of model_name or actor_network must be provided."
             raise ValueError(
-                "At least one of model_name or actor_network must be provided.",
+                msg,
             )
         if (
             accelerator is not None
@@ -1907,6 +1948,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             warnings.warn(
                 "Cannot specify the optimizer in the deepspeed config and use AgileRL's LR scheduler. If you want to use LR scheduling, \
             please specify in the deepspeed config. Setting LR scheduler to None.",
+                stacklevel=2,
             )
             cosine_lr_schedule_config = None
 
@@ -1923,8 +1965,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.model_config = model_config
 
         if not clone and reduce_memory_peak and micro_batch_size_per_gpu is not None:
+            msg = "Cannot specify micro_batch_size_per_gpu when reduce_memory_peak is True."
             raise ValueError(
-                "Cannot specify micro_batch_size_per_gpu when reduce_memory_peak is True.",
+                msg,
             )
 
         self._configure_batch_size(
@@ -1936,26 +1979,27 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.batch_size = self.batch_size_per_process * (
             self.accelerator.num_processes if self.accelerator is not None else 1
         )
-        if self.accelerator is not None:
-            if (
-                self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-                    "optimizer",
-                    None,
+        if self.accelerator is not None and (
+            self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                "optimizer",
+                None,
+            )
+            is not None
+        ):
+            optim_lr = self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                "optimizer"
+            ]["params"]["lr"]
+            if optim_lr is not None and optim_lr != lr:
+                warnings.warn(
+                    "Argument 'lr' will be overwritten by the 'lr' value set in the deepspeed config.",
+                    stacklevel=2,
                 )
-                is not None
-            ):
-                optim_lr = self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                    "optimizer"
-                ]["params"]["lr"]
-                if optim_lr is not None and optim_lr != lr:
-                    warnings.warn(
-                        "Argument 'lr' will be overwritten by the 'lr' value set in the deepspeed config.",
-                    )
-                    lr = optim_lr
+                lr = optim_lr
 
         if lora_config is None and not isinstance(actor_network, PeftModelProtocol):
             warnings.warn(
                 "No LoRA config provided. AgileRL can only be used to finetune adapters at present. Using default LoRA configuration for RL finetuning.",
+                stacklevel=2,
             )
             lora_config = LoraConfig(
                 r=16,
@@ -1974,6 +2018,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if accelerator.is_main_process:
                 warnings.warn(
                     "Argument 'max_grad_norm' will overwrite the equivalent value set for 'gradient_clipping' in the deepspeed config.",
+                    stacklevel=2,
                 )
             self.accelerator.state.deepspeed_plugin.deepspeed_config[
                 "gradient_clipping"
@@ -1996,6 +2041,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             ):
                 warnings.warn(
                     "DeepSpeed ZeRO Stage 3 is nascent and may not work as expected, proceed with caution when using this feature.",
+                    stacklevel=2,
                 )
         if self.accelerator is not None:
             if self.accelerator.is_main_process:
@@ -2007,7 +2053,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             set_seed(seed, device_specific=True)
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
-        """Dummy preprocesses observations for forward pass through neural network.
+        """Preprocess observations (dummy) for forward pass through neural network.
 
         :param observations: Observations of environment
         :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
@@ -2022,7 +2068,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param path: Location to save checkpoint at
         :type path: string
         :param weights_only: If True, only save the weights of the model, defaults to False
-        :type weights_only: bool, optional
+        :type weights_only: bool, optional.
         """
         if self.accelerator is not None:
             if not weights_only:
@@ -2105,19 +2151,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         device: DeviceType = "cpu",
         accelerator: Accelerator | None = None,
     ) -> None:
+        msg = (
+            "The load class method is not supported for this algorithm class. "
+            "To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO "
+            "class, using the pre-trained model.\n\n"
+            "base_model = AutoModelForCausalLM.from_pretrained(\n"
+            '    "Qwen/Qwen2.5-3B",\n'
+            "    torch_dtype=torch.bfloat16,\n"
+            '    device_map="auto"\n'
+            ")\n"
+            'tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")\n'
+            "model = PeftModelProtocol.from_pretrained(base_model, path)"
+        )
         raise NotImplementedError(
-            "The load class method is not supported for this algorithm class." """
-            To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO
-            class, using the pre-trained model.
-
-            base_model = AutoModelForCausalLM.from_pretrained(
-                "Qwen/Qwen2.5-3B",
-                torch_dtype=torch.bfloat16,
-                device_map="auto"
-            )
-            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
-            model = PeftModelProtocol.from_pretrained(base_model, path)
-            """,
+            msg,
         )
 
     def _select_optim_class(self) -> type[OptimizerType] | type[DummyOptimizer]:
@@ -2150,15 +2197,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type path: str
         """
         if self.accelerator is not None:
-            os.makedirs(path, exist_ok=True)
-            assert (
-                self.actor is not None
-            ), "Actor is not defined, please check that the actor is defined."
+            Path(path).mkdir(parents=True, exist_ok=True)
+            assert self.actor is not None, (
+                "Actor is not defined, please check that the actor is defined."
+            )
             self.actor.save_checkpoint(path, tag=tag)
             self.actor.set_adapter("actor")
         else:
             warnings.warn(
                 "Distributed actor save not supported for non-distributed training.",
+                stacklevel=2,
             )
 
     def _load_distributed_actor(
@@ -2172,29 +2220,34 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type path: str
         """
         if self.accelerator is not None:
-            deepspeed_dirs = sorted(glob.glob(f"{path}/{tag}"))
+            deepspeed_dirs = sorted(Path(path).glob(tag))
             try:
                 assert len(deepspeed_dirs) > 0
                 load_path, _ = self.actor.load_checkpoint(
-                    path,
+                    str(path),
                     tag=tag,
                     load_module_strict=False,
                     load_optimizer_states=True,
                     load_lr_scheduler_states=True,
                 )
                 if load_path is None:
+                    msg = (
+                        "Load path is returned as None from deepspeed load_checkpoint."
+                    )
                     raise ValueError(
-                        "Load path is returned as None from deepspeed load_checkpoint.",
+                        msg,
                     )
                 self.actor.set_adapter("actor")
 
             except Exception as e:
+                msg = f"Deepspeed failed to resume from checkpoint {path}"
                 raise ValueError(
-                    f"Deepspeed failed to resume from checkpoint {path}",
+                    msg,
                 ) from e
         else:
             warnings.warn(
                 "Distributed actor load not supported for non-distributed training.",
+                stacklevel=2,
             )
 
     def wrap_models(self) -> None:
@@ -2202,9 +2255,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         not individually.
         """
         if self.accelerator is not None:
-            assert (
-                self.optimizer is not None
-            ), "Optimizer is set to None, please check that the optimizer is correctly defined."
+            assert self.optimizer is not None, (
+                "Optimizer is set to None, please check that the optimizer is correctly defined."
+            )
             is_dummy_optimizer = isinstance(self.optimizer.optimizer, DummyOptimizer)
             self.actor, optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor,
@@ -2224,9 +2277,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     gradient_checkpointing_kwargs={"use_reentrant": False},
                 )
         else:
-            assert (
-                self.actor is not None
-            ), "Actor is set to None, please check that the actor is defined."
+            assert self.actor is not None, (
+                "Actor is set to None, please check that the actor is defined."
+            )
             self.actor = self.actor.to(self.device)
             if self.gradient_checkpointing:
                 self.actor.gradient_checkpointing_enable()
@@ -2266,8 +2319,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
-    def clone(self, index: int | None = None, wrap: bool = True):
-        """Creates a clone of the algorithm.
+    def clone(self, index: int | None = None, wrap: bool = True) -> Self:
+        """Create a clone of the algorithm.
 
         :param index: The index of the clone, defaults to None
         :type index: int | None, optional
@@ -2278,10 +2331,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: EvolvableAlgorithm
         """
         with tempfile.TemporaryDirectory() as temp_dir:
-
             # We need to use the same temp_dir for all processes, so we broadcast the temp_dir from the main process
             if self.accelerator is not None and self.accelerator.num_processes > 1:
-                temp_dir = broadcast_object_list([temp_dir], from_process=0)[0]
+                work_dir = broadcast_object_list([temp_dir], from_process=0)[0]
+            else:
+                work_dir = temp_dir
 
             if (
                 self.accelerator is not None
@@ -2289,7 +2343,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 and self.zero_stage >= 2
             ):
                 self.accelerator.wait_for_everyone()
-                self._save_distributed_actor(f"{temp_dir}/agent_{self.index}")
+                self._save_distributed_actor(f"{work_dir}/agent_{self.index}")
                 self.accelerator.wait_for_everyone()
 
             input_args = EvolvableAlgorithm.inspect_attributes(
@@ -2361,7 +2415,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
             if self.zero_stage is not None and self.zero_stage >= 2:
                 clone.accelerator.wait_for_everyone()
-                clone._load_distributed_actor(f"{temp_dir}/agent_{self.index}")
+                clone._load_distributed_actor(f"{work_dir}/agent_{self.index}")
                 clone.accelerator.wait_for_everyone()
             elif self.accelerator is not None:
                 self.accelerator.wait_for_everyone()
@@ -2375,7 +2429,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         accelerator: Accelerator | None = None,
         scheduler_config: CosineLRScheduleConfig | None = None,
     ) -> tuple[Accelerator | None, SequentialLR | None]:
-        """Update the learning rate of the optimizer
+        """Update the learning rate of the optimizer.
 
         :param optimizer: Optimizer
         :type optimizer: Optimizer
@@ -2404,13 +2458,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             not hasattr(accelerator.state, "deepspeed_plugin")
             or accelerator.state.deepspeed_plugin is None
         ):
+            msg = "Accelerator must be instantiated with a deepspeed plugin."
             raise ValueError(
-                "Accelerator must be instantiated with a deepspeed plugin.",
+                msg,
             )
 
         if not hasattr(accelerator.state.deepspeed_plugin, "deepspeed_config"):
+            msg = "Deepspeed config not found in accelerator state, make sure DeepSpeed is configured in your accelerator config."
             raise ValueError(
-                "Deepspeed config not found in accelerator state, make sure DeepSpeed is configured in your accelerator config.",
+                msg,
             )
 
         if (
@@ -2441,11 +2497,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param reference_update_tracker: The reference policy update tracker
         :type reference_update_tracker: int
         """
-        assert (
-            reference_update_tracker >= self.reference_update_tracker
-        ), "Reference policy update tracker should be greater than or equal to the current reference policy update tracker."
+        assert reference_update_tracker >= self.reference_update_tracker, (
+            "Reference policy update tracker should be greater than or equal to the current reference policy update tracker."
+        )
         if reference_update_tracker > self.reference_update_tracker:
-
             if self.accelerator is not None:
                 self.accelerator.wait_for_everyone()
             # Merge adapter into base model
@@ -2462,8 +2517,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         elif "actor" in name:
                             actor_param = param
                         else:
+                            msg = f"Only adapter names 'actor' and 'reference' are allowed, nether was found in {name}"
                             raise ValueError(
-                                f"Only adapter names 'actor' and 'reference' are allowed, nether was found in {name}",
+                                msg,
                             )
                     if ref_param is not None and actor_param is not None:
                         ref_param.data.copy_(actor_param.data)
@@ -2500,7 +2556,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self,
         base_model: PreTrainedModelProtocol | None,
         add_adapters: bool = True,
-    ):
+    ) -> None:
         """Initialize the actor network.
 
         :param base_model: Base model
@@ -2532,7 +2588,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.use_separate_reference_adapter and add_adapters:
             self.actor.add_adapter(
                 adapter_name="reference",
-                peft_config=self.lora_config,  # type: ignore
+                peft_config=self.lora_config,  # type: ignore[arg-type]
             )
 
         self.actor.set_adapter("actor")
@@ -2620,7 +2676,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return torch.cat(log_probs, dim=0)
 
     def _backward_pass(self, loss: float) -> None:
-        """Perform a backward pass
+        """Perform a backward pass.
 
         :param loss: Loss
         :type loss: float
@@ -2682,17 +2738,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
             model_ref.merge_adapter()
             for name, param in model_ref.named_parameters():
-                name = name.removeprefix("base_model.model.").replace(".base_layer", "")
-                if model_ref.prefix in name:
+                weight_name = name.removeprefix("base_model.model.").replace(
+                    ".base_layer",
+                    "",
+                )
+                if model_ref.prefix in weight_name:
                     continue
 
-                if "original_module" in name:
+                if "original_module" in weight_name:
                     continue
 
                 llm_model = (
                     self.llm.llm_engine.model_executor.driver_worker.model_runner.model
                 )
-                llm_model.load_weights([(name, param.data)])
+                llm_model.load_weights([(weight_name, param.data)])
             model_ref.unmerge_adapter()
 
         self.llm.reset_prefix_cache()
@@ -2745,7 +2804,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         ]
 
         if self.vllm_config.tensor_parallel_size > 1:
-
             orig_size = len(prompts_text)
 
             gathered_prompts_ids = [
@@ -2848,15 +2906,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: torch.Tensor
         """
         per_token_logps = []
-        for row_logits, row_labels in zip(logits, index):
+        for row_logits, row_labels in zip(logits, index, strict=False):
             row_logps = F.log_softmax(row_logits, dim=-1)
             row_per_token_logps = row_logps.gather(
                 dim=-1,
                 index=row_labels.unsqueeze(-1),
             ).squeeze(-1)
             per_token_logps.append(row_per_token_logps)
-        per_token_logps = torch.stack(per_token_logps)
-        return per_token_logps
+        return torch.stack(per_token_logps)
 
     def _configure_batch_size(
         self,
@@ -2870,8 +2927,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             return
 
         if batch_size % self.accelerator.num_processes != 0:
+            msg = f"Batch size ({batch_size}) must be divisible by the number of processes ({self.accelerator.num_processes})."
             raise ValueError(
-                f"Batch size ({batch_size}) must be divisible by the number of processes ({self.accelerator.num_processes}).",
+                msg,
             )
 
         ds_config = self.accelerator.state.deepspeed_plugin.deepspeed_config
@@ -2892,16 +2950,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 % ds_config.get("gradient_accumulation_steps", 1)
                 != 0
             ):
-                raise ValueError(
+                msg = (
                     f"Batch size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and gradient accumulation steps ({self.accelerator.state.deepspeed_plugin.deepspeed_config.get('gradient_accumulation_steps', 1)})."
-                    "Gradient accumulation steps can be updated in the deepspeed config by changing the 'gradient_accumulation_steps' parameter.",
+                    "Gradient accumulation steps can be updated in the deepspeed config by changing the 'gradient_accumulation_steps' parameter."
+                )
+                raise ValueError(
+                    msg,
                 )
             self.micro_batch_size_per_gpu = (
                 self.batch_size_per_process
                 // ds_config.get("gradient_accumulation_steps", 1)
             )
             if self.micro_batch_size_per_gpu == 0:
-                raise ValueError("Calculated micro_batch_size_per_gpu is 0...")
+                msg = "Calculated micro_batch_size_per_gpu is 0..."
+                raise ValueError(msg)
 
             if ds_config.get("train_micro_batch_size_per_gpu", "auto") == "auto":
                 ds_config["train_micro_batch_size_per_gpu"] = (
@@ -2915,8 +2977,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             % (self.micro_batch_size_per_gpu * self.accelerator.num_processes)
             != 0
         ):
+            msg = f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and micro_batch_size_per_gpu ({self.micro_batch_size_per_gpu})."
             raise ValueError(
-                f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and micro_batch_size_per_gpu ({self.micro_batch_size_per_gpu}).",
+                msg,
             )
         ds_config["train_micro_batch_size_per_gpu"] = self.micro_batch_size_per_gpu
         gradient_accumulation_steps = (
@@ -2924,14 +2987,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         warnings.warn(
             f"Overwriting deepspeed config gradient accumulation steps from {self.accelerator.state.deepspeed_plugin.deepspeed_config.get('gradient_accumulation_steps', 'auto')} to {gradient_accumulation_steps}",
+            stacklevel=2,
         )
         ds_config["gradient_accumulation_steps"] = int(gradient_accumulation_steps)
         return
 
     def recompile(self) -> None:
         """Recompiles the algorithm."""
+        msg = "Recompile method is not available for LLM finetuning algorithms."
         raise NotImplementedError(
-            "Recompile method is not available for LLM finetuning algorithms.",
+            msg,
         )
 
     def _update_existing_adapter(
@@ -2944,7 +3009,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param checkpoint_dir: Checkpoint directory
         :type checkpoint_dir: str
         :param adapter_name: Adapter name
-        :type adapter_name: str
+        :type adapter_name: str.
 
         :return: None
         :rtype: None
@@ -2977,7 +3042,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     @staticmethod
     def create_prompt_masks(prompt_lengths: list[int], max_length: int) -> torch.Tensor:
-        """Creates a mask for the prompts based on the prompt lengths (vectorized).
+        """Create a mask for the prompts based on the prompt lengths (vectorized).
 
         :param prompt_lengths: List of prompt lengths
         :type prompt_lengths: list[int]
@@ -2988,14 +3053,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         prompt_lengths_tensor = torch.tensor(prompt_lengths, dtype=torch.long)
         positions = torch.arange(max_length, dtype=torch.long).unsqueeze(0)
-        mask = positions > prompt_lengths_tensor.unsqueeze(1)
-        return mask
+        return positions > prompt_lengths_tensor.unsqueeze(1)
 
     def _configure_vllm(self) -> None:
         """Configure vLLM for efficient inference during generation in 'get_action'."""
         if self.vllm_config is None:
             warnings.warn(
                 "No VLLM config provided. Using default VLLM configuration for generation.",
+                stacklevel=2,
             )
             self.vllm_config = VLLMConfig()
         if self.accelerator is not None:
@@ -3003,8 +3068,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.accelerator.num_processes % self.vllm_config.tensor_parallel_size
                 != 0
             ):
+                msg = f"Tensor parallel size {self.vllm_config.tensor_parallel_size} must be a multiple of the number of processes {self.accelerator.num_processes}."
                 raise ValueError(
-                    f"Tensor parallel size {self.vllm_config.tensor_parallel_size} must be a multiple of the number of processes {self.accelerator.num_processes}.",
+                    msg,
                 )
 
             if self.vllm_config.tensor_parallel_size > 1:
@@ -3053,7 +3119,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.accelerator.wait_for_everyone()
 
     def _sync_deepspeed_gradient_clipping(self) -> None:
-        """Synchronizes max_grad_norm with DeepSpeed gradient_clipping config.
+        """Synchronize max_grad_norm with DeepSpeed gradient_clipping config.
         Registered as a mutation hook to ensure consistency after mutations.
         """
         if self.accelerator is None:

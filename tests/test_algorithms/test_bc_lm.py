@@ -46,6 +46,22 @@ class MockDataset(RL_Dataset):
         token_reward = MockTokenReward()
         super().__init__(tokenizer, token_reward, max_len)
 
+    def __iter__(self):
+        # Yield a minimal DataPoint so the dataset is iterable
+        yield DataPoint(
+            raw_str="",
+            tokens=[1, 2, 3, 4, 5],
+            state_idxs=[0, 1],
+            action_idxs=[0, 1],
+            rewards=[0.1, 0.1],
+            terminals=[0, 1],
+            utterance_state_idxs=[0, 1],
+            utterance_action_idxs=[0, 1],
+            utterance_rewards=[0.1, 0.1],
+            utterance_terminals=[0, 1],
+            meta=None,
+        )
+
     def collate(self, items, device):
         if isinstance(items, dict):
             return items
@@ -66,6 +82,21 @@ class MockDatasetNoneMaxLen(RL_Dataset):
         tokenizer = MockTokenizer()
         token_reward = MockTokenReward()
         super().__init__(tokenizer, token_reward, max_len=None)
+
+    def __iter__(self):
+        yield DataPoint(
+            raw_str="",
+            tokens=[1, 2, 3, 4, 5],
+            state_idxs=[0, 1],
+            action_idxs=[0, 1],
+            rewards=[0.1, 0.1],
+            terminals=[0, 1],
+            utterance_state_idxs=[0, 1],
+            utterance_action_idxs=[0, 1],
+            utterance_rewards=[0.1, 0.1],
+            utterance_terminals=[0, 1],
+            meta=None,
+        )
 
     def collate(self, items, device):
         if isinstance(items, dict):

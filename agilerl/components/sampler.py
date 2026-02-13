@@ -38,7 +38,7 @@ class Sampler:
     def tensordict_collate_fn(
         batch: list[TensorDict],
     ) -> TensorDict | list[TensorDict]:
-        """Custom collate function that properly handles TensorDict objects.
+        """Provide a custom collate function that properly handles TensorDict objects.
 
         :param batch: List of TensorDict objects to collate
         :type batch: list[TensorDict]
@@ -59,7 +59,9 @@ class Sampler:
 
         assert (memory is not None) or (
             (dataset is not None) and (dataloader is not None)
-        ), "Sampler needs to be initialized with either 'memory' or ('dataset' AND 'dataloader')."
+        ), (
+            "Sampler needs to be initialized with either 'memory' or ('dataset' AND 'dataloader')."
+        )
 
         self.distributed = (
             dataloader is not None
@@ -80,27 +82,33 @@ class Sampler:
                 self.dataloader = dataloader
 
             if not isinstance(self.dataset, ReplayDataset):
-                warnings.warn("Dataset is not an agilerl ReplayDataset.")
+                warnings.warn("Dataset is not an agilerl ReplayDataset.", stacklevel=2)
             if not isinstance(self.dataloader, DataLoader):
-                warnings.warn("Dataset is not a torch DataLoader object.")
+                warnings.warn("Dataset is not a torch DataLoader object.", stacklevel=2)
 
             self.sample = self.sample_distributed
         else:
             self.dataloader = dataloader
             if self.per:
                 if not isinstance(self.memory, PrioritizedReplayBuffer):
-                    warnings.warn("Memory is not an agilerl PrioritizedReplayBuffer.")
+                    warnings.warn(
+                        "Memory is not an agilerl PrioritizedReplayBuffer.",
+                        stacklevel=2,
+                    )
                 self.sample = self.sample_per
 
             elif self.n_step:
                 if not isinstance(self.memory, MultiStepReplayBuffer):
-                    warnings.warn("Memory is not an agilerl MultiStepReplayBuffer.")
+                    warnings.warn(
+                        "Memory is not an agilerl MultiStepReplayBuffer.", stacklevel=2
+                    )
                 self.sample = self.sample_n_step
 
             else:
                 if not isinstance(self.memory, (ReplayBuffer, MultiAgentReplayBuffer)):
                     warnings.warn(
                         "Memory is not an agilerl ReplayBuffer or MultiAgentReplayBuffer.",
+                        stacklevel=2,
                     )
                 self.sample = self.sample_standard
 
@@ -200,7 +208,7 @@ class Sampler:
         batch_size: int | None = None,
         **kwargs,
     ) -> DataLoader:
-        """Helper method to create a DataLoader with the appropriate collate function.
+        """Create a DataLoader with the appropriate collate function.
 
         :param dataset: Dataset to create a DataLoader for
         :type dataset: ReplayDataset

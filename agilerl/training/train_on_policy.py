@@ -56,7 +56,7 @@ def train_on_policy(
         Callable[[OnPolicyAlgorithms, gym.Env, int], None] | None
     ) = None,
 ) -> tuple[PopulationType, list[list[float]]]:
-    """The general on-policy RL training function. Returns trained population of agents
+    """Run the general on-policy RL training; returns trained population of agents
     and their fitnesses.
 
     :param env: The environment to train in. Can be vectorized.
@@ -140,11 +140,13 @@ def train_on_policy(
         warnings.warn(
             "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True.",
+            stacklevel=2,
         )
     if checkpoint is None and checkpoint_path is not None:
         warnings.warn(
             "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined.",
+            stacklevel=2,
         )
 
     if wb:
@@ -253,7 +255,6 @@ def train_on_policy(
                 obs, info = env.reset()
                 scores = np.zeros(num_envs)
                 for _ in range(-(evo_steps // -agent.learn_step)):
-
                     observations = []
                     actions = []
                     log_probs = []
@@ -433,16 +434,15 @@ def train_on_policy(
             agent.steps.append(agent.steps[-1])
 
         # Early stop if consistently reaches target
-        if target is not None:
-            if (
-                np.all(
-                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
-                )
-                and len(pop[0].steps) >= 100
-            ):
-                if wb:
-                    wandb.finish()
-                return pop, pop_fitnesses
+        if target is not None and (
+            np.all(
+                np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
+            )
+            and len(pop[0].steps) >= 100
+        ):
+            if wb:
+                wandb.finish()
+            return pop, pop_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -458,11 +458,11 @@ def train_on_policy(
             )
 
         if verbose:
-            fitness = ["%.2f" % fitness for fitness in fitnesses]
-            avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
-            avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+            fitness = [f"{fitness:.2f}" for fitness in fitnesses]
+            avg_fitness = [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
+            avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
             mean_scores = [
-                "%.2f" % mean_score if not isinstance(mean_score, str) else mean_score
+                f"{mean_score:.2f}" if not isinstance(mean_score, str) else mean_score
                 for mean_score in mean_scores
             ]
             agents = [agent.index for agent in pop]

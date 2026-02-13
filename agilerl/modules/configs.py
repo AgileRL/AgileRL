@@ -68,20 +68,18 @@ class MlpNetConfig(NetConfig):
     noisy: bool = field(default=False)
     noise_std: float = field(default=0.5)
 
-    def __post_init__(self):
-        assert (
-            len(self.hidden_size) >= self.min_hidden_layers
-        ), "Hidden layers must be greater than min_hidden_layers."
+    def __post_init__(self) -> None:
+        assert len(self.hidden_size) >= self.min_hidden_layers, (
+            "Hidden layers must be greater than min_hidden_layers."
+        )
 
-        assert (
-            len(self.hidden_size) <= self.max_hidden_layers
-        ), "Hidden layers must be less than max_hidden_layers."
+        assert len(self.hidden_size) <= self.max_hidden_layers, (
+            "Hidden layers must be less than max_hidden_layers."
+        )
 
         assert all(
-            [
-                self.min_mlp_nodes <= nodes <= self.max_mlp_nodes
-                for nodes in self.hidden_size
-            ],
+            self.min_mlp_nodes <= nodes <= self.max_mlp_nodes
+            for nodes in self.hidden_size
         ), "Nodes must be within min_nodes and max_nodes."
 
 
@@ -95,19 +93,21 @@ class SimBaNetConfig(NetConfig):
     min_mlp_nodes: int = field(default=16)
     max_mlp_nodes: int = field(default=500)
 
-    def __post_init__(self):
-        assert (
-            self.num_blocks >= self.min_blocks
-        ), "Number of residual blocks must be greater than min_blocks."
+    def __post_init__(self) -> None:
+        assert self.num_blocks >= self.min_blocks, (
+            "Number of residual blocks must be greater than min_blocks."
+        )
 
-        assert (
-            self.num_blocks <= self.max_blocks
-        ), "Number of residual blocks must be less than max_blocks."
+        assert self.num_blocks <= self.max_blocks, (
+            "Number of residual blocks must be less than max_blocks."
+        )
 
-        assert (
-            self.min_mlp_nodes <= self.hidden_size
-            and self.hidden_size <= self.max_mlp_nodes
-        ), "Nodes must be within min_nodes and max_nodes."
+        assert self.min_mlp_nodes <= self.hidden_size, (
+            "Nodes must be within min_nodes and max_nodes."
+        )
+        assert self.hidden_size <= self.max_mlp_nodes, (
+            "Nodes must be within min_nodes and max_nodes."
+        )
 
 
 @dataclass
@@ -160,15 +160,15 @@ class MultiInputNetConfig(NetConfig):
     # Additional settings
     init_dicts: dict[str, dict[str, Any]] = field(default_factory=dict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
         # Validate latent dimension
-        assert (
-            self.latent_dim >= self.min_latent_dim
-        ), f"Latent dimension {self.latent_dim} must be >= {self.min_latent_dim}"
-        assert (
-            self.latent_dim <= self.max_latent_dim
-        ), f"Latent dimension {self.latent_dim} must be <= {self.max_latent_dim}"
+        assert self.latent_dim >= self.min_latent_dim, (
+            f"Latent dimension {self.latent_dim} must be >= {self.min_latent_dim}"
+        )
+        assert self.latent_dim <= self.max_latent_dim, (
+            f"Latent dimension {self.latent_dim} must be <= {self.max_latent_dim}"
+        )
 
         # Validate network configurations if provided
         if self.cnn_config is not None:

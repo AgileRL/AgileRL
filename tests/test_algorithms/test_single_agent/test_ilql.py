@@ -384,7 +384,9 @@ def test_soft_update():
     assert all(
         torch.allclose(expected_param, target_param)
         for expected_param, target_param in zip(
-            expected_params, target_params, strict=False
+            expected_params,
+            target_params,
+            strict=False,
         )
     )
 
@@ -398,7 +400,9 @@ def test_soft_update():
     assert all(
         torch.allclose(expected_param, target_param)
         for expected_param, target_param in zip(
-            expected_params, target_params, strict=False
+            expected_params,
+            target_params,
+            strict=False,
         )
     )
 
@@ -412,7 +416,9 @@ def test_soft_update():
     assert all(
         torch.allclose(expected_param, target_param)
         for expected_param, target_param in zip(
-            expected_params, target_params, strict=False
+            expected_params,
+            target_params,
+            strict=False,
         )
     )
     algo.clean_up()
@@ -442,7 +448,7 @@ def test_hard_update():
 
     algo = ILQL(rl_ds, net_config=net_config, double_q=True)
 
-    algo.hardUpdate()
+    algo.hard_update()
 
     assert_state_dicts_equal(algo.q.state_dict(), algo.target_q.state_dict())
     assert_state_dicts_equal(algo.q2.state_dict(), algo.target_q2.state_dict())

@@ -805,9 +805,7 @@ if __name__ == "__main__":
                                 p0_state,
                                 epsilon,
                                 p0_action_mask,
-                            )[
-                                0
-                            ]  # Get next action from agent
+                            )[0]  # Get next action from agent
                             train_actions_hist[p0_action] += 1
 
                         env.step(p0_action)  # Act in environment
@@ -902,9 +900,7 @@ if __name__ == "__main__":
                                     p1_state,
                                     epsilon,
                                     p1_action_mask,
-                                )[
-                                    0
-                                ]  # Get next action from agent
+                                )[0]  # Get next action from agent
                                 train_actions_hist[p1_action] += 1
 
                             env.step(p1_action)  # Act in environment
@@ -1053,9 +1049,7 @@ if __name__ == "__main__":
                                             state,
                                             0,
                                             action_mask,
-                                        )[
-                                            0
-                                        ]  # Get next action from agent
+                                        )[0]  # Get next action from agent
                                         eval_actions_hist[action] += 1
                                 if player > 0:
                                     if not opponent_first:
@@ -1075,9 +1069,7 @@ if __name__ == "__main__":
                                             state,
                                             0,
                                             action_mask,
-                                        )[
-                                            0
-                                        ]  # Get next action from agent
+                                        )[0]  # Get next action from agent
                                         eval_actions_hist[action] += 1
 
                                 env.step(action)  # Act in environment

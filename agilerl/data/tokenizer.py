@@ -5,13 +5,13 @@ from typing import Any
 class Tokenizer(ABC):
     def __init__(
         self,
-        pad_token_id,
-        eos_token_id,
-        eoa_token_id,
-        bos_token_id,
-        boa_token_id,
-        eod_token_id,
-    ):
+        pad_token_id: int,
+        eos_token_id: int,
+        eoa_token_id: int,
+        bos_token_id: int,
+        boa_token_id: int,
+        eod_token_id: int,
+    ) -> None:
         self.pad_token_id = pad_token_id
         self.eos_token_id = eos_token_id
         self.eoa_token_id = eoa_token_id

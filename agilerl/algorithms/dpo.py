@@ -15,7 +15,7 @@ from agilerl.utils.llm_utils import PreferenceGym
 
 
 class DPO(LLMAlgorithm):
-    """The DPO algorithm class. DPO paper: https://arxiv.org/pdf/2305.18290
+    """The DPO algorithm class. DPO paper: https://arxiv.org/pdf/2305.18290.
 
     :param pad_token_id: Pad token id
     :type pad_token_id: int
@@ -89,7 +89,7 @@ class DPO(LLMAlgorithm):
         use_separate_reference_adapter: bool = False,
         seed: int = 42,
         gradient_checkpointing: bool = True,
-    ):
+    ) -> None:
         device = (
             f"cuda:{accelerator.process_index}"
             if accelerator is not None
@@ -137,7 +137,7 @@ class DPO(LLMAlgorithm):
         obs: LLMObsType,
         training: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Returns the action of the agent.
+        """Return the action of the agent.
 
         :param obs: The observation of the agent
         :type obs: LLMObsType
@@ -146,8 +146,9 @@ class DPO(LLMAlgorithm):
         :return: The action of the agent
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
+        msg = "DPO is an offline algorithm and therefore does not require completions to be generated."
         raise NotImplementedError(
-            "DPO is an offline algorithm and therefore does not require completions to be generated.",
+            msg,
         )
 
     def learn(
@@ -155,7 +156,7 @@ class DPO(LLMAlgorithm):
         experiences: ExperiencesType,
         training: bool = True,
     ) -> tuple[float, float, float]:
-        """Updates agent network parameters to learn from preference data.
+        """Update agent network parameters to learn from preference data.
 
         :param experiences: Batched chosen_input_ids, rejected_input_ids, chosen_attention_mask, rejected_attention_mask and rewards
         :type experiences: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
@@ -275,7 +276,7 @@ class DPO(LLMAlgorithm):
         chosen_mask: torch.Tensor,
         rejected_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Calculates the DPO loss.xw
+        """Calculate the DPO loss.xw.
 
         :param chosen_mask: Mask for the prompt and padding tokens of the chosen completions
         :type chosen_mask: torch.Tensor
@@ -289,9 +290,9 @@ class DPO(LLMAlgorithm):
 
         """
         # Mask and sum the logprobs
-        assert (
-            chosen_log_probs.shape == chosen_mask.shape
-        ), f"Chosen log probabilities and mask must have the same shape, got {chosen_log_probs.shape} and {chosen_mask.shape}"
+        assert chosen_log_probs.shape == chosen_mask.shape, (
+            f"Chosen log probabilities and mask must have the same shape, got {chosen_log_probs.shape} and {chosen_mask.shape}"
+        )
         chosen_log_probs = (chosen_log_probs * chosen_mask).sum(dim=-1)
         rejected_log_probs = (rejected_log_probs * rejected_mask).sum(dim=-1)
         ref_chosen_log_probs = (ref_chosen_log_probs * chosen_mask).sum(dim=-1)
@@ -327,7 +328,7 @@ class DPO(LLMAlgorithm):
         log_probs: torch.Tensor,
         ref_log_probs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Calculates the preference reward for the chosen and rejected completions.
+        """Calculate the preference reward for the chosen and rejected completions.
 
         :param log_probs: Log probabilities of the completions
         :type log_probs: torch.Tensor
@@ -340,7 +341,7 @@ class DPO(LLMAlgorithm):
         return self.beta * implicit_reward
 
     def test(self, env: PreferenceGym, loop: int = 1) -> torch.Tensor:
-        """Returns the fitness (test) score tensor of the agent.
+        """Return the fitness (test) score tensor of the agent.
 
         :param env: The environment to be tested in
         :type env: PreferenceGym environment

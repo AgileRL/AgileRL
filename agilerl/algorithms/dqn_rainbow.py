@@ -138,9 +138,9 @@ class RainbowDQN(RLAlgorithm):
             v_max,
             (float, int),
         ), "Maximum value of support must be a float."
-        assert (
-            v_max >= v_min
-        ), "Maximum value of support must be greater than or equal to minimum value."
+        assert v_max >= v_min, (
+            "Maximum value of support must be greater than or equal to minimum value."
+        )
         assert isinstance(n_step, int), "Step number must be an integer."
         assert n_step >= 1, "Step number must be greater than or equal to one."
         assert isinstance(
@@ -175,14 +175,14 @@ class RainbowDQN(RLAlgorithm):
         if actor_network is not None:
             if isinstance(actor_network, MakeEvolvable):
                 actor_network.rainbow = True
-                actor_network = actor_network
                 actor_network.support = self.support
                 actor_network.num_atoms = self.num_atoms
                 actor_network = MakeEvolvable(**actor_network.init_dict)
                 actor_network.load_state_dict(actor_network.state_dict())
             elif not isinstance(actor_network, EvolvableModule):
+                msg = f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule.",
+                    msg,
                 )
 
             self.actor, self.actor_target = make_safe_deepcopies(
@@ -202,7 +202,7 @@ class RainbowDQN(RLAlgorithm):
             )
             net_config["head_config"] = head_config
 
-            def create_actor():
+            def create_actor() -> RainbowQNetwork:
                 return RainbowQNetwork(
                     observation_space=observation_space,
                     action_space=action_space,
@@ -244,7 +244,7 @@ class RainbowDQN(RLAlgorithm):
         action_mask: np.ndarray | None = None,
         training: bool = True,
     ) -> np.ndarray:
-        """Returns the next action to take in the environment.
+        """Return the next action to take in the environment.
 
         :param obs: State observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
@@ -290,7 +290,7 @@ class RainbowDQN(RLAlgorithm):
         dones: torch.Tensor,
         gamma: float,
     ) -> torch.Tensor:
-        """Calculates the DQN loss.
+        """Calculate the DQN loss.
 
         :param obs: Batch of current states
         :type obs: torch.Tensor
@@ -364,8 +364,7 @@ class RainbowDQN(RLAlgorithm):
         log_p = log_q_dist[range(self.batch_size), actions.squeeze().long()]
 
         # loss
-        elementwise_loss = -(proj_dist * log_p).sum(1)
-        return elementwise_loss
+        return -(proj_dist * log_p).sum(1)
 
     def learn(
         self,
@@ -373,7 +372,7 @@ class RainbowDQN(RLAlgorithm):
         n_experiences: ExperiencesType | None = None,
         per: bool = False,
     ) -> tuple[float, np.ndarray | None, np.ndarray | None]:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
         :type experiences: TensorDict
@@ -490,6 +489,7 @@ class RainbowDQN(RLAlgorithm):
         for eval_param, target_param in zip(
             self.actor.parameters(),
             self.actor_target.parameters(),
+            strict=False,
         ):
             target_param.data.copy_(
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
@@ -502,7 +502,7 @@ class RainbowDQN(RLAlgorithm):
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
@@ -536,7 +536,7 @@ class RainbowDQN(RLAlgorithm):
                     obs, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
-                    for idx, (d, t) in enumerate(zip(done, trunc)):
+                    for idx, (d, t) in enumerate(zip(done, trunc, strict=False)):
                         if (
                             d or t or (max_steps is not None and step == max_steps)
                         ) and not finished[idx]:
