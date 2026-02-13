@@ -1281,13 +1281,17 @@ def test_matd3_soft_update(device, compile_mode, ma_vector_space, ma_discrete_sp
         expected_params = [
             matd3.tau * eval_param + (1.0 - matd3.tau) * target_param
             for eval_param, target_param in zip(
-                eval_params, target_params, strict=False
+                eval_params,
+                target_params,
+                strict=False,
             )
         ]
         assert all(
             torch.allclose(expected_param, target_param)
             for expected_param, target_param in zip(
-                expected_params, target_params, strict=False
+                expected_params,
+                target_params,
+                strict=False,
             )
         )
         matd3.soft_update(critic_1, critic_target_1)
@@ -1296,14 +1300,18 @@ def test_matd3_soft_update(device, compile_mode, ma_vector_space, ma_discrete_sp
         expected_params = [
             matd3.tau * eval_param + (1.0 - matd3.tau) * target_param
             for eval_param, target_param in zip(
-                eval_params, target_params, strict=False
+                eval_params,
+                target_params,
+                strict=False,
             )
         ]
 
         assert all(
             torch.allclose(expected_param, target_param)
             for expected_param, target_param in zip(
-                expected_params, target_params, strict=False
+                expected_params,
+                target_params,
+                strict=False,
             )
         )
         matd3.soft_update(critic_2, critic_target_2)
@@ -1312,14 +1320,18 @@ def test_matd3_soft_update(device, compile_mode, ma_vector_space, ma_discrete_sp
         expected_params = [
             matd3.tau * eval_param + (1.0 - matd3.tau) * target_param
             for eval_param, target_param in zip(
-                eval_params, target_params, strict=False
+                eval_params,
+                target_params,
+                strict=False,
             )
         ]
 
         assert all(
             torch.allclose(expected_param, target_param)
             for expected_param, target_param in zip(
-                expected_params, target_params, strict=False
+                expected_params,
+                target_params,
+                strict=False,
             )
         )
 

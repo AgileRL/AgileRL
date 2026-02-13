@@ -99,7 +99,6 @@ def test_constant_reward_envs(
             exp_infos,
             strict=False,
         ):
-
             assert int(np.mean(np.array(state))) == exp_state
             assert reward == exp_reward
             assert terminated == exp_terminated

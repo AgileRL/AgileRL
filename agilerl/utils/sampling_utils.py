@@ -1,9 +1,12 @@
+from collections.abc import Callable
+from typing import Any
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 
-def select_batch_idxs(x, idxs):
+def select_batch_idxs(x: torch.Tensor, idxs: torch.Tensor) -> torch.Tensor:
     return torch.gather(
         x,
         dim=0,
@@ -14,15 +17,27 @@ def select_batch_idxs(x, idxs):
     )
 
 
-def map_all_kvs(f, kvs):
+def map_all_kvs(
+    f: Callable[..., Any],
+    kvs: tuple[tuple[Any, ...], ...],
+) -> tuple[tuple[Any, ...], ...]:
     return tuple([tuple(map(f, items)) for items in kvs])
 
 
-def map_decoder_kvs(f, kvs):
+def map_decoder_kvs(
+    f: Callable[..., Any],
+    kvs: tuple[tuple[Any, ...], ...],
+) -> tuple[tuple[Any, ...], ...]:
     return tuple([(tuple(map(f, items[:2])) + tuple(items[2:])) for items in kvs])
 
 
-def pad_sequence(seq, to_len, val, device, dim):
+def pad_sequence(
+    seq: torch.Tensor,
+    to_len: int,
+    val: float,
+    device: torch.device | str,
+    dim: int,
+) -> torch.Tensor:
     return torch.cat(
         (
             seq,
@@ -35,33 +50,46 @@ def pad_sequence(seq, to_len, val, device, dim):
     )
 
 
-def update_kvs(kvs, updated_kvs, lens_chosen, idx):
+def update_kvs(
+    kvs: Any,
+    updated_kvs: Any,
+    lens_chosen: torch.Tensor,
+    idx: int,
+) -> Any:
     for i, layer in enumerate(kvs):
         for x, item in enumerate(layer):
             item[lens_chosen, :, idx, :] = updated_kvs[i][x][:, :, idx, :]
     return kvs
 
 
-def update_decoder_kvs(kvs, updated_kvs, lens_chosen, idx):
+def update_decoder_kvs(
+    kvs: Any,
+    updated_kvs: Any,
+    lens_chosen: torch.Tensor,
+    idx: int,
+) -> Any:
     for i, layer in enumerate(kvs):
         for x, item in enumerate(layer[:2]):
             item[lens_chosen, :, idx, :] = updated_kvs[i][x][:, :, idx, :]
     return kvs
 
 
-def get_relevant_kvs(kvs, lens_chosen, idx):
+def get_relevant_kvs(
+    kvs: Any,
+    lens_chosen: torch.Tensor,
+    idx: int,
+) -> tuple[tuple[Any, ...], ...]:
     kvs = map_all_kvs(lambda x: select_batch_idxs(x, lens_chosen), kvs)
-    kvs = map_all_kvs(lambda x: x[:, :, :idx, :], kvs)
-    return kvs
+    return map_all_kvs(lambda x: x[:, :, :idx, :], kvs)
 
 
-def top_k_logits(logits, k):
+def top_k_logits(logits: torch.Tensor, k: int) -> torch.Tensor:
     # logits = (batch, time, dim)
     _, bottom_k_idx = torch.topk(-logits, logits.shape[2] - k, dim=2)
     return torch.scatter(logits, dim=2, index=bottom_k_idx, value=float("-inf"))
 
 
-def top_p_logits(logits, p):
+def top_p_logits(logits: torch.Tensor, p: float) -> torch.Tensor:
     # logits = (batch, time, dim)
     sorted_logits, _ = torch.sort(logits, dim=2, descending=True)
     num_to_take = torch.sum(
@@ -76,7 +104,12 @@ def top_p_logits(logits, p):
     return logits.masked_fill(mask, float("-inf"))
 
 
-def process_logits(logits, temp=1.0, top_k=None, top_p=None):
+def process_logits(
+    logits: torch.Tensor,
+    temp: float = 1.0,
+    top_k: int | None = None,
+    top_p: float | None = None,
+) -> torch.Tensor:
     logits /= temp
     if top_k is not None:
         logits = top_k_logits(logits, top_k)
@@ -85,5 +118,5 @@ def process_logits(logits, temp=1.0, top_k=None, top_p=None):
     return logits
 
 
-def always_terminate(s: np.ndarray):
+def always_terminate(s: np.ndarray) -> bool:
     return True

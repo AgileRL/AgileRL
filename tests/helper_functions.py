@@ -33,7 +33,9 @@ def assert_state_dicts_equal(
     # First check that they have the same keys
     assert set(state_dict1.keys()) == set(
         state_dict2.keys(),
-    ), f"State dict keys don't match: {set(state_dict1.keys())} vs {set(state_dict2.keys())}"
+    ), (
+        f"State dict keys don't match: {set(state_dict1.keys())} vs {set(state_dict2.keys())}"
+    )
 
     # Then check each tensor
     for key, tensor1 in state_dict1.items():
@@ -44,9 +46,9 @@ def assert_state_dicts_equal(
                 tensor1 = tensor1.cpu()
                 tensor2 = tensor2.cpu()
 
-            assert (
-                tensor1.shape == tensor2.shape
-            ), f"Tensors for key '{key}' have different shapes: {tensor1.shape} != {tensor2.shape}"
+            assert tensor1.shape == tensor2.shape, (
+                f"Tensors for key '{key}' have different shapes: {tensor1.shape} != {tensor2.shape}"
+            )
             assert torch.allclose(
                 tensor1,
                 tensor2,
@@ -103,7 +105,9 @@ def check_equal_params_ind(
                 )
                 assert torch.all(
                     torch.eq(param.data[slice_index], old_param.data[slice_index]),
-                ), f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
+                ), (
+                    f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
+                )
 
 
 def unpack_network(model: nn.Sequential) -> list[nn.Module]:

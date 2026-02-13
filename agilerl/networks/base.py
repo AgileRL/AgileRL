@@ -2,7 +2,7 @@ import inspect
 import warnings
 from copy import deepcopy
 from dataclasses import asdict
-from typing import Any, TypeVar
+from typing import Any, ClassVar, TypeVar
 
 import numpy as np
 import torch
@@ -33,7 +33,7 @@ DefaultEncoderType = (
 
 
 def assert_correct_mlp_net_config(net_config: dict[str, Any]) -> None:
-    """Asserts that the MLP network configuration is correct.
+    """Assert that the MLP network configuration is correct.
 
     :param net_config: Configuration of the MLP network.
     :type net_config: dict[str, Any]
@@ -43,13 +43,13 @@ def assert_correct_mlp_net_config(net_config: dict[str, Any]) -> None:
         net_config["hidden_size"],
         list,
     ), "Net config hidden_size must be a list."
-    assert (
-        len(net_config["hidden_size"]) > 0
-    ), "Net config hidden_size must contain at least one element."
+    assert len(net_config["hidden_size"]) > 0, (
+        "Net config hidden_size must contain at least one element."
+    )
 
 
 def assert_correct_simba_net_config(net_config: dict[str, Any]) -> None:
-    """Asserts that the MLP network configuration is correct.
+    """Assert that the MLP network configuration is correct.
 
     :param net_config: Configuration of the MLP network.
     :type net_config: dict[str, Any]
@@ -67,7 +67,7 @@ def assert_correct_simba_net_config(net_config: dict[str, Any]) -> None:
 
 
 def assert_correct_cnn_net_config(net_config: dict[str, Any]) -> None:
-    """Asserts that the CNN network configuration is correct.
+    """Assert that the CNN network configuration is correct.
 
     :param net_config: Configuration of the CNN network.
     :type net_config: dict[str, Any]
@@ -79,9 +79,9 @@ def assert_correct_cnn_net_config(net_config: dict[str, Any]) -> None:
     ]:
         assert key in net_config, f"Net config must contain {key}: int."
         assert isinstance(net_config[key], list), f"Net config {key} must be a list."
-        assert (
-            len(net_config[key]) > 0
-        ), f"Net config {key} must contain at least one element."
+        assert len(net_config[key]) > 0, (
+            f"Net config {key} must contain at least one element."
+        )
 
         if key == "kernel_size":
             assert isinstance(
@@ -91,14 +91,14 @@ def assert_correct_cnn_net_config(net_config: dict[str, Any]) -> None:
 
 
 def assert_correct_lstm_net_config(net_config: dict[str, Any]) -> None:
-    """Asserts that the LSTM network configuration is correct.
+    """Assert that the LSTM network configuration is correct.
 
     :param net_config: Configuration of the LSTM network.
     :type net_config: dict[str, Any]
     """
-    assert (
-        "hidden_state_size" in net_config
-    ), "LSTM net config must contain hidden_state_size: int."
+    assert "hidden_state_size" in net_config, (
+        "LSTM net config must contain hidden_state_size: int."
+    )
     assert isinstance(net_config["hidden_state_size"], (int, np.int64)), (
         "LSTM net config hidden_state_size must be an integer but is "
         + str(type(net_config["hidden_state_size"]))
@@ -112,7 +112,7 @@ class NetworkMeta(ModuleMeta):
     an encoder and a head_net (named as such).
     """
 
-    def __call__(cls, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> SelfEvolvableNetwork:
         instance: SelfEvolvableNetwork = super().__call__(*args, **kwargs)
 
         # Check that the mutation methods of the network are correctly defined
@@ -121,9 +121,12 @@ class NetworkMeta(ModuleMeta):
             if "." in mut_method:
                 attr = mut_method.split(".")[0]
                 if attr not in ["encoder", "head_net"]:
-                    raise AttributeError(
+                    msg = (
                         "Mutation methods must reference only 'encoder' or 'head_net' "
-                        "so mutations apply consistently across networks (e.g. actor and critic).",
+                        "so mutations apply consistently across networks (e.g. actor and critic)."
+                    )
+                    raise AttributeError(
+                        msg,
                     )
 
         return instance
@@ -173,7 +176,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     head_net: EvolvableModule
 
     # Custom encoder aliases
-    _encoder_aliases: dict[str, type[EvolvableModule]] = {
+    _encoder_aliases: ClassVar[dict[str, type[EvolvableModule]]] = {
         "ResNet": EvolvableResNet,
     }
 
@@ -194,12 +197,12 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     ) -> None:
         super().__init__(device, random_seed)
 
-        assert (
-            latent_dim <= max_latent_dim
-        ), "Latent dimension must be less than or equal to max latent dimension."
-        assert (
-            latent_dim >= min_latent_dim
-        ), "Latent dimension must be greater than or equal to min latent dimension."
+        assert latent_dim <= max_latent_dim, (
+            "Latent dimension must be less than or equal to max latent dimension."
+        )
+        assert latent_dim >= min_latent_dim, (
+            "Latent dimension must be greater than or equal to min latent dimension."
+        )
 
         if encoder_config is None:
             encoder_config = get_default_encoder_config(
@@ -231,7 +234,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             if isinstance(encoder_cls, str):
                 self.encoder_cls = self._encoder_aliases[encoder_cls]
             elif not issubclass(encoder_cls, EvolvableModule):
-                raise TypeError("Encoder class must be a subclass of EvolvableModule.")
+                msg = "Encoder class must be a subclass of EvolvableModule."
+                raise TypeError(msg)
 
             # Check if encoder config contains `num_outputs` as input argument, in which
             # case we can enable latent space mutations. Otherwise, we disable them.
@@ -241,6 +245,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                     f"{self.encoder_cls.__name__} does not contain `num_outputs` as an "
                     "input argument. Disabling latent space mutations. Make sure to set the number of "
                     "outputs to the latent dimension in the encoder configuration.",
+                    stacklevel=2,
                 )
                 self.filter_mutation_methods("latent")
             else:
@@ -283,7 +288,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :rtype: dict[str, Any]
         """
         if not hasattr(self, "head_net"):
-            raise AttributeError("Network does not have a head_net attribute.")
+            msg = "Network does not have a head_net attribute."
+            raise AttributeError(msg)
 
         return self.head_net.net_config
 
@@ -296,7 +302,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         """
         return self.encoder.activation
 
-    def __call__(self, *args, **kwargs) -> torch.Tensor:
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         """Forward pass of the network."""
         return self.forward(*args, **kwargs)
 
@@ -319,7 +325,12 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             return self.encoder(x)
         return self.encoder(x, hidden_state=hidden_state)
 
-    def forward_head(self, latent: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+    def forward_head(
+        self,
+        latent: torch.Tensor,
+        *args: Any,
+        **kwargs: Any,
+    ) -> torch.Tensor:
         """Forward pass of the network head using pre-computed latent encodings.
 
         :param latent: Latent encodings from the encoder.
@@ -329,14 +340,18 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :rtype: torch.Tensor
         """
         if not hasattr(self, "head_net"):
-            raise AttributeError("Network does not have a head_net attribute.")
+            msg = "Network does not have a head_net attribute."
+            raise AttributeError(msg)
 
         return self.head_net(latent, *args, **kwargs)
 
-    def build_network_head(self, *args, **kwargs) -> None:
+    def build_network_head(self, *args: Any, **kwargs: Any) -> None:
         """Build the head of the network."""
+        msg = (
+            "Method build_network_head must be implemented in EvolvableNetwork objects."
+        )
         raise NotImplementedError(
-            "Method build_network_head must be implemented in EvolvableNetwork objects.",
+            msg,
         )
 
     def create_mlp(
@@ -346,7 +361,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         name: str,
         net_config: dict[str, Any],
     ) -> EvolvableMLP:
-        """Builds the head of the network based on the passed configuration.
+        """Build the head of the network based on the passed configuration.
 
         :param num_inputs: Number of inputs to the network head.
         :type num_inputs: int
@@ -399,7 +414,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :type env: GymEnvType
         """
         if self.recurrent:
-
             # if the hidden state is not initialized, initialize it
             if (
                 self.cached_hidden_state is None
@@ -417,8 +431,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                     )
                     self.cached_hidden_state[name] = torch.zeros(shape).to(self.device)
             return deepcopy(self.cached_hidden_state)
+        msg = "Cannot initialize hidden state for non-recurrent networks."
         raise ValueError(
-            "Cannot initialize hidden state for non-recurrent networks.",
+            msg,
         )
 
     def change_activation(self, activation: str, output: bool = False) -> None:
@@ -482,7 +497,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
 
     def _build_encoder(self, net_config: dict[str, Any]) -> DefaultEncoderType:
-        """Builds the encoder for the network based on the environments observation space.
+        """Build the encoder for the network based on the environments observation space.
 
         :return: Encoder module.
         :rtype: EvolvableModule

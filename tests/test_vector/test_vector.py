@@ -22,6 +22,7 @@ from gymnasium.vector.utils import CloudpickleWrapper
 from pettingzoo import ParallelEnv
 from pettingzoo.mpe import simple_speaker_listener_v4
 from pettingzoo.sisl import pursuit_v4
+from tests.pz_vector_test_utils import GenericTestEnv, term_env
 
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.vector.pz_async_vec_env import (  # PettingZooExperienceSpec,; SharedMemory,
@@ -33,7 +34,6 @@ from agilerl.vector.pz_async_vec_env import (  # PettingZooExperienceSpec,; Shar
     write_to_shared_memory,
 )
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
-from tests.pz_vector_test_utils import GenericTestEnv, term_env
 
 
 class DummyRecv:
@@ -596,7 +596,8 @@ def raise_error_step(self, action):
 def test_async_vector_subenv_error():
     env_list = [
         lambda: GenericTestEnv(
-            reset_func=raise_error_reset, step_func=raise_error_step
+            reset_func=raise_error_reset,
+            step_func=raise_error_step,
         ),
     ]
     envs = AsyncPettingZooVecEnv(env_list * 2)
@@ -607,7 +608,8 @@ def test_async_vector_subenv_error():
     envs.close()
     env_list = [
         lambda: GenericTestEnv(
-            reset_func=raise_error_reset, step_func=raise_error_step
+            reset_func=raise_error_reset,
+            step_func=raise_error_step,
         ),
     ]
     envs = AsyncPettingZooVecEnv(env_list * 3)

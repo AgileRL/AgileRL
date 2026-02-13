@@ -143,11 +143,13 @@ class DDPG(RLAlgorithm):
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
             and expl_noise.shape == (vect_noise_dim, self.action_dim)
-        ), f"Exploration action noise rate must be a float, or an array of size {self.action_dim}"
+        ), (
+            f"Exploration action noise rate must be a float, or an array of size {self.action_dim}"
+        )
         if isinstance(expl_noise, (float, int)):
-            assert (
-                expl_noise >= 0
-            ), "Exploration noise must be greater than or equal to zero."
+            assert expl_noise >= 0, (
+                "Exploration noise must be greater than or equal to zero."
+            )
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr_actor, float), "Actor learning rate must be a float."
@@ -160,13 +162,14 @@ class DDPG(RLAlgorithm):
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(policy_freq, int), "Policy frequency must be an integer."
-        assert (
-            policy_freq >= 1
-        ), "Policy frequency must be greater than or equal to one."
+        assert policy_freq >= 1, (
+            "Policy frequency must be greater than or equal to one."
+        )
 
         if (actor_network is not None) != (critic_network is not None):  # XOR operation
             warnings.warn(
                 "Actor and critic networks must both be supplied to use custom networks. Defaulting to net config.",
+                stacklevel=2,
             )
         assert isinstance(
             wrap,
@@ -205,12 +208,14 @@ class DDPG(RLAlgorithm):
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
+                msg = f"'actor_network' is of type {type(actor_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"'actor_network' is of type {type(actor_network)}, but must be of type EvolvableModule.",
+                    msg,
                 )
             if not isinstance(critic_network, EvolvableModule):
+                msg = f"'critic_network' is of type {type(critic_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"'critic_network' is of type {type(critic_network)}, but must be of type EvolvableModule.",
+                    msg,
                 )
 
             self.actor, self.critic = make_safe_deepcopies(
@@ -236,6 +241,7 @@ class DDPG(RLAlgorithm):
                         warnings.warn(
                             "Layer normalization is not supported for the encoder of DDPG networks. Disabling it. "
                             "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469",
+                            stacklevel=2,
                         )
                     encoder_config["layer_norm"] = False
             else:
@@ -261,7 +267,7 @@ class DDPG(RLAlgorithm):
             critic_net_config: dict[str, Any] = copy.deepcopy(net_config)
             critic_net_config["head_config"] = critic_head_config
 
-            def create_actor():
+            def create_actor() -> DeterministicActor:
                 return DeterministicActor(
                     observation_space=observation_space,
                     action_space=action_space,
@@ -269,7 +275,7 @@ class DDPG(RLAlgorithm):
                     **net_config,
                 )
 
-            def create_critic():
+            def create_critic() -> ContinuousQNetwork:
                 return ContinuousQNetwork(
                     observation_space=observation_space,
                     action_space=action_space,
@@ -336,16 +342,18 @@ class DDPG(RLAlgorithm):
             try:
                 share_encoder_parameters(self.actor, self.critic, self.critic_target)
             except KeyError as e:
+                msg = f"Found incompatible encoder architectures: {e} not found in shared network."
                 raise KeyError(
-                    f"Found incompatible encoder architectures: {e} not found in shared network.",
+                    msg,
                 ) from e
         else:
             warnings.warn(
                 "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork.",
+                stacklevel=2,
             )
 
     def get_action(self, obs: ObservationType, training: bool = True) -> np.ndarray:
-        """Returns the next action to take in the environment. If training, random noise
+        """Return the next action to take in the environment. If training, random noise
         is added to the action to promote exploration.
 
         :param obs: Environment observation, or multiple observations in a batch
@@ -365,8 +373,7 @@ class DDPG(RLAlgorithm):
         # Add noise for exploration
         if training:
             action = action.cpu().data.numpy()
-            action = (action + self.action_noise()).clip(-1, 1)
-            return action
+            return (action + self.action_noise()).clip(-1, 1)
 
         # Action scaled to action space bounds if not training
         action = DeterministicActor.rescale_action(
@@ -414,7 +421,7 @@ class DDPG(RLAlgorithm):
         noise_clip: float = 0.5,
         policy_noise: float = 0.2,
     ) -> tuple[float, float]:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
         :type experiences: dict[str, torch.Tensor[float]]
@@ -494,7 +501,9 @@ class DDPG(RLAlgorithm):
         :param target: Target network with parameters to be updated
         :type target: nn.Module
         """
-        for eval_param, target_param in zip(net.parameters(), target.parameters()):
+        for eval_param, target_param in zip(
+            net.parameters(), target.parameters(), strict=False
+        ):
             target_param.data.copy_(
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
             )
@@ -506,7 +515,7 @@ class DDPG(RLAlgorithm):
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
@@ -524,7 +533,7 @@ class DDPG(RLAlgorithm):
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
-            for i in range(loop):
+            for _i in range(loop):
                 obs, _ = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
@@ -537,7 +546,7 @@ class DDPG(RLAlgorithm):
                     obs, reward, done, trunc, _ = env.step(action)
                     step += 1
                     scores += np.array(reward)
-                    for idx, (d, t) in enumerate(zip(done, trunc)):
+                    for idx, (d, t) in enumerate(zip(done, trunc, strict=False)):
                         if (
                             d or t or (max_steps is not None and step == max_steps)
                         ) and not finished[idx]:

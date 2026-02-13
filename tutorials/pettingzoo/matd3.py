@@ -203,7 +203,7 @@ if __name__ == "__main__":
                 term_array = np.array(list(termination.values())).transpose()
                 trunc_array = np.array(list(truncation.values())).transpose()
                 for idx, (d, t) in enumerate(
-                    zip(term_array, trunc_array, strict=False)
+                    zip(term_array, trunc_array, strict=False),
                 ):
                     if np.any(d) or np.any(t):
                         completed_episode_scores.append(scores[idx])

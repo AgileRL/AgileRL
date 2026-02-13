@@ -122,7 +122,7 @@ class WordleState:
                     char_values.append(colored(str(x), "green"))
                 elif self.state[i].position_knowledge[x] == CharKnowledge.NOT_HERE:
                     char_values.append(colored(str(x), "yellow"))
-            str_items[k].append(f'{IDX2CHAR[i]}: {",".join(char_values)}')
+            str_items[k].append(f"{IDX2CHAR[i]}: {','.join(char_values)}")
         return "\n".join(
             [
                 "\n".join(str_items[k])

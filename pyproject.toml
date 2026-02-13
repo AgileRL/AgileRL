@@ -92,58 +92,48 @@ packages = ["agilerl"]
 [tool.hatch.build.targets.sdist]
 exclude = ["tutorials"]
 
-[tool.black]
+[tool.ruff]
+target-version = "py310"
 line-length = 88
-
-[tool.isort]
-profile = "black"
 
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-    "E501",      # line length handled by black
-    "FIX",       # FIXMEs
-    "TD",        # TODOs
-    "D203",      # conflicts with D211
-    "D213",      # conflicts with D212
-    "ARG002",    # unused arguments ("kwargs", etc.)
-    "ARG004",    # unused arguments (interface consistency)
-    "ANN003",    # missing type for kwargs
-    "ANN401",    # any types
-    "FBT001",    # boolean trap
-    "FBT002",    # boolean in function args
-    "FBT003",    # boolean in function call
-    "N812",      # import lowercase as upper
-    "C901",      # complexity
-    "PLR0912",   # too many branches
-    "PLR0913",   # too many function arguments (>5)
-    "PLR0915",   # function too long (>50 loc)
-    "PLR0911",   # too many return statements in function (>6)
+    "E501",          # Line length (handled by formatter)
+    "FIX", "TD",     # All FIXME and TODO rules
+    "D203", "D213",  # Specific docstring conflicts
+    "D100", "D107",  # Missing docstrings (module/init)
+    "ARG",           # All unused argument rules (ARG002, 004, etc.)
+    "ANN",           # All annotation rules (ANN002, 003, 401)
+    "FBT",           # All boolean trap rules (FBT001, 002, 003)
+    "PLR09",         # All "Too Many..." complexity rules (branches, args, returns)
+    "C901",          # complexity
+    "N812",          # import lowercase as upper
+    "UP007",         # union operator
+    "S101",          # use of asserts outside tests
+    "T201",          # print statements used in training loops (for now)
+    "DTZ005",        # datetime.now() without tz argument
+    "COM812",        # issues with ruff-format
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"{tests,benchmarking,demos,tutorials}/**" = [
-    "S",         # security (assert, pseudo-random, etc.)
-    "SLF001",    # private member access
-    "ERA001",    # commented-out code
-    "NPY002",    # legacy random
-    "D",         # docstrings
-    "ANN",       # type annotations
-    "ARG",       # unused arguments (fixtures, etc.)
-    "PLR",       # pylint refactor (magic values, complexity, etc.)
-    "PLW2901",   # loop variable overwritten
-    "FBT",       # boolean trap
-    "PT",        # pytest style
-    "N",         # naming conventions
-    "PLC0415",   # import not at top
-    "INP001",    # implicit namespace package
-    "PTH",       # pathlib
-    "C901",      # complexity
-    "BLE001",    # blind except
-    "TRY",       # tryceratops
-    "RUF",       # ruff-specific
-    "TD",        # TODOs
-    "FIX",       # FIXMEs
-    "PGH003",    # blanket type ignore
-    "T201",      # print statements
+"agilerl/**" = [
+    "D1",            # missing docstrings in public modules/classes/methods/packages
+    "D205",          # 1 blank line between summary and description
+    "D4",            # first line punctuation/period (conflicts with multi-line)
+    "N8",            # naming: math (L, T, H), public API (BC_LM), and casing
+    "S",             # security: pickle (checkpoints), random (non-crypto), asserts
+    "PTH",           # path/os compatibility: os.remove, isdir, open
+    "TRY", "BLE",    # exception handling: TypeError, abstract raises, catching Exception
+    "PLR", "PLW", "PLC", # pylint: magic values, registry/config __hash__, self-assignment, loops
+    "SIM",           # simplification: nested if, contextlib.suppress
+    "ARG001",        # unused args (interface consistency)
+    "ERA001",        # commented-out code (kept for reference)
+    "SLF001",        # private member access (torch/accelerate internals)
+    "NPY002",        # legacy np.random
+    "TC001", "TC003",# type-checking block imports
+    "A002",          # argument shadowing builtin (input)
+    "PIE790",        # unnecessary ...
+    "PD011",         # .values -> .to_numpy()
 ]
+"{tests,benchmarking,demos,tutorials}/**" = ["ALL"]

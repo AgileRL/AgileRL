@@ -95,15 +95,16 @@ def get_exp_layer(offspring: EvolvableModule) -> nn.Module:
     if isinstance(offspring, EvolvableModule):
         exp_layer = offspring.get_output_dense()
     else:
-        raise ValueError(
-            f"Bandit algorithm architecture {type(offspring)} not supported.",
-        )
+        msg = f"Bandit algorithm architecture {type(offspring)} not supported."
+        raise TypeError(msg)
 
     return exp_layer
 
 
-def reinit_shared_networks(mutation_func=None):
-    """Decorator to reinitialize shared networks after architecture and parameter mutations.
+def reinit_shared_networks(
+    mutation_func: Any = None,
+) -> Callable[..., Any]:
+    """Reinitialize shared networks after architecture and parameter mutations (decorator).
 
     :param mutation_func: The mutation function to decorate
     :type mutation_func: Callable[[IndividualType], IndividualType] | None
@@ -164,8 +165,8 @@ def reinit_shared_networks(mutation_func=None):
 
 
 class Mutations:
-    """Allows performing mutations on a population of :class:`EvolvableAlgorithm <agilerl.algorithms.core.EvolvableAlgorithm>` agents. Calling
-    :func:`Mutations.mutation() <agilerl.hpo.mutation.Mutations.mutation>` on a population of agents will return a mutated population of agents.
+    """Allow performing mutations on a population of :class:`EvolvableAlgorithm <agilerl.algorithms.core.EvolvableAlgorithm>` agents.
+    Calling :func:`Mutations.mutation() <agilerl.hpo.mutation.Mutations.mutation>` on a population of agents will return a mutated population of agents.
     The type of mutation applied to each agent is sampled randomly from the probabilities given by the user. The supported types of mutations that
     can be applied to an agent are:
 
@@ -214,57 +215,61 @@ class Mutations:
         activation: float,
         rl_hp: float,
         mutation_sd: float = 0.1,
-        activation_selection: list[str] = ["ReLU", "ELU", "GELU"],
+        activation_selection: list[str] | None = None,
         mutate_elite: bool = True,
         rand_seed: int | None = None,
         device: str = "cpu",
         accelerator: Accelerator | None = None,
-    ):
+    ) -> None:
+        if activation_selection is None:
+            activation_selection = ["ReLU", "ELU", "GELU"]
         assert isinstance(
             no_mutation,
             (float, int),
         ), "Probability of no mutation must be a float or integer."
-        assert (
-            no_mutation >= 0
-        ), "Probability of no mutation must be greater than or equal to zero."
+        assert no_mutation >= 0, (
+            "Probability of no mutation must be greater than or equal to zero."
+        )
         assert isinstance(
             architecture,
             (float, int),
         ), "Probability of architecture mutation must be a float or integer."
-        assert (
-            architecture >= 0
-        ), "Probability of architecture mutation must be greater than or equal to zero."
+        assert architecture >= 0, (
+            "Probability of architecture mutation must be greater than or equal to zero."
+        )
         assert isinstance(
             new_layer_prob,
             (float, int),
         ), "Probability of new layer architecture mutation must be a float or integer."
-        assert (
-            1 >= new_layer_prob >= 0
-        ), "Probability of new layer architecture mutation must be between zero and one (inclusive)."
+        assert 1 >= new_layer_prob >= 0, (
+            "Probability of new layer architecture mutation must be between zero and one (inclusive)."
+        )
         assert isinstance(
             parameters,
             (float, int),
         ), "Probability of parameters mutation must be a float or integer."
-        assert (
-            parameters >= 0
-        ), "Probability of parameters mutation must be greater than or equal to zero."
+        assert parameters >= 0, (
+            "Probability of parameters mutation must be greater than or equal to zero."
+        )
         assert isinstance(
             activation,
             (float, int),
         ), "Probability of activation mutation must be a float or integer."
-        assert (
-            activation >= 0
-        ), "Probability of activation mutation must be greater than or equal to zero."
+        assert activation >= 0, (
+            "Probability of activation mutation must be greater than or equal to zero."
+        )
         assert isinstance(
             rl_hp,
             (float, int),
-        ), "Probability of reinforcement learning hyperparameter mutation must be a float or integer."
-        assert (
-            rl_hp >= 0
-        ), "Probability of reinforcement learning hyperparameter mutation must be greater than or equal to zero."
-        assert (
-            mutation_sd >= 0
-        ), "Mutation strength must be greater than or equal to zero."
+        ), (
+            "Probability of reinforcement learning hyperparameter mutation must be a float or integer."
+        )
+        assert rl_hp >= 0, (
+            "Probability of reinforcement learning hyperparameter mutation must be greater than or equal to zero."
+        )
+        assert mutation_sd >= 0, (
+            "Mutation strength must be greater than or equal to zero."
+        )
         assert isinstance(
             mutation_sd,
             (float, int),
@@ -273,9 +278,9 @@ class Mutations:
             mutate_elite,
             bool,
         ), "Mutate elite must be boolean value True or False."
-        assert (
-            isinstance(rand_seed, int) or rand_seed is None
-        ), "Random seed must be an integer or None."
+        assert isinstance(rand_seed, int) or rand_seed is None, (
+            "Random seed must be an integer or None."
+        )
         if isinstance(rand_seed, int):
             assert rand_seed >= 0, "Random seed must be greater than or equal to zero."
 
@@ -308,7 +313,7 @@ class Mutations:
         population: PopulationType,
         pre_training_mut: bool = False,
     ) -> PopulationType:
-        """Returns a mutated population of agents. See :ref:`evo_hyperparam_opt` for more details.
+        """Return a mutated population of agents. See :ref:`evo_hyperparam_opt` for more details.
 
         :param population: Population of agents
         :type population: list[EvolvableAlgorithm]
@@ -340,7 +345,7 @@ class Mutations:
             mutation_choice[0] = self.no_mutation
 
         mutated_population = []
-        for mutation, individual in zip(mutation_choice, population):
+        for mutation, individual in zip(mutation_choice, population, strict=False):
             wrapped_ind = isinstance(individual, AgentWrapper)
             agent = individual.agent if wrapped_ind else individual
 
@@ -356,8 +361,8 @@ class Mutations:
 
         return mutated_population
 
-    def no_mutation(self, individual: IndividualType):
-        """Returns individual from population without mutation.
+    def no_mutation(self, individual: IndividualType) -> IndividualType:
+        """Return individual from population without mutation.
 
         :param individual: Individual agent from population
         :type individual:
@@ -367,7 +372,7 @@ class Mutations:
 
     @reinit_shared_networks
     def architecture_mutate(self, individual: IndividualType) -> IndividualType:
-        """Performs a random mutation to the architecture of the policy network of an agent. The way in
+        """Perform a random mutation to the architecture of the policy network of an agent. The way in
         which we apply an architecture mutation to single and multi-agent RL algorithms inherently differs
         given the nested nature of the networks in the latter.
 
@@ -395,15 +400,18 @@ class Mutations:
         elif isinstance(individual, MultiAgentRLAlgorithm):
             individual = self._architecture_mutate_multi(individual)
         else:
-            raise MutationError(
+            msg = (
                 f"Architecture mutations are not supported for {individual.__class__.__name__}. "
-                "Please make sure your algorithm inherits from 'RLAlgorithm' or 'MultiAgentRLAlgorithm'.",
+                "Please make sure your algorithm inherits from 'RLAlgorithm' or 'MultiAgentRLAlgorithm'."
+            )
+            raise MutationError(
+                msg,
             )
 
         return individual
 
     def rl_hyperparam_mutation(self, individual: IndividualType) -> IndividualType:
-        """Performs a random mutation of a learning hyperparameter of an agent. To do this, sample a hyperparameter from those
+        """Perform a random mutation of a learning hyperparameter of an agent. To do this, sample a hyperparameter from those
         specified through the :class:`HyperparameterConfig <agilerl.algorithms.core.registry.HyperparameterConfig>`
         passed during initialization of the agent. The hyperparameter is then mutated and the optimizer is reinitialized if the
         learning rate has been mutated.
@@ -433,11 +441,11 @@ class Mutations:
         # Reinitialize optimizer if mutated learning rate
         if mutate_attr in individual.get_lr_names():
             optimizer_configs = individual.registry.optimizers
-            to_reinit = [
+            to_reinit = next(
                 opt_config
                 for opt_config in optimizer_configs
                 if mutate_attr == opt_config.lr
-            ][0]
+            )
 
             individual.reinit_optimizers(optimizer=to_reinit)
 
@@ -447,7 +455,7 @@ class Mutations:
     # TODO: Activation mutations should really be integrated as architecture mutations
     @reinit_shared_networks
     def activation_mutation(self, individual: IndividualType) -> IndividualType:
-        """Performs a random mutation of the activation layer of the evaluation networks of an agent.
+        """Perform a random mutation of the activation layer of the evaluation networks of an agent.
 
         .. note::
             This is currently not supported for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
@@ -465,6 +473,7 @@ class Mutations:
         if individual.algo in ["PPO", "DDPG", "TD3", "IPPO", "MADDPG", "MATD3", "GRPO"]:
             warnings.warn(
                 f"Activation mutations are not supported for {individual.algo}.",
+                stacklevel=2,
             )
             individual.mut = "None"
             return individual
@@ -487,6 +496,7 @@ class Mutations:
                 warnings.warn(
                     "Found no activation mutation capabilities. We advise setting the probability to "
                     "0.0 to disable activation mutations.",
+                    stacklevel=2,
                 )
                 break
 
@@ -503,7 +513,7 @@ class Mutations:
         return individual
 
     def parameter_mutation(self, individual: IndividualType) -> IndividualType:
-        """Performs a random mutation to the weights of the policy network of an agent through
+        """Perform a random mutation to the weights of the policy network of an agent through
         the addition of Gaussian noise.
 
         .. note::
@@ -518,6 +528,7 @@ class Mutations:
         if isinstance(individual, LLMAlgorithm):
             warnings.warn(
                 "Parameter mutations are not supported for LLM algorithms. Skipping mutation.",
+                stacklevel=2,
             )
             individual.mut = "None"
             return individual
@@ -590,7 +601,7 @@ class Mutations:
         if len(mutation_options) == 0:
             mutation_options = [(self.no_mutation, 1)]
 
-        mutation_funcs, mutation_proba = zip(*mutation_options)
+        mutation_funcs, mutation_proba = zip(*mutation_options, strict=False)
         mutation_proba = np.array(mutation_proba) / np.sum(mutation_proba)
         return mutation_funcs, mutation_proba
 
@@ -600,7 +611,7 @@ class Mutations:
         name: str,
         networks: EvolvableNetworkType,
     ) -> None:
-        """Moves networks to the device and assigns them back to the individual.
+        """Move networks to the device and assigns them back to the individual.
 
         :param individual: The individual to assign the networks to
         :type individual: EvolvableAlgorithm
@@ -720,7 +731,7 @@ class Mutations:
         return network
 
     def _gaussian_parameter_mutation(self, network: EvolvableModule) -> EvolvableModule:
-        """Returns network with mutated weights using a Gaussian distribution.
+        """Return network with mutated weights using a Gaussian distribution.
 
         :param network: Neural network to mutate.
         :type network: EvolvableModule
@@ -834,12 +845,13 @@ class Mutations:
         # We first extract and apply a mutation to the policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics
         policy, offspring_evals = get_offspring_eval_modules(individual)
-        policy_name, policy_offspring = list(policy.items())[0]
+        policy_name, policy_offspring = next(iter(policy.items()))
 
         if not policy_offspring.mutation_methods:
             warnings.warn(
                 "No mutation methods found for the policy network. Skipping architecture mutation. "
                 "We advise setting the probability of architecture mutations to zero when using non-evolvable networks.",
+                stacklevel=2,
             )
             individual.mut = "None"
             return individual
@@ -899,12 +911,13 @@ class Mutations:
         # We first extract and apply a mutation to the policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics
         policy, offspring_evals = get_offspring_eval_modules(individual)
-        policy_name, policy_offspring = list(policy.items())[0]
+        policy_name, policy_offspring = next(iter(policy.items()))
 
         if not policy_offspring.mutation_methods:
             warnings.warn(
                 "No mutation methods found for the policy network. Skipping architecture mutation. "
                 "We advise setting the probability of architecture mutations to zero when using non-evolvable networks.",
+                stacklevel=2,
             )
             individual.mut = "None"
             return individual
@@ -980,10 +993,13 @@ class Mutations:
                             mut_dict,
                         )
                     else:
-                        raise MutationError(
+                        msg = (
                             f"Mutation method '{sampled_mutation}' not found in '{agent_eval.__class__.__name__}'. "
                             f"No analogous method found for agent '{agent_id}'. "
-                            f"Available methods: {agent_eval.mutation_methods}.",
+                            f"Available methods: {agent_eval.mutation_methods}."
+                        )
+                        raise MutationError(
+                            msg,
                         )
 
             self._to_device_and_set_individual(individual, name, offspring_eval)
@@ -1000,7 +1016,7 @@ class Mutations:
         mut_method: str | None,
         applied_mut_dict: dict[str, Any] | None = None,
     ) -> tuple[str | None, MutationReturnType]:
-        """Applies the mutation method to networks and returns mutation data if needed.
+        """Apply the mutation method to networks and returns mutation data if needed.
 
         :param networks: The networks to apply the mutation to
         :type networks: EvolvableNetworkType
@@ -1013,9 +1029,12 @@ class Mutations:
         :rtype: tuple[str | None, MutationReturnType]
         """
         if not isinstance(network, EvolvableModule):
-            raise MutationError(
+            msg = (
                 f"Can't apply architecture mutation to {network.__class__.__name__} network."
-                "Please make sure your network inherits from 'EvolvableModule'.",
+                "Please make sure your network inherits from 'EvolvableModule'."
+            )
+            raise MutationError(
+                msg,
             )
 
         applied_mut_dict = applied_mut_dict or {}
@@ -1026,9 +1045,12 @@ class Mutations:
             network.last_mutation = None
         else:
             if mut_method not in network.mutation_methods:
-                raise MutationError(
+                msg = (
                     f"Mutation method '{mut_method}' not found in '{network.__class__.__name__}'; "
-                    f"available methods: \n {network.mutation_methods}.",
+                    f"available methods: \n {network.mutation_methods}."
+                )
+                raise MutationError(
+                    msg,
                 )
 
             mut_dict = getattr(network, mut_method)(**applied_mut_dict)
@@ -1057,8 +1079,11 @@ class Mutations:
         if isinstance(offspring_actor, EvolvableModule):
             exp_layer = offspring_actor.get_output_dense()
         else:
+            msg = (
+                f"Bandit algorithm architecture {type(offspring_actor)} not supported."
+            )
             raise ValueError(
-                f"Bandit algorithm architecture {type(offspring_actor)} not supported.",
+                msg,
             )
 
         individual.numel = sum(

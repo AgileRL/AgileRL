@@ -123,7 +123,7 @@ class EvolvableMultiInput(EvolvableModule):
         device: str = "cpu",
         name: str = "multi_input",
         random_seed: int | None = None,
-    ):
+    ) -> None:
         super().__init__(device, random_seed)
 
         assert num_outputs > 0, "Number of outputs must be greater than 0."
@@ -132,12 +132,12 @@ class EvolvableMultiInput(EvolvableModule):
             observation_space,
             (spaces.Dict, spaces.Tuple),
         ), "Observation space must be a Dict or Tuple space."
-        assert (
-            latent_dim <= max_latent_dim
-        ), "Latent dimension must be less than or equal to max latent dimension."
-        assert (
-            latent_dim >= min_latent_dim
-        ), "Latent dimension must be greater than or equal to min latent dimension."
+        assert latent_dim <= max_latent_dim, (
+            "Latent dimension must be less than or equal to max latent dimension."
+        )
+        assert latent_dim >= min_latent_dim, (
+            "Latent dimension must be greater than or equal to min latent dimension."
+        )
 
         # Convert Tuple space to Dict space for consistency
         self.is_tuple_space = False
@@ -203,7 +203,7 @@ class EvolvableMultiInput(EvolvableModule):
 
     @property
     def net_config(self) -> dict[str, Any]:
-        """Returns the configuration of the network.
+        """Return the configuration of the network.
 
         :return: Network configuration
         :rtype: dict[str, Any]
@@ -234,7 +234,7 @@ class EvolvableMultiInput(EvolvableModule):
 
     @property
     def init_dicts(self) -> dict[str, dict[str, Any]]:
-        """Returns the initialization dictionaries for the network.
+        """Return the initialization dictionaries for the network.
 
         :return: Initialization dictionaries
         :rtype: dict[str, dict[str, Any]]
@@ -256,12 +256,12 @@ class EvolvableMultiInput(EvolvableModule):
 
     @property
     def cnn_init_dict(self) -> dict[str, Any]:
-        """Returns the initialization dictionary for the CNN."""
+        """Return the initialization dictionary for the CNN."""
         return copy.deepcopy(self.cnn_config)
 
     @property
     def mlp_init_dict(self) -> dict[str, Any]:
-        """Returns the initialization dictionary for the MLP."""
+        """Return the initialization dictionary for the MLP."""
         return copy.deepcopy(self.mlp_config)
 
     def _reformat_mlp_config(self, config: dict[str, Any]) -> dict[str, Any]:
@@ -272,7 +272,7 @@ class EvolvableMultiInput(EvolvableModule):
         return config
 
     def _modify_mlp_config(self) -> None:
-        """Modifies the MLP architecture to be appropriate for use as an encoder (i.e. disable
+        """Modify the MLP architecture to be appropriate for use as an encoder (i.e. disable
         output vanishing, and apply layer normalization at the final layer consistently with the
         rest of the network). See https://github.com/AgileRL/AgileRL/issues/337 for more details.
         """
@@ -293,7 +293,7 @@ class EvolvableMultiInput(EvolvableModule):
         EvolvableModule.init_weights_gaussian(self.final_dense, std_coeff=output_coeff)
 
     def calc_extracted_features_dim(self) -> int:
-        """Calculates the toal dimension of the features extracted by the evolvable
+        """Calculate the toal dimension of the features extracted by the evolvable
         feature extractors.
 
         :return: Total dimension of the extracted features.
@@ -308,7 +308,7 @@ class EvolvableMultiInput(EvolvableModule):
         )
 
     def get_inner_init_dict(self, key: str, default: ModuleType) -> NetConfigType:
-        """Returns the initialization dictionary for the specified key.
+        """Return the initialization dictionary for the specified key.
 
         :param key: Key of the observation space.
         :type key: str
@@ -331,8 +331,9 @@ class EvolvableMultiInput(EvolvableModule):
         }.get(default)
 
         if init_dict is None:
+            msg = "Invalid default value provided, must be 'cnn' or 'mlp' or 'multi_input'."
             raise ValueError(
-                "Invalid default value provided, must be 'cnn' or 'mlp' or 'multi_input'.",
+                msg,
             )
         # Check if we are extracting a nested dict
         nested_dict = init_dict.get(key)
@@ -350,7 +351,7 @@ class EvolvableMultiInput(EvolvableModule):
         return init_dict
 
     def build_feature_extractor(self) -> dict[str, SupportedEncoderTypes]:
-        """Creates the feature extractor and final MLP networks.
+        """Create the feature extractor and final MLP networks.
 
         :return: Dictionary of feature extractors.
         :rtype: dict[str, EvolvableMLP | EvolvableCNN | EvolvableLSTM | EvolvableMultiInput]
@@ -411,7 +412,7 @@ class EvolvableMultiInput(EvolvableModule):
         :rtype: torch.Tensor
         """
         if isinstance(x, tuple):
-            x = dict(zip(self.observation_space.spaces.keys(), x))
+            x = dict(zip(self.observation_space.spaces.keys(), x, strict=False))
 
         for key, obs in x.items():
             if not isinstance(obs, torch.Tensor):
@@ -420,18 +421,14 @@ class EvolvableMultiInput(EvolvableModule):
         # Extract features from non-vector subspaces
         extracted_features = OrderedDict()
         if self.extracted_features_dim > 0:
-            for key in x.keys():
-                if key in self.feature_net.keys():
+            for key in x:
+                if key in self.feature_net:
                     extracted_features[key] = self.feature_net[key](x[key])
 
         # Extract raw features from vector spaces
         vector_inputs = []
         for key, space in self.vector_spaces.items():
-            _obs = (
-                extracted_features.pop(key)
-                if key in extracted_features.keys()
-                else x[key]
-            )
+            _obs = extracted_features.pop(key) if key in extracted_features else x[key]
             if len(_obs.shape) == 1:
                 dim = len(space.shape) - 1
                 _obs = _obs.unsqueeze(dim)

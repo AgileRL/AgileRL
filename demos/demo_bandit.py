@@ -100,7 +100,7 @@ if __name__ == "__main__":
         # set the wandb project where this run will be logged
         project="AgileRL-Bandits",
         name="NeuralUCB-{}".format(
-            datetime.now(tz=timezone.utc).strftime("%m%d%Y%H%M%S")
+            datetime.now(tz=timezone.utc).strftime("%m%d%Y%H%M%S"),
         ),
         # track hyperparameters and run metadata
         config=INIT_HP,

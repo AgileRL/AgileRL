@@ -46,7 +46,6 @@ def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
-
         mock_agg.return_value = 0.5
         finetune_llm_reasoning(
             pop=[mock_agent],
@@ -109,7 +108,6 @@ def test_finetune_llm_reasoning_with_wandb_and_checkpoints(use_accelerator):
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
     ):
-
         # Configure mocks
         mock_pbar = Mock()
         mock_trange.return_value = mock_pbar
@@ -180,7 +178,6 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
             "agilerl.training.train_llm.tournament_selection_and_mutation",
         ) as mock_tournament_selection_and_mutation,
     ):
-
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
         mock_agg.return_value = 0.5
@@ -216,7 +213,7 @@ def test_finetune_llm_reasoning_evo_steps_not_set(finetune_fn):
         finetune_fn(
             pop=[
                 MagicMock(
-                    spec=(GRPO if finetune_fn == finetune_llm_reasoning else DPO)
+                    spec=(GRPO if finetune_fn == finetune_llm_reasoning else DPO),
                 ),
             ],
             env=MagicMock(),
@@ -241,7 +238,7 @@ def test_finetune_llm_reasoning_value_error_if_evo_steps_not_set(finetune_fn):
         finetune_llm_reasoning(
             pop=[
                 MagicMock(
-                    spec=(GRPO if finetune_fn == finetune_llm_reasoning else DPO)
+                    spec=(GRPO if finetune_fn == finetune_llm_reasoning else DPO),
                 ),
             ],
             env=MagicMock(),
@@ -290,7 +287,6 @@ def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps():
             "agilerl.training.train_llm.tournament_selection_and_mutation",
         ) as mock_tournament_selection_and_mutation,
     ):
-
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
         mock_agg.return_value = 0.5
@@ -348,7 +344,6 @@ def test_finetune_llm_reasoning_max_steps_set_from_num_epochs():
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
     ):
-
         mock_agg.return_value = 0.5
         finetune_llm_reasoning(
             pop=[mock_agent],
@@ -403,7 +398,6 @@ def test_finetune_llm_reasoning_break_on_num_epochs():
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
-
         mock_env.num_epochs = 2
         mock_agg.return_value = 0.5
         finetune_llm_reasoning(
@@ -458,7 +452,6 @@ def test_finetune_llm_preference_basic_training_loop(use_accelerator):
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
-
         mock_agg.return_value = 0.5
         finetune_llm_preference(
             pop=[mock_agent],
@@ -522,7 +515,6 @@ def test_finetune_llm_preference_with_wandb_and_checkpoints(use_accelerator):
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
     ):
-
         # Configure mocks
         mock_pbar = Mock()
         mock_trange.return_value = mock_pbar
@@ -600,7 +592,6 @@ def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
             "agilerl.training.train_llm.tournament_selection_and_mutation",
         ) as mock_tournament_selection_and_mutation,
     ):
-
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
         mock_agg.return_value = 0.5
@@ -666,7 +657,6 @@ def test_finetune_llm_preference_warning_num_epochs_and_max_steps():
             "agilerl.training.train_llm.tournament_selection_and_mutation",
         ) as mock_tournament_selection_and_mutation,
     ):
-
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
         mock_agg.return_value = 0.5
@@ -731,7 +721,6 @@ def test_finetune_llm_preference_break_on_num_epochs():
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
-
         mock_env.num_epochs = 2
         mock_agg.return_value = 0.5
         finetune_llm_preference(

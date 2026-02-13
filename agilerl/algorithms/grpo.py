@@ -29,7 +29,7 @@ if HAS_LLM_DEPENDENCIES:
 
 
 class GRPO(LLMAlgorithm):
-    """The GRPO algorithm class. GRPO paper: https://arxiv.org/pdf/2402.03300
+    """The GRPO algorithm class. GRPO paper: https://arxiv.org/pdf/2402.03300.
 
     :param pad_token_id: Pad token id
     :type pad_token_id: int
@@ -177,16 +177,16 @@ class GRPO(LLMAlgorithm):
             clip_coef,
             (float, int),
         ), "Clipping coefficient must be a float."
-        assert (
-            clip_coef >= 0
-        ), "Clipping coefficient must be greater than or equal to zero."
+        assert clip_coef >= 0, (
+            "Clipping coefficient must be greater than or equal to zero."
+        )
         assert isinstance(
             update_epochs,
             int,
         ), "Policy update epochs must be an integer."
-        assert (
-            update_epochs >= 1
-        ), "Policy update epochs must be greater than or equal to one."
+        assert update_epochs >= 1, (
+            "Policy update epochs must be greater than or equal to one."
+        )
         if actor_network is not None:
             assert isinstance(
                 actor_network,
@@ -203,8 +203,9 @@ class GRPO(LLMAlgorithm):
         self.top_k = top_k
         self.min_p = min_p
         if max_output_tokens is None and max_model_len is None:
+            msg = "Either max_output_tokens or max_model_len must be specified"
             raise ValueError(
-                "Either max_output_tokens or max_model_len must be specified",
+                msg,
             )
         self.max_output_tokens = max_output_tokens
         self.min_output_tokens = min_output_tokens
@@ -239,7 +240,7 @@ class GRPO(LLMAlgorithm):
         obs: LLMObsType,
         training: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Returns the next action to take in the environment.
+        """Return the next action to take in the environment.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
@@ -293,7 +294,7 @@ class GRPO(LLMAlgorithm):
         return completion_ids, action_masks
 
     def learn(self, experiences: ExperiencesType) -> tuple[float, float]:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param experiences: Batched completion_ids, action_masks and rewards
         :type experiences: ExperiencesType
@@ -361,7 +362,8 @@ class GRPO(LLMAlgorithm):
                     batch_advantages,
                 )
                 if not loss.isfinite():
-                    raise ValueError(f"Loss is not finite: {loss}")
+                    msg = f"Loss is not finite: {loss}"
+                    raise ValueError(msg)
                 self._backward_pass(loss)
                 mean_loss += loss.item()
                 mean_kl += kl.item()
@@ -374,7 +376,7 @@ class GRPO(LLMAlgorithm):
         env: ReasoningGym,
         loop: int = 1,
     ) -> torch.Tensor:
-        """Returns fitness (test) score tensor of llm on test sub-set.
+        """Return fitness (test) score tensor of llm on test sub-set.
 
         :param env: The environment to be tested in
         :type env: ReasoningGym environment

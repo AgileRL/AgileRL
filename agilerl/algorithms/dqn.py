@@ -122,8 +122,9 @@ class DQN(RLAlgorithm):
 
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
+                msg = f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule.",
+                    msg,
                 )
 
             # Need to make deepcopies for target and detached networks
@@ -134,7 +135,7 @@ class DQN(RLAlgorithm):
         else:
             net_config = {} if net_config is None else net_config
 
-            def create_actor():
+            def create_actor() -> QNetwork:
                 return QNetwork(
                     observation_space=observation_space,
                     action_space=action_space,
@@ -165,6 +166,7 @@ class DQN(RLAlgorithm):
         if self.cudagraphs:
             warnings.warn(
                 "CUDA graphs for DQN are implemented experimentally and may not work as expected.",
+                stacklevel=2,
             )
             self.update = torch.compile(self.update, mode=None)
             self._get_action = torch.compile(
@@ -190,7 +192,7 @@ class DQN(RLAlgorithm):
         epsilon: float = 0.0,
         action_mask: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Returns the next action to take in the environment.
+        """Return the next action to take in the environment.
 
         :param obs: The current observation from the environment
         :type obs: np.ndarray, dict[str, np.ndarray], tuple[np.ndarray]
@@ -232,7 +234,7 @@ class DQN(RLAlgorithm):
         epsilon: torch.Tensor,
         action_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Returns the next action to take in the environment.
+        """Return the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For greedy behaviour, set epsilon to 0.
 
@@ -266,9 +268,7 @@ class DQN(RLAlgorithm):
         )
 
         # Recompute actions with masking
-        actions = torch.where(use_policy, masked_policy_actions, masked_random_actions)
-
-        return actions
+        return torch.where(use_policy, masked_policy_actions, masked_random_actions)
 
     def update(
         self,
@@ -278,7 +278,7 @@ class DQN(RLAlgorithm):
         next_obs: TorchObsType,
         dones: torch.Tensor,
     ) -> torch.Tensor:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param obs: List of batched states
         :type obs: torch.Tensor[float], dict[str, torch.Tensor[float]], tuple[torch.Tensor[float]]
@@ -323,7 +323,7 @@ class DQN(RLAlgorithm):
         return loss.detach()
 
     def learn(self, experiences: ExperiencesType) -> float:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones in that order.
         :type experiences: tensordict.TensorDict
@@ -350,6 +350,7 @@ class DQN(RLAlgorithm):
         for eval_param, target_param in zip(
             self.actor.parameters(),
             self.actor_target.parameters(),
+            strict=False,
         ):
             target_param.data.copy_(
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
@@ -362,7 +363,7 @@ class DQN(RLAlgorithm):
         max_steps: int | None = None,
         loop: int = 1,
     ) -> float:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
@@ -395,7 +396,7 @@ class DQN(RLAlgorithm):
                     obs, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
-                    for idx, (d, t) in enumerate(zip(done, trunc)):
+                    for idx, (d, t) in enumerate(zip(done, trunc, strict=False)):
                         if (
                             d or t or (max_steps is not None and step == max_steps)
                         ) and not finished[idx]:

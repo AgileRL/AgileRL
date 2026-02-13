@@ -67,7 +67,7 @@ class DuelingDistributionalMLP(EvolvableMLP):
         noisy: bool = True,
         noise_std: float = 0.5,
         activation: str = "ReLU",
-        output_activation: str = None,
+        output_activation: str | None = None,
         min_hidden_layers: int = 1,
         max_hidden_layers: int = 3,
         min_mlp_nodes: int = 64,

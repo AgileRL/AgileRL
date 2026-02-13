@@ -647,9 +647,9 @@ def test_change_cnn_kernel_conv1d(device):
         evolvable_cnn.change_kernel()
 
     # Check if kernel size has changed
-    assert (
-        evolvable_cnn.mut_kernel_size.sizes != initial_kernels
-    ), evolvable_cnn.mut_kernel_size.sizes
+    assert evolvable_cnn.mut_kernel_size.sizes != initial_kernels, (
+        evolvable_cnn.mut_kernel_size.sizes
+    )
 
 
 def test_change_kernel_size_conv1d(device):

@@ -92,7 +92,7 @@ def train(cfg):
     if train_cfg["optim_state_path"] is not None and os.path.exists(
         train_cfg["optim_state_path"],
     ):
-        print(f'loading optimizer state from: {train_cfg["optim_state_path"]}')
+        print(f"loading optimizer state from: {train_cfg['optim_state_path']}")
         optim.load_state_dict(
             torch.load(
                 train_cfg["optim_state_path"],

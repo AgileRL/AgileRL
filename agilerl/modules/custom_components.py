@@ -8,7 +8,7 @@ from agilerl.typing import DeviceType
 
 
 class GumbelSoftmax(nn.Module):
-    """Applies gumbel softmax function element-wise"""
+    """Apply gumbel softmax function element-wise."""
 
     @staticmethod
     def gumbel_softmax(
@@ -16,7 +16,7 @@ class GumbelSoftmax(nn.Module):
         tau: float = 1.0,
         eps: float = 1e-20,
     ) -> torch.Tensor:
-        """Implementation of the gumbel softmax activation function
+        """Implement the gumbel softmax activation function.
 
         :param logits: Tensor containing unnormalized log probabilities for each class.
         :type logits: torch.Tensor
@@ -57,7 +57,7 @@ class NoisyLinear(nn.Module):
         out_features: int,
         std_init: float = 0.5,
         device: DeviceType = "cpu",
-    ):
+    ) -> None:
         super().__init__()
 
         self.in_features = in_features
@@ -87,7 +87,7 @@ class NoisyLinear(nn.Module):
         return f"{self.__class__.__name__}(in_features={self.in_features}, out_features={self.out_features})"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Returns output of neural network.
+        """Return output of neural network.
 
         :param x: Neural network input
         :type x: torch.Tensor
@@ -104,7 +104,7 @@ class NoisyLinear(nn.Module):
         return F.linear(x, weight, bias)
 
     def reset_parameters(self) -> None:
-        """Resets neural network parameters."""
+        """Reset neural network parameters."""
         mu_range = 1 / math.sqrt(self.in_features)
 
         self.weight_mu.data.uniform_(-mu_range, mu_range)
@@ -114,7 +114,7 @@ class NoisyLinear(nn.Module):
         self.bias_sigma.data.fill_(self.std_init / math.sqrt(self.out_features))
 
     def reset_noise(self) -> None:
-        """Resets neural network noise."""
+        """Reset neural network noise."""
         epsilon_in = self._scale_noise(self.in_features)
         epsilon_out = self._scale_noise(self.out_features)
 
@@ -122,7 +122,7 @@ class NoisyLinear(nn.Module):
         self.bias_epsilon.copy_(epsilon_out)
 
     def _scale_noise(self, size: int) -> torch.Tensor:
-        """Returns noisy tensor.
+        """Return noisy tensor.
 
         :param size: Tensor of same size as noisy output
         :type size: torch.Tensor()
@@ -132,11 +132,11 @@ class NoisyLinear(nn.Module):
 
 
 class NewGELU(nn.Module):
-    """Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
-    Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
+    """Implement the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
+    Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415.
     """
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return (
             0.5
             * x
@@ -198,7 +198,7 @@ class ResidualBlock(nn.Module):
         nn.init.kaiming_uniform_(self.conv2.weight, nonlinearity="relu")
 
     def asymmetric_padding(self, x: torch.Tensor, kernel_size: int) -> torch.Tensor:
-        """Applies asymmetric padding for even kernel sizes."""
+        """Apply asymmetric padding for even kernel sizes."""
         pad_l = (kernel_size - 1) // 2  # Floor
         pad_r = kernel_size // 2  # Ceiling
         return F.pad(x, (pad_l, pad_r, pad_l, pad_r), mode="replicate")
@@ -222,7 +222,7 @@ class ResidualBlock(nn.Module):
 
 
 class SimbaResidualBlock(nn.Module):
-    """Creates a residual block designed to avoid overfitting in RL by inducing
+    """Create a residual block designed to avoid overfitting in RL by inducing
     a simplicity bias through skip connections.
 
     Paper: https://arxiv.org/abs/2410.09754

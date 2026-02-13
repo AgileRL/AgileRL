@@ -132,7 +132,7 @@ class PPO(RLAlgorithm):
         share_encoders: bool = True,
         num_envs: int = 1,
         use_rollout_buffer: bool = False,
-        rollout_buffer_config: dict[str, Any] | None = {},
+        rollout_buffer_config: dict[str, Any] | None = None,
         recurrent: bool = False,
         device: str = "cpu",
         accelerator: Any | None = None,
@@ -140,6 +140,8 @@ class PPO(RLAlgorithm):
         bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
         max_seq_len: int | None = None,
     ) -> None:
+        if rollout_buffer_config is None:
+            rollout_buffer_config = {}
         super().__init__(
             observation_space,
             action_space,
@@ -164,51 +166,51 @@ class PPO(RLAlgorithm):
             action_std_init,
             (float, int),
         ), "Action standard deviation must be a float."
-        assert (
-            action_std_init >= 0
-        ), "Action standard deviation must be greater than or equal to zero."
+        assert action_std_init >= 0, (
+            "Action standard deviation must be greater than or equal to zero."
+        )
         assert isinstance(
             clip_coef,
             (float, int),
         ), "Clipping coefficient must be a float."
-        assert (
-            clip_coef >= 0
-        ), "Clipping coefficient must be greater than or equal to zero."
+        assert clip_coef >= 0, (
+            "Clipping coefficient must be greater than or equal to zero."
+        )
         assert isinstance(
             ent_coef,
             (float, int),
         ), "Entropy coefficient must be a float."
-        assert (
-            ent_coef >= 0
-        ), "Entropy coefficient must be greater than or equal to zero."
+        assert ent_coef >= 0, (
+            "Entropy coefficient must be greater than or equal to zero."
+        )
         assert isinstance(
             vf_coef,
             (float, int),
         ), "Value function coefficient must be a float."
-        assert (
-            vf_coef >= 0
-        ), "Value function coefficient must be greater than or equal to zero."
+        assert vf_coef >= 0, (
+            "Value function coefficient must be greater than or equal to zero."
+        )
         assert isinstance(
             max_grad_norm,
             (float, int),
         ), "Maximum norm for gradient clipping must be a float."
-        assert (
-            max_grad_norm >= 0
-        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
-        assert (
-            isinstance(target_kl, (float, int)) or target_kl is None
-        ), "Target KL divergence threshold must be a float."
+        assert max_grad_norm >= 0, (
+            "Maximum norm for gradient clipping must be greater than or equal to zero."
+        )
+        assert isinstance(target_kl, (float, int)) or target_kl is None, (
+            "Target KL divergence threshold must be a float."
+        )
         if target_kl is not None:
-            assert (
-                target_kl >= 0
-            ), "Target KL divergence threshold must be greater than or equal to zero."
+            assert target_kl >= 0, (
+                "Target KL divergence threshold must be greater than or equal to zero."
+            )
         assert isinstance(
             update_epochs,
             int,
         ), "Policy update epochs must be an integer."
-        assert (
-            update_epochs >= 1
-        ), "Policy update epochs must be greater than or equal to one."
+        assert update_epochs >= 1, (
+            "Policy update epochs must be greater than or equal to one."
+        )
         assert isinstance(
             wrap,
             bool,
@@ -246,7 +248,8 @@ class PPO(RLAlgorithm):
         self.net_config = net_config
 
         if self.recurrent and not self.use_rollout_buffer:
-            raise ValueError("use_rollout_buffer must be True if recurrent=True.")
+            msg = "use_rollout_buffer must be True if recurrent=True."
+            raise ValueError(msg)
 
         self.max_seq_len = max_seq_len
         self.batch_size = batch_size
@@ -268,12 +271,14 @@ class PPO(RLAlgorithm):
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
+                msg = f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule.",
+                    msg,
                 )
             if not isinstance(critic_network, EvolvableModule):
+                msg = f"Passed critic network is of type {type(critic_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"Passed critic network is of type {type(critic_network)}, but must be of type EvolvableModule.",
+                    msg,
                 )
 
             self.actor, self.critic = make_safe_deepcopies(
@@ -350,10 +355,11 @@ class PPO(RLAlgorithm):
         else:
             warnings.warn(
                 "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork.",
+                stacklevel=2,
             )
 
     def create_rollout_buffer(self) -> None:
-        """Creates a rollout buffer with the current configuration."""
+        """Create a rollout buffer with the current configuration."""
         self.rollout_buffer = RolloutBuffer(
             capacity=-(self.learn_step // -self.num_envs),
             observation_space=self.observation_space,
@@ -386,11 +392,11 @@ class PPO(RLAlgorithm):
         :return: Hidden state dictionary for the specific encoder
         :rtype: dict[str, ArrayOrTensor]
         """
-        network_hidden_state = {}
-        for key, value in full_hidden_state.items():
-            if key.startswith(encoder_name):
-                network_hidden_state[key] = value
-        return network_hidden_state
+        return {
+            key: value
+            for key, value in full_hidden_state.items()
+            if key.startswith(encoder_name)
+        }
 
     def _get_action_and_values(
         self,
@@ -408,7 +414,7 @@ class PPO(RLAlgorithm):
         torch.Tensor,
         dict[str, ArrayOrTensor] | None,
     ]:
-        """Returns the next action to take in the environment and the values.
+        """Return the next action to take in the environment and the values.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: ArrayOrTensor
@@ -526,7 +532,7 @@ class PPO(RLAlgorithm):
         actions: ArrayOrTensor,
         hidden_state: dict[str, ArrayOrTensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Evaluates the actions.
+        """Evaluate the actions.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: ArrayOrTensor
@@ -560,7 +566,7 @@ class PPO(RLAlgorithm):
         action_mask: ArrayOrTensor | None = None,
         hidden_state: dict[str, ArrayOrTensor] | None = None,
     ) -> ActionReturnType | RecurrentActionReturnType:
-        """Returns the next action to take in the environment.
+        """Return the next action to take in the environment.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: ArrayOrTensor
@@ -621,7 +627,7 @@ class PPO(RLAlgorithm):
         )
 
     def learn(self, experiences: ExperiencesType | None = None) -> float:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param experiences: Tuple of batched states, actions, log_probs, rewards, dones, values, next_state, next_done.
                             If use_rollout_buffer=True and experiences=None, uses data from rollout buffer.
@@ -629,20 +635,19 @@ class PPO(RLAlgorithm):
         :return: Mean loss value from training.
         :rtype: float
         """
-        if self.use_rollout_buffer:
+        if self.use_rollout_buffer and experiences is None:
             # NOTE: we are still allowing experiences to be passed in for backwards compatibility
             # but we will remove this in a future releases.
             # i.e. it's possible to do one learn with rollouts, then another with experiences on the same agent
-            if experiences is None:
-                # Learn from the internal rollout buffer
-                if self.recurrent:
-                    return self._learn_from_rollout_buffer_bptt()
-                return self._learn_from_rollout_buffer_flat()
+            # Learn from the internal rollout buffer
+            if self.recurrent:
+                return self._learn_from_rollout_buffer_bptt()
+            return self._learn_from_rollout_buffer_flat()
 
         return self._deprecated_learn_from_experiences(experiences)
 
     def _deprecated_learn_from_experiences(self, experiences: ExperiencesType) -> float:
-        """Deprecated method for learning from experiences tuple format.
+        """Learn from experiences without a rollout buffer.
 
         This method is deprecated and will be removed in a future release. The PPO implementation
         now uses a rollout buffer for improved performance, cleaner support for recurrent policies,
@@ -655,8 +660,9 @@ class PPO(RLAlgorithm):
         4. Call learn() without arguments to train on collected rollouts
         """
         if not experiences:
+            msg = "Experiences must be provided when use_rollout_buffer is False"
             raise ValueError(
-                "Experiences must be provided when use_rollout_buffer is False",
+                msg,
             )
 
         # Not self.use_rollout_buffer
@@ -793,9 +799,8 @@ class PPO(RLAlgorithm):
 
                     mean_loss += loss.item()
 
-            if self.target_kl is not None:
-                if approx_kl > self.target_kl:
-                    break
+            if self.target_kl is not None and approx_kl > self.target_kl:
+                break
 
         mean_loss /= num_samples * self.update_epochs
         return mean_loss
@@ -812,7 +817,7 @@ class PPO(RLAlgorithm):
             buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
 
         if buffer_td.is_empty():
-            warnings.warn("Buffer data is empty. Skipping learning step.")
+            warnings.warn("Buffer data is empty. Skipping learning step.", stacklevel=2)
             return 0.0
 
         # Normalize advantages globally
@@ -1062,6 +1067,7 @@ class PPO(RLAlgorithm):
                     if kl_for_current_minibatch > self.target_kl:
                         warnings.warn(
                             f"Epoch {epoch}, Minibatch: KL divergence {kl_for_current_minibatch:.4f} exceeded target {self.target_kl}. Stopping update for this epoch.",
+                            stacklevel=2,
                         )
                         break  # Break from minibatch loop for this epoch
 
@@ -1078,6 +1084,7 @@ class PPO(RLAlgorithm):
                 ):
                     warnings.warn(
                         f"Epoch {epoch}: Average KL divergence {avg_kl_this_epoch:.4f} exceeded target {self.target_kl} after completing epoch. Consider adjusting learning rate or target_kl.",
+                        stacklevel=2,
                     )
                     # This break is for the epoch loop if KL was exceeded on average for the epoch
                     # but not necessarily in the last minibatch that would have broken the inner loop.
@@ -1091,8 +1098,7 @@ class PPO(RLAlgorithm):
             ):
                 break
 
-        mean_loss = mean_loss / max(1e-8, total_minibatch_updates_total)
-        return mean_loss
+        return mean_loss / max(1e-8, total_minibatch_updates_total)
 
     def test(
         self,
@@ -1103,7 +1109,7 @@ class PPO(RLAlgorithm):
         vectorized: bool = True,
         callback: Callable[[float, dict[str, float]], None] | None = None,
     ) -> float:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: GymEnvType
@@ -1163,12 +1169,16 @@ class PPO(RLAlgorithm):
                                 try:
                                     action_mask = np.stack(masks)
                                 except Exception as e:
-                                    warnings.warn(f"Could not stack action masks: {e}")
+                                    warnings.warn(
+                                        f"Could not stack action masks: {e}",
+                                        stacklevel=2,
+                                    )
                                     action_mask = None
                             # If only some environments returned masks, we probably can't use them reliably
                             elif any(m is not None for m in masks):
                                 warnings.warn(
                                     "Action masks not provided for all vectorized environments. Skipping mask.",
+                                    stacklevel=2,
                                 )
                                 action_mask = None
                         # Handle case where info might be a single dict even if vectorized (e.g. VecNormalize)

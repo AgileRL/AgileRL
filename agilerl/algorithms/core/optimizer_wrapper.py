@@ -105,14 +105,15 @@ class OptimizerWrapper:
         ):
             self.networks = networks
         else:
-            raise TypeError("Expected a single / list of torch.nn.Module objects.")
+            msg = "Expected a single / list of torch.nn.Module objects."
+            raise TypeError(msg)
 
         # NOTE: This should be passed when reintializing the optimizer
         # when mutating an individual.
         if network_names is not None:
-            assert (
-                lr_name is not None
-            ), "Learning rate attribute name must be passed along with the network names."
+            assert lr_name is not None, (
+                "Learning rate attribute name must be passed along with the network names."
+            )
             self.network_names = network_names
             self.lr_name = lr_name
         else:
@@ -182,26 +183,27 @@ class OptimizerWrapper:
     def __getitem__(self, agent_id: str) -> Optimizer:
         try:
             return self.optimizer[agent_id]
-        except TypeError:
-            raise TypeError(
-                f"Can't access item of a single {type(self.optimizer)} object.",
-            )
+        except TypeError as err:
+            msg = f"Can't access item of a single {type(self.optimizer)} object."
+            raise TypeError(msg) from err
 
-    def items(self):
+    def items(self) -> list[tuple[str, Optimizer]]:
         if isinstance(self.optimizer, dict):
-            return self.optimizer.items()
+            return list(self.optimizer.items())
+        msg = f"Can't iterate over a single {type(self.optimizer)} object."
         raise TypeError(
-            f"Can't iterate over a single {type(self.optimizer)} object.",
+            msg,
         )
 
-    def values(self):
+    def values(self) -> list[Optimizer]:
         if isinstance(self.optimizer, dict):
-            return self.optimizer.values()
+            return list(self.optimizer.values())
+        msg = f"Can't iterate over a single {type(self.optimizer)} object."
         raise TypeError(
-            f"Can't iterate over a single {type(self.optimizer)} object.",
+            msg,
         )
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Any:
         try:
             return object.__getattribute__(self, name)
         except AttributeError:
@@ -258,12 +260,16 @@ class OptimizerWrapper:
             for match in matches:
                 if _check_lr_names(match):
                     return match
-            raise AttributeError(
+            msg = (
                 "Multiple attributes matched with the same value as the learning rate. "
-                "Please have your attribute contain 'lr' or 'learning_rate' in its name.",
+                "Please have your attribute contain 'lr' or 'learning_rate' in its name."
             )
+            raise AttributeError(
+                msg,
+            )
+        msg = "Learning rate attribute not found in the parent container."
         raise AttributeError(
-            "Learning rate attribute not found in the parent container.",
+            msg,
         )
 
     def load_state_dict(self, state_dict: StateDict) -> None:
@@ -273,17 +279,24 @@ class OptimizerWrapper:
         :type state_dict: dict[str, Any]
         """
         if isinstance(self.networks[0], ModuleDict):
-            assert (
-                isinstance(state_dict, dict)
-                and state_dict.keys() == self.optimizer.keys()
-            ), "Expected a dictionary of optimizer state dictionaries for multi-agent optimizers."
+            assert isinstance(
+                state_dict,
+                dict,
+            ), (
+                "Expected a dictionary of optimizer state dictionaries for multi-agent optimizers."
+            )
+            assert state_dict.keys() == self.optimizer.keys(), (
+                "Expected a dictionary of optimizer state dictionaries for multi-agent optimizers."
+            )
             for agent_id, opt in self.optimizer.items():
                 opt.load_state_dict(state_dict[agent_id])
         else:
             assert isinstance(
                 state_dict,
                 dict,
-            ), "Expected a single optimizer state dictionary for single-agent optimizers."
+            ), (
+                "Expected a single optimizer state dictionary for single-agent optimizers."
+            )
 
             self.optimizer.load_state_dict(state_dict)
 
@@ -326,19 +339,21 @@ class OptimizerWrapper:
     def zero_grad(self) -> None:
         """Zero the gradients of the optimizer."""
         if isinstance(self.networks[0], ModuleDict):
-            raise ValueError(
+            msg = (
                 "Please use the zero_grad() method of the individual optimizer in "
-                "a multi-agent algorithm.",
+                "a multi-agent algorithm."
             )
+            raise TypeError(msg)
         self.optimizer.zero_grad()
 
     def step(self) -> None:
         """Perform a single optimization step."""
         if isinstance(self.networks[0], ModuleDict):
-            raise ValueError(
+            msg = (
                 "Please use the step() method of the individual optimizer in "
-                "a multi-agent algorithm.",
+                "a multi-agent algorithm."
             )
+            raise TypeError(msg)
         self.optimizer.step()
 
     def __repr__(self) -> str:

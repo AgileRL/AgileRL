@@ -135,11 +135,13 @@ class TD3(RLAlgorithm):
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
             and expl_noise.shape == (vect_noise_dim, self.action_dim)
-        ), "Exploration action noise rate must be a float, or an array of size action_dim"
+        ), (
+            "Exploration action noise rate must be a float, or an array of size action_dim"
+        )
         if isinstance(expl_noise, (float, int)):
-            assert (
-                expl_noise >= 0
-            ), "Exploration noise must be greater than or equal to zero."
+            assert expl_noise >= 0, (
+                "Exploration noise must be greater than or equal to zero."
+            )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
@@ -155,14 +157,15 @@ class TD3(RLAlgorithm):
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(policy_freq, int), "Policy frequency must be an integer."
-        assert (
-            policy_freq >= 1
-        ), "Policy frequency must be greater than or equal to one."
+        assert policy_freq >= 1, (
+            "Policy frequency must be greater than or equal to one."
+        )
         if (actor_network is not None) != (
             critic_networks is not None
         ):  # XOR operation
             warnings.warn(
                 "Actor and critic networks must both be supplied to use custom networks. Defaulting to net config.",
+                stacklevel=2,
             )
         assert isinstance(
             wrap,
@@ -210,16 +213,19 @@ class TD3(RLAlgorithm):
             assert len(critic_networks) == 2, "TD3 requires exactly 2 critic networks."
 
             if not isinstance(actor_network, EvolvableModule):
+                msg = f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule.",
+                    msg,
                 )
             if not isinstance(critic_networks[0], EvolvableModule):
+                msg = f"Passed critic network at index 0 is of type {type(critic_networks[0])}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"Passed critic network at index 0 is of type {type(critic_networks[0])}, but must be of type EvolvableModule.",
+                    msg,
                 )
             if not isinstance(critic_networks[1], EvolvableModule):
+                msg = f"Passed critic network at index 1 is of type {type(critic_networks[1])}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"Passed critic network at index 1 is of type {type(critic_networks[1])}, but must be of type EvolvableModule.",
+                    msg,
                 )
 
             self.actor, self.critic_1, self.critic_2 = make_safe_deepcopies(
@@ -249,6 +255,7 @@ class TD3(RLAlgorithm):
                         warnings.warn(
                             "Layer normalization is not supported for the encoder of TD3 networks. Disabling it. "
                             "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469",
+                            stacklevel=2,
                         )
                     encoder_config["layer_norm"] = False
             else:
@@ -274,7 +281,7 @@ class TD3(RLAlgorithm):
             critic_net_config = copy.deepcopy(net_config)
             critic_net_config["head_config"] = critic_head_config
 
-            def create_actor():
+            def create_actor() -> DeterministicActor:
                 return DeterministicActor(
                     observation_space=observation_space,
                     action_space=action_space,
@@ -282,7 +289,7 @@ class TD3(RLAlgorithm):
                     **net_config,
                 )
 
-            def create_critic():
+            def create_critic() -> ContinuousQNetwork:
                 return ContinuousQNetwork(
                     observation_space=observation_space,
                     action_space=action_space,
@@ -374,16 +381,18 @@ class TD3(RLAlgorithm):
                     self.critic_target_2,
                 )
             except KeyError as e:
+                msg = f"Found incompatible encoder architectures: {e} not found in shared network."
                 raise KeyError(
-                    f"Found incompatible encoder architectures: {e} not found in shared network.",
+                    msg,
                 ) from e
         else:
             warnings.warn(
                 "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork.",
+                stacklevel=2,
             )
 
     def get_action(self, obs: ObservationType, training: bool = True) -> np.ndarray:
-        """Returns the next action to take in the environment. If training, random noise
+        """Return the next action to take in the environment. If training, random noise
         is added to the action to promote exploration.
 
         :param obs: Environment observation, or multiple observations in a batch
@@ -403,8 +412,7 @@ class TD3(RLAlgorithm):
         # Add noise for exploration
         if training:
             action = action.cpu().data.numpy()
-            action = (action + self.action_noise()).clip(-1, 1)
-            return action
+            return (action + self.action_noise()).clip(-1, 1)
 
         # Action scaled to action space bounds if not training
         action = DeterministicActor.rescale_action(
@@ -453,7 +461,7 @@ class TD3(RLAlgorithm):
         noise_clip: float = 0.5,
         policy_noise: float = 0.2,
     ) -> tuple[float | None, float]:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
         :type experiences: dict[str, torch.Tensor[float]]
@@ -546,7 +554,9 @@ class TD3(RLAlgorithm):
         :param target: Target network
         :type target: EvolvableModule
         """
-        for eval_param, target_param in zip(net.parameters(), target.parameters()):
+        for eval_param, target_param in zip(
+            net.parameters(), target.parameters(), strict=False
+        ):
             target_param.data.copy_(
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
             )
@@ -554,11 +564,11 @@ class TD3(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels=False,
-        max_steps=None,
-        loop=3,
+        swap_channels: bool = False,
+        max_steps: int | None = None,
+        loop: int = 3,
     ) -> float:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
@@ -576,7 +586,7 @@ class TD3(RLAlgorithm):
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
-            for i in range(loop):
+            for _i in range(loop):
                 obs, _ = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
@@ -590,7 +600,7 @@ class TD3(RLAlgorithm):
                     obs, reward, done, trunc, _ = env.step(action)
                     step += 1
                     scores += np.array(reward)
-                    for idx, (d, t) in enumerate(zip(done, trunc)):
+                    for idx, (d, t) in enumerate(zip(done, trunc, strict=False)):
                         if (
                             d or t or (max_steps is not None and step == max_steps)
                         ) and not finished[idx]:

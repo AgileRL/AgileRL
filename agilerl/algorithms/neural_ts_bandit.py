@@ -74,7 +74,7 @@ class NeuralTS(RLAlgorithm):
         device: str = "cpu",
         accelerator: Any | None = None,
         wrap: bool = True,
-    ):
+    ) -> None:
         super().__init__(
             observation_space,
             action_space,
@@ -121,8 +121,9 @@ class NeuralTS(RLAlgorithm):
 
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
+                msg = f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule.",
+                    msg,
                 )
 
             # Need to make deepcopies for target and detached networks
@@ -169,7 +170,7 @@ class NeuralTS(RLAlgorithm):
         )
 
     def init_params(self) -> None:
-        """Initializes parameters for the agent network."""
+        """Initialize parameters for the agent network."""
         self.exp_layer = self.actor.get_output_dense()
 
         self.numel = sum(
@@ -185,7 +186,7 @@ class NeuralTS(RLAlgorithm):
         obs: ObservationType,
         action_mask: np.ndarray | None = None,
     ) -> int:
-        """Returns the next action to take in the environment.
+        """Return the next action to take in the environment.
 
         :param obs: State observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
@@ -238,7 +239,7 @@ class NeuralTS(RLAlgorithm):
         return action
 
     def learn(self, experiences: ExperiencesType) -> float:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param experiences: Batched states, rewards in that order.
         :type experiences: dict[str, torch.Tensor[float]]
@@ -281,7 +282,7 @@ class NeuralTS(RLAlgorithm):
         max_steps: int = 100,
         loop: int = 1,
     ) -> float:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
@@ -295,7 +296,7 @@ class NeuralTS(RLAlgorithm):
         self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
-            for i in range(loop):
+            for _i in range(loop):
                 obs = env.reset()
                 score = 0
                 for _ in range(max_steps):

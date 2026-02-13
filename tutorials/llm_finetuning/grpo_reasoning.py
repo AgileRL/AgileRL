@@ -33,7 +33,6 @@ def format_reward_func(completions, target, **kwargs):
     rewards = []
 
     for completion, _gt in zip(completions, target, strict=False):
-
         try:
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion

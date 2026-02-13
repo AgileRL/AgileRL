@@ -1175,13 +1175,17 @@ def test_maddpg_soft_update(device, compile_mode, ma_vector_space, ma_discrete_s
         expected_params = [
             maddpg.tau * eval_param + (1.0 - maddpg.tau) * target_param
             for eval_param, target_param in zip(
-                eval_params, target_params, strict=False
+                eval_params,
+                target_params,
+                strict=False,
             )
         ]
         assert all(
             torch.allclose(expected_param, target_param)
             for expected_param, target_param in zip(
-                expected_params, target_params, strict=False
+                expected_params,
+                target_params,
+                strict=False,
             )
         )
 
@@ -1193,14 +1197,18 @@ def test_maddpg_soft_update(device, compile_mode, ma_vector_space, ma_discrete_s
         expected_params = [
             maddpg.tau * eval_param + (1.0 - maddpg.tau) * target_param
             for eval_param, target_param in zip(
-                eval_params, target_params, strict=False
+                eval_params,
+                target_params,
+                strict=False,
             )
         ]
 
         assert all(
             torch.allclose(expected_param, target_param)
             for expected_param, target_param in zip(
-                expected_params, target_params, strict=False
+                expected_params,
+                target_params,
+                strict=False,
             )
         )
     maddpg.clean_up()

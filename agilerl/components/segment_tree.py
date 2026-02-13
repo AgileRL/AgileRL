@@ -16,10 +16,11 @@ class SegmentTree:
     :type init_value: float
     """
 
-    def __init__(self, capacity: int, operation: Callable, init_value: float):
-        assert (
-            capacity > 0 and capacity & (capacity - 1) == 0
-        ), "capacity must be positive and a power of 2."
+    def __init__(self, capacity: int, operation: Callable, init_value: float) -> None:
+        assert capacity > 0, "capacity must be positive and a power of 2."
+        assert capacity & (capacity - 1) == 0, (
+            "capacity must be positive and a power of 2."
+        )
         self.capacity = capacity
         self.tree = [init_value for _ in range(2 * capacity)]
         self.operation = operation
@@ -32,7 +33,7 @@ class SegmentTree:
         node_start: int,
         node_end: int,
     ) -> float:
-        """Returns result of operation in segment.
+        """Return result of operation in segment.
 
         :param start: Start index of segment
         :type start: int
@@ -61,7 +62,7 @@ class SegmentTree:
         )
 
     def operate(self, start: int = 0, end: int = 0) -> float:
-        """Returns result of applying `self.operation`.
+        """Return result of applying `self.operation`.
 
         :param start: Start index of segment
         :type start: int
@@ -77,7 +78,7 @@ class SegmentTree:
 
         return self._operate_helper(start, end, 1, 0, self.capacity - 1)
 
-    def __setitem__(self, idx: int, val: float):
+    def __setitem__(self, idx: int, val: float) -> None:
         """Set value in tree.
 
         :param idx: Index to set value at
@@ -117,11 +118,11 @@ class SumSegmentTree(SegmentTree):
     :type capacity: int
     """
 
-    def __init__(self, capacity: int):
+    def __init__(self, capacity: int) -> None:
         super().__init__(capacity=capacity, operation=operator.add, init_value=0.0)
 
     def sum(self, start: int = 0, end: int = 0) -> float:
-        """Returns sum of elements from start to end index.
+        """Return sum of elements from start to end index.
 
         :param start: Start index of range, defaults to 0
         :type start: int, optional
@@ -133,7 +134,7 @@ class SumSegmentTree(SegmentTree):
         return super().operate(start, end)
 
     def retrieve(self, upperbound: float) -> int:
-        """Find the highest index `i` about `upperbound` in the tree
+        """Find the highest index `i` about `upperbound` in the tree.
 
         :param upperbound: Upper bound for cumulative sum
         :type upperbound: float
@@ -165,11 +166,11 @@ class MinSegmentTree(SegmentTree):
     :type capacity: int
     """
 
-    def __init__(self, capacity: int):
+    def __init__(self, capacity: int) -> None:
         super().__init__(capacity=capacity, operation=min, init_value=float("inf"))
 
     def min(self, start: int = 0, end: int = 0) -> float:
-        """Returns minimum element from start to end index.
+        """Return minimum element from start to end index.
 
         :param start: Start index of range, defaults to 0
         :type start: int, optional

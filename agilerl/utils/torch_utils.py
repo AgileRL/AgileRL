@@ -7,7 +7,10 @@ import torch
 from torch import nn
 
 
-def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any):
+def map_pytree(
+    f: Callable[[np.ndarray | torch.Tensor], Any],
+    item: Any,
+) -> Any:
     """Apply a function to all tensors/arrays in a nested data structure.
 
     Recursively traverses nested dictionaries, lists, tuples, and sets,
@@ -22,14 +25,14 @@ def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any):
     """
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
-    if isinstance(item, list) or isinstance(item, set) or isinstance(item, tuple):
+    if isinstance(item, (list, set, tuple)):
         return [map_pytree(f, v) for v in item]
-    if isinstance(item, np.ndarray) or isinstance(item, torch.Tensor):
+    if isinstance(item, (np.ndarray, torch.Tensor)):
         return f(item)
     return item
 
 
-def to(item: Any, device: torch.device):
+def to(item: Any, device: torch.device | str) -> Any:
     """Move all tensors/arrays in a nested data structure to specified device.
 
     :param item: Nested data structure containing tensors/arrays
@@ -42,8 +45,11 @@ def to(item: Any, device: torch.device):
     return map_pytree(lambda x: torch.tensor(x).to(device), item)
 
 
-def to_decorator(f, device):
-    """Decorator that moves the output of a function to a specified device.
+def to_decorator(
+    f: Callable[..., Any],
+    device: torch.device | str,
+) -> Callable[..., Any]:
+    """Move the output of a function to a specified device (decorator).
 
     :param f: Function whose output should be moved to device
     :type f: Callable
@@ -53,13 +59,13 @@ def to_decorator(f, device):
     :rtype: Callable
     """
 
-    def new_f(*args, **kwargs):
+    def new_f(*args: Any, **kwargs: Any) -> Any:
         return to(f(*args, **kwargs), device)
 
     return new_f
 
 
-def parameter_norm(model: nn.Module):
+def parameter_norm(model: nn.Module) -> float:
     """Calculate the L2 norm of all parameters in a model.
 
     :param model: PyTorch model
@@ -77,7 +83,7 @@ def get_transformer_logs(
     attentions: list[torch.Tensor],
     model: nn.Module,
     attn_mask: torch.Tensor,
-):
+) -> dict[str, tuple[float, int]]:
     """Extract logging information from transformer attention weights.
 
     Computes attention entropy and parameter norm for transformer models,
@@ -95,11 +101,11 @@ def get_transformer_logs(
     logs = {}
     n = attn_mask.sum()
     model_attention_entropy = -sum(
-        map(
-            lambda x: ((x * torch.log(x + 1e-7)).sum(dim=-1) * attn_mask.unsqueeze(1))
+        (
+            ((x * torch.log(x + 1e-7)).sum(dim=-1) * attn_mask.unsqueeze(1))
             .sum()
-            .item(),
-            attentions,
+            .item()
+            for x in attentions
         ),
     ) / (len(attentions) * n)
     model_parameter_norm = parameter_norm(model)

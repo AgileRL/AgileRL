@@ -24,8 +24,9 @@ def get_output_bounds(output_activation: str) -> tuple[float, float]:
         return -1.0, 1.0
     if output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
         return 0.0, 1.0
+    msg = f"Received invalid output activation function: {output_activation}. "
     raise ValueError(
-        f"Received invalid output activation function: {output_activation}. ",
+        msg,
     )
 
 
@@ -124,6 +125,7 @@ class DeterministicActor(EvolvableNetwork):
                     warnings.warn(
                         f"Output activation must be one of the following: {', '.join(self._allowed_output_activations)}. "
                         f"Got {user_output_activation} instead. Using default output activation.",
+                        stacklevel=2,
                     )
                 else:
                     output_activation = user_output_activation
@@ -180,7 +182,7 @@ class DeterministicActor(EvolvableNetwork):
         return rescaled_action.to(low.dtype)
 
     def build_network_head(self, net_config: NetConfigType | None = None) -> None:
-        """Builds the head of the network.
+        """Build the head of the network.
 
         :param net_config: Configuration of the head.
         :type net_config: ConfigType | None
@@ -285,7 +287,7 @@ class StochasticActor(EvolvableNetwork):
         use_experimental_distribution: bool = False,
         random_seed: int | None = None,
         encoder_name: str = "encoder",
-    ):
+    ) -> None:
         super().__init__(
             observation_space,
             encoder_cls=encoder_cls,
@@ -347,7 +349,7 @@ class StochasticActor(EvolvableNetwork):
         )
 
     def build_network_head(self, net_config: NetConfigType | None = None) -> None:
-        """Builds the head of the network.
+        """Build the head of the network.
 
         :param net_config: Configuration of the head.
         :type net_config: NetConfigType | None

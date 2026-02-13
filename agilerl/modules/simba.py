@@ -54,7 +54,7 @@ class EvolvableSimBa(EvolvableModule):
         num_outputs: int,
         hidden_size: int,
         num_blocks: int,
-        output_activation: str = None,
+        output_activation: str | None = None,
         scale_factor: int = 4,
         min_blocks: int = 1,
         max_blocks: int = 4,
@@ -93,7 +93,7 @@ class EvolvableSimBa(EvolvableModule):
 
     @property
     def net_config(self) -> dict[str, Any]:
-        """Returns model configuration in dictionary."""
+        """Return model configuration in dictionary."""
         net_config = self.init_dict.copy()
         for attr in ["num_inputs", "num_outputs", "device", "name"]:
             if attr in net_config:
@@ -102,7 +102,7 @@ class EvolvableSimBa(EvolvableModule):
         return net_config
 
     def forward(self, x: ObservationType) -> torch.Tensor:
-        """Returns output of neural network.
+        """Return output of neural network.
 
         :param x: Neural network input
         :type x: torch.Tensor
@@ -118,7 +118,7 @@ class EvolvableSimBa(EvolvableModule):
         return self.model(x)
 
     def get_output_dense(self) -> torch.nn.Module:
-        """Returns output layer of neural network."""
+        """Return output layer of neural network."""
         return getattr(self.model, f"{self.name}_linear_layer_output")
 
     def init_weights_gaussian(
@@ -135,7 +135,7 @@ class EvolvableSimBa(EvolvableModule):
 
     @mutation(MutationType.ACTIVATION)
     def change_activation(self, activation: str, output: bool = False) -> None:
-        """The SimBa architecture uses ReLU activations by default and this
+        """Use ReLU activations by default for SimBa architecture; this
         shouldn't be changed during training.
 
         :return: Activation function
@@ -145,7 +145,7 @@ class EvolvableSimBa(EvolvableModule):
 
     @mutation(MutationType.LAYER)
     def add_block(self) -> None:
-        """Adds a hidden layer to neural network. Falls back on add_node if
+        """Add a hidden layer to neural network. Falls back on add_node if
         max hidden layers reached.
         """
         # add layer to hyper params
@@ -153,20 +153,22 @@ class EvolvableSimBa(EvolvableModule):
             self.num_blocks += 1
         else:
             return self.add_node()
+        return None
 
     @mutation(MutationType.LAYER)
     def remove_block(self) -> None:
-        """Removes a hidden layer from neural network. Falls back on remove_node if
+        """Remove a hidden layer from neural network. Falls back on remove_node if
         min hidden layers reached.
         """
         if self.num_blocks > self.min_blocks:  # HARD LIMIT
             self.num_blocks -= 1
         else:
             return self.add_node()
+        return None
 
     @mutation(MutationType.NODE)
     def add_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
-        """Adds nodes to residual blocks of the neural network.
+        """Add nodes to residual blocks of the neural network.
 
         :param numb_new_nodes: Number of nodes to add, defaults to None
         :type numb_new_nodes: int, optional
@@ -181,7 +183,7 @@ class EvolvableSimBa(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def remove_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
-        """Removes nodes from hidden layer of neural network.
+        """Remove nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
         :type hidden_layer: int, optional

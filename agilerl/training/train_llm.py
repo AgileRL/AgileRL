@@ -40,7 +40,7 @@ def finetune_llm_reasoning(
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-):
+) -> None:
     """Finetunes a population of GRPOs on a ReasoningGym environment.
 
     :param pop: Population of GRPOs to finetune
@@ -79,36 +79,42 @@ def finetune_llm_reasoning(
     if evo_steps is not None and (tournament is None or mutation is None):
         warnings.warn(
             "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place.",
+            stacklevel=2,
         )
 
     if (tournament is not None and mutation is not None) and evo_steps is None:
+        msg = "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
         raise ValueError(
-            "'evo_steps' must be set if 'tournament' and 'mutation' are not None.",
+            msg,
         )
 
     if num_epochs is not None and max_steps is not None:
         warnings.warn(
             "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'.",
+            stacklevel=2,
         )
 
     if mutation is not None:
-        assert (
-            mutation.architecture_mut == 0
-        ), "Probability of architecture mutation must be 0 for LLM finetuning."
-        assert (
-            mutation.new_layer_prob == 0
-        ), "Probability of new layer mutation must be 0 for LLM finetuning."
-        assert (
-            mutation.parameters_mut == 0
-        ), "Probability of network parameters mutation must be 0 for LLM finetuning."
-        assert (
-            mutation.activation_mut == 0
-        ), "Probability of activation mutation must be 0 for LLM finetuning."
+        assert mutation.architecture_mut == 0, (
+            "Probability of architecture mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.new_layer_prob == 0, (
+            "Probability of new layer mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.parameters_mut == 0, (
+            "Probability of network parameters mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.activation_mut == 0, (
+            "Probability of activation mutation must be 0 for LLM finetuning."
+        )
 
     if not isinstance(pop[0], GRPO):
-        raise ValueError(
+        msg = (
             "The algorithm must be GRPO for reasoning-based reinforcement learning."
-            f"Got {type(pop[0])} instead.",
+            f"Got {type(pop[0])} instead."
+        )
+        raise ValueError(
+            msg,
         )
 
     if init_hp is None:
@@ -123,7 +129,7 @@ def finetune_llm_reasoning(
     if wb and (accelerator is None or accelerator.is_main_process):
         init_hp["effective_data_batch_size"] = effective_data_batch_size
         init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
-        init_hp["distributed_training"] = True if accelerator is not None else False
+        init_hp["distributed_training"] = accelerator is not None
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
         init_wandb(
             algo=init_hp["ALGO"],
@@ -131,6 +137,7 @@ def finetune_llm_reasoning(
             wandb_api_key=wandb_api_key,
             init_hyperparams=init_hp,
         )
+
     if accelerator is None or accelerator.is_main_process:
         print("\nTraining...")
 
@@ -312,7 +319,7 @@ def finetune_llm_reasoning(
                 wandb_dict |= {
                     f"HPO_agent_{agent_idx}/{key}": getattr(agent, key)
                     for agent_idx, agent in enumerate(pop)
-                    for key in agent.registry.hp_config.config.keys()
+                    for key in agent.registry.hp_config.config
                 }
 
             if agg_test_metrics is not None:
@@ -373,11 +380,11 @@ def finetune_llm_reasoning(
             else [None] * len(pop)
         )
         avg_fitness = (
-            ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
+            [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
             if fitness_calculated
             else [None] * len(pop)
         )
-        avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+        avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
         agents = [agent.index for agent in pop]
         num_steps = [agent.steps[-1] for agent in pop]
         muts = [agent.mut for agent in pop]
@@ -424,38 +431,44 @@ def finetune_llm_preference(
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-):
+) -> None:
     if evo_steps is not None and (tournament is None or mutation is None):
         warnings.warn(
             "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place.",
+            stacklevel=2,
         )
 
     if (tournament is not None and mutation is not None) and evo_steps is None:
+        msg = "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
         raise ValueError(
-            "'evo_steps' must be set if 'tournament' and 'mutation' are not None.",
+            msg,
         )
     if num_epochs is not None and max_steps is not None:
         warnings.warn(
             "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'.",
+            stacklevel=2,
         )
     if mutation is not None:
-        assert (
-            mutation.architecture_mut == 0
-        ), "Probability of architecture mutation must be 0 for LLM finetuning."
-        assert (
-            mutation.new_layer_prob == 0
-        ), "Probability of new layer mutation must be 0 for LLM finetuning."
-        assert (
-            mutation.parameters_mut == 0
-        ), "Probability of network parameters mutation must be 0 for LLM finetuning."
-        assert (
-            mutation.activation_mut == 0
-        ), "Probability of activation mutation must be 0 for LLM finetuning."
+        assert mutation.architecture_mut == 0, (
+            "Probability of architecture mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.new_layer_prob == 0, (
+            "Probability of new layer mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.parameters_mut == 0, (
+            "Probability of network parameters mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.activation_mut == 0, (
+            "Probability of activation mutation must be 0 for LLM finetuning."
+        )
 
     if not isinstance(pop[0], DPO):
-        raise ValueError(
+        msg = (
             "The algorithm must be DPO for preference-based reinforcement learning."
-            f"Got {type(pop[0])} instead.",
+            f"Got {type(pop[0])} instead."
+        )
+        raise ValueError(
+            msg,
         )
 
     if init_hp is None:
@@ -469,7 +482,7 @@ def finetune_llm_preference(
     if wb and (accelerator is None or accelerator.is_main_process):
         init_hp["effective_data_batch_size"] = effective_data_batch_size
         init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
-        init_hp["distributed_training"] = True if accelerator is not None else False
+        init_hp["distributed_training"] = accelerator is not None
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
         init_wandb(
             algo=init_hp["ALGO"],
@@ -479,7 +492,7 @@ def finetune_llm_preference(
         )
 
     if accelerator is None or accelerator.is_main_process:
-        print("\nTraining...")
+        pass
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
     if max_steps is None and num_epochs is None:
@@ -648,11 +661,11 @@ def finetune_llm_preference(
             else [None] * len(pop)
         )
         avg_fitness = (
-            ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
+            [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
             if fitness_calculated
             else [None] * len(pop)
         )
-        avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+        avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
         agents = [agent.index for agent in pop]
         num_steps = [agent.steps[-1] for agent in pop]
         muts = [agent.mut for agent in pop]

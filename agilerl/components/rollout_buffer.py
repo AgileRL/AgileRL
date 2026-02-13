@@ -73,7 +73,7 @@ class RolloutBuffer:
         wrap_at_capacity: bool = False,
         max_seq_len: int | None = None,
         bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
-    ):
+    ) -> None:
         self.capacity = capacity
         self.observation_space = observation_space
         self.action_space = action_space
@@ -202,8 +202,9 @@ class RolloutBuffer:
 
         if self.recurrent:
             if self.hidden_state_architecture is None:
+                msg = "hidden_state_architecture must be provided if recurrent=True"
                 raise ValueError(
-                    "hidden_state_architecture must be provided if recurrent=True",
+                    msg,
                 )
             # self.hidden_state_architecture is dict[str, tuple[num_layers, num_envs_at_ppo_init, hidden_size]]
             # For buffer storage, each hidden state key should map to a tensor of shape:
@@ -273,9 +274,12 @@ class RolloutBuffer:
             if self.wrap_at_capacity:
                 self.pos = 0
             else:
-                raise ValueError(
+                msg = (
                     f"Buffer has reached capacity ({self.capacity} transitions) but received more transitions. "
-                    "Either increase buffer capacity or set wrap_at_capacity=True.",
+                    "Either increase buffer capacity or set wrap_at_capacity=True."
+                )
+                raise ValueError(
+                    msg,
                 )
 
         # Prepare data as a dictionary of tensors for the current time step
@@ -487,6 +491,7 @@ class RolloutBuffer:
             if batch_size > total_samples:
                 warnings.warn(
                     f"Batch size {batch_size} is larger than buffer size {total_samples}. Returning all data.",
+                    stacklevel=2,
                 )
                 # Convert the flattened TensorDict to the old dictionary format
                 # For hidden_states, we need to handle the nested TensorDict structure
@@ -538,6 +543,7 @@ class RolloutBuffer:
                 warnings.warn(
                     f"Batch size {batch_size} is larger than buffer_size {total_samples}. "
                     "Returning all data.",
+                    stacklevel=2,
                 )
                 # Move the whole flattened_td to the target device
                 return flattened_td.to(target_device)
@@ -603,7 +609,7 @@ class RolloutBuffer:
         sequences: list[torch.Tensor | TensorDict],
         target_length: int | None = None,
     ) -> torch.Tensor | TensorDict:
-        """Pads sequences using zeros. If target_length is provided, the sequences are padded to the target length.
+        """Pad sequences using zeros. If target_length is provided, the sequences are padded to the target length.
         Otherwise, the sequences are padded to the length of the longest sequence. Results in a tensor of
         shape (B, T, *). We provide the option to pad to a specified target length but in general these should be padded
         to the maximum length of the sequences in the batch (i.e. using `torch.nn.utils.rnn.pad_sequence`).
@@ -653,7 +659,7 @@ class RolloutBuffer:
         data: torch.Tensor,
         episode_done_indices: list[list[int]],
     ) -> tuple[list[torch.Tensor], int]:
-        """Splits the provided data into sequences. If `self.max_seq_len` is not set, the entire episode
+        """Split the provided data into sequences. If `self.max_seq_len` is not set, the entire episode
         is used as a sequence. Otherwise, the episode is split into sequences of length `self.max_seq_len`.
         If the episode is shorter than `self.max_seq_len`, the entire episode is used as a sequence.
 
@@ -695,7 +701,7 @@ class RolloutBuffer:
         return sequences, max_length
 
     def prepare_sequence_tensors(self, device: str | None = None) -> TensorDict:
-        """Returns a TensorDict with all of the possible sequences in the buffer for the
+        """Return a TensorDict with all of the possible sequences in the buffer for the
         observations, actions, and hidden states. We pad the sequences to the same length to obtain
         a TensorDict with batch_size [num_sequences, max_sequence_length] for efficient truncated BPTT.
 
@@ -705,12 +711,14 @@ class RolloutBuffer:
         :rtype: TensorDict
         """
         if not self.recurrent:
+            msg = "prepare_sequence_tensors() is only supported when recurrent=True."
             raise ValueError(
-                "prepare_sequence_tensors() is only supported when recurrent=True.",
+                msg,
             )
 
         if self.size() == 0:
-            raise ValueError("Attempting to prepare sequences with empty buffer.")
+            msg = "Attempting to prepare sequences with empty buffer."
+            raise ValueError(msg)
 
         target_device = device or self.device
         buffer_size = self.capacity if self.full else self.pos
@@ -826,9 +834,12 @@ class RolloutBuffer:
         :rtype: Generator[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]], None, None]
         """
         if self.unpadded_slices is None:
-            raise ValueError(
+            msg = (
                 "Attempting to fetch minibatches before preparing sequences. "
-                "Call prepare_sequence_tensors() first.",
+                "Call prepare_sequence_tensors() first."
+            )
+            raise ValueError(
+                msg,
             )
 
         # Determine the number of sequences per mini batch
@@ -836,6 +847,7 @@ class RolloutBuffer:
             warnings.warn(
                 f"Batch size {batch_size} is larger than the number of sequences "
                 f"({self.num_sequences}), using batch_size = {self.num_sequences}.",
+                stacklevel=2,
             )
             batch_size = self.num_sequences
 
@@ -887,7 +899,7 @@ class RolloutBuffer:
             yield padded, unpadded
 
     def __getstate__(self) -> dict[str, Any]:
-        """Gets the state dictionary for pickling, ensuring arrays are copied.
+        """Get the state dictionary for pickling, ensuring arrays are copied.
 
         :return: State dictionary.
         :rtype: dict[str, Any]
@@ -895,7 +907,7 @@ class RolloutBuffer:
         return self.__dict__.copy()
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        """Sets the state dictionary when unpickling, re-initializing buffers.
+        """Set the state dictionary when unpickling, re-initializing buffers.
 
         :param state: State dictionary.
         :type state: dict[str, Any]
@@ -907,6 +919,7 @@ class RolloutBuffer:
         if not hasattr(self, "buffer") or not isinstance(self.buffer, TensorDict):
             warnings.warn(
                 "TensorDict buffer not found or invalid during unpickling. Re-initializing.",
+                stacklevel=2,
             )
             if not hasattr(self, "observation_space") or not hasattr(
                 self,
@@ -914,6 +927,7 @@ class RolloutBuffer:
             ):
                 warnings.warn(
                     "Observation or action space missing during RolloutBuffer unpickling. Buffer might be invalid.",
+                    stacklevel=2,
                 )
                 return
 
@@ -925,6 +939,7 @@ class RolloutBuffer:
             if self.buffer.batch_size != expected_batch_size:
                 warnings.warn(
                     f"Loaded TensorDict has batch_size {self.buffer.batch_size}, expected {expected_batch_size}. Re-initializing.",
+                    stacklevel=2,
                 )
                 self._initialize_buffers()
 

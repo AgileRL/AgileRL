@@ -331,23 +331,23 @@ class SimpleCritic(EvolvableModule):
     ):
         super().__init__(device)
 
-        assert (
-            num_inputs > 0
-        ), "'num_inputs' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            num_outputs > 0
-        ), "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
+        assert num_inputs > 0, (
+            "'num_inputs' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert num_outputs > 0, (
+            "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
+        )
         for num in hidden_size:
-            assert (
-                num > 0
-            ), "'hidden_size' cannot contain zero, please enter a valid integer."
+            assert num > 0, (
+                "'hidden_size' cannot contain zero, please enter a valid integer."
+            )
         assert len(hidden_size) != 0, "MLP must contain at least one hidden layer."
-        assert (
-            min_hidden_layers < max_hidden_layers
-        ), "'min_hidden_layers' must be less than 'max_hidden_layers."
-        assert (
-            min_mlp_nodes < max_mlp_nodes
-        ), "'min_mlp_nodes' must be less than 'max_mlp_nodes."
+        assert min_hidden_layers < max_hidden_layers, (
+            "'min_hidden_layers' must be less than 'max_hidden_layers."
+        )
+        assert min_mlp_nodes < max_mlp_nodes, (
+            "'min_mlp_nodes' must be less than 'max_mlp_nodes."
+        )
 
         self.name = name
         self.num_inputs = num_inputs

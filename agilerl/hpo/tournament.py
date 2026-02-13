@@ -48,8 +48,7 @@ class TournamentSelection:
         """
         selection = np.random.randint(0, len(fitness_values), size=self.tournament_size)
         selection_values = [fitness_values[i] for i in selection]
-        winner = selection[np.argmax(selection_values)]
-        return winner
+        return selection[np.argmax(selection_values)]
 
     def _elitism(
         self,
@@ -93,7 +92,7 @@ class TournamentSelection:
         self,
         population: PopulationType,
     ) -> tuple[EvolvableAlgorithm, PopulationType]:
-        """Returns best agent and new population of agents following tournament selection. Used for
+        """Return best agent and new population of agents following tournament selection. Used for
         a population of :class:`EvolvableAlgorithm <agilerl.algorithms.core.RLAlgorithm>` or
         :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.MultiAgentRLAlgorithm>` agents.
 
@@ -111,7 +110,7 @@ class TournamentSelection:
             selection_size = self.population_size
 
         # Select parents of next gen using tournament selection
-        for idx in range(selection_size):
+        for _idx in range(selection_size):
             max_id += 1
             actor_parent = population[self._tournament(rank)]
             new_individual = actor_parent.clone(max_id, wrap=False)
@@ -123,7 +122,7 @@ class TournamentSelection:
         self,
         population: PopulationType,
     ) -> tuple[EvolvableAlgorithm, PopulationType]:
-        """Returns best agent and new population of agents following tournament selection. Used for
+        """Return best agent and new population of agents following tournament selection. Used for
         a population of :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param population: Population of agents

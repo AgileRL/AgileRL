@@ -29,7 +29,6 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from torch.optim.optimizer import Optimizer
-from typing_extensions import Self
 
 NumpyObsType = np.ndarray | dict[str, np.ndarray] | tuple[np.ndarray, ...]
 TorchObsType = torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]
@@ -128,9 +127,14 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
     independently through mutations.
     """
 
-    def forward_head(self, latent: torch.Tensor, *args, **kwargs) -> torch.Tensor: ...
+    def forward_head(
+        self,
+        latent: torch.Tensor,
+        *args: Any,
+        **kwargs: Any,
+    ) -> torch.Tensor: ...
     def extract_features(self, x: TorchObsType) -> torch.Tensor: ...
-    def build_network_head(self, *args, **kwargs) -> None: ...
+    def build_network_head(self, *args: Any, **kwargs: Any) -> None: ...
     def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]: ...
     def remove_latent_node(
         self,
@@ -146,7 +150,7 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
         std_coeff: float = 4.0,
         output_coeff: float = 2.0,
     ) -> None: ...
-    def _build_encoder(self, *args, **kwargs) -> None: ...
+    def _build_encoder(self, *args: Any, **kwargs: Any) -> None: ...
 
 
 T = TypeVar("T", bound=EvolvableModuleProtocol | EvolvableNetworkProtocol)
@@ -273,7 +277,7 @@ class EvolvableAlgorithmProtocol(Protocol):
     def unwrap_models(self) -> None: ...
     def wrap_models(self) -> None: ...
     def load(
-        cls: type[SelfEvolvableAlgorithm],
+        self: type[SelfEvolvableAlgorithm],
         path: str,
     ) -> SelfEvolvableAlgorithm: ...
     def load_checkpoint(
@@ -289,20 +293,20 @@ class EvolvableAlgorithmProtocol(Protocol):
         **kwargs,
     ) -> None: ...
     def get_action(self, obs: ObservationType, **kwargs) -> Any: ...
-    def test(self, *args, **kwargs) -> np.ndarray: ...
+    def test(self, *args: Any, **kwargs: Any) -> np.ndarray: ...
     def evolvable_attributes(
         self,
         networks_only: bool = False,
     ) -> EvolvableAttributeDict: ...
     def inspect_attributes(
-        agent,
+        self,
         input_args_only: bool = False,
     ) -> dict[str, Any]: ...
     def clone(
         self,
         index: int | None,
         wrap: bool,
-    ) -> Self: ...
+    ) -> "EvolvableAlgorithmProtocol": ...
     def recompile(self) -> None: ...
     def mutation_hook(self) -> None: ...
 
@@ -331,7 +335,7 @@ class AgentWrapperProtocol(Protocol, Generic[T_EvolvableAlgorithm]):
 
 @runtime_checkable
 class LoraConfigProtocol(Protocol):
-    """ "Protocol for LoRA configuration.
+    """Protocol for LoRA configuration.
 
     LoRA configuration is used to configure the LoRA module.
     """

@@ -56,7 +56,7 @@ def train_offline(
     remote: bool = False,
     wandb_api_key: str | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
-    """The general offline RL training function. Returns trained population of agents and their fitnesses.
+    """Run the general offline RL training; returns trained population of agents and their fitnesses.
 
     :param env: The environment to train in
     :type env: Gym-style environment
@@ -134,11 +134,13 @@ def train_offline(
         warnings.warn(
             "'save_elite' set to False but 'elite_path' has been defined, elite will not\
                       be saved unless 'save_elite' is set to True.",
+            stacklevel=2,
         )
     if checkpoint is None and checkpoint_path is not None:
         warnings.warn(
             "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined.",
+            stacklevel=2,
         )
 
     if wb:
@@ -169,14 +171,9 @@ def train_offline(
         print("Filling replay buffer with dataset...")
 
     if minari_dataset_id:
-        print(f"Loading Minari Dataset with dataset_id {minari_dataset_id} in Buffer")
-
         memory = minari_to_agile_buffer(minari_dataset_id, memory, accelerator, remote)
 
-        print(f"Minari Dataset with dataset_id {minari_dataset_id} loaded in Buffer")
-
     else:
-        print("Loading buffer...")
         dataset_length = dataset["rewards"].shape[0]
         for i in range(dataset_length - 1):
             state = dataset["observations"][i]
@@ -205,10 +202,10 @@ def train_offline(
 
         if accelerator is not None:
             if accelerator.is_main_process:
-                print("Loaded buffer.")
+                pass
             accelerator.wait_for_everyone()
         else:
-            print("Loaded buffer.")
+            pass
 
     if accelerator is not None:
         # Create dataloader from replay buffer
@@ -220,9 +217,9 @@ def train_offline(
         sampler = Sampler(memory=memory)
 
     if accelerator is not None:
-        print(f"\nDistributed training on {accelerator.device}...")
+        pass
     else:
-        print("\nTraining...")
+        pass
 
     # Format progress bar
     pbar = default_progress_bar(max_steps, accelerator)
@@ -234,9 +231,8 @@ def train_offline(
     checkpoint_count = 0
 
     # Pre-training mutation
-    if accelerator is None:
-        if mutation is not None:
-            pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None and mutation is not None:
+        pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
@@ -245,7 +241,7 @@ def train_offline(
 
         for agent_idx, agent in enumerate(pop):  # Loop through population
             losses = []
-            for idx_step in range(evo_steps):
+            for _idx_step in range(evo_steps):
                 experiences = sampler.sample(agent.batch_size)  # Sample replay buffer
                 # Learn according to agent's RL algorithm
                 loss = agent.learn(experiences)
@@ -300,16 +296,15 @@ def train_offline(
             agent.steps.append(agent.steps[-1])
 
         # Early stop if consistently reaches target
-        if target is not None:
-            if (
-                np.all(
-                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
-                )
-                and len(pop[0].steps) >= 100
-            ):
-                if wb:
-                    wandb.finish()
-                return pop, pop_fitnesses
+        if target is not None and (
+            np.all(
+                np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
+            )
+            and len(pop[0].steps) >= 100
+        ):
+            if wb:
+                wandb.finish()
+            return pop, pop_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -325,8 +320,8 @@ def train_offline(
             )
 
         if verbose:
-            fitness = ["%.2f" % fitness for fitness in fitnesses]
-            avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
+            fitness = [f"{fitness:.2f}" for fitness in fitnesses]
+            avg_fitness = [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]

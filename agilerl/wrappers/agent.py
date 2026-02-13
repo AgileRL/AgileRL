@@ -58,7 +58,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
 
     @property
     def training(self) -> bool:
-        """Returns the training status of the agent.
+        """Return the training status of the agent.
 
         :return: Training status of the agent
         :rtype: bool
@@ -67,7 +67,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
 
     @property
     def device(self) -> DeviceType:
-        """Returns the device of the agent.
+        """Return the device of the agent.
 
         :return: Device of the agent
         :rtype: DeviceType
@@ -119,7 +119,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
             super().__setattr__(name, value)
 
     def clone(self, index: int | None = None, wrap: bool = True) -> SelfAgentWrapper:
-        """Clones the wrapper with the underlying agent.
+        """Clone the wrapper with the underlying agent.
 
         :param index: Index of the agent in a population, defaults to None
         :type index: int | None, optional
@@ -135,11 +135,10 @@ class AgentWrapper(ABC, Generic[AgentType]):
         input_args.pop("agent", None)
 
         clone = self.__class__(agent_clone, **input_args)
-        clone = EvolvableAlgorithm.copy_attributes(self, clone)
-        return clone
+        return EvolvableAlgorithm.copy_attributes(self, clone)
 
     def save_checkpoint(self, path: str) -> None:
-        """Saves a checkpoint of agent properties and network weights to path.
+        """Save a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
         :type path: string
@@ -168,7 +167,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
         )
 
     def load_checkpoint(self, path: str) -> None:
-        """Loads a checkpoint of agent properties and network weights from path.
+        """Load a checkpoint of agent properties and network weights from path.
 
         :param path: Location to load checkpoint from
         :type path: string
@@ -188,7 +187,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
         *args: Any,
         **kwargs: Any,
     ) -> Any:
-        """Returns the action from the agent.
+        """Return the action from the agent.
 
         :param obs: Observation from the environment
         :type obs: ObservationType | MARLObservationType
@@ -279,7 +278,7 @@ class RSNorm(AgentWrapper[AgentType]):
         norm_obs_keys: list[str] | None = None,
         device: DeviceType = "cpu",
     ) -> RunningMeanStd | dict[str, RunningMeanStd] | tuple[RunningMeanStd, ...]:
-        """Builds the RunningMeanStd object(s) based on the observation space.
+        """Build the RunningMeanStd object(s) based on the observation space.
 
         :param observation_space: Observation space of the agent
         :type observation_space: spaces.Space
@@ -308,7 +307,7 @@ class RSNorm(AgentWrapper[AgentType]):
         return RunningMeanStd(epsilon, shape=observation_space.shape, device=device)
 
     def _normalize_observation(self, observation: ObservationType) -> ObservationType:
-        """Normalizes the observation using the RunningMeanStd object(s).
+        """Normalize the observation using the RunningMeanStd object(s).
 
         :param observation: Observation from the environment
         :type observation: ObservationType
@@ -339,7 +338,7 @@ class RSNorm(AgentWrapper[AgentType]):
         return observation
 
     def normalize_observation(self, observation: ObservationType) -> ObservationType:
-        """Normalizes the observation using the RunningMeanStd object(s).
+        """Normalize the observation using the RunningMeanStd object(s).
 
         :param observation: Observation from the environment
         :type observation: ObservationType
@@ -355,7 +354,7 @@ class RSNorm(AgentWrapper[AgentType]):
         return self._normalize_observation(observation)
 
     def _update_statistics(self, observation: ObservationType) -> None:
-        """Updates the running statistics using the observation.
+        """Update the running statistics using the observation.
 
         :param observation: Observation from the environment
         :type observation: ObservationType
@@ -370,19 +369,19 @@ class RSNorm(AgentWrapper[AgentType]):
             self.obs_rms.update(observation)
 
     def update_statistics(self, observation: ObservationType) -> None:
-        """Updates the running statistics using the observation.
+        """Update the running statistics using the observation.
 
         :param observation: Observation from the environment
         :type observation: ObservationType
         """
         if self.multi_agent:
-            for _, obs in observation.items():
+            for obs in observation.values():
                 self._update_statistics(obs)
         else:
             self._update_statistics(observation)
 
     def get_action(self, obs: ObservationType, *args: Any, **kwargs: Any) -> Any:
-        """Returns the action from the agent after normalizing the observation.
+        """Return the action from the agent after normalizing the observation.
 
         :param obs: Observation from the environment
         :type obs: ObservationType
@@ -419,8 +418,9 @@ class RSNorm(AgentWrapper[AgentType]):
         """
         if experiences is None:
             if not isinstance(self.agent, PPO) or not self.agent.use_rollout_buffer:
+                msg = "Experiences must be provided if not using a rollout buffer."
                 raise ValueError(
-                    "Experiences must be provided if not using a rollout buffer.",
+                    msg,
                 )
 
             buffer_size = (
@@ -469,9 +469,9 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
     def __init__(self, agent: MultiAgentRLAlgorithm) -> None:
         super().__init__(agent)
 
-        assert (
-            self.agent.algo == "IPPO"
-        ), "AsyncAgentsWrapper is currently only supported for IPPO."
+        assert self.agent.algo == "IPPO", (
+            "AsyncAgentsWrapper is currently only supported for IPPO."
+        )
 
     def extract_inactive_agents(
         self,
@@ -562,7 +562,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         *args: Any,
         **kwargs: Any,
     ) -> ActionReturnType:
-        """Returns the action from the agent. Since the environments may not return observations for all agents
+        """Return the action from the agent. Since the environments may not return observations for all agents
         at the same time, we need to extract the inactive agents from the observation and fill in placeholder
         values for their actions.
 
@@ -595,7 +595,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
             )
 
         if isinstance(action_return, tuple):
-            action_return = (action_dict,) + action_return[1:]
+            action_return = (action_dict, *action_return[1:])
         else:
             action_return = action_dict
 

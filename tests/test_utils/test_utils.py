@@ -292,7 +292,15 @@ def test_prints_hyperparams():
     pop[0].lr = 0.01
     pop[0].batch_size = 32
 
-    expected_output = f"Agent ID: {pop[0].index}    Mean 5 Fitness: {np.mean(pop[0].fitness[-5:]):.2f}    Attributes: {EvolvableAlgorithm.inspect_attributes(pop[0])}"
+    agent = pop[0]
+    mean_fitness = np.mean(agent.fitness[-5:]).item()
+    attrs = EvolvableAlgorithm.inspect_attributes(agent)
+    expected_lines = [
+        f"Agent ID: {agent.index}  |  Mean 5 Fitness: {mean_fitness:.2f}",
+        "Attributes:",
+        *[f"  {k}: {v}" for k, v in sorted(attrs.items())],
+    ]
+    expected_output = "\n".join(expected_lines) + "\n"
 
     with patch("builtins.print") as mock_print:
         print_hyperparams(pop)

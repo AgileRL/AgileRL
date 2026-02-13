@@ -56,7 +56,7 @@ class EvolvableResNet(EvolvableModule):
         kernel_size: int,
         stride_size: int,
         num_blocks: int,
-        output_activation: str = None,
+        output_activation: str | None = None,
         scale_factor: int = 4,
         min_blocks: int = 1,
         max_blocks: int = 4,
@@ -99,7 +99,7 @@ class EvolvableResNet(EvolvableModule):
 
     @property
     def net_config(self) -> dict[str, Any]:
-        """Returns model configuration in dictionary."""
+        """Return model configuration in dictionary."""
         net_config = self.init_dict.copy()
         for attr in ["num_inputs", "num_outputs", "device", "name"]:
             if attr in net_config:
@@ -126,7 +126,7 @@ class EvolvableResNet(EvolvableModule):
         num_blocks: int,
         scale_factor: int,
     ) -> nn.Sequential:
-        """Creates and returns a convolutional neural network.
+        """Create and returns a convolutional neural network.
 
         :param in_channels: The number of input channels.
         :type in_channels: int
@@ -178,7 +178,7 @@ class EvolvableResNet(EvolvableModule):
         return nn.Sequential(net_dict)
 
     def forward(self, x: ObservationType) -> torch.Tensor:
-        """Returns output of neural network.
+        """Return output of neural network.
 
         :param x: Neural network input
         :type x: torch.Tensor
@@ -195,7 +195,7 @@ class EvolvableResNet(EvolvableModule):
 
     @mutation(MutationType.LAYER)
     def add_block(self) -> None:
-        """Adds a hidden layer to neural network. Falls back on ``add_channel()`` if
+        """Add a hidden layer to neural network. Falls back on ``add_channel()`` if
         max hidden layers reached.
         """
         # add layer to hyper params
@@ -203,16 +203,18 @@ class EvolvableResNet(EvolvableModule):
             self.num_blocks += 1
         else:
             return self.add_channel()
+        return None
 
     @mutation(MutationType.LAYER, shrink_params=True)
     def remove_block(self) -> None:
-        """Removes a hidden layer from neural network. Falls back on ``add_channel()`` if
+        """Remove a hidden layer from neural network. Falls back on ``add_channel()`` if
         min hidden layers reached.
         """
         if self.num_blocks > self.min_blocks:  # HARD LIMIT
             self.num_blocks -= 1
         else:
             return self.add_channel()
+        return None
 
     @mutation(MutationType.NODE)
     def add_channel(

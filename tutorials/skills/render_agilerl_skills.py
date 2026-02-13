@@ -72,7 +72,7 @@ if __name__ == "__main__":
 
                 state = next_state
 
-            print("-" * 15, f"Episode: {ep+1}", "-" * 15)
+            print("-" * 15, f"Episode: {ep + 1}", "-" * 15)
             print(f"Episode length: {_idx_step}")
             print(f"Score: {score}")
 
