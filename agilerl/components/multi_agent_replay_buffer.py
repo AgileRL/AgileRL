@@ -1,5 +1,5 @@
 import random
-from collections import deque
+from collections import deque, namedtuple
 from numbers import Number
 from typing import Any, NamedTuple
 
@@ -41,7 +41,7 @@ class MultiAgentReplayBuffer:
         self.memory_size: int = memory_size
         self.memory: deque = deque(maxlen=memory_size)
         self.field_names: list[str] = field_names
-        self.experience: type = NamedTuple("Experience", self.field_names)
+        self.experience: type = namedtuple("Experience", self.field_names)
         self.counter: int = 0
         self.device: str | None = device
         self.agent_ids: list[str] = agent_ids

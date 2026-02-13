@@ -114,6 +114,7 @@ ignore = [
     "T201",          # print statements used in training loops (for now)
     "DTZ005",        # datetime.now() without tz argument
     "COM812",        # issues with ruff-format
+    "PYI024",        # namedtuple issue
 ]
 
 [tool.ruff.lint.per-file-ignores]
