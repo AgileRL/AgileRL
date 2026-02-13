@@ -3213,7 +3213,10 @@ def test_load_distributed_actor_value_error(
     accelerator.state = MagicMock(spec=AcceleratorState)
     accelerator.free_memory.side_effect = lambda *args: [None] * len(args)
     grpo.accelerator = accelerator
-    with pytest.raises(ValueError, match="Deepspeed failed to resume from checkpoint"):
+    with pytest.raises(
+        TypeError,
+        match="argument should be a str or an os.PathLike object.*not 'NoneType'",
+    ):
         grpo._load_distributed_actor(None)
     grpo.clean_up()
 
