@@ -586,10 +586,7 @@ class IPPO(MultiAgentRLAlgorithm):
             agent_space = self.action_space[agent_id]
             action = action.cpu().data.numpy()
             if not self.training and isinstance(agent_space, spaces.Box):
-                if actor.squash_output:
-                    action = actor.scale_action(action)
-                else:
-                    action = np.clip(action, agent_space.low, agent_space.high)
+                action = np.clip(action, agent_space.low, agent_space.high)
 
             action_dict[agent_id] = action
             action_logprob_dict[agent_id] = log_prob.cpu().data.numpy()

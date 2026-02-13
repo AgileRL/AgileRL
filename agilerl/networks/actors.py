@@ -361,7 +361,7 @@ class StochasticActor(EvolvableNetwork):
             net_config=net_config,
         )
 
-    def rescale_action(self, action: torch.Tensor) -> torch.Tensor:
+    def scale_action(self, action: torch.Tensor) -> torch.Tensor:
         """Scale the action from [-1, 1] to the action space bounds [low, high].
 
         :param action: Action.
@@ -392,7 +392,7 @@ class StochasticActor(EvolvableNetwork):
 
         # Action scaling only relevant for continuous action spaces with squashing
         if isinstance(self.action_space, spaces.Box) and self.squash_output:
-            action = self.rescale_action(action)
+            action = self.scale_action(action)
 
         return action, log_prob, entropy
 
