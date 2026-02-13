@@ -3,7 +3,11 @@ from typing import TYPE_CHECKING
 import torch
 import yaml
 from gymnasium import spaces
-from ucimlrepo import fetch_ucirepo
+
+from tutorials.utils import require_package
+
+with require_package():
+    from ucimlrepo import fetch_ucirepo
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import ReplayBuffer

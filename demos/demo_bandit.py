@@ -5,7 +5,10 @@ import torch
 import wandb
 from gymnasium import spaces
 from tensordict import TensorDict
-from ucimlrepo import fetch_ucirepo
+from tutorials.utils import require_package
+
+with require_package():
+    from ucimlrepo import fetch_ucirepo
 
 from agilerl.algorithms import NeuralUCB
 from agilerl.components.replay_buffer import ReplayBuffer
