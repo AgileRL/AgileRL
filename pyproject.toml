@@ -34,7 +34,7 @@ dependencies = [
     "tensordict~=0.8",
     "tqdm~=4.66.4",
     "ucimlrepo~=0.0.3",
-    "wandb~=0.17.6",
+    "wandb~=0.18.0",
 ]
 
 [project.optional-dependencies]
