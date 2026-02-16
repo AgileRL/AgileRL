@@ -51,14 +51,14 @@ if __name__ == "__main__":
             state, _ = env.reset()  # Reset environment at start of episode
             frames.append(env.render())
             score = 0
-            for idx_step in range(max_steps):
+            for _idx_step in range(max_steps):
                 # Get next action from agent
                 if state[6] or state[7]:
                     action = [0]
                 else:
                     action, log_prob, _, value = agent.get_action(state)
                 next_state, reward, termination, truncation, _ = env.step(
-                    action[0]
+                    action[0],
                 )  # Act in environment
 
                 # Save the frame for this step and append to frames list
@@ -72,8 +72,8 @@ if __name__ == "__main__":
 
                 state = next_state
 
-            print("-" * 15, f"Episode: {ep+1}", "-" * 15)
-            print(f"Episode length: {idx_step}")
+            print("-" * 15, f"Episode: {ep + 1}", "-" * 15)
+            print(f"Episode length: {_idx_step}")
             print(f"Score: {score}")
 
         print("============================================")

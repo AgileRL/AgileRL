@@ -1,16 +1,20 @@
+import warnings
 from dataclasses import asdict
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
-import torch.nn as nn
 from gymnasium import spaces
 
-from agilerl.modules import EvolvableMLP, EvolvableModule, EvolvableMultiInput
+from agilerl.modules import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.custom_modules import DuelingDistributionalMLP
 from agilerl.typing import ArrayOrTensor, NetConfigType, TorchObsType
-from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
+from agilerl.utils.evolvable_networks import (
+    get_default_encoder_config,
+    is_image_space,
+    is_mlp_net_config,
+)
 
 
 class QNetwork(EvolvableNetwork):
@@ -26,11 +30,11 @@ class QNetwork(EvolvableNetwork):
     :type action_space: DiscreteSpace
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
+    :type encoder_cls: str | type[EvolvableModule] | None
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: ConfigType
     :param head_config: Configuration of the network MLP head.
-    :type head_config: Optional[ConfigType]
+    :type head_config: ConfigType | None
     :param min_latent_dim: Minimum dimension of the latent space representation. Defaults to 8.
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
@@ -46,7 +50,7 @@ class QNetwork(EvolvableNetwork):
     :param device: Device to use for the network.
     :type device: str
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     supported_spaces = (spaces.Discrete, spaces.MultiDiscrete)
@@ -54,18 +58,18 @@ class QNetwork(EvolvableNetwork):
     def __init__(
         self,
         observation_space: spaces.Space,
-        action_space: Union[spaces.Discrete, spaces.MultiDiscrete],
-        encoder_cls: Optional[Union[str, type[EvolvableModule]]] = None,
-        encoder_config: Optional[NetConfigType] = None,
-        head_config: Optional[NetConfigType] = None,
+        action_space: spaces.Discrete | spaces.MultiDiscrete,
+        encoder_cls: str | type[EvolvableModule] | None = None,
+        encoder_config: NetConfigType | None = None,
+        head_config: NetConfigType | None = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
-        random_seed: Optional[int] = None,
-    ):
+        random_seed: int | None = None,
+    ) -> None:
         super().__init__(
             observation_space,
             action_space=action_space,
@@ -81,7 +85,8 @@ class QNetwork(EvolvableNetwork):
         )
 
         if not isinstance(action_space, self.supported_spaces):
-            raise ValueError("Action space must be either Discrete or MultiDiscrete")
+            msg = "Action space must be either Discrete or MultiDiscrete"
+            raise ValueError(msg)
 
         if head_config is None:
             head_config = asdict(MlpNetConfig(hidden_size=[16], output_activation=None))
@@ -94,7 +99,7 @@ class QNetwork(EvolvableNetwork):
         self.build_network_head(head_config)
 
     def build_network_head(self, net_config: dict[str, Any]) -> None:
-        """Builds the head of the network based on the passed configuration.
+        """Build the head of the network based on the passed configuration.
 
         :param net_config: Configuration of the network head.
         :type net_config: dict[str, Any]
@@ -119,7 +124,7 @@ class QNetwork(EvolvableNetwork):
         return self.head_net(latent)
 
     def recreate_network(self) -> None:
-        """Recreates the network"""
+        """Recreates the network."""
         self.recreate_encoder()
 
         head_net = self.create_mlp(
@@ -144,7 +149,7 @@ class RainbowQNetwork(EvolvableNetwork):
     :type action_space: DiscreteSpace
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
+    :type encoder_cls: str | type[EvolvableModule] | None
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: ConfigType
     :param support: Support for the distributional value function.
@@ -152,7 +157,7 @@ class RainbowQNetwork(EvolvableNetwork):
     :param num_atoms: Number of atoms in the distributional value function. Defaults to 51.
     :type num_atoms: int
     :param head_config: Configuration of the network MLP head.
-    :type head_config: Optional[ConfigType]
+    :type head_config: ConfigType | None
     :param min_latent_dim: Minimum dimension of the latent space representation. Defaults to 8.
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
@@ -162,7 +167,7 @@ class RainbowQNetwork(EvolvableNetwork):
     :param device: Device to use for the network.
     :type device: str
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
@@ -172,26 +177,29 @@ class RainbowQNetwork(EvolvableNetwork):
         support: torch.Tensor,
         num_atoms: int = 51,
         noise_std: float = 0.5,
-        encoder_config: Optional[NetConfigType] = None,
-        head_config: Optional[NetConfigType] = None,
+        encoder_config: NetConfigType | None = None,
+        head_config: NetConfigType | None = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         latent_dim: int = 32,
         device: str = "cpu",
-        random_seed: Optional[int] = None,
-    ):
+        random_seed: int | None = None,
+    ) -> None:
 
         if isinstance(observation_space, spaces.Box) and not is_image_space(
-            observation_space
+            observation_space,
         ):
             if encoder_config is None:
                 encoder_config = get_default_encoder_config(
-                    observation_space, simba=False, recurrent=False
+                    observation_space,
+                    simba=False,
+                    recurrent=False,
                 )
 
             encoder_config["noise_std"] = noise_std
             encoder_config["output_activation"] = encoder_config.get(
-                "activation", "ReLU"
+                "activation",
+                "ReLU",
             )
             encoder_config["output_vanish"] = False
             encoder_config["init_layers"] = False
@@ -209,13 +217,16 @@ class RainbowQNetwork(EvolvableNetwork):
         )
 
         if not isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
-            raise ValueError("Action space must be either Discrete or MultiDiscrete")
+            msg = "Action space must be either Discrete or MultiDiscrete"
+            raise ValueError(msg)
 
         if head_config is None:
             head_config = asdict(
                 MlpNetConfig(
-                    hidden_size=[16], output_activation=None, noise_std=noise_std
-                )
+                    hidden_size=[16],
+                    output_activation=None,
+                    noise_std=noise_std,
+                ),
             )
         elif isinstance(head_config, NetConfig):
             head_config = asdict(head_config)
@@ -237,7 +248,7 @@ class RainbowQNetwork(EvolvableNetwork):
         self.build_network_head(head_config)
 
     def build_network_head(self, net_config: dict[str, Any]) -> None:
-        """Builds the value and advantage heads of the network based on the passed configuration.
+        """Build the value and advantage heads of the network based on the passed configuration.
 
         :param net_config: Configuration of the network head.
         :type net_config: dict[str, Any]
@@ -252,7 +263,10 @@ class RainbowQNetwork(EvolvableNetwork):
         )
 
     def forward(
-        self, obs: TorchObsType, q: bool = True, log: bool = False
+        self,
+        obs: TorchObsType,
+        q: bool = True,
+        log: bool = False,
     ) -> torch.Tensor:
         """Forward pass of the Rainbow Q network.
 
@@ -298,11 +312,11 @@ class ContinuousQNetwork(EvolvableNetwork):
     :type action_space: spaces.Box
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
+    :type encoder_cls: str | type[EvolvableModule] | None
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: ConfigType
     :param head_config: Configuration of the network MLP head.
-    :type head_config: Optional[ConfigType]
+    :type head_config: ConfigType | None
     :param min_latent_dim: Minimum dimension of the latent space representation. Defaults to 8.
     :type min_latent_dim: int
     :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
@@ -313,13 +327,10 @@ class ContinuousQNetwork(EvolvableNetwork):
     :type simba: bool
     :param recurrent: Whether to use a recurrent network. Defaults to False.
     :type recurrent: bool
-    :param normalize_actions: Whether to normalize the actions. Defaults to False. This is set to True if
-        the encoder has nn.LayerNorm layers.
-    :type normalize_actions: bool
     :param device: Device to use for the network.
     :type device: str
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     action_mean: torch.Tensor
@@ -330,18 +341,36 @@ class ContinuousQNetwork(EvolvableNetwork):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Box,
-        encoder_cls: Optional[type[EvolvableModule]] = None,
-        encoder_config: Optional[NetConfigType] = None,
-        head_config: Optional[NetConfigType] = None,
+        encoder_cls: type[EvolvableModule] | None = None,
+        encoder_config: NetConfigType | None = None,
+        head_config: NetConfigType | None = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
-        normalize_actions: bool = False,
         device: str = "cpu",
-        random_seed: Optional[int] = None,
-    ):
+        random_seed: int | None = None,
+    ) -> None:
+        # NOTE: Need to disable layer normalization for the encoder since we're
+        # concatenating the actions to the latent space and we don't want to do the same
+        # to these so as to not lose scale information
+        if encoder_config is None:
+            encoder_config = get_default_encoder_config(
+                observation_space,
+                simba=simba,
+                recurrent=recurrent,
+                layer_norm=False,
+            )
+        elif is_mlp_net_config(encoder_config):
+            if encoder_config.get("layer_norm", False):
+                warnings.warn(
+                    "Layer normalization is not supported for the encoder of DDPG networks. Disabling it. "
+                    "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469",
+                    stacklevel=2,
+                )
+
+            encoder_config["layer_norm"] = False
 
         super().__init__(
             observation_space,
@@ -363,39 +392,13 @@ class ContinuousQNetwork(EvolvableNetwork):
             head_config["output_activation"] = None
 
         self.num_actions = spaces.flatdim(action_space)
-
-        # If the encoder has nn.LayerNorm layers, we normalize the actions for
-        # better training stability
-        # see https://github.com/AgileRL/AgileRL/issues/337
-        self.normalize_actions = normalize_actions or self._check_normalize_actions()
-
-        # Build value network
-        self.build_network_head(head_config)
-
-    def _check_normalize_actions(self) -> bool:
-        """Checks if the actions should be normalized.
-
-        :return: Whether to normalize the actions.
-        :rtype: bool
-        """
-        if isinstance(self.encoder, EvolvableMLP):
-            return self.encoder.layer_norm
-
-        # NOTE: In multi-input encoders, normalizing actions is only relevant if
-        # we specify `vector_space_mlp=True` in the encoder config.
-        elif (
-            isinstance(self.encoder, EvolvableMultiInput)
-            and "vector_mlp" in self.encoder.feature_net
-        ):
-            return self.encoder.feature_net["vector_mlp"].layer_norm
-
-        return False
+        self.build_network_head(head_config)  # Build value network
 
     def build_network_head(self, net_config: NetConfigType) -> None:
-        """Builds the head of the network.
+        """Build the head of the network.
 
         :param head_config: Configuration of the head.
-        :type head_config: Optional[NetConfigType]
+        :type head_config: NetConfigType | None
         """
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim + self.num_actions,
@@ -422,10 +425,6 @@ class ContinuousQNetwork(EvolvableNetwork):
 
         # Extract features from the observation
         latent = self.extract_features(obs)
-
-        # Normalize actions
-        if self.normalize_actions:
-            actions = nn.functional.layer_norm(actions, [actions.size(-1)])
 
         x = torch.cat([latent, actions], dim=-1)
         return self.head_net(x)

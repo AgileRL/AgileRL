@@ -51,16 +51,15 @@ def load_item(config, *args, verbose=True):
     name = config.pop("name")
     if name not in registry:
         raise NotImplementedError
-    if "cache_id" in config:
-        if (name, config["cache_id"]) in cache:
-            if verbose:
-                print(f'loading from cache ({name}, {config["cache_id"]})')
-            return cache[(name, config["cache_id"])]
+    if "cache_id" in config and (name, config["cache_id"]) in cache:
+        if verbose:
+            print(f"loading from cache ({name}, {config['cache_id']})")
+        return cache[(name, config["cache_id"])]
     if verbose:
         print(f"loading {name}: {config}")
     item = registry[name](config, *args, verbose=verbose)
     if "cache_id" in config:
-        print(f'saving to cache ({name}, {config["cache_id"]})')
+        print(f"saving to cache ({name}, {config['cache_id']})")
         cache[(name, config["cache_id"])] = item
     return item
 
@@ -70,8 +69,10 @@ def load_model(config, model, device, verbose=True):
     if config["checkpoint_path"] is not None:
         if verbose:
             print(
-                "loading %s state dict from: %s"
-                % (config["name"], convert_path(config["checkpoint_path"]))
+                "loading {} state dict from: {}".format(
+                    config["name"],
+                    convert_path(config["checkpoint_path"]),
+                ),
             )
         chkpt_state_dict = torch.load(
             convert_path(config["checkpoint_path"]),
@@ -84,8 +85,10 @@ def load_model(config, model, device, verbose=True):
     elif config["gpt_pretrained"]:
         if verbose:
             print(
-                "loading %s state dict from: %s"
-                % (config["name"], convert_path(config["gpt_checkpoint_path"]))
+                "loading {} state dict from: {}".format(
+                    config["name"],
+                    convert_path(config["gpt_checkpoint_path"]),
+                ),
             )
         pretrained_state_dict = convert_path(config["gpt_checkpoint_path"])
         model.model = EvolvableGPT.from_pretrained(
@@ -135,7 +138,10 @@ def load_bc_policy(config, device, verbose=True):
 def load_bc_evaluator(config, device, verbose=True):
     env = load_item(config["env"], device, verbose=verbose)
     return BC_Evaluator(
-        env, config["env"], config["kind"], **config["generation_kwargs"]
+        env,
+        config["env"],
+        config["kind"],
+        **config["generation_kwargs"],
     )
 
 
@@ -158,7 +164,10 @@ def load_iql_policy(config, device, verbose=True):
 def load_iql_evaluator(config, device, verbose=True):
     env = load_item(config["env"], device, verbose=verbose)
     return ILQL_Evaluator(
-        env, config["verbose"], config["kind"], **config["generation_kwargs"]
+        env,
+        config["verbose"],
+        config["kind"],
+        **config["generation_kwargs"],
     )
 
 
@@ -166,18 +175,26 @@ def load_iql_evaluator(config, device, verbose=True):
 def load_top_advantage_n_grams(config, device, verbose=True):
     data = load_item(config["data"], device, verbose=verbose)
     return TopAdvantageNGrams(
-        data, config["print_every"], config["print_k"], config["n_gram"]
+        data,
+        config["print_every"],
+        config["print_k"],
+        config["n_gram"],
     )
 
 
 @register("vocab")
 def load_vocab(config, verbose=True):
     vocab = Vocabulary.from_file(
-        convert_path(config["vocab_path"]), config["fill_cache"]
+        convert_path(config["vocab_path"]),
+        config["fill_cache"],
     )
     if config["cache_path"] is not None:
         if verbose:
-            print("loading vocab cache from: %s" % convert_path(config["cache_path"]))
+            print(
+                "loading vocab cache from: {}".format(
+                    convert_path(config["cache_path"]),
+                ),
+            )
         vocab.cache.load(convert_path(config["cache_path"]))
         if verbose:
             print("loaded.")
@@ -210,16 +227,20 @@ def load_optimal_policy(config, device, verbose=True):
     start_word_policy = None
     if config["start_word_policy"] is not None:
         start_word_policy = load_item(
-            config["start_word_policy"], device, verbose=verbose
+            config["start_word_policy"],
+            device,
+            verbose=verbose,
         )
     policy = OptimalPolicy(
-        start_word_policy=start_word_policy, progress_bar=config["progress_bar"]
+        start_word_policy=start_word_policy,
+        progress_bar=config["progress_bar"],
     )
     if config["cache_path"] is not None:
         if verbose:
             print(
-                "loading optimal policy cache from: %s"
-                % convert_path(config["cache_path"])
+                "loading optimal policy cache from: {}".format(
+                    convert_path(config["cache_path"]),
+                ),
             )
         policy.cache.load(convert_path(config["cache_path"]))
         if verbose:
@@ -238,7 +259,9 @@ def load_repeat_policy(config, device, verbose=True):
     start_word_policy = None
     if config["start_word_policy"] is not None:
         start_word_policy = load_item(
-            config["start_word_policy"], device, verbose=verbose
+            config["start_word_policy"],
+            device,
+            verbose=verbose,
         )
     return RepeatPolicy(start_word_policy=start_word_policy, first_n=config["first_n"])
 
@@ -270,7 +293,10 @@ def load_wordle_iterable_dataset(config, device, verbose=True):
     vocab = load_item(config["vocab"], verbose=verbose)
     token_reward = load_item(config["token_reward"], device, verbose=verbose)
     return WordleIterableDataset(
-        policy, vocab, max_len=config["max_len"], token_reward=token_reward
+        policy,
+        vocab,
+        max_len=config["max_len"],
+        token_reward=token_reward,
     )
 
 
@@ -282,7 +308,10 @@ def load_wordle_dataset(config, device, verbose=True):
         vocab = None
     token_reward = load_item(config["token_reward"], device, verbose=verbose)
     return WordleListDataset.from_file(
-        convert_path(config["file_path"]), config["max_len"], vocab, token_reward
+        convert_path(config["file_path"]),
+        config["max_len"],
+        vocab,
+        token_reward,
     )
 
 

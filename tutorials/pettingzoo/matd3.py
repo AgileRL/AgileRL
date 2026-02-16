@@ -74,7 +74,11 @@ if __name__ == "__main__":
         lr_critic=RLParameter(min=1e-4, max=1e-2),
         batch_size=RLParameter(min=8, max=512, dtype=int),
         learn_step=RLParameter(
-            min=20, max=200, dtype=int, grow_factor=1.5, shrink_factor=0.75
+            min=20,
+            max=200,
+            dtype=int,
+            grow_factor=1.5,
+            shrink_factor=0.75,
         ),
     )
 
@@ -143,10 +147,11 @@ if __name__ == "__main__":
             steps = 0
             for idx_step in range(evo_steps // num_envs):
                 action, raw_action = agent.get_action(
-                    obs=obs, infos=info
+                    obs=obs,
+                    infos=info,
                 )  # Predict action
                 next_obs, reward, termination, truncation, info = env.step(
-                    action
+                    action,
                 )  # Act in environment
 
                 scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
@@ -173,10 +178,10 @@ if __name__ == "__main__":
                         and memory.counter > learning_delay
                     ):
                         experiences = memory.sample(
-                            agent.batch_size
+                            agent.batch_size,
                         )  # Sample replay buffer
                         agent.learn(
-                            experiences
+                            experiences,
                         )  # Learn according to agent's RL algorithm
 
                 # Handle num_envs > learn step; learn multiple times per step in env
@@ -185,10 +190,10 @@ if __name__ == "__main__":
                 ):
                     for _ in range(num_envs // agent.learn_step):
                         experiences = memory.sample(
-                            agent.batch_size
+                            agent.batch_size,
                         )  # Sample replay buffer
                         agent.learn(
-                            experiences
+                            experiences,
                         )  # Learn according to agent's RL algorithm
 
                 obs = next_obs
@@ -197,7 +202,9 @@ if __name__ == "__main__":
                 reset_noise_indices = []
                 term_array = np.array(list(termination.values())).transpose()
                 trunc_array = np.array(list(truncation.values())).transpose()
-                for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
+                for idx, (d, t) in enumerate(
+                    zip(term_array, trunc_array, strict=False),
+                ):
                     if np.any(d) or np.any(t):
                         completed_episode_scores.append(scores[idx])
                         agent.scores.append(scores[idx])
@@ -233,9 +240,9 @@ if __name__ == "__main__":
             f"--- Global steps {total_steps} ---\n"
             f"Steps {[agent.steps[-1] for agent in pop]}\n"
             f"Scores: {mean_scores}\n"
-            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
-            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
-            f"Mutations: {[agent.mut for agent in pop]}"
+            f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n"
+            f"Mutations: {[agent.mut for agent in pop]}",
         )
 
         # Tournament selection and population mutation

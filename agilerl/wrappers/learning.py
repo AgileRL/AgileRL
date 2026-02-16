@@ -1,4 +1,5 @@
 import random
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
@@ -13,16 +14,26 @@ class Skill(gym.Wrapper, gym.utils.RecordConstructorArgs):
     :type env: Gymnasium-style environment
     """
 
-    def __init__(self, env: gym.Env):
+    def __init__(self, env: gym.Env) -> None:
         gym.utils.RecordConstructorArgs.__init__(self)
         gym.Wrapper.__init__(self, env)
 
-    def step(self, action):
+    def step(
+        self,
+        action: Any,
+    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation, reward, terminated, truncated, info = self.env.step(action)
         # Use custom reward
         return self.skill_reward(observation, reward, terminated, truncated, info)
 
-    def skill_reward(self, observation, reward, terminated, truncated, info):
+    def skill_reward(
+        self,
+        observation: Any,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        info: dict[str, Any],
+    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         return observation, reward, terminated, truncated, info
 
 
@@ -44,7 +55,9 @@ class BanditEnv:
         self.targets = pd.factorize(targets.values.ravel())[0]
         self.prev_reward = np.zeros(self.arms)
 
-    def _new_state_and_target_action(self):
+    def _new_state_and_target_action(
+        self,
+    ) -> tuple[np.ndarray, int]:
         # Randomly select next context
         r = random.randint(0, len(self.features) - 1)
 
@@ -52,11 +65,13 @@ class BanditEnv:
         context = np.array(self.features.loc[r])
         target = self.targets[r]
         next_state = np.zeros((self.arms, *self.context_dim))
-        for i, j in zip(range(self.arms), range(0, self.context_dim[0], len(context))):
+        for i, j in zip(
+            range(self.arms), range(0, self.context_dim[0], len(context)), strict=False
+        ):
             next_state[i, j : j + len(context)] = context
         return next_state, target
 
-    def step(self, k):
+    def step(self, k: int) -> tuple[np.ndarray, float]:
         # Calculate reward from action in previous state
         reward = self.prev_reward[k]
 
@@ -69,7 +84,7 @@ class BanditEnv:
         self.prev_reward = next_reward
         return next_state, reward
 
-    def reset(self):
+    def reset(self) -> np.ndarray:
         next_state, target = self._new_state_and_target_action()
         next_reward = np.zeros(self.arms)
         next_reward[target] = 1

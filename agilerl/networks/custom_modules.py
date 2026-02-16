@@ -67,7 +67,7 @@ class DuelingDistributionalMLP(EvolvableMLP):
         noisy: bool = True,
         noise_std: float = 0.5,
         activation: str = "ReLU",
-        output_activation: str = None,
+        output_activation: str | None = None,
         min_hidden_layers: int = 1,
         max_hidden_layers: int = 3,
         min_mlp_nodes: int = 64,
@@ -125,7 +125,10 @@ class DuelingDistributionalMLP(EvolvableMLP):
         return net_config
 
     def forward(
-        self, x: torch.Tensor, q: bool = True, log: bool = False
+        self,
+        x: torch.Tensor,
+        q: bool = True,
+        log: bool = False,
     ) -> torch.Tensor:
         """Forward pass of the network.
 
@@ -180,5 +183,6 @@ class DuelingDistributionalMLP(EvolvableMLP):
         )
 
         self.advantage_net = EvolvableModule.preserve_parameters(
-            self.advantage_net, advantage_net
+            self.advantage_net,
+            advantage_net,
         )

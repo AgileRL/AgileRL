@@ -52,10 +52,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     hp_config = HyperparameterConfig(
         lr_actor=RLParameter(
-            min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+            min=MUTATION_PARAMS["MIN_LR"],
+            max=MUTATION_PARAMS["MAX_LR"],
         ),
         lr_critic=RLParameter(
-            min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+            min=MUTATION_PARAMS["MIN_LR"],
+            max=MUTATION_PARAMS["MAX_LR"],
         ),
         batch_size=RLParameter(
             min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
@@ -99,9 +101,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         eval_steps=INIT_HP["EVAL_STEPS"],
         eval_loop=INIT_HP["EVAL_LOOP"],
         learning_delay=INIT_HP["LEARNING_DELAY"],
-        eps_start=INIT_HP["EPS_START"] if "EPS_START" in INIT_HP else 1.0,
-        eps_end=INIT_HP["EPS_END"] if "EPS_END" in INIT_HP else 0.01,
-        eps_decay=INIT_HP["EPS_DECAY"] if "EPS_DECAY" in INIT_HP else 0.999,
+        eps_start=INIT_HP.get("EPS_START", 1.0),
+        eps_end=INIT_HP.get("EPS_END", 0.01),
+        eps_decay=INIT_HP.get("EPS_DECAY", 0.999),
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,

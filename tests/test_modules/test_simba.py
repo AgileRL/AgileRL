@@ -24,7 +24,11 @@ def encoder_simba_config():
 
 def test_correct_initialization():
     model = EvolvableSimBa(
-        num_inputs=10, num_outputs=2, hidden_size=64, num_blocks=3, device="cpu"
+        num_inputs=10,
+        num_outputs=2,
+        hidden_size=64,
+        num_blocks=3,
+        device="cpu",
     )
     assert model.num_inputs == 10
     assert model.num_outputs == 2
@@ -45,7 +49,11 @@ def test_incorrect_initialization():
 
 def test_forward_pass():
     model = EvolvableSimBa(
-        num_inputs=10, num_outputs=2, hidden_size=64, num_blocks=3, device="cpu"
+        num_inputs=10,
+        num_outputs=2,
+        hidden_size=64,
+        num_blocks=3,
+        device="cpu",
     )
     x = torch.randn(1, 10)
     output = model(x)
@@ -54,7 +62,11 @@ def test_forward_pass():
 
 def test_add_block():
     model = EvolvableSimBa(
-        num_inputs=10, num_outputs=2, hidden_size=64, num_blocks=3, device="cpu"
+        num_inputs=10,
+        num_outputs=2,
+        hidden_size=64,
+        num_blocks=3,
+        device="cpu",
     )
     initial_blocks = model.num_blocks
     model.add_block()
@@ -63,7 +75,11 @@ def test_add_block():
 
 def test_remove_block():
     model = EvolvableSimBa(
-        num_inputs=10, num_outputs=2, hidden_size=64, num_blocks=3, device="cpu"
+        num_inputs=10,
+        num_outputs=2,
+        hidden_size=64,
+        num_blocks=3,
+        device="cpu",
     )
     initial_blocks = model.num_blocks
     model.remove_block()
@@ -73,7 +89,11 @@ def test_remove_block():
 @pytest.mark.parametrize("numb_new_nodes", [16, None])
 def test_add_node(numb_new_nodes):
     model = EvolvableSimBa(
-        num_inputs=10, num_outputs=2, hidden_size=64, num_blocks=3, device="cpu"
+        num_inputs=10,
+        num_outputs=2,
+        hidden_size=64,
+        num_blocks=3,
+        device="cpu",
     )
     initial_hidden_size = model.hidden_size
     mut_dict = model.add_node(numb_new_nodes=numb_new_nodes)
@@ -83,7 +103,11 @@ def test_add_node(numb_new_nodes):
 @pytest.mark.parametrize("numb_new_nodes", [16, None])
 def test_remove_node(numb_new_nodes):
     model = EvolvableSimBa(
-        num_inputs=10, num_outputs=2, hidden_size=124, num_blocks=3, device="cpu"
+        num_inputs=10,
+        num_outputs=2,
+        hidden_size=124,
+        num_blocks=3,
+        device="cpu",
     )
     initial_hidden_size = model.hidden_size
     mut_dict = model.remove_node(numb_new_nodes=numb_new_nodes)
@@ -92,7 +116,11 @@ def test_remove_node(numb_new_nodes):
 
 def test_recreate_network():
     model = EvolvableSimBa(
-        num_inputs=10, num_outputs=2, hidden_size=64, num_blocks=3, device="cpu"
+        num_inputs=10,
+        num_outputs=2,
+        hidden_size=64,
+        num_blocks=3,
+        device="cpu",
     )
     initial_model = model.model
     model.recreate_network()
@@ -101,7 +129,11 @@ def test_recreate_network():
 
 def test_clone():
     model = EvolvableSimBa(
-        num_inputs=10, num_outputs=2, hidden_size=64, num_blocks=3, device="cpu"
+        num_inputs=10,
+        num_outputs=2,
+        hidden_size=64,
+        num_blocks=3,
+        device="cpu",
     )
     clone = model.clone()
     assert clone is not model

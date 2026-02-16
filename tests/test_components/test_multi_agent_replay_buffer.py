@@ -324,7 +324,9 @@ def test_returns_np_transition_dictionary():
 
     # Initialize the class object
     buffer = MultiAgentReplayBuffer(
-        memory_size=memory_size, field_names=field_names, agent_ids=agent_ids
+        memory_size=memory_size,
+        field_names=field_names,
+        agent_ids=agent_ids,
     )
 
     # Create some dummy experiences
@@ -395,7 +397,9 @@ def test_returns_np_transition_asingle_experience_dictionary():
 
     # Initialize the class object
     buffer = MultiAgentReplayBuffer(
-        memory_size=memory_size, field_names=field_names, agent_ids=agent_ids
+        memory_size=memory_size,
+        field_names=field_names,
+        agent_ids=agent_ids,
     )
 
     # Create some dummy experiences
@@ -459,7 +463,9 @@ def test_returns_np_transition_dictionary_images():
 
     # Initialize the class object
     buffer = MultiAgentReplayBuffer(
-        memory_size=memory_size, field_names=field_names, agent_ids=agent_ids
+        memory_size=memory_size,
+        field_names=field_names,
+        agent_ids=agent_ids,
     )
 
     # Create some dummy experiences
@@ -614,8 +620,10 @@ def test_returns_torch_transition_dictionary():
         torch.from_numpy(np.array([[6, 5, 4], [9, 8, 7]])).to(device),
     )
     assert torch.equal(
-        transition["done"]["agent1"], torch.from_numpy(np.array([[1], [0]])).to(device)
+        transition["done"]["agent1"],
+        torch.from_numpy(np.array([[1], [0]])).to(device),
     )
     assert torch.equal(
-        transition["done"]["agent2"], torch.from_numpy(np.array([[0], [1]])).to(device)
+        transition["done"]["agent2"],
+        torch.from_numpy(np.array([[0], [1]])).to(device),
     )

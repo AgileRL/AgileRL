@@ -1,5 +1,5 @@
 import gc
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -29,7 +29,7 @@ if HAS_LLM_DEPENDENCIES:
 
 
 class GRPO(LLMAlgorithm):
-    """The GRPO algorithm class. GRPO paper: https://arxiv.org/pdf/2402.03300
+    """The GRPO algorithm class. GRPO paper: https://arxiv.org/pdf/2402.03300.
 
     :param pad_token_id: Pad token id
     :type pad_token_id: int
@@ -106,7 +106,7 @@ class GRPO(LLMAlgorithm):
         model_name: str | None = None,
         actor_network: PreTrainedModelProtocol | None = None,
         model_config: dict[str, Any] | None = None,
-        hp_config: Optional[HyperparameterConfig] = None,
+        hp_config: HyperparameterConfig | None = None,
         index: int = 0,
         batch_size: int = 16,
         beta: float = 0.001,
@@ -124,17 +124,17 @@ class GRPO(LLMAlgorithm):
         micro_batch_size_per_gpu: int | None = None,
         reduce_memory_peak: bool = False,
         max_output_tokens: int | None = 1024,
-        min_output_tokens: Optional[int] = None,
-        max_model_len: Optional[int] = None,
-        lora_config: Optional[LoraConfigProtocol] = None,
-        cosine_lr_schedule_config: Optional[CosineLRScheduleConfig] = None,
-        accelerator: Optional[Accelerator] = None,
+        min_output_tokens: int | None = None,
+        max_model_len: int | None = None,
+        lora_config: LoraConfigProtocol | None = None,
+        cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
+        accelerator: Accelerator | None = None,
         device: str = "cpu",
         wrap: bool = True,
         clone: bool = False,
         use_separate_reference_adapter: bool = False,
         use_vllm: bool = False,
-        vllm_config: Optional[VLLMConfig] = None,
+        vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         gradient_checkpointing: bool = True,
     ) -> None:
@@ -174,20 +174,23 @@ class GRPO(LLMAlgorithm):
         assert isinstance(lr, float), "Learning rate must be a float."
         assert lr > 0, "Learning rate must be greater than zero."
         assert isinstance(
-            clip_coef, (float, int)
+            clip_coef,
+            (float, int),
         ), "Clipping coefficient must be a float."
-        assert (
-            clip_coef >= 0
-        ), "Clipping coefficient must be greater than or equal to zero."
+        assert clip_coef >= 0, (
+            "Clipping coefficient must be greater than or equal to zero."
+        )
         assert isinstance(
-            update_epochs, int
+            update_epochs,
+            int,
         ), "Policy update epochs must be an integer."
-        assert (
-            update_epochs >= 1
-        ), "Policy update epochs must be greater than or equal to one."
+        assert update_epochs >= 1, (
+            "Policy update epochs must be greater than or equal to one."
+        )
         if actor_network is not None:
             assert isinstance(
-                actor_network, (PeftModelProtocol, PreTrainedModelProtocol)
+                actor_network,
+                (PeftModelProtocol, PreTrainedModelProtocol),
             ), "Actor network must be a PeftModelProtocol or PreTrainedModelProtocol"
 
         self.clip_coef = clip_coef
@@ -200,8 +203,9 @@ class GRPO(LLMAlgorithm):
         self.top_k = top_k
         self.min_p = min_p
         if max_output_tokens is None and max_model_len is None:
+            msg = "Either max_output_tokens or max_model_len must be specified"
             raise ValueError(
-                "Either max_output_tokens or max_model_len must be specified"
+                msg,
             )
         self.max_output_tokens = max_output_tokens
         self.min_output_tokens = min_output_tokens
@@ -232,9 +236,11 @@ class GRPO(LLMAlgorithm):
             self.wrap_models()
 
     def get_action(
-        self, obs: LLMObsType, training: bool = True
+        self,
+        obs: LLMObsType,
+        training: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Returns the next action to take in the environment.
+        """Return the next action to take in the environment.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
@@ -265,7 +271,9 @@ class GRPO(LLMAlgorithm):
                     )
                     completion_ids.append(completion_id)
                     action_mask = torch.zeros_like(
-                        completion_id, dtype=torch.bool, device=self.device
+                        completion_id,
+                        dtype=torch.bool,
+                        device=self.device,
                     )
                     action_mask[:, prompt["input_ids"].shape[1] :] = True
                     action_mask[completion_id == self.pad_token_id] = False
@@ -277,7 +285,8 @@ class GRPO(LLMAlgorithm):
                 self.llm.wake_up()
             self._move_model_to_vllm()
             completion_ids, action_masks = self._generate_with_vllm_colocate(
-                obs, group_size
+                obs,
+                group_size,
             )
             if self.vllm_config.sleep_mode:
                 self.llm.sleep(level=2)
@@ -285,7 +294,7 @@ class GRPO(LLMAlgorithm):
         return completion_ids, action_masks
 
     def learn(self, experiences: ExperiencesType) -> tuple[float, float]:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param experiences: Batched completion_ids, action_masks and rewards
         :type experiences: ExperiencesType
@@ -294,7 +303,8 @@ class GRPO(LLMAlgorithm):
         torch.cuda.empty_cache()
 
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
-            *experiences, padding_values=[self.pad_token_id, False, None]
+            *experiences,
+            padding_values=[self.pad_token_id, False, None],
         )
         advantages = self._calculate_advantage(rewards).to(self.device)
 
@@ -352,7 +362,8 @@ class GRPO(LLMAlgorithm):
                     batch_advantages,
                 )
                 if not loss.isfinite():
-                    raise ValueError(f"Loss is not finite: {loss}")
+                    msg = f"Loss is not finite: {loss}"
+                    raise ValueError(msg)
                 self._backward_pass(loss)
                 mean_loss += loss.item()
                 mean_kl += kl.item()
@@ -365,7 +376,7 @@ class GRPO(LLMAlgorithm):
         env: ReasoningGym,
         loop: int = 1,
     ) -> torch.Tensor:
-        """Returns fitness (test) score tensor of llm on test sub-set.
+        """Return fitness (test) score tensor of llm on test sub-set.
 
         :param env: The environment to be tested in
         :type env: ReasoningGym environment
@@ -388,7 +399,9 @@ class GRPO(LLMAlgorithm):
         return reward_tensor
 
     def _calculate_advantage(
-        self, rewards: torch.Tensor, eps: float = 1e-8
+        self,
+        rewards: torch.Tensor,
+        eps: float = 1e-8,
     ) -> torch.Tensor:
         """Calculate the group relative advantage for each groups reward.
 
@@ -408,7 +421,9 @@ class GRPO(LLMAlgorithm):
         return advantage.flatten().unsqueeze(1)
 
     def _calculate_kl_divergence(
-        self, log_probs: torch.Tensor, reference_log_probs: torch.Tensor
+        self,
+        log_probs: torch.Tensor,
+        reference_log_probs: torch.Tensor,
     ) -> torch.Tensor:
         """Calculate the KL divergence between the current and reference log probabilities.
 
@@ -451,14 +466,17 @@ class GRPO(LLMAlgorithm):
         kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
         log_probs_ratio = torch.exp(log_probs - old_log_probs)
         clipped_log_probs_ratio = log_probs_ratio.clamp(
-            1 - self.clip_coef, 1 + self.clip_coef
+            1 - self.clip_coef,
+            1 + self.clip_coef,
         )
         surrogate = log_probs_ratio * advantages
         clipped_surrogate = clipped_log_probs_ratio * advantages
         loss = -torch.min(surrogate, clipped_surrogate) + self.beta * kl
         denominator = mask.sum(dim=-1)
         denominator = torch.where(
-            denominator > 0, denominator, torch.ones_like(denominator)
+            denominator > 0,
+            denominator,
+            torch.ones_like(denominator),
         )
         loss = (loss * mask).sum(dim=-1) / denominator
         log_probs_ratio, clipped_log_probs_ratio, surrogate, clipped_surrogate = (

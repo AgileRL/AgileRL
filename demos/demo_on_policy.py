@@ -21,7 +21,7 @@ if __name__ == "__main__":
     NET_CONFIG = {
         "encoder_config": {
             "hidden_size": [32, 32],  # Actor hidden size
-        }
+        },
     }
 
     INIT_HP = {
@@ -114,9 +114,11 @@ if __name__ == "__main__":
                 completed_episodes += episode_scores
 
             pop_episode_scores.append(
-                np.mean(completed_episodes)
-                if len(completed_episodes) > 0
-                else "0 completed episodes"
+                (
+                    np.mean(completed_episodes)
+                    if len(completed_episodes) > 0
+                    else "0 completed episodes"
+                ),
             )
             pbar.update(steps // len(pop))
 
@@ -134,8 +136,8 @@ if __name__ == "__main__":
             f"--- Global steps {total_steps} ---\n"
             f"Steps: {[agent.steps[-1] for agent in pop]}\n"
             f"Scores: {pop_episode_scores}\n"
-            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
-            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+            f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n",
         )
 
         # Tournament selection and population mutation

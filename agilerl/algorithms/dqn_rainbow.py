@@ -1,9 +1,9 @@
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
-import torch.optim as optim
 from gymnasium import spaces
+from torch import optim
 from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
@@ -79,8 +79,8 @@ class RainbowDQN(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
-        hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[dict[str, Any]] = None,
+        hp_config: HyperparameterConfig | None = None,
+        net_config: dict[str, Any] | None = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 5,
@@ -93,12 +93,12 @@ class RainbowDQN(RLAlgorithm):
         v_max: float = 200,
         noise_std: float = 0.5,
         n_step: int = 3,
-        mut: Optional[str] = None,
+        mut: str | None = None,
         normalize_images: bool = True,
         combined_reward: bool = False,
-        actor_network: Optional[EvolvableModule] = None,
+        actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
+        accelerator: Any | None = None,
         wrap: bool = True,
     ) -> None:
         super().__init__(
@@ -124,24 +124,28 @@ class RainbowDQN(RLAlgorithm):
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(
-            prior_eps, float
+            prior_eps,
+            float,
         ), "Minimum priority for sampling must be a float."
         assert prior_eps > 0, "Minimum priority for sampling must be greater than zero."
         assert isinstance(num_atoms, int), "Number of atoms must be an integer."
         assert num_atoms >= 1, "Number of atoms must be greater than or equal to one."
         assert isinstance(
-            v_min, (float, int)
+            v_min,
+            (float, int),
         ), "Minimum value of support must be a float."
         assert isinstance(
-            v_max, (float, int)
+            v_max,
+            (float, int),
         ), "Maximum value of support must be a float."
-        assert (
-            v_max >= v_min
-        ), "Maximum value of support must be greater than or equal to minimum value."
+        assert v_max >= v_min, (
+            "Maximum value of support must be greater than or equal to minimum value."
+        )
         assert isinstance(n_step, int), "Step number must be an integer."
         assert n_step >= 1, "Step number must be greater than or equal to one."
         assert isinstance(
-            wrap, bool
+            wrap,
+            bool,
         ), "Wrap models flag must be boolean value True or False."
 
         self.batch_size = batch_size
@@ -161,29 +165,33 @@ class RainbowDQN(RLAlgorithm):
         self.noise_std = noise_std
 
         self.support = torch.linspace(
-            self.v_min, self.v_max, self.num_atoms, device=self.device
+            self.v_min,
+            self.v_max,
+            self.num_atoms,
+            device=self.device,
         )
         self.delta_z = (self.v_max - self.v_min) / (self.num_atoms - 1)
 
         if actor_network is not None:
             if isinstance(actor_network, MakeEvolvable):
                 actor_network.rainbow = True
-                actor_network = actor_network
                 actor_network.support = self.support
                 actor_network.num_atoms = self.num_atoms
                 actor_network = MakeEvolvable(**actor_network.init_dict)
                 actor_network.load_state_dict(actor_network.state_dict())
             elif not isinstance(actor_network, EvolvableModule):
+                msg = f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+                    msg,
                 )
 
             self.actor, self.actor_target = make_safe_deepcopies(
-                actor_network, actor_network
+                actor_network,
+                actor_network,
             )
         else:
             net_config = {} if net_config is None else net_config
-            head_config: Optional[dict[str, Any]] = net_config.get("head_config", {})
+            head_config: dict[str, Any] | None = net_config.get("head_config", {})
 
             head_config = MlpNetConfig(
                 hidden_size=head_config.get("hidden_size", [64]),
@@ -194,7 +202,7 @@ class RainbowDQN(RLAlgorithm):
             )
             net_config["head_config"] = head_config
 
-            def create_actor():
+            def create_actor() -> RainbowQNetwork:
                 return RainbowQNetwork(
                     observation_space=observation_space,
                     action_space=action_space,
@@ -227,16 +235,16 @@ class RainbowDQN(RLAlgorithm):
                 eval_network=self.actor,
                 shared_networks=self.actor_target,
                 policy=True,
-            )
+            ),
         )
 
     def get_action(
         self,
         obs: ObservationType,
-        action_mask: Optional[np.ndarray] = None,
+        action_mask: np.ndarray | None = None,
         training: bool = True,
     ) -> np.ndarray:
-        """Returns the next action to take in the environment.
+        """Return the next action to take in the environment.
 
         :param obs: State observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
@@ -259,12 +267,13 @@ class RainbowDQN(RLAlgorithm):
             # Need to stack if vectorized env
             action_mask = (
                 np.stack(action_mask)
-                if action_mask.dtype == np.object_ or isinstance(action_mask, list)
+                if action_mask.dtype == object or isinstance(action_mask, list)
                 else action_mask
             )
             inv_mask = 1 - action_mask
             masked_action_values = np.ma.array(
-                action_values.cpu().data.numpy(), mask=inv_mask
+                action_values.cpu().data.numpy(),
+                mask=inv_mask,
             )
             action = np.argmax(masked_action_values, axis=-1)
 
@@ -281,7 +290,7 @@ class RainbowDQN(RLAlgorithm):
         dones: torch.Tensor,
         gamma: float,
     ) -> torch.Tensor:
-        """Calculates the DQN loss.
+        """Calculate the DQN loss.
 
         :param obs: Batch of current states
         :type obs: torch.Tensor
@@ -324,8 +333,8 @@ class RainbowDQN(RLAlgorithm):
 
             # Shape of projected q distribution is (batch_size, num_atoms) as we have argmaxed over actions
             # Fix disappearing probability mass
-            L[(u > 0) * (L == u)] -= 1
-            u[(L < (self.num_atoms - 1)) * (L == u)] += 1
+            L[(u > 0) * (u == L)] -= 1
+            u[((self.num_atoms - 1) > L) * (u == L)] += 1
             offset = (
                 torch.linspace(
                     0,
@@ -340,10 +349,14 @@ class RainbowDQN(RLAlgorithm):
             proj_dist = torch.zeros(target_q_dist.size(), device=self.device)
 
             proj_dist.view(-1).index_add_(
-                0, (L + offset).view(-1), (target_q_dist * (u.float() - b)).view(-1)
+                0,
+                (L + offset).view(-1),
+                (target_q_dist * (u.float() - b)).view(-1),
             )
             proj_dist.view(-1).index_add_(
-                0, (u + offset).view(-1), (target_q_dist * (b - L.float())).view(-1)
+                0,
+                (u + offset).view(-1),
+                (target_q_dist * (b - L.float())).view(-1),
             )
 
         # Calculate the current obs
@@ -351,16 +364,15 @@ class RainbowDQN(RLAlgorithm):
         log_p = log_q_dist[range(self.batch_size), actions.squeeze().long()]
 
         # loss
-        elementwise_loss = -(proj_dist * log_p).sum(1)
-        return elementwise_loss
+        return -(proj_dist * log_p).sum(1)
 
     def learn(
         self,
         experiences: ExperiencesType,
-        n_experiences: Optional[ExperiencesType] = None,
+        n_experiences: ExperiencesType | None = None,
         per: bool = False,
-    ) -> tuple[float, Optional[np.ndarray], Optional[np.ndarray]]:
-        """Updates agent network parameters to learn from experiences.
+    ) -> tuple[float, np.ndarray | None, np.ndarray | None]:
+        """Update agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
         :type experiences: TensorDict
@@ -390,12 +402,22 @@ class RainbowDQN(RLAlgorithm):
 
             if self.combined_reward or not n_step:
                 elementwise_loss = self._dqn_loss(
-                    obs, actions, rewards, next_obs, dones, self.gamma
+                    obs,
+                    actions,
+                    rewards,
+                    next_obs,
+                    dones,
+                    self.gamma,
                 )
             if n_step:
                 n_gamma = self.gamma**self.n_step
                 n_step_elementwise_loss = self._dqn_loss(
-                    n_obs, n_actions, n_rewards, n_next_obs, n_dones, n_gamma
+                    n_obs,
+                    n_actions,
+                    n_rewards,
+                    n_next_obs,
+                    n_dones,
+                    n_gamma,
                 )
                 if self.combined_reward:
                     elementwise_loss += n_step_elementwise_loss
@@ -418,13 +440,23 @@ class RainbowDQN(RLAlgorithm):
             new_priorities = None
             if self.combined_reward or not n_step:
                 elementwise_loss = self._dqn_loss(
-                    obs, actions, rewards, next_obs, dones, self.gamma
+                    obs,
+                    actions,
+                    rewards,
+                    next_obs,
+                    dones,
+                    self.gamma,
                 )
 
             if n_step:
                 n_gamma = self.gamma**self.n_step
                 n_step_elementwise_loss = self._dqn_loss(
-                    n_obs, n_actions, n_rewards, n_next_obs, n_dones, n_gamma
+                    n_obs,
+                    n_actions,
+                    n_rewards,
+                    n_next_obs,
+                    n_dones,
+                    n_gamma,
                 )
                 if self.combined_reward:
                     elementwise_loss += n_step_elementwise_loss
@@ -455,20 +487,22 @@ class RainbowDQN(RLAlgorithm):
     def soft_update(self) -> None:
         """Soft updates target network."""
         for eval_param, target_param in zip(
-            self.actor.parameters(), self.actor_target.parameters()
+            self.actor.parameters(),
+            self.actor_target.parameters(),
+            strict=False,
         ):
             target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
+                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
             )
 
     def test(
         self,
         env: GymEnvType,
         swap_channels: bool = False,
-        max_steps: Optional[int] = None,
+        max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
@@ -495,12 +529,14 @@ class RainbowDQN(RLAlgorithm):
 
                     action_mask = info.get("action_mask", None)
                     action = self.get_action(
-                        obs, training=False, action_mask=action_mask
+                        obs,
+                        training=False,
+                        action_mask=action_mask,
                     )
                     obs, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
-                    for idx, (d, t) in enumerate(zip(done, trunc)):
+                    for idx, (d, t) in enumerate(zip(done, trunc, strict=False)):
                         if (
                             d or t or (max_steps is not None and step == max_steps)
                         ) and not finished[idx]:

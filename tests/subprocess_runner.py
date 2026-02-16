@@ -54,7 +54,6 @@ def setup_test_env_vars():
     """Set pytest ini env vars that would normally be set by pytest."""
     os.environ.setdefault("PYTHONHASHSEED", "0")
     os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
-    os.environ.setdefault("AGILERL_TEST_CLEAN_GPU_MEMORY", "1")
 
 
 def set_seed(seed=42):

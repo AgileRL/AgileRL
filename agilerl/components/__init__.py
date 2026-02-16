@@ -6,8 +6,8 @@ from .replay_buffer import (
 )
 
 __all__ = [
+    "MultiAgentReplayBuffer",
     "MultiStepReplayBuffer",
     "PrioritizedReplayBuffer",
     "ReplayBuffer",
-    "MultiAgentReplayBuffer",
 ]

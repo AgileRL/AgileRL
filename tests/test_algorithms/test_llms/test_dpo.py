@@ -54,6 +54,9 @@ def make_preference_gym(
     )
 
 
+pytestmark = pytest.mark.llm
+
+
 @pytest.fixture
 def preference_dataset_factory():
     return make_preference_gym
@@ -193,7 +196,9 @@ def test_init_dpo(
     assert dpo.device == (
         dpo.accelerator.device
         if torch.cuda.is_available() and dpo.accelerator is not None
-        else "cuda" if torch.cuda.is_available() else "cpu"
+        else "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
     )
     assert dpo.index == 0
     assert dpo.scores == []
@@ -360,7 +365,7 @@ def test_dpo_learn(
                 for i in range(100)
             ],
             "rejected": [f"REALLY BAD RESPONSE {i}" for i in range(100)],
-        }
+        },
     )
     test_dataset = Dataset.from_dict(
         {
@@ -370,7 +375,7 @@ def test_dpo_learn(
                 for i in range(100)
             ],
             "rejected": [f"REALLY BAD RESPONSE {i}" for i in range(100)],
-        }
+        },
     )
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
     env = PreferenceGym(
@@ -396,6 +401,7 @@ def test_dpo_learn(
     for (param_name, param), (_, pre_learn_param) in zip(
         dpo.actor.state_dict().items(),
         pre_learn_actor_state_dict.items(),
+        strict=False,
     ):
         if "actor" in param_name:
             assert not torch.equal(param, pre_learn_param)
@@ -467,7 +473,7 @@ def test_dpo_test(
                 for i in range(100)
             ],
             "rejected": [f"Bad response {i}" for i in range(100)],
-        }
+        },
     )
     test_dataset = Dataset.from_dict(
         {
@@ -477,7 +483,7 @@ def test_dpo_test(
                 for i in range(100)
             ],
             "rejected": [f"Bad response {i}" for i in range(100)],
-        }
+        },
     )
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
     env = PreferenceGym(

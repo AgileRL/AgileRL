@@ -3,8 +3,8 @@ from .optimizer_wrapper import OptimizerWrapper
 
 __all__ = [
     "EvolvableAlgorithm",
-    "RLAlgorithm",
+    "LLMAlgorithm",
     "MultiAgentRLAlgorithm",
     "OptimizerWrapper",
-    "LLMAlgorithm",
+    "RLAlgorithm",
 ]

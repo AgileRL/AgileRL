@@ -6,17 +6,15 @@ from peft import LoraConfig
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
-from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
+from agilerl.algorithms import GRPO
 from agilerl.training.train_llm import finetune_llm_reasoning
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym
-from agilerl.utils.utils import create_population
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 USE_VLLM = True
+MAX_CONTEXT_LENGTH = 1024
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
@@ -34,8 +32,7 @@ def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
 def format_reward_func(completions, target, **kwargs):
     rewards = []
 
-    for completion, gt in zip(completions, target):
-
+    for completion, _gt in zip(completions, target, strict=False):
         try:
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
@@ -45,7 +42,7 @@ def format_reward_func(completions, target, **kwargs):
                 rewards.append(0.0)
             else:
                 rewards.append(1.0)
-        except Exception:
+        except Exception:  # noqa: PERF203
             rewards.append(0.0)
     return rewards
 
@@ -53,7 +50,7 @@ def format_reward_func(completions, target, **kwargs):
 def equation_reward_func(completions, target, nums, **kwargs):
     rewards = []
 
-    for completion, gt, numbers in zip(completions, target, nums):
+    for completion, gt, numbers in zip(completions, target, nums, strict=False):
         try:
             # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
@@ -91,10 +88,17 @@ def combined_rewards(completion, solution, prompt):
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
     )
+
+    if reward == 2.0:
+        with open("countdown_completions.txt", "a") as text_file:
+            text_file.write(
+                f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n",
+            )
+
     return reward
 
 
-def main(init_hp, mut_p):
+def main():
     # Instantiate the model and the associated tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
@@ -111,11 +115,12 @@ def main(init_hp, mut_p):
         },
         {
             "role": "user",
-            "content": "Using each number in this tensor only once {question}, create an equation that equals {answer}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+            "content": "Using each number in this list only once {question}, create an equation that equals {answer}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
         },
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
 
+    # Convert the HuggingFace dataset into a Gymnasium environment
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -124,113 +129,52 @@ def main(init_hp, mut_p):
         conversation_template=conversation_template,
         data_batch_size_per_gpu=10,
         accelerator=accelerator,
-        return_raw_completions=USE_VLLM,
-        max_context_length=init_hp["MAX_MODEL_LEN"],
+        return_raw_completions=USE_VLLM,  # This is necessary for vLLM to work
+        max_context_length=MAX_CONTEXT_LENGTH,
     )
 
-    hp_config = HyperparameterConfig(
-        beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
-        lr=RLParameter(min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]),
-        group_size=RLParameter(
-            min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
-        ),
+    # Define the LoRA configuration
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=64,
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "up_proj",
+            "down_proj",
+            "gate_proj",
+        ],
+        task_type="CAUSAL_LM",
+        lora_dropout=0.05,
     )
 
-    # Define the algorithm kwargs
-    algo_kwargs = {
-        "model_name": MODEL_PATH,
-        "lora_config": LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-            lora_dropout=0.05,
-            bias="none",
-        ),
-        "use_vllm": USE_VLLM,
-        "vllm_config": VLLMConfig(sleep_mode=False, max_num_seqs=4),
-        "pad_token_id": tokenizer.pad_token_id,
-        "pad_token": tokenizer.pad_token,
-    }
-
-    pop = create_population(
-        algo=init_hp["ALGO"],
-        net_config=None,
-        INIT_HP=init_hp,
-        hp_config=hp_config,
-        population_size=init_hp["POP_SIZE"],
+    # Instantiate the grpo agent
+    agent = GRPO(
+        model_name=MODEL_PATH,
+        pad_token_id=tokenizer.eos_token_id,
+        pad_token=tokenizer.eos_token,
+        lora_config=lora_config,
+        batch_size=16,
+        max_model_len=MAX_CONTEXT_LENGTH,
+        group_size=8,
         accelerator=accelerator,
-        algo_kwargs=algo_kwargs,
+        use_vllm=USE_VLLM,
+        vllm_config=VLLMConfig(sleep_mode=True, max_num_seqs=4),
     )
-
-    tournament = TournamentSelection(
-        init_hp["TOURN_SIZE"],
-        init_hp["ELITISM"],
-        init_hp["POP_SIZE"],
-        init_hp["EVAL_LOOP"],
-    )
-
-    mutations = Mutations(
-        no_mutation=mut_p["NO_MUT"],
-        architecture=0,
-        new_layer_prob=0,
-        parameters=0,
-        activation=0,
-        rl_hp=mut_p["RL_HP_MUT"],
-        mutation_sd=mut_p["MUT_SD"],
-        rand_seed=mut_p["RAND_SEED"],
-        accelerator=accelerator,
-    )
-
     finetune_llm_reasoning(
-        pop=pop,
+        pop=[agent],
         env=env,
-        init_hp=init_hp,
         evaluation_interval=10,
         wb=True,
         save_elite=True,
-        elite_path="saved_llms",
+        elite_path="checkpoints",
         max_reward=2.0,
-        evo_steps=10,
-        mutation=mutations,
-        tournament=tournament,
         accelerator=accelerator,
-        verbose=True,
         num_epochs=1,
     )
-    accelerator.end_training()
 
 
 if __name__ == "__main__":
-    import os
-
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-    MUTATION_PARAMS = {
-        "NO_MUT": 0.1,
-        "RL_HP_MUT": 0.6,
-        "MUT_SD": 0.1,
-        "RAND_SEED": 42,
-        "MIN_LR": 0.0000001,
-        "MAX_LR": 0.00001,
-        "MIN_BETA": 0.0001,
-        "MAX_BETA": 0.01,
-        "MIN_GROUP_SIZE": 4,
-        "MAX_GROUP_SIZE": 12,
-    }
-
-    INIT_HP = {
-        "ALGO": "GRPO",
-        "BATCH_SIZE": 16,
-        "BETA": 0.001,
-        "LR": 0.000005,
-        "CLIP_COEF": 0.2,
-        "MAX_GRAD_NORM": 0.1,
-        "UPDATE_EPOCHS": 1,
-        "GROUP_SIZE": 8,
-        "TEMPERATURE": 0.9,
-        "MAX_MODEL_LEN": 1024,
-        "TOURN_SIZE": 2,
-        "ELITISM": True,
-        "POP_SIZE": 4,
-        "EVAL_LOOP": 1,
-    }
-    main(INIT_HP, MUTATION_PARAMS)
+    main()

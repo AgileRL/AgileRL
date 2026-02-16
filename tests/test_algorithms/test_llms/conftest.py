@@ -59,7 +59,6 @@ def set_seed():
     torch.cuda.manual_seed_all(SEED)
     np.random.seed(SEED)
     random.seed(SEED)
-    yield
 
 
 def generate_accelerator(use_deepspeed_optimizer, config):

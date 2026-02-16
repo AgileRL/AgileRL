@@ -3,8 +3,8 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 from gymnasium import spaces
+from torch import nn
 from torch._dynamo.eval_frame import OptimizedModule
 
 from agilerl.modules.cnn import MutableKernelSizes
@@ -55,7 +55,9 @@ def test_calc_max_kernel_sizes(input_shape, channel_size, kernel_size, stride_si
         rng=np.random.default_rng(42),
     )
     max_kernel_sizes = mutable_kernel_sizes.calc_max_kernel_sizes(
-        channel_size, stride_size, input_shape
+        channel_size,
+        stride_size,
+        input_shape,
     )
     assert max_kernel_sizes == [3, 3]
 
@@ -74,7 +76,9 @@ def test_max_kernel_size_negative(input_shape, channel_size, kernel_size, stride
         rng=np.random.default_rng(42),
     )
     max_kernel_sizes = mutable_kernel_sizes.calc_max_kernel_sizes(
-        channel_size, stride_size, input_shape
+        channel_size,
+        stride_size,
+        input_shape,
     )
     assert max_kernel_sizes == [1, 1]
 
@@ -217,7 +221,7 @@ class TestGetInputSizeFromSpace:
                 "position": spaces.Box(low=-10, high=10, shape=(2,), dtype=np.float32),
                 "velocity": spaces.Discrete(4),
                 "sensor": spaces.MultiBinary(6),
-            }
+            },
         )
         result = get_input_size_from_space(space)
         expected = {"position": (2,), "velocity": (4,), "sensor": (6,)}
@@ -230,7 +234,7 @@ class TestGetInputSizeFromSpace:
                 spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32),
                 spaces.Discrete(5),
                 spaces.MultiDiscrete([2, 3]),
-            )
+            ),
         )
         result = get_input_size_from_space(space)
         expected = ((3,), (5,), (5,))  # (3,), (5,), (2+3,)
@@ -253,15 +257,21 @@ class TestGetInputSizeFromSpace:
                 "observations": spaces.Dict(
                     {
                         "position": spaces.Box(
-                            low=-10, high=10, shape=(3,), dtype=np.float32
+                            low=-10,
+                            high=10,
+                            shape=(3,),
+                            dtype=np.float32,
                         ),
                         "velocity": spaces.Box(
-                            low=-1, high=1, shape=(3,), dtype=np.float32
+                            low=-1,
+                            high=1,
+                            shape=(3,),
+                            dtype=np.float32,
                         ),
-                    }
+                    },
                 ),
                 "action_mask": spaces.MultiBinary(5),
-            }
+            },
         )
         result = get_input_size_from_space(space)
         expected = {
@@ -278,10 +288,10 @@ class TestGetInputSizeFromSpace:
                     (
                         spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
                         spaces.Discrete(3),
-                    )
+                    ),
                 ),
                 spaces.Box(low=0, high=1, shape=(4,), dtype=np.float32),
-            )
+            ),
         )
         result = get_input_size_from_space(space)
         expected = (((2,), (3,)), (4,))
@@ -351,10 +361,13 @@ class TestGetOutputSizeFromSpace:
             {
                 "discrete_action": spaces.Discrete(4),
                 "continuous_action": spaces.Box(
-                    low=-1, high=1, shape=(2,), dtype=np.float32
+                    low=-1,
+                    high=1,
+                    shape=(2,),
+                    dtype=np.float32,
                 ),
                 "binary_action": spaces.MultiBinary(3),
-            }
+            },
         )
         result = get_output_size_from_space(space)
         expected = {"discrete_action": 4, "continuous_action": 2, "binary_action": 3}
@@ -378,12 +391,15 @@ class TestGetOutputSizeFromSpace:
                     {
                         "direction": spaces.Discrete(4),
                         "speed": spaces.Box(
-                            low=0, high=1, shape=(1,), dtype=np.float32
+                            low=0,
+                            high=1,
+                            shape=(1,),
+                            dtype=np.float32,
                         ),
-                    }
+                    },
                 ),
                 "special_action": spaces.MultiBinary(2),
-            }
+            },
         )
         result = get_output_size_from_space(space)
         expected = {"movement": {"direction": 4, "speed": 1}, "special_action": 2}
@@ -437,23 +453,29 @@ class TestSpaceSizeEdgeCases:
                     (
                         spaces.Box(low=0, high=255, shape=(3, 64, 64), dtype=np.uint8),
                         spaces.Box(low=0, high=255, shape=(1, 32, 32), dtype=np.uint8),
-                    )
+                    ),
                 ),
                 "proprioception": spaces.Dict(
                     {
                         "position": spaces.Box(
-                            low=-10, high=10, shape=(6,), dtype=np.float32
+                            low=-10,
+                            high=10,
+                            shape=(6,),
+                            dtype=np.float32,
                         ),
                         "velocity": spaces.Box(
-                            low=-5, high=5, shape=(6,), dtype=np.float32
+                            low=-5,
+                            high=5,
+                            shape=(6,),
+                            dtype=np.float32,
                         ),
                         "discrete_state": spaces.Discrete(10),
-                    }
+                    },
                 ),
                 "sensors": spaces.Tuple(
-                    (spaces.MultiBinary(16), spaces.MultiDiscrete([4, 8, 2]))
+                    (spaces.MultiBinary(16), spaces.MultiDiscrete([4, 8, 2])),
                 ),
-            }
+            },
         )
 
         # Complex action space - Using Python tuple instead of spaces.Tuple
@@ -461,10 +483,13 @@ class TestSpaceSizeEdgeCases:
         action_space = spaces.Dict(
             {
                 "motor_commands": spaces.Box(
-                    low=-1, high=1, shape=(12,), dtype=np.float32
+                    low=-1,
+                    high=1,
+                    shape=(12,),
+                    dtype=np.float32,
                 ),
                 "binary_switches": spaces.MultiBinary(8),
-            }
+            },
         )
 
         # Test input size
@@ -522,7 +547,7 @@ class TestSpaceSizeEdgeCases:
             {
                 "a": spaces.Discrete(3),
                 "b": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
-            }
+            },
         )
 
         python_dict_space = {

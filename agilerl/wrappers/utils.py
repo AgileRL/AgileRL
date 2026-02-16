@@ -21,7 +21,7 @@ class RunningMeanStd:
         epsilon: float = 1e-4,
         shape: tuple[int, ...] = (),
         device: DeviceType = "cpu",
-        dtype=torch.float32,
+        dtype: torch.dtype = torch.float32,
     ) -> None:
 
         self.epsilon = epsilon
@@ -31,16 +31,23 @@ class RunningMeanStd:
         self.count = torch.tensor(epsilon, dtype=dtype, device=device)
 
     def update(self, x: torch.Tensor) -> None:
-        """Updates mean, variance, and count using a batch of samples."""
+        """Update mean, variance, and count using a batch of samples.
+
+        :param x: Batch of samples.
+        :type x: torch.Tensor
+        """
         batch_mean = torch.mean(x, dim=0)
         batch_var = torch.var(x, dim=0, unbiased=False)  # Matches NumPy's default
         batch_count = x.shape[0]
         self.update_from_moments(batch_mean, batch_var, batch_count)
 
     def update_from_moments(
-        self, batch_mean: torch.Tensor, batch_var: torch.Tensor, batch_count: int
+        self,
+        batch_mean: torch.Tensor,
+        batch_var: torch.Tensor,
+        batch_count: int,
     ) -> None:
-        """Updates mean and variance using batch moments.
+        """Update mean and variance using batch moments.
 
         :param batch_mean: Mean of the batch
         :type batch_mean: torch.Tensor
@@ -55,6 +62,6 @@ class RunningMeanStd:
         self.mean = self.mean + delta * batch_count / tot_count
         m_a = self.var * self.count
         m_b = batch_var * batch_count
-        M2 = m_a + m_b + (delta**2) * (self.count * batch_count / tot_count)
-        self.var = M2 / tot_count
+        m2 = m_a + m_b + (delta**2) * (self.count * batch_count / tot_count)
+        self.var = m2 / tot_count
         self.count = tot_count

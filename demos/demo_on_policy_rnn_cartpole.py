@@ -3,11 +3,12 @@
 # This script demonstrates how to use recurrent neural networks (RNNs) or MLPs with PPO to solve the Pendulum-v1
 # environment with masked angular velocities.
 
+from typing import TYPE_CHECKING
+
 import gymnasium as gym
 import numpy as np
 import torch
 
-from agilerl.algorithms import PPO
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -16,6 +17,9 @@ from agilerl.typing import BPTTSequenceType
 from agilerl.utils.utils import create_population, default_progress_bar, make_vect_envs
 from agilerl.wrappers.agent import RSNorm
 from benchmarking.benchmarking_recurrent import MaskVelocityWrapper
+
+if TYPE_CHECKING:
+    from agilerl.algorithms import PPO
 
 
 def run_demo():
@@ -79,7 +83,9 @@ def run_demo():
         return MaskVelocityWrapper(gym.make("CartPole-v1"))
 
     env = make_vect_envs(
-        make_env=make_env, num_envs=num_envs, should_async_vector=False
+        make_env=make_env,
+        num_envs=num_envs,
+        should_async_vector=False,
     )
     single_test_env = gym.vector.SyncVectorEnv([make_env])
 
@@ -174,9 +180,11 @@ def run_demo():
                 completed_episodes += episode_scores
 
             pop_episode_scores.append(
-                round(np.mean(completed_episodes), 2)
-                if len(completed_episodes) > 0
-                else "0 completed episodes"
+                (
+                    round(np.mean(completed_episodes), 2)
+                    if len(completed_episodes) > 0
+                    else "0 completed episodes"
+                ),
             )
 
             pbar.update(steps // len(pop))
@@ -194,14 +202,14 @@ def run_demo():
             f"--- Global steps {total_steps} ---\n"
             f"Steps: {[agent.steps[-1] for agent in pop]}\n"
             f"Scores: {pop_episode_scores}\n"
-            f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
-            f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
-            f"Mutations: {[agent.mut for agent in pop]}\n"
+            f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
+            f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n"
+            f"Mutations: {[agent.mut for agent in pop]}\n",
         )
 
         if any(score >= required_score for score in pop_episode_scores):
             print(
-                f"\nAgent achieved required score {required_score}. Stopping training."
+                f"\nAgent achieved required score {required_score}. Stopping training.",
             )
             elite, _ = tournament.select(pop)
             training_complete = True
@@ -246,7 +254,8 @@ def run_demo():
         while not done[0]:
             if recurrent:
                 action, _, _, _, hidden_state = elite.get_action(
-                    obs, hidden_state=hidden_state
+                    obs,
+                    hidden_state=hidden_state,
                 )
             else:
                 action, _, _, _, _ = elite.get_action(obs)
@@ -255,7 +264,7 @@ def run_demo():
             episode_reward += reward[0]
             episode_steps += 1
         print(
-            f"Episode {episode + 1}: Reward: {episode_reward}, Steps: {episode_steps}"
+            f"Episode {episode + 1}: Reward: {episode_reward}, Steps: {episode_steps}",
         )
         total_steps += episode_steps
         episode_rewards.append(episode_reward)
