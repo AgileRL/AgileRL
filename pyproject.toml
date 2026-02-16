@@ -78,6 +78,7 @@ branch = true
 source = ["agilerl"]
 concurrency = ["multiprocessing"]
 sigterm = true
+omit = "agilerl/networks/distributions_experimental.py"
 
 [tool.coverage.report]
 exclude_lines = [
