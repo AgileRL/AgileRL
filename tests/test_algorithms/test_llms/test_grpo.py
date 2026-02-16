@@ -278,92 +278,93 @@ def create_module(input_size, max_tokens, vocab_size, device):
     )
 
 
+def generate_grpo(
+    accelerator_factory,
+    model_factory,
+    config,
+    use_deepspeed_optimizer,
+    vocab_size,
+    input_size,
+    max_tokens,
+    group_size,
+    use_separate_reference_adapter,
+    use_vllm,
+    pretrained_model_name_or_path,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+    sleep_mode=False,
+    from_name=False,
+):
+    gc.collect()
+    torch.cuda.empty_cache()
+    AcceleratorState._reset_state(True)
+
+    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+    if not use_deepspeed_optimizer and accelerator is not None:
+        accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
+    if use_vllm:
+        lora_config = None
+        vllm_config = VLLMConfig(
+            gpu_memory_utilization=0.2, max_num_seqs=1, sleep_mode=sleep_mode
+        )
+
+        actor = model_factory(pretrained_model_name_or_path)
+    else:
+        if pretrained_model_name_or_path is not None:
+            actor = model_factory(pretrained_model_name_or_path)
+            target_modules = [
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "up_proj",
+                "down_proj",
+                "gate_proj",
+            ]
+        else:
+            actor = create_module(
+                input_size=input_size,
+                max_tokens=max_tokens,
+                vocab_size=vocab_size,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            )
+            target_modules = ["linear_1"]
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=target_modules,
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        vllm_config = None
+    grpo = GRPO(
+        actor_network=actor if not from_name else None,
+        model_name=pretrained_model_name_or_path if from_name else None,
+        lr=1e-5,
+        pad_token_id=vocab_size - 1,
+        pad_token="<pad>",
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        group_size=group_size,
+        lora_config=lora_config,
+        cosine_lr_schedule_config=(
+            None
+            if accelerator is not None
+            else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+        ),
+        accelerator=accelerator,
+        use_separate_reference_adapter=use_separate_reference_adapter,
+        use_vllm=use_vllm,
+        vllm_config=vllm_config,
+        max_output_tokens=max_tokens,
+        max_model_len=max_tokens + 5,
+        reduce_memory_peak=reduce_memory_peak,
+        micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+    )
+    return grpo
+
+
 @pytest.fixture(scope="function")
 def grpo_factory():
-    def generate_grpo(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        group_size,
-        use_separate_reference_adapter,
-        use_vllm,
-        pretrained_model_name_or_path,
-        reduce_memory_peak,
-        micro_batch_size_per_gpu,
-        sleep_mode=False,
-        from_name=False,
-    ):
-        gc.collect()
-        torch.cuda.empty_cache()
-        AcceleratorState._reset_state(True)
-
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        if not use_deepspeed_optimizer and accelerator is not None:
-            accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
-        if use_vllm:
-            lora_config = None
-            vllm_config = VLLMConfig(
-                gpu_memory_utilization=0.2, max_num_seqs=1, sleep_mode=sleep_mode
-            )
-
-            actor = model_factory(pretrained_model_name_or_path)
-        else:
-            if pretrained_model_name_or_path is not None:
-                actor = model_factory(pretrained_model_name_or_path)
-                target_modules = [
-                    "q_proj",
-                    "k_proj",
-                    "v_proj",
-                    "o_proj",
-                    "up_proj",
-                    "down_proj",
-                    "gate_proj",
-                ]
-            else:
-                actor = create_module(
-                    input_size=input_size,
-                    max_tokens=max_tokens,
-                    vocab_size=vocab_size,
-                    device="cuda" if torch.cuda.is_available() else "cpu",
-                )
-                target_modules = ["linear_1"]
-            lora_config = LoraConfig(
-                r=16,
-                lora_alpha=64,
-                target_modules=target_modules,
-                task_type="CAUSAL_LM",
-                lora_dropout=0.05,
-            )
-            vllm_config = None
-        grpo = GRPO(
-            actor_network=actor if not from_name else None,
-            model_name=pretrained_model_name_or_path if from_name else None,
-            lr=1e-5,
-            pad_token_id=vocab_size - 1,
-            pad_token="<pad>",
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            group_size=group_size,
-            lora_config=lora_config,
-            cosine_lr_schedule_config=(
-                None
-                if accelerator is not None
-                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-            ),
-            accelerator=accelerator,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-            use_vllm=use_vllm,
-            vllm_config=vllm_config,
-            max_output_tokens=max_tokens,
-            max_model_len=max_tokens + 5,
-            reduce_memory_peak=reduce_memory_peak,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        )
-        return grpo
-
     return generate_grpo
 
 
@@ -494,7 +495,6 @@ def test_grpo_clean_up_vllm(
     grpo_factory,
     model_factory,
     accelerator_factory,
-    request,
     batch_size,
     config,
     use_deepspeed_optimizer,
@@ -3047,7 +3047,6 @@ def test_grpo_clean_up(
     grpo_factory,
     model_factory,
     accelerator_factory,
-    request,
     batch_size,
     config,
     use_deepspeed_optimizer,
@@ -3103,7 +3102,6 @@ def test_grpo_preprocess_observation(
     grpo_factory,
     model_factory,
     accelerator_factory,
-    request,
     batch_size,
     config,
     use_deepspeed_optimizer,
@@ -3159,7 +3157,6 @@ def test_load_distributed_actor_value_error(
     grpo_factory,
     model_factory,
     accelerator_factory,
-    request,
     batch_size,
     config,
     use_deepspeed_optimizer,
@@ -3217,7 +3214,6 @@ def test_load_distributed_actor_warning(
     grpo_factory,
     model_factory,
     accelerator_factory,
-    request,
     batch_size,
     config,
     use_deepspeed_optimizer,

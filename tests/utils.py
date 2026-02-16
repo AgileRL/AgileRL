@@ -2,6 +2,8 @@
 
 import functools
 import gc
+import inspect
+import json
 import os
 import subprocess
 import sys
@@ -18,18 +20,67 @@ AGILERL_PATH = Path(__file__).parent.parent
 _P = ParamSpec("_P")
 
 
+def _get_parametrized_names(f: Callable) -> set[str]:
+    """Extract the set of parametrized argument names from pytest marks."""
+    names: set[str] = set()
+    for mark in getattr(f, "pytestmark", []):
+        if mark.name == "parametrize":
+            argnames = mark.args[0]
+            if isinstance(argnames, str):
+                names.update(n.strip() for n in argnames.split(","))
+            else:
+                names.update(argnames)
+    return names
+
+
+def _num_mock_patch_args(f: Callable) -> int:
+    """Count mock parameters injected by @patch (where new is DEFAULT).
+
+    Mirrors pytest's own num_mock_patch_args logic: only patches that don't
+    specify an explicit ``new`` value inject an extra positional argument.
+    ``@patch(target, DummyClass)`` does NOT inject a parameter.
+    """
+    patchings = getattr(f, "patchings", None)
+    if not patchings:
+        return 0
+    mock_mod = sys.modules.get("unittest.mock")
+    if mock_mod is None:
+        return 0
+    sentinel = getattr(mock_mod, "DEFAULT", None)
+    return sum(1 for p in patchings if p.new is sentinel)
+
+
+def _build_kwargs(f: Callable, args: tuple, kwargs: dict) -> dict:
+    """Map positional args + kwargs to a single dict using the function signature.
+
+    Skips leading parameters injected by ``@unittest.mock.patch`` because
+    pytest itself skips them during fixture resolution, so they never appear
+    in the *args* that the outer pytest passes to the wrapper.
+    """
+    num_patches = _num_mock_patch_args(f)
+    sig = inspect.signature(f)
+    param_names = list(sig.parameters.keys())[num_patches:]
+    merged = {}
+    for i, arg in enumerate(args):
+        if i < len(param_names):
+            merged[param_names[i]] = arg
+    merged.update(kwargs)
+    return merged
+
+
 def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
     """Decorator to spawn a new process for each test function.
 
-    Runs the test in a fresh subprocess via pytest to ensure clean GPU state.
+    Runs the test in a fresh subprocess via a lightweight Python runner
+    (tests/subprocess_runner.py) to ensure clean GPU state without the overhead
+    of a full pytest session. Only the specific parametrized variant is executed.
+
     Coverage is collected via sitecustomize.py when COVERAGE_PROCESS_START is set.
     """
 
     @functools.wraps(f)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
-        # Check if we're already in a subprocess
         if os.environ.get("RUNNING_IN_SUBPROCESS") == "1":
-            # If we are, just run the function directly
             return f(*args, **kwargs)
 
         import torch.multiprocessing as mp
@@ -37,7 +88,12 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
         with suppress(RuntimeError):
             mp.set_start_method("spawn")
 
-        # Create a process with environment variable set
+        all_kwargs = _build_kwargs(f, args, kwargs)
+        parametrized_names = _get_parametrized_names(f)
+
+        param_kwargs = {k: v for k, v in all_kwargs.items() if k in parametrized_names}
+        fixture_names = [k for k in all_kwargs if k not in parametrized_names]
+
         env = os.environ.copy()
         env["RUNNING_IN_SUBPROCESS"] = "1"
         env["COVERAGE_PROCESS_START"] = os.path.join(
@@ -47,26 +103,29 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
         repo_root = str(AGILERL_PATH.resolve())
         env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
 
-        # Get module file path and test name to run pytest with specific test
         module_file = sys.modules[f.__module__].__file__
         test_name = f.__name__
 
+        runner = str(AGILERL_PATH / "tests" / "subprocess_runner.py")
+
         cmd = [
             sys.executable,
-            "-m",
-            "pytest",
-            f"{module_file}::{test_name}",
-            "-v",
-            "-x",
+            runner,
+            "--module",
+            module_file,
+            "--test",
+            test_name,
+            "--params",
+            json.dumps(param_kwargs),
+            "--fixtures",
+            json.dumps(fixture_names),
         ]
 
         returned = subprocess.run(cmd, capture_output=True, env=env)
 
-        # Check if the subprocess is successful
         try:
             returned.check_returncode()
         except Exception as e:
-            # Wrap raised exception to provide more information
             raise RuntimeError(
                 f"Error in subprocess:\nstdout:\n{returned.stdout.decode()}\nstderr:\n{returned.stderr.decode()}"
             ) from e

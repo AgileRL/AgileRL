@@ -25,102 +25,104 @@ from tests.test_algorithms.test_llms.test_grpo import (
 from tests.utils import spawn_new_process_for_each_test
 
 
+def make_preference_gym(
+    num_samples: int,
+    accelerator: Accelerator | None,
+    tokenizer: AutoTokenizer,
+    data_batch_size_per_gpu: int = 8,
+):
+    train_dataset = Dataset.from_dict(
+        {
+            "prompt": [f"Prompt {i}" for i in range(num_samples)],
+            "chosen": [f"Chosen {i}" for i in range(num_samples)],
+            "rejected": [f"Rejected {i}" for i in range(num_samples)],
+        }
+    )
+    test_dataset = Dataset.from_dict(
+        {
+            "prompt": [f"Prompt {i}" for i in range(num_samples)],
+            "chosen": [f"Chosen {i}" for i in range(num_samples)],
+            "rejected": [f"Rejected {i}" for i in range(num_samples)],
+        }
+    )
+    return PreferenceGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        data_batch_size_per_gpu=data_batch_size_per_gpu,
+        accelerator=accelerator,
+    )
+
+
 @pytest.fixture
 def preference_dataset_factory():
-    def make_preference_gym(
-        num_samples: int,
-        accelerator: Accelerator | None,
-        tokenizer: AutoTokenizer,
-        data_batch_size_per_gpu: int = 8,
-    ):
-        train_dataset = Dataset.from_dict(
-            {
-                "prompt": [f"Prompt {i}" for i in range(num_samples)],
-                "chosen": [f"Chosen {i}" for i in range(num_samples)],
-                "rejected": [f"Rejected {i}" for i in range(num_samples)],
-            }
-        )
-        test_dataset = Dataset.from_dict(
-            {
-                "prompt": [f"Prompt {i}" for i in range(num_samples)],
-                "chosen": [f"Chosen {i}" for i in range(num_samples)],
-                "rejected": [f"Rejected {i}" for i in range(num_samples)],
-            }
-        )
-        return PreferenceGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            data_batch_size_per_gpu=data_batch_size_per_gpu,
-            accelerator=accelerator,
-        )
-
     return make_preference_gym
+
+
+def generate_dpo(
+    accelerator_factory,
+    model_factory,
+    config,
+    use_deepspeed_optimizer,
+    vocab_size,
+    input_size,
+    max_tokens,
+    use_separate_reference_adapter,
+    pretrained_model_name_or_path,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+    from_name=False,
+):
+    gc.collect()
+    torch.cuda.empty_cache()
+    AcceleratorState._reset_state(True)
+
+    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+    if not use_deepspeed_optimizer and accelerator is not None:
+        accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
+    if pretrained_model_name_or_path is not None:
+        actor = model_factory(pretrained_model_name_or_path)
+        target_modules = [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "up_proj",
+            "down_proj",
+            "gate_proj",
+        ]
+    else:
+        actor = create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
+        target_modules = ["linear_1"]
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=64,
+        target_modules=target_modules,
+        task_type="CAUSAL_LM",
+        lora_dropout=0.05,
+    )
+    dpo = DPO(
+        actor_network=actor if not from_name else None,
+        model_name=pretrained_model_name_or_path if from_name else None,
+        pad_token_id=vocab_size - 1,
+        pad_token="<pad>",
+        lora_config=lora_config,
+        accelerator=accelerator,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        use_separate_reference_adapter=use_separate_reference_adapter,
+        reduce_memory_peak=reduce_memory_peak,
+        micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+    )
+    return dpo
 
 
 @pytest.fixture(scope="function")
 def dpo_factory():
-    def generate_dpo(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        use_separate_reference_adapter,
-        pretrained_model_name_or_path,
-        reduce_memory_peak,
-        micro_batch_size_per_gpu,
-        from_name=False,
-    ):
-        gc.collect()
-        torch.cuda.empty_cache()
-        AcceleratorState._reset_state(True)
-
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        if not use_deepspeed_optimizer and accelerator is not None:
-            accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
-        if pretrained_model_name_or_path is not None:
-            actor = model_factory(pretrained_model_name_or_path)
-            target_modules = [
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "up_proj",
-                "down_proj",
-                "gate_proj",
-            ]
-        else:
-            actor = create_module(
-                input_size=input_size,
-                max_tokens=max_tokens,
-                vocab_size=vocab_size,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            )
-            target_modules = ["linear_1"]
-        lora_config = LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=target_modules,
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-        dpo = DPO(
-            actor_network=actor if not from_name else None,
-            model_name=pretrained_model_name_or_path if from_name else None,
-            pad_token_id=vocab_size - 1,
-            pad_token="<pad>",
-            lora_config=lora_config,
-            accelerator=accelerator,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            use_separate_reference_adapter=use_separate_reference_adapter,
-            reduce_memory_peak=reduce_memory_peak,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        )
-        return dpo
-
     return generate_dpo
 
 
