@@ -909,6 +909,10 @@ def test_grpo_test_vllm(
     "reduce_memory_peak, micro_batch_size_per_gpu",
     [(True, None), (False, 2)],
 )
+@pytest.mark.parametrize(
+    "from_name",
+    [True, False],
+)
 def test_init_grpo_with_accelerator(
     deepspeed_env,
     grpo_factory,
