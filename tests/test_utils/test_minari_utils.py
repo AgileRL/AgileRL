@@ -143,7 +143,7 @@ def test_load_minari_dataset_errors(dataset_id: str) -> None:
 def test_load_remote_minari_dataset(dataset_id: str) -> None:
     try:
         dataset = minari_utils.load_minari_dataset(dataset_id, remote=True)
-    except HTTPError as e:
+    except (KeyError, HTTPError) as e:
         pytest.skip(f"Skipping test due to remote dataset not being available: {e}")
 
     assert isinstance(dataset, MinariDataset)

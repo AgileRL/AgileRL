@@ -175,23 +175,13 @@ def get_checkpoint_dict(
     network_info: dict[str, dict[str, Any]] = {"modules": {}, "optimizers": {}}
     for attr in agent.evolvable_attributes():
         evolvable_obj: EvolvableAttributeType = getattr(agent, attr)
-        if isinstance(evolvable_obj, OptimizerWrapper):
-            if not using_deepspeed:
-                optimizer_chkpt = evolvable_obj.checkpoint_dict(attr)
-                network_info["optimizers"].update(optimizer_chkpt)
-
-        elif isinstance(evolvable_obj, (OptimizedModule, EvolvableModule)):
+        if isinstance(evolvable_obj, (OptimizedModule, EvolvableModule)):
             module_chkpt = module_checkpoint_dict(evolvable_obj, attr)
             network_info["modules"].update(module_chkpt)
+        elif isinstance(evolvable_obj, OptimizerWrapper) and not using_deepspeed:
+            optimizer_chkpt = evolvable_obj.checkpoint_dict(attr)
+            network_info["optimizers"].update(optimizer_chkpt)
 
-        else:
-            msg = (
-                f"Something went wrong. Identified '{attr}' as an evolvable module or "
-                f"optimizer when it is of type {type(evolvable_obj)}."
-            )
-            raise TypeError(
-                msg,
-            )
     network_attr_names = list(agent.evolvable_attributes(networks_only=True))
     optimizer_attr_names = [
         name

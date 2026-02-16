@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import dill
 import numpy as np
 import pytest
 import torch
@@ -11,6 +12,7 @@ from torch._dynamo.eval_frame import OptimizedModule
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
+    MutationRegistry,
     NetworkGroup,
     RLParameter,
 )
@@ -308,6 +310,74 @@ class DummyRLAlgorithmNoPolicy(RLAlgorithm):
         return
 
 
+class NoRegistryRLAlgorithm(RLAlgorithm):
+    """Algorithm that never registers any network group, so _registry_init raises."""
+
+    def __init__(self, observation_space, action_space, index=0):
+        super().__init__(
+            observation_space=observation_space,
+            action_space=action_space,
+            index=index,
+        )
+        # Intentionally do not call register_network_group
+
+    def get_action(self, *args, **kwargs):
+        return None
+
+    def learn(self, *args, **kwargs):
+        return None
+
+    def test(self, *args, **kwargs):
+        return None
+
+
+class NoPolicyRegistryRLAlgorithm(RLAlgorithm):
+    """Algorithm that registers a network group with policy=False."""
+
+    def __init__(self, observation_space, action_space, index=0):
+        super().__init__(
+            observation_space=observation_space,
+            action_space=action_space,
+            index=index,
+        )
+        num_outputs = (
+            action_space.n
+            if hasattr(action_space, "n")
+            else int(np.prod(action_space.shape))
+        )
+        num_inputs = (
+            observation_space.shape[0]
+            if hasattr(observation_space, "shape")
+            else observation_space.n
+        )
+        self.dummy_actor = EvolvableMLP(
+            num_inputs,
+            num_outputs,
+            hidden_size=[8],
+            device=self.device,
+        )
+        self.lr = 0.01
+        self.dummy_optimizer = OptimizerWrapper(
+            torch.optim.Adam,
+            self.dummy_actor,
+            self.lr,
+            network_names=["dummy_actor"],
+            lr_name="lr",
+        )
+        self.register_network_group(
+            NetworkGroup(eval_network=self.dummy_actor, policy=False),
+        )
+
+    def get_action(self, *args, **kwargs):
+        return None
+
+    def learn(self, *args, **kwargs):
+        return None
+
+    def test(self, *args, **kwargs):
+        return None
+
+
 class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
     def __init__(
         self,
@@ -510,6 +580,56 @@ def test_population_multi_agent(ma_vector_space, ma_discrete_space):
         assert agent.index == i
 
 
+def test_get_state_dim_returns_expected_output(vector_space, discrete_space):
+    """get_state_dim returns the same as get_input_size_from_space for observation space."""
+    with pytest.warns(DeprecationWarning, match="get_input_size_from_space"):
+        state_dim = RLAlgorithm.get_state_dim(vector_space)
+    assert state_dim == vector_space.shape
+    with pytest.warns(DeprecationWarning, match="get_input_size_from_space"):
+        state_dim_discrete = RLAlgorithm.get_state_dim(discrete_space)
+    assert state_dim_discrete == (discrete_space.n,)
+
+
+def test_get_action_dim_returns_expected_output(vector_space, discrete_space):
+    """get_action_dim returns the same as get_output_size_from_space for action space."""
+    with pytest.warns(DeprecationWarning, match="get_output_size_from_space"):
+        action_dim = RLAlgorithm.get_action_dim(discrete_space)
+    assert action_dim == discrete_space.n
+    with pytest.warns(DeprecationWarning, match="get_output_size_from_space"):
+        action_dim_box = RLAlgorithm.get_action_dim(vector_space)
+    assert action_dim_box == vector_space.shape[0]
+
+
+def test_population_with_wrapper_cls(vector_space, discrete_space):
+    """population classmethod returns wrapped agents when wrapper_cls is provided."""
+
+    class SimpleWrapper:
+        def __init__(self, agent, label="wrapped"):
+            self.agent = agent
+            self.label = label
+
+        def get_action(self, obs, **kwargs):
+            return self.agent.get_action(obs, **kwargs)
+
+        def learn(self, experiences, **kwargs):
+            return self.agent.learn(experiences, **kwargs)
+
+    population = DummyRLAlgorithm.population(
+        3,
+        vector_space,
+        discrete_space,
+        wrapper_cls=SimpleWrapper,
+        wrapper_kwargs={"label": "custom"},
+    )
+    assert len(population) == 3
+    for i, wrapped in enumerate(population):
+        assert isinstance(wrapped, SimpleWrapper)
+        assert wrapped.label == "custom"
+        assert wrapped.agent.observation_space == vector_space
+        assert wrapped.agent.action_space == discrete_space
+        assert wrapped.agent.index == i
+
+
 @pytest.mark.parametrize(
     "observation_space",
     ["vector_space", "image_space", "dict_space"],
@@ -557,6 +677,24 @@ def test_incorrect_hp_config(vector_space, discrete_space):
             index=0,
             hp_config=hp_config,
         )
+
+
+def test_registry_init_raises_when_no_groups_defined(vector_space, discrete_space):
+    """AttributeError is raised when no network groups have been registered."""
+    with pytest.raises(
+        AttributeError,
+        match="No network groups have been registered in the algorithms __init__ method",
+    ):
+        NoRegistryRLAlgorithm(vector_space, discrete_space, index=0)
+
+
+def test_registry_init_raises_when_no_policy_registered(vector_space, discrete_space):
+    """AttributeError is raised when no network group is registered as policy."""
+    with pytest.raises(
+        AttributeError,
+        match="No network group has been registered as a policy",
+    ):
+        NoPolicyRegistryRLAlgorithm(vector_space, discrete_space, index=0)
 
 
 def test_recompile(ma_vector_space, ma_discrete_space):
@@ -608,6 +746,18 @@ def test_unwrap_models_single_agent(vector_space, discrete_space):
     )
     agent.unwrap_models()
     assert isinstance(agent.dummy_actor, torch.nn.Module)
+
+
+def test_unwrap_models_raises_without_accelerator(vector_space, discrete_space):
+    """AttributeError is raised when unwrap_models is called without an accelerator."""
+    agent = DummyRLAlgorithm(
+        vector_space,
+        discrete_space,
+        index=0,
+    )
+    assert agent.accelerator is None
+    with pytest.raises(AttributeError, match="No accelerator has been set"):
+        agent.unwrap_models()
 
 
 @pytest.mark.parametrize("with_hp_config", [False, True])
@@ -1237,6 +1387,29 @@ def test_missing_attribute_warning(tmpdir, vector_space):
 
     # The attribute should keep its original value
     assert new_agent.dummy_attribute == "test_value"
+
+
+def test_load_checkpoint_raises_when_registries_dont_match(
+    tmpdir, vector_space, discrete_space
+):
+    """ValueError is raised when loading a checkpoint whose registry does not match the algorithm."""
+    agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    agent.save_checkpoint(checkpoint_path)
+
+    # Load checkpoint and replace registry with one that does not match (e.g. empty)
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
+    checkpoint["registry"] = MutationRegistry()
+
+    mismatched_path = Path(tmpdir) / "mismatched_checkpoint.pth"
+    torch.save(checkpoint, mismatched_path, pickle_module=dill)
+
+    new_agent = DummyRLAlgorithm(vector_space, discrete_space, index=1)
+    with pytest.raises(
+        ValueError,
+        match="Loaded registry does not match the algorithm's registry",
+    ):
+        new_agent.load_checkpoint(mismatched_path)
 
 
 @pytest.mark.parametrize("flatten", [True, False])
