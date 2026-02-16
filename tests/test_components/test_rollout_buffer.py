@@ -56,7 +56,7 @@ class TestRolloutBufferInitialization:
             {
                 "vector": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
                 "discrete": spaces.Discrete(3),
-            }
+            },
         )
         action_space = spaces.Discrete(2)
 
@@ -126,7 +126,8 @@ class TestRolloutBufferInitialization:
         action_space = spaces.Discrete(2)
 
         with pytest.raises(
-            ValueError, match="hidden_state_architecture must be provided"
+            ValueError,
+            match="hidden_state_architecture must be provided",
         ):
             RolloutBuffer(
                 capacity=10,
@@ -163,7 +164,7 @@ class TestRolloutBufferDataAddition:
         value = 0.5
         log_prob = -0.5
         next_obs = np.random.rand(*observation_space.shape).astype(
-            observation_space.dtype
+            observation_space.dtype,
         )
 
         buffer.add(obs, action, reward, done, value, log_prob, next_obs)
@@ -174,11 +175,15 @@ class TestRolloutBufferDataAddition:
         # Data is stored at buffer.pos - 1
         current_pos_idx = buffer.pos - 1
         assert np.array_equal(
-            buffer.buffer.get("observations")[current_pos_idx, 0].cpu().numpy(), obs
+            buffer.buffer.get("observations")[current_pos_idx, 0].cpu().numpy(),
+            obs,
         )
         assert np.array_equal(
-            buffer.buffer.get("actions")[current_pos_idx, 0, 0].cpu().numpy(), action[0]
-        ), f"Expected action {action[0]} at position {current_pos_idx}, but got {buffer.buffer.get('actions')[current_pos_idx, 0].cpu().numpy()}"
+            buffer.buffer.get("actions")[current_pos_idx, 0, 0].cpu().numpy(),
+            action[0],
+        ), (
+            f"Expected action {action[0]} at position {current_pos_idx}, but got {buffer.buffer.get('actions')[current_pos_idx, 0].cpu().numpy()}"
+        )
         assert buffer.buffer.get("rewards")[current_pos_idx, 0].item() == reward
         assert buffer.buffer.get("dones")[current_pos_idx, 0].item() == float(done)
         assert buffer.buffer.get("values")[current_pos_idx, 0].item() == value
@@ -276,7 +281,7 @@ class TestRolloutBufferDataAddition:
             {
                 "vector": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
                 "discrete": spaces.Discrete(3),
-            }
+            },
         )
         action_space = spaces.Discrete(2)
 
@@ -475,7 +480,7 @@ class TestRolloutBufferReturnsAndAdvantages:
         # Add samples
         for i in range(capacity):
             obs = np.random.rand(*observation_space.shape).astype(
-                observation_space.dtype
+                observation_space.dtype,
             )
             action = np.array([action_space.sample()])
             reward = 1.0
@@ -483,7 +488,7 @@ class TestRolloutBufferReturnsAndAdvantages:
             value = 0.5
             log_prob = -0.5
             next_obs = np.random.rand(*observation_space.shape).astype(
-                observation_space.dtype
+                observation_space.dtype,
             )
 
             buffer.add(obs, action, reward, done, value, log_prob, next_obs)
@@ -496,10 +501,12 @@ class TestRolloutBufferReturnsAndAdvantages:
         # Check that returns and advantages are computed
         # Slicing [:, 0] gets data for the first (and only) environment
         assert not np.array_equal(
-            buffer.buffer.get("returns")[:, 0].cpu().numpy(), np.zeros((capacity, 1))
+            buffer.buffer.get("returns")[:, 0].cpu().numpy(),
+            np.zeros((capacity, 1)),
         )
         assert not np.array_equal(
-            buffer.buffer.get("advantages")[:, 0].cpu().numpy(), np.zeros((capacity, 1))
+            buffer.buffer.get("advantages")[:, 0].cpu().numpy(),
+            np.zeros((capacity, 1)),
         )
 
         # Check that returns are higher for earlier steps (due to discounting)
@@ -646,7 +653,7 @@ class TestRolloutBufferDataRetrieval:
         # Add samples
         for i in range(num_samples):
             obs = np.random.rand(*observation_space.shape).astype(
-                observation_space.dtype
+                observation_space.dtype,
             )
             action = np.array([action_space.sample()])
             reward = 1.0
@@ -654,7 +661,7 @@ class TestRolloutBufferDataRetrieval:
             value = 0.5
             log_prob = -0.5
             next_obs = np.random.rand(*observation_space.shape).astype(
-                observation_space.dtype
+                observation_space.dtype,
             )
 
             buffer.add(obs, action, reward, done, value, log_prob, next_obs)
@@ -698,7 +705,7 @@ class TestRolloutBufferDataRetrieval:
             {
                 "vector": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
                 "discrete": spaces.Discrete(3),
-            }
+            },
         )
         action_space = spaces.Discrete(2)
 
@@ -804,7 +811,13 @@ class TestRolloutBufferSequences:
             hidden_state = {"h_actor": torch.randn(1, 2, 4)}
 
             buffer.add(
-                obs, action, reward, done, value, log_prob, hidden_state=hidden_state
+                obs,
+                action,
+                reward,
+                done,
+                value,
+                log_prob,
+                hidden_state=hidden_state,
             )
 
         # Compute returns
@@ -868,7 +881,13 @@ class TestRolloutBufferSequences:
             }
 
             buffer.add(
-                obs, action, reward, done, value, log_prob, hidden_state=hidden_state
+                obs,
+                action,
+                reward,
+                done,
+                value,
+                log_prob,
+                hidden_state=hidden_state,
             )
 
         # Compute returns
@@ -887,7 +906,7 @@ class TestRolloutBufferSequences:
         # Check that initial hidden states are prepared
         try:
             initial_hidden_states = buffer.padded_data.get_non_tensor(
-                "initial_hidden_states"
+                "initial_hidden_states",
             )
             assert "h_actor" in initial_hidden_states
             assert "h_critic" in initial_hidden_states
@@ -898,9 +917,10 @@ class TestRolloutBufferSequences:
                 4,
             )  # (batch, layers, hidden_size)
             assert initial_hidden_states["h_critic"].shape[1:] == (2, 8)
-        except KeyError:
+        except KeyError as err:
             # If initial_hidden_states is not found, the test should fail
-            assert False, "initial_hidden_states should be present for recurrent buffer"
+            msg = "initial_hidden_states should be present for recurrent buffer"
+            raise AssertionError(msg) from err
 
     def test_get_minibatch_sequences(self):
         """Test getting minibatch sequences."""
@@ -933,7 +953,13 @@ class TestRolloutBufferSequences:
             hidden_state = {"h_actor": torch.randn(1, 2, 4)}
 
             buffer.add(
-                obs, action, reward, done, value, log_prob, hidden_state=hidden_state
+                obs,
+                action,
+                reward,
+                done,
+                value,
+                log_prob,
+                hidden_state=hidden_state,
             )
 
         # Compute returns
@@ -971,7 +997,7 @@ class TestRolloutBufferSequences:
             # Check that initial hidden states are present
             try:
                 initial_hidden_states = padded_batch.get_non_tensor(
-                    "initial_hidden_states"
+                    "initial_hidden_states",
                 )
                 assert "h_actor" in initial_hidden_states
             except KeyError:
@@ -1132,7 +1158,7 @@ class TestRolloutBufferSequences:
             {
                 "vector": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
                 "discrete": spaces.Discrete(3),
-            }
+            },
         )
         action_space = spaces.Discrete(2)
         hidden_state_arch = {
@@ -1369,7 +1395,8 @@ class TestRolloutBufferUtilities:
         episode_done_indices = [[3, 7, 9], [4, 9]]  # Different episode endings per env
 
         sequences, max_length = buffer._get_complete_sequences(
-            test_data, episode_done_indices
+            test_data,
+            episode_done_indices,
         )
 
         # Should have multiple sequences
@@ -1553,7 +1580,7 @@ class TestRolloutBufferUtilities:
         minibatch_generator = buffer.get_minibatch_sequences(batch_size)
 
         batch_sizes = []
-        for padded_batch, unpadded_batch in minibatch_generator:
+        for padded_batch, _unpadded_batch in minibatch_generator:
             # Count sequences in this batch by checking the batch dimension
             batch_sequences = padded_batch.batch_size[0] // buffer.max_sequence_length
             batch_sizes.append(batch_sequences)
@@ -1591,12 +1618,19 @@ class TestRolloutBufferUtilities:
         hidden_state = {"h_actor": torch.randn(1, 2, 4)}
 
         buffer.add(
-            obs, action, reward, done, value, log_prob, hidden_state=hidden_state
+            obs,
+            action,
+            reward,
+            done,
+            value,
+            log_prob,
+            hidden_state=hidden_state,
         )
 
         # Prepare sequences
         buffer.compute_returns_and_advantages(
-            np.array([0.0, 0.0]), np.array([True, True])
+            np.array([0.0, 0.0]),
+            np.array([True, True]),
         )
 
         if recurrent:

@@ -58,7 +58,7 @@ Below we show our implementation of our custom head with a distributional duelin
             :param num_outputs: Number of output features.
             :type num_outputs: int
             :param hidden_size: List of hidden layer sizes.
-            :type hidden_size: List[int]
+            :type hidden_size: list[int]
             :param num_atoms: Number of atoms in the distribution.
             :type num_atoms: int
             :param support: Support of the distribution.
@@ -93,7 +93,7 @@ Below we show our implementation of our custom head with a distributional duelin
                 self,
                 num_inputs: int,
                 num_outputs: int,
-                hidden_size: List[int],
+                hidden_size: list[int],
                 num_atoms: int,
                 support: torch.Tensor,
                 noise_std: float = 0.5,
@@ -148,7 +148,7 @@ Below we show our implementation of our custom head with a distributional duelin
                 )
 
             @property
-            def net_config(self) -> Dict[str, Any]:
+            def net_config(self) -> dict[str, Any]:
                 net_config = super().net_config.copy()
                 net_config.pop("num_atoms")
                 net_config.pop("support")
@@ -227,12 +227,13 @@ and uses our custom head. Since we have done most of the work in the head, the i
 
     .. code-block:: python
 
-        from typing import Optional, Dict, Any
+        from typing import Any
         from dataclasses import asdict
 
         import torch
-        from gym import spaces
+        from gymnasium import spaces
 
+        from agilerl.typing import NetConfigType
         from agilerl.networks.base import EvolvableNetwork
         from agilerl.modules.configs import MlpNetConfig
 
@@ -247,20 +248,20 @@ and uses our custom head. Since we have done most of the work in the head, the i
             :param action_space: Action space of the environment
             :type action_space: DiscreteSpace
             :param encoder_config: Configuration of the encoder network.
-            :type encoder_config: ConfigType
+            :type encoder_config: NetConfigType
             :param support: Support for the distributional value function.
             :type support: torch.Tensor
             :param num_atoms: Number of atoms in the distributional value function. Defaults to 51.
             :type num_atoms: int
             :param head_config: Configuration of the network MLP head.
-            :type head_config: Optional[ConfigType]
+            :type head_config: NetConfigType | None
             :param min_latent_dim: Minimum dimension of the latent space representation. Defaults to 8.
             :type min_latent_dim: int
             :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
             :type max_latent_dim: int
             :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
                 single-agent environments.
-            :type n_agents: Optional[int]
+            :type n_agents: int | None
             :param latent_dim: Dimension of the latent space representation.
             :type latent_dim: int
             :param device: Device to use for the network.
@@ -274,11 +275,11 @@ and uses our custom head. Since we have done most of the work in the head, the i
                 support: torch.Tensor,
                 num_atoms: int = 51,
                 noise_std: float = 0.5,
-                encoder_config: Optional[ConfigType] = None,
-                head_config: Optional[ConfigType] = None,
+                encoder_config: dict[str, Any] | None = None,
+                head_config: dict[str, Any] | None = None,
                 min_latent_dim: int = 8,
                 max_latent_dim: int = 128,
-                n_agents: Optional[int] = None,
+                n_agents: int | None = None,
                 latent_dim: int = 32,
                 device: str = "cpu",
             ):
@@ -336,11 +337,11 @@ and uses our custom head. Since we have done most of the work in the head, the i
                 # Build value and advantage networks
                 self.build_network_head(head_config)
 
-            def build_network_head(self, net_config: Dict[str, Any]) -> None:
+            def build_network_head(self, net_config: dict[str, Any]) -> None:
                 """Builds the value and advantage heads of the network based on the passed configuration.
 
                 :param net_config: Configuration of the network head.
-                :type net_config: Dict[str, Any]
+                :type net_config: dict[str, Any]
                 """
                 self.head_net = DuelingDistributionalMLP(
                     num_inputs=self.latent_dim,

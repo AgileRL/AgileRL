@@ -1,11 +1,11 @@
 [project]
 name = "agilerl"
-version = "2.4.3.dev1"
+version = "2.5.0.dev0"
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.10,<3.14"
 
 dependencies = [
     "accelerate~=1.7.0",
@@ -14,11 +14,11 @@ dependencies = [
     "flatten_dict~=0.4.2",
     "gymnasium~=1.0.0",
     "google-cloud-storage~=2.5.0",
-    "h5py~=3.8.0",
+    "h5py~=3.15.0",
     "hydra-core~=1.3.2",
     "matplotlib~=3.9.4,<3.10",
     "minari[all]==0.5.2",
-    "numpy~=1.26.4",
+    "numpy>=2.0.0,<3.0",
     "omegaconf~=2.3.0",
     "pandas~=2.2.3",
     "pettingzoo~=1.23.1",
@@ -28,14 +28,12 @@ dependencies = [
     "pygame~=2.6.0",
     "pymunk~=6.2.0",
     "redis~=4.4.4",
-    "scipy~=1.12.0",
     "SuperSuit~=3.9.0",
     "termcolor~=1.1.0",
     "torch==2.7.1",
     "tensordict~=0.8",
-    "tqdm~=4.66.4",
-    "ucimlrepo~=0.0.3",
-    "wandb~=0.17.6",
+    "tqdm>=4.66.4",
+    "wandb~=0.18.0",
 ]
 
 [project.optional-dependencies]
@@ -70,6 +68,18 @@ docs = [
 [tool.pytest.ini_options]
 # Deterministic ordering for tests; useful for pytest-xdist.
 env = ["PYTHONHASHSEED=0", "VLLM_ATTENTION_BACKEND=XFORMERS", "VLLM_USE_FLASHINFER_SAMPLER=0"]
+filterwarnings = [
+    # MakeEvolvable deprecation (use EvolvableModule/EvolvableNetwork instead)
+    "ignore::DeprecationWarning:agilerl.wrappers.make_evolvable",
+    # HPO: activation mutations not supported for some algorithms
+    "ignore:Activation mutations are not supported for .*:UserWarning:agilerl.hpo.mutation",
+    # Pygame warnings
+    "ignore:pkg_resources is deprecated",
+    "ignore:Deprecated call to `pkg_resources.*"
+]
+markers = [
+    "llm: LLM-related tests (exclude with -m 'not llm')",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -81,12 +91,49 @@ packages = ["agilerl"]
 [tool.hatch.build.targets.sdist]
 exclude = ["tutorials"]
 
-[tool.black]
-line-length = 88
-
-[tool.isort]
-profile = "black"
-
 [tool.ruff]
-# ignore = ["E501"]
+target-version = "py310"
 line-length = 88
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "E501",          # Line length (handled by formatter)
+    "FIX", "TD",     # All FIXME and TODO rules
+    "D203", "D213",  # Specific docstring conflicts
+    "D100", "D107",  # Missing docstrings (module/init)
+    "ARG",           # All unused argument rules (ARG002, 004, etc.)
+    "ANN",           # All annotation rules (ANN002, 003, 401)
+    "FBT",           # All boolean trap rules (FBT001, 002, 003)
+    "PLR09",         # All "Too Many..." complexity rules (branches, args, returns)
+    "C901",          # complexity
+    "N812",          # import lowercase as upper
+    "UP007",         # union operator
+    "S101",          # use of asserts outside tests
+    "T201",          # print statements used in training loops (for now)
+    "DTZ005",        # datetime.now() without tz argument
+    "COM812",        # issues with ruff-format
+    "PYI024",        # namedtuple issue
+]
+
+[tool.ruff.lint.per-file-ignores]
+"agilerl/**" = [
+    "D1",            # missing docstrings in public modules/classes/methods/packages
+    "D205",          # 1 blank line between summary and description
+    "D4",            # first line punctuation/period (conflicts with multi-line)
+    "N8",            # naming: math (L, T, H), public API (BC_LM), and casing
+    "S",             # security: pickle (checkpoints), random (non-crypto), asserts
+    "PTH",           # path/os compatibility: os.remove, isdir, open
+    "TRY", "BLE",    # exception handling: TypeError, abstract raises, catching Exception
+    "PLR", "PLW", "PLC", # pylint: magic values, registry/config __hash__, self-assignment, loops
+    "SIM",           # simplification: nested if, contextlib.suppress
+    "ARG001",        # unused args (interface consistency)
+    "ERA001",        # commented-out code (kept for reference)
+    "SLF001",        # private member access (torch/accelerate internals)
+    "NPY002",        # legacy np.random
+    "TC001", "TC003",# type-checking block imports
+    "A002",          # argument shadowing builtin (input)
+    "PIE790",        # unnecessary ...
+    "PD011",         # .values -> .to_numpy()
+]
+"{tests,benchmarking,demos,tutorials}/**" = ["ALL"]

@@ -40,7 +40,6 @@ def set_seed():
     torch.cuda.manual_seed_all(SEED)
     np.random.seed(SEED)
     random.seed(SEED)
-    yield
 
 
 @pytest.fixture(scope="function")
@@ -91,7 +90,6 @@ def model_factory():
             attn_implementation="sdpa",
         )
         model.gradient_checkpointing_enable()
-        model = get_peft_model(model, peft_config)
-        return model
+        return get_peft_model(model, peft_config)
 
     return generate_model

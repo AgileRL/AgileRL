@@ -1,5 +1,4 @@
 from collections import deque
-from typing import Deque, Optional, Union
 
 import torch
 from tensordict import TensorDict, TensorDictBase, is_tensor_collection
@@ -7,7 +6,7 @@ from tensordict import TensorDict, TensorDictBase, is_tensor_collection
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 from agilerl.typing import ArrayOrTensor
 
-DataType = Union[dict[str, ArrayOrTensor], TensorDict]
+DataType = dict[str, ArrayOrTensor] | TensorDict
 
 
 class ReplayBuffer:
@@ -16,7 +15,7 @@ class ReplayBuffer:
     :param max_size: Maximum number of transitions to store
     :type max_size: int
     :param device: Device to store the transitions on
-    :type device: Optional[Union[str, torch.device]], optional
+    :type device: str | torch.device | None, optional
     :param dtype: Data type for the tensors
     :type dtype: torch.dtype, optional
     """
@@ -24,7 +23,7 @@ class ReplayBuffer:
     def __init__(
         self,
         max_size: int,
-        device: Union[str, torch.device] = "cpu",
+        device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float32,
     ) -> None:
         self.max_size = max_size
@@ -35,7 +34,7 @@ class ReplayBuffer:
 
         self._cursor = 0
         self._size = 0
-        self._storage: Optional[TensorDict] = None
+        self._storage: TensorDict | None = None
 
     @property
     def storage(self) -> TensorDict:
@@ -74,7 +73,7 @@ class ReplayBuffer:
         """Add a transition to the buffer.
 
         :param data: Transition to add to the buffer
-        :type data: Union[TensorDict, dict[str, Any]]
+        :type data: TensorDict | dict[str, Any]
         """
         # Initialize storage
         data = data.to(self.device)
@@ -83,17 +82,16 @@ class ReplayBuffer:
         # Ensure all tensors in data have proper dimensions beyond batch dimension
         # Handles the case of scalar observations that become (batch_size,)
         # instead of (batch_size, 1)
-        for key, value in data.items():
-            if is_tensor_collection(value):
-                value: TensorDictBase = value
-                for k, v in value.items():
+        for key, item in data.items():
+            if is_tensor_collection(item):
+                item: TensorDictBase = item
+                for k, v in item.items():
                     if v.ndim == 1:
-                        value[k] = v.reshape(_n_transitions, 1)
-            else:
-                if value.ndim == 1:
-                    value = value.reshape(_n_transitions, 1)
+                        item[k] = v.reshape(_n_transitions, 1)
+            elif item.ndim == 1:
+                item = item.reshape(_n_transitions, 1)
 
-            data[key] = value
+            data[key] = item
 
         if self._storage is None:
             self._init(data)
@@ -150,7 +148,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
     :param gamma: Discount factor
     :type gamma: float
     :param device: Device to store the transitions on
-    :type device: Optional[Union[str, torch.device]], optional
+    :type device: str | torch.device | None, optional
     :param dtype: Data type for the tensors
     :type dtype: torch.dtype, optional
     """
@@ -160,25 +158,25 @@ class MultiStepReplayBuffer(ReplayBuffer):
         max_size: int,
         n_step: int = 3,
         gamma: float = 0.99,
-        device: Union[str, torch.device] = "cpu",
+        device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__(max_size, device, dtype)
 
         self.n_step = n_step
         self.gamma = gamma
-        self.n_step_buffer: Deque[TensorDict] = deque(maxlen=n_step)
+        self.n_step_buffer: deque[TensorDict] = deque(maxlen=n_step)
         self.reward_key = "reward"
         self.done_key = None
         self.ns_key = "next_obs"
 
-    def add(self, data: TensorDict) -> Optional[TensorDict]:
+    def add(self, data: TensorDict) -> TensorDict | None:
         """Add a transition to the n-step buffer and potentially to the replay buffer.
 
         :param data: Transition to add to the buffer
         :type data: TensorDict
         :return: First transition in the n-step buffer
-        :rtype: Optional[TensorDict]
+        :rtype: TensorDict | None
         """
         # Add to n-step buffer
         data = data.to(self.device)
@@ -186,7 +184,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
 
         # If buffer is not full yet, don't process n-step return
         if len(self.n_step_buffer) < self.n_step:
-            return
+            return None
 
         # Calculate n-step return
         n_step_data = self._get_n_step_info()
@@ -216,12 +214,12 @@ class MultiStepReplayBuffer(ReplayBuffer):
 
         # Get the reward key based on what's available in the transition
         if not self.initialized:
-            assert (
-                self.reward_key in self.n_step_buffer[0]
-            ), f"Reward key not found in transition. Expected key: {self.reward_key}"
-            assert (
-                self.ns_key in self.n_step_buffer[0]
-            ), f"Next observation key not found in transition. Expected key: {self.ns_key}"
+            assert self.reward_key in self.n_step_buffer[0], (
+                f"Reward key not found in transition. Expected key: {self.reward_key}"
+            )
+            assert self.ns_key in self.n_step_buffer[0], (
+                f"Next observation key not found in transition. Expected key: {self.ns_key}"
+            )
 
             done_key = None
             expected_keys = ["done", "termination", "terminated"]
@@ -230,9 +228,9 @@ class MultiStepReplayBuffer(ReplayBuffer):
                     done_key = key
                     break
 
-            assert (
-                done_key is not None
-            ), f"No done/termination key found in transition. Expected keys: {expected_keys}"
+            assert done_key is not None, (
+                f"No done/termination key found in transition. Expected keys: {expected_keys}"
+            )
             self.done_key = done_key
 
         # Start with reward from first transition
@@ -269,7 +267,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
     :param alpha: How much prioritization to use (0 - no prioritization, 1 - full prioritization)
     :type alpha: float
     :param device: Device to store the transitions on.
-    :type device: Optional[Union[str, torch.device]], optional
+    :type device: str | torch.device | None, optional
     :param dtype: Data type for the tensors
     :type dtype: torch.dtype, optional
     """
@@ -278,7 +276,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self,
         max_size: int,
         alpha: float = 0.6,
-        device: Union[str, torch.device] = "cpu",
+        device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__(max_size, device, dtype)
@@ -306,7 +304,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
         # Add max priority for new entries
         n_transitions = data.shape[0]
-        for i in range(n_transitions):
+        for _i in range(n_transitions):
             self._update_priority(self.tree_ptr, self.max_priority)
             self.tree_ptr = (self.tree_ptr + 1) % self.max_size
 
@@ -411,7 +409,9 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         return weights
 
     def update_priorities(
-        self, indices: torch.Tensor, priorities: torch.Tensor
+        self,
+        indices: torch.Tensor,
+        priorities: torch.Tensor,
     ) -> None:
         """Update priorities of the sampled transitions.
 
@@ -420,9 +420,9 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         :param priorities: New priorities
         :type priorities: torch.Tensor
         """
-        for idx, priority in zip(indices, priorities):
+        for idx, priority in zip(indices, priorities, strict=False):
             # Handle small priorities
-            priority = max(priority.item(), 1e-5)
+            new_priority = max(priority.item(), 1e-5)
 
             # Update the priority
-            self._update_priority(idx.item(), priority)
+            self._update_priority(idx.item(), new_priority)

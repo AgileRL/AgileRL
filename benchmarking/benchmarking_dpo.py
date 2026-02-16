@@ -1,8 +1,9 @@
 from agilerl import HAS_LLM_DEPENDENCIES
 
 if not HAS_LLM_DEPENDENCIES:
+    msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
     raise ImportError(
-        "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
+        msg,
     )
 
 import yaml

@@ -1,12 +1,11 @@
 import copy
 import warnings
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from gymnasium import spaces
+from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -45,7 +44,7 @@ class DDPG(RLAlgorithm):
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise, defaults to 0.1
-    :type expl_noise: Union[float, np.ndarray], optional
+    :type expl_noise: float | np.ndarray, optional
     :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
     :type vect_noise_dim: int, optional
     :param mean_noise: Mean of exploration noise, defaults to 0.0
@@ -59,7 +58,7 @@ class DDPG(RLAlgorithm):
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param net_config: Encoder configuration, defaults to None
-    :type net_config: Optional[dict[str, Any]], optional
+    :type net_config: dict[str, Any] | None, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr_actor: Learning rate for actor optimizer, defaults to 1e-4
@@ -75,13 +74,13 @@ class DDPG(RLAlgorithm):
     :param normalize_images: Normalize images flag, defaults to True
     :type normalize_images: bool, optional
     :param mut: Most recent mutation to agent, defaults to None
-    :type mut: Optional[str], optional
+    :type mut: str | None, optional
     :param policy_freq: Frequency of critic network updates compared to policy network, defaults to 2
     :type policy_freq: int, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: Optional[nn.Module], optional
+    :type actor_network: nn.Module | None, optional
     :param critic_network: Custom critic network, defaults to None
-    :type critic_network: Optional[nn.Module], optional
+    :type critic_network: nn.Module | None, optional
     :param share_encoders: Share encoders between actor and critic, defaults to False
     :type share_encoders: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -99,14 +98,14 @@ class DDPG(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Box,
         O_U_noise: bool = True,
-        expl_noise: Union[float, np.ndarray] = 0.1,
+        expl_noise: float | np.ndarray = 0.1,
         vect_noise_dim: int = 1,
         mean_noise: float = 0.0,
         theta: float = 0.15,
         dt: float = 1e-2,
         index: int = 0,
-        hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[dict[str, Any]] = None,
+        hp_config: HyperparameterConfig | None = None,
+        net_config: dict[str, Any] | None = None,
         batch_size: int = 64,
         lr_actor: float = 1e-4,
         lr_critic: float = 1e-3,
@@ -114,13 +113,13 @@ class DDPG(RLAlgorithm):
         gamma: float = 0.99,
         tau: float = 1e-3,
         normalize_images: bool = True,
-        mut: Optional[str] = None,
+        mut: str | None = None,
         policy_freq: int = 2,
-        actor_network: Optional[EvolvableModule] = None,
-        critic_network: Optional[EvolvableModule] = None,
+        actor_network: EvolvableModule | None = None,
+        critic_network: EvolvableModule | None = None,
         share_encoders: bool = False,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
+        accelerator: Any | None = None,
         wrap: bool = True,
     ) -> None:
 
@@ -138,16 +137,19 @@ class DDPG(RLAlgorithm):
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert isinstance(
-            action_space, spaces.Box
+            action_space,
+            spaces.Box,
         ), "DDPG only supports continuous action spaces."
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
             and expl_noise.shape == (vect_noise_dim, self.action_dim)
-        ), f"Exploration action noise rate must be a float, or an array of size {self.action_dim}"
+        ), (
+            f"Exploration action noise rate must be a float, or an array of size {self.action_dim}"
+        )
         if isinstance(expl_noise, (float, int)):
-            assert (
-                expl_noise >= 0
-            ), "Exploration noise must be greater than or equal to zero."
+            assert expl_noise >= 0, (
+                "Exploration noise must be greater than or equal to zero."
+            )
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr_actor, float), "Actor learning rate must be a float."
@@ -160,16 +162,18 @@ class DDPG(RLAlgorithm):
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(policy_freq, int), "Policy frequency must be an integer."
-        assert (
-            policy_freq >= 1
-        ), "Policy frequency must be greater than or equal to one."
+        assert policy_freq >= 1, (
+            "Policy frequency must be greater than or equal to one."
+        )
 
         if (actor_network is not None) != (critic_network is not None):  # XOR operation
             warnings.warn(
-                "Actor and critic networks must both be supplied to use custom networks. Defaulting to net config."
+                "Actor and critic networks must both be supplied to use custom networks. Defaulting to net config.",
+                stacklevel=2,
             )
         assert isinstance(
-            wrap, bool
+            wrap,
+            bool,
         ), "Wrap models flag must be boolean value True or False."
 
         self.batch_size = batch_size
@@ -204,19 +208,23 @@ class DDPG(RLAlgorithm):
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
+                msg = f"'actor_network' is of type {type(actor_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"'actor_network' is of type {type(actor_network)}, but must be of type EvolvableModule."
+                    msg,
                 )
             if not isinstance(critic_network, EvolvableModule):
+                msg = f"'critic_network' is of type {type(critic_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"'critic_network' is of type {type(critic_network)}, but must be of type EvolvableModule."
+                    msg,
                 )
 
             self.actor, self.critic = make_safe_deepcopies(
-                actor_network, critic_network
+                actor_network,
+                critic_network,
             )
             self.actor_target, self.critic_target = make_safe_deepcopies(
-                actor_network, critic_network
+                actor_network,
+                critic_network,
             )
         else:
             net_config = {} if net_config is None else net_config
@@ -224,14 +232,16 @@ class DDPG(RLAlgorithm):
             # NOTE: Set layer_norm=False for encoder config, since critic automatically
             # does this the actor should too to allow encoder sharing
             encoder_config: NetConfigType | None = net_config.get(
-                "encoder_config", None
+                "encoder_config",
+                None,
             )
             if encoder_config is not None:
                 if is_mlp_net_config(encoder_config):
                     if encoder_config.get("layer_norm", False):
                         warnings.warn(
                             "Layer normalization is not supported for the encoder of DDPG networks. Disabling it. "
-                            "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469"
+                            "See GitHub PR for more details: https://github.com/AgileRL/AgileRL/pull/469",
+                            stacklevel=2,
                         )
                     encoder_config["layer_norm"] = False
             else:
@@ -257,7 +267,7 @@ class DDPG(RLAlgorithm):
             critic_net_config: dict[str, Any] = copy.deepcopy(net_config)
             critic_net_config["head_config"] = critic_head_config
 
-            def create_actor():
+            def create_actor() -> DeterministicActor:
                 return DeterministicActor(
                     observation_space=observation_space,
                     action_space=action_space,
@@ -265,7 +275,7 @@ class DDPG(RLAlgorithm):
                     **net_config,
                 )
 
-            def create_critic():
+            def create_critic() -> ContinuousQNetwork:
                 return ContinuousQNetwork(
                     observation_space=observation_space,
                     action_space=action_space,
@@ -293,10 +303,14 @@ class DDPG(RLAlgorithm):
 
         # Optimizers
         self.actor_optimizer = OptimizerWrapper(
-            optim.Adam, networks=self.actor, lr=lr_actor
+            optim.Adam,
+            networks=self.actor,
+            lr=lr_actor,
         )
         self.critic_optimizer = OptimizerWrapper(
-            optim.Adam, networks=self.critic, lr=lr_critic
+            optim.Adam,
+            networks=self.critic,
+            lr=lr_critic,
         )
 
         if self.accelerator is not None and wrap:
@@ -310,33 +324,36 @@ class DDPG(RLAlgorithm):
                 eval_network=self.actor,
                 shared_networks=self.actor_target,
                 policy=True,
-            )
+            ),
         )
         self.register_network_group(
             NetworkGroup(
                 eval_network=self.critic,
                 shared_networks=self.critic_target,
                 policy=False,
-            )
+            ),
         )
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic. Registered as a mutation hook
-        when share_encoders=True."""
+        when share_encoders=True.
+        """
         if all(isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]):
             try:
                 share_encoder_parameters(self.actor, self.critic, self.critic_target)
             except KeyError as e:
+                msg = f"Found incompatible encoder architectures: {e} not found in shared network."
                 raise KeyError(
-                    f"Found incompatible encoder architectures: {e} not found in shared network."
+                    msg,
                 ) from e
         else:
             warnings.warn(
-                "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork."
+                "Encoder sharing is disabled as actor or critic is not an EvolvableNetwork.",
+                stacklevel=2,
             )
 
     def get_action(self, obs: ObservationType, training: bool = True) -> np.ndarray:
-        """Returns the next action to take in the environment. If training, random noise
+        """Return the next action to take in the environment. If training, random noise
         is added to the action to promote exploration.
 
         :param obs: Environment observation, or multiple observations in a batch
@@ -356,8 +373,7 @@ class DDPG(RLAlgorithm):
         # Add noise for exploration
         if training:
             action = action.cpu().data.numpy()
-            action = (action + self.action_noise()).clip(-1, 1)
-            return action
+            return (action + self.action_noise()).clip(-1, 1)
 
         # Action scaled to action space bounds if not training
         action = DeterministicActor.rescale_action(
@@ -405,7 +421,7 @@ class DDPG(RLAlgorithm):
         noise_clip: float = 0.5,
         policy_noise: float = 0.2,
     ) -> tuple[float, float]:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
         :type experiences: dict[str, torch.Tensor[float]]
@@ -430,7 +446,9 @@ class DDPG(RLAlgorithm):
             noise = multi_dim_clamp(-noise_clip, noise_clip, noise)
             next_actions = next_actions + noise
             next_actions = multi_dim_clamp(
-                self.action_low, self.action_high, next_actions
+                self.action_low,
+                self.action_high,
+                next_actions,
             )
             q_value_next_state = self.critic_target(next_obs, next_actions)
 
@@ -483,19 +501,21 @@ class DDPG(RLAlgorithm):
         :param target: Target network with parameters to be updated
         :type target: nn.Module
         """
-        for eval_param, target_param in zip(net.parameters(), target.parameters()):
+        for eval_param, target_param in zip(
+            net.parameters(), target.parameters(), strict=False
+        ):
             target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
+                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
             )
 
     def test(
         self,
         env: GymEnvType,
         swap_channels: bool = False,
-        max_steps: Optional[int] = None,
+        max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
@@ -513,7 +533,7 @@ class DDPG(RLAlgorithm):
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
-            for i in range(loop):
+            for _i in range(loop):
                 obs, _ = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
@@ -526,7 +546,7 @@ class DDPG(RLAlgorithm):
                     obs, reward, done, trunc, _ = env.step(action)
                     step += 1
                     scores += np.array(reward)
-                    for idx, (d, t) in enumerate(zip(done, trunc)):
+                    for idx, (d, t) in enumerate(zip(done, trunc, strict=False)):
                         if (
                             d or t or (max_steps is not None and step == max_steps)
                         ) and not finished[idx]:

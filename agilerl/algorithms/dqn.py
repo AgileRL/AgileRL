@@ -1,13 +1,12 @@
 import warnings
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
 import torch._dynamo
-import torch.nn as nn
-import torch.optim as optim
 from gymnasium import spaces
 from tensordict.nn import CudaGraphModule
+from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -63,19 +62,19 @@ class DQN(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
-        hp_config: Optional[HyperparameterConfig] = None,
-        net_config: Optional[dict[str, Any]] = None,
+        hp_config: HyperparameterConfig | None = None,
+        net_config: dict[str, Any] | None = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 5,
         gamma: float = 0.99,
         tau: float = 1e-3,
-        mut: Optional[str] = None,
+        mut: str | None = None,
         double: bool = False,
         normalize_images: bool = True,
-        actor_network: Optional[EvolvableModule] = None,
+        actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Optional[Any] = None,
+        accelerator: Any | None = None,
         cudagraphs: bool = False,
         wrap: bool = True,
     ) -> None:
@@ -102,10 +101,12 @@ class DQN(RLAlgorithm):
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(
-            double, bool
+            double,
+            bool,
         ), "Double Q-learning flag must be boolean value True or False."
         assert isinstance(
-            wrap, bool
+            wrap,
+            bool,
         ), "Wrap models flag must be boolean value True or False."
 
         self.batch_size = batch_size
@@ -121,18 +122,20 @@ class DQN(RLAlgorithm):
 
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
+                msg = f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+                    msg,
                 )
 
             # Need to make deepcopies for target and detached networks
             self.actor, self.actor_target = make_safe_deepcopies(
-                actor_network, actor_network
+                actor_network,
+                actor_network,
             )
         else:
             net_config = {} if net_config is None else net_config
 
-            def create_actor():
+            def create_actor() -> QNetwork:
                 return QNetwork(
                     observation_space=observation_space,
                     action_space=action_space,
@@ -162,11 +165,14 @@ class DQN(RLAlgorithm):
         # torch.compile and cuda graph optimizations
         if self.cudagraphs:
             warnings.warn(
-                "CUDA graphs for DQN are implemented experimentally and may not work as expected."
+                "CUDA graphs for DQN are implemented experimentally and may not work as expected.",
+                stacklevel=2,
             )
             self.update = torch.compile(self.update, mode=None)
             self._get_action = torch.compile(
-                self._get_action, mode=None, fullgraph=True
+                self._get_action,
+                mode=None,
+                fullgraph=True,
             )
             self.update = CudaGraphModule(self.update)
             self._get_action = CudaGraphModule(self._get_action)
@@ -177,16 +183,16 @@ class DQN(RLAlgorithm):
                 eval_network=self.actor,
                 shared_networks=self.actor_target,
                 policy=True,
-            )
+            ),
         )
 
     def get_action(
         self,
         obs: ObservationType,
         epsilon: float = 0.0,
-        action_mask: Optional[np.ndarray] = None,
+        action_mask: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Returns the next action to take in the environment.
+        """Return the next action to take in the environment.
 
         :param obs: The current observation from the environment
         :type obs: np.ndarray, dict[str, np.ndarray], tuple[np.ndarray]
@@ -205,7 +211,7 @@ class DQN(RLAlgorithm):
             # Need to stack if vectorized env
             action_mask = (
                 np.stack(action_mask)
-                if action_mask.dtype == np.object_ or isinstance(action_mask, list)
+                if action_mask.dtype == object or isinstance(action_mask, list)
                 else action_mask
             )
             action_mask = torch.as_tensor(action_mask, device=device)
@@ -223,9 +229,12 @@ class DQN(RLAlgorithm):
         return self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
 
     def _get_action(
-        self, obs: TorchObsType, epsilon: torch.Tensor, action_mask: torch.Tensor
+        self,
+        obs: TorchObsType,
+        epsilon: torch.Tensor,
+        action_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Returns the next action to take in the environment.
+        """Return the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For greedy behaviour, set epsilon to 0.
 
@@ -259,9 +268,7 @@ class DQN(RLAlgorithm):
         )
 
         # Recompute actions with masking
-        actions = torch.where(use_policy, masked_policy_actions, masked_random_actions)
-
-        return actions
+        return torch.where(use_policy, masked_policy_actions, masked_random_actions)
 
     def update(
         self,
@@ -271,7 +278,7 @@ class DQN(RLAlgorithm):
         next_obs: TorchObsType,
         dones: torch.Tensor,
     ) -> torch.Tensor:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param obs: List of batched states
         :type obs: torch.Tensor[float], dict[str, torch.Tensor[float]], tuple[torch.Tensor[float]]
@@ -316,7 +323,7 @@ class DQN(RLAlgorithm):
         return loss.detach()
 
     def learn(self, experiences: ExperiencesType) -> float:
-        """Updates agent network parameters to learn from experiences.
+        """Update agent network parameters to learn from experiences.
 
         :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones in that order.
         :type experiences: tensordict.TensorDict
@@ -341,20 +348,22 @@ class DQN(RLAlgorithm):
     def soft_update(self) -> None:
         """Soft updates target network."""
         for eval_param, target_param in zip(
-            self.actor.parameters(), self.actor_target.parameters()
+            self.actor.parameters(),
+            self.actor_target.parameters(),
+            strict=False,
         ):
             target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
+                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data,
             )
 
     def test(
         self,
         env: GymEnvType,
         swap_channels: bool = False,
-        max_steps: Optional[int] = None,
+        max_steps: int | None = None,
         loop: int = 1,
     ) -> float:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
@@ -387,7 +396,7 @@ class DQN(RLAlgorithm):
                     obs, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
-                    for idx, (d, t) in enumerate(zip(done, trunc)):
+                    for idx, (d, t) in enumerate(zip(done, trunc, strict=False)):
                         if (
                             d or t or (max_steps is not None and step == max_steps)
                         ) and not finished[idx]:

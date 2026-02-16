@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -55,7 +55,7 @@ class EvolvableMLP(EvolvableModule):
     :param name: Name of the network, defaults to 'mlp'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
@@ -64,7 +64,7 @@ class EvolvableMLP(EvolvableModule):
         num_outputs: int,
         hidden_size: list[int],
         activation: str = "ReLU",
-        output_activation: str = None,
+        output_activation: str | None = None,
         min_hidden_layers: int = 1,
         max_hidden_layers: int = 3,
         min_mlp_nodes: int = 32,
@@ -78,27 +78,27 @@ class EvolvableMLP(EvolvableModule):
         new_gelu: bool = False,
         device: str = "cpu",
         name: str = "mlp",
-        random_seed: Optional[int] = None,
-    ):
+        random_seed: int | None = None,
+    ) -> None:
         super().__init__(device, random_seed)
 
-        assert (
-            num_inputs > 0
-        ), "'num_inputs' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            num_outputs > 0
-        ), "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
+        assert num_inputs > 0, (
+            "'num_inputs' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert num_outputs > 0, (
+            "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
+        )
         for num in hidden_size:
-            assert (
-                num > 0
-            ), "'hidden_size' cannot contain zero, please enter a valid integer."
+            assert num > 0, (
+                "'hidden_size' cannot contain zero, please enter a valid integer."
+            )
         assert len(hidden_size) != 0, "MLP must contain at least one hidden layer."
-        assert (
-            min_hidden_layers < max_hidden_layers
-        ), "'min_hidden_layers' must be less than 'max_hidden_layers."
-        assert (
-            min_mlp_nodes < max_mlp_nodes
-        ), "'min_mlp_nodes' must be less than 'max_mlp_nodes."
+        assert min_hidden_layers < max_hidden_layers, (
+            "'min_hidden_layers' must be less than 'max_hidden_layers."
+        )
+        assert min_mlp_nodes < max_mlp_nodes, (
+            "'min_mlp_nodes' must be less than 'max_mlp_nodes."
+        )
 
         self.name = name
         self.num_inputs = num_inputs
@@ -137,7 +137,7 @@ class EvolvableMLP(EvolvableModule):
 
     @property
     def net_config(self) -> dict[str, Any]:
-        """Returns model configuration in dictionary.
+        """Return model configuration in dictionary.
 
         :return: Model configuration
         :rtype: dict[str, Any]
@@ -151,7 +151,7 @@ class EvolvableMLP(EvolvableModule):
 
     @property
     def activation(self) -> str:
-        """Returns activation function.
+        """Return activation function.
 
         :return: Activation function
         :rtype: str
@@ -168,7 +168,9 @@ class EvolvableMLP(EvolvableModule):
         self._activation = activation
 
     def init_weights_gaussian(
-        self, std_coeff: float = 4, output_coeff: float = 4
+        self,
+        std_coeff: float = 4,
+        output_coeff: float = 4,
     ) -> None:
         """Initialise weights of neural network using Gaussian distribution.
 
@@ -184,7 +186,7 @@ class EvolvableMLP(EvolvableModule):
         EvolvableModule.init_weights_gaussian(output_layer, std_coeff=output_coeff)
 
     def forward(self, x: ArrayOrTensor) -> torch.Tensor:
-        """Returns output of neural network.
+        """Return output of neural network.
 
         :param x: Neural network input
         :type x: torch.Tensor or np.ndarray
@@ -201,7 +203,7 @@ class EvolvableMLP(EvolvableModule):
         return self.model(x)
 
     def get_output_dense(self) -> torch.nn.Module:
-        """Returns output layer of neural network.
+        """Return output layer of neural network.
 
         :return: Output layer of neural network
         :rtype: torch.nn.Module
@@ -223,8 +225,8 @@ class EvolvableMLP(EvolvableModule):
         self.recreate_network()
 
     @mutation(MutationType.LAYER)
-    def add_layer(self) -> Optional[dict[str, int]]:
-        """Adds a hidden layer to neural network. Falls back on ``add_node()`` if ``max_hidden_layers`` reached.
+    def add_layer(self) -> dict[str, int] | None:
+        """Add a hidden layer to neural network. Falls back on ``add_node()`` if ``max_hidden_layers`` reached.
 
         :return: Dictionary containing the hidden layer and number of new nodes.
         :rtype: dict[str, int]
@@ -234,10 +236,11 @@ class EvolvableMLP(EvolvableModule):
             self.hidden_size += [self.hidden_size[-1]]
         else:
             return self.add_node()
+        return None
 
     @mutation(MutationType.LAYER)
-    def remove_layer(self) -> Optional[dict[str, int]]:
-        """Removes a hidden layer from neural network. Falls back on ``add_node()`` if ``min_hidden_layers`` reached.
+    def remove_layer(self) -> dict[str, int] | None:
+        """Remove a hidden layer from neural network. Falls back on ``add_node()`` if ``min_hidden_layers`` reached.
 
         :return: Dictionary containing the hidden layer and number of new nodes.
         :rtype: dict[str, int]
@@ -246,12 +249,15 @@ class EvolvableMLP(EvolvableModule):
             self.hidden_size = self.hidden_size[:-1]
         else:
             return self.add_node()
+        return None
 
     @mutation(MutationType.NODE)
     def add_node(
-        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+        self,
+        hidden_layer: int | None = None,
+        numb_new_nodes: int | None = None,
     ) -> dict[str, int]:
-        """Adds nodes to hidden layer of neural network.
+        """Add nodes to hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
         :type hidden_layer: int, optional
@@ -277,9 +283,11 @@ class EvolvableMLP(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def remove_node(
-        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+        self,
+        hidden_layer: int | None = None,
+        numb_new_nodes: int | None = None,
     ) -> dict[str, int]:
-        """Removes nodes from hidden layer of neural network.
+        """Remove nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
         :type hidden_layer: int, optional
@@ -323,5 +331,6 @@ class EvolvableMLP(EvolvableModule):
         )
 
         self.model = EvolvableModule.preserve_parameters(
-            old_net=self.model, new_net=model
+            old_net=self.model,
+            new_net=model,
         )

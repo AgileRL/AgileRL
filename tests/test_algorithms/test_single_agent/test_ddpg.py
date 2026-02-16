@@ -3,11 +3,10 @@ import copy
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from torch import nn, optim
 
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
@@ -58,22 +57,32 @@ class SimpleCNN(nn.Module):
         super().__init__()
 
         self.conv1 = nn.Conv2d(
-            3, 16, kernel_size=3, stride=1, padding=1
+            3,
+            16,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         )  # Input channels: 3 (for RGB images), Output channels: 16
         self.relu1 = nn.ReLU()
         self.mp1 = nn.MaxPool2d(kernel_size=2, stride=2)
         self.conv2 = nn.Conv2d(
-            16, 32, kernel_size=3, stride=1, padding=1
+            16,
+            32,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         )  # Input channels: 16, Output channels: 32
         self.relu2 = nn.ReLU()
         self.mp2 = nn.MaxPool2d(kernel_size=2, stride=2)
         self.flat = nn.Flatten()  # Flatten the 2D feature map to a 1D vector
         self.linear1 = nn.Linear(
-            32 * 8 * 8, 128
+            32 * 8 * 8,
+            128,
         )  # Fully connected layer with 128 output features
         self.relu3 = nn.ReLU()
         self.linear2 = nn.Linear(
-            128, 128
+            128,
+            128,
         )  # Fully connected layer with 128 output features
 
     def forward(self, x, xc):
@@ -81,8 +90,7 @@ class SimpleCNN(nn.Module):
         x = self.mp2(self.relu2(self.conv2(x)))
         x = self.flat(x)
         x = self.relu3(self.linear1(x))
-        x = self.relu3(self.linear2(x))
-        return x
+        return self.relu3(self.linear2(x))
 
 
 # initialize ddpg with valid parameters
@@ -333,7 +341,10 @@ def test_returns_expected_action_training(observation_space, request, action_dty
 
     # Test without OU noise
     ddpg = DDPG(
-        observation_space, action_space, O_U_noise=False, accelerator=accelerator
+        observation_space,
+        action_space,
+        O_U_noise=False,
+        accelerator=accelerator,
     )
     state = get_sample_from_space(observation_space)
     training = True
@@ -381,11 +392,14 @@ def test_learns_from_experiences(observation_space, accelerator, request):
     critic_target = ddpg.critic_target
     critic_pre_learn_sd = copy.deepcopy(ddpg.critic.state_dict())
 
-    for i in range(policy_freq * 2):
+    for _i in range(policy_freq * 2):
         # Create a batch of experiences & learn
         device = accelerator.device if accelerator else "cpu"
         experiences = get_experiences_batch(
-            observation_space, action_space, batch_size, device
+            observation_space,
+            action_space,
+            batch_size,
+            device,
         )
         ddpg.scores.append(0)
         actor_loss, critic_loss = ddpg.learn(experiences)
@@ -442,12 +456,16 @@ def test_soft_update():
     target_params = list(ddpg.actor_target.parameters())
     expected_params = [
         ddpg.tau * eval_param + (1.0 - ddpg.tau) * target_param
-        for eval_param, target_param in zip(eval_params, target_params)
+        for eval_param, target_param in zip(eval_params, target_params, strict=False)
     ]
 
     assert all(
         torch.allclose(expected_param, target_param)
-        for expected_param, target_param in zip(expected_params, target_params)
+        for expected_param, target_param in zip(
+            expected_params,
+            target_params,
+            strict=False,
+        )
     )
 
     ddpg.soft_update(ddpg.critic, ddpg.critic_target)
@@ -456,12 +474,16 @@ def test_soft_update():
     target_params = list(ddpg.critic_target.parameters())
     expected_params = [
         ddpg.tau * eval_param + (1.0 - ddpg.tau) * target_param
-        for eval_param, target_param in zip(eval_params, target_params)
+        for eval_param, target_param in zip(eval_params, target_params, strict=False)
     ]
 
     assert all(
         torch.allclose(expected_param, target_param)
-        for expected_param, target_param in zip(expected_params, target_params)
+        for expected_param, target_param in zip(
+            expected_params,
+            target_params,
+            strict=False,
+        )
     )
     ddpg.clean_up()
 
@@ -479,7 +501,9 @@ def test_algorithm_test_loop(observation_space, num_envs, device, request):
 
     # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     agent = DDPG(
-        observation_space=observation_space, action_space=action_space, device=device
+        observation_space=observation_space,
+        action_space=action_space,
+        device=device,
     )
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
@@ -512,17 +536,21 @@ def test_clone_returns_identical_agent(observation_space, request):
     assert clone_agent.accelerator == ddpg.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        ddpg.actor_target.state_dict(),
     )
     assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
     assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
+        clone_agent.critic_target.state_dict(),
+        ddpg.critic_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
+        clone_agent.actor_optimizer.state_dict(),
+        ddpg.actor_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
+        clone_agent.critic_optimizer.state_dict(),
+        ddpg.critic_optimizer.state_dict(),
     )
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
@@ -548,17 +576,21 @@ def test_clone_returns_identical_agent(observation_space, request):
     assert clone_agent.accelerator == ddpg.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        ddpg.actor_target.state_dict(),
     )
     assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
     assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
+        clone_agent.critic_target.state_dict(),
+        ddpg.critic_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
+        clone_agent.actor_optimizer.state_dict(),
+        ddpg.actor_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
+        clone_agent.critic_optimizer.state_dict(),
+        ddpg.critic_optimizer.state_dict(),
     )
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
@@ -583,17 +615,21 @@ def test_clone_returns_identical_agent(observation_space, request):
     assert clone_agent.accelerator == ddpg.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        ddpg.actor_target.state_dict(),
     )
     assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
     assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
+        clone_agent.critic_target.state_dict(),
+        ddpg.critic_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
+        clone_agent.actor_optimizer.state_dict(),
+        ddpg.actor_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
+        clone_agent.critic_optimizer.state_dict(),
+        ddpg.critic_optimizer.state_dict(),
     )
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
@@ -639,17 +675,21 @@ def test_clone_after_learning():
     assert clone_agent.accelerator == ddpg.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        ddpg.actor_target.state_dict(),
     )
     assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
     assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
+        clone_agent.critic_target.state_dict(),
+        ddpg.critic_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
+        clone_agent.actor_optimizer.state_dict(),
+        ddpg.actor_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
+        clone_agent.critic_optimizer.state_dict(),
+        ddpg.critic_optimizer.state_dict(),
     )
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
@@ -688,7 +728,9 @@ def test_share_encoder_parameters_incompatible_architectures_raises_key_error(
 
 
 def test_share_encoder_parameters_non_evolvable_network_emits_warning(
-    vector_space, simple_mlp, simple_mlp_critic
+    vector_space,
+    simple_mlp,
+    simple_mlp_critic,
 ):
     """When share_encoder_parameters() is called with actor/critic that are not EvolvableNetwork, a warning is emitted."""
     action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)

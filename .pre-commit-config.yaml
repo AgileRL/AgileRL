@@ -23,10 +23,6 @@ repos:
           - id: debug-statements
           - id: mixed-line-ending
             args: [--fix=lf]
-    - repo: https://github.com/psf/black-pre-commit-mirror
-      rev: 26.1.0
-      hooks:
-          - id: black
     - repo: https://github.com/codespell-project/codespell
       rev: v2.4.1
       hooks:
@@ -35,24 +31,20 @@ repos:
                 - --skip=*.css,*.js,*.map,*.scss,*.svg
                 - --ignore-words-list=magent,pres,roate
     - repo: https://github.com/astral-sh/ruff-pre-commit
-      rev: v0.15.0
+      rev: v0.15.1
       hooks:
-          - id: ruff-check
-            args:
-                - --select=I
-                - --fix
-                - --ignore=E501,F401
-    - repo: https://github.com/asottile/pyupgrade
-      rev: v3.21.2
-      hooks:
-          - id: pyupgrade
-            args: [--py38-plus]
+          - id: ruff
+            name: Ruff Linter
+            args: [--fix]
+          - id: ruff-format
+            name: Ruff Formatter
+
     - repo: https://github.com/jumanjihouse/pre-commit-hook-yamlfmt
       rev: 0.2.3
       hooks:
           - id: yamlfmt
     - repo: https://github.com/astral-sh/uv-pre-commit
       # uv version.
-      rev: 0.10.0
+      rev: 0.10.2
       hooks:
           - id: uv-lock

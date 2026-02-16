@@ -1,13 +1,14 @@
 import inspect
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from numbers import Number
-from typing import Any, Callable, Optional, Union
+from typing import Any, Optional
 
 import numpy as np
 import torch
 from torch.optim import Optimizer
 
-from agilerl.protocols import EvolvableAlgorithm
+from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import NetworkType
 from agilerl.utils.algo_utils import DummyOptimizer
 
@@ -24,17 +25,18 @@ class NetworkConfig:
 
     :type eval_network: bool
     :param optimizer: The name of the optimizer that updates the network.
-    :type optimizer: Optional[str]
+    :type optimizer: str | None
     """
 
     name: str
     eval_network: bool = field(default=False)
-    optimizer: Optional[str] = field(default=None)
+    optimizer: str | None = field(default=None)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.eval_network and self.optimizer is None:
+            msg = "Evaluation network must have an optimizer associated with it."
             raise ValueError(
-                "Evaluation network must have an optimizer associated with it."
+                msg,
             )
 
 
@@ -58,12 +60,12 @@ class OptimizerConfig:
     """
 
     name: str
-    networks: Union[str, list[str]]
+    networks: str | list[str]
     lr: str
-    optimizer_cls: Union[type[Optimizer], list[type[Optimizer]]]
-    optimizer_kwargs: Union[dict[str, Any], list[dict[str, Any]]]
+    optimizer_cls: type[Optimizer] | list[type[Optimizer]]
+    optimizer_kwargs: dict[str, Any] | list[dict[str, Any]]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         # Save optimizer_cls as string for serialization
         if isinstance(self.optimizer_cls, dict):
             self.optimizer_cls = {
@@ -75,11 +77,11 @@ class OptimizerConfig:
     def __eq__(self, other: "OptimizerConfig") -> bool:
         return self.name == other.name and self.networks == other.networks
 
-    def get_optimizer_cls(self) -> Union[type[Optimizer], dict[str, type[Optimizer]]]:
+    def get_optimizer_cls(self) -> type[Optimizer] | dict[str, type[Optimizer]]:
         """Get the optimizer object/s from the stored configuration.
 
         :return: The optimizer object/s from the stored configuration.
-        :rtype: Union[Optimizer, dict[str, Optimizer]]
+        :rtype: Optimizer | dict[str, Optimizer]
         """
         name_to_cls = {
             "Adam": torch.optim.Adam,
@@ -118,19 +120,19 @@ class RLParameter:
     :param grow_factor: The factor by which the hyperparameter will be grown during mutation. Default is 1.2.
     :type grow_factor: float
     :param dtype: The data type of the hyperparameter. Default is float.
-    :type dtype: Union[type[float], type[int], type[np.ndarray]]
+    :type dtype: type[float] | type[int] | type[np.ndarray]
     :param value: The current value of the hyperparameter. Default is None.
-    :type value: Optional[Union[Number, np.ndarray]]
+    :type value: Number | np.ndarray | None
     """
 
     min: float
     max: float
     shrink_factor: float = 0.8
     grow_factor: float = 1.2
-    dtype: Union[type[float], type[int], type[np.ndarray]] = float
-    value: Optional[Union[Number, np.ndarray]] = field(default=None, init=False)
+    dtype: type[float] | type[int] | type[np.ndarray] = float
+    value: Number | np.ndarray | None = field(default=None, init=False)
 
-    def mutate(self) -> Union[Number, np.ndarray]:
+    def mutate(self) -> Number | np.ndarray:
         """Mutate the hyperparameter value by either growing or shrinking it.
 
         For scalar values (int/float), the mutation applies the grow/shrink factor uniformly.
@@ -138,7 +140,7 @@ class RLParameter:
         of min/max constraints and preservation of the original array's dtype.
 
         :return: The mutated hyperparameter value.
-        :rtype: Union[Number, np.ndarray]
+        :rtype: Number | np.ndarray
         """
         assert self.value is not None, "Hyperparameter value is not set"
 
@@ -151,24 +153,21 @@ class RLParameter:
                     self.value * self.shrink_factor,
                     self.min,
                 )
+            elif self.value * self.shrink_factor > self.min:
+                new_value = self.value * self.shrink_factor
             else:
-                if self.value * self.shrink_factor > self.min:
-                    new_value = self.value * self.shrink_factor
-                else:
-                    new_value = self.min
+                new_value = self.min
+        # Growing
+        elif isinstance(self.value, np.ndarray):
+            new_value = np.where(
+                self.value * self.grow_factor < self.max,
+                self.value * self.grow_factor,
+                self.max,
+            )
+        elif self.value * self.grow_factor < self.max:
+            new_value = self.value * self.grow_factor
         else:
-            # Growing
-            if isinstance(self.value, np.ndarray):
-                new_value = np.where(
-                    self.value * self.grow_factor < self.max,
-                    self.value * self.grow_factor,
-                    self.max,
-                )
-            else:
-                if self.value * self.grow_factor < self.max:
-                    new_value = self.value * self.grow_factor
-                else:
-                    new_value = self.max
+            new_value = self.max
 
         # Clip the new value to the min and max
         if isinstance(new_value, np.ndarray):
@@ -190,15 +189,15 @@ class RLParameter:
 class HyperparameterConfig:
     """Stores the RL hyperparameters that will be mutated during training. For each
     hyperparameter, we store the name of the attribute where the hyperparameter is
-    stored, and the range of values that the hyperparameter can take."""
+    stored, and the range of values that the hyperparameter can take.
+    """
 
-    def __init__(self, **kwargs: dict[str, RLParameter]):
+    def __init__(self, **kwargs: dict[str, RLParameter]) -> None:
         self.config = kwargs
         for key, value in kwargs.items():
             if not isinstance(value, RLParameter):
-                raise ValueError(
-                    "Expected RLParameter object for hyperparameter configuration."
-                )
+                msg = "Expected RLParameter object for hyperparameter configuration."
+                raise TypeError(msg)
 
             setattr(self, key, value)
 
@@ -210,7 +209,7 @@ class HyperparameterConfig:
         )
 
     def __bool__(self) -> bool:
-        """Returns False if the config is empty, True otherwise.
+        """Return False if the config is empty, True otherwise.
 
         :return: Whether the config contains any hyperparameters
         :rtype: bool
@@ -220,7 +219,7 @@ class HyperparameterConfig:
     def __eq__(self, other: "HyperparameterConfig") -> bool:
         return set(self.names()) == set(other.names())
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[str]:
         return iter(self.config)
 
     def __getitem__(self, key: str) -> RLParameter:
@@ -247,13 +246,13 @@ class NetworkGroup:
     """Dataclass for storing a group of networks. This consists of an evaluation network (i.e.
     a network that is optimized during training) and, optionally, some other networks that
     share parameters with the evaluation network (e.g. the target network in DQN). If the
-    networks are passed as an agilerl.modules.base.ModuleDict, we assume that the networks
+    networks are passed as an `agilerl.modules.base.ModuleDict` object, we assume that the networks
     are part of a multiagent setting.
 
     :param eval_network: The evaluation network.
     :type eval_network: NetworkType
     :param shared_networks: The list of shared networks.
-    :type shared_networks: Optional[NetworkType]
+    :type shared_networks: NetworkType | None
     :param policy: Whether the network is a policy (e.g. the network used to get the actions
         of the agent). There must be one network group in an algorithm which sets this to True.
         Default is False.
@@ -261,10 +260,10 @@ class NetworkGroup:
     """
 
     eval_network: NetworkType
-    shared_networks: Optional[NetworkType] = field(default=None)
+    shared_networks: NetworkType | None = field(default=None)
     policy: bool = field(default=False)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         # Check that the shared networks are of the same type as the eval network
         if self.shared_networks is not None:
             eval_cls = type(self.eval_network)
@@ -293,9 +292,8 @@ class NetworkGroup:
     def __hash__(self) -> int:
         return hash((self.eval_network, self.shared_networks, self.policy))
 
-    def _infer_parent_container(self) -> EvolvableAlgorithm:
-        """
-        Infer the parent container dynamically using the stack frame.
+    def _infer_parent_container(self) -> EvolvableAlgorithmProtocol:
+        """Infer the parent container dynamically using the stack frame.
 
         :return: The parent container object
         :rtype: EvolvableAlgorithm
@@ -307,15 +305,16 @@ class NetworkGroup:
         return current_frame.f_back.f_back.f_back.f_locals["self"]
 
     def _infer_attribute_names(
-        self, container: object, objects: Union[object, list[object]]
+        self,
+        container: object,
+        objects: object | list[object],
     ) -> list[str]:
-        """
-        Infer attribute names of the networks being optimized.
+        """Infer attribute names of the networks being optimized.
 
         :param container: The container object to inspect.
         :type container: object
         :param objects: The objects to match.
-        :type objects: Union[object, list[object]]
+        :type objects: object | list[object]
 
         :return: List of attribute names for the networks
         :rtype: list[str]
@@ -324,8 +323,7 @@ class NetworkGroup:
         def _match_condition(attr_value: Any) -> bool:
             if isinstance(objects, list):
                 return any(id(attr_value) == id(obj) for obj in objects)
-            else:
-                return id(attr_value) == id(objects)
+            return id(attr_value) == id(objects)
 
         return [
             attr_name
@@ -336,7 +334,7 @@ class NetworkGroup:
 
 def make_network_group(
     eval_network: str,
-    shared_networks: Optional[Union[str, list[str]]],
+    shared_networks: str | list[str] | None,
     policy: bool = False,
 ) -> NetworkGroup:
     """Make a network group from a given eval network and, optionally, some network/s that
@@ -345,7 +343,7 @@ def make_network_group(
     :param eval_network: The evaluation network.
     :type eval_network: str
     :param shared_networks: The list of shared networks.
-    :type shared_networks: Optional[Union[str, list[str]]]
+    :type shared_networks: str | list[str] | None
     :param policy: Whether the network is a policy (e.g. the network used to get the actions
     of the agent). There must be one network group in an algorithm which sets this to True.
     Default is False.
@@ -355,14 +353,16 @@ def make_network_group(
     :rtype: NetworkGroup
     """
     return NetworkGroup(
-        eval_network=eval_network, shared_networks=shared_networks, policy=policy
+        eval_network=eval_network,
+        shared_networks=shared_networks,
+        policy=policy,
     )
 
 
 @dataclass
 class MutationRegistry:
-    """Registry to keep track of the components of an algorithms that may evolve during training
-    in a structured way to be interpreted by a :class:`Mutations <agilerl.hpo.mutations.Mutations>` object
+    """Registry to keep track of the components of an algorithms that may evolve during training.
+    This is interpreted by a :class:`Mutations <agilerl.hpo.mutations.Mutations>` object
     when performing evolutionary hyperparameter optimization. This includes:
 
     1. The hyperparameter configuration of the algorithm.
@@ -374,9 +374,9 @@ class MutationRegistry:
     :type hp_config: HyperparameterConfig
     """
 
-    hp_config: Optional[HyperparameterConfig] = field(default=None)
+    hp_config: HyperparameterConfig | None = field(default=None)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.groups: list[NetworkGroup] = []
         self.optimizers: list[OptimizerConfig] = []
         self.hooks: list[Callable] = []
@@ -389,13 +389,13 @@ class MutationRegistry:
             [
                 f"Eval: '{group.eval_network}', Shared: {group.shared_networks}"
                 for group in self.groups
-            ]
+            ],
         )
         optimizers_str = "\n".join(
             [
                 f"{opt.optimizer_cls}: '{opt.name}', Networks: {opt.networks}"
                 for opt in self.optimizers
-            ]
+            ],
         )
         return f"Network Groups:\n{groups_str}\n\nOptimizers:\n{optimizers_str}"
 
@@ -404,7 +404,7 @@ class MutationRegistry:
         that the network groups and optimizer configurations are the same.
 
         :param other: The other MutationRegistry object to compare with.
-        :type other: Optional[MutationRegistry]
+        :type other: MutationRegistry | None
 
         :return: True if the two MutationRegistry objects are equal, False otherwise.
         :rtype: bool
@@ -420,22 +420,22 @@ class MutationRegistry:
         """
         return {config.name: config.networks for config in self.optimizers}
 
-    def policy(self, return_group: bool = False) -> Optional[Union[str, NetworkGroup]]:
+    def policy(self, return_group: bool = False) -> str | NetworkGroup | None:
         """Get the name of the policy network in the registry.
 
         :param return_group: Whether to return the network group instead of just the name.
         :type return_group: bool
 
         :return: The name of the policy network in the registry.
-        :rtype: Optional[Union[str, NetworkGroup]]
+        :rtype: str | NetworkGroup | None
         """
         for group in self.groups:
             if group.policy:
                 return group.eval_network if not return_group else group
-        return
+        return None
 
     def all_registered(self) -> list[str]:
-        """Returns all of the members in the registry.
+        """Return all of the members in the registry.
 
         :return: A list of all the members in the registry.
         :rtype: list[str]

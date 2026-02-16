@@ -98,7 +98,8 @@ def test_sequence_with_target_handling():
     input_sequence = torch.randint(0, model.vocab_size, (1, model.block_size))
     target_sequence = torch.randint(0, model.vocab_size, (1, model.block_size))
     logits, all_hidden_states, presents, loss = model(
-        input_sequence, targets=target_sequence
+        input_sequence,
+        targets=target_sequence,
     )
     assert logits.shape[1] == model.block_size
     assert loss is not None
@@ -108,7 +109,10 @@ def test_sequence_with_target_handling():
     # past_key_values = tuple([None] * model.n_layer)
     past_length = 0
     pos = torch.arange(
-        past_length, t + past_length, dtype=torch.long, device=tok_emb.device
+        past_length,
+        t + past_length,
+        dtype=torch.long,
+        device=tok_emb.device,
     ).unsqueeze(0)
     logits, all_hidden_states, presents, loss = model(tok_emb=tok_emb, pos=pos)
     assert logits.shape[1] == model.block_size
@@ -135,7 +139,10 @@ def test_decrease_block_size_successfully():
         block.attn.register_buffer(
             "attention_bias",
             torch.tril(torch.ones(block_size, block_size)).view(
-                1, 1, block_size, block_size
+                1,
+                1,
+                block_size,
+                block_size,
             ),
         )
 
@@ -259,7 +266,10 @@ def test_causal_self_attention_forward():
     attn.register_buffer(
         "attention_bias",
         torch.tril(torch.ones(block_size, block_size)).view(
-            1, 1, block_size, block_size
+            1,
+            1,
+            block_size,
+            block_size,
         ),
     )
     B = 4  # Batch size

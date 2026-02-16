@@ -1,7 +1,7 @@
 import h5py
 import torch
-import torch.nn as nn
 import yaml
+from torch import nn
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
@@ -68,7 +68,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     actor = BasicNetActor(state_dim[0], [32, 32], action_dim)
     actor_network = MakeEvolvable(
-        actor, input_tensor=torch.ones(state_dim), device=device
+        actor,
+        input_tensor=torch.ones(state_dim),
+        device=device,
     )
 
     dataset = h5py.File(INIT_HP["DATASET"], "r")

@@ -41,7 +41,7 @@ class DummyMultiEnvAsync(ParallelEnv):
         }
 
         # Initialize step counters for each agent
-        self.agent_step_counters = {agent: 0 for agent in self.agents}
+        self.agent_step_counters = dict.fromkeys(self.agents, 0)
 
         self.active_agents = self.agents.copy()  # Initially all agents are active
         self.current_step = 0
@@ -57,14 +57,14 @@ class DummyMultiEnvAsync(ParallelEnv):
     def reset(self, seed=None, options=None):
         # Reset step counters
         self.current_step = 0
-        self.agent_step_counters = {agent: 0 for agent in self.agents}
+        self.agent_step_counters = dict.fromkeys(self.agents, 0)
 
         # All agents observe at reset (step 0)
         self.active_agents = self.agents.copy()
 
         observations = {
             agent: np.random.rand(
-                *self.observation_spaces[self.possible_agents.index(agent)].shape
+                *self.observation_spaces[self.possible_agents.index(agent)].shape,
             )
             for agent in self.active_agents
         }
@@ -97,12 +97,12 @@ class DummyMultiEnvAsync(ParallelEnv):
 
         observations = {
             agent: np.random.rand(
-                *self.observation_spaces[self.possible_agents.index(agent)].shape
+                *self.observation_spaces[self.possible_agents.index(agent)].shape,
             )
             for agent in self.active_agents
         }
 
-        rewards = {agent: np.random.randint(0, 5) for agent in action.keys()}
+        rewards = {agent: np.random.randint(0, 5) for agent in action}
 
         # Different grouped agents done at different times
         dones = {}
@@ -112,7 +112,7 @@ class DummyMultiEnvAsync(ParallelEnv):
             else:
                 dones[agent] = self.current_step >= 40
 
-        truncated = {agent: False for agent in self.active_agents}
+        truncated = dict.fromkeys(self.active_agents, False)
         infos = {agent: {} for agent in self.active_agents}
 
         return observations, rewards, dones, truncated, infos
@@ -161,7 +161,7 @@ def setup_rs_norm_dict():
         {
             "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
             "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
-        }
+        },
     )
     mock_agent = MagicMock(spec=RLAlgorithm)
     mock_agent.observation_space = observation_space
@@ -179,7 +179,7 @@ def setup_rs_norm_tuple():
         (
             spaces.Box(low=-1.0, high=1.0, shape=(3,)),
             spaces.Box(low=-1.0, high=1.0, shape=(2,)),
-        )
+        ),
     )
     mock_agent = MagicMock(spec=RLAlgorithm)
     mock_agent.observation_space = observation_space
@@ -229,7 +229,7 @@ def test_normalize_observation(setup_rs_norm):
 
     normalized_obs = wrapper._normalize_observation(obs)
     expected_obs = (obs - wrapper.obs_rms.mean) / torch.sqrt(
-        wrapper.obs_rms.var + wrapper.obs_rms.epsilon
+        wrapper.obs_rms.var + wrapper.obs_rms.epsilon,
     )
     assert torch.allclose(normalized_obs, expected_obs)
 
@@ -240,10 +240,14 @@ def test_update_statistics(setup_rs_norm):
     wrapper.update_statistics(obs)
 
     assert torch.allclose(
-        wrapper.obs_rms.mean, torch.tensor([2.5, 3.5, 4.5]), atol=1e-2
+        wrapper.obs_rms.mean,
+        torch.tensor([2.5, 3.5, 4.5]),
+        atol=1e-2,
     )
     assert torch.allclose(
-        wrapper.obs_rms.var, torch.tensor([2.25, 2.25, 2.25]), atol=1e-2
+        wrapper.obs_rms.var,
+        torch.tensor([2.25, 2.25, 2.25]),
+        atol=1e-2,
     )
 
 
@@ -282,11 +286,11 @@ def test_normalize_observation_dict(setup_rs_norm_dict):
     expected_obs = {
         "sensor1": (obs["sensor1"] - wrapper.obs_rms["sensor1"].mean)
         / torch.sqrt(
-            wrapper.obs_rms["sensor1"].var + wrapper.obs_rms["sensor1"].epsilon
+            wrapper.obs_rms["sensor1"].var + wrapper.obs_rms["sensor1"].epsilon,
         ),
         "sensor2": (obs["sensor2"] - wrapper.obs_rms["sensor2"].mean)
         / torch.sqrt(
-            wrapper.obs_rms["sensor2"].var + wrapper.obs_rms["sensor2"].epsilon
+            wrapper.obs_rms["sensor2"].var + wrapper.obs_rms["sensor2"].epsilon,
         ),
     }
     assert torch.allclose(normalized_obs["sensor1"], expected_obs["sensor1"], atol=1e-2)
@@ -302,16 +306,24 @@ def test_update_statistics_dict(setup_rs_norm_dict):
     wrapper.update_statistics(obs)
 
     assert torch.allclose(
-        wrapper.obs_rms["sensor1"].mean, torch.tensor([2.5, 3.5, 4.5]), atol=1e-2
+        wrapper.obs_rms["sensor1"].mean,
+        torch.tensor([2.5, 3.5, 4.5]),
+        atol=1e-2,
     )
     assert torch.allclose(
-        wrapper.obs_rms["sensor1"].var, torch.tensor([2.25, 2.25, 2.25]), atol=1e-2
+        wrapper.obs_rms["sensor1"].var,
+        torch.tensor([2.25, 2.25, 2.25]),
+        atol=1e-2,
     )
     assert torch.allclose(
-        wrapper.obs_rms["sensor2"].mean, torch.tensor([2.0, 3.0]), atol=1e-2
+        wrapper.obs_rms["sensor2"].mean,
+        torch.tensor([2.0, 3.0]),
+        atol=1e-2,
     )
     assert torch.allclose(
-        wrapper.obs_rms["sensor2"].var, torch.tensor([1.0, 1.0]), atol=1e-2
+        wrapper.obs_rms["sensor2"].var,
+        torch.tensor([1.0, 1.0]),
+        atol=1e-2,
     )
 
 
@@ -345,10 +357,14 @@ def test_update_statistics_tuple(setup_rs_norm_tuple):
     wrapper.update_statistics(obs)
 
     assert torch.allclose(
-        wrapper.obs_rms[0].mean, torch.tensor([2.5, 3.5, 4.5]), atol=1e-2
+        wrapper.obs_rms[0].mean,
+        torch.tensor([2.5, 3.5, 4.5]),
+        atol=1e-2,
     )
     assert torch.allclose(
-        wrapper.obs_rms[0].var, torch.tensor([2.25, 2.25, 2.25]), atol=1e-2
+        wrapper.obs_rms[0].var,
+        torch.tensor([2.25, 2.25, 2.25]),
+        atol=1e-2,
     )
     assert torch.allclose(wrapper.obs_rms[1].mean, torch.tensor([2.0, 3.0]), atol=1e-2)
     assert torch.allclose(wrapper.obs_rms[1].var, torch.tensor([1.0, 1.0]), atol=1e-2)
@@ -371,17 +387,19 @@ def test_normalize_observation_multi_agent(setup_rs_norm_multi_agent):
     expected_obs = {
         "agent_1": (obs["agent_1"] - wrapper.obs_rms["agent_1"].mean)
         / torch.sqrt(
-            wrapper.obs_rms["agent_1"].var + wrapper.obs_rms["agent_1"].epsilon
+            wrapper.obs_rms["agent_1"].var + wrapper.obs_rms["agent_1"].epsilon,
         ),
         "other_agent_1": (obs["other_agent_1"] - wrapper.obs_rms["other_agent_1"].mean)
         / torch.sqrt(
             wrapper.obs_rms["other_agent_1"].var
-            + wrapper.obs_rms["other_agent_1"].epsilon
+            + wrapper.obs_rms["other_agent_1"].epsilon,
         ),
     }
     assert torch.allclose(normalized_obs["agent_1"], expected_obs["agent_1"], atol=1e-2)
     assert torch.allclose(
-        normalized_obs["other_agent_1"], expected_obs["other_agent_1"], atol=1e-2
+        normalized_obs["other_agent_1"],
+        expected_obs["other_agent_1"],
+        atol=1e-2,
     )
 
 
@@ -425,11 +443,14 @@ def test_rsnorm_learn(observation_space, vector_space, request, accelerator):
     critic_target = ddpg.critic_target
     critic_pre_learn_sd = copy.deepcopy(ddpg.critic.state_dict())
 
-    for i in range(policy_freq * 2):
+    for _i in range(policy_freq * 2):
         # Create a batch of experiences & learn
         device = accelerator.device if accelerator else "cpu"
         experiences = get_experiences_batch(
-            observation_space, action_space, batch_size, device
+            observation_space,
+            action_space,
+            batch_size,
+            device,
         )
         ddpg.scores.append(0)
         actor_loss, critic_loss = ddpg.learn(experiences)
@@ -470,7 +491,7 @@ def test_rsnorm_clone_returns_identical_agent(vector_space):
     observation_space = vector_space
     action_space = copy.deepcopy(vector_space)
     ddpg_norm = RSNorm(
-        DDPG(observation_space=observation_space, action_space=action_space)
+        DDPG(observation_space=observation_space, action_space=action_space),
     )
     ddpg = ddpg_norm.agent
     ddpg.fitness = [200, 200, 200]
@@ -493,17 +514,21 @@ def test_rsnorm_clone_returns_identical_agent(vector_space):
     assert clone_agent.accelerator == ddpg.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        ddpg.actor_target.state_dict(),
     )
     assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
     assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
+        clone_agent.critic_target.state_dict(),
+        ddpg.critic_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
+        clone_agent.actor_optimizer.state_dict(),
+        ddpg.actor_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
+        clone_agent.critic_optimizer.state_dict(),
+        ddpg.critic_optimizer.state_dict(),
     )
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
@@ -516,7 +541,7 @@ def test_rsnorm_clone_returns_identical_agent(vector_space):
             observation_space=observation_space,
             action_space=action_space,
             accelerator=accelerator,
-        )
+        ),
     )
     ddpg = ddpg_norm.agent
     clone = ddpg_norm.clone()
@@ -535,17 +560,21 @@ def test_rsnorm_clone_returns_identical_agent(vector_space):
     assert clone_agent.accelerator == ddpg.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        ddpg.actor_target.state_dict(),
     )
     assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
     assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
+        clone_agent.critic_target.state_dict(),
+        ddpg.critic_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
+        clone_agent.actor_optimizer.state_dict(),
+        ddpg.actor_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
+        clone_agent.critic_optimizer.state_dict(),
+        ddpg.critic_optimizer.state_dict(),
     )
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
@@ -553,7 +582,7 @@ def test_rsnorm_clone_returns_identical_agent(vector_space):
 
     accelerator = Accelerator()
     ddpg_norm = RSNorm(
-        DDPG(observation_space, action_space, accelerator=accelerator, wrap=False)
+        DDPG(observation_space, action_space, accelerator=accelerator, wrap=False),
     )
     ddpg = ddpg_norm.agent
     clone = ddpg_norm.clone(wrap=False)
@@ -572,17 +601,21 @@ def test_rsnorm_clone_returns_identical_agent(vector_space):
     assert clone_agent.accelerator == ddpg.accelerator
     assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
     assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(), ddpg.actor_target.state_dict()
+        clone_agent.actor_target.state_dict(),
+        ddpg.actor_target.state_dict(),
     )
     assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
     assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(), ddpg.critic_target.state_dict()
+        clone_agent.critic_target.state_dict(),
+        ddpg.critic_target.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(), ddpg.actor_optimizer.state_dict()
+        clone_agent.actor_optimizer.state_dict(),
+        ddpg.actor_optimizer.state_dict(),
     )
     assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(), ddpg.critic_optimizer.state_dict()
+        clone_agent.critic_optimizer.state_dict(),
+        ddpg.critic_optimizer.state_dict(),
     )
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
@@ -594,7 +627,7 @@ def test_rsnorm_save_load_checkpoint(tmp_path, vector_space):
     action_space = copy.deepcopy(vector_space)
 
     ddpg_norm = RSNorm(
-        DDPG(observation_space=observation_space, action_space=action_space)
+        DDPG(observation_space=observation_space, action_space=action_space),
     )
     checkpoint_path = os.path.join(tmp_path, "checkpoint.pth")
     ddpg_norm.save_checkpoint(checkpoint_path)
@@ -680,7 +713,11 @@ def test_rsnorm_save_load_checkpoint(tmp_path, vector_space):
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("num_envs", [1, 2])
 def test_ippo_custom_training_with_async_env(
-    device, ma_vector_space, ma_discrete_space, compile_mode, num_envs
+    device,
+    ma_vector_space,
+    ma_discrete_space,
+    compile_mode,
+    num_envs,
 ):
     # Create async environment with agents that return observations asynchronously
     vectorized = num_envs > 1
@@ -690,7 +727,8 @@ def test_ippo_custom_training_with_async_env(
         env = make_multi_agent_vect_envs(
             DummyMultiEnvAsync,
             num_envs=num_envs,
-            **dict(observation_spaces=observation_spaces, action_spaces=action_spaces),
+            observation_spaces=observation_spaces,
+            action_spaces=action_spaces,
         )
     else:
         env = DummyMultiEnvAsync(observation_spaces, action_spaces)
@@ -736,7 +774,8 @@ def test_ippo_custom_training_with_async_env(
         for _ in range(max_steps):
             # Get actions for current active agents
             action_dict, logprob_dict, _, value_dict = async_agent.get_action(
-                observations, infos
+                observations,
+                infos,
             )
 
             # Verify actions are only for active agents
@@ -770,7 +809,7 @@ def test_ippo_custom_training_with_async_env(
                     next_dones[agent_id] = result
                 else:
                     next_dones[agent_id] = np.array(
-                        [np.logical_or(term, trunc)]
+                        [np.logical_or(term, trunc)],
                     ).astype(np.int8)
 
             # Update for next step
@@ -779,7 +818,7 @@ def test_ippo_custom_training_with_async_env(
             infos = next_infos
 
             # Break if all agents report done
-            for idx, agent_dones in enumerate(zip(*next_dones.values())):
+            for _idx, agent_dones in enumerate(zip(*next_dones.values(), strict=False)):
                 if all(agent_dones):
                     if not vectorized:
                         observations, info = env.reset()

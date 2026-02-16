@@ -2,15 +2,16 @@ import copy
 import glob
 import os
 import sys
+import types
 from collections import OrderedDict
-from typing import ForwardRef, Union
+from typing import Union, get_args, get_origin
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 from gymnasium import spaces
+from torch import nn
 from torch.optim.lr_scheduler import SequentialLR
 
 from agilerl.modules import EvolvableModule
@@ -51,7 +52,8 @@ def test_stack_and_pad_experiences_with_padding():
     tensor6 = torch.tensor([[13, 14, 15, 16, 17]])
     tensor_list = [[tensor1, tensor2, tensor3], tensor4, [tensor5, tensor6]]
     stacked_tensor, unchanged_tensor, stacked_tensor_2 = stack_and_pad_experiences(
-        *tensor_list, padding_values=[0, 0, 99]
+        *tensor_list,
+        padding_values=[0, 0, 99],
     )
     assert torch.equal(unchanged_tensor, tensor4)
     assert torch.equal(
@@ -62,11 +64,12 @@ def test_stack_and_pad_experiences_with_padding():
                 [4, 5, 6, 0, 0, 0, 0, 0, 0, 0],
                 [8, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-            ]
+            ],
         ),
     )
     assert torch.equal(
-        stacked_tensor_2, torch.tensor([[10, 11, 12, 99, 99], [13, 14, 15, 16, 17]])
+        stacked_tensor_2,
+        torch.tensor([[10, 11, 12, 99, 99], [13, 14, 15, 16, 17]]),
     )
 
 
@@ -82,7 +85,11 @@ def test_stack_and_pad_experiences_with_padding():
     ],
 )
 def test_multi_dim_clamp_scalar_bounds(
-    min_val, max_val, action, expected_result, device
+    min_val,
+    max_val,
+    action,
+    expected_result,
+    device,
 ):
     """multi_dim_clamp with float min/max uses torch.clamp path."""
     if device == "cuda" and not torch.cuda.is_available():
@@ -118,7 +125,11 @@ def test_multi_dim_clamp_scalar_bounds(
     ],
 )
 def test_multi_dim_clamp_tensor_bounds(
-    min_val, max_val, action, expected_result, device
+    min_val,
+    max_val,
+    action,
+    expected_result,
+    device,
 ):
     """multi_dim_clamp with both min and max as tensors (on same device as input)."""
     if device == "cuda" and not torch.cuda.is_available():
@@ -364,7 +375,7 @@ def test_maybe_add_batch_dim():
 
 
 # Create a custom evolvable module class for testing
-class TestEvolvableModule(EvolvableNetwork):
+class DummyEvolvableModule(EvolvableNetwork):
     def __init__(self):
         test_space = spaces.Box(low=0, high=1, shape=(10,))
         super().__init__(test_space)
@@ -391,7 +402,7 @@ class TestEvolvableModule(EvolvableNetwork):
 
 def test_recursive_check_module_attrs():
     # Create a test module
-    module = TestEvolvableModule()
+    module = DummyEvolvableModule()
 
     # The function has complex logic that depends on many aspects
     # Use mocking to make the test pass
@@ -442,22 +453,22 @@ def test_chkpt_attribute_to_device():
 
 def test_make_safe_deepcopies():
     # Create modules for testing
-    module1 = TestEvolvableModule()
-    module2 = TestEvolvableModule()
+    module1 = DummyEvolvableModule()
+    module2 = DummyEvolvableModule()
 
     # Single module
-    with patch("copy.deepcopy", return_value=TestEvolvableModule()):
+    with patch("copy.deepcopy", return_value=DummyEvolvableModule()):
         copied_module = make_safe_deepcopies(module1)
         assert copied_module is not module1
 
     # List of modules
     module_list = [module1, module2]
-    with patch("copy.deepcopy", return_value=TestEvolvableModule()):
+    with patch("copy.deepcopy", return_value=DummyEvolvableModule()):
         copied_list = make_safe_deepcopies(module_list)
         assert len(copied_list) == len(module_list)
 
     # Multiple arguments
-    with patch("copy.deepcopy", return_value=TestEvolvableModule()):
+    with patch("copy.deepcopy", return_value=DummyEvolvableModule()):
         copied1, copied2 = make_safe_deepcopies(module1, module2)
         assert copied1 is not module1
         assert copied2 is not module2
@@ -499,7 +510,8 @@ class MockEncoder(EvolvableModule):
     def __init__(self):
         super().__init__(device="cpu")
         self.linear = nn.Linear(
-            10, 10
+            10,
+            10,
         )  # Use consistent attribute name 'linear' instead of 'layer'
 
     def forward(self, x):
@@ -613,7 +625,7 @@ def test_remove_compile_prefix():
             ("_orig_mod.layer1.bias", torch.zeros(5)),
             ("_orig_mod.layer2.weight", torch.ones(3, 5)),
             ("regular_layer.weight", torch.zeros(2, 2)),
-        ]
+        ],
     )
 
     # Remove prefix
@@ -641,7 +653,10 @@ def test_preprocess_observation():
 
     # Test with normalize_images=True
     processed_box = preprocess_observation(
-        box_space, box_obs, device, normalize_images=True
+        box_space,
+        box_obs,
+        device,
+        normalize_images=True,
     )
     assert isinstance(processed_box, torch.Tensor)
     assert processed_box.shape == (1, 3, 84, 84)  # Added batch dimension
@@ -649,7 +664,10 @@ def test_preprocess_observation():
 
     # Test with normalize_images=False
     processed_box_no_norm = preprocess_observation(
-        box_space, box_obs, device, normalize_images=False
+        box_space,
+        box_obs,
+        device,
+        normalize_images=False,
     )
     assert isinstance(processed_box_no_norm, torch.Tensor)
     assert processed_box_no_norm.shape == (1, 3, 84, 84)
@@ -659,7 +677,7 @@ def test_preprocess_observation():
         {
             "image": spaces.Box(low=0, high=255, shape=(3, 84, 84)),
             "vector": spaces.Box(low=-1, high=1, shape=(5,)),
-        }
+        },
     )
     dict_obs = {"image": np.ones((3, 84, 84)) * 127.5, "vector": np.ones(5) * 0.5}
 
@@ -675,7 +693,7 @@ def test_preprocess_observation():
         (
             spaces.Box(low=0, high=255, shape=(3, 84, 84)),
             spaces.Box(low=-1, high=1, shape=(5,)),
-        )
+        ),
     )
     tuple_obs = (np.ones((3, 84, 84)) * 127.5, np.ones(5) * 0.5)
 
@@ -700,7 +718,9 @@ def test_preprocess_observation():
     multidiscrete_obs = np.array([[1, 2]])  # Make 2D to work with split operation
 
     processed_multidiscrete = preprocess_observation(
-        multidiscrete_space, multidiscrete_obs, device
+        multidiscrete_space,
+        multidiscrete_obs,
+        device,
     )
     assert isinstance(processed_multidiscrete, torch.Tensor)
     assert processed_multidiscrete.shape[1] == 7  # 3 + 4 = 7 (sum of categories)
@@ -710,7 +730,9 @@ def test_preprocess_observation():
     multibinary_obs = np.array([[1, 0, 1]])
 
     processed_multibinary = preprocess_observation(
-        multibinary_space, multibinary_obs, device
+        multibinary_space,
+        multibinary_obs,
+        device,
     )
     assert isinstance(processed_multibinary, torch.Tensor)
     assert processed_multibinary.shape == (1, 3)
@@ -728,7 +750,9 @@ def test_get_experiences_samples():
 
     # Sample experiences
     sampled_tensor, sampled_dict = get_experiences_samples(
-        minibatch_indices, tensor_exp, dict_exp
+        minibatch_indices,
+        tensor_exp,
+        dict_exp,
     )
 
     # Check tensor samples
@@ -884,8 +908,12 @@ def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
             # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
             import agilerl.utils.algo_utils as algo_utils_reloaded
 
-            expected = Union[ForwardRef("PeftModel"), ForwardRef("PreTrainedModel")]
-            assert algo_utils_reloaded.PreTrainedModelType == expected
+            pt_type = algo_utils_reloaded.PreTrainedModelType
+            assert get_origin(pt_type) in (types.UnionType, Union)
+            args = get_args(pt_type)
+            assert len(args) == 2
+            forward_names = {getattr(a, "__forward_arg__", None) for a in args}
+            assert forward_names == {"PeftModel", "PreTrainedModel"}
     finally:
         # Restore original module to avoid affecting other tests
         sys.modules["agilerl.utils.algo_utils"] = original_module

@@ -1,5 +1,4 @@
 from dataclasses import asdict
-from typing import Optional, Union
 
 import torch
 from gymnasium import spaces
@@ -19,11 +18,11 @@ class ValueNetwork(EvolvableNetwork):
     :type observation_space: spaces.Space
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
-    :type encoder_cls: Optional[Union[str, type[EvolvableModule]]]
+    :type encoder_cls: str | type[EvolvableModule] | None
     :param encoder_config: Configuration of the encoder.
     :type encoder_config: NetConfigType
     :param head_config: Configuration of the head.
-    :type head_config: Optional[NetConfigType]
+    :type head_config: NetConfigType | None
     :param min_latent_dim: Minimum latent dimension.
     :type min_latent_dim: int
     :param max_latent_dim: Maximum latent dimension.
@@ -37,24 +36,24 @@ class ValueNetwork(EvolvableNetwork):
     :param device: Device to run the network on.
     :type device: str
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
         self,
         observation_space: spaces.Space,
-        encoder_cls: Optional[Union[str, type[EvolvableModule]]] = None,
-        encoder_config: Optional[NetConfigType] = None,
-        head_config: Optional[NetConfigType] = None,
+        encoder_cls: str | type[EvolvableModule] | None = None,
+        encoder_config: NetConfigType | None = None,
+        head_config: NetConfigType | None = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
         encoder_name: str = "encoder",
-    ):
+    ) -> None:
 
         super().__init__(
             observation_space,
@@ -78,7 +77,7 @@ class ValueNetwork(EvolvableNetwork):
         self.build_network_head(head_config)
 
     def get_output_dense(self) -> torch.nn.Linear:
-        """Returns the output dense layer of the network.
+        """Return the output dense layer of the network.
 
         :return: Output dense layer.
         :rtype: torch.nn.Linear
@@ -86,7 +85,7 @@ class ValueNetwork(EvolvableNetwork):
         return self.head_net.get_output_dense()
 
     def build_network_head(self, net_config: NetConfigType) -> None:
-        """Builds the head of the network.
+        """Build the head of the network.
 
         :param net_config: Configuration of the head.
         :type net_config: NetConfigType
@@ -99,8 +98,10 @@ class ValueNetwork(EvolvableNetwork):
         )
 
     def forward(
-        self, x: TorchObsType, hidden_state: Optional[TorchObsType] = None
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        self,
+        x: TorchObsType,
+        hidden_state: TorchObsType | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the network.
 
         :param x: Input tensor.
@@ -111,9 +112,8 @@ class ValueNetwork(EvolvableNetwork):
         if self.recurrent:
             latent, hidden_state = self.extract_features(x, hidden_state=hidden_state)
             return self.head_net(latent), hidden_state
-        else:
-            latent = self.extract_features(x)
-            return self.head_net(latent)
+        latent = self.extract_features(x)
+        return self.head_net(latent)
 
     def recreate_network(self) -> None:
         """Recreates the network."""

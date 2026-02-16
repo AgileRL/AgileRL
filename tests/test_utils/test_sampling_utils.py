@@ -43,9 +43,9 @@ def test_update_kvs_with_updated_kvs():
                 [
                     [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],
                     [[[9, 10], [11, 12]], [[13, 14], [15, 16]]],
-                ]
-            ]
-        ]
+                ],
+            ],
+        ],
     )
     updated_kvs = np.array(
         [
@@ -53,9 +53,9 @@ def test_update_kvs_with_updated_kvs():
                 [
                     [[[17, 18], [19, 20]], [[21, 22], [23, 24]]],
                     [[[25, 26], [27, 28]], [[29, 30], [31, 32]]],
-                ]
-            ]
-        ]
+                ],
+            ],
+        ],
     )
     lens_chosen = slice(0, None)
     idx = 0
@@ -63,7 +63,7 @@ def test_update_kvs_with_updated_kvs():
         [
             [[[17, 18], [3, 4]], [[21, 22], [7, 8]]],
             [[[25, 26], [11, 12]], [[29, 30], [15, 16]]],
-        ]
+        ],
     )
 
     result = update_kvs(kvs, updated_kvs, lens_chosen, idx)
@@ -79,9 +79,9 @@ def test_update_decoder_kvs_with_updated_kvs():
                 [
                     [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],
                     [[[9, 10], [11, 12]], [[13, 14], [15, 16]]],
-                ]
-            ]
-        ]
+                ],
+            ],
+        ],
     )
     updated_kvs = np.array(
         [
@@ -89,9 +89,9 @@ def test_update_decoder_kvs_with_updated_kvs():
                 [
                     [[[17, 18], [19, 20]], [[21, 22], [23, 24]]],
                     [[[25, 26], [27, 28]], [[29, 30], [31, 32]]],
-                ]
-            ]
-        ]
+                ],
+            ],
+        ],
     )
     lens_chosen = slice(0, None)
     idx = 0
@@ -99,7 +99,7 @@ def test_update_decoder_kvs_with_updated_kvs():
         [
             [[[17, 18], [3, 4]], [[21, 22], [7, 8]]],
             [[[25, 26], [11, 12]], [[29, 30], [15, 16]]],
-        ]
+        ],
     )
 
     result = update_decoder_kvs(kvs, updated_kvs, lens_chosen, idx)

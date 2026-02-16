@@ -65,7 +65,12 @@ from agilerl.utils.probe_envs import (
     ],
 )
 def test_constant_reward_envs(
-    env_class, exp_state, exp_reward, exp_terminated, exp_truncated, exp_info
+    env_class,
+    exp_state,
+    exp_reward,
+    exp_terminated,
+    exp_truncated,
+    exp_info,
 ):
     env = env_class()
     state, info = env.reset()
@@ -138,7 +143,12 @@ def test_constant_reward_envs(
     ],
 )
 def test_observation_dependent_reward_envs(
-    env_class, exp_state, exp_reward, exp_terminated, exp_truncated, exp_info
+    env_class,
+    exp_state,
+    exp_reward,
+    exp_terminated,
+    exp_truncated,
+    exp_info,
 ):
     env = env_class()
     state, info = env.reset()
@@ -148,15 +158,12 @@ def test_observation_dependent_reward_envs(
 
         if isinstance(exp_state, dict):
             if all(
-                [
-                    int(np.mean(np.array(state[key]))) == exp_state[key]
-                    for key in exp_state.keys()
-                ]
+                int(np.mean(np.array(state[key]))) == exp_state[key]
+                for key in exp_state
             ):
                 assert reward == exp_reward
-        else:
-            if int(np.mean(np.array(state))) == exp_state:
-                assert reward == exp_reward
+        elif int(np.mean(np.array(state))) == exp_state:
+            assert reward == exp_reward
 
         assert terminated == exp_terminated
         assert truncated == exp_truncated
@@ -188,7 +195,11 @@ def test_observation_dependent_reward_envs(
     ],
 )
 def test_discounted_reward_envs(
-    env_class, exp_state, exp_reward, exp_truncated, exp_info
+    env_class,
+    exp_state,
+    exp_reward,
+    exp_truncated,
+    exp_info,
 ):
     env = env_class()
     state, info = env.reset()
@@ -198,10 +209,8 @@ def test_discounted_reward_envs(
 
         if isinstance(exp_state, dict):
             if all(
-                [
-                    int(np.mean(np.array(state[key]))) == exp_state[key]
-                    for key in exp_state.keys()
-                ]
+                int(np.mean(np.array(state[key]))) == exp_state[key]
+                for key in exp_state
             ):
                 assert reward == exp_reward
             assert terminated == int(np.mean(state["box"]))
@@ -276,7 +285,12 @@ def test_discrete_actions_fixed_observation_policy_reward_envs(
     ],
 )
 def test_continuous_actions_fixed_observation_policy_reward_envs(
-    env_class, exp_state, exp_action, exp_terminated, exp_truncated, exp_info
+    env_class,
+    exp_state,
+    exp_action,
+    exp_terminated,
+    exp_truncated,
+    exp_info,
 ):
     env = env_class()
     state, info = env.reset()
@@ -308,7 +322,12 @@ def test_continuous_actions_fixed_observation_policy_reward_envs(
     ],
 )
 def test_discrete_actions_policy_envs(
-    env_class, same_reward, diff_reward, exp_terminated, exp_truncated, exp_info
+    env_class,
+    same_reward,
+    diff_reward,
+    exp_terminated,
+    exp_truncated,
+    exp_info,
 ):
     env = env_class()
     state, info = env.reset()
@@ -321,16 +340,15 @@ def test_discrete_actions_policy_envs(
                 int(np.mean(np.array(state["box"]))) == action[0]
                 and state["discrete"] == action[0]
             ):
-                assert (
-                    reward == same_reward
-                ), f"action: {action}, state: {state} box: {int(np.mean(state['box']))}"
+                assert reward == same_reward, (
+                    f"action: {action}, state: {state} box: {int(np.mean(state['box']))}"
+                )
             else:
                 assert reward == diff_reward
+        elif int(np.mean(np.array(state))) == action:
+            assert reward == same_reward
         else:
-            if int(np.mean(np.array(state))) == action:
-                assert reward == same_reward
-            else:
-                assert reward == diff_reward
+            assert reward == diff_reward
         assert terminated == exp_terminated
         assert truncated == exp_truncated
         assert info == exp_info
@@ -348,7 +366,12 @@ def test_discrete_actions_policy_envs(
     ],
 )
 def test_continuous_actions_policy_envs(
-    env_class, reward_goal_0, reward_goal_1, exp_terminated, exp_truncated, exp_info
+    env_class,
+    reward_goal_0,
+    reward_goal_1,
+    exp_terminated,
+    exp_truncated,
+    exp_info,
 ):
     env = env_class()
     state, info = env.reset()
@@ -369,19 +392,18 @@ def test_continuous_actions_policy_envs(
                     == -((reward_goal_1 - action[0]) ** 2)
                     - (reward_goal_0 - action[1]) ** 2
                 )
+        elif int(np.mean(np.array(state))):
+            assert (
+                reward
+                == -((reward_goal_0 - action[0]) ** 2)
+                - (reward_goal_1 - action[1]) ** 2
+            )
         else:
-            if int(np.mean(np.array(state))):
-                assert (
-                    reward
-                    == -((reward_goal_0 - action[0]) ** 2)
-                    - (reward_goal_1 - action[1]) ** 2
-                )
-            else:
-                assert (
-                    reward
-                    == -((reward_goal_1 - action[0]) ** 2)
-                    - (reward_goal_0 - action[1]) ** 2
-                )
+            assert (
+                reward
+                == -((reward_goal_1 - action[0]) ** 2)
+                - (reward_goal_0 - action[1]) ** 2
+            )
         assert terminated == exp_terminated
         assert truncated == exp_truncated
         assert info == exp_info
@@ -397,7 +419,12 @@ def test_continuous_actions_policy_envs(
     ],
 )
 def test_continuous_actions_policy_envs_simple(
-    env_class, reward_goal_0, reward_goal_1, exp_terminated, exp_truncated, exp_info
+    env_class,
+    reward_goal_0,
+    reward_goal_1,
+    exp_terminated,
+    exp_truncated,
+    exp_info,
 ):
     env = env_class()
     state, info = env.reset()
@@ -446,7 +473,7 @@ def test_q_learning_with_probe_env_cnn():
                 "channel_size": [32],  # CNN channel size
                 "kernel_size": [3],  # CNN kernel size
                 "stride_size": [1],  # CNN stride size
-            }
+            },
         },
         "normalize_images": False,
         "lr": 1e-2,
@@ -477,7 +504,7 @@ def test_q_learning_with_probe_env_dict():
                     "stride_size": [1],  # CNN stride size
                 },
                 "latent_dim": 16,  # Latent dimension
-            }
+            },
         },
         "normalize_images": False,
         "lr": 1e-2,
@@ -505,7 +532,12 @@ def test_policy_q_learning_with_probe_env():
         device=device,
     )
     check_policy_q_learning_with_probe_env(
-        env, DDPG, algo_args, memory, learn_steps, device
+        env,
+        DDPG,
+        algo_args,
+        memory,
+        learn_steps,
+        device,
     )
     gc.collect()
 
@@ -537,7 +569,12 @@ def test_policy_q_learning_with_probe_env_cnn():
         device=device,
     )
     check_policy_q_learning_with_probe_env(
-        env, DDPG, algo_args, memory, learn_steps, device
+        env,
+        DDPG,
+        algo_args,
+        memory,
+        learn_steps,
+        device,
     )
     gc.collect()
 
@@ -575,7 +612,12 @@ def test_policy_q_learning_with_probe_env_dict():
         device=device,
     )
     check_policy_q_learning_with_probe_env(
-        env, DDPG, algo_args, memory, learn_steps, device
+        env,
+        DDPG,
+        algo_args,
+        memory,
+        learn_steps,
+        device,
     )
     gc.collect()
 
@@ -590,7 +632,12 @@ def test_policy_on_policy_discrete_with_probe_env():
         "lr": 0.01,
     }
     check_policy_on_policy_with_probe_env(
-        env, PPO, algo_args, learn_steps, device, True
+        env,
+        PPO,
+        algo_args,
+        learn_steps,
+        device,
+        True,
     )
     gc.collect()
 
@@ -605,7 +652,12 @@ def test_policy_on_policy_with_probe_env():
         "lr": 0.01,
     }
     check_policy_on_policy_with_probe_env(
-        env, PPO, algo_args, learn_steps, device, False
+        env,
+        PPO,
+        algo_args,
+        learn_steps,
+        device,
+        False,
     )
     gc.collect()
 
@@ -631,7 +683,12 @@ def test_policy_on_policy_with_probe_env_cnn():
         "lr": 0.01,
     }
     check_policy_on_policy_with_probe_env(
-        env, PPO, algo_args, learn_steps, device, False
+        env,
+        PPO,
+        algo_args,
+        learn_steps,
+        device,
+        False,
     )
     gc.collect()
 
@@ -663,6 +720,11 @@ def test_policy_on_policy_with_probe_env_dict():
         "lr": 0.01,
     }
     check_policy_on_policy_with_probe_env(
-        env, PPO, algo_args, learn_steps, device, False
+        env,
+        PPO,
+        algo_args,
+        learn_steps,
+        device,
+        False,
     )
     gc.collect()

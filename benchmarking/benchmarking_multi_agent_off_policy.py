@@ -62,9 +62,11 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
 
         return env
 
-    env_kwargs = dict(max_cycles=25, continuous_actions=False)
+    env_kwargs = {"max_cycles": 25, "continuous_actions": False}
     env = make_multi_agent_vect_envs(
-        create_env, num_envs=INIT_HP["NUM_ENVS"], **env_kwargs
+        create_env,
+        num_envs=INIT_HP["NUM_ENVS"],
+        **env_kwargs,
     )
 
     env.reset(seed=42)
@@ -79,7 +81,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
             for agent, obs in observation_spaces.items()
         }
 
-    INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
+    INIT_HP["AGENT_IDS"] = list(env.agents)
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = MultiAgentReplayBuffer(
@@ -111,10 +113,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
 
     hp_config = HyperparameterConfig(
         lr_actor=RLParameter(
-            min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+            min=MUTATION_PARAMS["MIN_LR"],
+            max=MUTATION_PARAMS["MAX_LR"],
         ),
         lr_critic=RLParameter(
-            min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+            min=MUTATION_PARAMS["MIN_LR"],
+            max=MUTATION_PARAMS["MAX_LR"],
         ),
         batch_size=RLParameter(
             min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
@@ -146,7 +150,11 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
                 output_activation="GumbelSoftmax",
                 device=device,
             )
-            for state_dim, action_dim in zip(state_dims.values(), action_dims.values())
+            for state_dim, action_dim in zip(
+                state_dims.values(),
+                action_dims.values(),
+                strict=False,
+            )
         ]
         NET_CONFIG = None
         critic = [

@@ -4,8 +4,8 @@ import socket
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 from gymnasium import spaces
+from torch import nn
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from tests.helper_functions import (
@@ -172,32 +172,40 @@ def ac_hp_config():
         lr_critic=RLParameter(min=1e-4, max=1e-2),
         batch_size=RLParameter(min=8, max=512, dtype=int),
         learn_step=RLParameter(
-            min=20, max=200, dtype=int, grow_factor=1.5, shrink_factor=0.75
+            min=20,
+            max=200,
+            dtype=int,
+            grow_factor=1.5,
+            shrink_factor=0.75,
         ),
     )
 
 
 @pytest.fixture(scope="session")
 def default_hp_config():
-    yield HyperparameterConfig(
+    return HyperparameterConfig(
         lr=RLParameter(min=6.25e-5, max=1e-2),
         batch_size=RLParameter(min=8, max=512, dtype=int),
         learn_step=RLParameter(
-            min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75
+            min=1,
+            max=10,
+            dtype=int,
+            grow_factor=1.5,
+            shrink_factor=0.75,
         ),
     )
 
 
 @pytest.fixture(scope="session")
 def grpo_hp_config():
-    yield HyperparameterConfig(
+    return HyperparameterConfig(
         lr=RLParameter(min=0.00001, max=1),
     )
 
 
 @pytest.fixture(scope="session")
 def encoder_mlp_config():
-    yield {
+    return {
         "latent_dim": 8,
         "min_latent_dim": 1,
         "encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 1},
@@ -207,7 +215,7 @@ def encoder_mlp_config():
 
 @pytest.fixture(scope="session")
 def encoder_simba_config():
-    yield {
+    return {
         "latent_dim": 8,
         "min_latent_dim": 1,
         "simba": True,
@@ -221,7 +229,7 @@ def encoder_simba_config():
 
 @pytest.fixture(scope="session")
 def encoder_cnn_config():
-    yield {
+    return {
         "latent_dim": 8,
         "min_latent_dim": 1,
         "encoder_config": {
@@ -237,7 +245,7 @@ def encoder_cnn_config():
 
 @pytest.fixture(scope="session")
 def encoder_multi_input_config():
-    yield {
+    return {
         "latent_dim": 8,
         "min_latent_dim": 1,
         "encoder_config": {
@@ -269,16 +277,16 @@ def dummy_rng():
     return EvoDummyRNG()
 
 
-dist_env = dict(
-    ACCELERATE_USE_DEEPSPEED="true",
-    MASTER_ADDR="localhost",
-    MASTER_PORT="10999",
-    RANK="0",
-    LOCAL_RANK="0",
-    WORLD_SIZE="1",
-    PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True",
-    CUDA_VISIBLE_DEVICES="0",
-)
+dist_env = {
+    "ACCELERATE_USE_DEEPSPEED": "true",
+    "MASTER_ADDR": "localhost",
+    "MASTER_PORT": "10999",
+    "RANK": "0",
+    "LOCAL_RANK": "0",
+    "WORLD_SIZE": "1",
+    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    "CUDA_VISIBLE_DEVICES": "0",
+}
 
 
 def get_free_port():

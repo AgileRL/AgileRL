@@ -17,7 +17,6 @@ Dependencies
 .. code-block:: python
 
     import re
-    from typing import Tuple
     import torch
     import yaml
     from accelerate import Accelerator
@@ -90,7 +89,7 @@ model, and the Countdown dataset:
         MODEL_PATH = "Qwen/Qwen2.5-1.5B"
         DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
-        def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
+        def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
             raw_dataset = (
                 load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
             )

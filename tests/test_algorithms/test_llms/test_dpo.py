@@ -23,6 +23,8 @@ from tests.test_algorithms.test_llms.test_grpo import (
     deepspeed_config_stage_2,
 )
 
+pytestmark = pytest.mark.llm
+
 
 @pytest.fixture
 def preference_dataset_factory():
@@ -37,14 +39,14 @@ def preference_dataset_factory():
                 "prompt": [f"Prompt {i}" for i in range(num_samples)],
                 "chosen": [f"Chosen {i}" for i in range(num_samples)],
                 "rejected": [f"Rejected {i}" for i in range(num_samples)],
-            }
+            },
         )
         test_dataset = Dataset.from_dict(
             {
                 "prompt": [f"Prompt {i}" for i in range(num_samples)],
                 "chosen": [f"Chosen {i}" for i in range(num_samples)],
                 "rejected": [f"Rejected {i}" for i in range(num_samples)],
-            }
+            },
         )
         return PreferenceGym(
             train_dataset=train_dataset,
@@ -106,7 +108,7 @@ def dpo_factory():
             task_type="CAUSAL_LM",
             lora_dropout=0.05,
         )
-        dpo = DPO(
+        return DPO(
             actor_network=actor if not from_name else None,
             model_name=pretrained_model_name_or_path if from_name else None,
             pad_token_id=vocab_size - 1,
@@ -118,7 +120,6 @@ def dpo_factory():
             reduce_memory_peak=reduce_memory_peak,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         )
-        return dpo
 
     return generate_dpo
 
@@ -189,7 +190,9 @@ def test_init_dpo(
     assert dpo.device == (
         dpo.accelerator.device
         if torch.cuda.is_available() and dpo.accelerator is not None
-        else "cuda" if torch.cuda.is_available() else "cpu"
+        else "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
     )
     assert dpo.index == 0
     assert dpo.scores == []
@@ -353,7 +356,7 @@ def test_dpo_learn(
                 for i in range(100)
             ],
             "rejected": [f"REALLY BAD RESPONSE {i}" for i in range(100)],
-        }
+        },
     )
     test_dataset = Dataset.from_dict(
         {
@@ -363,7 +366,7 @@ def test_dpo_learn(
                 for i in range(100)
             ],
             "rejected": [f"REALLY BAD RESPONSE {i}" for i in range(100)],
-        }
+        },
     )
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
     env = PreferenceGym(
@@ -389,6 +392,7 @@ def test_dpo_learn(
     for (param_name, param), (_, pre_learn_param) in zip(
         dpo.actor.state_dict().items(),
         pre_learn_actor_state_dict.items(),
+        strict=False,
     ):
         if "actor" in param_name:
             assert not torch.equal(param, pre_learn_param)
@@ -459,7 +463,7 @@ def test_dpo_test(
                 for i in range(100)
             ],
             "rejected": [f"Bad response {i}" for i in range(100)],
-        }
+        },
     )
     test_dataset = Dataset.from_dict(
         {
@@ -469,7 +473,7 @@ def test_dpo_test(
                 for i in range(100)
             ],
             "rejected": [f"Bad response {i}" for i in range(100)],
-        }
+        },
     )
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
     env = PreferenceGym(

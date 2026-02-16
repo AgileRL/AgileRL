@@ -3,7 +3,7 @@ import gc
 
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 
 from agilerl.modules.custom_components import NoisyLinear
 from agilerl.wrappers.make_evolvable import MakeEvolvable
@@ -16,10 +16,16 @@ class TwoArgCNN(nn.Module):
 
         # Define the convolutional layers
         self.conv1 = nn.Conv3d(
-            in_channels=4, out_channels=16, kernel_size=(2, 3, 3), stride=(4, 4, 4)
+            in_channels=4,
+            out_channels=16,
+            kernel_size=(2, 3, 3),
+            stride=(4, 4, 4),
         )  # W: 160, H: 210
         self.conv2 = nn.Conv3d(
-            in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=(2, 2, 2)
+            in_channels=16,
+            out_channels=32,
+            kernel_size=(1, 3, 3),
+            stride=(2, 2, 2),
         )  # W:
 
         # Define the max-pooling layers
@@ -49,9 +55,7 @@ class TwoArgCNN(nn.Module):
         x = self.fc2(x)
 
         # Apply softmax for classification
-        x = self.softmax(x)
-
-        return x
+        return self.softmax(x)
 
 
 @pytest.fixture
@@ -73,7 +77,11 @@ def simple_mlp():
 @pytest.fixture
 def simple_mlp_2():
     network = nn.Sequential(
-        nn.Linear(10, 128), nn.ReLU(), nn.Linear(128, 128), nn.ReLU(), nn.Linear(128, 1)
+        nn.Linear(10, 128),
+        nn.ReLU(),
+        nn.Linear(128, 128),
+        nn.ReLU(),
+        nn.Linear(128, 1),
     )
     yield network
     del network
@@ -103,12 +111,20 @@ def mlp_norm_layers():
 def simple_cnn():
     network = nn.Sequential(
         nn.Conv2d(
-            3, 16, kernel_size=3, stride=1, padding=1
+            3,
+            16,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         ),  # Input channels: 3 (for RGB images), Output channels: 16
         nn.ReLU(),
         nn.MaxPool2d(kernel_size=2, stride=2),
         nn.Conv2d(
-            16, 32, kernel_size=3, stride=1, padding=1
+            16,
+            32,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         ),  # Input channels: 16, Output channels: 32
         nn.ReLU(),
         nn.MaxPool2d(kernel_size=2, stride=2),
@@ -127,13 +143,21 @@ def simple_cnn():
 def cnn_norm_layers():
     network = nn.Sequential(
         nn.Conv2d(
-            3, 16, kernel_size=3, stride=1, padding=1
+            3,
+            16,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         ),  # Input channels: 3 (for RGB images), Output channels: 16
         nn.BatchNorm2d(16),
         nn.ReLU(),
         nn.MaxPool2d(kernel_size=2, stride=2),
         nn.Conv2d(
-            16, 32, kernel_size=3, stride=1, padding=1
+            16,
+            32,
+            kernel_size=3,
+            stride=1,
+            padding=1,
         ),  # Input channels: 16, Output channels: 32
         nn.BatchNorm2d(32),
         nn.ReLU(),
@@ -179,7 +203,11 @@ def test_instantiation_with_required_parameters(network, input_tensor, request):
 # The class can be instantiated with minimal parameters and default values are assigned correctly.
 def test_instantiation_with_minimal_parameters():
     network = nn.Sequential(
-        nn.Linear(10, 20), nn.Linear(20, 20), nn.ReLU(), nn.Linear(20, 1), nn.ReLU()
+        nn.Linear(10, 20),
+        nn.Linear(20, 20),
+        nn.ReLU(),
+        nn.Linear(20, 1),
+        nn.ReLU(),
     )
     input_tensor = torch.randn(1, 10)
     evolvable_network = MakeEvolvable(network, input_tensor)
@@ -191,10 +219,15 @@ def test_instantiation_with_rainbow():
     input_tensor = torch.randn(1, 3)
     support = torch.linspace(-200, 200, 51)
     evolvable_network = MakeEvolvable(
-        network, input_tensor, support=support, rainbow=True
+        network,
+        input_tensor,
+        support=support,
+        rainbow=True,
     )
     assert isinstance(evolvable_network, MakeEvolvable)
-    assert str(evolvable_network) == """MakeEvolvable(
+    assert (
+        str(evolvable_network)
+        == """MakeEvolvable(
   (feature_net): Sequential(
     (feature_linear_layer_0): Linear(in_features=3, out_features=128, bias=True)
     (feature_activation_0): ReLU()
@@ -210,6 +243,7 @@ def test_instantiation_with_rainbow():
     (advantage_linear_layer_output): NoisyLinear(in_features=8, out_features=102)
   )
 )"""
+    )
     del network, evolvable_network
 
 
@@ -223,7 +257,12 @@ def test_instantiation_with_rainbow():
     ],
 )
 def test_forward_method(
-    network, input_tensor, secondary_input_tensor, expected_result, request, device
+    network,
+    input_tensor,
+    secondary_input_tensor,
+    expected_result,
+    request,
+    device,
 ):
     network = request.getfixturevalue(network)
     if secondary_input_tensor is None:
@@ -240,7 +279,8 @@ def test_forward_method(
         with torch.no_grad():
             input_tensor = input_tensor.to(dtype=torch.float16)
             actual_output = evolvable_network.forward(
-                input_tensor, secondary_input_tensor
+                input_tensor,
+                secondary_input_tensor,
             )
     output_shape = actual_output.shape
     assert output_shape == expected_result
@@ -256,13 +296,22 @@ def test_forward_method(
     ],
 )
 def test_forward_method_rainbow(
-    network, input_tensor, secondary_input_tensor, expected_result, request, device
+    network,
+    input_tensor,
+    secondary_input_tensor,
+    expected_result,
+    request,
+    device,
 ):
     network = request.getfixturevalue(network)
     support = torch.linspace(-200, 200, 51).to(device)
     if secondary_input_tensor is None:
         evolvable_network = MakeEvolvable(
-            network, input_tensor, support=support, rainbow=True, device=device
+            network,
+            input_tensor,
+            support=support,
+            rainbow=True,
+            device=device,
         )
         with torch.no_grad():
             actual_output = evolvable_network.forward(input_tensor)
@@ -278,7 +327,8 @@ def test_forward_method_rainbow(
         with torch.no_grad():
             input_tensor = input_tensor.to(dtype=torch.float16)
             actual_output = evolvable_network.forward(
-                input_tensor, secondary_input_tensor
+                input_tensor,
+                secondary_input_tensor,
             )
     output_shape = actual_output.shape
     assert output_shape == expected_result
@@ -334,10 +384,17 @@ def test_reset_noise():
 # Detects architecture of a neural network with convolutional layers and without normalization layers
 def test_detect_architecture_mlp_simple(device):
     net = nn.Sequential(
-        nn.Linear(4, 16), nn.ReLU(), nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 1)
+        nn.Linear(4, 16),
+        nn.ReLU(),
+        nn.Linear(16, 16),
+        nn.ReLU(),
+        nn.Linear(16, 1),
     )
     evolvable_net = MakeEvolvable(
-        net, torch.randn(1, 4), device=device, output_vanish=True
+        net,
+        torch.randn(1, 4),
+        device=device,
+        output_vanish=True,
     )
     assert evolvable_net.mlp_layer_info == {"activation_layers": {0: "ReLU", 1: "ReLU"}}
     assert str(unpack_network(net)) == str(unpack_network(evolvable_net))
@@ -346,7 +403,11 @@ def test_detect_architecture_mlp_simple(device):
 
 def test_detect_architecture_medium(device):
     net = nn.Sequential(
-        nn.Linear(4, 16), nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 1), nn.Tanh()
+        nn.Linear(4, 16),
+        nn.Linear(16, 16),
+        nn.ReLU(),
+        nn.Linear(16, 1),
+        nn.Tanh(),
     )
     evolvable_net = MakeEvolvable(net, torch.randn(1, 4), device=device)
     assert evolvable_net.mlp_layer_info == {"activation_layers": {1: "ReLU", 2: "Tanh"}}
@@ -397,7 +458,7 @@ def test_detect_architecure_exception(device):
         nn.Linear(16, 1),
         nn.LogSoftmax(dim=-1),
     )
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         MakeEvolvable(net, torch.randn(1, 4), device=device)
     del net
 
@@ -411,7 +472,11 @@ def test_detect_architecture_empty_hidden_size(device):
 
 def test_detect_architecure_different_acitvations(device):
     net = nn.Sequential(
-        nn.Linear(2, 16), nn.ReLU(), nn.Linear(16, 16), nn.Tanh(), nn.Linear(16, 4)
+        nn.Linear(2, 16),
+        nn.ReLU(),
+        nn.Linear(16, 16),
+        nn.Tanh(),
+        nn.Linear(16, 4),
     )
     with pytest.raises(TypeError):
         MakeEvolvable(net, torch.randn(1, 2), device=device)
@@ -424,45 +489,52 @@ def test_detect_architecure_different_acitvations(device):
 def test_add_mlp_layer_simple(simple_mlp, device):
     input_tensor = torch.randn(1, 10)
     evolvable_network = MakeEvolvable(
-        simple_mlp, input_tensor, init_layers=True, device=device
+        simple_mlp,
+        input_tensor,
+        init_layers=True,
+        device=device,
     )
     feature_net = evolvable_network.feature_net
     feature_net_dict = dict(feature_net.named_parameters())
     initial_num_layers = len(evolvable_network.hidden_size)
     assert evolvable_network.mlp_layer_info == {
-        "activation_layers": {0: "ReLU", 1: "ReLU", 2: "Tanh"}
+        "activation_layers": {0: "ReLU", 1: "ReLU", 2: "Tanh"},
     }, evolvable_network.mlp_layer_info
     evolvable_network.add_mlp_layer()
     new_feature_net = evolvable_network.feature_net
     assert len(evolvable_network.hidden_size) == initial_num_layers + 1
     assert evolvable_network.mlp_layer_info == {
-        "activation_layers": {0: "ReLU", 1: "ReLU", 2: "ReLU", 3: "Tanh"}
+        "activation_layers": {0: "ReLU", 1: "ReLU", 2: "ReLU", 3: "Tanh"},
     }, evolvable_network.mlp_layer_info
     for key, param in new_feature_net.named_parameters():
-        if key in feature_net_dict.keys():
+        if key in feature_net_dict:
             assert torch.equal(param, feature_net_dict[key])
     del evolvable_network
 
 
 def test_add_mlp_layer_medium(device):
     network = nn.Sequential(
-        nn.Linear(4, 16), nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 1), nn.Tanh()
+        nn.Linear(4, 16),
+        nn.Linear(16, 16),
+        nn.ReLU(),
+        nn.Linear(16, 1),
+        nn.Tanh(),
     )
     evolvable_network = MakeEvolvable(network, torch.randn(1, 4), device=device)
     feature_net = evolvable_network.feature_net
     feature_net_dict = dict(feature_net.named_parameters())
     initial_num_layers = len(evolvable_network.hidden_size)
     assert evolvable_network.mlp_layer_info == {
-        "activation_layers": {1: "ReLU", 2: "Tanh"}
+        "activation_layers": {1: "ReLU", 2: "Tanh"},
     }, evolvable_network.mlp_layer_info
     evolvable_network.add_mlp_layer()
     new_feature_net = evolvable_network.feature_net
     assert len(evolvable_network.hidden_size) == initial_num_layers + 1
     assert evolvable_network.mlp_layer_info == {
-        "activation_layers": {1: "ReLU", 2: "ReLU", 3: "Tanh"}
+        "activation_layers": {1: "ReLU", 2: "ReLU", 3: "Tanh"},
     }, evolvable_network.mlp_layer_info
     for key, param in new_feature_net.named_parameters():
-        if key in feature_net_dict.keys():
+        if key in feature_net_dict:
             assert torch.equal(param, feature_net_dict[key])
     del network, evolvable_network
 
@@ -492,17 +564,24 @@ def test_add_mlp_layer_complex(device):
         "norm_layers": {0: "LayerNorm"},
     }, evolvable_network.mlp_layer_info
     for key, param in new_feature_net.named_parameters():
-        if key in feature_net_dict.keys():
+        if key in feature_net_dict:
             assert torch.equal(param, feature_net_dict[key])
     del net, evolvable_network
 
 
 def test_add_mlp_layer_else_statement(device):
     network = nn.Sequential(
-        nn.Linear(4, 16), nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 1), nn.Tanh()
+        nn.Linear(4, 16),
+        nn.Linear(16, 16),
+        nn.ReLU(),
+        nn.Linear(16, 1),
+        nn.Tanh(),
     )
     evolvable_network = MakeEvolvable(
-        network, torch.randn(1, 4), device=device, max_hidden_layers=2
+        network,
+        torch.randn(1, 4),
+        device=device,
+        max_hidden_layers=2,
     )
     initial_num_layers = len(evolvable_network.hidden_size)
     evolvable_network.add_mlp_layer()
@@ -518,39 +597,43 @@ def test_remove_mlp_layer_simple(simple_mlp_2, device):
     feature_net_dict = dict(feature_net.named_parameters())
     initial_num_layers = len(evolvable_network.hidden_size)
     assert evolvable_network.mlp_layer_info == {
-        "activation_layers": {0: "ReLU", 1: "ReLU"}
+        "activation_layers": {0: "ReLU", 1: "ReLU"},
     }
     evolvable_network.remove_mlp_layer()
     new_feature_net = evolvable_network.feature_net
     assert len(evolvable_network.hidden_size) == initial_num_layers - 1
     assert evolvable_network.mlp_layer_info == {
-        "activation_layers": {0: "ReLU"}
+        "activation_layers": {0: "ReLU"},
     }, evolvable_network.mlp_layer_info
     for key, param in new_feature_net.named_parameters():
-        if key in feature_net_dict.keys():
+        if key in feature_net_dict:
             torch.testing.assert_close(param, feature_net_dict[key])
     del evolvable_network
 
 
 def test_remove_mlp_layer_medium(device):
     network = nn.Sequential(
-        nn.Linear(4, 16), nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 1), nn.Tanh()
+        nn.Linear(4, 16),
+        nn.Linear(16, 16),
+        nn.ReLU(),
+        nn.Linear(16, 1),
+        nn.Tanh(),
     )
     evolvable_network = MakeEvolvable(network, torch.randn(1, 4), device=device)
     feature_net = evolvable_network.feature_net
     feature_net_dict = dict(feature_net.named_parameters())
     initial_num_layers = len(evolvable_network.hidden_size)
     assert evolvable_network.mlp_layer_info == {
-        "activation_layers": {1: "ReLU", 2: "Tanh"}
+        "activation_layers": {1: "ReLU", 2: "Tanh"},
     }, evolvable_network.mlp_layer_info
     evolvable_network.remove_mlp_layer()
     new_feature_net = evolvable_network.feature_net
     assert len(evolvable_network.hidden_size) == initial_num_layers - 1
     assert evolvable_network.mlp_layer_info == {
-        "activation_layers": {1: "Tanh"}
+        "activation_layers": {1: "Tanh"},
     }, evolvable_network.mlp_layer_info
     for key, param in new_feature_net.named_parameters():
-        if key in feature_net_dict.keys():
+        if key in feature_net_dict:
             assert torch.equal(param, feature_net_dict[key])
     del network, evolvable_network
 
@@ -581,17 +664,24 @@ def test_remove_mlp_layer_complex(device):
         "norm_layers": {0: "LayerNorm"},
     }, evolvable_network.mlp_layer_info
     for key, param in new_feature_net.named_parameters():
-        if key in feature_net_dict.keys():
+        if key in feature_net_dict:
             assert torch.equal(param, feature_net_dict[key])
     del net, evolvable_network
 
 
 def test_remove_mlp_layer_else_statement(device):
     network = nn.Sequential(
-        nn.Linear(4, 16), nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 1), nn.Tanh()
+        nn.Linear(4, 16),
+        nn.Linear(16, 16),
+        nn.ReLU(),
+        nn.Linear(16, 1),
+        nn.Tanh(),
     )
     evolvable_network = MakeEvolvable(
-        network, torch.randn(1, 4), device=device, min_hidden_layers=2
+        network,
+        torch.randn(1, 4),
+        device=device,
+        min_hidden_layers=2,
     )
     initial_num_layers = len(evolvable_network.hidden_size)
     evolvable_network.remove_mlp_layer()
@@ -601,23 +691,27 @@ def test_remove_mlp_layer_else_statement(device):
 
 def test_remove_mlp_layer_no_output_activation(device):
     net = nn.Sequential(
-        nn.Linear(4, 16), nn.ReLU(), nn.Linear(16, 16), nn.Linear(16, 1), nn.Tanh()
+        nn.Linear(4, 16),
+        nn.ReLU(),
+        nn.Linear(16, 16),
+        nn.Linear(16, 1),
+        nn.Tanh(),
     )
     evolvable_network = MakeEvolvable(net, torch.randn(1, 4), device=device)
     feature_net = evolvable_network.feature_net
     feature_net_dict = dict(feature_net.named_parameters())
     initial_num_layers = len(evolvable_network.hidden_size)
     assert evolvable_network.mlp_layer_info == {
-        "activation_layers": {0: "ReLU", 2: "Tanh"}
+        "activation_layers": {0: "ReLU", 2: "Tanh"},
     }, evolvable_network.mlp_layer_info
     evolvable_network.remove_mlp_layer()
     new_feature_net = evolvable_network.feature_net
     assert len(evolvable_network.hidden_size) == initial_num_layers - 1
     assert evolvable_network.mlp_layer_info == {
-        "activation_layers": {0: "ReLU", 1: "Tanh"}
+        "activation_layers": {0: "ReLU", 1: "Tanh"},
     }, evolvable_network.mlp_layer_info
     for key, param in new_feature_net.named_parameters():
-        if key in feature_net_dict.keys():
+        if key in feature_net_dict:
             assert torch.equal(param, feature_net_dict[key])
     del net, evolvable_network
 
@@ -743,7 +837,10 @@ def test_make_evo_add_cnn_layer_no_activation(device):
 
 def test_make_evo_add_cnn_layer_else_statement(simple_cnn, device):
     evolvable_cnn = MakeEvolvable(
-        simple_cnn, torch.randn(1, 3, 64, 64), device=device, max_cnn_hidden_layers=2
+        simple_cnn,
+        torch.randn(1, 3, 64, 64),
+        device=device,
+        max_cnn_hidden_layers=2,
     )
     original_channels = copy.deepcopy(evolvable_cnn.channel_size)
     evolvable_cnn.add_cnn_layer()
@@ -768,7 +865,7 @@ def test_remove_cnn_layer(simple_cnn, device):
         "activation_layers": {0: "ReLU"},
         "conv_layer_type": "Conv2d",
         "pooling_layers": {
-            0: {"name": "MaxPool2d", "kernel": 2, "stride": 2, "padding": 0}
+            0: {"name": "MaxPool2d", "kernel": 2, "stride": 2, "padding": 0},
         },
     }, evolvable_network.cnn_layer_info
     del evolvable_network
@@ -793,7 +890,10 @@ def test_remove_cnn_layer_no_activation(device):
 
 def test_remove_cnn_layer_else_statement(simple_cnn, device):
     evolvable_cnn = MakeEvolvable(
-        simple_cnn, torch.randn(1, 3, 64, 64), device=device, min_cnn_hidden_layers=2
+        simple_cnn,
+        torch.randn(1, 3, 64, 64),
+        device=device,
+        min_cnn_hidden_layers=2,
     )
     original_channels = copy.deepcopy(evolvable_cnn.channel_size)
     evolvable_cnn.remove_cnn_layer()
@@ -809,7 +909,8 @@ def test_make_evo_add_cnn_channel(simple_cnn, device):
     layer = 1
     original_channel_size = evolvable_network.channel_size[layer]
     evolvable_network.add_cnn_channel(
-        hidden_layer=layer, numb_new_channels=numb_new_channels
+        hidden_layer=layer,
+        numb_new_channels=numb_new_channels,
     )
     assert evolvable_network.channel_size[layer] == original_channel_size + 16
     del evolvable_network
@@ -834,7 +935,8 @@ def test_remove_cnn_channel(device):
     original_channel_size = copy.deepcopy(evolvable_network.channel_size)
     evolvable_network.min_channel_size = 16
     result = evolvable_network.remove_cnn_channel(
-        hidden_layer=layer, numb_new_channels=numb_new_channels
+        hidden_layer=layer,
+        numb_new_channels=numb_new_channels,
     )
     numb_new_channels = result["numb_new_channels"]
     hidden_layer = result["hidden_layer"]
@@ -863,7 +965,8 @@ def test_remove_cnn_channel_specified_hidden_layer(device):
     original_channel_size = copy.deepcopy(evolvable_network.channel_size)
     evolvable_network.min_channel_size = 16
     result = evolvable_network.remove_cnn_channel(
-        hidden_layer=layer, numb_new_channels=numb_new_channels
+        hidden_layer=layer,
+        numb_new_channels=numb_new_channels,
     )
     numb_new_channels = result["numb_new_channels"]
     assert (
@@ -928,7 +1031,9 @@ def test_change_kernel_multi_single_arg(device):
         nn.Linear(128, 1),
     )
     evolvable_cnn = MakeEvolvable(
-        network, torch.randn(1, 3, 1, 210, 160), device=device
+        network,
+        torch.randn(1, 3, 1, 210, 160),
+        device=device,
     )
     while evolvable_cnn.kernel_size == [(1, 3, 3), (1, 3, 3)]:
         evolvable_cnn.change_cnn_kernel()
@@ -950,7 +1055,9 @@ def test_change_kernel_multi_single_arg_else_statement(device):
         nn.Linear(128, 1),
     )
     evolvable_cnn = MakeEvolvable(
-        network, torch.randn(1, 3, 1, 210, 160), device=device
+        network,
+        torch.randn(1, 3, 1, 210, 160),
+        device=device,
     )
     evolvable_cnn.change_cnn_kernel()
     assert len(evolvable_cnn.kernel_size) == 2
@@ -990,7 +1097,7 @@ def test_recreate_nets_parameters_preserved(simple_mlp, device):
     new_feature_net = evolvable_network.feature_net
 
     for key, param in new_feature_net.named_parameters():
-        if key in feature_net_dict.keys():
+        if key in feature_net_dict:
             assert torch.equal(param, feature_net_dict[key])
     del evolvable_network
 
@@ -999,7 +1106,11 @@ def test_recreate_nets_parameters_preserved_rainbow(simple_mlp, device):
     input_tensor = torch.randn(1, 10)
     support = torch.linspace(-200, 200, 51).to(device)
     evolvable_network = MakeEvolvable(
-        simple_mlp, input_tensor, support=support, rainbow=True, device=device
+        simple_mlp,
+        input_tensor,
+        support=support,
+        rainbow=True,
+        device=device,
     )
 
     feature_net = evolvable_network.feature_net
@@ -1020,22 +1131,26 @@ def test_recreate_nets_parameters_preserved_rainbow(simple_mlp, device):
     new_advantage_net = evolvable_network.advantage_net
 
     for key, param in new_feature_net.named_parameters():
-        if key in feature_net_dict.keys():
+        if key in feature_net_dict:
             assert torch.equal(param, feature_net_dict[key])
 
     for key, param in new_value_net.named_parameters():
-        if key in value_net_dict.keys():
+        if key in value_net_dict:
             assert torch.equal(param, value_net_dict[key])
 
     for key, param in new_advantage_net.named_parameters():
-        if key in advantage_net_dict.keys():
+        if key in advantage_net_dict:
             assert torch.equal(param, advantage_net_dict[key])
     del evolvable_network
 
 
 def test_recreate_nets_parameters_shrink_preserved(device):
     network = nn.Sequential(
-        nn.Linear(4, 32), nn.ReLU(), nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 2)
+        nn.Linear(4, 32),
+        nn.ReLU(),
+        nn.Linear(32, 32),
+        nn.ReLU(),
+        nn.Linear(32, 2),
     )
 
     input_tensor = torch.randn(1, 4)
@@ -1050,7 +1165,7 @@ def test_recreate_nets_parameters_shrink_preserved(device):
     new_feature_net = evolvable_network.feature_net
 
     for key, param in new_feature_net.named_parameters():
-        if key in feature_net_dict.keys():
+        if key in feature_net_dict:
             torch.testing.assert_close(param, feature_net_dict[key])
     del network, evolvable_network
 

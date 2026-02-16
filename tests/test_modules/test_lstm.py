@@ -32,7 +32,11 @@ def test_instantiation(input_size, hidden_size, num_outputs, num_layers, device)
     [(0, 64, 5, 1), (10, 0, 5, 1), (10, 64, 0, 1), (10, 64, 5, 0)],
 )
 def test_incorrect_instantiation(
-    input_size, hidden_size, num_outputs, num_layers, device
+    input_size,
+    hidden_size,
+    num_outputs,
+    num_layers,
+    device,
 ):
     with pytest.raises(AssertionError):
         EvolvableLSTM(
@@ -82,13 +86,14 @@ def test_forward_with_states(device):
     with torch.no_grad():
         # Pass hidden states to forward manually
         lstm_output, (hn, cn) = evolvable_lstm.model[f"{evolvable_lstm.name}_lstm"](
-            input_tensor, (h0, c0)
+            input_tensor,
+            (h0, c0),
         )
         output = evolvable_lstm.model[f"{evolvable_lstm.name}_lstm_output"](
-            lstm_output[:, -1, :]
+            lstm_output[:, -1, :],
         )
         output = evolvable_lstm.model[f"{evolvable_lstm.name}_output_activation"](
-            output
+            output,
         )
 
         # Regular forward pass
@@ -129,7 +134,7 @@ def test_add_layer(input_size, hidden_size, num_outputs, num_layers, device):
         assert evolvable_lstm.num_layers == initial_layers + 1
         # Check only non-LSTM parameters remain the same (output layer)
         for key, param in new_net.named_parameters():
-            if key in initial_net_dict.keys() and "lstm" not in key:
+            if key in initial_net_dict and "lstm" not in key:
                 torch.testing.assert_close(param, initial_net_dict[key])
     else:
         assert evolvable_lstm.num_layers == initial_layers
@@ -160,7 +165,7 @@ def test_remove_layer(input_size, hidden_size, num_outputs, num_layers, device):
         assert evolvable_lstm.num_layers == initial_layers - 1
         # Check only non-LSTM parameters remain the same (output layer)
         for key, param in new_net.named_parameters():
-            if key in initial_net_dict.keys() and "lstm" not in key:
+            if key in initial_net_dict and "lstm" not in key:
                 torch.testing.assert_close(param, initial_net_dict[key])
     else:
         assert evolvable_lstm.num_layers == initial_layers
@@ -176,7 +181,12 @@ def test_remove_layer(input_size, hidden_size, num_outputs, num_layers, device):
     ],
 )
 def test_add_nodes(
-    input_size, hidden_size, num_outputs, num_layers, numb_new_nodes, device
+    input_size,
+    hidden_size,
+    num_outputs,
+    num_layers,
+    numb_new_nodes,
+    device,
 ):
     lstm = EvolvableLSTM(
         input_size=input_size,
@@ -206,7 +216,12 @@ def test_add_nodes(
     ],
 )
 def test_remove_nodes(
-    input_size, hidden_size, num_outputs, num_layers, numb_new_nodes, device
+    input_size,
+    hidden_size,
+    num_outputs,
+    num_layers,
+    numb_new_nodes,
+    device,
 ):
     lstm = EvolvableLSTM(
         input_size=input_size,
