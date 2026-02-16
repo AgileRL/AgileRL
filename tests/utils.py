@@ -291,7 +291,7 @@ def wait_for_gpu_memory_to_clear(
 
             if elapsed >= timeout_s:
                 status_str = ", ".join(
-                    f"GPU{d}: {u:.2f}/{t:.2f} GiB ({u/t:.0%})"
+                    f"GPU{d}: {u:.2f}/{t:.2f} GiB ({u / t:.0%})"
                     for d, (u, t) in memory_status.items()
                 )
                 raise ValueError(
