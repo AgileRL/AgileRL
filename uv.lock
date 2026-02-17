@@ -118,8 +118,8 @@ requires-dist = [
     { name = "accelerate", specifier = "~=1.7.0" },
     { name = "datasets", marker = "extra == 'all'", specifier = "==4.4.1" },
     { name = "datasets", marker = "extra == 'llm'", specifier = "==4.4.1" },
-    { name = "deepspeed", marker = "extra == 'all'", specifier = ">=0.17.1" },
-    { name = "deepspeed", marker = "extra == 'llm'", specifier = ">=0.17.1" },
+    { name = "deepspeed", marker = "extra == 'all'", specifier = "~=0.17.1" },
+    { name = "deepspeed", marker = "extra == 'llm'", specifier = "~=0.17.1" },
     { name = "dill", specifier = "~=0.3.7" },
     { name = "fastrand", specifier = "~=1.3.0" },
     { name = "flatten-dict", specifier = "~=0.4.2" },
@@ -134,8 +134,8 @@ requires-dist = [
     { name = "omegaconf", specifier = "~=2.3.0" },
     { name = "packaging", specifier = ">=20.0" },
     { name = "pandas", specifier = "~=2.2.3" },
-    { name = "peft", marker = "extra == 'all'", specifier = ">=0.18.0" },
-    { name = "peft", marker = "extra == 'llm'", specifier = ">=0.18.0" },
+    { name = "peft", marker = "extra == 'all'", specifier = "~=0.18.0" },
+    { name = "peft", marker = "extra == 'llm'", specifier = "~=0.18.0" },
     { name = "pettingzoo", specifier = "~=1.23.1" },
     { name = "pre-commit", specifier = "~=3.8.0" },
     { name = "pygame", specifier = "~=2.6.0" },
@@ -146,8 +146,8 @@ requires-dist = [
     { name = "termcolor", specifier = "~=1.1.0" },
     { name = "torch", specifier = "==2.9.0" },
     { name = "tqdm", specifier = ">=4.66.4" },
-    { name = "transformers", marker = "extra == 'all'", specifier = ">=4.57.1" },
-    { name = "transformers", marker = "extra == 'llm'", specifier = ">=4.57.1" },
+    { name = "transformers", marker = "extra == 'all'", specifier = "~=4.57.1" },
+    { name = "transformers", marker = "extra == 'llm'", specifier = "~=4.57.1" },
     { name = "vllm", marker = "extra == 'all'", specifier = "==0.13.0" },
     { name = "vllm", marker = "extra == 'llm'", specifier = "==0.13.0" },
     { name = "wandb", specifier = "~=0.18.0" },
@@ -157,15 +157,15 @@ provides-extras = ["llm", "all"]
 [package.metadata.requires-dev]
 dev = [
     { name = "nvidia-ml-py", specifier = ">=12.0.0" },
-    { name = "pytest", specifier = ">=9.0.2" },
-    { name = "pytest-cov", specifier = ">=7.0.0" },
+    { name = "pytest", specifier = "~=9.0.2" },
+    { name = "pytest-cov", specifier = "~=7.0.0" },
 ]
 docs = [
-    { name = "furo", specifier = ">=2025.12.19" },
-    { name = "sphinx-github-changelog", specifier = ">=1.7.1" },
-    { name = "sphinx-notfound-page", specifier = ">=1.1.0" },
-    { name = "sphinx-toolbox", specifier = ">=4.1.2" },
-    { name = "sphinxcontrib-googleanalytics", specifier = ">=0.5" },
+    { name = "furo", specifier = "~=2025.12.19" },
+    { name = "sphinx-github-changelog", specifier = "~=1.7.1" },
+    { name = "sphinx-notfound-page", specifier = "~=1.1.0" },
+    { name = "sphinx-toolbox", specifier = "~=4.1.2" },
+    { name = "sphinxcontrib-googleanalytics", specifier = "~=0.5" },
 ]
 
 [[package]]

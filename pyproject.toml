@@ -41,31 +41,31 @@ dependencies = [
 [project.optional-dependencies]
 llm = [
     "datasets==4.4.1",
-    "deepspeed>=0.17.1",
-    "peft>=0.18.0",
-    "transformers>=4.57.1",
+    "deepspeed~=0.17.1",
+    "peft~=0.18.0",
+    "transformers~=4.57.1",
     "vllm==0.13.0",
 ]
 all = [
     "datasets==4.4.1",
-    "deepspeed>=0.17.1",
-    "peft>=0.18.0",
-    "transformers>=4.57.1",
+    "deepspeed~=0.17.1",
+    "peft~=0.18.0",
+    "transformers~=4.57.1",
     "vllm==0.13.0",
 ]
 
 [dependency-groups]
 dev = [
-    "pytest>=9.0.2",
-    "pytest-cov>=7.0.0",
+    "pytest~=9.0.2",
+    "pytest-cov~=7.0.0",
     "nvidia-ml-py>=12.0.0",  # For GPU memory monitoring in tests
 ]
 docs = [
-    "furo>=2025.12.19",
-    "sphinx-github-changelog>=1.7.1",
-    "sphinx-notfound-page>=1.1.0",
-    "sphinx-toolbox>=4.1.2",
-    "sphinxcontrib-googleanalytics>=0.5",
+    "furo~=2025.12.19",
+    "sphinx-github-changelog~=1.7.1",
+    "sphinx-notfound-page~=1.1.0",
+    "sphinx-toolbox~=4.1.2",
+    "sphinxcontrib-googleanalytics~=0.5",
 ]
 
 [tool.pytest.ini_options]
