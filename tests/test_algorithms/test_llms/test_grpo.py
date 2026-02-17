@@ -882,11 +882,11 @@ def test_grpo_test_vllm(
 @pytest.mark.parametrize(
     "config, use_deepspeed_optimizer",
     [
-        # (deepspeed_config_stage_1, False),
-        # (deepspeed_config_stage_1, True),
-        # (deepspeed_config_stage_1_with_scheduler, False),
-        # (deepspeed_config_stage_1_with_scheduler, True),
-        # (deepspeed_config_stage_2, False),
+        (deepspeed_config_stage_1, False),
+        (deepspeed_config_stage_1, True),
+        (deepspeed_config_stage_1_with_scheduler, False),
+        (deepspeed_config_stage_1_with_scheduler, True),
+        (deepspeed_config_stage_2, False),
         (deepspeed_config_stage_2, True),
     ],
 )
@@ -896,10 +896,7 @@ def test_grpo_test_vllm(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_separate_reference_adapter",
-    [
-        # False,
-        True
-    ],
+    [False, True],
 )
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
