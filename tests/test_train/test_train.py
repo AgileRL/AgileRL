@@ -3209,7 +3209,9 @@ def test_multi_agent_early_stop_on_policy(
         patch("agilerl.training.train_multi_agent_on_policy.wandb.login") as _,
         patch("agilerl.training.train_multi_agent_on_policy.wandb.init") as _,
         patch("agilerl.training.train_multi_agent_on_policy.wandb.log") as _,
-        patch() as mock_wandb_finish,
+        patch(
+            "agilerl.training.train_multi_agent_on_policy.wandb.finish"
+        ) as mock_wandb_finish,
     ):
         # Call the function that should trigger wandb.init
         agilerl.training.train_multi_agent_on_policy.train_multi_agent_on_policy(

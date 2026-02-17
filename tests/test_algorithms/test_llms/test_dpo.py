@@ -22,7 +22,6 @@ from tests.test_algorithms.test_llms.test_grpo import (
     deepspeed_config_stage_1,
     deepspeed_config_stage_2,
 )
-from tests.utils import spawn_new_process_for_each_test
 
 
 def make_preference_gym(
@@ -129,7 +128,6 @@ def dpo_factory():
     return generate_dpo
 
 
-@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config, use_deepspeed_optimizer",
     [
@@ -219,7 +217,6 @@ def test_init_dpo(
     AcceleratorState._reset_state(True)
 
 
-@spawn_new_process_for_each_test
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -249,7 +246,6 @@ def test_init_dpo_model_name_none_actor_network_none(
     AcceleratorState._reset_state(True)
 
 
-@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config, use_deepspeed_optimizer",
     [
@@ -306,7 +302,6 @@ def test_dpo_get_action(
     AcceleratorState._reset_state(True)
 
 
-@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config, use_deepspeed_optimizer",
     [
@@ -415,7 +410,6 @@ def test_dpo_learn(
     AcceleratorState._reset_state(True)
 
 
-@spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config, use_deepspeed_optimizer",
     [
