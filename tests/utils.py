@@ -108,6 +108,12 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
 
         runner = str(AGILERL_PATH / "tests" / "subprocess_runner.py")
 
+        # Serialize tensors
+        param_kwargs = {
+            k: v if not isinstance(v, torch.Tensor) else v.tolist()
+            for k, v in param_kwargs.items()
+        }
+
         cmd = [
             sys.executable,
             runner,

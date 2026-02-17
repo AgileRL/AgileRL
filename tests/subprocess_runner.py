@@ -173,6 +173,9 @@ def main():
     args = parser.parse_args()
 
     params = json.loads(args.params)
+    params = {
+        k: torch.tensor(v) if isinstance(v, list) else v for k, v in params.items()
+    }
     fixture_names = json.loads(args.fixtures)
 
     setup_test_env_vars()
