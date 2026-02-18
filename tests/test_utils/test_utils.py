@@ -535,7 +535,7 @@ def test_tournament_selection_and_mutation_language_model():
     with (
         patch("agilerl.utils.utils.save_llm_checkpoint") as mock_save_llm_checkpoint,
         patch(
-            "agilerl.utils.utils.consolidate_mutations",
+            "agilerl.utils.utils.consolidate_mutations"
         ) as mock_consolidate_mutations,
     ):
         output_pop = tournament_selection_and_mutation(

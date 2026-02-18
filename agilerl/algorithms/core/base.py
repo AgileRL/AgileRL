@@ -2302,7 +2302,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 None,
                 None,
             )
-        if hasattr(self, "llm"):
+        if hasattr(self, "llm") and self.llm is not None:
             del self.llm.llm_engine.model_executor
             del self.llm
         gc.collect()

@@ -175,7 +175,7 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch(
-            "agilerl.training.train_llm.tournament_selection_and_mutation",
+            "agilerl.training.train_llm.tournament_selection_and_mutation"
         ) as mock_tournament_selection_and_mutation,
     ):
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
@@ -284,7 +284,7 @@ def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps():
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch(
-            "agilerl.training.train_llm.tournament_selection_and_mutation",
+            "agilerl.training.train_llm.tournament_selection_and_mutation"
         ) as mock_tournament_selection_and_mutation,
     ):
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
@@ -589,7 +589,7 @@ def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch(
-            "agilerl.training.train_llm.tournament_selection_and_mutation",
+            "agilerl.training.train_llm.tournament_selection_and_mutation"
         ) as mock_tournament_selection_and_mutation,
     ):
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
@@ -654,7 +654,7 @@ def test_finetune_llm_preference_warning_num_epochs_and_max_steps():
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch(
-            "agilerl.training.train_llm.tournament_selection_and_mutation",
+            "agilerl.training.train_llm.tournament_selection_and_mutation"
         ) as mock_tournament_selection_and_mutation,
     ):
         mock_tournament_selection_and_mutation.return_value = [mock_agent]

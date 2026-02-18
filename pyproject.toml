@@ -1,10 +1,12 @@
 [project]
 name = "agilerl"
-version = "2.5.0.dev0"
+
+version = "2.5.0.dev1"
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
 readme = "README.md"
+
 requires-python = ">=3.10,<3.14"
 
 dependencies = [
@@ -30,7 +32,7 @@ dependencies = [
     "redis~=4.4.4",
     "SuperSuit~=3.9.0",
     "termcolor~=1.1.0",
-    "torch==2.7.1",
+    "torch==2.9.0",
     "tensordict~=0.8",
     "tqdm>=4.66.4",
     "wandb~=0.18.0",
@@ -42,20 +44,21 @@ llm = [
     "deepspeed~=0.17.1",
     "peft~=0.18.0",
     "transformers~=4.57.1",
-    "vllm~=0.10.0",
+    "vllm==0.13.0",
 ]
 all = [
     "datasets==4.4.1",
     "deepspeed~=0.17.1",
     "peft~=0.18.0",
     "transformers~=4.57.1",
-    "vllm~=0.10.0",
+    "vllm==0.13.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest~=9.0.2",
     "pytest-cov~=7.0.0",
+    "nvidia-ml-py>=12.0.0",  # For GPU memory monitoring in tests
 ]
 docs = [
     "furo~=2025.12.19",
@@ -68,6 +71,20 @@ docs = [
 [tool.pytest.ini_options]
 # Deterministic ordering for tests; useful for pytest-xdist.
 env = ["PYTHONHASHSEED=0", "VLLM_ATTENTION_BACKEND=XFORMERS", "VLLM_USE_FLASHINFER_SAMPLER=0"]
+
+[tool.coverage.run]
+parallel = true
+source = ["agilerl"]
+concurrency = ["multiprocessing"]
+sigterm = true
+omit = ["agilerl/networks/distributions_experimental.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+]
+
 filterwarnings = [
     # MakeEvolvable deprecation (use EvolvableModule/EvolvableNetwork instead)
     "ignore::DeprecationWarning:agilerl.wrappers.make_evolvable",

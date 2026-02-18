@@ -43,6 +43,7 @@ repos:
       rev: 0.2.3
       hooks:
           - id: yamlfmt
+
     - repo: https://github.com/astral-sh/uv-pre-commit
       # uv version.
       rev: 0.10.3
