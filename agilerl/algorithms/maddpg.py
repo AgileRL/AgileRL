@@ -25,6 +25,7 @@ from agilerl.typing import (
     SupportedObsSpaces,
 )
 from agilerl.utils.algo_utils import (
+    apply_env_defined_actions,
     concatenate_spaces,
     format_shared_critic_encoder,
     get_deepest_head_config,
@@ -515,10 +516,15 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
-            for agent in self.agent_ids:
-                processed_action_dict[agent][agent_masks[agent]] = env_defined_actions[
-                    agent
-                ][agent_masks[agent]]
+            action_dict = apply_env_defined_actions(
+                self.agent_ids,
+                processed_action_dict,
+                env_defined_actions,
+                agent_masks,
+                discrete_actions=isinstance(
+                    next(iter(self.action_space.values())), spaces.Discrete
+                ),
+            )
 
         return processed_action_dict, action_dict
 

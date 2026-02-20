@@ -90,11 +90,6 @@ def ma_vector_space():
 
 
 @pytest.fixture(scope="session")
-def ma_vector_space_batched():
-    return generate_multi_agent_box_spaces(3, (16, 6))
-
-
-@pytest.fixture(scope="session")
 def ma_discrete_space():
     return generate_multi_agent_discrete_spaces(3, 2)
 
