@@ -915,6 +915,7 @@ def no_sync(self):
     ],
 )
 @pytest.mark.parametrize("compile_mode", [None])
+# FIXME add test to include vec env agent_masking
 def test_ippo_get_action_agent_masking(
     ma_vector_space,
     action_spaces,
@@ -944,6 +945,64 @@ def test_ippo_get_action_agent_masking(
     # Define the ippo agent
     ippo = IPPO(
         observation_spaces=ma_vector_space,
+        action_spaces=action_spaces,
+        agent_ids=agent_ids,
+        device=device,
+        torch_compiler=compile_mode,
+    )
+
+    # Get the action
+    actions, _, _, _ = ippo.get_action(obs=state, infos=info)
+
+    if discrete_actions:
+        assert np.array_equal(actions["agent_0"], np.array([[1]])), actions["agent_0"]
+    else:
+        assert np.array_equal(
+            actions["agent_0"],
+            np.array([[0, 1, 0, 1, 0, 1]]),
+        ), actions["agent_0"]
+    ippo.clean_up()
+
+
+@pytest.mark.parametrize(
+    "action_spaces",
+    [
+        "ma_discrete_space",
+        "ma_vector_space",
+    ],
+)
+@pytest.mark.parametrize("compile_mode", [None])
+def test_ippo_get_action_agent_masking_batched(
+    ma_vector_space_batched,
+    action_spaces,
+    device,
+    compile_mode,
+    request,
+):
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    state = {
+        agent: np.random.randn(*ma_vector_space_batched[0].shape) for agent in agent_ids
+    }
+    action_spaces = request.getfixturevalue(action_spaces)
+    discrete_actions = all(
+        isinstance(space, spaces.Discrete) for space in action_spaces
+    )
+    if discrete_actions:
+        info = {
+            "agent_0": {"env_defined_actions": 1},
+            "agent_1": {"env_defined_actions": None},
+            "other_agent_0": {"env_defined_actions": None},
+        }
+    else:
+        info = {
+            "agent_0": {"env_defined_actions": np.array([0, 1, 0, 1, 0, 1])},
+            "agent_1": {"env_defined_actions": None},
+            "other_agent_0": {"env_defined_actions": None},
+        }
+
+    # Define the ippo agent
+    ippo = IPPO(
+        observation_spaces=ma_vector_space_batched,
         action_spaces=action_spaces,
         agent_ids=agent_ids,
         device=device,
