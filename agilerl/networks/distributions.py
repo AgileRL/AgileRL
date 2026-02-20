@@ -44,7 +44,6 @@ class TorchDistribution:
     :type log_std: torch.Tensor | None
     :param squash_output: Whether to squash the output to the action space.
     :type squash_output: bool
-
     """
 
     def __init__(
@@ -63,9 +62,6 @@ class TorchDistribution:
         self.squash_output = squash_output and isinstance(action_space, spaces.Box)
         self._sampled_action: torch.Tensor | None = None
 
-    # ------------------------------------------------------------------ #
-    # fast tensor-only primitives                                         #
-    # ------------------------------------------------------------------ #
     def sample(self) -> torch.Tensor:
         """Sample from the distribution for the given action space.
 
