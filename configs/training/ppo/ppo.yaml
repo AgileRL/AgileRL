@@ -56,15 +56,14 @@ NET_CONFIG:
 
     encoder_config:
         hidden_size: [64]
-        activation: Tanh
+        activation: ReLU
         min_mlp_nodes: 64
         max_mlp_nodes: 500
         layer_norm: true
 
     head_config:
         hidden_size: [64]
-        activation: Tanh
-        output_activation:
+        activation: ReLU
         min_hidden_layers: 1
         max_hidden_layers: 3
         min_mlp_nodes: 64
