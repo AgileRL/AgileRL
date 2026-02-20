@@ -1814,6 +1814,9 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             for i, agent_id in enumerate(agent_ids):
                 output_dict[agent_id] = group_outputs[group_id][i]
 
+                if isinstance(self.possible_action_spaces[agent_id], spaces.Discrete):
+                    output_dict[agent_id] = output_dict[agent_id].squeeze(-1)
+
         return output_dict
 
     def sum_shared_rewards(self, rewards: ArrayDict) -> ArrayDict:
