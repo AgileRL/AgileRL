@@ -1571,17 +1571,6 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                     val = np.array([[val]])
                     env_defined_actions[agent_id] = val
 
-                # Ensure additional dimension is added in so shapes align for masking
-                if isinstance(val, np.ndarray) and len(val.shape) == 1:
-                    val = (
-                        val[:, np.newaxis]
-                        if isinstance(
-                            self.possible_action_spaces[agent_id],
-                            spaces.Discrete,
-                        )
-                        else val[np.newaxis, :]
-                    )
-                    env_defined_actions[agent_id] = val
                 agent_masks[agent_id] = np.where(
                     np.isnan(env_defined_actions[agent_id]),
                     0,

@@ -602,9 +602,19 @@ class IPPO(MultiAgentRLAlgorithm):
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
             for agent_id in unique_agents_ids:
-                action_dict[agent_id][agent_masks[agent_id]] = env_defined_actions[
-                    agent_id
-                ][agent_masks[agent_id]]
+                agent_action = action_dict[agent_id]
+                env_defined_action = env_defined_actions[agent_id]
+                agent_mask = agent_masks[agent_id]
+
+                if agent_action.shape != env_defined_action.shape:
+                    env_defined_action = np.broadcast_to(
+                        env_defined_action, agent_action.shape
+                    )
+
+                if agent_action.shape != agent_mask.shape:
+                    agent_mask = np.broadcast_to(agent_mask, agent_action.shape)
+
+                action_dict[agent_id][agent_mask] = env_defined_action[agent_mask]
 
         return (
             action_dict,
