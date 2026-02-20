@@ -175,7 +175,6 @@ class EvolvableDistribution(EvolvableWrapper):
         # Normal distribution for Continuous action spaces
         if isinstance(self.action_space, spaces.Box):
             log_std = self.log_std.expand_as(logits)
-            # Pass mu and log_std directly to TorchDistribution
             return TorchDistribution(
                 action_space=self.action_space,
                 mu=logits,
@@ -185,29 +184,26 @@ class EvolvableDistribution(EvolvableWrapper):
 
         # Categorical distribution for Discrete action spaces
         if isinstance(self.action_space, spaces.Discrete):
-            # Pass logits directly to TorchDistribution
             return TorchDistribution(
                 action_space=self.action_space,
                 logits=logits,
-                squash_output=self.squash_output,  # squash_output is ignored for discrete
+                squash_output=self.squash_output,
             )
 
         # List of categorical distributions for MultiDiscrete action spaces
         if isinstance(self.action_space, spaces.MultiDiscrete):
-            # Pass logits directly to TorchDistribution
             return TorchDistribution(
                 action_space=self.action_space,
                 logits=logits,
-                squash_output=self.squash_output,  # squash_output is ignored for discrete
+                squash_output=self.squash_output,
             )
 
         # Bernoulli distribution for MultiBinary action spaces
         if isinstance(self.action_space, spaces.MultiBinary):
-            # Pass logits directly to TorchDistribution
             return TorchDistribution(
                 action_space=self.action_space,
                 logits=logits,
-                squash_output=self.squash_output,  # squash_output is ignored for discrete
+                squash_output=self.squash_output,
             )
         msg = f"Action space {self.action_space} not supported."
         raise NotImplementedError(msg)
@@ -224,7 +220,7 @@ class EvolvableDistribution(EvolvableWrapper):
             msg = "Distribution not initialized. Call forward first."
             raise ValueError(msg)
 
-        # The new TorchDistribution handles squashing correction internally for Box space
+        # Handles squashing correction internally for Box space
         return self.dist.log_prob(action)
 
     def entropy(self) -> torch.Tensor:
@@ -237,7 +233,7 @@ class EvolvableDistribution(EvolvableWrapper):
             msg = "Distribution not initialized. Call forward first."
             raise ValueError(msg)
 
-        # The new TorchDistribution returns analytical entropy for supported spaces
+        # Returns analytical entropy for supported spaces
         return self.dist.entropy()
 
     def apply_mask(self, logits: torch.Tensor, mask: ArrayOrTensor) -> torch.Tensor:
@@ -332,7 +328,6 @@ class EvolvableDistribution(EvolvableWrapper):
             logits = self.apply_mask(logits, action_mask)
 
         # Distribution from logits
-        # get_distribution now creates the new TorchDistribution object
         self.dist = self.get_distribution(logits)
 
         # Sample action, compute log probability and entropy
@@ -340,10 +335,8 @@ class EvolvableDistribution(EvolvableWrapper):
             action = self.dist.sample()
             log_prob = self.dist.log_prob(action)
         else:
-            action = None  # Mode/mean might be more appropriate if not sampling
-            log_prob = (
-                None  # Log prob of mode/mean typically not used in PPO sample step
-            )
+            action = None
+            log_prob = None
 
         entropy = self.dist.entropy()
         return action, log_prob, entropy

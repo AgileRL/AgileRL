@@ -9,6 +9,7 @@ from gymnasium import spaces
 from agilerl.utils.torch_utils import (
     entropy_from_space,
     get_transformer_logs,
+    log_prob_discrete,
     log_prob_from_space,
     map_pytree,
     parameter_norm,
@@ -274,3 +275,55 @@ def test_distribution_roundtrip_discrete():
     lp = log_prob_from_space(action_space, action, logits=logits)
     assert lp.shape == (4,)
     assert torch.all(torch.isfinite(lp))
+
+
+def test_log_prob_discrete_action_same_ndim_trailing_one():
+    """Action with same ndim as logits and shape[-1]==1 is treated as indices."""
+    logits = torch.randn(4, 5)
+    action = torch.randint(0, 5, (4, 1))
+    lp = log_prob_discrete(logits, action)
+    assert lp.shape == (4,)
+    assert torch.all(torch.isfinite(lp))
+
+
+def test_log_prob_discrete_one_hot_action():
+    """One-hot encoded action is decoded via argmax when n_actions is provided."""
+    logits = torch.randn(4, 5)
+    action_idx = torch.randint(0, 5, (4,))
+    one_hot = torch.zeros(4, 5)
+    one_hot.scatter_(1, action_idx.unsqueeze(-1), 1)
+    lp = log_prob_discrete(logits, one_hot, n_actions=5)
+    assert lp.shape == (4,)
+    assert torch.all(torch.isfinite(lp))
+    lp_ref = log_prob_discrete(logits, action_idx)
+    torch.testing.assert_close(lp, lp_ref)
+
+
+def test_log_prob_discrete_same_ndim_invalid_shape_raises():
+    """Same ndim but incompatible last dim raises ValueError."""
+    logits = torch.randn(4, 5)
+    action = torch.randint(0, 5, (4, 3))
+    with pytest.raises(ValueError, match="not compatible with Discrete space"):
+        log_prob_discrete(logits, action)
+
+
+def test_log_prob_discrete_wrong_ndim_raises():
+    """Completely wrong ndim raises ValueError."""
+    logits = torch.randn(4, 5)
+    action = torch.randint(0, 5, (2, 4, 1))
+    with pytest.raises(ValueError, match="not compatible with logits ndim"):
+        log_prob_discrete(logits, action)
+
+
+def test_log_prob_from_space_unsupported_raises():
+    """Unsupported space type raises NotImplementedError for log_prob_from_space."""
+    action_space = spaces.Tuple((spaces.Discrete(2),))
+    with pytest.raises(NotImplementedError, match="Unsupported action space"):
+        log_prob_from_space(action_space, torch.randn(1, 2), logits=torch.randn(1, 2))
+
+
+def test_entropy_from_space_unsupported_raises():
+    """Unsupported space type raises NotImplementedError for entropy_from_space."""
+    action_space = spaces.Tuple((spaces.Discrete(2),))
+    with pytest.raises(NotImplementedError, match="Unsupported action space"):
+        entropy_from_space(action_space, logits=torch.randn(1, 2))
