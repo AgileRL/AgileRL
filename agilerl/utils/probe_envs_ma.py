@@ -2067,10 +2067,19 @@ def check_on_policy_learning_with_probe_env(
                 if policy_values is not None:
                     if discrete:
                         _, _, _ = actor(state[agent_id])
-                        (actor.head_net.dist.distribution.probs.detach().cpu().numpy())
+                        # TorchDistribution uses raw tensors: logits -> probs via softmax
+                        predicted_policy_values = (
+                            torch.softmax(actor.head_net.dist.logits, dim=-1)
+                            .detach()
+                            .cpu()
+                            .numpy()
+                        )
                     else:
                         _, _, _ = actor(state[agent_id])
-                        (actor.head_net.dist.distribution.loc.detach().cpu().numpy())
+                        # TorchDistribution uses mu (mean) for continuous
+                        predicted_policy_values = (  # noqa: F841
+                            actor.head_net.dist.mu.detach().cpu().numpy()
+                        )
                     # assert np.allclose(policy_values[agent_id], predicted_policy_values, atol=0.1)
                     # if not np.allclose(
                     #     policy_values[agent_id], predicted_policy_values, atol=0.1

@@ -1,209 +1,184 @@
-"""Tests for agilerl.networks.distributions."""
+"""Tests for TorchDistribution and distribution dispatch (torch-primitive based)."""
 
+import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 from gymnasium import spaces
-from torch.distributions import Beta, Bernoulli, Categorical, Normal
 
-from agilerl.modules import EvolvableMLP
-from agilerl.networks.distributions import (
-    BernoulliHandler,
-    CategoricalHandler,
-    DistributionHandler,
-    EvolvableDistribution,
-    MultiCategoricalHandler,
-    NormalHandler,
-    TorchDistribution,
-)
+from agilerl.modules.base import EvolvableModule
+from agilerl.networks.distributions import EvolvableDistribution, TorchDistribution
 
 
-# ---------------------------------------------------------------------------
-# ValueErrors when self.dist is None (EvolvableDistribution)
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("batch_size", [1, 4])
+def test_torch_distribution_discrete_sample_log_prob_entropy(batch_size):
+    """TorchDistribution with Discrete: sample, log_prob, entropy are consistent."""
+    action_space = spaces.Discrete(5)
+    logits = torch.randn(batch_size, 5)
+    dist = TorchDistribution(action_space=action_space, logits=logits)
+
+    action = dist.sample()
+    assert action.shape == (batch_size,)
+    assert torch.all(action >= 0) and torch.all(action < 5)
+
+    lp = dist.log_prob(action)
+    assert lp.shape == (batch_size,)
+    assert torch.all(torch.isfinite(lp))
+
+    ent = dist.entropy()
+    assert ent.shape == (batch_size,)
+    assert torch.all(ent > 0)
 
 
-def test_evolvable_distribution_log_prob_raises_when_dist_is_none(
-    vector_space, discrete_space
-):
-    """EvolvableDistribution.log_prob raises ValueError when self.dist is None."""
-    network = EvolvableMLP(4, discrete_space.n, hidden_size=[8])
-    evo = EvolvableDistribution(
-        action_space=discrete_space,
-        network=network,
-        device="cpu",
-    )
-    assert evo.dist is None
-    with pytest.raises(
-        ValueError, match="Distribution not initialized. Call forward first."
-    ):
-        evo.log_prob(torch.zeros(1, 1, dtype=torch.long))
-
-
-def test_evolvable_distribution_entropy_raises_when_dist_is_none(
-    vector_space, discrete_space
-):
-    """EvolvableDistribution.entropy raises ValueError when self.dist is None."""
-    network = EvolvableMLP(4, discrete_space.n, hidden_size=[8])
-    evo = EvolvableDistribution(
-        action_space=discrete_space,
-        network=network,
-        device="cpu",
-    )
-    assert evo.dist is None
-    with pytest.raises(
-        ValueError, match="Distribution not initialized. Call forward first."
-    ):
-        evo.entropy()
-
-
-# ---------------------------------------------------------------------------
-# NotImplementedError when action space or Distribution is not supported
-# ---------------------------------------------------------------------------
-
-
-def test_get_distribution_raises_for_unsupported_action_space(vector_space):
-    """EvolvableDistribution.get_distribution raises NotImplementedError for unsupported action space."""
-    # spaces.Dict is not supported (only Box, Discrete, MultiDiscrete, MultiBinary are)
-    action_space = spaces.Dict({"a": spaces.Discrete(2)})
-    network = EvolvableMLP(4, 2, hidden_size=[8])
-    evo = EvolvableDistribution(
-        action_space=action_space,
-        network=network,
-        device="cpu",
-    )
-    logits = torch.randn(1, 2)
-    with pytest.raises(NotImplementedError, match="Action space .* not supported."):
-        evo.get_distribution(logits)
-
-
-def test_apply_mask_raises_for_unsupported_action_space(vector_space):
-    """EvolvableDistribution.apply_mask raises NotImplementedError for unsupported action space (e.g. Box)."""
-    # apply_mask supports Discrete, MultiDiscrete, MultiBinary; Box falls through to else
+@pytest.mark.parametrize("batch_size", [1, 4])
+def test_torch_distribution_box_sample_log_prob_entropy(batch_size):
+    """TorchDistribution with Box: sample, log_prob, entropy; squash_output clips action."""
     action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,))
-    network = EvolvableMLP(4, 2, hidden_size=[8])
-    evo = EvolvableDistribution(
+    mu = torch.zeros(batch_size, 2)
+    log_std = torch.zeros(batch_size, 2)
+    dist = TorchDistribution(
         action_space=action_space,
-        network=network,
-        device="cpu",
+        mu=mu,
+        log_std=log_std,
+        squash_output=True,
     )
-    logits = torch.randn(1, 2)
-    mask = torch.ones(1, 2, dtype=torch.bool)
-    with pytest.raises(NotImplementedError, match="Action space .* not supported."):
-        evo.apply_mask(logits, mask)
+
+    action = dist.sample()
+    assert action.shape == (batch_size, 2)
+    assert torch.all(action >= -1.0) and torch.all(action <= 1.0)
+
+    lp = dist.log_prob(action)
+    assert lp.shape == (batch_size,)
+    assert torch.all(torch.isfinite(lp))
+
+    ent = dist.entropy()
+    assert ent.shape == (batch_size,)
+    assert torch.all(torch.isfinite(ent))
 
 
-def test_torch_distribution_raises_for_unsupported_distribution_type():
-    """TorchDistribution raises NotImplementedError when Distribution type is not supported."""
-    # Beta is not in _handlers (only Normal, Bernoulli, Categorical, list are)
-    dist = Beta(
-        concentration1=torch.ones(1, 2),
-        concentration0=torch.ones(1, 2),
-    )
-    with pytest.raises(NotImplementedError, match="Distribution .* not supported."):
-        TorchDistribution(dist)
+@pytest.mark.parametrize("batch_size", [1, 4])
+def test_torch_distribution_multi_discrete_sample_log_prob_entropy(batch_size):
+    """TorchDistribution with MultiDiscrete: sample, log_prob, entropy."""
+    action_space = spaces.MultiDiscrete([3, 2, 4])
+    logits = torch.randn(batch_size, 9)
+    dist = TorchDistribution(action_space=action_space, logits=logits)
+
+    action = dist.sample()
+    assert action.shape == (batch_size, 3)
+    lp = dist.log_prob(action)
+    assert lp.shape == (batch_size,)
+    ent = dist.entropy()
+    assert ent.shape == (batch_size,)
+    assert torch.all(ent > 0)
 
 
-# ---------------------------------------------------------------------------
-# DistributionHandler protocol – handlers implement the protocol
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("batch_size", [1, 4])
+def test_torch_distribution_multi_binary_sample_log_prob_entropy(batch_size):
+    """TorchDistribution with MultiBinary: sample, log_prob, entropy."""
+    action_space = spaces.MultiBinary(4)
+    logits = torch.randn(batch_size, 4)
+    dist = TorchDistribution(action_space=action_space, logits=logits)
+
+    action = dist.sample()
+    assert action.shape == (batch_size, 4)
+    assert torch.all((action == 0) | (action == 1))
+    lp = dist.log_prob(action)
+    assert lp.shape == (batch_size,)
+    ent = dist.entropy()
+    assert ent.shape == (batch_size,)
+    assert torch.all(ent > 0)
 
 
-def test_normal_handler_satisfies_distribution_handler_protocol():
-    """NormalHandler implements DistributionHandler protocol (sample, log_prob, entropy)."""
-    handler = NormalHandler()
-    dist = Normal(loc=torch.zeros(2, 3), scale=torch.ones(2, 3))
-    # Protocol: sample(distribution) -> Tensor
-    sample = handler.sample(dist)
-    assert isinstance(sample, torch.Tensor)
-    assert sample.shape == (2, 3)
-    # Protocol: log_prob(distribution, action) -> Tensor
-    log_prob = handler.log_prob(dist, sample)
-    assert isinstance(log_prob, torch.Tensor)
-    assert log_prob.shape == (2,)
-    # Protocol: entropy(distribution) -> Tensor | None
-    ent = handler.entropy(dist)
-    assert isinstance(ent, torch.Tensor)
-    assert ent.shape == (2,)
+def test_torch_distribution_sampled_action_stored():
+    """TorchDistribution stores last sampled action in _sampled_action."""
+    action_space = spaces.Discrete(3)
+    logits = torch.randn(2, 3)
+    dist = TorchDistribution(action_space=action_space, logits=logits)
+    assert dist._sampled_action is None
+    action = dist.sample()
+    assert dist._sampled_action is not None
+    torch.testing.assert_close(dist._sampled_action, action)
 
 
-def test_bernoulli_handler_satisfies_distribution_handler_protocol():
-    """BernoulliHandler implements DistributionHandler protocol."""
-    handler = BernoulliHandler()
-    dist = Bernoulli(logits=torch.zeros(2, 4))
-    sample = handler.sample(dist)
-    assert isinstance(sample, torch.Tensor)
-    log_prob = handler.log_prob(dist, sample)
-    assert isinstance(log_prob, torch.Tensor)
-    ent = handler.entropy(dist)
-    assert isinstance(ent, torch.Tensor)
+# --------------------------------------------------------------------------- #
+# Helper: minimal EvolvableModule for testing EvolvableDistribution
+# --------------------------------------------------------------------------- #
 
 
-def test_categorical_handler_satisfies_distribution_handler_protocol():
-    """CategoricalHandler implements DistributionHandler protocol."""
-    handler = CategoricalHandler()
-    dist = Categorical(logits=torch.randn(2, 3))
-    sample = handler.sample(dist)
-    assert isinstance(sample, torch.Tensor)
-    log_prob = handler.log_prob(dist, sample)
-    assert isinstance(log_prob, torch.Tensor)
-    ent = handler.entropy(dist)
-    assert isinstance(ent, torch.Tensor)
+class _DummyModule(EvolvableModule):
+    """Simple linear module that returns logits of the right size."""
+
+    def __init__(self, in_features: int, out_features: int, device: str = "cpu"):
+        super().__init__(device=device)
+        self.in_features = in_features
+        self.out_features = out_features
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)
+
+    def recreate_network(self):
+        self.linear = nn.Linear(self.in_features, self.out_features)
 
 
-def test_multi_categorical_handler_satisfies_distribution_handler_protocol():
-    """MultiCategoricalHandler implements DistributionHandler protocol (list of Categorical)."""
-    handler = MultiCategoricalHandler()
-    dist_list = [
-        Categorical(logits=torch.randn(2, 2)),
-        Categorical(logits=torch.randn(2, 3)),
-    ]
-    sample = handler.sample(dist_list)
-    assert isinstance(sample, torch.Tensor)
-    assert sample.shape == (2, 2)
-    log_prob = handler.log_prob(dist_list, sample)
-    assert isinstance(log_prob, torch.Tensor)
-    assert log_prob.shape == (2,)
-    ent = handler.entropy(dist_list)
-    assert isinstance(ent, torch.Tensor)
+# --------------------------------------------------------------------------- #
+# EvolvableDistribution: get_distribution unsupported space (line 212-213)
+# --------------------------------------------------------------------------- #
 
 
-def test_distribution_handler_protocol_accepts_all_handlers():
-    """DistributionHandler protocol: function accepting DistributionHandler works with all handler types."""
-    from torch.distributions import Distribution
+def test_evolvable_distribution_get_distribution_unsupported_raises():
+    """get_distribution raises NotImplementedError for an unsupported action space."""
+    action_space = spaces.Tuple((spaces.Discrete(2),))
+    net = _DummyModule(4, 2)
+    ed = EvolvableDistribution(action_space=action_space, network=net)
+    with pytest.raises(NotImplementedError, match="not supported"):
+        ed.get_distribution(torch.randn(1, 2))
 
-    def use_handler(
-        handler: DistributionHandler,
-        distribution: Distribution | list,
-        action: torch.Tensor | None = None,
-    ):
-        sample = handler.sample(distribution)
-        if action is None:
-            action = sample
-        log_prob = handler.log_prob(distribution, action)
-        entropy = handler.entropy(distribution)
-        return sample, log_prob, entropy
 
-    # NormalHandler
-    dist_n = Normal(loc=torch.zeros(1, 2), scale=torch.ones(1, 2))
-    s, lp, e = use_handler(NormalHandler(), dist_n)
-    assert s.shape == (1, 2)
-    assert lp.shape == (1,)
-    assert e.shape == (1,)
+# --------------------------------------------------------------------------- #
+# EvolvableDistribution: apply_mask unsupported space (lines 285-286)
+# --------------------------------------------------------------------------- #
 
-    # BernoulliHandler
-    dist_b = Bernoulli(logits=torch.zeros(1, 2))
-    s, lp, e = use_handler(BernoulliHandler(), dist_b)
-    assert s.shape == (1, 2)
 
-    # CategoricalHandler
-    dist_c = Categorical(logits=torch.randn(1, 3))
-    s, lp, e = use_handler(CategoricalHandler(), dist_c)
-    assert s.shape == (1,)
+def test_evolvable_distribution_apply_mask_unsupported_raises():
+    """apply_mask raises NotImplementedError for a non-discrete action space."""
+    action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,))
+    net = _DummyModule(4, 2)
+    ed = EvolvableDistribution(action_space=action_space, network=net)
+    with pytest.raises(NotImplementedError, match="not supported for masking"):
+        ed.apply_mask(torch.randn(1, 2), torch.ones(1, 2, dtype=torch.bool))
 
-    # MultiCategoricalHandler
-    dist_m = [
-        Categorical(logits=torch.randn(1, 2)),
-        Categorical(logits=torch.randn(1, 2)),
-    ]
-    s, lp, e = use_handler(MultiCategoricalHandler(), dist_m)
-    assert s.shape == (1, 2)
+
+# --------------------------------------------------------------------------- #
+# EvolvableDistribution: forward with list-of-arrays action_mask (lines 318-324)
+# --------------------------------------------------------------------------- #
+
+
+def test_evolvable_distribution_forward_list_action_mask():
+    """forward handles action_mask given as a list of numpy arrays."""
+    action_space = spaces.Discrete(3)
+    net = _DummyModule(4, 3)
+    ed = EvolvableDistribution(action_space=action_space, network=net)
+    latent = torch.randn(2, 4)
+    mask = [np.array([True, True, False]), np.array([False, True, True])]
+    action, log_prob, entropy = ed(latent, action_mask=mask)
+    assert action is not None
+    assert action.shape == (2,)
+    assert torch.all(torch.isfinite(log_prob))
+    assert torch.all(torch.isfinite(entropy))
+
+
+def test_evolvable_distribution_forward_object_array_action_mask():
+    """forward handles action_mask given as a numpy object array."""
+    action_space = spaces.Discrete(3)
+    net = _DummyModule(4, 3)
+    ed = EvolvableDistribution(action_space=action_space, network=net)
+    latent = torch.randn(2, 4)
+    mask = np.empty(2, dtype=object)
+    mask[0] = np.array([True, True, False])
+    mask[1] = np.array([False, True, True])
+    action, log_prob, entropy = ed(latent, action_mask=mask)
+    assert action is not None
+    assert action.shape == (2,)
+    assert torch.all(torch.isfinite(log_prob))
+    assert torch.all(torch.isfinite(entropy))
