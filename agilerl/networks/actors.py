@@ -252,9 +252,6 @@ class StochasticActor(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
-    :param use_experimental_distribution: Whether to use the experimental distribution implementation, which
-        includes several optimizations related to using torch primitives for statistics calculations. Defaults to False.
-    :type use_experimental_distribution: bool
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     :param encoder_name: Name of the encoder network.
@@ -284,7 +281,6 @@ class StochasticActor(EvolvableNetwork):
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
-        use_experimental_distribution: bool = False,
         random_seed: int | None = None,
         encoder_name: str = "encoder",
     ) -> None:
@@ -312,7 +308,6 @@ class StochasticActor(EvolvableNetwork):
         self.action_std_init = action_std_init
         self.squash_output = squash_output
         self.action_space = action_space
-        self.use_experimental_distribution = use_experimental_distribution
         self.output_size = get_output_size_from_space(self.action_space)
 
         self.build_network_head(head_config)
@@ -331,14 +326,6 @@ class StochasticActor(EvolvableNetwork):
             )
         else:
             self.action_low, self.action_high = None, None
-
-        # Wrap the network in an EvolvableDistribution
-        if use_experimental_distribution:
-            from agilerl.networks.distributions_experimental import (
-                EvolvableDistribution,
-            )
-        else:
-            from agilerl.networks.distributions import EvolvableDistribution
 
         self.head_net = EvolvableDistribution(
             action_space=action_space,

@@ -18,6 +18,29 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import assert_not_equal_state_dict, assert_state_dicts_equal
 
 
+def get_eval_action_for_space(action_space: spaces.Space, device: torch.device):
+    """Build a valid batched action tensor (batch=1) for evaluate_actions."""
+    if isinstance(action_space, spaces.Discrete):
+        # (1,) or (1, 1) integer indices in [0, n-1]
+        return torch.zeros(1, dtype=torch.long, device=device).clamp(
+            0, action_space.n - 1
+        )
+    if isinstance(action_space, spaces.MultiDiscrete):
+        return torch.stack(
+            [
+                torch.randint(0, int(high), (1,), device=device)
+                for high in action_space.nvec
+            ],
+            dim=1,
+        )
+    if isinstance(action_space, spaces.MultiBinary):
+        n = action_space.n
+        return torch.randint(0, 2, (1, n), device=device).float()
+    if isinstance(action_space, spaces.Box):
+        return torch.zeros(1, *action_space.shape, device=device)
+    raise NotImplementedError(f"Unsupported action space: {type(action_space)}")
+
+
 def get_batch_states(observation_space, num_steps) -> tuple[torch.Tensor, torch.Tensor]:
     if isinstance(observation_space, spaces.Discrete):
         states = torch.randint(0, observation_space.n, (num_steps,)).float()
@@ -367,8 +390,8 @@ def test_returns_expected_action(
         assert isinstance(action, np.ndarray)
         assert action.shape == (1, *action_space.shape)
 
-    # Now with grad=True, and eval_action
-    eval_action = torch.Tensor([[0, 1, 0, 1]]).to(build_ppo.device)
+    # Now with grad=True, and eval_action (must match action_space)
+    eval_action = get_eval_action_for_space(action_space, build_ppo.device)
     action_logprob, dist_entropy, state_values = build_ppo.evaluate_actions(
         obs=state,
         actions=eval_action,
@@ -442,7 +465,7 @@ def test_returns_expected_action_recurrent(
         assert isinstance(action, np.ndarray)
         assert action.shape == (1, *action_space.shape)
 
-    eval_action = torch.Tensor([[0, 1, 0, 1]]).to(build_ppo.device)
+    eval_action = get_eval_action_for_space(action_space, build_ppo.device)
     action_logprob, dist_entropy, state_values = build_ppo.evaluate_actions(
         obs=state,
         actions=eval_action,
