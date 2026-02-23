@@ -27,6 +27,7 @@ from agilerl.typing import (
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
+    apply_env_defined_actions,
     concatenate_experiences_into_batches,
     concatenate_tensors,
     get_experiences_samples,
@@ -601,10 +602,15 @@ class IPPO(MultiAgentRLAlgorithm):
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
-            for agent_id in unique_agents_ids:
-                action_dict[agent_id][agent_masks[agent_id]] = env_defined_actions[
-                    agent_id
-                ][agent_masks[agent_id]]
+            action_dict = apply_env_defined_actions(
+                unique_agents_ids,
+                action_dict,
+                env_defined_actions,
+                agent_masks,
+                discrete_actions=isinstance(
+                    next(iter(self.action_space.values())), spaces.Discrete
+                ),
+            )
 
         return (
             action_dict,

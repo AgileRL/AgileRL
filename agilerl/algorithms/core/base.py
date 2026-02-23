@@ -1561,27 +1561,16 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                         nan_arr = np.empty(self.action_dims[agent_id])
                         nan_arr[:] = np.nan
                     else:
-                        nan_arr = np.array([[np.nan]])
+                        nan_arr = np.array([np.nan])
 
                     env_defined_actions[agent_id] = nan_arr
                     val = nan_arr
 
                 # Handle discrete actions + env not vectorized
                 if isinstance(val, (int, float)):
-                    val = np.array([[val]])
+                    val = np.array([val])
                     env_defined_actions[agent_id] = val
 
-                # Ensure additional dimension is added in so shapes align for masking
-                if isinstance(val, np.ndarray) and len(val.shape) == 1:
-                    val = (
-                        val[:, np.newaxis]
-                        if isinstance(
-                            self.possible_action_spaces[agent_id],
-                            spaces.Discrete,
-                        )
-                        else val[np.newaxis, :]
-                    )
-                    env_defined_actions[agent_id] = val
                 agent_masks[agent_id] = np.where(
                     np.isnan(env_defined_actions[agent_id]),
                     0,
@@ -1813,6 +1802,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             )
             for i, agent_id in enumerate(agent_ids):
                 output_dict[agent_id] = group_outputs[group_id][i]
+
+                if (
+                    isinstance(self.possible_action_spaces[agent_id], spaces.Discrete)
+                    and output_dict[agent_id].shape[-1] == 1
+                ):
+                    output_dict[agent_id] = output_dict[agent_id].squeeze(-1)
 
         return output_dict
 

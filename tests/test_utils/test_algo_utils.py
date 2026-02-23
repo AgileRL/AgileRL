@@ -18,6 +18,7 @@ from agilerl.modules import EvolvableModule
 from agilerl.networks import EvolvableNetwork
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
+    _reconcile_shapes,
     apply_image_normalization,
     chkpt_attribute_to_device,
     concatenate_spaces,
@@ -917,3 +918,79 @@ def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
     finally:
         # Restore original module to avoid affecting other tests
         sys.modules["agilerl.utils.algo_utils"] = original_module
+
+
+class TestReconcileShapes:
+    """Tests for _reconcile_shapes."""
+
+    def test_same_shape_is_noop(self):
+        ref = np.array([1, 2, 3])
+        other = np.array([4, 5, 6])
+        r, o = _reconcile_shapes(ref, other, discrete_actions=False)
+        np.testing.assert_array_equal(r, ref)
+        np.testing.assert_array_equal(o, other)
+
+    def test_same_shape_2d(self):
+        ref = np.ones((4, 3))
+        other = np.zeros((4, 3))
+        r, o = _reconcile_shapes(ref, other, discrete_actions=True)
+        assert r.shape == (4, 3)
+        assert o.shape == (4, 3)
+
+    def test_discrete_other_lower_ndim_squeezes_reference(self):
+        ref = np.array([[1], [2], [3]])  # (3, 1)
+        other = np.array([10, 20, 30])  # (3,)
+        r, o = _reconcile_shapes(ref, other, discrete_actions=True)
+        assert r.shape == o.shape
+        np.testing.assert_array_equal(r, np.array([1, 2, 3]))
+        np.testing.assert_array_equal(o, np.array([10, 20, 30]))
+
+    def test_discrete_other_higher_ndim_squeezes_other(self):
+        ref = np.array([1, 2, 3])  # (3,)
+        other = np.array([[10], [20], [30]])  # (3, 1)
+        r, o = _reconcile_shapes(ref, other, discrete_actions=True)
+        assert r.shape == o.shape
+        np.testing.assert_array_equal(r, np.array([1, 2, 3]))
+        np.testing.assert_array_equal(o, np.array([10, 20, 30]))
+
+    def test_continuous_other_lower_ndim_expands_other(self):
+        ref = np.array([[1, 2, 3]])  # (1, 3)
+        other = np.array([4, 5, 6])  # (3,)
+        r, o = _reconcile_shapes(ref, other, discrete_actions=False)
+        assert r.shape == (1, 3)
+        assert o.shape == (1, 3)
+        np.testing.assert_array_equal(o, np.array([[4, 5, 6]]))
+
+    def test_continuous_other_higher_ndim_expands_reference(self):
+        ref = np.array([1, 2, 3])  # (3,)
+        other = np.array([[4, 5, 6]])  # (1, 3)
+        r, o = _reconcile_shapes(ref, other, discrete_actions=False)
+        assert r.shape == (1, 3)
+        assert o.shape == (1, 3)
+        np.testing.assert_array_equal(r, np.array([[1, 2, 3]]))
+
+    def test_broadcast_when_shapes_differ_but_incompatible_element_count(self):
+        ref = np.array([[1, 2], [3, 4]])  # (2, 2)
+        other = np.array([10, 20])  # (2,) -- different prod, triggers broadcast
+        r, o = _reconcile_shapes(ref, other, discrete_actions=False)
+        assert o.shape == r.shape
+        expected = np.broadcast_to(np.array([10, 20]), (2, 2))
+        np.testing.assert_array_equal(o, expected)
+
+    def test_discrete_batched_scalar_actions(self):
+        ref = np.array([0, 1, 2, 3])  # (4,)
+        other = np.array([5, 5, 5, 5])  # (4,)
+        r, o = _reconcile_shapes(ref, other, discrete_actions=True)
+        assert r.shape == o.shape == (4,)
+
+    def test_continuous_batched_multi_dim(self):
+        ref = np.ones((8, 6))  # (8, 6)
+        other = np.zeros((8, 6))  # (8, 6)
+        r, o = _reconcile_shapes(ref, other, discrete_actions=False)
+        assert r.shape == o.shape == (8, 6)
+
+    def test_returns_readonly_broadcast(self):
+        ref = np.array([[1, 2], [3, 4]])  # (2, 2)
+        other = np.array([10, 20])  # (2,)
+        _r, o = _reconcile_shapes(ref, other, discrete_actions=False)
+        assert not o.flags.writeable

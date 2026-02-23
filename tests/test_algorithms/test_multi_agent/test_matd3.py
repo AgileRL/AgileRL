@@ -995,6 +995,69 @@ def test_matd3_get_action_agent_masking(
         ), action["agent_0"]
 
 
+@pytest.mark.parametrize(
+    "action_spaces",
+    [
+        "ma_discrete_space",
+        "ma_vector_space",
+    ],
+)
+@pytest.mark.parametrize("compile_mode", [None])
+def test_matd3_get_action_agent_masking_batched(
+    ma_vector_space,
+    action_spaces,
+    device,
+    compile_mode,
+    request,
+):
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    batched_shape = (16, *ma_vector_space[0].shape)
+    state = {agent: np.random.randn(*batched_shape) for agent in agent_ids}
+    action_spaces = request.getfixturevalue(action_spaces)
+    discrete_actions = all(
+        isinstance(space, spaces.Discrete) for space in action_spaces
+    )
+    if discrete_actions:
+        info = {
+            "agent_0": {"env_defined_actions": np.array([1] * batched_shape[0])},
+            "agent_1": {"env_defined_actions": None},
+            "other_agent_0": {"env_defined_actions": None},
+        }
+    else:
+        info = {
+            "agent_0": {
+                "env_defined_actions": np.array([[0, 1, 0, 1, 0, 1]] * batched_shape[0])
+            },
+            "agent_1": {"env_defined_actions": None},
+            "other_agent_0": {"env_defined_actions": None},
+        }
+
+    # Define the ippo agent
+    matd3 = MATD3(
+        observation_spaces=ma_vector_space,
+        action_spaces=action_spaces,
+        agent_ids=agent_ids,
+        device=device,
+        torch_compiler=compile_mode,
+    )
+
+    # Get the action
+    actions, _ = matd3.get_action(obs=state, infos=info)
+
+    print("Agent 0 action shape", actions["agent_0"].shape)
+
+    if discrete_actions:
+        assert np.array_equal(actions["agent_0"], np.array([1] * batched_shape[0])), (
+            actions["agent_0"]
+        )
+    else:
+        assert np.array_equal(
+            actions["agent_0"],
+            np.array([[0, 1, 0, 1, 0, 1]] * batched_shape[0]),
+        ), actions["agent_0"]
+    matd3.clean_up()
+
+
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space", "ma_vector_space"])
 @pytest.mark.parametrize("training", [False, True])

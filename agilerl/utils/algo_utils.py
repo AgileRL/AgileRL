@@ -1746,3 +1746,68 @@ class DummyOptimizer:
         raise RuntimeError(
             msg,
         )
+
+
+def _reconcile_shapes(
+    reference: np.ndarray, other: np.ndarray, discrete_actions: bool
+) -> tuple[np.ndarray, np.ndarray]:
+    """Squeeze and broadcast `other` to match `reference` shape where possible.
+
+    :param reference: Reference array to match shape to.
+    :type reference: np.ndarray
+    :param other: Array to reconcile shape of.
+    :type other: np.ndarray
+    :param discrete_actions: Whether the actions are discrete, defaults to False
+    :type discrete_actions: bool, optional
+    :return: Tuple of reconciled arrays.
+    :rtype: tuple[np.ndarray, np.ndarray]
+    """
+    if reference.shape == other.shape:
+        return reference, other
+
+    if np.prod(other.shape) == np.prod(reference.shape):
+        if discrete_actions:
+            if other.ndim < reference.ndim:
+                reference = reference.squeeze()
+            else:
+                other = other.squeeze()
+        else:
+            if other.ndim < reference.ndim:
+                other = np.expand_dims(other, 0)
+            else:
+                reference = np.expand_dims(reference, 0)
+
+    return reference, np.broadcast_to(other, reference.shape)
+
+
+def apply_env_defined_actions(
+    agent_ids: list[str],
+    action_dict: dict[str, np.ndarray],
+    env_defined_actions: dict[str, np.ndarray],
+    agent_masks: dict[str, np.ndarray],
+    discrete_actions: bool,
+) -> dict[str, np.ndarray]:
+    """Apply env-defined actions to agent actions where the agent mask is True.
+
+    :param agent_ids: Agent identifiers to process.
+    :type agent_ids: list[str]
+    :param action_dict: Mutable mapping of agent id → action array.
+    :type action_dict: dict[str, np.ndarray]
+    :param env_defined_actions: Mapping of agent id → override action array.
+    :type env_defined_actions: dict[str, np.ndarray]
+    :param agent_masks: Mapping of agent id → boolean mask array.
+    :type agent_masks: dict[str, np.ndarray]
+    :param discrete_actions: Whether the actions are discrete, defaults to False
+    :type discrete_actions: bool, optional
+    :return: `action_dict` with overrides applied in-place.
+    :rtype: dict[str, np.ndarray]
+    """
+    for agent_id in agent_ids:
+        action = action_dict[agent_id]
+        override = env_defined_actions[agent_id]
+        mask = agent_masks[agent_id]
+        action, override = _reconcile_shapes(action, override, discrete_actions)
+        action, mask = _reconcile_shapes(action, mask, discrete_actions)
+        action[mask] = override[mask]
+        action_dict[agent_id] = action
+    return action_dict
