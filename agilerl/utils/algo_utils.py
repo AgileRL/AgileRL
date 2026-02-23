@@ -452,6 +452,21 @@ def chkpt_attribute_to_device(
     return chkpt_dict
 
 
+def filter_init_dict(init_dict: dict[str, Any], cls: type) -> dict[str, Any]:
+    """Filter the init dict to only include parameters that are valid for the given class.
+
+    :param init_dict: Initialization dictionary
+    :type init_dict: dict[str, Any]
+    :param cls: Class to filter the init dict for
+    :type cls: type
+
+    :return: Filtered initialization dictionary
+    :rtype: dict[str, Any]
+    """
+    init_params = inspect.signature(cls.__init__).parameters.keys()
+    return {k: v for k, v in init_dict.items() if k in init_params}
+
+
 def key_in_nested_dict(nested_dict: dict[str, Any], target: str) -> bool:
     """Determine if key is in nested dictionary.
 

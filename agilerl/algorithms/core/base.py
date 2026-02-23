@@ -77,6 +77,7 @@ from agilerl.utils.algo_utils import (
     chkpt_attribute_to_device,
     clone_llm,
     create_warmup_cosine_scheduler,
+    filter_init_dict,
     get_input_size_from_space,
     get_output_size_from_space,
     isroutine,
@@ -1094,22 +1095,20 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             )
             if isinstance(module_cls, dict):
                 for agent_id, mod_cls in module_cls.items():
-                    d = init_dict[agent_id]
+                    d = filter_init_dict(init_dict[agent_id], mod_cls)
                     d["device"] = device
                     mod: EvolvableModule = mod_cls(**d)
                     loaded_modules[name][agent_id] = mod
             else:
+                init_dict = filter_init_dict(init_dict, module_cls)
                 init_dict["device"] = device
                 module = module_cls(**init_dict)
                 loaded_modules[name] = module
 
         # Reconstruct the algorithm
-        constructor_params = inspect.signature(cls.__init__).parameters.keys()
         checkpoint["accelerator"] = accelerator
         checkpoint["device"] = device
-        class_init_dict = {
-            k: v for k, v in checkpoint.items() if k in constructor_params
-        }
+        class_init_dict = filter_init_dict(checkpoint, cls)
         self = cls(**class_init_dict)
         registry: MutationRegistry = checkpoint["registry"]
         self.registry = registry
