@@ -16,3 +16,6 @@ def get_extra_dependencies(package: str, extra: str) -> list[str]:
 
 LLM_PACKAGES = get_extra_dependencies("agilerl", "llm")
 HAS_LLM_DEPENDENCIES = all(find_spec(pkg) is not None for pkg in LLM_PACKAGES)
+
+ARENA_PACKAGES = get_extra_dependencies("agilerl", "arena")
+HAS_ARENA_DEPENDENCIES = all(find_spec(pkg) is not None for pkg in ARENA_PACKAGES)
