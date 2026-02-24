@@ -599,6 +599,8 @@ def format_shared_critic_encoder(encoder_configs: NetConfigType) -> dict[str, An
         if encoder_key == "mlp_config":
             encoder_config[encoder_key] = config
             encoder_config["latent_dim"] = config.get("hidden_size", [32])[-1]
+            encoder_config["min_latent_dim"] = config.get("min_mlp_nodes", 8)
+            encoder_config["max_latent_dim"] = config.get("max_mlp_nodes", 1024)
         else:
             encoder_config["init_dicts"][encoder_key] = config
 
