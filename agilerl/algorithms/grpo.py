@@ -479,20 +479,19 @@ class GRPO(LLMAlgorithm):
                 batch_old_log_probs,
                 batch_reference_log_probs,
             )
-        else:
-            batch_log_probs = self._get_logprobs(
-                batch_ids,
-                batch_size=batch_size,
-                use_reference=False,
-                eval_mode=False,
-            )
-            return self._grpo_loss_standard(
-                batch_action_mask,
-                batch_log_probs,
-                batch_old_log_probs,
-                batch_reference_log_probs,
-                batch_advantages,
-            )
+        batch_log_probs = self._get_logprobs(
+            batch_ids,
+            batch_size=batch_size,
+            use_reference=False,
+            eval_mode=False,
+        )
+        return self._grpo_loss_standard(
+            batch_action_mask,
+            batch_log_probs,
+            batch_old_log_probs,
+            batch_reference_log_probs,
+            batch_advantages,
+        )
 
     def _grpo_loss_standard(
         self,
@@ -565,7 +564,7 @@ class GRPO(LLMAlgorithm):
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         batch_ids = batch_ids.to(self.device)
-        mask = action_mask.to(self.device).contiguous()          # (B, seq_len-1)
+        mask = action_mask.to(self.device).contiguous()  # (B, seq_len-1)
         adv = advantages.squeeze(-1).to(self.device).contiguous()  # (B,)
         old_logp = old_logp.to(self.device).contiguous()
         ref_logp = ref_logp.to(self.device).contiguous() if self.beta != 0.0 else None
@@ -580,10 +579,15 @@ class GRPO(LLMAlgorithm):
                 lambda m, inputs: captured.append(inputs[0])
             )
             try:
-                self.actor(input_ids=input_ids, attention_mask=attention_mask, use_cache=use_cache, position_ids=position_ids)
+                self.actor(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=use_cache,
+                    position_ids=position_ids,
+                )
             finally:
                 hook.remove()
-            return captured[0] 
+            return captured[0]
 
         attention_mask = (batch_ids != self.pad_token_id).long()
         model_kwargs = {
@@ -604,7 +608,6 @@ class GRPO(LLMAlgorithm):
 
         print("Target ids shape: ", target_ids.shape)
         print("mask shape: ", mask.shape)
-        
 
         loss, aux = LigerFusedLinearGRPOFunction.apply(
             policy_hidden,
@@ -623,14 +626,14 @@ class GRPO(LLMAlgorithm):
             self.clip_coef,
             "grpo",
             self.max_output_tokens,
-            "token", # Sequence for gspo when we implement it
+            "token",  # Sequence for gspo when we implement it
             None,
             None,
             self.temperature,
-            None, 
+            None,
             True,
-            1, # Chunk size
-            None 
+            1,  # Chunk size
+            None,
         )
 
         kl = aux[0]

@@ -1866,7 +1866,9 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         return group_outputs
 
 
-class LLMAlgorithm(EvolvableAlgorithm, ABC): # FIXME the below docstring is not complete
+class LLMAlgorithm(
+    EvolvableAlgorithm, ABC
+):  # FIXME the below docstring is not complete
     """Base object for all LLM algorithms in the AgileRL framework.
 
     :param action_space: The action space of the environment.
@@ -1997,7 +1999,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC): # FIXME the below docstring is not 
             )
         if use_liger_loss:
             warnings.warn(
-                "Liger Loss used with LoRA, deactivating LoRA for the lm_head by setting exclude_modules to ['lm_head']"
+                "Liger Loss used with LoRA, deactivating LoRA for the lm_head by setting exclude_modules to ['lm_head']",
+                stacklevel=2,
             )
             lora_config.exclude_modules = ["lm_head"]
         self.lr = lr
@@ -3150,7 +3153,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC): # FIXME the below docstring is not 
         for attr in ("lm_head", "embed_out"):
             if hasattr(model, attr):
                 return getattr(model, attr)
-        raise AttributeError(
-            f"Cannot find lm_head in {type(self.actor).__name__}. "
-            "Set use_liger_loss=False."
-        )
+        err_msg = f"""Cannot find lm_head in {type(self.actor).__name__}.
+        Set use_liger_loss=False.
+        """
+        raise AttributeError(err_msg)
