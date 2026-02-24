@@ -1,7 +1,7 @@
 ---
 INIT_HP:
     ALGO: DPO
-    BATCH_SIZE: 16
+    BATCH_SIZE: 128
     BETA: 0.001
     UPDATE_EPOCHS: 1
     MAX_GRAD_NORM: 0.1

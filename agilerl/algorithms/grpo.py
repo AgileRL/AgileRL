@@ -4,6 +4,7 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate import Accelerator
+from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
@@ -97,6 +98,9 @@ class GRPO(LLMAlgorithm):
     :type seed: int, optional
     :param gradient_checkpointing: Flag to indicate if gradient checkpointing should be used, defaults to True
     :type gradient_checkpointing: bool, optional
+    :param use_liger_loss: Use Liger kernel for memory-efficient loss computation, defaults to True.
+        Requires ``liger_kernel`` to be installed; pass ``False`` to fall back to the standard PyTorch path.
+    :type use_liger_loss: bool, optional
     """
 
     def __init__(
@@ -137,6 +141,7 @@ class GRPO(LLMAlgorithm):
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         gradient_checkpointing: bool = True,
+        use_liger_loss: bool = False,
     ) -> None:
 
         device = (
@@ -155,6 +160,7 @@ class GRPO(LLMAlgorithm):
             seed=seed,
             pad_token_id=pad_token_id,
             pad_token=pad_token,
+            use_liger_loss=use_liger_loss,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
@@ -192,7 +198,7 @@ class GRPO(LLMAlgorithm):
                 actor_network,
                 (PeftModelProtocol, PreTrainedModelProtocol),
             ), "Actor network must be a PeftModelProtocol or PreTrainedModelProtocol"
-
+        self.use_liger_loss = use_liger_loss
         self.clip_coef = clip_coef
         self.update_epochs = update_epochs
         self.group_size = group_size
@@ -327,39 +333,20 @@ class GRPO(LLMAlgorithm):
                 eval_mode=True,
             )
 
-        experiences = (
-            completion_ids,
-            action_masks,
-            advantages,
-            old_log_probs,
-            reference_log_probs,
-        )
-
         for _ in range(self.update_epochs):
             self.rng.shuffle(batch_idxs)
             for start in range(0, num_samples, batch_size):
                 minibatch_idxs = batch_idxs[
                     start : min((start + batch_size), num_samples)
                 ]
-                (
-                    batch_ids,
-                    batch_action_mask,
-                    batch_advantages,
-                    batch_old_log_probs,
-                    batch_reference_log_probs,
-                ) = get_experiences_samples(minibatch_idxs, *experiences)
-                batch_log_probs = self._get_logprobs(
-                    batch_ids,
-                    batch_size=batch_size,
-                    use_reference=False,
-                    eval_mode=False,
-                )
                 loss, kl = self._grpo_loss(
-                    batch_action_mask,
-                    batch_log_probs,
-                    batch_old_log_probs,
-                    batch_reference_log_probs,
-                    batch_advantages,
+                    batch_size,
+                    minibatch_idxs,
+                    completion_ids,
+                    action_masks,
+                    advantages,
+                    old_log_probs,
+                    reference_log_probs,
                 )
                 if not loss.isfinite():
                     msg = f"Loss is not finite: {loss}"
@@ -442,13 +429,80 @@ class GRPO(LLMAlgorithm):
 
     def _grpo_loss(
         self,
+        batch_size: int,
+        minibatch_idxs: np.ndarray,
+        completion_ids: torch.Tensor,
+        action_masks: torch.Tensor,
+        advantages: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        reference_log_probs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample a minibatch and compute the GRPO loss, dispatching to the
+        Liger or standard implementation based on ``self.use_liger_loss``.
+
+        :param batch_size: Micro-batch size used for log-prob computation.
+        :type batch_size: int
+        :param minibatch_idxs: Indices selecting the current minibatch.
+        :type minibatch_idxs: np.ndarray
+        :param completion_ids: Full completion token IDs.
+        :type completion_ids: torch.Tensor
+        :param action_masks: Full action masks.
+        :type action_masks: torch.Tensor
+        :param advantages: Full advantages tensor.
+        :type advantages: torch.Tensor
+        :param old_log_probs: Full old policy log probabilities.
+        :type old_log_probs: torch.Tensor
+        :param reference_log_probs: Full reference policy log probabilities.
+        :type reference_log_probs: torch.Tensor
+        :return: Mean loss and mean KL divergence.
+        :rtype: tuple[torch.Tensor, torch.Tensor]
+        """
+        (
+            batch_ids,
+            batch_action_mask,
+            batch_advantages,
+            batch_old_log_probs,
+            batch_reference_log_probs,
+        ) = get_experiences_samples(
+            minibatch_idxs,
+            completion_ids,
+            action_masks,
+            advantages,
+            old_log_probs,
+            reference_log_probs,
+        )
+        if self.use_liger_loss:
+            return self._grpo_loss_liger(
+                batch_ids,
+                batch_action_mask,
+                batch_advantages,
+                batch_old_log_probs,
+                batch_reference_log_probs,
+            )
+        else:
+            batch_log_probs = self._get_logprobs(
+                batch_ids,
+                batch_size=batch_size,
+                use_reference=False,
+                eval_mode=False,
+            )
+            return self._grpo_loss_standard(
+                batch_action_mask,
+                batch_log_probs,
+                batch_old_log_probs,
+                batch_reference_log_probs,
+                batch_advantages,
+            )
+
+    def _grpo_loss_standard(
+        self,
         mask: torch.Tensor,
         log_probs: torch.Tensor,
         old_log_probs: torch.Tensor,
         reference_log_probs: torch.Tensor,
         advantages: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Calculate the GRPO loss.
+        """Calculate the GRPO loss using the standard PyTorch path.
 
         :param mask: Attention mask.
         :type mask: torch.Tensor
@@ -486,3 +540,98 @@ class GRPO(LLMAlgorithm):
             None,
         )
         return loss.mean(), kl.mean()
+
+    def _grpo_loss_liger(
+        self,
+        batch_ids: torch.Tensor,
+        action_mask: torch.Tensor,
+        advantages: torch.Tensor,
+        old_logp: torch.Tensor,
+        ref_logp: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Calculate the GRPO loss using the Liger Triton-fused kernel.
+
+        :param batch_ids: Input token IDs.
+        :type batch_ids: torch.Tensor
+        :param action_mask: Boolean action mask (B, seq_len-1).
+        :type action_mask: torch.Tensor
+        :param advantages: Per-sample advantages (B,) or (B, 1).
+        :type advantages: torch.Tensor
+        :param old_logp: Log probs from the frozen old policy (B, seq_len-1).
+        :type old_logp: torch.Tensor
+        :param ref_logp: Log probs from the reference policy (B, seq_len-1).
+        :type ref_logp: torch.Tensor
+        :return: Mean loss and mean KL divergence.
+        :rtype: tuple[torch.Tensor, torch.Tensor]
+        """
+        batch_ids = batch_ids.to(self.device)
+        mask = action_mask.to(self.device).contiguous()          # (B, seq_len-1)
+        adv = advantages.squeeze(-1).to(self.device).contiguous()  # (B,)
+        old_logp = old_logp.to(self.device).contiguous()
+        ref_logp = ref_logp.to(self.device).contiguous() if self.beta != 0.0 else None
+        lm_head = self._get_lm_head()
+        lm_head_weight = lm_head.weight
+        lm_head_bias = lm_head.bias
+
+        def _get_hidden(input_ids, attention_mask, use_cache=False, position_ids=None):
+            """Run forward pass; capture the input to lm_head via a pre-hook."""
+            captured = []
+            hook = lm_head.register_forward_pre_hook(
+                lambda m, inputs: captured.append(inputs[0])
+            )
+            try:
+                self.actor(input_ids=input_ids, attention_mask=attention_mask, use_cache=use_cache, position_ids=position_ids)
+            finally:
+                hook.remove()
+            return captured[0] 
+
+        attention_mask = (batch_ids != self.pad_token_id).long()
+        model_kwargs = {
+            "input_ids": batch_ids,
+            "attention_mask": attention_mask,
+            "use_cache": False,
+        }
+        if self.calc_position_embeddings:
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            model_kwargs["position_ids"] = position_ids
+
+        with self.select_policy(use_reference=False):
+            self.actor.train()
+            policy_hidden = _get_hidden(**model_kwargs)  # (B, seq_len, H)
+
+        target_ids = batch_ids[:, 1:].contiguous()  # (B, seq_len-1)
+
+        print("Target ids shape: ", target_ids.shape)
+        print("mask shape: ", mask.shape)
+        
+
+        loss, aux = LigerFusedLinearGRPOFunction.apply(
+            policy_hidden,
+            lm_head_weight,
+            target_ids,
+            mask,
+            adv,
+            lm_head_bias,
+            ref_logp,
+            old_logp,
+            None,
+            None,
+            None,
+            self.beta,
+            self.clip_coef,
+            self.clip_coef,
+            "grpo",
+            self.max_output_tokens,
+            "token", # Sequence for gspo when we implement it
+            None,
+            None,
+            self.temperature,
+            None, 
+            True,
+            1, # Chunk size
+            None 
+        )
+
+        kl = aux[0]
+        return loss.mean(), kl

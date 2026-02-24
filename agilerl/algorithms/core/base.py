@@ -1866,7 +1866,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         return group_outputs
 
 
-class LLMAlgorithm(EvolvableAlgorithm, ABC):
+class LLMAlgorithm(EvolvableAlgorithm, ABC): # FIXME the below docstring is not complete
     """Base object for all LLM algorithms in the AgileRL framework.
 
     :param action_space: The action space of the environment.
@@ -1874,7 +1874,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :param index: The index of the algorithm.
     :type index: int
     :param hp_config: The hyperparameter configuration.
-    :type hp_config: HyperparameterConfig | None
+    :type hp_config: Optional[HyperparameterConfig]
+    :param use_liger_loss: Whether to use Liger loss.
+    :type use_liger_loss: bool
     :param device: The device to run the algorithm on.
     :type device: str | torch.device
     :param accelerator: The accelerator to use.
@@ -1899,6 +1901,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         seed: int,
         pad_token_id: int,
         pad_token: str,
+        use_liger_loss: bool,
         lora_config: LoraConfigProtocol | None,
         use_separate_reference_adapter: bool,
         model_name: str | None = None,
@@ -1992,6 +1995,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 task_type="CAUSAL_LM",
                 lora_dropout=0.05,
             )
+        if use_liger_loss:
+            warnings.warn(
+                "Liger Loss used with LoRA, deactivating LoRA for the lm_head by setting exclude_modules to ['lm_head']"
+            )
+            lora_config.exclude_modules = ["lm_head"]
         self.lr = lr
         self.lora_config = lora_config
         self.wrap = wrap
@@ -3126,3 +3134,23 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.actor.optimizer.grad_clip = self.max_grad_norm
             if hasattr(self.actor.optimizer, "clip_grad"):
                 self.actor.optimizer.clip_grad = self.max_grad_norm
+
+    def _get_lm_head(self):
+        """Locate the lm_head module, handling both raw and PEFT-wrapped models.
+
+        :return: The lm_head (or embed_out) linear layer.
+        :rtype: torch.nn.Module
+        :raises AttributeError: If no lm_head can be found.
+        """
+        model = self.actor
+        if hasattr(model, "base_model"):  # PeftModel → LoraModel
+            model = model.base_model
+        if hasattr(model, "model"):  # LoraModel → CausalLM
+            model = model.model
+        for attr in ("lm_head", "embed_out"):
+            if hasattr(model, attr):
+                return getattr(model, attr)
+        raise AttributeError(
+            f"Cannot find lm_head in {type(self.actor).__name__}. "
+            "Set use_liger_loss=False."
+        )

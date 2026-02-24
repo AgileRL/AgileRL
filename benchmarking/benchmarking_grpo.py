@@ -25,7 +25,7 @@ from agilerl.utils.utils import create_population
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 USE_VLLM = True
-MAX_CONTEXT_LENGTH = 1024
+MAX_CONTEXT_LENGTH = 4096
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
@@ -204,8 +204,8 @@ def main(init_hp, mut_p):
         elite_path="saved_llms",
         max_reward=2.0,
         evo_steps=10,
-        mutation=mutations,
-        tournament=tournament,
+        mutation=None,
+        tournament=None,
         accelerator=accelerator,
         verbose=True,
     )
