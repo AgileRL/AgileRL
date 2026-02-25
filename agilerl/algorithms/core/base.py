@@ -1866,19 +1866,47 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         return group_outputs
 
 
-class LLMAlgorithm(
-    EvolvableAlgorithm, ABC
-):  # FIXME the below docstring is not complete
+class LLMAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all LLM algorithms in the AgileRL framework.
 
-    :param action_space: The action space of the environment.
-    :type action_space: gymnasium.spaces.Space
     :param index: The index of the algorithm.
     :type index: int
-    :param hp_config: The hyperparameter configuration.
-    :type hp_config: Optional[HyperparameterConfig]
+    :param batch_size: The batch size.
+    :type batch_size: int
+    :param lr: The learning rate.
+    :type lr: float
+    :param max_grad_norm: The maximum gradient norm.
+    :type max_grad_norm: float
+    :param clone: Whether to clone the model.
+    :type clone: bool
+    :param reduce_memory_peak: Whether to reduce memory peak.
+    :type reduce_memory_peak: bool
+    :param calc_position_embeddings: Whether to calculate position embeddings.
+    :type calc_position_embeddings: bool
+    :param seed: The seed.
+    :type seed: int
+    :param pad_token_id: The pad token id.
+    :type pad_token_id: int
+    :param pad_token: The pad token.
+    :type pad_token: str
     :param use_liger_loss: Whether to use Liger loss.
     :type use_liger_loss: bool
+    :param lora_config: The LoRA config.
+    :type lora_config: LoraConfigProtocol | None
+    :param use_separate_reference_adapter: Whether to use a separate reference adapter.
+    :type use_separate_reference_adapter: bool
+    :param model_name: The name of the model.
+    :type model_name: str | None
+    :param actor_network: The actor network.
+    :type actor_network: PreTrainedModelProtocol | None
+    :param micro_batch_size_per_gpu: The micro batch size per GPU.
+    :type micro_batch_size_per_gpu: int | None
+    :param cosine_lr_schedule_config: The cosine LR schedule config.
+    :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
+    :param hp_config: The hyperparameter configuration.
+    :type hp_config: Optional[HyperparameterConfig]
+    :param wrap: Whether to wrap the model.
+    :type wrap: bool
     :param device: The device to run the algorithm on.
     :type device: str | torch.device
     :param accelerator: The accelerator to use.
