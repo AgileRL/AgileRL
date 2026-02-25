@@ -480,7 +480,7 @@ class DPO(LLMAlgorithm):
         # Build shifted targets; mask prompt/padding tokens with -100
         def _make_target(ids, mask):
             t = ids[:, 1:].clone()  # (B, seq_len-1)
-            t[~mask] = -100
+            t[~mask.bool()] = -100
             return t
 
         chosen_target = _make_target(chosen_ids, chosen_mask.to(self.device))

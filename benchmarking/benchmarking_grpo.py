@@ -25,7 +25,7 @@ from agilerl.utils.utils import create_population
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 USE_VLLM = True
-MAX_CONTEXT_LENGTH = 4096
+MAX_CONTEXT_LENGTH = 2048
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:

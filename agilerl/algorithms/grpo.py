@@ -432,7 +432,7 @@ class GRPO(LLMAlgorithm):
         batch_size: int,
         minibatch_idxs: np.ndarray,
         completion_ids: torch.Tensor,
-        action_masks: torch.Tensor,
+        action_mask: torch.Tensor,
         advantages: torch.Tensor,
         old_log_probs: torch.Tensor,
         reference_log_probs: torch.Tensor,
@@ -446,8 +446,8 @@ class GRPO(LLMAlgorithm):
         :type minibatch_idxs: np.ndarray
         :param completion_ids: Full completion token IDs.
         :type completion_ids: torch.Tensor
-        :param action_masks: Full action masks.
-        :type action_masks: torch.Tensor
+        :param action_mask: Full action mask.
+        :type action_mask: torch.Tensor
         :param advantages: Full advantages tensor.
         :type advantages: torch.Tensor
         :param old_log_probs: Full old policy log probabilities.
@@ -466,7 +466,7 @@ class GRPO(LLMAlgorithm):
         ) = get_experiences_samples(
             minibatch_idxs,
             completion_ids,
-            action_masks,
+            action_mask,
             advantages,
             old_log_probs,
             reference_log_probs,
@@ -545,8 +545,8 @@ class GRPO(LLMAlgorithm):
         batch_ids: torch.Tensor,
         action_mask: torch.Tensor,
         advantages: torch.Tensor,
-        old_logp: torch.Tensor,
-        ref_logp: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        reference_log_probs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate the GRPO loss using the Liger Triton-fused kernel.
 
@@ -556,18 +556,22 @@ class GRPO(LLMAlgorithm):
         :type action_mask: torch.Tensor
         :param advantages: Per-sample advantages (B,) or (B, 1).
         :type advantages: torch.Tensor
-        :param old_logp: Log probs from the frozen old policy (B, seq_len-1).
-        :type old_logp: torch.Tensor
-        :param ref_logp: Log probs from the reference policy (B, seq_len-1).
-        :type ref_logp: torch.Tensor
+        :param old_log_probs: Log probs from the frozen old policy (B, seq_len-1).
+        :type old_log_probs: torch.Tensor
+        :param reference_log_probs: Log probs from the reference policy (B, seq_len-1).
+        :type reference_log_probs: torch.Tensor
         :return: Mean loss and mean KL divergence.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         batch_ids = batch_ids.to(self.device)
         mask = action_mask.to(self.device).contiguous()  # (B, seq_len-1)
         adv = advantages.squeeze(-1).to(self.device).contiguous()  # (B,)
-        old_logp = old_logp.to(self.device).contiguous()
-        ref_logp = ref_logp.to(self.device).contiguous() if self.beta != 0.0 else None
+        old_log_probs = old_log_probs.to(self.device).contiguous()
+        reference_log_probs = (
+            reference_log_probs.to(self.device).contiguous()
+            if self.beta != 0.0
+            else None
+        )
         lm_head = self._get_lm_head()
         lm_head_weight = lm_head.weight
         lm_head_bias = lm_head.bias
@@ -599,16 +603,10 @@ class GRPO(LLMAlgorithm):
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
             model_kwargs["position_ids"] = position_ids
-
         with self.select_policy(use_reference=False):
             self.actor.train()
             policy_hidden = _get_hidden(**model_kwargs)  # (B, seq_len, H)
-
         target_ids = batch_ids[:, 1:].contiguous()  # (B, seq_len-1)
-
-        print("Target ids shape: ", target_ids.shape)
-        print("mask shape: ", mask.shape)
-
         loss, aux = LigerFusedLinearGRPOFunction.apply(
             policy_hidden,
             lm_head_weight,
@@ -616,8 +614,8 @@ class GRPO(LLMAlgorithm):
             mask,
             adv,
             lm_head_bias,
-            ref_logp,
-            old_logp,
+            reference_log_probs,
+            old_log_probs,
             None,
             None,
             None,
