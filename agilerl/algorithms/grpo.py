@@ -98,7 +98,7 @@ class GRPO(LLMAlgorithm):
     :type seed: int, optional
     :param gradient_checkpointing: Flag to indicate if gradient checkpointing should be used, defaults to True
     :type gradient_checkpointing: bool, optional
-    :param use_liger_loss: Use Liger kernel for memory-efficient loss computation, defaults to True.
+    :param use_liger_loss: Use Liger kernel for memory-efficient loss computation, defaults to False.
         Requires ``liger_kernel`` to be installed; pass ``False`` to fall back to the standard PyTorch path.
     :type use_liger_loss: bool, optional
     """

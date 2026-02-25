@@ -63,7 +63,7 @@ class DPO(LLMAlgorithm):
     :type seed: int, optional
     :param gradient_checkpointing: Flag to indicate if gradient checkpointing should be used, defaults to True
     :type gradient_checkpointing: bool, optional
-    :param use_liger_loss: Use Liger kernel for memory-efficient loss computation, defaults to True.
+    :param use_liger_loss: Use Liger kernel for memory-efficient loss computation, defaults to False.
         Requires ``liger_kernel`` to be installed; pass ``False`` to fall back to the standard PyTorch path.
         When ``training=False`` the standard path is always used regardless of this flag.
     :type use_liger_loss: bool, optional
@@ -134,10 +134,6 @@ class DPO(LLMAlgorithm):
         self.use_vllm = False  # DPO does not use VLLM
         self.update_epochs = update_epochs
         self.use_liger_loss = use_liger_loss
-        # self.liger_loss_function = None if not use_liger_loss else LigerFusedLinearDPOLoss(
-        #         beta=self.beta,
-        #         loss_type="sigmoid",
-        #     )
 
         self._initialize_actors(actor_network, not clone)
         # Register network groups for mutations
