@@ -309,6 +309,7 @@ def generate_grpo(
     micro_batch_size_per_gpu,
     sleep_mode=False,
     from_name=False,
+    use_liger_loss=False,
 ):
     gc.collect()
     torch.cuda.empty_cache()
@@ -374,6 +375,7 @@ def generate_grpo(
         max_model_len=max_tokens + 5,
         reduce_memory_peak=reduce_memory_peak,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+        use_liger_loss=use_liger_loss,
     )
     return grpo
 
@@ -2031,20 +2033,30 @@ def test_grpo_loss(
         reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
-    advantages = torch.arange(0, 10).unsqueeze(1)
+    advantages = torch.arange(0, 10, device=grpo.device).unsqueeze(1)
     normal_dist = torch.distributions.normal.Normal(0.0, 1.0)
-    reference_log_probs = normal_dist.log_prob(torch.randn(200)).reshape(10, -1)
-    old_log_probs = normal_dist.log_prob(torch.randn(200)).reshape(10, -1)
-    log_probs = normal_dist.log_prob(torch.randn(200)).reshape(10, -1)
+    reference_log_probs = normal_dist.log_prob(
+        torch.randn(200, device=grpo.device)
+    ).reshape(10, -1)
+    old_log_probs = normal_dist.log_prob(torch.randn(200, device=grpo.device)).reshape(
+        10, -1
+    )
+    log_probs = normal_dist.log_prob(torch.randn(200, device=grpo.device)).reshape(
+        10, -1
+    )
     mask = torch.ones_like(log_probs)
     mask[:, -3:] = 0
     mask = mask.to(torch.bool)
     loss, kl = grpo._grpo_loss(
-        mask,
-        log_probs,
-        old_log_probs,
-        reference_log_probs,
-        advantages,
+        batch_size=10,
+        minibatch_idxs=torch.arange(10, device=grpo.device),
+        completion_ids=torch.randint(
+            0, vocab_size, (10, max_tokens + 1), device=grpo.device
+        ),
+        action_mask=mask,
+        advantages=advantages,
+        old_log_probs=old_log_probs,
+        reference_log_probs=reference_log_probs,
     )
     assert loss != 0
     assert kl != 0
@@ -2064,6 +2076,7 @@ def test_grpo_loss(
 )
 @pytest.mark.parametrize("batch_size", [6])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+@pytest.mark.parametrize("use_liger_loss", [False, True])
 def test_grpo_learn(
     deepspeed_env,
     grpo_factory,
@@ -2081,6 +2094,7 @@ def test_grpo_learn(
     batch_size,
     reduce_memory_peak,
     micro_batch_size_per_gpu,
+    use_liger_loss,
 ):
     grpo = grpo_factory(
         accelerator_factory,
@@ -2096,6 +2110,7 @@ def test_grpo_learn(
         pretrained_model_name_or_path,
         reduce_memory_peak,
         micro_batch_size_per_gpu,
+        use_liger_loss=use_liger_loss,
     )
     completions = [
         torch.randint(

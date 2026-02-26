@@ -74,6 +74,7 @@ def generate_dpo(
     reduce_memory_peak,
     micro_batch_size_per_gpu,
     from_name=False,
+    use_liger_loss=False,
 ):
     gc.collect()
     torch.cuda.empty_cache()
@@ -119,6 +120,7 @@ def generate_dpo(
         use_separate_reference_adapter=use_separate_reference_adapter,
         reduce_memory_peak=reduce_memory_peak,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+        use_liger_loss=use_liger_loss,
     )
     return dpo
 
@@ -322,6 +324,7 @@ def test_dpo_get_action(
 @pytest.mark.parametrize("data_batch_size", [32])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+@pytest.mark.parametrize("use_liger_loss", [False, True])
 def test_dpo_learn(
     deepspeed_env,
     dpo_factory,
@@ -337,6 +340,7 @@ def test_dpo_learn(
     data_batch_size,
     reduce_memory_peak,
     micro_batch_size_per_gpu,
+    use_liger_loss,
 ):
     dpo = dpo_factory(
         accelerator_factory,
@@ -350,6 +354,7 @@ def test_dpo_learn(
         pretrained_model_name_or_path,
         reduce_memory_peak,
         micro_batch_size_per_gpu,
+        use_liger_loss=use_liger_loss,
     )
 
     train_dataset = Dataset.from_dict(

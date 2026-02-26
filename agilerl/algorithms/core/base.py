@@ -1869,12 +1869,44 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 class LLMAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all LLM algorithms in the AgileRL framework.
 
-    :param action_space: The action space of the environment.
-    :type action_space: gymnasium.spaces.Space
     :param index: The index of the algorithm.
     :type index: int
+    :param batch_size: The batch size.
+    :type batch_size: int
+    :param lr: The learning rate.
+    :type lr: float
+    :param max_grad_norm: The maximum gradient norm.
+    :type max_grad_norm: float
+    :param clone: Whether to clone the model.
+    :type clone: bool
+    :param reduce_memory_peak: Whether to reduce memory peak.
+    :type reduce_memory_peak: bool
+    :param calc_position_embeddings: Whether to calculate position embeddings.
+    :type calc_position_embeddings: bool
+    :param seed: The seed.
+    :type seed: int
+    :param pad_token_id: The pad token id.
+    :type pad_token_id: int
+    :param pad_token: The pad token.
+    :type pad_token: str
+    :param use_liger_loss: Whether to use Liger loss.
+    :type use_liger_loss: bool
+    :param lora_config: The LoRA config.
+    :type lora_config: LoraConfigProtocol | None
+    :param use_separate_reference_adapter: Whether to use a separate reference adapter.
+    :type use_separate_reference_adapter: bool
+    :param model_name: The name of the model.
+    :type model_name: str | None
+    :param actor_network: The actor network.
+    :type actor_network: PreTrainedModelProtocol | None
+    :param micro_batch_size_per_gpu: The micro batch size per GPU.
+    :type micro_batch_size_per_gpu: int | None
+    :param cosine_lr_schedule_config: The cosine LR schedule config.
+    :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
     :param hp_config: The hyperparameter configuration.
-    :type hp_config: HyperparameterConfig | None
+    :type hp_config: Optional[HyperparameterConfig]
+    :param wrap: Whether to wrap the model.
+    :type wrap: bool
     :param device: The device to run the algorithm on.
     :type device: str | torch.device
     :param accelerator: The accelerator to use.
@@ -1899,6 +1931,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         seed: int,
         pad_token_id: int,
         pad_token: str,
+        use_liger_loss: bool,
         lora_config: LoraConfigProtocol | None,
         use_separate_reference_adapter: bool,
         model_name: str | None = None,
@@ -1992,6 +2025,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 task_type="CAUSAL_LM",
                 lora_dropout=0.05,
             )
+        if use_liger_loss:
+            warnings.warn(
+                "Liger Loss used with LoRA, deactivating LoRA for the lm_head by setting exclude_modules to ['lm_head']",
+                stacklevel=2,
+            )
+            lora_config.exclude_modules = ["lm_head"]
         self.lr = lr
         self.lora_config = lora_config
         self.wrap = wrap
@@ -3126,3 +3165,23 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.actor.optimizer.grad_clip = self.max_grad_norm
             if hasattr(self.actor.optimizer, "clip_grad"):
                 self.actor.optimizer.clip_grad = self.max_grad_norm
+
+    def _get_lm_head(self):
+        """Locate the lm_head module, handling both raw and PEFT-wrapped models.
+
+        :return: The lm_head (or embed_out) linear layer.
+        :rtype: torch.nn.Module
+        :raises AttributeError: If no lm_head can be found.
+        """
+        model = self.actor
+        if hasattr(model, "base_model"):  # PeftModel → LoraModel
+            model = model.base_model
+        if hasattr(model, "model"):  # LoraModel → CausalLM
+            model = model.model
+        for attr in ("lm_head", "embed_out"):
+            if hasattr(model, attr):
+                return getattr(model, attr)
+        err_msg = f"""Cannot find lm_head in {type(self.actor).__name__}.
+        Set use_liger_loss=False.
+        """
+        raise AttributeError(err_msg)

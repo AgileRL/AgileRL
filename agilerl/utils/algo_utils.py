@@ -1184,6 +1184,8 @@ def get_experiences_samples(
             sampled_exp = tuple(value[minibatch_indices] for value in exp)
         elif isinstance(exp, torch.Tensor):
             sampled_exp = exp[minibatch_indices]
+        elif exp is None:
+            sampled_exp = None
         else:
             msg = f"Unsupported experience type: {type(exp)}"
             raise TypeError(msg)
