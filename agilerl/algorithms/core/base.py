@@ -2706,16 +2706,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         if self.accelerator is not None:
             self.accelerator.backward(loss)
-            if (
-                self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-                    "optimizer",
-                    None,
-                )
-                is None
-            ):
-                # Accelerate handles optimizer step and zero grad if optimizer is defined in deepspeed config
-                self.optimizer.step()
-                self.optimizer.zero_grad()
         else:
             loss.backward()
             clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
