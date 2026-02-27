@@ -71,7 +71,8 @@ MUTATION_PARAMS:
 
 NET_CONFIG:
     latent_dim: 64
-
+    min_latent_dim: 8
+    max_latent_dim: 1024
     encoder_config:
         hidden_size: [64]
         min_mlp_nodes: 64

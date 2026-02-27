@@ -452,6 +452,21 @@ def chkpt_attribute_to_device(
     return chkpt_dict
 
 
+def filter_init_dict(init_dict: dict[str, Any], cls: type) -> dict[str, Any]:
+    """Filter the init dict to only include parameters that are valid for the given class.
+
+    :param init_dict: Initialization dictionary
+    :type init_dict: dict[str, Any]
+    :param cls: Class to filter the init dict for
+    :type cls: type
+
+    :return: Filtered initialization dictionary
+    :rtype: dict[str, Any]
+    """
+    init_params = inspect.signature(cls.__init__).parameters.keys()
+    return {k: v for k, v in init_dict.items() if k in init_params}
+
+
 def key_in_nested_dict(nested_dict: dict[str, Any], target: str) -> bool:
     """Determine if key is in nested dictionary.
 
@@ -584,6 +599,8 @@ def format_shared_critic_encoder(encoder_configs: NetConfigType) -> dict[str, An
         if encoder_key == "mlp_config":
             encoder_config[encoder_key] = config
             encoder_config["latent_dim"] = config.get("hidden_size", [32])[-1]
+            encoder_config["min_latent_dim"] = config.get("min_mlp_nodes", 8)
+            encoder_config["max_latent_dim"] = config.get("max_mlp_nodes", 1024)
         else:
             encoder_config["init_dicts"][encoder_key] = config
 
@@ -1167,6 +1184,8 @@ def get_experiences_samples(
             sampled_exp = tuple(value[minibatch_indices] for value in exp)
         elif isinstance(exp, torch.Tensor):
             sampled_exp = exp[minibatch_indices]
+        elif exp is None:
+            sampled_exp = None
         else:
             msg = f"Unsupported experience type: {type(exp)}"
             raise TypeError(msg)

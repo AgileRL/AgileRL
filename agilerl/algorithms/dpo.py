@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
+from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOFunction
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -62,6 +63,10 @@ class DPO(LLMAlgorithm):
     :type seed: int, optional
     :param gradient_checkpointing: Flag to indicate if gradient checkpointing should be used, defaults to True
     :type gradient_checkpointing: bool, optional
+    :param use_liger_loss: Use Liger kernel for memory-efficient loss computation, defaults to False.
+        Requires ``liger_kernel`` to be installed; pass ``False`` to fall back to the standard PyTorch path.
+        When ``training=False`` the standard path is always used regardless of this flag.
+    :type use_liger_loss: bool, optional
     """
 
     def __init__(
@@ -89,6 +94,7 @@ class DPO(LLMAlgorithm):
         use_separate_reference_adapter: bool = False,
         seed: int = 42,
         gradient_checkpointing: bool = True,
+        use_liger_loss: bool = False,
     ) -> None:
         device = (
             f"cuda:{accelerator.process_index}"
@@ -106,6 +112,7 @@ class DPO(LLMAlgorithm):
             seed=seed,
             pad_token_id=pad_token_id,
             pad_token=pad_token,
+            use_liger_loss=use_liger_loss,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
@@ -126,6 +133,8 @@ class DPO(LLMAlgorithm):
         )
         self.use_vllm = False  # DPO does not use VLLM
         self.update_epochs = update_epochs
+        self.use_liger_loss = use_liger_loss
+
         self._initialize_actors(actor_network, not clone)
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
@@ -193,38 +202,31 @@ class DPO(LLMAlgorithm):
         batch_size = min(num_samples, self.micro_batch_size_per_gpu)
         batch_idxs = np.arange(num_samples)
         mean_loss, mean_chosen_reward, mean_rejected_reward = 0.0, 0.0, 0.0
-
-        with torch.no_grad():
-            ref_rejected_log_probs = self._get_logprobs(
-                rejected_input_ids,
-                batch_size,
-                use_reference=True,
-                eval_mode=True,
-                attention_mask=rejected_attention_mask,
-            )
-            ref_chosen_log_probs = self._get_logprobs(
-                chosen_input_ids,
-                batch_size,
-                use_reference=True,
-                eval_mode=True,
-                attention_mask=chosen_attention_mask,
-            )
+        ref_rejected_log_probs, ref_chosen_log_probs = None, None
+        if not self.use_liger_loss:
+            with torch.no_grad():
+                ref_rejected_log_probs = self._get_logprobs(
+                    rejected_input_ids,
+                    batch_size,
+                    use_reference=True,
+                    eval_mode=True,
+                    attention_mask=rejected_attention_mask,
+                )
+                ref_chosen_log_probs = self._get_logprobs(
+                    chosen_input_ids,
+                    batch_size,
+                    use_reference=True,
+                    eval_mode=True,
+                    attention_mask=chosen_attention_mask,
+                )
 
         for _ in range(self.update_epochs):
             for start in range(0, num_samples, batch_size):
                 minibatch_idxs = batch_idxs[
                     start : min((start + batch_size), num_samples)
                 ]
-                (
-                    batch_chosen_input_ids,
-                    batch_chosen_attention_mask,
-                    batch_rejected_input_ids,
-                    batch_rejected_attention_mask,
-                    batch_chosen_mask,
-                    batch_rejected_mask,
-                    batch_ref_rejected_log_probs,
-                    batch_ref_chosen_log_probs,
-                ) = get_experiences_samples(
+                loss, chosen_reward, rejected_reward = self._dpo_loss(
+                    batch_size,
                     minibatch_idxs,
                     chosen_input_ids,
                     chosen_attention_mask,
@@ -234,28 +236,7 @@ class DPO(LLMAlgorithm):
                     rejected_mask,
                     ref_rejected_log_probs,
                     ref_chosen_log_probs,
-                )
-                batch_rejected_log_probs = self._get_logprobs(
-                    batch_rejected_input_ids,
-                    batch_size,
-                    use_reference=False,
-                    eval_mode=(not training),
-                    attention_mask=batch_rejected_attention_mask,
-                )
-                batch_chosen_log_probs = self._get_logprobs(
-                    batch_chosen_input_ids,
-                    batch_size,
-                    use_reference=False,
-                    eval_mode=(not training),
-                    attention_mask=batch_chosen_attention_mask,
-                )
-                loss, chosen_reward, rejected_reward = self._dpo_loss(
-                    batch_chosen_log_probs,
-                    batch_rejected_log_probs,
-                    batch_ref_chosen_log_probs,
-                    batch_ref_rejected_log_probs,
-                    batch_chosen_mask,
-                    batch_rejected_mask,
+                    training,
                 )
                 if training:
                     self._backward_pass(loss)
@@ -268,6 +249,99 @@ class DPO(LLMAlgorithm):
         return mean_loss, mean_chosen_reward, mean_rejected_reward
 
     def _dpo_loss(
+        self,
+        batch_size: int,
+        minibatch_idxs: torch.Tensor,
+        chosen_input_ids: torch.Tensor,
+        chosen_attention_mask: torch.Tensor,
+        rejected_input_ids: torch.Tensor,
+        rejected_attention_mask: torch.Tensor,
+        chosen_mask: torch.Tensor,
+        rejected_mask: torch.Tensor,
+        ref_rejected_log_probs: torch.Tensor | None,
+        ref_chosen_log_probs: torch.Tensor | None,
+        training: bool,
+    ):
+        """Calculates the DPO loss.
+
+        :param batch_size: Batch size
+        :type batch_size: int
+        :param minibatch_idxs: Minibatch indices
+        :type minibatch_idxs: torch.Tensor
+        :param chosen_input_ids: Chosen input IDs
+        :type chosen_input_ids: torch.Tensor
+        :param chosen_attention_mask: Chosen attention mask
+        :type chosen_attention_mask: torch.Tensor
+        :param rejected_input_ids: Rejected input IDs
+        :type rejected_input_ids: torch.Tensor
+        :param rejected_attention_mask: Rejected attention mask
+        :type rejected_attention_mask: torch.Tensor
+        :param chosen_mask: Chosen mask
+        :type chosen_mask: torch.Tensor
+        :param rejected_mask: Rejected mask
+        :type rejected_mask: torch.Tensor
+        :param ref_rejected_log_probs: Rejected log probabilities using the reference model
+        :type ref_rejected_log_probs: torch.Tensor | None
+        :param ref_chosen_log_probs: Chosen log probabilities using the reference model
+        :type ref_chosen_log_probs: torch.Tensor | None
+        :param training: Whether the agent is training or not
+        :type training: bool
+        :return: Loss, chosen rewards, rejected rewards
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        """
+        (
+            batch_chosen_input_ids,
+            batch_chosen_attention_mask,
+            batch_rejected_input_ids,
+            batch_rejected_attention_mask,
+            batch_chosen_mask,
+            batch_rejected_mask,
+            batch_ref_rejected_log_probs,
+            batch_ref_chosen_log_probs,
+        ) = get_experiences_samples(
+            minibatch_idxs,
+            chosen_input_ids,
+            chosen_attention_mask,
+            rejected_input_ids,
+            rejected_attention_mask,
+            chosen_mask,
+            rejected_mask,
+            ref_rejected_log_probs,
+            ref_chosen_log_probs,
+        )
+        if self.use_liger_loss:
+            return self._dpo_loss_liger(
+                batch_chosen_input_ids,
+                batch_rejected_input_ids,
+                batch_chosen_attention_mask,
+                batch_rejected_attention_mask,
+                batch_chosen_mask,
+                batch_rejected_mask,
+            )
+        batch_rejected_log_probs = self._get_logprobs(
+            batch_rejected_input_ids,
+            batch_size,
+            use_reference=False,
+            eval_mode=(not training),
+            attention_mask=batch_rejected_attention_mask,
+        )
+        batch_chosen_log_probs = self._get_logprobs(
+            batch_chosen_input_ids,
+            batch_size,
+            use_reference=False,
+            eval_mode=(not training),
+            attention_mask=batch_chosen_attention_mask,
+        )
+        return self._dpo_loss_standard(
+            batch_chosen_log_probs,
+            batch_rejected_log_probs,
+            batch_ref_chosen_log_probs,
+            batch_ref_rejected_log_probs,
+            batch_chosen_mask,
+            batch_rejected_mask,
+        )
+
+    def _dpo_loss_standard(
         self,
         chosen_log_probs: torch.Tensor,
         rejected_log_probs: torch.Tensor,
@@ -322,6 +396,122 @@ class DPO(LLMAlgorithm):
             implicit_chosen_reward,
             implicit_rejected_reward,
         )
+
+    def _dpo_loss_liger(
+        self,
+        chosen_ids: torch.Tensor,
+        rejected_ids: torch.Tensor,
+        chosen_attn: torch.Tensor,
+        rejected_attn: torch.Tensor,
+        chosen_mask: torch.Tensor,
+        rejected_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Calculate the DPO loss using the Liger fused linear kernel.
+
+        :param chosen_ids: Input IDs for chosen completions (B, seq_len).
+        :type chosen_ids: torch.Tensor
+        :param rejected_ids: Input IDs for rejected completions (B, seq_len).
+        :type rejected_ids: torch.Tensor
+        :param chosen_attn: Attention mask for chosen completions (B, seq_len).
+        :type chosen_attn: torch.Tensor
+        :param rejected_attn: Attention mask for rejected completions (B, seq_len).
+        :type rejected_attn: torch.Tensor
+        :param chosen_mask: Completion token mask for chosen, shifted (B, seq_len-1).
+        :type chosen_mask: torch.Tensor
+        :param rejected_mask: Completion token mask for rejected, shifted (B, seq_len-1).
+        :type rejected_mask: torch.Tensor
+        :return: Loss, chosen rewards, rejected rewards.
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        """
+        lm_head = self._get_lm_head()
+        lm_head_weight = lm_head.weight  # (vocab_size, hidden_size)
+        lm_head_bias = lm_head.bias
+
+        def _get_hidden(ids, attn_mask):
+            """Run forward pass; capture the input to lm_head via a pre-hook."""
+            captured = []
+            hook = lm_head.register_forward_pre_hook(
+                lambda m, inputs: captured.append(inputs[0])
+            )
+            try:
+                self.actor(input_ids=ids, attention_mask=attn_mask, use_cache=False)
+            finally:
+                hook.remove()
+            return captured[0]  # (B, seq_len, hidden_size)
+
+        chosen_ids = chosen_ids.to(self.device)
+        rejected_ids = rejected_ids.to(self.device)
+        chosen_attn = chosen_attn.to(self.device)
+        rejected_attn = rejected_attn.to(self.device)
+
+        # Reference hidden states — no gradient, two separate forward passes (B each)
+        with torch.no_grad():
+            with self.select_policy(use_reference=True):
+                self.actor.eval()
+                ref_chosen_hidden = _get_hidden(
+                    chosen_ids, chosen_attn
+                )  # (B, seq_len, H)
+                ref_rejected_hidden = _get_hidden(
+                    rejected_ids, rejected_attn
+                )  # (B, seq_len, H)
+        ref_hidden = torch.cat(
+            [ref_chosen_hidden, ref_rejected_hidden], dim=0
+        )  # (2B, seq_len, H)
+        ref_chosen_hidden = ref_rejected_hidden = None  # free immediately
+
+        # Policy hidden states — with gradient, two separate forward passes (B each)
+        with self.select_policy(use_reference=False):
+            self.actor.train()
+            policy_chosen_hidden = _get_hidden(
+                chosen_ids, chosen_attn
+            )  # (B, seq_len, H)
+            policy_rejected_hidden = _get_hidden(
+                rejected_ids, rejected_attn
+            )  # (B, seq_len, H)
+        policy_hidden = torch.cat(
+            [policy_chosen_hidden, policy_rejected_hidden], dim=0
+        )  # (2B, seq_len, H)
+        policy_chosen_hidden = policy_rejected_hidden = None  # free immediately
+
+        # Build shifted targets; mask prompt/padding tokens with -100
+        def _make_target(ids, mask):
+            t = ids[:, 1:].clone()  # (B, seq_len-1)
+            t[~mask.bool()] = -100
+            return t
+
+        chosen_target = _make_target(chosen_ids, chosen_mask.to(self.device))
+        rejected_target = _make_target(rejected_ids, rejected_mask.to(self.device))
+        stacked_target = torch.cat(
+            [chosen_target, rejected_target], dim=0
+        )  # (2B, seq_len-1)
+
+        # Trim hidden states to seq_len-1 to align with shifted targets
+        policy_hidden = policy_hidden[:, :-1, :].contiguous()
+        ref_hidden = ref_hidden[:, :-1, :].contiguous()
+
+        loss, aux = LigerFusedLinearDPOFunction.apply(
+            policy_hidden,
+            lm_head_weight,
+            stacked_target,
+            lm_head_bias,  # bias (None for most LLMs)
+            ref_hidden,  # ref_input
+            lm_head_weight,  # ref_weight (lm_head is never LoRA-adapted, so is the same as the policy weight)
+            lm_head_bias,  # ref_bias (same weight → same bias)
+            -100,  # ignore_index
+            self.beta,
+            False,  # compute_nll_loss
+            True,  # compiled
+            True,  # use_ref_model
+            False,  # average_log_prob (sum, matching _dpo_loss)
+            1,  # chunk_size
+            "sigmoid",  # loss_type
+        )
+        # aux = (chosen_logps, rejected_logps, chosen_logits_mean, rejected_logits_mean,
+        #        nll_loss, chosen_rewards, rejected_rewards)
+        chosen_reward = aux[5]  # beta * (chosen_logps  - ref_chosen_logps)
+        rejected_reward = aux[6]  # beta * (rejected_logps - ref_rejected_logps)
+
+        return loss, chosen_reward, rejected_reward
 
     def _compute_implicit_reward(
         self,

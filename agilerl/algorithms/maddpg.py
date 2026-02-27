@@ -299,7 +299,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             )
             max_latent_dim = max(
                 [
-                    agent_configs[agent_id].get("max_latent_dim", 128)
+                    agent_configs[agent_id].get("max_latent_dim", 1024)
                     for agent_id in self.agent_ids
                 ],
             )
