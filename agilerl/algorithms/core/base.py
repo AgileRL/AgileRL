@@ -2865,7 +2865,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         all_outputs = self.llm.generate(
             all_prompts_text,
             sampling_params=sampling_params,
-            use_tqdm=True,
+            use_tqdm=False,
         )  # Change this to False
 
         completion_ids = [
