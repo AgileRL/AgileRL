@@ -9,12 +9,12 @@ from typing import Any
 
 import numpy as np
 import torch
-import wandb
 from torch import nn, optim
 from torch.nn import functional as F
 from tqdm import tqdm
 from typing_extensions import Self
 
+import wandb
 from agilerl.data.rl_data import DataPoint, RL_Dataset
 from agilerl.modules.gpt import EvolvableGPT
 from agilerl.modules.mlp import EvolvableMLP
@@ -1476,7 +1476,6 @@ class ILQL_Policy:
                 qv_kwargs={"past_key_values": curr_kvs},
                 policy_kwargs={"past_key_values": curr_policy_kvs},
                 target_kwargs={"past_key_values": curr_target_kvs},
-                is_causal=False,
             )
             model_outputs, logits = iql_outputs["model_outputs"], iql_outputs["logits"]
 

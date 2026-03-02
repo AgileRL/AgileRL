@@ -13,7 +13,7 @@ from peft import LoraConfig
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import MutationError, Mutations, get_exp_layer
-from agilerl.modules import EvolvableBERT, ModuleDict
+from agilerl.modules import EvolvableBERT, EvolvableModule, ModuleDict
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
 from tests.helper_functions import assert_state_dicts_equal
@@ -251,6 +251,217 @@ def test_find_analogous_mutation_returns_none_when_bottom_matches_but_no_agent_o
         )
         is None
     )
+
+
+def test_gaussian_parameter_mutation_skips_zero_sized_weights(device):
+    class ZeroWeightModule(EvolvableModule):
+        def __init__(self):
+            super().__init__(device="cpu")
+            self.w = torch.nn.Parameter(torch.empty(0, 2))
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+    muts = Mutations(0, 0, 0.5, 1, 0, 0, 0.1, device=device)
+    mod = ZeroWeightModule()
+    out = muts._gaussian_parameter_mutation(mod)
+    assert out is mod
+
+
+def test_architecture_mutate_single_no_methods_sets_none(monkeypatch, device):
+    class DummyPolicy:
+        mutation_methods = []
+
+    class DummyIndividual:
+        def __init__(self):
+            self.mut = None
+
+    muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
+    individual = DummyIndividual()
+    monkeypatch.setattr(
+        "agilerl.hpo.mutation.get_offspring_eval_modules",
+        lambda _ind: ({"actor": DummyPolicy()}, {}),
+    )
+    with pytest.warns(
+        UserWarning, match="No mutation methods found for the policy network"
+    ):
+        out = muts._architecture_mutate_single(individual)
+    assert out.mut == "None"
+
+
+def test_architecture_mutate_multi_no_methods_sets_none(monkeypatch, device):
+    class DummyPolicy:
+        mutation_methods = []
+
+    class DummyIndividual:
+        def __init__(self):
+            self.mut = None
+
+    muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
+    individual = DummyIndividual()
+    monkeypatch.setattr(
+        "agilerl.hpo.mutation.get_offspring_eval_modules",
+        lambda _ind: ({"actors": DummyPolicy()}, {}),
+    )
+    with pytest.warns(
+        UserWarning, match="No mutation methods found for the policy network"
+    ):
+        out = muts._architecture_mutate_multi(individual)
+    assert out.mut == "None"
+
+
+def test_architecture_mutate_multi_none_applied_mutation_branch(monkeypatch, device):
+    class DummySubmodule:
+        mutation_methods = ["add_node"]
+
+    class DummyPolicyDict(dict):
+        mutation_methods = ["agent_0.add_node", "agent_1.add_node"]
+
+        def sample_mutation_method(self, *_args, **_kwargs):
+            return "agent_0.add_node"
+
+    class DummyIndividual:
+        def mutation_hook(self):
+            return None
+
+        def reinit_optimizers(self):
+            return None
+
+    policy = DummyPolicyDict({"agent_0": DummySubmodule(), "agent_1": DummySubmodule()})
+    muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
+    monkeypatch.setattr(
+        "agilerl.hpo.mutation.get_offspring_eval_modules",
+        lambda _ind: ({"actors": policy}, {}),
+    )
+    monkeypatch.setattr(
+        muts,
+        "_apply_arch_mutation",
+        lambda *_args, **_kwargs: (None, {}),
+    )
+    monkeypatch.setattr(
+        muts, "_to_device_and_set_individual", lambda *_args, **_kwargs: None
+    )
+    individual = DummyIndividual()
+    out = muts._architecture_mutate_multi(individual)
+    assert out.mut == "None"
+
+
+def test_architecture_mutate_multi_raises_when_no_analogous(monkeypatch, device):
+    class DummyEval:
+        mutation_methods = ["agent_9.other_mut"]
+        last_mutation_attr = None
+
+    class DummyPolicy(dict):
+        mutation_methods = ["agent_0.add_node"]
+
+        def sample_mutation_method(self, *_args, **_kwargs):
+            return "agent_0.add_node"
+
+    class DummyIndividual:
+        def mutation_hook(self):
+            return None
+
+        def reinit_optimizers(self):
+            return None
+
+    policy = DummyPolicy({"agent_0": DummyEval()})
+    evals = {"critics": {"agent_0": DummyEval()}}
+    muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
+    monkeypatch.setattr(
+        "agilerl.hpo.mutation.get_offspring_eval_modules",
+        lambda _ind: ({"actors": policy}, evals),
+    )
+    monkeypatch.setattr(
+        muts,
+        "_apply_arch_mutation",
+        lambda *_args, **_kwargs: ("agent_0.add_node", {}),
+    )
+    monkeypatch.setattr(
+        muts, "_to_device_and_set_individual", lambda *_args, **_kwargs: None
+    )
+    with pytest.raises(MutationError, match="No analogous method found"):
+        muts._architecture_mutate_multi(DummyIndividual())
+
+
+def test_apply_arch_mutation_error_and_none_paths(device):
+    muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
+
+    with pytest.raises(MutationError, match="inherits from 'EvolvableModule'"):
+        muts._apply_arch_mutation(torch.nn.Linear(2, 2), "x")
+
+    class DummyNet(EvolvableModule):
+        def __init__(self):
+            super().__init__(device="cpu")
+            self._layer_mutation_methods = ["mut"]
+            self._node_mutation_methods = []
+            self.last_mutation_attr = "mut"
+            self.last_mutation = lambda: None
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+        def mut(self):
+            self.last_mutation_attr = "mut"
+            return {"k": 1}
+
+    net = DummyNet()
+    applied, m = muts._apply_arch_mutation(net, None)
+    assert applied is None
+    assert m == {}
+    with pytest.raises(MutationError, match="not found"):
+        muts._apply_arch_mutation(net, "missing_mut")
+
+
+def test_reinit_bandit_grads_error_and_matrix_resize_paths(device):
+    class DummyActor(EvolvableModule):
+        def __init__(self, out_mod):
+            super().__init__(device="cpu")
+            self.out_mod = out_mod
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+        def get_output_dense(self):
+            return self.out_mod
+
+    class OldLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w1 = torch.nn.Parameter(torch.ones(2, 2))  # 4
+            self.w2 = torch.nn.Parameter(torch.ones(2))  # 2
+            self.only_old = torch.nn.Parameter(torch.ones(1))  # 1
+
+    class NewLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w1 = torch.nn.Parameter(torch.ones(1, 2))  # smaller than old w1
+            self.w2 = torch.nn.Parameter(torch.ones(4))  # bigger than old w2
+            self.only_new = torch.nn.Parameter(torch.ones(2))  # key absent in old
+
+    class DummyBandit:
+        def __init__(self):
+            self.sigma_inv = torch.eye(7)
+            self.lamb = 2.0
+            self.device = "cpu"
+            self.accelerator = None
+
+    muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
+    with pytest.raises(ValueError, match="not supported"):
+        muts._reinit_bandit_grads(DummyBandit(), torch.nn.Linear(2, 2), OldLayer())
+
+    bandit = DummyBandit()
+    muts._reinit_bandit_grads(bandit, DummyActor(NewLayer()), OldLayer())
+    assert bandit.sigma_inv.shape[0] == 8
+    assert bandit.exp_layer is not None
 
 
 # Checks no mutations if all probabilities set to zero
