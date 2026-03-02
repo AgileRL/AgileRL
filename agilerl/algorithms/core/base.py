@@ -1019,6 +1019,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Load other attributes
         checkpoint.pop("network_info")
         for attribute, value in checkpoint.items():
+            if isinstance(value, torch.Tensor) and isinstance(
+                getattr(self, attribute, None), torch.Tensor
+            ):
+                value = value.to(getattr(self, attribute).device)
             setattr(self, attribute, value)
 
         # Wrap models / compile if necessary
@@ -1185,7 +1189,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 )
                 continue
 
-            setattr(self, attribute, checkpoint.get(attribute))
+            value = checkpoint.get(attribute)
+            if isinstance(value, torch.Tensor) and isinstance(
+                getattr(self, attribute, None), torch.Tensor
+            ):
+                value = value.to(getattr(self, attribute).device)
+            setattr(self, attribute, value)
 
         # Wrap models / compile if necessary
         if accelerator is not None:
