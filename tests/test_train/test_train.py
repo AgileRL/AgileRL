@@ -4807,6 +4807,608 @@ def test_bandit_train_save_checkpoint(
             os.remove(f"{checkpoint_path}_{i}_{10 * (s + 1)}.pt")
 
 
+@pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])
+def test_train_off_policy_wandb_kwargs_update(env, memory):
+    agent = DummyAgentOffPolicy(5, env, 0.4)
+
+    with (
+        patch("agilerl.training.train_off_policy.init_wandb") as mock_init_wandb,
+        patch("agilerl.training.train_off_policy.wandb.log"),
+        patch("agilerl.training.train_off_policy.wandb.finish"),
+    ):
+        train_off_policy(
+            env,
+            "env_name",
+            "algo",
+            [agent],
+            memory,
+            max_steps=2,
+            evo_steps=2,
+            wb=True,
+            wandb_kwargs={"project": "custom_project", "name": "custom_run"},
+            verbose=False,
+        )
+
+    kwargs = mock_init_wandb.call_args.kwargs
+    assert kwargs["project"] == "custom_project"
+    assert kwargs["name"] == "custom_run"
+
+
+@pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])
+def test_train_off_policy_per_nstep_none_branches(env):
+    class CapturingPerAgent(DummyAgentOffPolicy):
+        def __init__(self, batch_size, env):
+            super().__init__(batch_size, env, 0.4)
+            self.captured = []
+
+        def learn(self, experiences, n_experiences=None, per=False):
+            self.captured.append(n_experiences)
+            return 0.1, torch.tensor([0]), torch.tensor([1.0])
+
+    agent_gt = CapturingPerAgent(5, env)
+    agent_gt.learn_step = 4
+    train_off_policy(
+        env,
+        "env_name",
+        "algo",
+        [agent_gt],
+        DummyMemory(),
+        max_steps=4,
+        evo_steps=4,
+        per=True,
+        n_step_memory=None,
+        verbose=False,
+    )
+    assert any(item is None for item in agent_gt.captured)
+
+    agent_le = CapturingPerAgent(5, env)
+    agent_le.learn_step = 1
+    train_off_policy(
+        env,
+        "env_name",
+        "algo",
+        [agent_le],
+        DummyMemory(),
+        max_steps=4,
+        evo_steps=4,
+        per=True,
+        n_step_memory=None,
+        verbose=False,
+    )
+    assert any(item is None for item in agent_le.captured)
+
+
+@pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])
+def test_train_off_policy_wandb_dqn_and_ddpg_loss_branches(env, monkeypatch):
+    class DQNLossAgent(DummyAgentOffPolicy):
+        def get_action(self, *args, **kwargs):
+            return np.array([0, 1], dtype=int)
+
+        def learn(self, experiences, n_experiences=None, per=False):
+            return 0.25
+
+    class DDPGLossAgent(DummyAgentOffPolicy):
+        def learn(self, experiences, n_experiences=None, per=False):
+            return (0.1, 0.2)
+
+    dqn_agent = DQNLossAgent(5, env, 0.4)
+    dqn_agent.steps = [0] * 100
+    ddpg_agent = DDPGLossAgent(5, env, 0.4)
+    ddpg_agent.steps = [0] * 100
+
+    monkeypatch.setattr(agilerl.training.train_off_policy, "DQN", DQNLossAgent)
+    monkeypatch.setattr(agilerl.training.train_off_policy, "DDPG", DDPGLossAgent)
+    monkeypatch.setattr(agilerl.training.train_off_policy, "TD3", DDPGLossAgent)
+
+    with (
+        patch("agilerl.training.train_off_policy.init_wandb"),
+        patch("agilerl.training.train_off_policy.wandb.log") as mock_wandb_log,
+        patch("agilerl.training.train_off_policy.wandb.finish"),
+    ):
+        train_off_policy(
+            env,
+            "env_name",
+            "algo",
+            [dqn_agent],
+            DummyMemory(),
+            max_steps=4,
+            evo_steps=4,
+            wb=True,
+            verbose=False,
+        )
+        dqn_log = mock_wandb_log.call_args[0][0]
+        assert "train/agent_0_actor_loss" in dqn_log
+        assert any(key.startswith("train/action_") for key in dqn_log)
+
+        train_off_policy(
+            env,
+            "env_name",
+            "algo",
+            [ddpg_agent],
+            DummyMemory(),
+            max_steps=4,
+            evo_steps=4,
+            wb=True,
+            verbose=False,
+        )
+        ddpg_log = mock_wandb_log.call_args[0][0]
+        assert "train/agent_0_actor_loss" in ddpg_log
+        assert "train/agent_0_critic_loss" in ddpg_log
+
+
+@pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])
+def test_train_off_policy_early_stop_wb_branch(env):
+    agent = DummyAgentOffPolicy(5, env, 0.4)
+    agent.steps = [0] * 100
+
+    with (
+        patch("agilerl.training.train_off_policy.init_wandb"),
+        patch("agilerl.training.train_off_policy.wandb.log"),
+        patch("agilerl.training.train_off_policy.wandb.finish") as mock_wandb_finish,
+    ):
+        train_off_policy(
+            env,
+            "env_name",
+            "algo",
+            [agent],
+            DummyMemory(),
+            max_steps=2,
+            evo_steps=2,
+            target=-1.0,
+            wb=True,
+            verbose=False,
+        )
+    mock_wandb_finish.assert_called()
+
+
+@pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])
+def test_train_on_policy_wandb_kwargs_update(env):
+    agent = DummyAgentOnPolicy(5, env)
+    with (
+        patch("agilerl.training.train_on_policy.init_wandb") as mock_init_wandb,
+        patch("agilerl.training.train_on_policy.wandb.log"),
+        patch("agilerl.training.train_on_policy.wandb.finish"),
+    ):
+        train_on_policy(
+            env,
+            "env_name",
+            "algo",
+            [agent],
+            max_steps=2,
+            evo_steps=2,
+            wb=True,
+            wandb_kwargs={"project": "custom_project", "name": "custom_run"},
+            verbose=False,
+        )
+    kwargs = mock_init_wandb.call_args.kwargs
+    assert kwargs["project"] == "custom_project"
+    assert kwargs["name"] == "custom_run"
+
+
+@pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])
+def test_train_on_policy_recurrent_collect_rollouts_import_branch(env, monkeypatch):
+    agent = DummyAgentOnPolicy(5, env)
+    agent.use_rollout_buffer = True
+    agent.recurrent = True
+    agent.learn_step = 1
+
+    def fake_collect(*args, **kwargs):
+        return [], None, None, None, None
+
+    monkeypatch.setattr("agilerl.rollouts.collect_rollouts_recurrent", fake_collect)
+
+    train_on_policy(
+        env,
+        "env_name",
+        "algo",
+        [agent],
+        max_steps=1,
+        evo_steps=1,
+        wb=False,
+        verbose=False,
+    )
+
+
+def test_train_on_policy_clip_box_without_squash_and_scalar_done(monkeypatch):
+    class ScalarDoneEnv:
+        def __init__(self):
+            self.action_space = Box(low=-1.0, high=1.0, shape=(1,))
+            self.state_size = (1,)
+            self.action_size = 1
+
+        def reset(self):
+            return np.array([0.0], dtype=np.float32), {}
+
+        def step(self, action):
+            return np.array([0.0], dtype=np.float32), 1.0, True, False, {}
+
+    class DummyStochastic:
+        def __init__(self):
+            self.squash_output = False
+
+        def scale_action(self, action):
+            return action
+
+    monkeypatch.setattr(
+        agilerl.training.train_on_policy, "StochasticActor", DummyStochastic
+    )
+
+    env = ScalarDoneEnv()
+    agent = DummyAgentOnPolicy(1, env)
+    agent.action_space = Box(low=-1.0, high=1.0, shape=(1,))
+    agent.actor = DummyStochastic()
+    agent.registry.policy.side_effect = lambda: "actor"
+    agent.get_action = lambda *args, **kwargs: (
+        np.array([2.5], dtype=np.float32),
+        np.array([0.1], dtype=np.float32),
+        np.array([0.2], dtype=np.float32),
+        np.array([0.3], dtype=np.float32),
+    )
+
+    train_on_policy(
+        env,
+        "env_name",
+        "algo",
+        [agent],
+        max_steps=1,
+        evo_steps=1,
+        wb=False,
+        verbose=False,
+    )
+
+
+def test_train_on_policy_clip_box_with_squash(monkeypatch):
+    class ScalarDoneEnv:
+        def __init__(self):
+            self.action_space = Box(low=-1.0, high=1.0, shape=(1,))
+            self.state_size = (1,)
+            self.action_size = 1
+
+        def reset(self):
+            return np.array([0.0], dtype=np.float32), {}
+
+        def step(self, action):
+            return np.array([0.0], dtype=np.float32), 1.0, True, False, {}
+
+    class DummyStochastic:
+        def __init__(self):
+            self.squash_output = True
+
+        def scale_action(self, action):
+            return np.clip(action, -1.0, 1.0)
+
+    monkeypatch.setattr(
+        agilerl.training.train_on_policy, "StochasticActor", DummyStochastic
+    )
+
+    env = ScalarDoneEnv()
+    agent = DummyAgentOnPolicy(1, env)
+    agent.action_space = Box(low=-1.0, high=1.0, shape=(1,))
+    agent.actor = DummyStochastic()
+    agent.registry.policy.side_effect = lambda: "actor"
+    agent.get_action = lambda *args, **kwargs: (
+        np.array([2.5], dtype=np.float32),
+        np.array([0.1], dtype=np.float32),
+        np.array([0.2], dtype=np.float32),
+        np.array([0.3], dtype=np.float32),
+    )
+
+    train_on_policy(
+        env,
+        "env_name",
+        "algo",
+        [agent],
+        max_steps=1,
+        evo_steps=1,
+        wb=False,
+        verbose=False,
+    )
+
+
+@pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])
+def test_train_on_policy_early_stop_wb_branch(env):
+    agent = DummyAgentOnPolicy(5, env)
+    agent.steps = [0] * 100
+    with (
+        patch("agilerl.training.train_on_policy.init_wandb"),
+        patch("agilerl.training.train_on_policy.wandb.log"),
+        patch("agilerl.training.train_on_policy.wandb.finish") as mock_wandb_finish,
+    ):
+        train_on_policy(
+            env,
+            "env_name",
+            "algo",
+            [agent],
+            max_steps=2,
+            evo_steps=2,
+            target=-1.0,
+            wb=True,
+            verbose=False,
+        )
+    mock_wandb_finish.assert_called()
+
+
+@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+def test_train_multi_agent_off_policy_learn_step_branch_and_early_stop(
+    multi_env,
+    multi_memory,
+):
+    agent = DummyMultiAgent(1, multi_env, on_policy=False)
+    agent.learn_step = 2
+    agent.steps = [0] * 100
+
+    with (
+        patch("agilerl.training.train_multi_agent_off_policy.init_wandb"),
+        patch("agilerl.training.train_multi_agent_off_policy.wandb.log"),
+        patch(
+            "agilerl.training.train_multi_agent_off_policy.wandb.finish"
+        ) as mock_wandb_finish,
+    ):
+        train_multi_agent_off_policy(
+            multi_env,
+            "env_name",
+            "algo",
+            [agent],
+            multi_memory,
+            max_steps=2,
+            evo_steps=2,
+            target=-1.0,
+            wb=True,
+            verbose=False,
+        )
+    mock_wandb_finish.assert_called()
+
+
+def test_train_multi_agent_off_policy_empty_score_nan_branch(multi_memory, monkeypatch):
+    class EmptyAgentEnv:
+        agents = []
+
+    class DummyPbar:
+        def update(self, *args, **kwargs):
+            return None
+
+        def write(self, *args, **kwargs):
+            return None
+
+        def close(self):
+            return None
+
+    class ToggleLess:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, *_args, **_kwargs):
+            self.calls += 1
+            return np.array([True]) if self.calls == 1 else np.array([False])
+
+    monkeypatch.setattr(
+        agilerl.training.train_multi_agent_off_policy,
+        "default_progress_bar",
+        lambda *args, **kwargs: DummyPbar(),
+    )
+    monkeypatch.setattr(
+        agilerl.training.train_multi_agent_off_policy,
+        "np",
+        MagicMock(
+            less=ToggleLess(),
+            mean=np.mean,
+            max=lambda x, axis=0: np.array([]) if len(x) == 0 else np.max(x, axis=axis),
+            stack=np.stack,
+            all=np.all,
+            greater=np.greater,
+            array=np.array,
+        ),
+    )
+
+    train_multi_agent_off_policy(
+        EmptyAgentEnv(),
+        "env_name",
+        "algo",
+        [],
+        multi_memory,
+        sum_scores=False,
+        max_steps=1,
+        evo_steps=1,
+        wb=False,
+        verbose=False,
+    )
+
+
+@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+def test_train_multi_agent_on_policy_compiled_clip_and_early_stop(
+    multi_env,
+    monkeypatch,
+):
+    class DummyStochastic:
+        def __init__(self):
+            self.squash_output = False
+
+        def scale_action(self, action):
+            return action
+
+    class DummyCompiledPolicy:
+        def __init__(self):
+            self._orig_mod = DummyStochastic()
+
+    monkeypatch.setattr(
+        agilerl.training.train_multi_agent_on_policy, "StochasticActor", DummyStochastic
+    )
+
+    agent = DummyMultiAgent(1, multi_env, on_policy=True)
+    agent.torch_compiler = "compiled"
+    agent.steps = [0] * 100
+    agent.possible_action_spaces = Dict(
+        {"agent_0": Box(0, 1, (2,)), "other_agent_0": Box(0, 1, (2,))}
+    )
+    agent.actors = {
+        "agent_0": DummyCompiledPolicy(),
+        "other_agent_0": DummyCompiledPolicy(),
+    }
+
+    with (
+        patch("agilerl.training.train_multi_agent_on_policy.init_wandb"),
+        patch("agilerl.training.train_multi_agent_on_policy.wandb.log"),
+        patch(
+            "agilerl.training.train_multi_agent_on_policy.wandb.finish"
+        ) as mock_wandb_finish,
+    ):
+        train_multi_agent_on_policy(
+            multi_env,
+            "env_name",
+            "algo",
+            [agent],
+            sum_scores=True,
+            max_steps=2,
+            evo_steps=2,
+            target=-1.0,
+            wb=True,
+            verbose=False,
+        )
+    mock_wandb_finish.assert_called()
+
+
+@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+def test_train_multi_agent_on_policy_compiled_clip_with_squash(
+    multi_env,
+    monkeypatch,
+):
+    class DummyStochastic:
+        def __init__(self):
+            self.squash_output = True
+
+        def scale_action(self, action):
+            return np.clip(action, 0.0, 1.0)
+
+    class DummyCompiledPolicy:
+        def __init__(self):
+            self._orig_mod = DummyStochastic()
+
+    monkeypatch.setattr(
+        agilerl.training.train_multi_agent_on_policy,
+        "StochasticActor",
+        DummyStochastic,
+    )
+
+    agent = DummyMultiAgent(1, multi_env, on_policy=True)
+    agent.torch_compiler = "compiled"
+    agent.possible_action_spaces = Dict(
+        {"agent_0": Box(0, 1, (2,)), "other_agent_0": Box(0, 1, (2,))}
+    )
+    agent.actors = {
+        "agent_0": DummyCompiledPolicy(),
+        "other_agent_0": DummyCompiledPolicy(),
+    }
+
+    train_multi_agent_on_policy(
+        multi_env,
+        "env_name",
+        "algo",
+        [agent],
+        sum_scores=True,
+        max_steps=2,
+        evo_steps=2,
+        wb=False,
+        verbose=False,
+    )
+
+
+@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+def test_train_multi_agent_on_policy_nan_mean_score_branch(multi_env, monkeypatch):
+    class OddIterPop(list):
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.iter_calls = 0
+
+        def __iter__(self):
+            self.iter_calls += 1
+            # Iteration call order inside train_multi_agent_on_policy is:
+            # 1-3: setup list comprehensions, 4: while condition, 5: training loop
+            # We make the training loop empty to keep pop_episode_scores == [].
+            if self.iter_calls == 5:
+                return iter([])
+            return super().__iter__()
+
+    class DummyPbar:
+        def update(self, *args, **kwargs):
+            return None
+
+        def write(self, *args, **kwargs):
+            return None
+
+        def close(self):
+            return None
+
+    class ToggleSum:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, _):
+            self.calls += 1
+            return 0 if self.calls == 1 else 2
+
+    monkeypatch.setattr(
+        agilerl.training.train_multi_agent_on_policy,
+        "default_progress_bar",
+        lambda *args, **kwargs: DummyPbar(),
+    )
+    monkeypatch.setattr(
+        agilerl.training.train_multi_agent_on_policy.np, "sum", ToggleSum()
+    )
+
+    pop = OddIterPop([DummyMultiAgent(1, multi_env, on_policy=True)])
+    train_multi_agent_on_policy(
+        multi_env,
+        "env_name",
+        "algo",
+        pop,
+        sum_scores=False,
+        max_steps=1,
+        evo_steps=1,
+        wb=False,
+        verbose=False,
+    )
+
+
+@pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])
+def test_train_offline_minari_branch_and_early_stop(env, memory):
+    agent = DummyAgentOffPolicy(5, env, 0.4)
+    agent.steps = [0] * 100
+    seed_transition = Transition(
+        obs=np.random.randn(2, *env.state_size[1:]),
+        action=np.random.randn(2, env.action_size),
+        reward=np.random.uniform(0, 1, 2),
+        done=np.random.choice([True, False], 2),
+        next_obs=np.random.randn(2, *env.state_size[1:]),
+    ).to_tensordict()
+    seed_transition.batch_size = [2]
+    memory.add(seed_transition)
+    with (
+        patch(
+            "agilerl.training.train_offline.minari_to_agile_buffer",
+            side_effect=lambda *_args, **_kwargs: memory,
+        ) as mock_minari,
+        patch("agilerl.training.train_offline.init_wandb"),
+        patch("agilerl.training.train_offline.wandb.log"),
+        patch("agilerl.training.train_offline.wandb.finish") as mock_wandb_finish,
+    ):
+        train_offline(
+            env,
+            "env_name",
+            {},
+            "algo",
+            [agent],
+            memory,
+            max_steps=2,
+            evo_steps=2,
+            minari_dataset_id="dummy_minari_id",
+            wb=True,
+            target=-1.0,
+            verbose=False,
+        )
+    mock_minari.assert_called_once()
+    mock_wandb_finish.assert_called()
+
+
 # LEAVE LAST, TEMPORARY TO DELETE SAVED MODELS
 # TODO: Properly handle saving/deletion in tests
 def test_remove_saved_models():
