@@ -24,8 +24,7 @@ from agilerl.utils.utils import create_population
 
 
 class MemoryGameEnv(gym.Env):
-    """
-    Observation: one-hot vector of length n_symbols, or all zeros during delay.
+    """Observation: one-hot vector of length n_symbols, or all zeros during delay.
     Action: discrete, n_symbols.
     Reward: +1 if action matches the original symbol at the query step, else 0.
     Episode: Each episode is delay_steps+2 steps (show, delay, query).
@@ -38,7 +37,10 @@ class MemoryGameEnv(gym.Env):
         self.n_symbols = n_symbols
         self.delay_steps = delay_steps
         self.observation_space = gym.spaces.Box(
-            low=0.0, high=1.0, shape=(n_symbols,), dtype=np.float32
+            low=0.0,
+            high=1.0,
+            shape=(n_symbols,),
+            dtype=np.float32,
         )
         self.action_space = gym.spaces.Discrete(n_symbols)
         self.render_mode = render_mode
@@ -75,7 +77,8 @@ class MemoryGameEnv(gym.Env):
         elif self.current_step == self.delay_steps + 1:
             # Query step: Set a distinct observation
             obs = np.ones(
-                self.n_symbols, dtype=np.float32
+                self.n_symbols,
+                dtype=np.float32,
             )  # <-- Change observation here
             self.last_action = action
             if action == self.symbol:
@@ -96,7 +99,7 @@ class MemoryGameEnv(gym.Env):
             print(f"Delay step {self.current_step}")
         elif self.current_step == self.delay_steps + 1:
             print(
-                f"Query: Agent answered {self.last_action}, correct was {self.symbol}"
+                f"Query: Agent answered {self.last_action}, correct was {self.symbol}",
             )
 
     def close(self):
@@ -259,12 +262,16 @@ print(f"Achieved mean reward of: {mean_reward}")
 # ADDITIONAL PROFILING WITH PYTORCH PROFILER
 # =====================================================================
 print("\n--- Profiling with PyTorch Profiler ---")
-with profile(
-    activities=[ProfilerActivity.CPU], record_shapes=True, with_stack=True
-) as prof:
-    with record_function("training_step"):
-        collect_rollouts_recurrent(agent, env)
-        agent.learn()
+with (
+    profile(
+        activities=[ProfilerActivity.CPU],
+        record_shapes=True,
+        with_stack=True,
+    ) as prof,
+    record_function("training_step"),
+):
+    collect_rollouts_recurrent(agent, env)
+    agent.learn()
 
 prof.export_chrome_trace("pytorch_trace.json")
 print("PyTorch profiler trace saved to pytorch_trace.json")

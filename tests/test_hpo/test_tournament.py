@@ -94,7 +94,7 @@ def test_returns_best_agent_and_new_population():
         "CQN": CQN,
     }
 
-    for algo in algo_classes.keys():
+    for algo in algo_classes:
         if algo in ["TD3", "DDPG"]:
             action_space = continuous_action_space
         else:
@@ -151,7 +151,7 @@ def test_returns_best_agent_and_new_population_without_elitism():
         "CQN": CQN,
     }
 
-    for algo in algo_classes.keys():
+    for algo in algo_classes:
         if algo in ["TD3", "DDPG"]:
             action_space = continuous_action_space
         else:
@@ -199,7 +199,7 @@ def test_returns_best_agent_and_new_population_multi_agent():
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
-    for algo in algo_classes.keys():
+    for algo in algo_classes:
         population = create_population(
             algo=algo,
             observation_space=observation_space,
@@ -243,7 +243,7 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
-    for algo in algo_classes.keys():
+    for algo in algo_classes:
         population = create_population(
             algo=algo,
             observation_space=observation_space,
@@ -301,7 +301,10 @@ def test_language_model_tournament(use_accelerator, elitism, num_processes):
         "PAD_TOKEN_ID": 1000,
     }
     actor_network = create_module(
-        input_size=1, max_tokens=1024, vocab_size=1000, device="cpu"
+        input_size=1,
+        max_tokens=1024,
+        vocab_size=1000,
+        device="cpu",
     )
     accelerator = MagicMock(spec=Accelerator)
     accelerator.is_main_process = True
@@ -309,7 +312,7 @@ def test_language_model_tournament(use_accelerator, elitism, num_processes):
     accelerator.state = MagicMock()
     accelerator.state.deepspeed_plugin = MagicMock()
     accelerator.state.deepspeed_plugin.deepspeed_config = {
-        "zero_optimization": {"stage": 1}
+        "zero_optimization": {"stage": 1},
     }
     accelerator.free_memory = lambda *args: args
     accelerator.unwrap_model = lambda arg: arg
@@ -333,7 +336,7 @@ def test_language_model_tournament(use_accelerator, elitism, num_processes):
             calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
             reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
             max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", 1024),
-            min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS", None),
+            min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
             lora_config=LoraConfig(
                 r=16,
                 lora_alpha=64,
@@ -353,12 +356,12 @@ def test_language_model_tournament(use_accelerator, elitism, num_processes):
 
     for agent in population:
         # Create a mock clone that returns a new mock agent
-        def mock_clone(new_idx, wrap=False):
+        def mock_clone(new_idx, wrap=False, _agent=agent):
             mock_agent = MagicMock()
             mock_agent.index = new_idx
             mock_agent.accelerator = accelerator
             mock_agent.clean_up = MagicMock()
-            mock_agent.fitness = agent.fitness
+            mock_agent.fitness = _agent.fitness
             return mock_agent
 
         agent.clone = MagicMock(side_effect=mock_clone)

@@ -4,13 +4,12 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from gymnasium.spaces import Box, Discrete
 from pettingzoo import ParallelEnv
+from torch import nn, optim
 from torch._dynamo import OptimizedModule
 
 from agilerl.algorithms.ippo import IPPO
@@ -60,7 +59,7 @@ class DummyMultiEnv(ParallelEnv):
                 for i, agent in enumerate(self.agents)
             },
             {agent: np.random.randint(0, 5) for agent in self.agents},
-            {agent: 1 for agent in self.agents},
+            dict.fromkeys(self.agents, 1),
             {agent: np.random.randint(0, 2) for agent in self.agents},
             self.reset()[1],
         )
@@ -70,10 +69,16 @@ class MultiAgentCNNActor(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv1 = nn.Conv2d(
-            in_channels=3, out_channels=16, kernel_size=(3, 3), stride=4
+            in_channels=3,
+            out_channels=16,
+            kernel_size=(3, 3),
+            stride=4,
         )
         self.conv2 = nn.Conv2d(
-            in_channels=16, out_channels=32, kernel_size=(3, 3), stride=2
+            in_channels=16,
+            out_channels=32,
+            kernel_size=(3, 3),
+            stride=2,
         )
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
         self.fc1 = nn.Linear(288, 256)
@@ -86,18 +91,23 @@ class MultiAgentCNNActor(nn.Module):
         x = self.relu(self.conv2(x))
         x = x.view(x.size(0), -1)
         x = self.relu(self.fc1(x))
-        action_dist = self.output_activation(self.fc2(x))
-        return action_dist
+        return self.output_activation(self.fc2(x))
 
 
 class MultiAgentCNNCritic(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv1 = nn.Conv2d(
-            in_channels=3, out_channels=16, kernel_size=(3, 3), stride=4
+            in_channels=3,
+            out_channels=16,
+            kernel_size=(3, 3),
+            stride=4,
         )
         self.conv2 = nn.Conv2d(
-            in_channels=16, out_channels=32, kernel_size=(3, 3), stride=2
+            in_channels=16,
+            out_channels=32,
+            kernel_size=(3, 3),
+            stride=2,
         )
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
         self.fc1 = nn.Linear(288, 256)
@@ -187,7 +197,12 @@ def mocked_accelerator():
 
 @pytest.fixture(scope="function")
 def accelerated_experiences(
-    batch_size, observation_spaces, action_spaces, agent_ids, device, request
+    batch_size,
+    observation_spaces,
+    action_spaces,
+    agent_ids,
+    device,
+    request,
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -234,7 +249,12 @@ def accelerated_experiences(
 
 @pytest.fixture(scope="function")
 def experiences(
-    batch_size, observation_spaces, action_spaces, agent_ids, device, request
+    batch_size,
+    observation_spaces,
+    action_spaces,
+    agent_ids,
+    device,
+    request,
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -281,7 +301,13 @@ def experiences(
 
 @pytest.fixture(scope="function")
 def vectorized_experiences(
-    batch_size, vect_dim, observation_spaces, action_spaces, agent_ids, device, request
+    batch_size,
+    vect_dim,
+    observation_spaces,
+    action_spaces,
+    agent_ids,
+    device,
+    request,
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -358,9 +384,8 @@ def test_loop(
         env = make_multi_agent_vect_envs(
             DummyMultiEnv,
             2,
-            **dict(
-                observation_spaces=observation_spaces, action_spaces=ma_discrete_space
-            ),
+            observation_spaces=observation_spaces,
+            action_spaces=ma_discrete_space,
         )
     else:
         env = DummyMultiEnv(observation_spaces, ma_discrete_space)
@@ -386,7 +411,12 @@ def test_loop(
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("wrap", [True, False])
 def test_ippo_clone_returns_identical_agent(
-    accelerator_flag, wrap, compile_mode, observation_spaces, ma_discrete_space, request
+    accelerator_flag,
+    wrap,
+    compile_mode,
+    observation_spaces,
+    ma_discrete_space,
+    request,
 ):
     # Clones the agent and returns an identical copy.
     observation_spaces = request.getfixturevalue(observation_spaces)
@@ -770,7 +800,7 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
                 [[1, 1, 1, 1, 1, 1], [2, 2, 2, 2, 2, 2], [3, 3, 3, 3, 3, 3]],
                 [[4, 4, 4, 4, 4, 4], [5, 5, 5, 5, 5, 5], [6, 6, 6, 6, 6, 6]],
                 [[7, 7, 7, 7, 7, 7], [8, 8, 8, 8, 8, 8], [9, 9, 9, 9, 9, 9]],
-            ]
+            ],
         )
         * i
         for i, agent in enumerate(agent_ids)
@@ -781,7 +811,7 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
                 [[1, 1, 1, 1, 1, 1], [2, 2, 2, 2, 2, 2], [3, 3, 3, 3, 3, 3]],
                 [[4, 4, 4, 4, 4, 4], [5, 5, 5, 5, 5, 5], [6, 6, 6, 6, 6, 6]],
                 [[7, 7, 7, 7, 7, 7], [8, 8, 8, 8, 8, 8], [9, 9, 9, 9, 9, 9]],
-            ]
+            ],
         )
         * i
         for i, agent in enumerate(agent_ids)
@@ -804,7 +834,7 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
     }
     next_state = {
         agent: np.array(
-            [[4, 4, 4, 4, 4, 4], [7, 7, 7, 7, 7, 7], [10, 10, 10, 10, 10, 10]]
+            [[4, 4, 4, 4, 4, 4], [7, 7, 7, 7, 7, 7], [10, 10, 10, 10, 10, 10]],
         )
         * i
         for i, agent in enumerate(agent_ids)
@@ -885,8 +915,13 @@ def no_sync(self):
     ],
 )
 @pytest.mark.parametrize("compile_mode", [None])
+# FIXME add test to include vec env agent_masking
 def test_ippo_get_action_agent_masking(
-    ma_vector_space, action_spaces, device, compile_mode, request
+    ma_vector_space,
+    action_spaces,
+    device,
+    compile_mode,
+    request,
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     state = {agent: np.random.randn(*ma_vector_space[0].shape) for agent in agent_ids}
@@ -920,10 +955,72 @@ def test_ippo_get_action_agent_masking(
     actions, _, _, _ = ippo.get_action(obs=state, infos=info)
 
     if discrete_actions:
-        assert np.array_equal(actions["agent_0"], np.array([[1]])), actions["agent_0"]
+        assert np.array_equal(actions["agent_0"], np.array([1])), actions["agent_0"]
     else:
         assert np.array_equal(
-            actions["agent_0"], np.array([[0, 1, 0, 1, 0, 1]])
+            actions["agent_0"],
+            np.array([[0, 1, 0, 1, 0, 1]]),
+        ), actions["agent_0"]
+    ippo.clean_up()
+
+
+@pytest.mark.parametrize(
+    "action_spaces",
+    [
+        "ma_discrete_space",
+        "ma_vector_space",
+    ],
+)
+@pytest.mark.parametrize("compile_mode", [None])
+def test_ippo_get_action_agent_masking_batched(
+    ma_vector_space,
+    action_spaces,
+    device,
+    compile_mode,
+    request,
+):
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    batched_shape = (16, *ma_vector_space[0].shape)
+    state = {agent: np.random.randn(*batched_shape) for agent in agent_ids}
+    action_spaces = request.getfixturevalue(action_spaces)
+    discrete_actions = all(
+        isinstance(space, spaces.Discrete) for space in action_spaces
+    )
+    if discrete_actions:
+        info = {
+            "agent_0": {"env_defined_actions": np.array([1] * batched_shape[0])},
+            "agent_1": {"env_defined_actions": None},
+            "other_agent_0": {"env_defined_actions": None},
+        }
+    else:
+        info = {
+            "agent_0": {
+                "env_defined_actions": np.array([[0, 1, 0, 1, 0, 1]] * batched_shape[0])
+            },
+            "agent_1": {"env_defined_actions": None},
+            "other_agent_0": {"env_defined_actions": None},
+        }
+
+    # Define the ippo agent
+    ippo = IPPO(
+        observation_spaces=ma_vector_space,
+        action_spaces=action_spaces,
+        agent_ids=agent_ids,
+        device=device,
+        torch_compiler=compile_mode,
+    )
+
+    # Get the action
+    actions, _, _, _ = ippo.get_action(obs=state, infos=info)
+
+    if discrete_actions:
+        assert np.array_equal(actions["agent_0"], np.array([1] * batched_shape[0])), (
+            actions["agent_0"]
+        )
+    else:
+        assert np.array_equal(
+            actions["agent_0"],
+            np.array([[0, 1, 0, 1, 0, 1]] * batched_shape[0]),
         ), actions["agent_0"]
     ippo.clean_up()
 
@@ -963,7 +1060,7 @@ def test_ippo_get_action(
     action_spaces = request.getfixturevalue(action_spaces)
 
     state = {}
-    for agent_id, obs_space in zip(agent_ids, observation_spaces):
+    for agent_id, obs_space in zip(agent_ids, observation_spaces, strict=False):
         sample_state = get_sample_from_space(obs_space)
 
         if (
@@ -987,7 +1084,8 @@ def test_ippo_get_action(
         action_batch_size=action_batch_size,
     )
     actions, log_probs, dist_entropy, state_values = ippo.get_action(
-        obs=state, infos=info
+        obs=state,
+        infos=info,
     )
 
     # Check action shapes
@@ -1018,7 +1116,11 @@ def test_ippo_get_action(
 )
 @pytest.mark.parametrize("compile_mode", [None])
 def test_ippo_get_action_vectorized(
-    observation_spaces, action_spaces, device, compile_mode, request
+    observation_spaces,
+    action_spaces,
+    device,
+    compile_mode,
+    request,
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     vect_dim = 2
@@ -1033,7 +1135,7 @@ def test_ippo_get_action_vectorized(
     else:
         state = {
             agent: np.random.randn(vect_dim, *observation_spaces[idx].shape).astype(
-                np.float32
+                np.float32,
             )
             for idx, agent in enumerate(agent_ids)
         }
@@ -1047,7 +1149,8 @@ def test_ippo_get_action_vectorized(
         torch_compiler=compile_mode,
     )
     actions, log_probs, dist_entropy, state_values = ippo.get_action(
-        obs=state, infos=info
+        obs=state,
+        infos=info,
     )
 
     # Check action shapes
@@ -1062,7 +1165,9 @@ def test_ippo_get_action_vectorized(
 
 
 def test_ippo_get_action_action_masking_exception(
-    ma_vector_space, ma_discrete_space, device
+    ma_vector_space,
+    ma_discrete_space,
+    device,
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     state = {
@@ -1104,14 +1209,15 @@ def test_ippo_get_action_action_masking(ma_vector_space, ma_discrete_space, devi
     actions, _, _, _ = ippo.get_action(obs=state, infos=info)
 
     # With action mask [0, 1, 0, 1], actions should be index 1 or 3
-    for agent_id, action_array in actions.items():
+    for action_array in actions.values():
         for action in action_array:
             assert action in [1, 3]
     ippo.clean_up()
 
 
 @pytest.mark.parametrize(
-    "mode", (None, 0, False, "default", "reduce-overhead", "max-autotune")
+    "mode",
+    (None, 0, False, "default", "reduce-overhead", "max-autotune"),
 )
 def test_ippo_init_torch_compiler_no_error(ma_vector_space, ma_discrete_space, mode):
     ippo = IPPO(
@@ -1138,7 +1244,10 @@ def test_ippo_init_torch_compiler_no_error(ma_vector_space, ma_discrete_space, m
 
 @pytest.mark.parametrize("mode", (1, True, "max-autotune-no-cudagraphs"))
 def test_ippo_init_torch_compiler_error(
-    mode, ma_vector_space, ma_discrete_space, device
+    mode,
+    ma_vector_space,
+    ma_discrete_space,
+    device,
 ):
     err_string = (
         "Choose between torch compiler modes: "
@@ -1250,22 +1359,30 @@ def test_initialize_ippo_with_mlp_networks(
     evo_actors = ModuleDict(
         {
             "agent": MakeEvolvable(
-                network=mlp_actor, input_tensor=torch.randn(1, 6), device=device
+                network=mlp_actor,
+                input_tensor=torch.randn(1, 6),
+                device=device,
             ),
             "other_agent": MakeEvolvable(
-                network=mlp_actor, input_tensor=torch.randn(1, 6), device=device
+                network=mlp_actor,
+                input_tensor=torch.randn(1, 6),
+                device=device,
             ),
-        }
+        },
     )
     evo_critics = ModuleDict(
         {
             "agent": MakeEvolvable(
-                network=mlp_critic, input_tensor=torch.randn(1, 6), device=device
+                network=mlp_critic,
+                input_tensor=torch.randn(1, 6),
+                device=device,
             ),
             "other_agent": MakeEvolvable(
-                network=mlp_critic, input_tensor=torch.randn(1, 6), device=device
+                network=mlp_critic,
+                input_tensor=torch.randn(1, 6),
+                device=device,
             ),
-        }
+        },
     )
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     ippo = IPPO(
@@ -1371,10 +1488,7 @@ def test_initialize_ippo_with_cnn_networks(
     device,
     compile_mode,
 ):
-    if accelerator_flag:
-        accelerator = Accelerator()
-    else:
-        accelerator = None
+    accelerator = Accelerator() if accelerator_flag else None
     evo_actors = ModuleDict(
         {
             "agent": MakeEvolvable(
@@ -1387,7 +1501,7 @@ def test_initialize_ippo_with_cnn_networks(
                 input_tensor=torch.randn(1, *ma_image_space[0].shape),
                 device=device,
             ),
-        }
+        },
     )
     evo_critics = ModuleDict(
         {
@@ -1401,7 +1515,7 @@ def test_initialize_ippo_with_cnn_networks(
                 input_tensor=torch.randn(1, *ma_image_space[0].shape),
                 device=device,
             ),
-        }
+        },
     )
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     ippo = IPPO(
@@ -1493,12 +1607,18 @@ def test_initialize_ippo_with_evo_networks(
     evo_actors = ModuleDict(
         {
             "agent": StochasticActor(
-                observation_spaces[0], ma_discrete_space[0], device=device, **net_config
+                observation_spaces[0],
+                ma_discrete_space[0],
+                device=device,
+                **net_config,
             ),
             "other_agent": StochasticActor(
-                observation_spaces[2], ma_discrete_space[2], device=device, **net_config
+                observation_spaces[2],
+                ma_discrete_space[2],
+                device=device,
+                **net_config,
             ),
-        }
+        },
     )
     evo_critics = ModuleDict(
         {
@@ -1512,7 +1632,7 @@ def test_initialize_ippo_with_evo_networks(
                 device=device,
                 **critic_net_config,
             ),
-        }
+        },
     )
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     ippo = IPPO(
@@ -1564,7 +1684,9 @@ def test_initialize_ippo_with_evo_networks(
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_ippo_with_incorrect_evo_networks(
-    compile_mode, ma_vector_space, ma_discrete_space
+    compile_mode,
+    ma_vector_space,
+    ma_discrete_space,
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     evo_actors = []
@@ -1600,7 +1722,11 @@ def test_initialize_ippo_with_incorrect_evo_networks(
     ],
 )
 def test_initialize_ippo_with_incorrect_networks(
-    observation_spaces, action_spaces, actors, critics, request
+    observation_spaces,
+    action_spaces,
+    actors,
+    critics,
+    request,
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -1618,7 +1744,11 @@ def test_initialize_ippo_with_incorrect_networks(
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
 def test_ippo_init_warning(
-    mlp_actor, observation_spaces, action_spaces, device, request
+    mlp_actor,
+    observation_spaces,
+    action_spaces,
+    device,
+    request,
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -1639,8 +1769,8 @@ def test_ippo_init_warning(
 
 def test_grouped_outputs_functions(ma_vector_space, ma_discrete_space):
     """Test that the assemble_grouped_outputs and disassemble_grouped_outputs
-    functions work as expected and are inverses of each other."""
-
+    functions work as expected and are inverses of each other.
+    """
     # Initialize agent with grouped agents
     compile_mode = None
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
@@ -1680,7 +1810,9 @@ def test_grouped_outputs_functions(ma_vector_space, ma_discrete_space):
 
     # Test disassemble_grouped_outputs
     disassembled_outputs = agent.disassemble_grouped_outputs(
-        grouped_outputs, vect_dim, agent.grouped_agents
+        grouped_outputs,
+        vect_dim,
+        agent.grouped_agents,
     )
 
     # Check that the disassembled outputs have the correct keys
@@ -1731,7 +1863,7 @@ def test_get_action_distributed(compile_mode, ma_vector_space, ma_discrete_space
                 head_config={"hidden_size": [16], "init_layers": False},
             )
             for shared_id, actor in ippo.actors.items()
-        }
+        },
     )
     ippo.actors = new_actors
     actions, log_probs, dist_entropy, state_values = ippo.get_action(obs=state)
@@ -1747,3 +1879,193 @@ def test_get_action_distributed(compile_mode, ma_vector_space, ma_discrete_space
         assert agent_id in log_probs
         assert agent_id in dist_entropy
         assert agent_id in state_values
+
+
+def test_initialize_ippo_with_valid_actors_invalid_critics_raises_type_error(
+    ma_vector_space,
+    ma_discrete_space,
+):
+    actors = [EvolvableMLP(6, 2, [32]) for _ in range(2)]
+    critics = ModuleDict({"agent": nn.Linear(6, 1), "other_agent": nn.Linear(6, 1)})
+    with pytest.raises(TypeError, match="All critic networks must be instances"):
+        IPPO(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            actor_networks=actors,
+            critic_networks=critics,
+            torch_compiler=None,
+        )
+
+
+def test_initialize_ippo_with_invalid_actor_modules_raises_type_error(
+    ma_vector_space,
+    ma_discrete_space,
+):
+    actors = ModuleDict({"agent": nn.Linear(6, 2), "other_agent": nn.Linear(6, 2)})
+    critics = ModuleDict(
+        {"agent": EvolvableMLP(6, 1, [32]), "other_agent": EvolvableMLP(6, 1, [32])},
+    )
+    with pytest.raises(TypeError, match="All actor networks must be instances"):
+        IPPO(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            actor_networks=actors,
+            critic_networks=critics,
+            torch_compiler=None,
+        )
+
+
+def test_ippo_compiler_falls_back_to_default_for_gumbel_softmax(
+    ma_vector_space,
+    ma_discrete_space,
+    monkeypatch,
+):
+    monkeypatch.setattr(IPPO, "recompile", lambda self: None)
+    actor_networks = ModuleDict(
+        {
+            "agent": EvolvableMLP(6, 2, [32], output_activation="GumbelSoftmax"),
+            "other_agent": EvolvableMLP(6, 2, [32], output_activation="GumbelSoftmax"),
+        },
+    )
+    critic_networks = ModuleDict(
+        {
+            "agent": EvolvableMLP(6, 1, [32]),
+            "other_agent": EvolvableMLP(6, 1, [32]),
+        },
+    )
+    with pytest.warns(UserWarning, match="not compatible with GumbelSoftmax"):
+        ippo = IPPO(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            actor_networks=actor_networks,
+            critic_networks=critic_networks,
+            torch_compiler="reduce-overhead",
+            device="cpu",
+        )
+    assert ippo.torch_compiler == "default"
+
+
+def test_preprocess_observation_handles_empty_group(ma_vector_space, ma_discrete_space):
+    ippo = IPPO(
+        observation_spaces=ma_vector_space,
+        action_spaces=ma_discrete_space,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+        device="cpu",
+        torch_compiler=None,
+    )
+    obs = {
+        "agent_0": np.random.randn(*ma_vector_space[0].shape).astype(np.float32),
+        "agent_1": np.random.randn(*ma_vector_space[1].shape).astype(np.float32),
+    }
+    preprocessed = ippo.preprocess_observation(obs, ["agent", "other_agent"])
+    assert "agent" in preprocessed
+    assert "other_agent" in preprocessed
+    assert preprocessed["other_agent"] == []
+
+
+def test_get_action_and_values_batch_mask_branch(ma_vector_space, ma_discrete_space):
+    ippo = IPPO(
+        observation_spaces=ma_vector_space,
+        action_spaces=ma_discrete_space,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+        device="cpu",
+        torch_compiler=None,
+    )
+    obs = torch.randn(5, ma_vector_space[0].shape[0])
+    mask = torch.ones(5, ma_discrete_space[0].n)
+    action, log_prob, entropy, values = ippo._get_action_and_values(
+        obs=obs,
+        actor=ippo.actors["agent"],
+        critic=ippo.critics["agent"],
+        action_mask=mask,
+        batch_size=2,
+    )
+    assert action.shape[0] == 5
+    assert log_prob.shape[0] == 5
+    assert entropy.shape[0] == 5
+    assert values.shape[0] == 5
+
+
+def test_get_action_clips_inference_actions_for_box_spaces(ma_vector_space):
+    action_spaces = [Box(-1, 1, (2,), dtype=np.float32) for _ in range(3)]
+    ippo = IPPO(
+        observation_spaces=ma_vector_space,
+        action_spaces=action_spaces,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+        device="cpu",
+        torch_compiler=None,
+    )
+    ippo.set_training_mode(False)
+
+    def fake_get_action_and_values(*args, **kwargs):
+        n = kwargs["obs"].shape[0]
+        return (
+            torch.full((n, 2), 10.0),
+            torch.zeros(n),
+            torch.zeros(n),
+            torch.zeros(n),
+        )
+
+    ippo._get_action_and_values = fake_get_action_and_values
+    obs = {
+        "agent_0": np.random.randn(*ma_vector_space[0].shape).astype(np.float32),
+        "agent_1": np.random.randn(*ma_vector_space[1].shape).astype(np.float32),
+        "other_agent_0": np.random.randn(*ma_vector_space[2].shape).astype(np.float32),
+    }
+    actions, _, _, _ = ippo.get_action(obs, infos=None)
+    for action in actions.values():
+        assert np.all(action <= 1.0)
+        assert np.all(action >= -1.0)
+
+
+def test_learn_individual_unsqueezes_box_single_action(ma_vector_space):
+    action_spaces = [Box(-1, 1, (1,), dtype=np.float32) for _ in range(3)]
+    ippo = IPPO(
+        observation_spaces=ma_vector_space,
+        action_spaces=action_spaces,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+        batch_size=4,
+        device="cpu",
+        torch_compiler=None,
+    )
+    experiences = (
+        {"agent_0": np.random.randn(8, ma_vector_space[0].shape[0])},
+        {"agent_0": np.random.randn(8, 1)},
+        {"agent": np.random.randn(8, 1)},
+        {"agent": np.random.randn(8)},
+        {"agent": np.random.randint(0, 2, 8)},
+        {"agent": np.random.randn(8, 1)},
+        {"agent": np.random.randn(ma_vector_space[0].shape[0])},
+        {"agent": np.array([0])},
+    )
+    loss = ippo._learn_individual(
+        experiences=experiences,
+        actor=ippo.actors["agent"],
+        critic=ippo.critics["agent"],
+        actor_optimizer=ippo.actor_optimizers["agent"],
+        critic_optimizer=ippo.critic_optimizers["agent"],
+        obs_space=ma_vector_space[0],
+        action_space=action_spaces[0],
+    )
+    assert isinstance(loss, float)
+
+
+def test_ippo_test_with_swap_channels_path(
+    ma_image_space, ma_discrete_space, monkeypatch
+):
+    env = DummyMultiEnv(ma_image_space, ma_discrete_space)
+    monkeypatch.setattr("agilerl.algorithms.ippo.obs_channels_to_first", lambda x: x)
+    ippo = IPPO(
+        observation_spaces=ma_image_space,
+        action_spaces=ma_discrete_space,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+        device="cpu",
+        torch_compiler=None,
+    )
+    mean_score = ippo.test(
+        env, swap_channels=True, max_steps=1, loop=1, sum_scores=True
+    )
+    assert isinstance(mean_score, float)

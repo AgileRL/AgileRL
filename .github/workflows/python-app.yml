@@ -1,5 +1,5 @@
 ---
-name: Python application
+name: Tests
 
 on:
     push:
@@ -17,42 +17,39 @@ permissions:
 jobs:
     build:
         runs-on: gha-runner-scale-set
+        strategy:
+            fail-fast: false
+            max-parallel: 4
+            matrix:
+                python-version: ['3.10', '3.11', '3.12', '3.13']
+
         container:
             image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-devel
             options: --user root
-        # todo: test on different python versions!
-        # strategy:
-        #     matrix:
-        #         python-version: ["3.10", "3.11", "3.12"]
+
+        # Workspace (/__w) is ~1GB with little free space; root (/) has plenty. Put cache and venv on /.
+        env:
+            UV_CACHE_DIR: /tmp/uv-cache
+            UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
+
         steps:
             - uses: actions/checkout@v4
-            # - name: Set up Python 3.11
-            #   uses: actions/setup-python@v4
-            #   with:
-            #       python-version: '3.11'
+            - uses: astral-sh/setup-uv@v7
+              with:
+                  enable-cache: true
+                  python-version: ${{ matrix.python-version }}
+
             - name: Install dependencies
               run: |
-                  python -m pip install --upgrade pip
+                  uv sync --locked --all-groups --extra all
+                  echo "/tmp/agilerl-venv/bin" >> $GITHUB_PATH
+                  uv cache clean
+                  rm -rf /tmp/uv-cache
 
-                  # Use uv for faster downloads
-                  pip install uv
-                  uv pip install --system ruff pytest pytest-cov black codespell yamlfmt isort pyupgrade
-                  uv pip install --system -e .[llm]
-            - name: Run black
-              run: |
-                  black .
-            - name: Spellcheck with codespell
-              run: |
-                  codespell --skip=*.css,*.js,*.map,*.scss,*.svg --ignore-words-list=magent,pres,roate
-            - name: Lint with ruff
-              run: |
-                  ruff check .
-            - name: Run pyupgrade
-              run: |
-                  pyupgrade --py38-plus
             - name: Test with pytest
               run: |
-                  pytest --exitfirst --cov=agilerl --cov-report=xml
+                  uv run pytest --exitfirst --cov=agilerl --cov-report=xml
+
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3
               env:

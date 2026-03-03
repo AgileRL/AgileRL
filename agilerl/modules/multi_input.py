@@ -1,11 +1,11 @@
 import copy
 from collections import OrderedDict
 from dataclasses import asdict
-from typing import Any, Optional, TypeVar, Union
+from typing import Any, TypeVar
 
 import torch
-import torch.nn as nn
 from gymnasium import spaces
+from torch import nn
 
 from agilerl.modules import EvolvableCNN, EvolvableLSTM, EvolvableMLP
 from agilerl.modules.base import EvolvableModule, ModuleDict, MutationType, mutation
@@ -19,10 +19,10 @@ from agilerl.utils.evolvable_networks import (
 )
 
 SelfMultiInput = TypeVar("SelfMultiInput", bound="EvolvableMultiInput")
-SupportedEncoderTypes = Union[EvolvableCNN, EvolvableMLP, EvolvableLSTM, SelfMultiInput]
-MultiInputConfigType = Union[ConfigType, dict[str, ConfigType]]
-TupleOrDictSpace = Union[spaces.Tuple, spaces.Dict]
-TupleOrDictObservation = Union[dict[str, ArrayOrTensor], tuple[ArrayOrTensor]]
+SupportedEncoderTypes = EvolvableCNN | EvolvableMLP | EvolvableLSTM | SelfMultiInput
+MultiInputConfigType = ConfigType | dict[str, ConfigType]
+TupleOrDictSpace = spaces.Tuple | spaces.Dict
+TupleOrDictObservation = dict[str, ArrayOrTensor] | tuple[ArrayOrTensor]
 
 # Default configurations for the feature extractors
 DefaultCnnConfig = CnnNetConfig(
@@ -92,7 +92,7 @@ class EvolvableMultiInput(EvolvableModule):
     :param init_dicts: Dictionary of initialization dictionaries for the feature extractors. Default is {}.
     :type init_dicts: dict[str, dict[str, Any]], optional
     :param output_activation: Activation function for the output layer. Default is None.
-    :type output_activation: Optional[str], optional
+    :type output_activation: str | None, optional
     :param min_latent_dim: Minimum dimension of the latent space. Default is 8.
     :type min_latent_dim: int, optional
     :param max_latent_dim: Maximum dimension of the latent space. Default is 128.
@@ -102,7 +102,7 @@ class EvolvableMultiInput(EvolvableModule):
     :param name: Name of the network. Default is "multi_input".
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     feature_net: ModuleDict
@@ -113,30 +113,31 @@ class EvolvableMultiInput(EvolvableModule):
         num_outputs: int,
         latent_dim: int = 32,
         vector_space_mlp: bool = False,
-        cnn_config: Optional[MultiInputConfigType] = None,
-        mlp_config: Optional[MultiInputConfigType] = None,
-        init_dicts: Optional[MultiInputConfigType] = None,
-        output_activation: Optional[str] = None,
+        cnn_config: MultiInputConfigType | None = None,
+        mlp_config: MultiInputConfigType | None = None,
+        init_dicts: MultiInputConfigType | None = None,
+        output_activation: str | None = None,
         output_layernorm: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         device: str = "cpu",
         name: str = "multi_input",
-        random_seed: Optional[int] = None,
-    ):
+        random_seed: int | None = None,
+    ) -> None:
         super().__init__(device, random_seed)
 
         assert num_outputs > 0, "Number of outputs must be greater than 0."
         assert latent_dim > 0, "Latent dimension must be greater than 0."
         assert isinstance(
-            observation_space, (spaces.Dict, spaces.Tuple)
+            observation_space,
+            (spaces.Dict, spaces.Tuple),
         ), "Observation space must be a Dict or Tuple space."
-        assert (
-            latent_dim <= max_latent_dim
-        ), "Latent dimension must be less than or equal to max latent dimension."
-        assert (
-            latent_dim >= min_latent_dim
-        ), "Latent dimension must be greater than or equal to min latent dimension."
+        assert latent_dim <= max_latent_dim, (
+            "Latent dimension must be less than or equal to max latent dimension."
+        )
+        assert latent_dim >= min_latent_dim, (
+            "Latent dimension must be greater than or equal to min latent dimension."
+        )
 
         # Convert Tuple space to Dict space for consistency
         self.is_tuple_space = False
@@ -175,7 +176,7 @@ class EvolvableMultiInput(EvolvableModule):
                 key: space
                 for key, space in observation_space.spaces.items()
                 if vector_space_check(space)
-            }
+            },
         )
         self.total_vector_dims = get_total_flatdim(self.vector_spaces)
 
@@ -202,7 +203,7 @@ class EvolvableMultiInput(EvolvableModule):
 
     @property
     def net_config(self) -> dict[str, Any]:
-        """Returns the configuration of the network.
+        """Return the configuration of the network.
 
         :return: Network configuration
         :rtype: dict[str, Any]
@@ -233,7 +234,7 @@ class EvolvableMultiInput(EvolvableModule):
 
     @property
     def init_dicts(self) -> dict[str, dict[str, Any]]:
-        """Returns the initialization dictionaries for the network.
+        """Return the initialization dictionaries for the network.
 
         :return: Initialization dictionaries
         :rtype: dict[str, dict[str, Any]]
@@ -255,12 +256,12 @@ class EvolvableMultiInput(EvolvableModule):
 
     @property
     def cnn_init_dict(self) -> dict[str, Any]:
-        """Returns the initialization dictionary for the CNN."""
+        """Return the initialization dictionary for the CNN."""
         return copy.deepcopy(self.cnn_config)
 
     @property
     def mlp_init_dict(self) -> dict[str, Any]:
-        """Returns the initialization dictionary for the MLP."""
+        """Return the initialization dictionary for the MLP."""
         return copy.deepcopy(self.mlp_config)
 
     def _reformat_mlp_config(self, config: dict[str, Any]) -> dict[str, Any]:
@@ -271,7 +272,7 @@ class EvolvableMultiInput(EvolvableModule):
         return config
 
     def _modify_mlp_config(self) -> None:
-        """Modifies the MLP architecture to be appropriate for use as an encoder (i.e. disable
+        """Modify the MLP architecture to be appropriate for use as an encoder (i.e. disable
         output vanishing, and apply layer normalization at the final layer consistently with the
         rest of the network). See https://github.com/AgileRL/AgileRL/issues/337 for more details.
         """
@@ -280,7 +281,9 @@ class EvolvableMultiInput(EvolvableModule):
         self.mlp_config["output_activation"] = self.mlp_config.get("activation", "ReLU")
 
     def init_weights_gaussian(
-        self, std_coeff: float = 4, output_coeff: float = 4
+        self,
+        std_coeff: float = 4,
+        output_coeff: float = 4,
     ) -> None:
         """Initialise weights of linear layers using Gaussian distribution."""
         for module in self.feature_net.modules().values():
@@ -290,7 +293,7 @@ class EvolvableMultiInput(EvolvableModule):
         EvolvableModule.init_weights_gaussian(self.final_dense, std_coeff=output_coeff)
 
     def calc_extracted_features_dim(self) -> int:
-        """Calculates the toal dimension of the features extracted by the evolvable
+        """Calculate the toal dimension of the features extracted by the evolvable
         feature extractors.
 
         :return: Total dimension of the extracted features.
@@ -301,11 +304,11 @@ class EvolvableMultiInput(EvolvableModule):
                 self.latent_dim
                 for name in self.feature_net.keys()
                 if name not in self.vector_spaces.keys()
-            ]
+            ],
         )
 
     def get_inner_init_dict(self, key: str, default: ModuleType) -> NetConfigType:
-        """Returns the initialization dictionary for the specified key.
+        """Return the initialization dictionary for the specified key.
 
         :param key: Key of the observation space.
         :type key: str
@@ -328,27 +331,27 @@ class EvolvableMultiInput(EvolvableModule):
         }.get(default)
 
         if init_dict is None:
+            msg = "Invalid default value provided, must be 'cnn' or 'mlp' or 'multi_input'."
             raise ValueError(
-                "Invalid default value provided, must be 'cnn' or 'mlp' or 'multi_input'."
+                msg,
             )
-        else:
-            # Check if we are extracting a nested dict
-            nested_dict = init_dict.get(key)
-            init_dict = (
-                copy.deepcopy(nested_dict)
-                if nested_dict is not None
-                else copy.deepcopy(init_dict)
-            )
+        # Check if we are extracting a nested dict
+        nested_dict = init_dict.get(key)
+        init_dict = (
+            copy.deepcopy(nested_dict)
+            if nested_dict is not None
+            else copy.deepcopy(init_dict)
+        )
 
-            if isinstance(init_dict, NetConfig):
-                init_dict = asdict(init_dict)
+        if isinstance(init_dict, NetConfig):
+            init_dict = asdict(init_dict)
 
         init_dict["num_outputs"] = self.latent_dim
         init_dict["device"] = self.device
         return init_dict
 
     def build_feature_extractor(self) -> dict[str, SupportedEncoderTypes]:
-        """Creates the feature extractor and final MLP networks.
+        """Create the feature extractor and final MLP networks.
 
         :return: Dictionary of feature extractors.
         :rtype: dict[str, EvolvableMLP | EvolvableCNN | EvolvableLSTM | EvolvableMultiInput]
@@ -362,7 +365,8 @@ class EvolvableMultiInput(EvolvableModule):
             # EvolvableMultiInput for nested multi-input spaces
             if isinstance(space, (spaces.Dict, spaces.Tuple)):
                 init_dict = self.get_inner_init_dict(
-                    key, default=ModuleType.MULTI_INPUT
+                    key,
+                    default=ModuleType.MULTI_INPUT,
                 )
                 feature_extractor = EvolvableMultiInput(
                     observation_space=space,
@@ -389,7 +393,9 @@ class EvolvableMultiInput(EvolvableModule):
 
             self.mlp_name = init_dict.pop("name", "vector_mlp")
             vector_mlp = EvolvableMLP(
-                num_inputs=self.total_vector_dims, name=self.mlp_name, **init_dict
+                num_inputs=self.total_vector_dims,
+                name=self.mlp_name,
+                **init_dict,
             )
             feature_net[self.mlp_name] = vector_mlp
 
@@ -406,7 +412,7 @@ class EvolvableMultiInput(EvolvableModule):
         :rtype: torch.Tensor
         """
         if isinstance(x, tuple):
-            x = dict(zip(self.observation_space.spaces.keys(), x))
+            x = dict(zip(self.observation_space.spaces.keys(), x, strict=False))
 
         for key, obs in x.items():
             if not isinstance(obs, torch.Tensor):
@@ -415,18 +421,14 @@ class EvolvableMultiInput(EvolvableModule):
         # Extract features from non-vector subspaces
         extracted_features = OrderedDict()
         if self.extracted_features_dim > 0:
-            for key in x.keys():
-                if key in self.feature_net.keys():
+            for key in x:
+                if key in self.feature_net:
                     extracted_features[key] = self.feature_net[key](x[key])
 
         # Extract raw features from vector spaces
         vector_inputs = []
         for key, space in self.vector_spaces.items():
-            _obs = (
-                extracted_features.pop(key)
-                if key in extracted_features.keys()
-                else x[key]
-            )
+            _obs = extracted_features.pop(key) if key in extracted_features else x[key]
             if len(_obs.shape) == 1:
                 dim = len(space.shape) - 1
                 _obs = _obs.unsqueeze(dim)
@@ -478,7 +480,7 @@ class EvolvableMultiInput(EvolvableModule):
             self.output = get_activation(activation)
 
     @mutation(MutationType.NODE)
-    def add_latent_node(self, numb_new_nodes: Optional[int] = None) -> dict[str, Any]:
+    def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
         """Add a latent node to the network.
 
         :param numb_new_nodes: Number of new nodes to add, defaults to None
@@ -496,9 +498,7 @@ class EvolvableMultiInput(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_latent_node(
-        self, numb_new_nodes: Optional[int] = None
-    ) -> dict[str, Any]:
+    def remove_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
         """Remove a latent node from the network.
 
         :param numb_new_nodes: Number of nodes to remove, defaults to None
@@ -519,7 +519,8 @@ class EvolvableMultiInput(EvolvableModule):
         """Recreates the network with the new latent dimension."""
         feature_net = self.build_feature_extractor()
         self.feature_net = EvolvableModule.preserve_parameters(
-            old_net=self.feature_net, new_net=feature_net
+            old_net=self.feature_net,
+            new_net=feature_net,
         )
 
         # Calculate total extracted features dimension
@@ -529,5 +530,6 @@ class EvolvableMultiInput(EvolvableModule):
         )
         final_dense = nn.Linear(features_dim, self.num_outputs, device=self.device)
         self.final_dense = EvolvableModule.preserve_parameters(
-            old_net=self.final_dense, new_net=final_dense
+            old_net=self.final_dense,
+            new_net=final_dense,
         )

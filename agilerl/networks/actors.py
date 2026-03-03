@@ -1,5 +1,5 @@
 import warnings
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 import torch
 from gymnasium import spaces
@@ -22,12 +22,12 @@ def get_output_bounds(output_activation: str) -> tuple[float, float]:
     """
     if output_activation in ["Tanh", "Softsign"]:
         return -1.0, 1.0
-    elif output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
+    if output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
         return 0.0, 1.0
-    else:
-        raise ValueError(
-            f"Received invalid output activation function: {output_activation}. "
-        )
+    msg = f"Received invalid output activation function: {output_activation}. "
+    raise ValueError(
+        msg,
+    )
 
 
 class DeterministicActor(EvolvableNetwork):
@@ -124,7 +124,8 @@ class DeterministicActor(EvolvableNetwork):
                 if user_output_activation not in self._allowed_output_activations:
                     warnings.warn(
                         f"Output activation must be one of the following: {', '.join(self._allowed_output_activations)}. "
-                        f"Got {user_output_activation} instead. Using default output activation."
+                        f"Got {user_output_activation} instead. Using default output activation.",
+                        stacklevel=2,
                     )
                 else:
                     output_activation = user_output_activation
@@ -133,7 +134,8 @@ class DeterministicActor(EvolvableNetwork):
 
         if head_config is None:
             head_config = MlpNetConfig(
-                hidden_size=[32], output_activation=output_activation
+                hidden_size=[32],
+                output_activation=output_activation,
             )
         else:
             head_config["output_activation"] = output_activation
@@ -179,11 +181,11 @@ class DeterministicActor(EvolvableNetwork):
         )
         return rescaled_action.to(low.dtype)
 
-    def build_network_head(self, net_config: Optional[NetConfigType] = None) -> None:
-        """Builds the head of the network.
+    def build_network_head(self, net_config: NetConfigType | None = None) -> None:
+        """Build the head of the network.
 
         :param net_config: Configuration of the head.
-        :type net_config: Optional[ConfigType]
+        :type net_config: ConfigType | None
         """
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
@@ -250,9 +252,6 @@ class StochasticActor(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to use for the network.
     :type device: str
-    :param use_experimental_distribution: Whether to use the experimental distribution implementation, which
-        includes several optimizations related to using torch primitives for statistics calculations. Defaults to False.
-    :type use_experimental_distribution: bool
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     :param encoder_name: Name of the encoder network.
@@ -282,10 +281,9 @@ class StochasticActor(EvolvableNetwork):
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
-        use_experimental_distribution: bool = False,
         random_seed: int | None = None,
         encoder_name: str = "encoder",
-    ):
+    ) -> None:
         super().__init__(
             observation_space,
             encoder_cls=encoder_cls,
@@ -310,7 +308,6 @@ class StochasticActor(EvolvableNetwork):
         self.action_std_init = action_std_init
         self.squash_output = squash_output
         self.action_space = action_space
-        self.use_experimental_distribution = use_experimental_distribution
         self.output_size = get_output_size_from_space(self.action_space)
 
         self.build_network_head(head_config)
@@ -318,21 +315,17 @@ class StochasticActor(EvolvableNetwork):
 
         if isinstance(self.action_space, spaces.Box):
             self.action_low = torch.as_tensor(
-                self.action_space.low, device=self.device, dtype=torch.float32
+                self.action_space.low,
+                device=self.device,
+                dtype=torch.float32,
             )
             self.action_high = torch.as_tensor(
-                self.action_space.high, device=self.device, dtype=torch.float32
+                self.action_space.high,
+                device=self.device,
+                dtype=torch.float32,
             )
         else:
             self.action_low, self.action_high = None, None
-
-        # Wrap the network in an EvolvableDistribution
-        if use_experimental_distribution:
-            from agilerl.networks.distributions_experimental import (
-                EvolvableDistribution,
-            )
-        else:
-            from agilerl.networks.distributions import EvolvableDistribution
 
         self.head_net = EvolvableDistribution(
             action_space=action_space,
@@ -343,7 +336,7 @@ class StochasticActor(EvolvableNetwork):
         )
 
     def build_network_head(self, net_config: NetConfigType | None = None) -> None:
-        """Builds the head of the network.
+        """Build the head of the network.
 
         :param net_config: Configuration of the head.
         :type net_config: NetConfigType | None
@@ -368,7 +361,9 @@ class StochasticActor(EvolvableNetwork):
         )
 
     def forward(
-        self, obs: TorchObsType, action_mask: ArrayOrTensor | None = None
+        self,
+        obs: TorchObsType,
+        action_mask: ArrayOrTensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the network.
 
@@ -418,8 +413,8 @@ class StochasticActor(EvolvableNetwork):
         )
 
         head_net = EvolvableDistribution(
-            self.action_space,
-            head_net,
+            action_space=self.action_space,
+            network=head_net,
             action_std_init=self.action_std_init,
             squash_output=self.squash_output,
             device=self.device,

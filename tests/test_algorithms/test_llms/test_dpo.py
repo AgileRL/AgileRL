@@ -24,102 +24,109 @@ from tests.test_algorithms.test_llms.test_grpo import (
 )
 
 
+def make_preference_gym(
+    num_samples: int,
+    accelerator: Accelerator | None,
+    tokenizer: AutoTokenizer,
+    data_batch_size_per_gpu: int = 8,
+):
+    train_dataset = Dataset.from_dict(
+        {
+            "prompt": [f"Prompt {i}" for i in range(num_samples)],
+            "chosen": [f"Chosen {i}" for i in range(num_samples)],
+            "rejected": [f"Rejected {i}" for i in range(num_samples)],
+        }
+    )
+    test_dataset = Dataset.from_dict(
+        {
+            "prompt": [f"Prompt {i}" for i in range(num_samples)],
+            "chosen": [f"Chosen {i}" for i in range(num_samples)],
+            "rejected": [f"Rejected {i}" for i in range(num_samples)],
+        }
+    )
+    return PreferenceGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        data_batch_size_per_gpu=data_batch_size_per_gpu,
+        accelerator=accelerator,
+    )
+
+
+pytestmark = pytest.mark.llm
+
+
 @pytest.fixture
 def preference_dataset_factory():
-    def make_preference_gym(
-        num_samples: int,
-        accelerator: Accelerator | None,
-        tokenizer: AutoTokenizer,
-        data_batch_size_per_gpu: int = 8,
-    ):
-        train_dataset = Dataset.from_dict(
-            {
-                "prompt": [f"Prompt {i}" for i in range(num_samples)],
-                "chosen": [f"Chosen {i}" for i in range(num_samples)],
-                "rejected": [f"Rejected {i}" for i in range(num_samples)],
-            }
-        )
-        test_dataset = Dataset.from_dict(
-            {
-                "prompt": [f"Prompt {i}" for i in range(num_samples)],
-                "chosen": [f"Chosen {i}" for i in range(num_samples)],
-                "rejected": [f"Rejected {i}" for i in range(num_samples)],
-            }
-        )
-        return PreferenceGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            data_batch_size_per_gpu=data_batch_size_per_gpu,
-            accelerator=accelerator,
-        )
-
     return make_preference_gym
+
+
+def generate_dpo(
+    accelerator_factory,
+    model_factory,
+    config,
+    use_deepspeed_optimizer,
+    vocab_size,
+    input_size,
+    max_tokens,
+    use_separate_reference_adapter,
+    pretrained_model_name_or_path,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+    from_name=False,
+    use_liger_loss=False,
+):
+    gc.collect()
+    torch.cuda.empty_cache()
+    AcceleratorState._reset_state(True)
+
+    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+    if not use_deepspeed_optimizer and accelerator is not None:
+        accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
+    if pretrained_model_name_or_path is not None:
+        actor = model_factory(pretrained_model_name_or_path)
+        target_modules = [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "up_proj",
+            "down_proj",
+            "gate_proj",
+        ]
+    else:
+        actor = create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
+        target_modules = ["linear_1"]
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=64,
+        target_modules=target_modules,
+        task_type="CAUSAL_LM",
+        lora_dropout=0.05,
+    )
+    dpo = DPO(
+        actor_network=actor if not from_name else None,
+        model_name=pretrained_model_name_or_path if from_name else None,
+        pad_token_id=vocab_size - 1,
+        pad_token="<pad>",
+        lora_config=lora_config,
+        accelerator=accelerator,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        use_separate_reference_adapter=use_separate_reference_adapter,
+        reduce_memory_peak=reduce_memory_peak,
+        micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+        use_liger_loss=use_liger_loss,
+    )
+    return dpo
 
 
 @pytest.fixture(scope="function")
 def dpo_factory():
-    def generate_dpo(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        use_separate_reference_adapter,
-        pretrained_model_name_or_path,
-        reduce_memory_peak,
-        micro_batch_size_per_gpu,
-        from_name=False,
-    ):
-        gc.collect()
-        torch.cuda.empty_cache()
-        AcceleratorState._reset_state(True)
-
-        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        if not use_deepspeed_optimizer and accelerator is not None:
-            accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
-        if pretrained_model_name_or_path is not None:
-            actor = model_factory(pretrained_model_name_or_path)
-            target_modules = [
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "up_proj",
-                "down_proj",
-                "gate_proj",
-            ]
-        else:
-            actor = create_module(
-                input_size=input_size,
-                max_tokens=max_tokens,
-                vocab_size=vocab_size,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            )
-            target_modules = ["linear_1"]
-        lora_config = LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=target_modules,
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-        dpo = DPO(
-            actor_network=actor if not from_name else None,
-            model_name=pretrained_model_name_or_path if from_name else None,
-            pad_token_id=vocab_size - 1,
-            pad_token="<pad>",
-            lora_config=lora_config,
-            accelerator=accelerator,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            use_separate_reference_adapter=use_separate_reference_adapter,
-            reduce_memory_peak=reduce_memory_peak,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        )
-        return dpo
-
     return generate_dpo
 
 
@@ -189,7 +196,9 @@ def test_init_dpo(
     assert dpo.device == (
         dpo.accelerator.device
         if torch.cuda.is_available() and dpo.accelerator is not None
-        else "cuda" if torch.cuda.is_available() else "cpu"
+        else "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
     )
     assert dpo.index == 0
     assert dpo.scores == []
@@ -315,6 +324,7 @@ def test_dpo_get_action(
 @pytest.mark.parametrize("data_batch_size", [32])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+@pytest.mark.parametrize("use_liger_loss", [False, True])
 def test_dpo_learn(
     deepspeed_env,
     dpo_factory,
@@ -330,6 +340,7 @@ def test_dpo_learn(
     data_batch_size,
     reduce_memory_peak,
     micro_batch_size_per_gpu,
+    use_liger_loss,
 ):
     dpo = dpo_factory(
         accelerator_factory,
@@ -343,6 +354,7 @@ def test_dpo_learn(
         pretrained_model_name_or_path,
         reduce_memory_peak,
         micro_batch_size_per_gpu,
+        use_liger_loss=use_liger_loss,
     )
 
     train_dataset = Dataset.from_dict(
@@ -353,7 +365,7 @@ def test_dpo_learn(
                 for i in range(100)
             ],
             "rejected": [f"REALLY BAD RESPONSE {i}" for i in range(100)],
-        }
+        },
     )
     test_dataset = Dataset.from_dict(
         {
@@ -363,7 +375,7 @@ def test_dpo_learn(
                 for i in range(100)
             ],
             "rejected": [f"REALLY BAD RESPONSE {i}" for i in range(100)],
-        }
+        },
     )
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
     env = PreferenceGym(
@@ -389,6 +401,7 @@ def test_dpo_learn(
     for (param_name, param), (_, pre_learn_param) in zip(
         dpo.actor.state_dict().items(),
         pre_learn_actor_state_dict.items(),
+        strict=False,
     ):
         if "actor" in param_name:
             assert not torch.equal(param, pre_learn_param)
@@ -459,7 +472,7 @@ def test_dpo_test(
                 for i in range(100)
             ],
             "rejected": [f"Bad response {i}" for i in range(100)],
-        }
+        },
     )
     test_dataset = Dataset.from_dict(
         {
@@ -469,7 +482,7 @@ def test_dpo_test(
                 for i in range(100)
             ],
             "rejected": [f"Bad response {i}" for i in range(100)],
-        }
+        },
     )
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
     env = PreferenceGym(

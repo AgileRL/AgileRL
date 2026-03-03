@@ -1,14 +1,14 @@
 # Configuration file for the Sphinx documentation builder.
 
-import os
 import sys
+from pathlib import Path
 
-sys.path.insert(0, os.path.abspath(".."))
+sys.path.insert(0, str(Path("..").resolve()))
 
 # -- Project information
 
 project = "AgileRL"
-copyright = "2023, AgileRL"
+copyright = "2023, AgileRL"  # noqa: A001
 author = "Nick Ustaran-Anderegg"
 
 release = "0.1"

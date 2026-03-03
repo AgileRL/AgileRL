@@ -1,7 +1,8 @@
 from abc import ABC
 from collections import OrderedDict
+from collections.abc import Callable
 from functools import partial
-from typing import Any, Callable, Generic, Optional, TypeVar, Union
+from typing import Any, Generic, TypeVar
 
 import dill
 import numpy as np
@@ -25,7 +26,7 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import obs_to_tensor, stack_experiences
 from agilerl.wrappers.utils import RunningMeanStd
 
-AgentType = TypeVar("AgentType", bound=Union[RLAlgorithm, MultiAgentRLAlgorithm])
+AgentType = TypeVar("AgentType", bound=RLAlgorithm | MultiAgentRLAlgorithm)
 MARLObservationType = dict[str, ObservationType]
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapper")
 
@@ -57,7 +58,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
 
     @property
     def training(self) -> bool:
-        """Returns the training status of the agent.
+        """Return the training status of the agent.
 
         :return: Training status of the agent
         :rtype: bool
@@ -66,7 +67,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
 
     @property
     def device(self) -> DeviceType:
-        """Returns the device of the agent.
+        """Return the device of the agent.
 
         :return: Device of the agent
         :rtype: DeviceType
@@ -109,7 +110,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
         except AttributeError:
             return getattr(self.agent, name)
 
-    def __setattr__(self, name: str, value: Union[Any, AgentType]) -> None:
+    def __setattr__(self, name: str, value: Any | AgentType) -> None:
         if name == "agent" or not hasattr(self, "agent"):
             super().__setattr__(name, value)
         if hasattr(self.agent, name):
@@ -117,11 +118,11 @@ class AgentWrapper(ABC, Generic[AgentType]):
         else:
             super().__setattr__(name, value)
 
-    def clone(self, index: Optional[int] = None, wrap: bool = True) -> SelfAgentWrapper:
-        """Clones the wrapper with the underlying agent.
+    def clone(self, index: int | None = None, wrap: bool = True) -> SelfAgentWrapper:
+        """Clone the wrapper with the underlying agent.
 
         :param index: Index of the agent in a population, defaults to None
-        :type index: Optional[int], optional
+        :type index: int | None, optional
         :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
         :type wrap: bool, optional
 
@@ -134,11 +135,10 @@ class AgentWrapper(ABC, Generic[AgentType]):
         input_args.pop("agent", None)
 
         clone = self.__class__(agent_clone, **input_args)
-        clone = EvolvableAlgorithm.copy_attributes(self, clone)
-        return clone
+        return EvolvableAlgorithm.copy_attributes(self, clone)
 
     def save_checkpoint(self, path: str) -> None:
-        """Saves a checkpoint of agent properties and network weights to path.
+        """Save a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
         :type path: string
@@ -151,7 +151,8 @@ class AgentWrapper(ABC, Generic[AgentType]):
         # Add wrapper attributes to checkpoint
         checkpoint["wrapper_cls"] = self.__class__
         checkpoint["wrapper_init_dict"] = EvolvableAlgorithm.inspect_attributes(
-            self, input_args_only=True
+            self,
+            input_args_only=True,
         )
         checkpoint["wrapper_attrs"] = EvolvableAlgorithm.inspect_attributes(self)
 
@@ -166,7 +167,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
         )
 
     def load_checkpoint(self, path: str) -> None:
-        """Loads a checkpoint of agent properties and network weights from path.
+        """Load a checkpoint of agent properties and network weights from path.
 
         :param path: Location to load checkpoint from
         :type path: string
@@ -182,14 +183,14 @@ class AgentWrapper(ABC, Generic[AgentType]):
 
     def get_action(
         self,
-        obs: Union[ObservationType, MARLObservationType],
+        obs: ObservationType | MARLObservationType,
         *args: Any,
         **kwargs: Any,
     ) -> Any:
-        """Returns the action from the agent.
+        """Return the action from the agent.
 
         :param obs: Observation from the environment
-        :type obs: Union[ObservationType, MARLObservationType]
+        :type obs: ObservationType | MARLObservationType
         :param args: Additional positional arguments
         :type args: Any
         :param kwargs: Additional keyword arguments
@@ -216,9 +217,9 @@ class AgentWrapper(ABC, Generic[AgentType]):
         return self.wrapped_learn(experiences, *args, **kwargs)
 
 
-RunningStatsType = Union[
-    RunningMeanStd, dict[str, RunningMeanStd], tuple[RunningMeanStd, ...]
-]
+RunningStatsType = (
+    RunningMeanStd | dict[str, RunningMeanStd] | tuple[RunningMeanStd, ...]
+)
 
 
 class RSNorm(AgentWrapper[AgentType]):
@@ -239,16 +240,16 @@ class RSNorm(AgentWrapper[AgentType]):
     :param epsilon: Small value to avoid division by zero, defaults to 1e-4
     :type epsilon: float, optional
     :param norm_obs_keys: List of observation keys to normalize, defaults to None
-    :type norm_obs_keys: Optional[List]
+    :type norm_obs_keys: List | None
     """
 
-    obs_rms: Union[RunningStatsType, dict[str, RunningStatsType]]
+    obs_rms: RunningStatsType | dict[str, RunningStatsType]
 
     def __init__(
         self,
         agent: AgentType,
         epsilon: float = 1e-4,
-        norm_obs_keys: Optional[list[str]] = None,
+        norm_obs_keys: list[str] | None = None,
     ) -> None:
         super().__init__(agent)
 
@@ -257,26 +258,32 @@ class RSNorm(AgentWrapper[AgentType]):
             self.obs_rms = OrderedDict()
             for agent_id, obs_space in self.observation_space.items():
                 self.obs_rms[agent_id] = RSNorm.build_rms(
-                    obs_space, epsilon, norm_obs_keys, self.device
+                    obs_space,
+                    epsilon,
+                    norm_obs_keys,
+                    self.device,
                 )
         else:
             self.obs_rms = RSNorm.build_rms(
-                self.observation_space, epsilon, norm_obs_keys, self.device
+                self.observation_space,
+                epsilon,
+                norm_obs_keys,
+                self.device,
             )
 
     @staticmethod
     def build_rms(
         observation_space: spaces.Space,
         epsilon: float = 1e-4,
-        norm_obs_keys: Optional[list[str]] = None,
+        norm_obs_keys: list[str] | None = None,
         device: DeviceType = "cpu",
-    ) -> Union[RunningMeanStd, dict[str, RunningMeanStd], tuple[RunningMeanStd, ...]]:
-        """Builds the RunningMeanStd object(s) based on the observation space.
+    ) -> RunningMeanStd | dict[str, RunningMeanStd] | tuple[RunningMeanStd, ...]:
+        """Build the RunningMeanStd object(s) based on the observation space.
 
         :param observation_space: Observation space of the agent
         :type observation_space: spaces.Space
         :return: RunningMeanStd object(s)
-        :rtype: Union[RunningMeanStd, dict[str, RunningMeanStd], tuple[RunningMeanStd, ...]]
+        :rtype: RunningMeanStd | dict[str, RunningMeanStd] | tuple[RunningMeanStd, ...]
         """
         if isinstance(observation_space, spaces.Dict):
             if norm_obs_keys is not None:
@@ -291,17 +298,16 @@ class RSNorm(AgentWrapper[AgentType]):
                 for key, value in observation_space.spaces.items()
             }
 
-        elif isinstance(observation_space, spaces.Tuple):
+        if isinstance(observation_space, spaces.Tuple):
             return tuple(
                 RunningMeanStd(epsilon, shape=value.shape, device=device)
                 for value in observation_space.spaces
             )
 
-        else:
-            return RunningMeanStd(epsilon, shape=observation_space.shape, device=device)
+        return RunningMeanStd(epsilon, shape=observation_space.shape, device=device)
 
     def _normalize_observation(self, observation: ObservationType) -> ObservationType:
-        """Normalizes the observation using the RunningMeanStd object(s).
+        """Normalize the observation using the RunningMeanStd object(s).
 
         :param observation: Observation from the environment
         :type observation: ObservationType
@@ -332,7 +338,7 @@ class RSNorm(AgentWrapper[AgentType]):
         return observation
 
     def normalize_observation(self, observation: ObservationType) -> ObservationType:
-        """Normalizes the observation using the RunningMeanStd object(s).
+        """Normalize the observation using the RunningMeanStd object(s).
 
         :param observation: Observation from the environment
         :type observation: ObservationType
@@ -348,7 +354,7 @@ class RSNorm(AgentWrapper[AgentType]):
         return self._normalize_observation(observation)
 
     def _update_statistics(self, observation: ObservationType) -> None:
-        """Updates the running statistics using the observation.
+        """Update the running statistics using the observation.
 
         :param observation: Observation from the environment
         :type observation: ObservationType
@@ -363,19 +369,19 @@ class RSNorm(AgentWrapper[AgentType]):
             self.obs_rms.update(observation)
 
     def update_statistics(self, observation: ObservationType) -> None:
-        """Updates the running statistics using the observation.
+        """Update the running statistics using the observation.
 
         :param observation: Observation from the environment
         :type observation: ObservationType
         """
         if self.multi_agent:
-            for _, obs in observation.items():
+            for obs in observation.values():
                 self._update_statistics(obs)
         else:
             self._update_statistics(observation)
 
     def get_action(self, obs: ObservationType, *args: Any, **kwargs: Any) -> Any:
-        """Returns the action from the agent after normalizing the observation.
+        """Return the action from the agent after normalizing the observation.
 
         :param obs: Observation from the environment
         :type obs: ObservationType
@@ -393,7 +399,10 @@ class RSNorm(AgentWrapper[AgentType]):
         return self.wrapped_get_action(obs, *args, **kwargs)
 
     def learn(
-        self, experiences: Optional[ExperiencesType] = None, *args: Any, **kwargs: Any
+        self,
+        experiences: ExperiencesType | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> Any:
         """Learns from the experiences after normalizing the observations.
 
@@ -409,8 +418,9 @@ class RSNorm(AgentWrapper[AgentType]):
         """
         if experiences is None:
             if not isinstance(self.agent, PPO) or not self.agent.use_rollout_buffer:
+                msg = "Experiences must be provided if not using a rollout buffer."
                 raise ValueError(
-                    "Experiences must be provided if not using a rollout buffer."
+                    msg,
                 )
 
             buffer_size = (
@@ -420,10 +430,10 @@ class RSNorm(AgentWrapper[AgentType]):
             )
             valid_data = self.agent.rollout_buffer.buffer[:buffer_size]
             valid_data["observations"] = self.normalize_observation(
-                valid_data["observations"]
+                valid_data["observations"],
             )
             valid_data["next_observations"] = self.normalize_observation(
-                valid_data["next_observations"]
+                valid_data["next_observations"],
             )
             self.agent.rollout_buffer.buffer[:buffer_size] = valid_data
 
@@ -431,7 +441,7 @@ class RSNorm(AgentWrapper[AgentType]):
         elif is_tensor_collection(experiences):
             experiences["obs"] = self.normalize_observation(experiences["obs"])
             experiences["next_obs"] = self.normalize_observation(
-                experiences["next_obs"]
+                experiences["next_obs"],
             )
         else:
             experiences = (
@@ -459,12 +469,13 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
     def __init__(self, agent: MultiAgentRLAlgorithm) -> None:
         super().__init__(agent)
 
-        assert (
-            self.agent.algo == "IPPO"
-        ), "AsyncAgentsWrapper is currently only supported for IPPO."
+        assert self.agent.algo == "IPPO", (
+            "AsyncAgentsWrapper is currently only supported for IPPO."
+        )
 
     def extract_inactive_agents(
-        self, obs: dict[str, ObservationType]
+        self,
+        obs: dict[str, ObservationType],
     ) -> tuple[dict[str, np.ndarray], dict[str, ObservationType]]:
         """Extract the inactive agents from an observation. Inspects each key in the
         observation dictionary and, if all the values are `np.nan` (as set by
@@ -546,9 +557,12 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         return stacked_experience
 
     def get_action(
-        self, obs: ObservationType, *args: Any, **kwargs: Any
+        self,
+        obs: ObservationType,
+        *args: Any,
+        **kwargs: Any,
     ) -> ActionReturnType:
-        """Returns the action from the agent. Since the environments may not return observations for all agents
+        """Return the action from the agent. Since the environments may not return observations for all agents
         at the same time, we need to extract the inactive agents from the observation and fill in placeholder
         values for their actions.
 
@@ -574,11 +588,14 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
             # Insert placeholder values for inactive agents
             action_dict[agent_id] = np.insert(
-                action_dict[agent_id], inactive_array, placeholder, axis=0
+                action_dict[agent_id],
+                inactive_array,
+                placeholder,
+                axis=0,
             )
 
         if isinstance(action_return, tuple):
-            action_return = (action_dict,) + action_return[1:]
+            action_return = (action_dict, *action_return[1:])
         else:
             action_return = action_dict
 
@@ -598,12 +615,13 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         :rtype: Any
         """
         states, actions, log_probs, rewards, dones, values, next_state, next_done = map(
-            self.stack_experiences, experiences
+            self.stack_experiences,
+            experiences,
         )
 
         # Handle case where we haven't collected a next state for each sub-agent
         for agent_id in self.agent.agent_ids:
-            agent_next_state: Optional[np.ndarray] = next_state.get(agent_id, None)
+            agent_next_state: np.ndarray | None = next_state.get(agent_id, None)
 
             # If we haven't collected a next state for this agent yet, we need to use
             # last collected state as next_state

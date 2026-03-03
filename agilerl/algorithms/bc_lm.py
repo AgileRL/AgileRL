@@ -1,13 +1,17 @@
-from typing import Any, Callable, Optional, Union
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 from agilerl.data.language_environment import Language_Observation, interact_environment
 from agilerl.data.rl_data import DataPoint, RL_Dataset
 from agilerl.modules.gpt import EvolvableGPT
+from agilerl.typing import NetConfigType
 from agilerl.utils.sampling_utils import (
     always_terminate,
     map_all_kvs,
@@ -21,10 +25,10 @@ class BC_LM(nn.Module):
     def __init__(
         self,
         dataset: RL_Dataset,
-        net_config,
-        device: Union[torch.device, str] = "cuda",
+        net_config: NetConfigType,
+        device: torch.device | str = "cuda",
         transition_weight: float = 0.0,
-    ):
+    ) -> None:
         super().__init__()
 
         self.dataset = dataset
@@ -51,19 +55,20 @@ class BC_LM(nn.Module):
     def forward(
         self,
         tokens: torch.Tensor,
-        attn_mask: Optional[torch.Tensor],
-        prefix_embs: Optional[torch.Tensor] = None,
-        prefix_attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None,
+        prefix_embs: torch.Tensor | None = None,
+        prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
-        **kwargs,
-    ):
-        # tokens – b,t
-        # attn_mask – b,t
-        # prefix_embs – b,t',d
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, Any]:
+        # tokens - b,t
+        # attn_mask - b,t
+        # prefix_embs - b,t',d
         # prefix_attn_mask - b, t'
         if prefix_embs is None:
             prefix_embs = torch.empty(
-                (tokens.shape[0], 0, self.h_dim), device=self.device
+                (tokens.shape[0], 0, self.h_dim),
+                device=self.device,
             )
         set_pos_ids = prefix_attn_mask is not None
         if prefix_attn_mask is not None and attn_mask is not None:
@@ -73,10 +78,11 @@ class BC_LM(nn.Module):
         position_ids = torch.cumsum(input_attn_mask, dim=1) - 1 if set_pos_ids else None
         if remove_prefix_position_embs:
             prefix_embs -= self.model.transformer.wpe(
-                position_ids[:, : prefix_embs.shape[1]]
+                position_ids[:, : prefix_embs.shape[1]],
             )
         input_embeddings = torch.cat(
-            (prefix_embs, self.model.transformer.wte(tokens)), dim=1
+            (prefix_embs, self.model.transformer.wte(tokens)),
+            dim=1,
         )
 
         model_outputs, _, model_past_key_values, _ = self.model(
@@ -87,7 +93,9 @@ class BC_LM(nn.Module):
         )
         return model_outputs, model_past_key_values
 
-    def get_weights(self, tokens: torch.Tensor, action_idxs: torch.Tensor):
+    def get_weights(
+        self, tokens: torch.Tensor, action_idxs: torch.Tensor
+    ) -> torch.Tensor:
         weights = torch.full(tokens.shape, self.transition_weight, device=self.device)
         if action_idxs.shape[1] == 0:
             n = torch.zeros((tokens.shape[0],), device=self.device).long()
@@ -102,7 +110,13 @@ class BC_LM(nn.Module):
             )
         return weights
 
-    def awac_loss(self, tokens, attn_mask, logits, w):
+    def awac_loss(
+        self,
+        tokens: torch.Tensor,
+        attn_mask: torch.Tensor,
+        logits: torch.Tensor,
+        w: torch.Tensor,
+    ) -> torch.Tensor:
         w = w.detach()
         losses = F.cross_entropy(
             logits[:, :-1, :].reshape(-1, logits.shape[-1]),
@@ -112,7 +126,9 @@ class BC_LM(nn.Module):
         losses = losses.reshape(tokens.shape[0], tokens.shape[1] - 1)
         return (losses * w[:, :-1] * attn_mask[:, 1:]).sum() / attn_mask[:, 1:].sum()
 
-    def get_loss(self, items):
+    def get_loss(
+        self, items: list[DataPoint] | dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, dict[str, tuple[float, float]], list[Any]]:
         prepared_inputs = self.prepare_inputs(items)
         tokens, attn_mask = prepared_inputs["tokens"], prepared_inputs["attn_mask"]
         a_idx = prepared_inputs["action_idxs"]
@@ -124,29 +140,31 @@ class BC_LM(nn.Module):
         logs["loss"] = (token_loss.item(), n)
         return token_loss, logs, []
 
-    def prepare_inputs(self, items):
+    def prepare_inputs(
+        self, items: list[DataPoint] | dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
         if isinstance(items, dict):
             return items
         return to(self.dataset.collate(items, self.device), self.device)
 
     def score(
         self,
-        model_args,
-        model_kwargs,
+        model_args: tuple[torch.Tensor, ...],
+        model_kwargs: dict[str, Any],
         temp: float = 1.0,
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
-    ):
+        top_k: int | None = None,
+        top_p: float | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         logits, _ = self(*model_args, **model_kwargs)
         logits = process_logits(logits, temp=temp, top_k=top_k, top_p=top_p)
         return torch.log(F.softmax(logits, dim=-1)), logits
 
     def get_scores(
         self,
-        items,
+        items: list[DataPoint] | dict[str, torch.Tensor],
         temp: float = 1.0,
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
     ) -> torch.Tensor:
         prepared_inputs = self.prepare_inputs(items)
         tokens, attn_mask = prepared_inputs["tokens"], prepared_inputs["attn_mask"]
@@ -163,10 +181,10 @@ class BC_LM(nn.Module):
 
     def initial_score(
         self,
-        items,
+        items: list[DataPoint] | dict[str, torch.Tensor],
         temp: float = 1.0,
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
     ) -> tuple[torch.Tensor, Any]:
         prepared_inputs = self.prepare_inputs(items)
         tokens = prepared_inputs["tokens"]
@@ -185,10 +203,10 @@ class BC_LM(nn.Module):
     def next_score(
         self,
         tokens: torch.Tensor,
-        obs: Any,
+        obs: Any,  # past_key_values
         temp: float = 1.0,
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
     ) -> tuple[torch.Tensor, Any]:
         scores, model_outputs = self.score(
             (
@@ -216,15 +234,15 @@ class BC_Policy:
         tokens: torch.Tensor,
         attn_mask: torch.Tensor,
         termination_condition: Callable[[np.ndarray], bool],
-        num_generations=1,
-        max_generation_len=None,
-        temp=1.0,
-        top_k=None,
-        top_p=None,
-        prefix_embs: Optional[torch.Tensor] = None,
-        prefix_attn_mask: Optional[torch.Tensor] = None,
+        num_generations: int = 1,
+        max_generation_len: int | None = None,
+        temp: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        prefix_embs: torch.Tensor | None = None,
+        prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
-    ):
+    ) -> tuple[list[tuple[list[str], list[list[str]], torch.Tensor]], torch.Tensor]:
         tokenizer = self.bc_lm.dataset.tokenizer
         max_length = self.bc_lm.dataset.max_len
         if max_length is None:
@@ -277,13 +295,19 @@ class BC_Policy:
         while termination_mask.sum() > 0 and (t + prefix_t) < max_length:
             curr_token = tokens[:, t - 1].unsqueeze(1)
             curr_dialogue_kvs = map_all_kvs(
-                lambda x: x[:, :, : (t + prefix_t) - 1, :], dialogue_kvs
+                lambda x, t=t: x[:, :, : (t + prefix_t) - 1, :],
+                dialogue_kvs,
             )
             logits, past_key_values = self.bc_lm(
-                curr_token, None, past_key_values=curr_dialogue_kvs, is_causal=False
+                curr_token,
+                None,
+                past_key_values=curr_dialogue_kvs,
+                is_causal=False,
             )
             logits[:, 0, tokenizer.pad_token_id] = torch.where(
-                termination_mask == 1, float("-inf"), 1e7
+                termination_mask == 1,
+                float("-inf"),
+                1e7,
             )
             logits[
                 torch.arange(0, n, device=device),
@@ -294,7 +318,8 @@ class BC_Policy:
                 torch.full((n,), 0, device=device),
                 tokens[:, t],
             ].masked_fill_(
-                t < dialogue_lens, 1e7
+                t < dialogue_lens,
+                1e7,
             )
             logits = process_logits(logits, temp=temp, top_k=top_k, top_p=top_p)
             cat_dist = torch.distributions.categorical.Categorical(logits=logits[:, 0])
@@ -314,8 +339,8 @@ class BC_Policy:
                             tokenizer.decode(
                                 tokens[idx, :].tolist(),
                                 clean_up_tokenization_spaces=False,
-                            )
-                        )
+                            ),
+                        ),
                     )
             t += 1
             termination_mask *= ((t - dialogue_lens) < max_generation_len).int()
@@ -334,19 +359,22 @@ class BC_Policy:
                 if tokenizer.id_to_token(tokenizer.pad_token_id) in processed_str:
                     processed_str = processed_str[
                         : processed_str.find(
-                            tokenizer.id_to_token(tokenizer.pad_token_id)
+                            tokenizer.id_to_token(tokenizer.pad_token_id),
                         )
                     ].strip()
                 if tokenizer.id_to_token(tokenizer.eoa_token_id) in processed_str:
                     processed_str = processed_str[
                         : processed_str.find(
-                            tokenizer.id_to_token(tokenizer.eoa_token_id)
+                            tokenizer.id_to_token(tokenizer.eoa_token_id),
                         )
                     ].strip()
                 temp_outputs.append(processed_str)
             processed_outputs.append(temp_outputs)
-        return list(zip(input_strs, processed_outputs)), log_probs.reshape(
-            -1, num_generations
+        return list(
+            zip(input_strs, processed_outputs, strict=False)
+        ), log_probs.reshape(
+            -1,
+            num_generations,
         )
 
     def beam_raw(
@@ -354,12 +382,12 @@ class BC_Policy:
         tokens: torch.Tensor,
         attn_mask: torch.Tensor,
         termination_condition: Callable[[np.ndarray], bool],
-        beam_width=1,
-        max_generation_len=None,
-        prefix_embs: Optional[torch.Tensor] = None,
-        prefix_attn_mask: Optional[torch.Tensor] = None,
+        beam_width: int = 1,
+        max_generation_len: int | None = None,
+        prefix_embs: torch.Tensor | None = None,
+        prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
-    ):
+    ) -> tuple[list[tuple[list[str], list[list[str]], torch.Tensor]], torch.Tensor]:
         tokenizer = self.bc_lm.dataset.tokenizer
         max_length = self.bc_lm.dataset.max_len
         if max_length is None:
@@ -389,7 +417,8 @@ class BC_Policy:
         dialogue_kvs = past_key_values
         original_dialogue_lens = attn_mask.sum(dim=1)
         batch_indicator = torch.stack(
-            beam_width * [torch.arange(0, bsize, device=device)], dim=1
+            beam_width * [torch.arange(0, bsize, device=device)],
+            dim=1,
         )
         tokens = pad_sequence(
             torch.repeat_interleave(tokens, beam_width, dim=0),
@@ -399,7 +428,9 @@ class BC_Policy:
             1,
         )
         dialogue_lens = torch.repeat_interleave(
-            original_dialogue_lens, beam_width, dim=0
+            original_dialogue_lens,
+            beam_width,
+            dim=0,
         )
         dialogue_kvs = map_all_kvs(
             lambda x: pad_sequence(
@@ -417,13 +448,19 @@ class BC_Policy:
         while termination_mask.sum() > 0 and (t + prefix_t) < max_length:
             curr_token = tokens[:, t - 1].unsqueeze(1)
             curr_dialogue_kvs = map_all_kvs(
-                lambda x: x[:, :, : (t + prefix_t) - 1, :], dialogue_kvs
+                lambda x, t=t: x[:, :, : (t + prefix_t) - 1, :],
+                dialogue_kvs,
             )
             logits, past_key_values = self.bc_lm(
-                curr_token, None, past_key_values=curr_dialogue_kvs, is_causal=False
+                curr_token,
+                None,
+                past_key_values=curr_dialogue_kvs,
+                is_causal=False,
             )
             logits[:, 0, tokenizer.pad_token_id] = torch.where(
-                termination_mask == 1, float("-inf"), 1e7
+                termination_mask == 1,
+                float("-inf"),
+                1e7,
             )
             logits[
                 torch.arange(0, n, device=device),
@@ -434,7 +471,8 @@ class BC_Policy:
                 torch.full((n,), 0, device=device),
                 tokens[:, t],
             ].masked_fill_(
-                t < dialogue_lens, 1e7
+                t < dialogue_lens,
+                1e7,
             )
             scores = (
                 (
@@ -453,14 +491,17 @@ class BC_Policy:
                 float("-inf"),
             )
             curr_scores, top_k = torch.topk(
-                scores[0, :, :], k=beam_width, dim=1
+                scores[0, :, :],
+                k=beam_width,
+                dim=1,
             )  # (batch, k), (batch, k)
             tokens = tokens[
-                (batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1), :
+                (batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1),
+                :,
             ]
             tokens[:, t] = top_k.reshape(-1) % vocab_size  # (batch*k,)
             fixed_dialogue_kvs = map_all_kvs(
-                lambda x: x[
+                lambda x, top_k=top_k: x[
                     (batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1),
                     :,
                     :,
@@ -469,7 +510,7 @@ class BC_Policy:
                 past_key_values,
             )
             dialogue_kvs = map_all_kvs(
-                lambda x: x[
+                lambda x, top_k=top_k: x[
                     (batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1),
                     :,
                     :,
@@ -496,8 +537,8 @@ class BC_Policy:
                             tokenizer.decode(
                                 tokens[idx, :].tolist(),
                                 clean_up_tokenization_spaces=False,
-                            )
-                        )
+                            ),
+                        ),
                     )
             t += 1
             termination_mask *= ((t - dialogue_lens) < max_generation_len).int()
@@ -515,22 +556,25 @@ class BC_Policy:
                 if tokenizer.id_to_token(tokenizer.pad_token_id) in processed_str:
                     processed_str = processed_str[
                         : processed_str.find(
-                            tokenizer.id_to_token(tokenizer.pad_token_id)
+                            tokenizer.id_to_token(tokenizer.pad_token_id),
                         )
                     ].strip()
                 if tokenizer.id_to_token(tokenizer.eoa_token_id) in processed_str:
                     processed_str = processed_str[
                         : processed_str.find(
-                            tokenizer.id_to_token(tokenizer.eoa_token_id)
+                            tokenizer.id_to_token(tokenizer.eoa_token_id),
                         )
                     ].strip()
                 temp_outputs.append(processed_str)
             processed_outputs.append(temp_outputs)
-        return list(zip(input_strs, processed_outputs)), curr_scores
+        return list(zip(input_strs, processed_outputs, strict=False)), curr_scores
 
     def generate(
-        self, items, termination_condition: Callable[[np.ndarray], bool], **kwargs
-    ):
+        self,
+        items: list[DataPoint] | dict[str, torch.Tensor],
+        termination_condition: Callable[[np.ndarray], bool],
+        **kwargs: Any,
+    ) -> tuple[list[tuple[list[str], list[list[str]], torch.Tensor]], torch.Tensor]:
         prepared_inputs = self.bc_lm.prepare_inputs(items)
         tokens, attn_mask = prepared_inputs["tokens"], prepared_inputs["attn_mask"]
         if self.kind == "beam":
@@ -544,71 +588,85 @@ class BC_Policy:
 
     def act(self, obs: Language_Observation) -> str:
         item = DataPoint.from_obs(
-            obs, self.bc_lm.dataset.tokenizer, self.bc_lm.dataset.token_reward
+            obs,
+            self.bc_lm.dataset.tokenizer,
+            self.bc_lm.dataset.token_reward,
         )
         generations, probs = self.generate(
-            [item], always_terminate, **self.generation_kwargs
+            [item],
+            always_terminate,
+            **self.generation_kwargs,
         )
-        sorted_outputs = list(
-            zip(*sorted(zip(generations[0][1], probs[0]), key=lambda x: -x[1]))
-        )[0]
+        sorted_outputs = next(
+            zip(
+                *sorted(
+                    zip(generations[0][1], probs[0], strict=False), key=lambda x: -x[1]
+                ),
+                strict=False,
+            )
+        )
         return sorted_outputs[0]
 
-    def train(self):
+    def train(self) -> None:
         self.bc_lm.train()
 
-    def eval(self):
+    def eval(self) -> None:
         self.bc_lm.eval()
 
 
 class BC_Evaluator:
-    def __init__(self, env, verbose: bool, kind: str, **generation_kwargs) -> None:
+    def __init__(
+        self,
+        env: Any,  # ParallelEnv or similar
+        verbose: bool,
+        kind: str,
+        **generation_kwargs: Any,
+    ) -> None:
         super().__init__()
         self.env = env
         self.verbose = verbose
         self.kind = kind
         self.generation_kwargs = generation_kwargs
 
-    def evaluate(self, model: BC_LM, items):
+    def evaluate(
+        self,
+        model: BC_LM,
+        items: list[DataPoint] | dict[str, torch.Tensor],
+    ) -> dict[str, tuple[float, int]]:
         policy = BC_Policy(model, self.kind, **self.generation_kwargs)
         tokens = model.prepare_inputs(items)["tokens"]
         n = tokens.shape[0]
         total_token_reward = 0
         total_env_reward = 0
-        for i in range(n):
+        for _i in range(n):
             result, sequence = interact_environment(self.env, policy, None)
-            env_reward = sum(map(lambda x: x[2], sequence))
+            env_reward = sum(x[2] for x in sequence)
             token_reward = sum(
                 DataPoint.get_token_reward(
-                    result, model.dataset.tokenizer, model.dataset.token_reward
-                )
+                    result,
+                    model.dataset.tokenizer,
+                    model.dataset.token_reward,
+                ),
             )
             total_env_reward += env_reward
             total_token_reward += token_reward
             if self.verbose:
-                print(result)
-                print("=" * 25)
-                print("token reward:", token_reward)
-                print("env reward:", env_reward)
-                print("avg token reward:", total_token_reward / (i + 1))
-                print("avg env reward:", total_env_reward / (i + 1))
-                print("=" * 25)
+                pass
         return {
             "token_reward": (total_token_reward / n, n),
             "env_reward": (total_env_reward / n, n),
         }
 
 
-def to(item: Any, device: torch.device):
+def to(item: Any, device: torch.device | str) -> Any:
     return map_pytree(lambda x: torch.tensor(x, device=device), item)
 
 
-def map_pytree(f: Callable[[Union[np.ndarray, torch.Tensor]], Any], item: Any):
+def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any) -> Any:
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
-    elif isinstance(item, list) or isinstance(item, set) or isinstance(item, tuple):
+    if isinstance(item, (list, set, tuple)):
         return [map_pytree(f, v) for v in item]
-    elif isinstance(item, np.ndarray) or isinstance(item, torch.Tensor):
+    if isinstance(item, (np.ndarray, torch.Tensor)):
         return f(item)
-    else:
-        return item
+    return item

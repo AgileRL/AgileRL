@@ -21,7 +21,9 @@ def test_convert_path():
     path = "example_path"
     converted_path = convert_path(path)
     assert converted_path == os.path.join(
-        os.path.dirname(os.path.realpath("agilerl/utils/ilql_utils.py")), "../../", path
+        os.path.dirname(os.path.realpath("agilerl/utils/ilql_utils.py")),
+        "../../",
+        path,
     )
 
 

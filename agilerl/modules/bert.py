@@ -1,10 +1,10 @@
 import math
 import warnings
 from collections import OrderedDict
-from typing import Any, Optional
+from typing import Any
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 
@@ -53,7 +53,7 @@ class EvolvableBERT(EvolvableModule):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
-    :type random_seed: Optional[int]
+    :type random_seed: int | None
     """
 
     def __init__(
@@ -76,7 +76,7 @@ class EvolvableBERT(EvolvableModule):
         max_decoder_layers: int = 12,
         device: str = "cpu",
         name: str = "bert",
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
     ) -> None:
         super().__init__(device, random_seed)
 
@@ -122,14 +122,16 @@ class EvolvableBERT(EvolvableModule):
     def activation(self, activation: str) -> None:
         self._activation = activation
 
-    def build_networks(self):
-        """Creates and returns transformer neural network."""
+    def build_networks(
+        self,
+    ) -> tuple[nn.ModuleDict, nn.ModuleDict]:
+        """Create and returns transformer neural network."""
         encoder_dict = OrderedDict()
         decoder_dict = OrderedDict()
 
         # Create the encoder
         for n, dim_feedfwd in enumerate(self.encoder_layers):
-            encoder_dict[f"{self.name}_encoder_layer_{str(n)}"] = (
+            encoder_dict[f"{self.name}_encoder_layer_{n!s}"] = (
                 nn.modules.TransformerEncoderLayer(
                     self.d_model,
                     self.n_head,
@@ -145,13 +147,15 @@ class EvolvableBERT(EvolvableModule):
         if self.encoder_norm:
             encoder_dict[f"{self.name}_encoder_norm_0"] = (
                 nn.modules.normalization.LayerNorm(
-                    self.d_model, eps=self.layer_norm_eps, device=self.device
+                    self.d_model,
+                    eps=self.layer_norm_eps,
+                    device=self.device,
                 )
             )
 
         # Create the decoder
         for n, dim_feedfwd in enumerate(self.decoder_layers):
-            decoder_dict[f"{self.name}_decoder_layer_{str(n)}"] = (
+            decoder_dict[f"{self.name}_decoder_layer_{n!s}"] = (
                 nn.modules.TransformerDecoderLayer(
                     self.d_model,
                     self.n_head,
@@ -167,7 +171,9 @@ class EvolvableBERT(EvolvableModule):
         if self.decoder_norm:
             decoder_dict[f"{self.name}_decoder_norm_0"] = (
                 nn.modules.normalization.LayerNorm(
-                    self.d_model, eps=self.layer_norm_eps, device=self.device
+                    self.d_model,
+                    eps=self.layer_norm_eps,
+                    device=self.device,
                 )
             )
 
@@ -175,8 +181,8 @@ class EvolvableBERT(EvolvableModule):
 
         return nn.ModuleDict(encoder_dict), nn.ModuleDict(decoder_dict)
 
-    def generate_square_subsequent_mask(self, sz):
-        """Returns a square mask for the sequence that prevents the model from looking into the future words when
+    def generate_square_subsequent_mask(self, sz: int) -> torch.Tensor:
+        """Return a square mask for the sequence that prevents the model from looking into the future words when
         making predictions.
         The masked positions are filled with float('-inf'). Unmasked positions are filled with float(0.0).
 
@@ -184,19 +190,22 @@ class EvolvableBERT(EvolvableModule):
         :type sz: int
         """
         mask = (torch.triu(torch.ones((sz, sz), device=self.device)) == 1).transpose(
-            0, 1
+            0,
+            1,
         )
-        mask = (
+        return (
             mask.float()
             .masked_fill(mask == 0, float("-inf"))
-            .masked_fill(mask == 1, float(0.0))
+            .masked_fill(mask == 1, 0.0)
         )
-        return mask
 
     def create_mask(
-        self, src: torch.Tensor, tgt: torch.Tensor, pad_idx: int
+        self,
+        src: torch.Tensor,
+        tgt: torch.Tensor,
+        pad_idx: int,
     ) -> tuple[torch.Tensor, ...]:
-        """Returns masks to hide source and target padding tokens.
+        """Return masks to hide source and target padding tokens.
 
         :param src: Source
         :type src: torch.Tensor
@@ -210,7 +219,7 @@ class EvolvableBERT(EvolvableModule):
 
         tgt_mask = self.generate_square_subsequent_mask(tgt_seq_len)
         src_mask = torch.zeros((src_seq_len, src_seq_len), device=self.device).type(
-            torch.bool
+            torch.bool,
         )
 
         src_padding_mask = (src == pad_idx).transpose(0, 1)
@@ -222,7 +231,7 @@ class EvolvableBERT(EvolvableModule):
             tgt_padding_mask.to(self.device),
         )
 
-    def _reset_parameters(self):
+    def _reset_parameters(self) -> None:
         """Initiate parameters in the transformer model."""
         for p in self.parameters():
             if p.dim() > 1:
@@ -232,40 +241,43 @@ class EvolvableBERT(EvolvableModule):
         self,
         src: torch.Tensor,
         tgt: torch.Tensor,
-        src_mask: Optional[torch.Tensor] = None,
-        tgt_mask: Optional[torch.Tensor] = None,
-        memory_mask: Optional[torch.Tensor] = None,
-        src_key_padding_mask: Optional[torch.Tensor] = None,
-        tgt_key_padding_mask: Optional[torch.Tensor] = None,
-        memory_key_padding_mask: Optional[torch.Tensor] = None,
+        src_mask: torch.Tensor | None = None,
+        tgt_mask: torch.Tensor | None = None,
+        memory_mask: torch.Tensor | None = None,
+        src_key_padding_mask: torch.Tensor | None = None,
+        tgt_key_padding_mask: torch.Tensor | None = None,
+        memory_key_padding_mask: torch.Tensor | None = None,
         is_causal: bool = False,
     ) -> torch.Tensor:
-        """Returns output of neural network.
+        """Return output of neural network.
 
         :param src: Encoder input sequence
         :type src: torch.Tensor
         :param tgt: Decoder input sequence
         :type tgt: torch.Tensor
         :param src_mask: Additive mask for the src sequence, defaults to None
-        :type src_mask: Optional[torch.Tensor], optional
+        :type src_mask: torch.Tensor | None, optional
         :param tgt_mask: Additive mask for the tgt sequence, defaults to None
-        :type tgt_mask: Optional[torch.Tensor], optional
+        :type tgt_mask: torch.Tensor | None, optional
         :param memory_mask: Additive mask for the encoder output, defaults to None
-        :type memory_mask: Optional[torch.Tensor], optional
+        :type memory_mask: torch.Tensor | None, optional
         :param src_key_padding_mask: Tensor mask for src keys per batch, defaults to None
-        :type src_key_padding_mask: Optional[torch.Tensor], optional
+        :type src_key_padding_mask: torch.Tensor | None, optional
         :param tgt_key_padding_mask: Tensor mask for tgt keys per batch, defaults to None
-        :type tgt_key_padding_mask: Optional[torch.Tensor], optional
+        :type tgt_key_padding_mask: torch.Tensor | None, optional
         :param memory_key_padding_mask: Tensor mask for memory keys per batch, defaults to None
-        :type memory_key_padding_mask: Optional[torch.Tensor], optional
+        :type memory_key_padding_mask: torch.Tensor | None, optional
         :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product attention, defaults to False
         :type is_causal: bool, optional
         """
-        encoder_output, encoder_hidden_states = self.encode(
-            src, src_mask, src_key_padding_mask, is_causal
+        encoder_output, _encoder_hidden_states = self.encode(
+            src,
+            src_mask,
+            src_key_padding_mask,
+            is_causal,
         )
         memory = encoder_output
-        decoder_output, decoder_hidden_states = self.decode(
+        decoder_output, _decoder_hidden_states = self.decode(
             tgt,
             memory,
             tgt_mask,
@@ -282,11 +294,11 @@ class EvolvableBERT(EvolvableModule):
     def encode(
         self,
         src: torch.Tensor,
-        src_mask: Optional[torch.Tensor] = None,
-        src_key_padding_mask: Optional[torch.Tensor] = None,
+        src_mask: torch.Tensor | None = None,
+        src_key_padding_mask: torch.Tensor | None = None,
         is_causal: bool = False,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
-        """Returns encoded transformer input.
+        """Return encoded transformer input.
 
         :param src: Encoder input sequence
         :type src: torch.Tensor
@@ -329,15 +341,14 @@ class EvolvableBERT(EvolvableModule):
         # Prevent type refinement
         make_causal = is_causal is True
 
-        if is_causal is None:
-            if src_mask is not None:
-                sz = src_mask.size(0)
-                causal_comparison = torch.triu(
-                    torch.ones(sz, sz, device=src_mask.device) * float("-inf"),
-                    diagonal=1,
-                ).to(src_mask.dtype)
-                if torch.equal(src_mask, causal_comparison):
-                    make_causal = True
+        if is_causal is None and src_mask is not None:
+            sz = src_mask.size(0)
+            causal_comparison = torch.triu(
+                torch.ones(sz, sz, device=src_mask.device) * float("-inf"),
+                diagonal=1,
+            ).to(src_mask.dtype)
+            if torch.equal(src_mask, causal_comparison):
+                make_causal = True
         is_causal = make_causal
 
         all_hidden_states = ()
@@ -345,32 +356,32 @@ class EvolvableBERT(EvolvableModule):
         # Encoder forward pass
         for key in self.encoder_keys:
             if "norm" not in key:
-                all_hidden_states = all_hidden_states + (encoder_output,)
+                all_hidden_states = (*all_hidden_states, encoder_output)
                 encoder_output = self.encoder[key](
                     encoder_output,
                     src_mask=src_mask,
                     is_causal=is_causal,
                     src_key_padding_mask=src_key_padding_mask_for_layers,
                 )
-        all_hidden_states = all_hidden_states + (encoder_output,)
+        all_hidden_states = (*all_hidden_states, encoder_output)
         if convert_to_nested:
             encoder_output = encoder_output.to_padded_tensor(0.0)
-            all_hidden_states = all_hidden_states + (encoder_output,)
+            all_hidden_states = (*all_hidden_states, encoder_output)
         if "encoder_norm_0" in self.encoder_keys:
             encoder_output = self.encoder["encoder_norm_0"](encoder_output)
-            all_hidden_states = all_hidden_states + (encoder_output,)
+            all_hidden_states = (*all_hidden_states, encoder_output)
         return encoder_output, all_hidden_states
 
     def decode(
         self,
         tgt: torch.Tensor,
         memory: torch.Tensor,
-        tgt_mask: Optional[torch.Tensor] = None,
-        memory_mask: Optional[torch.Tensor] = None,
-        tgt_key_padding_mask: Optional[torch.Tensor] = None,
-        memory_key_padding_mask: Optional[torch.Tensor] = None,
+        tgt_mask: torch.Tensor | None = None,
+        memory_mask: torch.Tensor | None = None,
+        tgt_key_padding_mask: torch.Tensor | None = None,
+        memory_key_padding_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
-        """Returns decoded transformer input.
+        """Return decoded transformer input.
 
         :param tgt: Decoder input sequence
         :type tgt: torch.Tensor
@@ -394,7 +405,7 @@ class EvolvableBERT(EvolvableModule):
         decoder_output = tgt
         for key in self.decoder_keys:
             if "norm" not in key:
-                all_hidden_states = all_hidden_states + (decoder_output,)
+                all_hidden_states = (*all_hidden_states, decoder_output)
                 decoder_output = self.decoder[key](
                     decoder_output,
                     memory,
@@ -403,10 +414,10 @@ class EvolvableBERT(EvolvableModule):
                     tgt_key_padding_mask=tgt_key_padding_mask,
                     memory_key_padding_mask=memory_key_padding_mask,
                 )
-        all_hidden_states = all_hidden_states + (decoder_output,)
+        all_hidden_states = (*all_hidden_states, decoder_output)
         if "decoder_norm_0" in self.decoder_keys:
             decoder_output = self.decoder["decoder_norm_0"](decoder_output)
-            all_hidden_states = all_hidden_states + (decoder_output,)
+            all_hidden_states = (*all_hidden_states, decoder_output)
         return decoder_output, all_hidden_states
 
     def check_encoder_sparsity_fast_path(
@@ -419,7 +430,7 @@ class EvolvableBERT(EvolvableModule):
         src_key_padding_mask: torch.Tensor,
         src_key_padding_mask_for_layers: torch.Tensor,
     ) -> tuple[torch.Tensor, bool, torch.Tensor]:
-        """Returns encoder output, conversion to nested and padding mask depending on if sparsity fast path possible.
+        """Return encoder output, conversion to nested and padding mask depending on if sparsity fast path possible.
         :param src: Encoder input sequence
         :type src: torch.Tensor
         :param output: Encoder output sequence
@@ -433,7 +444,7 @@ class EvolvableBERT(EvolvableModule):
         :param src_key_padding_mask: Tensor mask for src keys per batch
         :type src_key_padding_mask: torch.Tensor
         :param src_key_padding_mask_for_layers: Tensor mask for src keys per batch for layers
-        :type src_key_padding_mask_for_layers: torch.Tensor
+        :type src_key_padding_mask_for_layers: torch.Tensor.
         """
         convert_to_nested = False
         if (
@@ -446,7 +457,8 @@ class EvolvableBERT(EvolvableModule):
             and src.dim() == 3
             and src_key_padding_mask is not None
             and torch._nested_tensor_from_mask_left_aligned(
-                src, src_key_padding_mask.logical_not()
+                src,
+                src_key_padding_mask.logical_not(),
             )
             and not output.is_nested
             and mask is None
@@ -476,14 +488,16 @@ class EvolvableBERT(EvolvableModule):
             ):
                 convert_to_nested = True
                 output = torch._nested_tensor_from_mask(
-                    output, src_key_padding_mask.logical_not(), mask_check=False
+                    output,
+                    src_key_padding_mask.logical_not(),
+                    mask_check=False,
                 )
                 src_key_padding_mask_for_layers = None
 
         return output, convert_to_nested, src_key_padding_mask_for_layers
 
     def count_parameters(self, without_layer_norm: bool = False) -> int:
-        """Returns number of parameters in neural network.
+        """Return number of parameters in neural network.
 
         :param without_layer_norm: Exclude normalization layers, defaults to False
         :type without_layer_norm: bool, optional
@@ -495,32 +509,32 @@ class EvolvableBERT(EvolvableModule):
         return count
 
     @mutation(MutationType.LAYER)
-    def add_encoder_layer(self):
-        """Adds an encoder layer to transformer."""
+    def add_encoder_layer(self) -> None:
+        """Add an encoder layer to transformer."""
         if len(self.encoder_layers) < self.max_encoder_layers:
             self.encoder_layers += [self.encoder_layers[-1]]
         # else:
         #     self.add_node()
 
     @mutation(MutationType.LAYER)
-    def add_decoder_layer(self):
-        """Adds a decoder layer to transformer."""
+    def add_decoder_layer(self) -> None:
+        """Add a decoder layer to transformer."""
         if len(self.decoder_layers) < self.max_decoder_layers:
             self.decoder_layers += [self.decoder_layers[-1]]
         # else:
         #     self.add_node()
 
     @mutation(MutationType.LAYER)
-    def remove_encoder_layer(self):
-        """Removes an encoder layer from transformer."""
+    def remove_encoder_layer(self) -> None:
+        """Remove an encoder layer from transformer."""
         if len(self.encoder_layers) > 1:
             self.encoder_layers = self.encoder_layers[:-1]
         # else:
         #     self.add_node()
 
     @mutation(MutationType.LAYER)
-    def remove_decoder_layer(self):
-        """Removes a decoder layer from transformer."""
+    def remove_decoder_layer(self) -> None:
+        """Remove a decoder layer from transformer."""
         if len(self.decoder_layers) > 1:
             self.decoder_layers = self.decoder_layers[:-1]
         # else:
@@ -529,11 +543,11 @@ class EvolvableBERT(EvolvableModule):
     @mutation(MutationType.NODE)
     def add_node(
         self,
-        network: Optional[str] = None,
-        hidden_layer: Optional[int] = None,
-        numb_new_nodes: Optional[int] = None,
+        network: str | None = None,
+        hidden_layer: int | None = None,
+        numb_new_nodes: int | None = None,
     ) -> dict[str, Any]:
-        """Adds nodes to hidden layer of encoder/decoder.
+        """Add nodes to hidden layer of encoder/decoder.
 
         :param network: Network to add node to, 'encoder' or 'decoder', defaults to None
         :type network: str, optional
@@ -575,18 +589,18 @@ class EvolvableBERT(EvolvableModule):
     @mutation(MutationType.NODE)
     def remove_node(
         self,
-        network: Optional[str] = None,
-        hidden_layer: Optional[int] = None,
-        numb_new_nodes: Optional[int] = None,
+        network: str | None = None,
+        hidden_layer: int | None = None,
+        numb_new_nodes: int | None = None,
     ) -> dict[str, Any]:
-        """Removes nodes from hidden layer of encoder/decoder.
+        """Remove nodes from hidden layer of encoder/decoder.
 
         :param network: Network to remove node from, 'encoder' or 'decoder', defaults to None
-        :type network: Optional[str], optional
+        :type network: str | None, optional
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
-        :type hidden_layer: Optional[int], optional
+        :type hidden_layer: int | None, optional
         :param numb_new_nodes: Number of nodes to remove from hidden layer, defaults to None
-        :type numb_new_nodes: Optional[int], optional
+        :type numb_new_nodes: int | None, optional
 
         :return: Dictionary containing hidden layer, number of removed nodes and network
         :rtype: dict[str, Any]
@@ -625,10 +639,12 @@ class EvolvableBERT(EvolvableModule):
         new_encoder, new_decoder = self.build_networks()
 
         new_encoder = EvolvableModule.preserve_parameters(
-            old_net=self.encoder, new_net=new_encoder
+            old_net=self.encoder,
+            new_net=new_encoder,
         )
         self.decoder = EvolvableModule.preserve_parameters(
-            old_net=self.decoder, new_net=new_decoder
+            old_net=self.decoder,
+            new_net=new_decoder,
         )
 
         self.encoder = new_encoder
@@ -636,21 +652,21 @@ class EvolvableBERT(EvolvableModule):
 
 
 def _canonical_mask(
-    mask: Optional[torch.Tensor],
+    mask: torch.Tensor | None,
     mask_name: str,
-    other_type: Optional[torch.dtype],
+    other_type: torch.dtype | None,
     other_name: str,
     target_type: torch.dtype,
     check_other: bool = True,
-) -> Optional[torch.Tensor]:
-    """Returns canonical mask. Adapted from torch.nn.functional.
+) -> torch.Tensor | None:
+    """Return canonical mask. Adapted from torch.nn.functional.
 
     :param mask: Input mask tensor
-    :type mask: Optional[torch.Tensor]
+    :type mask: torch.Tensor | None
     :param mask_name: Name of the mask
     :type mask_name: str
     :param other_type: Data type of the other tensor
-    :type other_type: Optional[torch.dtype]
+    :type other_type: torch.dtype | None
     :param other_name: Name of the other tensor
     :type other_name: str
     :param target_type: Target data type for the mask
@@ -658,24 +674,26 @@ def _canonical_mask(
     :param check_other: Flag to check other tensor type, defaults to True
     :type check_other: bool, optional
     :return: Canonical mask tensor
-    :rtype: Optional[torch.Tensor]
+    :rtype: torch.Tensor | None
     """
     if mask is not None:
         _mask_dtype = mask.dtype
         _mask_is_float = torch.is_floating_point(mask)
         if _mask_dtype != torch.bool and not _mask_is_float:
+            msg = f"only bool and floating types of {mask_name} are supported"
             raise AssertionError(
-                f"only bool and floating types of {mask_name} are supported"
+                msg,
             )
-        if check_other and other_type is not None:
-            if _mask_dtype != other_type:
-                warnings.warn(
-                    f"Support for mismatched {mask_name} and {other_name} "
-                    "is deprecated. Use same type for both instead."
-                )
+        if check_other and other_type is not None and _mask_dtype != other_type:
+            warnings.warn(
+                f"Support for mismatched {mask_name} and {other_name} "
+                "is deprecated. Use same type for both instead.",
+                stacklevel=2,
+            )
         if not _mask_is_float:
             mask = torch.zeros_like(mask, dtype=target_type).masked_fill_(
-                mask, float("-inf")
+                mask,
+                float("-inf"),
             )
     return mask
 
@@ -710,7 +728,7 @@ class PositionalEncoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through positional encoder.
         :param x: Input to positional encoder, shape [seq_len, batch_size, embedding_dim]
-        :type x: torch.Tensor
+        :type x: torch.Tensor.
         """
         return self.dropout(x + self.pos_embedding[: x.size(0), :])
 
@@ -720,15 +738,15 @@ class PositionalEncoding(nn.Module):
     Converts tensor of input indices into corresponding tensor of position embeddings.
     """
 
-    def __init__(self, max_positions: int, emb_size: int):
+    def __init__(self, max_positions: int, emb_size: int) -> None:
         super().__init__()
         self.embedding = nn.Embedding(max_positions, emb_size)
         self.emb_size = emb_size
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         """Forward pass through position embedding module.
         :param tokens: Tokens to embed
-        :type tokens: torch.Tensor
+        :type tokens: torch.Tensor.
         """
         return self.embedding(tokens)
 
@@ -743,7 +761,7 @@ class TokenEmbedding(nn.Module):
     :type emb_size: int
     """
 
-    def __init__(self, vocab_size: int, emb_size: int):
+    def __init__(self, vocab_size: int, emb_size: int) -> None:
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, emb_size)
         self.emb_size = emb_size
@@ -751,19 +769,20 @@ class TokenEmbedding(nn.Module):
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         """Forward pass through token embedding module.
         :param tokens: Tokens to embed
-        :type tokens: torch.Tensor
+        :type tokens: torch.Tensor.
         """
         # return self.embedding(tokens.long()) * math.sqrt(self.emb_size)
         return self.embedding(tokens)
 
 
-def _none_or_dtype(input: Any) -> Optional[torch.dtype]:
-    """Returns None or dtype of input. Adapted from torch.nn.functional.
+def _none_or_dtype(input: Any) -> torch.dtype | None:
+    """Return None or dtype of input. Adapted from torch.nn.functional.
     :param input: Input to return dtype of
-    :type input: Any
+    :type input: Any.
     """
     if input is None:
         return None
-    elif isinstance(input, torch.Tensor):
+    if isinstance(input, torch.Tensor):
         return input.dtype
-    raise RuntimeError("input to _none_or_dtype() must be None or torch.Tensor")
+    msg = "input to _none_or_dtype() must be None or torch.Tensor"
+    raise RuntimeError(msg)

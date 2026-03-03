@@ -11,6 +11,7 @@ from agilerl.data.rl_data import (
     DataPoint,
     Iterable_RL_Dataset,
     List_RL_Dataset,
+    RL_Dataset,
     SpecifiedTokenReward,
     TokenReward,
 )
@@ -47,12 +48,10 @@ class WordleTokenizer(Tokenizer):
         if isinstance(str_, str):
             special_idxs = []
             for special_char in self.special_vocab:
-                special_idxs += list(
-                    map(
-                        lambda x: (x.start(), x.end(), self.token_to_id(special_char)),
-                        re.finditer(re.escape(special_char), str_),
-                    )
-                )
+                special_idxs += [
+                    (x.start(), x.end(), self.token_to_id(special_char))
+                    for x in re.finditer(re.escape(special_char), str_)
+                ]
             special_idxs.sort(key=lambda x: x[0])
             tokens = []
             curr = 0
@@ -62,25 +61,25 @@ class WordleTokenizer(Tokenizer):
                 curr = e
             tokens.extend([self.token_to_id(c) for c in str_[curr:]])
             return tokens, [int(t != self.pad_token_id) for t in tokens]
-        elif isinstance(str_, list):
-            tokens, pads = zip(*[self.encode(item) for item in str_])
+        if isinstance(str_, list):
+            tokens, pads = zip(*[self.encode(item) for item in str_], strict=False)
             max_len = max(map(len, tokens))
             return [
                 list(item) + ([self.pad_token_id] * (max_len - len(item)))
                 for item in tokens
             ], [list(item) + ([0] * (max_len - len(item))) for item in pads]
-        else:
-            raise ValueError("str_ must be a string or a list of strings")
+        msg = "str_ must be a string or a list of strings"
+        raise ValueError(msg)
 
     def decode(self, tokens, **kwargs):
         if len(tokens) == 0:
             return ""
         if not isinstance(tokens[0], list):
             return "".join([self.id_to_token(item) for item in tokens])
-        elif isinstance(tokens[0], list):
+        if isinstance(tokens[0], list):
             return [self.decode(item) for item in tokens]
-        else:
-            raise ValueError("tokens must be a list of ints or a list of lists of ints")
+        msg = "tokens must be a list of ints or a list of lists of ints"
+        raise ValueError(msg)
 
     def num_tokens(self):
         return len(self.vocab)
@@ -317,3 +316,122 @@ def test_tokenizer_base_class():
     assert tok.bos_token_id == 3
     assert tok.boa_token_id == 4
     assert tok.eod_token_id == 5
+
+
+def test_rl_dataset_base_iter():
+    RL_Dataset.__abstractmethods__ = set()
+
+    dataset = RL_Dataset(WordleTokenizer(), ConstantTokenReward(0), max_len=None)
+    iterator = dataset.__iter__()
+
+    assert iterator is None
+
+
+def test_list_rl_dataset_iter():
+    class DummyListDataset(List_RL_Dataset):
+        def __init__(self):
+            super().__init__(WordleTokenizer(), ConstantTokenReward(0), max_len=None)
+            self.items = [
+                DataPoint(
+                    raw_str="a",
+                    tokens=[1],
+                    state_idxs=[0],
+                    action_idxs=[],
+                    rewards=[],
+                    terminals=[1],
+                    utterance_state_idxs=[0],
+                    utterance_action_idxs=[],
+                    utterance_rewards=[],
+                    utterance_terminals=[1],
+                ),
+                DataPoint(
+                    raw_str="b",
+                    tokens=[2],
+                    state_idxs=[0],
+                    action_idxs=[],
+                    rewards=[],
+                    terminals=[0],
+                    utterance_state_idxs=[0],
+                    utterance_action_idxs=[],
+                    utterance_rewards=[],
+                    utterance_terminals=[0],
+                ),
+            ]
+
+        def get_item(self, idx):
+            return self.items[idx]
+
+        def size(self):
+            return len(self.items)
+
+    dataset = DummyListDataset()
+    out = list(dataset)
+
+    assert len(out) == 2
+    assert out[0].raw_str == "a"
+    assert out[1].raw_str == "b"
+
+
+def test_iterable_rl_dataset_iter():
+    class DummyIterableDataset(Iterable_RL_Dataset):
+        def __init__(self):
+            super().__init__(WordleTokenizer(), ConstantTokenReward(0), max_len=None)
+            self.idx = 0
+            self.items = [
+                DataPoint(
+                    raw_str="x",
+                    tokens=[1],
+                    state_idxs=[0],
+                    action_idxs=[],
+                    rewards=[],
+                    terminals=[0],
+                    utterance_state_idxs=[0],
+                    utterance_action_idxs=[],
+                    utterance_rewards=[],
+                    utterance_terminals=[0],
+                ),
+                DataPoint(
+                    raw_str="y",
+                    tokens=[2],
+                    state_idxs=[0],
+                    action_idxs=[],
+                    rewards=[],
+                    terminals=[1],
+                    utterance_state_idxs=[0],
+                    utterance_action_idxs=[],
+                    utterance_rewards=[],
+                    utterance_terminals=[1],
+                ),
+            ]
+
+        def sample_item(self):
+            item = self.items[self.idx % len(self.items)]
+            self.idx += 1
+            return item
+
+    dataset = DummyIterableDataset()
+    iterator = iter(dataset)
+
+    first = next(iterator)
+    second = next(iterator)
+
+    assert first.raw_str == "x"
+    assert second.raw_str == "y"
+
+
+def test_dp_from_obs_empty_sequence_non_terminal():
+    class EmptyLangObs(Language_Observation):
+        def to_sequence(self, **kwargs):
+            return [], False
+
+    lang_obs = EmptyLangObs()
+    tokenizer = WordleTokenizer()
+    token_reward = ConstantTokenReward(1)
+
+    dp = DataPoint.from_obs(lang_obs, tokenizer, token_reward, meta=None)
+
+    assert isinstance(dp, DataPoint)
+    assert dp.raw_str == tokenizer.id_to_token(tokenizer.boa_token_id)
+    assert dp.action_idxs == []
+    assert dp.rewards == []
+    assert dp.terminals == [0]

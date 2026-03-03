@@ -352,3 +352,130 @@ def test_replace_dataloader_collate_fn():
 
     # Check that tensors have the expected dimensions
     assert samples["state"].shape[0] == batch_size
+
+
+def test_distributed_sampler_with_non_replay_buffer_dataset():
+    class FakeDataset:
+        def __init__(self):
+            self.buffer = object()  # Not a ReplayBuffer
+            self.batch_size = 1
+
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, idx):
+            return TensorDict({"state": torch.tensor([idx])}, batch_size=[1])
+
+    dataset = FakeDataset()
+    dataloader = DataLoader(dataset, batch_size=None)
+
+    with pytest.warns(UserWarning, match="Dataset is not an agilerl ReplayDataset"):
+        sampler = Sampler(memory=None, dataset=dataset, dataloader=dataloader)
+
+    # For non-ReplayBuffer datasets, dataloader should not be replaced
+    assert sampler.dataloader is dataloader
+
+
+def test_distributed_sampler_warns_for_non_replaydataset():
+    class FakeDataset:
+        def __init__(self, buffer):
+            self.buffer = buffer
+            self.batch_size = 1
+
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, idx):
+            return TensorDict({"state": torch.tensor([idx])}, batch_size=[1])
+
+    dataset = FakeDataset(ReplayBuffer(10, "cpu"))
+    dataloader = DataLoader(dataset, batch_size=None)
+
+    with pytest.warns(UserWarning, match="Dataset is not an agilerl ReplayDataset"):
+        _ = Sampler(memory=None, dataset=dataset, dataloader=dataloader)
+
+
+def test_distributed_sampler_warns_for_non_dataloader_after_replacement(monkeypatch):
+    class BrokenSampler(Sampler):
+        def _replace_dataloader_collate_fn(self, dataloader):
+            return []  # Force non-DataLoader return to hit warning path
+
+    replay_dataset = ReplayDataset(ReplayBuffer(10, "cpu"), batch_size=1)
+    dataloader = DataLoader(replay_dataset, batch_size=None)
+
+    with pytest.warns(UserWarning, match="Dataset is not a torch DataLoader object"):
+        _ = BrokenSampler(memory=None, dataset=replay_dataset, dataloader=dataloader)
+
+
+def test_sampler_warns_for_invalid_per_memory(monkeypatch):
+    class ToggleMeta(type):
+        calls = 0
+
+        def __instancecheck__(cls, instance):
+            cls.calls += 1
+            return cls.calls == 1
+
+    class TogglePrioritized(metaclass=ToggleMeta):
+        pass
+
+    import agilerl.components.sampler as sampler_module
+
+    monkeypatch.setattr(sampler_module, "PrioritizedReplayBuffer", TogglePrioritized)
+    with pytest.warns(
+        UserWarning,
+        match="Memory is not an agilerl PrioritizedReplayBuffer",
+    ):
+        _ = Sampler(memory=object())
+
+
+def test_sampler_warns_for_invalid_nstep_memory(monkeypatch):
+    class ToggleMeta(type):
+        calls = 0
+
+        def __instancecheck__(cls, instance):
+            cls.calls += 1
+            return cls.calls == 1
+
+    class ToggleMultiStep(metaclass=ToggleMeta):
+        pass
+
+    import agilerl.components.sampler as sampler_module
+
+    monkeypatch.setattr(
+        sampler_module, "PrioritizedReplayBuffer", type("Never", (), {})
+    )
+    monkeypatch.setattr(sampler_module, "MultiStepReplayBuffer", ToggleMultiStep)
+    with pytest.warns(
+        UserWarning,
+        match="Memory is not an agilerl MultiStepReplayBuffer",
+    ):
+        _ = Sampler(memory=object())
+
+
+def test_replace_dataloader_collate_fn_preserves_optional_params():
+    dataset = ReplayDataset(ReplayBuffer(20, "cpu"), batch_size=2)
+    original = DataLoader(
+        dataset,
+        batch_size=2,
+        num_workers=1,
+        pin_memory=True,
+        drop_last=True,
+        prefetch_factor=3,
+        persistent_workers=True,
+    )
+    sampler = Sampler(memory=None, dataset=dataset, dataloader=original)
+    replaced = sampler.dataloader
+
+    assert replaced.num_workers == 1
+    assert replaced.pin_memory is True
+    assert replaced.drop_last is True
+    assert replaced.prefetch_factor == 3
+    assert replaced.persistent_workers is True
+
+
+def test_create_dataloader_sets_default_collate():
+    dataset = ReplayDataset(ReplayBuffer(20, "cpu"), batch_size=2)
+    dataloader = Sampler.create_dataloader(dataset, batch_size=None)
+
+    assert isinstance(dataloader, DataLoader)
+    assert dataloader.collate_fn == Sampler.tensordict_collate_fn
