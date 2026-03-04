@@ -24,6 +24,10 @@ class ArenaAPIError(ArenaError):
         super().__init__(f"Arena API error {status_code}: {detail}")
 
 
+class ArenaTimeoutError(ArenaAuthError):
+    """Raised when the device-flow login times out waiting for user authorization."""
+
+
 class ArenaValidationError(ArenaError):
     """Raised when server-side environment validation fails.
 

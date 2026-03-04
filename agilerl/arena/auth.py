@@ -1,56 +1,38 @@
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 import logging
 import os
-import secrets
 import stat
-import threading
+import time
 import webbrowser
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
 
-import httpx
+from keycloak import KeycloakOpenID
+from keycloak.exceptions import KeycloakError
 
-from agilerl.arena.exceptions import ArenaAuthError
+from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 
 logger = logging.getLogger(__name__)
 
-_CREDENTIALS_DIR = Path.home() / ".arena"
-_CREDENTIALS_FILE = _CREDENTIALS_DIR / "credentials.json"
 
-
-def _generate_pkce_pair() -> tuple[str, str]:
-    """Return ``(code_verifier, code_challenge)`` for PKCE S256."""
-    verifier = secrets.token_urlsafe(64)
-    digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return verifier, challenge
-
-
-def _write_credentials(data: dict[str, Any]) -> None:
-    """Persist credentials with restricted file permissions (owner-only)."""
-    _CREDENTIALS_DIR.mkdir(parents=True, exist_ok=True)
-    os.chmod(_CREDENTIALS_DIR, stat.S_IRWXU)
-
-    _CREDENTIALS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.chmod(_CREDENTIALS_FILE, stat.S_IRUSR | stat.S_IWUSR)
-
-
-def load_credentials() -> dict[str, Any] | None:
+def load_credentials(
+    credentials_path: Path | os.PathLike[str] = "~/.arena/credentials.json",
+) -> dict[str, Any] | None:
     """Read stored credentials from ``~/.arena/credentials.json``.
 
-    :return: Token dictionary, or ``None`` if absent / malformed.
-    :rtype: dict or None
+    :param credentials_path: The path to the credentials file.
+    :type credentials_path: Path | os.PathLike[str]
+
+    :returns: Token dictionary, or ``None`` if absent or malformed.
+    :rtype: dict[str, Any] | None
     """
-    if not _CREDENTIALS_FILE.is_file():
+    credentials_path = Path(os.fspath(credentials_path)).resolve()
+    if not credentials_path.is_file():
         return None
     try:
-        data = json.loads(_CREDENTIALS_FILE.read_text(encoding="utf-8"))
+        data = json.loads(credentials_path.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or "access_token" not in data:
             return None
         return data
@@ -58,215 +40,181 @@ def load_credentials() -> dict[str, Any] | None:
         return None
 
 
-def login(base_url: str, *, port: int = 8400, timeout: int = 300) -> str:
-    """Run the browser-based OAuth login flow and return an access token.
+class ArenaOAuth2:
+    """Authentication for the Arena RLOps platform.
 
-    1. Generate a PKCE verifier/challenge and a random *state* token.
-    2. Start a temporary HTTP server on ``127.0.0.1:{port}``.
-    3. Open the user's browser to the Arena authorization endpoint.
-    4. Wait for the callback with an authorization code.
-    5. Exchange the code for tokens via the Arena token endpoint.
-    6. Persist the tokens to ``~/.arena/credentials.json``.
-
-    :param base_url: Root URL of the Arena platform
-        (e.g. ``https://arena.agilerl.com``).
-    :type base_url: str
-    :param port: Local port for the OAuth callback listener.
-    :type port: int
-    :param timeout: Seconds to wait for the browser callback before
-        raising an error.
-    :type timeout: int
-
-    :return: The access token.
-    :rtype: str
-
-    :raises ArenaAuthError: If the flow times out, the user denies
-        access, the state parameter does not match, or the token
-        exchange fails.
+    Handles authentication with Keycloak. Supports OAuth 2.0 Device Authorization Grant flow.
     """
-    verifier, challenge = _generate_pkce_pair()
-    state = secrets.token_urlsafe(32)
-    loopback = "127.0.0.1"
-    redirect_uri = f"http://{loopback}:{port}/callback"
 
-    result: dict[str, Any] = {}
-    error: list[str] = []
+    CREDENTIALS_DIR = Path.home() / ".arena"
+    CREDENTIALS_FILE = CREDENTIALS_DIR / "credentials.json"
+    KEYCLOAK_URL = "https://auth.arena.agilerl.com"
+    REALM = "arena"
+    CLIENT_ID = "arena-cli"
 
-    class _CallbackHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            params = parse_qs(urlparse(self.path).query)
+    def __init__(self):
+        # Create a Keycloak OpenID client with the configured URL, realm, and client ID.
+        self.kc = KeycloakOpenID(
+            server_url=self.KEYCLOAK_URL,
+            realm_name=self.REALM,
+            client_id=self.CLIENT_ID,
+        )
 
-            if params.get("error"):
-                error.append(params["error"][0])
-                self._respond(
-                    400,
-                    "Authentication denied. You may close this tab.",
-                )
-                return
+    @classmethod
+    def configure(
+        cls,
+        *,
+        keycloak_url: str | None = None,
+        realm: str | None = None,
+        client_id: str | None = None,
+        credentials_dir: Path | None = None,
+        credentials_file: Path | None = None,
+    ) -> type[ArenaOAuth2]:
+        """Configure the ArenaOAuth2 instance.
 
-            received_state = (params.get("state") or [None])[0]
-            if received_state != state:
-                error.append("state_mismatch")
-                self._respond(
-                    400,
-                    "Security validation failed (state mismatch). "
-                    "Please try logging in again.",
-                )
-                return
+        :param keycloak_url: The URL of the Keycloak server.
+        :param realm: The realm to use for authentication.
+        :param client_id: The client ID to use for authentication.
+        :param credentials_dir: The directory to store the credentials. Defaults to ``~/.arena``.
+        :param credentials_file: The file to store the credentials. Defaults to ``~/.arena/credentials.json``.
+        :returns: The configured ArenaOAuth2 instance.
+        """
+        if keycloak_url is not None:
+            cls.KEYCLOAK_URL = keycloak_url
+        if realm is not None:
+            cls.REALM = realm
+        if client_id is not None:
+            cls.CLIENT_ID = client_id
+        if credentials_dir is not None:
+            cls.CREDENTIALS_DIR = credentials_dir
+        if credentials_file is not None:
+            cls.CREDENTIALS_FILE = credentials_file
+        return cls
 
-            code = (params.get("code") or [None])[0]
-            if not code:
-                error.append("missing_code")
-                self._respond(400, "Missing authorization code.")
-                return
+    @classmethod
+    def _write_credentials(cls, data: dict[str, Any]) -> None:
+        """Persist credentials with owner-only file permissions.
 
-            result["code"] = code
-            self._respond(
-                200,
-                "Login successful! You may close this tab and return to your terminal.",
-            )
+        :param data: The credentials to persist.
+        :returns: The credentials.
+        """
+        cls.CREDENTIALS_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(cls.CREDENTIALS_DIR, stat.S_IRWXU)
+        cls.CREDENTIALS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.chmod(cls.CREDENTIALS_FILE, stat.S_IRUSR | stat.S_IWUSR)
 
-        def _respond(self, status: int, body: str) -> None:
-            self.send_response(status)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(body.encode("utf-8"))
-
-        def log_message(self, format, *args):
+    @staticmethod
+    def _extract_error(exc: KeycloakError) -> str:
+        """Pull the ``error`` field from a Keycloak error response body."""
+        try:
+            body = getattr(exc, "response_body", None)
+            if isinstance(body, bytes):
+                body = body.decode("utf-8", errors="replace")
+            if isinstance(body, str):
+                return json.loads(body).get("error", "")
+        except (json.JSONDecodeError, AttributeError):
             pass
 
-    server = HTTPServer((loopback, port), _CallbackHandler)
-    server.timeout = timeout
+        msg = str(exc)
+        for known in ("authorization_pending", "slow_down", "expired_token"):
+            if known in msg:
+                return known
+        return ""
 
-    auth_url = (
-        f"{base_url}/auth/authorize"
-        f"?response_type=code"
-        f"&redirect_uri={redirect_uri}"
-        f"&code_challenge={challenge}"
-        f"&code_challenge_method=S256"
-        f"&state={state}"
-    )
+    def device_login(self, timeout: int = 300) -> dict[str, Any]:
+        """Run the OAuth 2.0 Device Authorization Grant flow.
 
-    logger.info(
-        "Opening browser for Arena login. If it does not open "
-        "automatically, visit:\n  %s",
-        auth_url,
-    )
-    webbrowser.open(auth_url)
+        Requests a device code from Keycloak, opens the verification URL in a browser,
+        then polls until the user authorizes or *timeout* seconds elapse.
 
-    shutdown_event = threading.Event()
+        :param timeout: Maximum seconds to wait for user authorization.
+        :returns: Token dict with ``access_token``, ``refresh_token``, etc.
+        :raises ArenaAuthError: If Keycloak rejects the request.
+        :raises ArenaTimeoutError: If the user does not authorize in time.
+        """
+        try:
+            # Request a device code from Keycloak.
+            device_resp = self.kc.device(scope="openid profile email")
+        except KeycloakError as exc:
+            msg = f"Failed to initiate device authorization: {exc}"
+            raise ArenaAuthError(msg) from exc
 
-    def _serve() -> None:
-        while not shutdown_event.is_set():
-            server.handle_request()
-            if result or error:
-                break
-
-    thread = threading.Thread(target=_serve, daemon=True)
-    thread.start()
-    thread.join(timeout=timeout)
-    shutdown_event.set()
-    server.server_close()
-
-    if error:
-        msg = f"Authentication failed: {error[0]}. Please try again."
-        raise ArenaAuthError(msg)
-    if "code" not in result:
-        msg = f"Authentication timed out. No callback received within {timeout}s."
-        raise ArenaAuthError(msg)
-
-    tokens = _exchange_code(
-        base_url=base_url,
-        code=result["code"],
-        redirect_uri=redirect_uri,
-        code_verifier=verifier,
-    )
-
-    _write_credentials(tokens)
-    return tokens["access_token"]
-
-
-def _exchange_code(
-    *,
-    base_url: str,
-    code: str,
-    redirect_uri: str,
-    code_verifier: str,
-) -> dict[str, Any]:
-    """Exchange an authorization code for access/refresh tokens."""
-    try:
-        resp = httpx.post(
-            f"{base_url}/auth/token",
-            json={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-                "code_verifier": code_verifier,
-            },
-            timeout=30,
+        # Extract the device code and verification URI from the response.
+        device_code = device_resp["device_code"]
+        verification_uri = device_resp.get(
+            "verification_uri_complete", device_resp.get("verification_uri", "")
         )
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        msg = "Token exchange failed. Please try logging in again."
-        raise ArenaAuthError(msg) from exc
-    except httpx.HTTPError as exc:
-        msg = f"Could not reach Arena auth service at {base_url}."
-        raise ArenaAuthError(msg) from exc
+        interval = device_resp.get("interval", 5)
 
-    data = resp.json()
-    if "access_token" not in data:
-        msg = "Unexpected response from token endpoint (no access_token)."
-        raise ArenaAuthError(msg)
-    return data
-
-
-def refresh_access_token(base_url: str, refresh_token: str) -> str:
-    """Use a refresh token to obtain a new access token.
-
-    Updates ``~/.arena/credentials.json`` on success.
-
-    :param base_url: Root URL of the Arena platform.
-    :type base_url: str
-    :param refresh_token: The stored refresh token.
-    :type refresh_token: str
-
-    :return: The new access token.
-    :rtype: str
-    """
-    try:
-        resp = httpx.post(
-            f"{base_url}/auth/token",
-            json={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-            },
-            timeout=30,
+        logger.info(
+            "\n  Opening browser for authentication...\n    %s\n",
+            verification_uri,
         )
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        msg = (
-            "Token refresh failed — your session may have expired. "
-            "Please run `login()` again."
-        )
-        raise ArenaAuthError(msg) from exc
-    except httpx.HTTPError as exc:
-        msg = f"Could not reach Arena auth service at {base_url}."
-        raise ArenaAuthError(msg) from exc
+        if not webbrowser.open(verification_uri):
+            logger.warning(
+                "  Could not open browser automatically. Please visit the URL above."
+            )
 
-    data = resp.json()
-    if "access_token" not in data:
-        msg = "Unexpected response from refresh endpoint (no access_token)."
-        raise ArenaAuthError(msg)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(interval)
+            try:
+                tokens = self.kc.token(
+                    grant_type="urn:ietf:params:oauth:grant-type:device_code",
+                    device_code=device_code,
+                )
+                ArenaOAuth2._write_credentials(tokens)
+                return tokens
+            except KeycloakError as exc:
+                error = ArenaOAuth2._extract_error(exc)
+                if error == "authorization_pending":
+                    continue
+                if error == "slow_down":
+                    interval += 5
+                    continue
+                if error == "expired_token":
+                    msg = "Device code expired before authorization was completed."
+                    raise ArenaTimeoutError(msg) from exc
+                msg = f"Device authorization failed: {exc}"
+                raise ArenaAuthError(msg) from exc
 
-    creds = load_credentials() or {}
-    creds.update(data)
-    _write_credentials(creds)
-    return data["access_token"]
+        msg = f"Authentication timed out after {timeout}s. No authorization received."
+        raise ArenaTimeoutError(msg)
 
+    def refresh_access_token(self, refresh_token: str) -> dict[str, Any]:
+        """Obtain a fresh access token using a refresh token.
 
-def logout() -> None:
-    """Remove stored Arena credentials."""
-    try:
-        _CREDENTIALS_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
+        Persists the updated token set to ``~/.arena/credentials.json``.
+
+        :param refresh_token: The stored refresh token.
+        :returns: Updated token dict.
+        :raises ArenaAuthError: If the refresh is rejected (session expired).
+        """
+        try:
+            tokens = self.kc.refresh_token(refresh_token)
+        except KeycloakError as exc:
+            msg = (
+                "Token refresh failed — your session may have expired. "
+                "Please run client.login() again."
+            )
+            raise ArenaAuthError(msg) from exc
+
+        creds = load_credentials(self.CREDENTIALS_FILE) or {}
+        creds.update(tokens)
+        ArenaOAuth2._write_credentials(creds)
+        return tokens
+
+    def revoke(self, refresh_token: str) -> None:
+        """Revoke a Keycloak session and delete stored credentials.
+
+        :param refresh_token: The refresh token to revoke.
+        """
+        try:
+            self.kc.logout(refresh_token)
+        except KeycloakError:
+            logger.debug("Keycloak logout failed (token may already be expired).")
+
+        try:
+            self.CREDENTIALS_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
