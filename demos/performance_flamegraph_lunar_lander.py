@@ -123,7 +123,7 @@ profiler.stop()
 # PROFILING A COMPLETE TRAINING LOOP
 # =====================================================================
 # Choose whether to profile the full training loop
-use_profiler = False  # Set to True to enable flamegraph profiling for the full loop
+use_profiler = os.getenv("AGILERL_USE_PROFILER", "0") == "1"
 
 # Training parameters
 max_steps = 400000 // num_envs  # Reduced for profiling
@@ -134,6 +134,8 @@ start_time = time.time()
 if use_profiler:
     full_profiler = pyinstrument.Profiler()
     full_profiler.start()
+else:
+    full_profiler = None
 
 # TRAINING LOOP
 print("\n--- Running Training Loop ---")

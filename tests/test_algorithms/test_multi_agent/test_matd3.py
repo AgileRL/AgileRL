@@ -868,7 +868,7 @@ def test_matd3_get_action(
         for idx, env_action in enumerate(list(processed_action.values())):
             for action in env_action:
                 assert action <= action_spaces[idx].n - 1
-    matd3 = None
+    matd3.clean_up()
 
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
@@ -1043,8 +1043,6 @@ def test_matd3_get_action_agent_masking_batched(
 
     # Get the action
     actions, _ = matd3.get_action(obs=state, infos=info)
-
-    print("Agent 0 action shape", actions["agent_0"].shape)
 
     if discrete_actions:
         assert np.array_equal(actions["agent_0"], np.array([1] * batched_shape[0])), (

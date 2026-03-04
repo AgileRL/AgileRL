@@ -78,14 +78,13 @@ if __name__ == "__main__":
     )
 
     mutations = Mutations(
-        algo="DQN",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.2,  # New layer mutation
         parameters=0.2,  # Network parameters mutation
         activation=0,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
-        mutation_sd=0.1,  # Mutation strength  # Network architecture
+        mutation_sd=0.1,  # Mutation strength
         rand_seed=1,  # Random seed
         accelerator=accelerator,
     )  # Accelerator)
@@ -118,13 +117,13 @@ if __name__ == "__main__":
         accelerator.wait_for_everyone()
         pop_episode_scores = []
         for agent in pop:  # Loop through population
-            obs, info = env.reset()  # Reset environment at start of episode
+            obs, _ = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
-            completed_episode_scores, losses = [], []
+            completed_episode_scores = []
             steps = 0
             epsilon = eps_start
 
-            for _idx_step in range(evo_steps):
+            for _ in range(evo_steps):
                 # Get next action from agent
                 action = agent.get_action(obs, epsilon)
                 epsilon = max(
@@ -133,7 +132,7 @@ if __name__ == "__main__":
                 )  # Decay epsilon for exploration
 
                 # Act in environment
-                next_obs, reward, terminated, truncated, info = env.step(action)
+                next_obs, reward, terminated, truncated, _ = env.step(action)
                 scores += np.array(reward)
                 steps += num_envs
                 total_steps += num_envs
@@ -207,7 +206,7 @@ if __name__ == "__main__":
             model.unwrap_models()
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
-            elite, pop = tournament.select(pop)
+            _, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
             for pop_i, model in enumerate(pop):
                 model.save_checkpoint(f"{accel_temp_models_path}/DQN_{pop_i}.pt")

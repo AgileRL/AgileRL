@@ -24,6 +24,7 @@ import traceback
 
 import numpy as np
 import torch
+from _pytest.outcomes import Skipped
 from accelerate.state import AcceleratorState
 from torch._inductor.utils import fresh_cache
 
@@ -54,13 +55,17 @@ def setup_test_env_vars():
     """Set pytest ini env vars that would normally be set by pytest."""
     os.environ.setdefault("PYTHONHASHSEED", "0")
     os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    if not torch.cuda.is_available():
+        os.environ.setdefault("ACCELERATE_USE_CPU", "true")
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 
 def set_seed(seed=42):
     """Set random seeds for reproducibility."""
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
 
@@ -205,6 +210,8 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except Skipped:
+        sys.exit(0)
     except Exception:
         traceback.print_exc()
         sys.exit(1)

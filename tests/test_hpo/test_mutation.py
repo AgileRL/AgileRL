@@ -137,9 +137,6 @@ def init_pop(
         torch_compiler=torch_compiler,
     )
     yield pop
-    for agent in pop:
-        del agent
-    del pop
     gc.collect()
 
 
@@ -185,8 +182,6 @@ def test_constructor_initializes_attributes():
     assert mutations.mutate_elite == mutate_elite
     assert mutations.device == device
     assert mutations.accelerator == accelerator
-
-    del mutations
 
 
 def test_find_analogous_mutation_returns_none_for_empty_sampled():
@@ -488,8 +483,6 @@ def test_mutation_no_options(init_pop, device):
     for old, individual in zip(population, mutated_population, strict=False):
         assert_state_dicts_equal(old.actor.state_dict(), individual.actor.state_dict())
 
-    del mutations, mutated_population, new_population
-
 
 #### Single-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
@@ -517,8 +510,6 @@ def test_mutation_no_options(init_pop, device):
 def test_mutation_applies_random_mutations(algo, init_pop, device, accelerator):
     population = init_pop
     pre_training_mut = True
-
-    population = init_pop
 
     mutations = Mutations(
         0,
@@ -555,8 +546,6 @@ def test_mutation_applies_random_mutations(algo, init_pop, device, accelerator):
             "param",
             policy.last_mutation_attr,
         ]
-
-    del mutations, mutated_population
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
@@ -608,8 +597,6 @@ def test_mutation_applies_no_mutations(init_pop, device, accelerator):
         assert old.index == individual.index
         assert old.actor != individual.actor
         assert_state_dicts_equal(old.actor.state_dict(), individual.actor.state_dict())
-
-    del mutations, mutated_population, new_population
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
@@ -669,8 +656,6 @@ def test_mutation_applies_no_mutations_pre_training_mut(init_pop, device, accele
         assert old.actor != individual.actor
         assert_state_dicts_equal(old.actor.state_dict(), individual.actor.state_dict())
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -729,8 +714,6 @@ def test_mutation_applies_rl_hp_mutations(
         max_value = hp_config[individual.mut].max
         assert min_value <= new_value <= max_value
         assert old.index == individual.index
-
-    del mutations, mutated_population, new_population
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
@@ -798,8 +781,6 @@ def test_mutation_applies_activation_mutations(
             assert individual.actor.activation in activation_selection
         assert old.index == individual.index
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -845,8 +826,6 @@ def test_mutation_applies_activation_mutations_no_skip(init_pop, device, acceler
             assert old.actor.activation != individual.actor.activation
             assert individual.actor.activation in ["ReLU", "ELU", "GELU"]
         assert old.index == individual.index
-
-    del mutations, mutated_population, new_population
 
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
@@ -925,8 +904,6 @@ def test_mutation_applies_parameter_mutations(
                 break
 
         assert mutation_found, f"Mutation not applied for agent index {old.index}"
-
-    del mutations, mutated_population, new_population
 
 
 def test_get_exp_layer_raises_for_non_evolvable_module():
@@ -1059,8 +1036,6 @@ def test_mutation_applies_architecture_mutations(
         applied_mutations,
     )
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
 @pytest.mark.skip(reason="Skipping BERT architecture mutations test.")
@@ -1163,8 +1138,6 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 
     # assert_equal_state_dict(population, mutated_population)
 
-    del mutations, mutated_population, new_population
-
 
 #### Multi-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
@@ -1222,8 +1195,6 @@ def test_mutation_applies_random_mutations_multi_agent(init_pop, device, acceler
             sampled_mutation,
         ]
 
-    del mutations, mutated_population
-
 
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
@@ -1265,12 +1236,7 @@ def test_mutation_applies_no_mutations_multi_agent(init_pop, device, accelerator
         assert old.index == individual.index
         assert old.actors == individual.actors
 
-    del mutations
-    del population
-    del mutated_population
 
-
-# The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
     "algo, hp_config",
     [
@@ -1326,8 +1292,6 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
         assert min_value <= new_value <= max_value
         assert old.index == individual.index
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
@@ -1380,8 +1344,6 @@ def test_mutation_applies_activation_mutations_multi_agent(
                     "GELU",
                 ]
         assert old.index == individual.index
-
-    del mutations, mutated_population, new_population
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
@@ -1437,8 +1399,6 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
                     "GELU",
                 ]
         assert old.index == individual.index
-
-    del mutations, mutated_population, new_population
 
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
@@ -1511,8 +1471,6 @@ def test_mutation_applies_parameter_mutations_multi_agent(
                 break
 
         assert mutation_found, f"Mutation not applied for agent index {old.index}"
-
-    del mutations, mutated_population, new_population
 
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
@@ -1621,10 +1579,6 @@ def test_mutation_applies_architecture_mutations_multi_agent(
                             assert bottom_eval_mut == bottom_policy_mut
 
             assert old.index == individual.index
-
-        del new_population, mutated_population
-
-    del mutations
 
     assert all(mut in applied_mutations for mut in mut_methods), set(mut_methods) - set(
         applied_mutations,
@@ -1741,9 +1695,6 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
 
             assert old.index == individual.index
 
-        del new_population, mutated_population
-    del mutations, population
-
 
 @pytest.mark.parametrize(
     "use_accelerator, use_deepspeed_optimizer",
@@ -1772,6 +1723,8 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
     grpo_hp_config,
     deepspeed_env,
 ):
+    if use_accelerator and not torch.cuda.is_available():
+        pytest.skip("DeepSpeed accelerator LLM mutation tests require CUDA.")
 
     if hp_to_mutate == "max_grad_norm":
         grpo_hp_config = HyperparameterConfig(
@@ -1976,7 +1929,3 @@ def test_mutations_warns_on_llm_algorithm(
     for mut_agent, old_agent in zip(mutated_population, new_population, strict=False):
         mut_agent.clean_up()
         old_agent.clean_up()
-    del mutations
-    del population
-    del mutated_population
-    del new_population

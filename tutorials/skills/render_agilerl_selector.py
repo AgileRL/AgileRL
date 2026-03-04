@@ -53,9 +53,9 @@ if __name__ == "__main__":
 
     env = gym.make("LunarLander-v3", render_mode="rgb_array")
 
-    stabilize_agent = PPO.load("./models/PPO/PPO_trained_agent_stabilize.pt")
-    center_agent = PPO.load("./models/PPO/PPO_trained_agent_center.pt")
-    landing_agent = PPO.load("./models/PPO/PPO_trained_agent_landing.pt")
+    stabilize_agent = PPO.load("./models/PPO/PPO_trained_agent_stabilize.pt", device)
+    center_agent = PPO.load("./models/PPO/PPO_trained_agent_center.pt", device)
+    landing_agent = PPO.load("./models/PPO/PPO_trained_agent_landing.pt", device)
 
     trained_skills = {
         0: {"skill": "stabilize", "agent": stabilize_agent, "skill_duration": 40},
@@ -67,13 +67,12 @@ if __name__ == "__main__":
     selector_path = (
         "./models/PPO/PPO_trained_agent_selector.pt"  # Path to saved agent checkpoint
     )
-    agent = PPO.load(selector_path)
+    agent = PPO.load(selector_path, device)
 
     # Define test loop parameters
     episodes = 3  # Number of episodes to test agent on
     max_steps = 100  # Max number of steps to take in the environment in each episode
 
-    rewards = []  # List to collect total episodic reward
     frames = []  # List to collect frames
 
     print("============================================")
@@ -85,7 +84,7 @@ if __name__ == "__main__":
         frames.append(env.render())
         score = 0
         steps = 0
-        for _idx_step in range(max_steps):
+        for _ in range(max_steps):
             # Get next action from agent
             action, log_prob, _, value = agent.get_action(state)
 
@@ -94,7 +93,7 @@ if __name__ == "__main__":
             skill_agent = trained_skills[action[0]]["agent"]
             skill_duration = trained_skills[action[0]]["skill_duration"]
             reward = 0
-            for _skill_step in range(skill_duration):
+            for _ in range(skill_duration):
                 if state[6] or state[7]:
                     next_state, skill_reward, termination, truncation, _ = env.step(0)
                 else:

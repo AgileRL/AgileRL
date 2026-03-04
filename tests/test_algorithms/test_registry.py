@@ -27,6 +27,15 @@ class MockNetworkGroup:
     def __hash__(self) -> int:
         return hash((self.eval_network, self.shared_networks, self.policy))
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, MockNetworkGroup):
+            return False
+        return (
+            self.eval_network == other.eval_network
+            and self.shared_networks == other.shared_networks
+            and self.policy == other.policy
+        )
+
 
 # Mock classes for testing
 class MockEvolvableNetwork(EvolvableModule):

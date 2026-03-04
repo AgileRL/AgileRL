@@ -8,7 +8,6 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import OptimizerType, StateDict
-from agilerl.utils.algo_utils import DummyOptimizer
 
 if HAS_LLM_DEPENDENCIES:
     from peft import PeftModel
@@ -18,7 +17,7 @@ else:
     PeftModelType = "PeftModel"
 
 ModuleList = list[EvolvableModule]
-_Optimizer = type[OptimizerType] | dict[str, type[OptimizerType]] | type[DummyOptimizer]
+_Optimizer = type[OptimizerType] | dict[str, type[OptimizerType]] | type[Any]
 _Module = Union[EvolvableModule, ModuleDict, ModuleList, PeftModelType]
 
 

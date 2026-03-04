@@ -28,17 +28,14 @@ def default_cnn_config():
     )
 
 
-@pytest.fixture(scope="module")
-def multiagent_cnn_config(
-    device,
-    image_shape: tuple = (3, 32, 32),
-    sample_input: str = "default",
+def _make_multiagent_cnn_config(
+    device, image_shape=(3, 32, 32), sample_input="default"
 ):
+    """Build multiagent CNN config with optional sample_input override."""
     if sample_input == "default":
-        sample_input = torch.randn(1, *image_shape).unsqueeze(2).to(device)
+        sample_input_val = torch.randn(1, *image_shape).unsqueeze(2).to(device)
     else:
-        sample_input = None
-
+        sample_input_val = None
     return asdict(
         CnnNetConfig(
             channel_size=[32],
@@ -46,9 +43,14 @@ def multiagent_cnn_config(
             stride_size=[1],
             output_activation="ReLU",
             block_type="Conv3d",
-            sample_input=sample_input,
+            sample_input=sample_input_val,
         ),
     )
+
+
+@pytest.fixture(scope="module")
+def multiagent_cnn_config(device, image_shape=(3, 32, 32), sample_input="default"):
+    return _make_multiagent_cnn_config(device, image_shape, sample_input)
 
 
 @pytest.fixture(scope="module")
@@ -148,14 +150,14 @@ def test_incorrect_instantiation_for_multi_agents(
     num_outputs: int,
     sample_input,
     device,
-    multiagent_cnn_config,
     default_mlp_config,
 ):
-    with pytest.raises(TypeError):
+    cnn_config = _make_multiagent_cnn_config(device, sample_input=sample_input)
+    with pytest.raises((TypeError, AssertionError)):
         EvolvableMultiInput(
             observation_space=observation_space,
             num_outputs=num_outputs,
-            cnn_config=multiagent_cnn_config(sample_input=sample_input),
+            cnn_config=cnn_config,
             mlp_config=default_mlp_config,
             device=device,
         )
@@ -841,10 +843,10 @@ def test_clone_instance(
     assert isinstance(clone, EvolvableMultiInput)
     assert_state_dicts_equal(clone.state_dict(), evolvable_composed.state_dict())
 
-    for key, cloned_net in clone.feature_net.items():
-        original_net = original_nets[key]
-        for key, param in cloned_net.named_parameters():
-            torch.testing.assert_close(param, original_net[key])
+    for net_key, cloned_net in clone.feature_net.items():
+        original_net = original_nets[net_key]
+        for param_key, param in cloned_net.named_parameters():
+            torch.testing.assert_close(param, original_net[param_key])
 
 
 @pytest.mark.parametrize(

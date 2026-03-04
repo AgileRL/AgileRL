@@ -79,7 +79,7 @@ class MockAlgorithm(RLAlgorithm):
                 NetworkGroup(eval_network=self.critic, policy=False),
             )
 
-    def get_action(self, obs):
+    def get_action(self, obs, *args, **kwargs):
         return
 
     def learn(self, experiences):
@@ -147,7 +147,7 @@ class MockMultiAgentAlgorithm(MultiAgentRLAlgorithm):
             device=self.device,
         )
 
-    def get_action(self, obs):
+    def get_action(self, obs, *args, **kwargs):
         return
 
     def learn(self, experiences):

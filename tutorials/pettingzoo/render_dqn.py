@@ -3,7 +3,7 @@ import os
 import imageio
 import numpy as np
 import torch
-from agilerl_dqn_curriculum import Opponent, transform_and_flip
+from dqn_curriculum import Opponent, transform_and_flip
 from pettingzoo.classic import connect_four_v3
 from PIL import Image, ImageDraw, ImageFont
 
@@ -55,18 +55,6 @@ if __name__ == "__main__":
     env = connect_four_v3.env(render_mode="rgb_array")
     env.reset()
 
-    # Configure the algo input arguments
-    state_dim = [
-        env.observation_space(agent)["observation"].shape for agent in env.agents
-    ]
-    action_dim = [env.action_space(agent).n for agent in env.agents]
-
-    # Pre-process dimensions for pytorch layers
-    # We will use self-play, so we only need to worry about the state dim of a single agent
-    # We flatten the 6x7x2 observation as input to the agent's neural network
-    state_dim = np.zeros(state_dim[0]).flatten().shape
-    action_dim = action_dim[0]
-
     # Load the saved agent
     dqn = DQN.load(path, device)
 
@@ -83,7 +71,6 @@ if __name__ == "__main__":
             500  # Max number of steps to take in the environment in each episode
         )
 
-        rewards = []  # List to collect total episodic reward
         frames = []  # List to collect frames
 
         print("============================================")
@@ -108,7 +95,7 @@ if __name__ == "__main__":
             observation, reward, done, truncation, _ = env.last()
             player = -1  # Tracker for which player's turn it is
             score = 0
-            for idx_step in range(max_steps):
+            for step in range(max_steps):
                 action_mask = observation["action_mask"]
                 if player < 0:
                     state, _ = transform_and_flip(observation, player=0)
@@ -156,7 +143,7 @@ if __name__ == "__main__":
                     _label_with_episode_number(
                         frame,
                         episode_num=ep,
-                        frame_no=idx_step,
+                        frame_no=step,
                         p=p,
                     ),
                 )
@@ -175,7 +162,7 @@ if __name__ == "__main__":
                 player *= -1
 
             print("-" * 15, f"Episode: {ep + 1}", "-" * 15)
-            print(f"Episode length: {idx_step}")
+            print(f"Episode length: {step}")
             print(f"Score: {score}")
 
         print("============================================")

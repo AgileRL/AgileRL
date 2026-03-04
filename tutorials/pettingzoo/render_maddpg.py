@@ -44,7 +44,6 @@ if __name__ == "__main__":
     env.reset()
 
     # Append number of agents and agent IDs to the initial hyperparameter dictionary
-    n_agents = env.num_agents
     agent_ids = env.agents
 
     # Load the saved agent

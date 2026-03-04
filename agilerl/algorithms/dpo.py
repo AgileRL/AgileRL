@@ -1,11 +1,19 @@
 import gc
+import warnings
 from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOFunction
+
+try:
+    from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOFunction
+
+    HAS_LIGER_KERNEL = True
+except ImportError:
+    LigerFusedLinearDPOFunction = None
+    HAS_LIGER_KERNEL = False
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -96,7 +104,15 @@ class DPO(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         use_liger_loss: bool = False,
     ) -> None:
-        device = (
+        if use_liger_loss and not HAS_LIGER_KERNEL:
+            warnings.warn(
+                "use_liger_loss=True requested, but `liger-kernel` is not available on this platform/environment. "
+                "Falling back to standard loss.",
+                stacklevel=2,
+            )
+            use_liger_loss = False
+
+        resolved_device = (
             f"cuda:{accelerator.process_index}"
             if accelerator is not None
             else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -122,7 +138,7 @@ class DPO(LLMAlgorithm):
             cosine_lr_schedule_config=None,
             hp_config=hp_config,
             wrap=wrap,
-            device=device,
+            device=resolved_device,
             accelerator=accelerator,
             name="DPO",
             gradient_checkpointing=gradient_checkpointing,
@@ -144,14 +160,15 @@ class DPO(LLMAlgorithm):
     def get_action(
         self,
         obs: LLMObsType,
-        training: bool = True,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Return the action of the agent.
 
         :param obs: The observation of the agent
         :type obs: LLMObsType
-        :param training: Whether the agent is training or not
-        :type training: bool
+        :param args: Additional arguments (unused; for base contract compatibility)
+        :param kwargs: Additional keyword arguments (e.g. training; unused)
         :return: The action of the agent
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
@@ -251,7 +268,7 @@ class DPO(LLMAlgorithm):
     def _dpo_loss(
         self,
         batch_size: int,
-        minibatch_idxs: torch.Tensor,
+        minibatch_idxs: np.ndarray,
         chosen_input_ids: torch.Tensor,
         chosen_attention_mask: torch.Tensor,
         rejected_input_ids: torch.Tensor,
@@ -383,14 +400,6 @@ class DPO(LLMAlgorithm):
                 ref_rejected_log_probs,
             )
 
-        # Clean up intermediate tensors to free up memory
-        chosen_log_probs = None
-        rejected_log_probs = None
-        ref_chosen_log_probs = None
-        ref_rejected_log_probs = None
-        chosen_mask = None
-        rejected_mask = None
-
         return (
             -F.logsigmoid(self.beta * (chosen_ratio - rejected_ratio)).mean(),
             implicit_chosen_reward,
@@ -423,6 +432,13 @@ class DPO(LLMAlgorithm):
         :return: Loss, chosen rewards, rejected rewards.
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
+        if LigerFusedLinearDPOFunction is None:
+            msg = (
+                "Liger DPO loss was requested but `liger-kernel` is not available. "
+                "Set use_liger_loss=False."
+            )
+            raise ImportError(msg)
+
         lm_head = self._get_lm_head()
         lm_head_weight = lm_head.weight  # (vocab_size, hidden_size)
         lm_head_bias = lm_head.bias
@@ -457,7 +473,6 @@ class DPO(LLMAlgorithm):
         ref_hidden = torch.cat(
             [ref_chosen_hidden, ref_rejected_hidden], dim=0
         )  # (2B, seq_len, H)
-        ref_chosen_hidden = ref_rejected_hidden = None  # free immediately
 
         # Policy hidden states — with gradient, two separate forward passes (B each)
         with self.select_policy(use_reference=False):
@@ -471,7 +486,6 @@ class DPO(LLMAlgorithm):
         policy_hidden = torch.cat(
             [policy_chosen_hidden, policy_rejected_hidden], dim=0
         )  # (2B, seq_len, H)
-        policy_chosen_hidden = policy_rejected_hidden = None  # free immediately
 
         # Build shifted targets; mask prompt/padding tokens with -100
         def _make_target(ids, mask):
@@ -517,28 +531,34 @@ class DPO(LLMAlgorithm):
         self,
         log_probs: torch.Tensor,
         ref_log_probs: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """Calculate the preference reward for the chosen and rejected completions.
 
         :param log_probs: Log probabilities of the completions
         :type log_probs: torch.Tensor
         :param ref_log_probs: Log probabilities of the completions using the reference model
         :type ref_log_probs: torch.Tensor
-        :return: Implicit reward for the chosen and rejected completions
-        :rtype: tuple[torch.Tensor, torch.Tensor]
+        :return: Implicit reward (beta * (log_probs - ref_log_probs))
+        :rtype: torch.Tensor
         """
         implicit_reward = log_probs - ref_log_probs
         return self.beta * implicit_reward
 
-    def test(self, env: PreferenceGym, loop: int = 1) -> torch.Tensor:
-        """Return the fitness (test) score tensor of the agent.
+    def test(
+        self,
+        env: PreferenceGym,
+        loop: int = 1,
+        *args: Any,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Return the fitness (test) score of the agent.
 
         :param env: The environment to be tested in
         :type env: PreferenceGym environment
-        :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
+        :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 1
         :type loop: int, optional
-        :return: Test score tensor of the agent
-        :rtype: torch.Tensor
+        :return: Mean test score (numpy array)
+        :rtype: np.ndarray
         """
         with env.eval_mode(), torch.no_grad():
             prompts = env.reset()
@@ -548,5 +568,7 @@ class DPO(LLMAlgorithm):
                 reward_margin = chosen_reward - rejected_reward
                 rewards.append(reward_margin)
                 prompts = env.step()
-        self.fitness.append(reward_margin)
-        return reward_margin
+            reward_tensor = torch.stack(rewards)
+            mean_fit = torch.mean(reward_tensor).item()
+        self.fitness.append(mean_fit)
+        return np.array(mean_fit)

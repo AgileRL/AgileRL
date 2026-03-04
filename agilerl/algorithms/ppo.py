@@ -565,6 +565,8 @@ class PPO(RLAlgorithm):
         obs: ArrayOrTensor,
         action_mask: ArrayOrTensor | None = None,
         hidden_state: dict[str, ArrayOrTensor] | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> ActionReturnType | RecurrentActionReturnType:
         """Return the next action to take in the environment.
 

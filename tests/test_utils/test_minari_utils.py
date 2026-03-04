@@ -141,11 +141,13 @@ def test_load_minari_dataset_errors(dataset_id: str) -> None:
     ["D4RL/door/human-v2"],
 )
 def test_load_remote_minari_dataset(dataset_id: str) -> None:
+    dataset: MinariDataset | None = None
     try:
         dataset = minari_utils.load_minari_dataset(dataset_id, remote=True)
     except (KeyError, HTTPError) as e:
         pytest.skip(f"Skipping test due to remote dataset not being available: {e}")
 
+    assert dataset is not None
     assert isinstance(dataset, MinariDataset)
 
     check_delete_dataset(dataset_id)
@@ -157,6 +159,7 @@ def test_load_remote_minari_dataset(dataset_id: str) -> None:
 )
 def test_load_remote_minari_dataset_accelerator(dataset_id: str) -> None:
     accelerator = Accelerator()
+    dataset: MinariDataset | None = None
 
     try:
         dataset = minari_utils.load_minari_dataset(
@@ -167,6 +170,7 @@ def test_load_remote_minari_dataset_accelerator(dataset_id: str) -> None:
     except HTTPError as e:
         pytest.skip(f"Skipping test due to remote dataset not being available: {e}")
 
+    assert dataset is not None
     assert isinstance(dataset, MinariDataset)
 
     check_delete_dataset(dataset_id)

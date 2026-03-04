@@ -1,3 +1,5 @@
+import os
+
 import gymnasium as gym
 import supersuit as ss
 import torch
@@ -25,7 +27,6 @@ from agilerl.utils.utils import (
 )
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from benchmarking.networks import (
-    BasicNetActor,
     BasicNetCritic,
     ClipReward,
     SimpleCNNActor,
@@ -36,6 +37,10 @@ from benchmarking.networks import (
 
 def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    actor = None
+    critic = None
+    memory = None
+    trained_pop = None
 
     if not multi:
         ####
@@ -52,14 +57,13 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         if INIT_HP["CHANNELS_LAST"]:
             observation_space = observation_space_channels_to_first(observation_space)
 
+        action_dims = get_output_size_from_space(action_space)
+        state_dims = get_input_size_from_space(observation_space)
+
         if NET_CONFIG is not None:
             actor = None
             critic = None
         else:
-            NET_CONFIG = None
-
-            action_dims = get_output_size_from_space(action_space)
-            state_dims = get_input_size_from_space(observation_space)
             if atari:
                 # DQN
                 network_actor = SimpleCNNActor(action_dims)
@@ -82,53 +86,23 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             else:
                 # DQN
                 if INIT_HP["ALGO"] == "DQN":
-                    # network_actor_dqn = BasicNetActorDQN(
-                    #     state_dims[0], [64, 64], action_dims
-                    # )
-                    # actor = MakeEvolvable(
-                    #     network_actor_dqn,
-                    #     input_tensor=torch.ones(state_dims[0]),
-                    #     device=device,
-                    # )
-
                     actor = EvolvableMLP(
                         num_inputs=state_dims[0],
                         num_outputs=action_dims,
                         device=device,
                         hidden_size=[64, 64],
-                        mlp_activation="ReLU",
+                        activation="ReLU",
                     )
 
                     critic = None
-                if INIT_HP["ALGO"] == "DDPG":
-                    network_actor_ddpg = BasicNetActor(
-                        state_dims[0],
-                        [64, 64],
-                        action_dims,
-                    )
-                    actor = MakeEvolvable(
-                        network_actor_ddpg,
-                        input_tensor=torch.ones(state_dims[0]),
-                        device=device,
-                    )
-                    network_critic = BasicNetCritic(
-                        state_dims[0] + action_dims,
-                        [64, 64],
-                        1,
-                    )
-                    critic = MakeEvolvable(
-                        network_critic,
-                        torch.ones(state_dims[0] + action_dims),
-                        device=device,
-                    )
-
+                elif INIT_HP["ALGO"] == "DDPG":
                     actor = EvolvableMLP(
                         num_inputs=state_dims[0],
                         num_outputs=action_dims,
                         device=device,
                         hidden_size=[64, 64],
-                        mlp_activation="ReLU",
-                        mlp_output_activation="Tanh",
+                        activation="ReLU",
+                        output_activation="Tanh",
                     )
 
                     critic = EvolvableMLP(
@@ -136,34 +110,32 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                         num_outputs=action_dims,
                         device=device,
                         hidden_size=[64, 64],
-                        mlp_activation="ReLU",
+                        activation="ReLU",
                     )
 
                 elif INIT_HP["ALGO"] == "TD3":
-                    network_actor_td3 = BasicNetActor(
-                        state_dims[0],
-                        [64, 64],
-                        action_dims,
-                    )
-                    actor = MakeEvolvable(
-                        network_actor_td3,
-                        input_tensor=torch.ones(state_dims[0]),
+                    actor = EvolvableMLP(
+                        num_inputs=state_dims[0],
+                        num_outputs=action_dims,
                         device=device,
+                        hidden_size=[64, 64],
+                        activation="ReLU",
+                        output_activation="Tanh",
                     )
-                    network_critic = BasicNetCritic(
-                        state_dims[0] + action_dims,
-                        [64, 64],
-                        1,
-                    )
-                    critic_1 = MakeEvolvable(
-                        network_critic,
-                        torch.ones(state_dims[0] + action_dims),
+
+                    critic_1 = EvolvableMLP(
+                        num_inputs=state_dims[0] + action_dims,
+                        num_outputs=1,
                         device=device,
+                        hidden_size=[64, 64],
+                        activation="ReLU",
                     )
-                    critic_2 = MakeEvolvable(
-                        network_critic,
-                        torch.ones(state_dims[0] + action_dims),
+                    critic_2 = EvolvableMLP(
+                        num_inputs=state_dims[0] + action_dims,
+                        num_outputs=1,
                         device=device,
+                        hidden_size=[64, 64],
+                        activation="ReLU",
                     )
                     critic = [critic_1, critic_2]
                 elif INIT_HP["ALGO"] == "PPO":
@@ -298,6 +270,11 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
     )
 
     if INIT_HP["ALGO"] in ["MATD3", "MADDPG"]:
+        if memory is None:
+            msg = (
+                "Replay buffer must be initialized for multi-agent off-policy training."
+            )
+            raise RuntimeError(msg)
         trained_pop, pop_fitnesses = train_multi_agent_off_policy(
             env,
             INIT_HP["ENV_NAME"],
@@ -306,7 +283,6 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             memory=memory,
             INIT_HP=INIT_HP,
             MUT_P=MUTATION_PARAMS,
-            net_config=NET_CONFIG,
             swap_channels=INIT_HP["CHANNELS_LAST"],
             max_steps=INIT_HP["MAX_STEPS"],
             evo_steps=INIT_HP["EVO_STEPS"],
@@ -337,6 +313,9 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             wb=INIT_HP["WANDB"],
         )
     elif INIT_HP["ALGO"] in ["DDPG", "DQN", "TD3"]:
+        if memory is None:
+            msg = "Replay buffer must be initialized for off-policy training."
+            raise RuntimeError(msg)
         trained_pop, pop_fitnesses = train_off_policy(
             env,
             INIT_HP["ENV_NAME"],
@@ -360,6 +339,10 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             wb=INIT_HP["WANDB"],
         )
 
+    if trained_pop is None:
+        msg = f"Unsupported algorithm '{INIT_HP['ALGO']}'."
+        raise RuntimeError(msg)
+
     print_hyperparams(trained_pop)
     # plot_population_score(trained_pop)
 
@@ -370,32 +353,23 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
 
 
 if __name__ == "__main__":
-    dqn = False
-    ppo = False
-    ddpg = True
-    td3 = False
-    maddpg = False
-    matd3 = False
-    standard = True
-    atari = False
+    dqn = os.getenv("AGILERL_BENCH_DQN", "0") == "1"
+    ppo = os.getenv("AGILERL_BENCH_PPO", "0") == "1"
+    ddpg = os.getenv("AGILERL_BENCH_DDPG", "1") == "1"
+    td3 = os.getenv("AGILERL_BENCH_TD3", "0") == "1"
+    maddpg = os.getenv("AGILERL_BENCH_MADDPG", "0") == "1"
+    matd3 = os.getenv("AGILERL_BENCH_MATD3", "0") == "1"
+    standard = os.getenv("AGILERL_BENCH_STANDARD", "1") == "1"
+    atari = os.getenv("AGILERL_BENCH_ATARI", "0") == "1"
 
     if dqn:
         with open("configs/training/dqn/dqn.yaml") as file:
             dqn_config = yaml.safe_load(file)
         INIT_HP = dqn_config["INIT_HP"]
         MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
-        # net_config_mlp = dqn_config["MLP"]
-        # net_config_cnn = dqn_config["CNN"]
         if standard:
             print("-" * 20, "DQN Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
-            # print("-" * 20, "DQN Lunar Lander using net_config", "-" * 20)
-            # main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
-        # if atari:
-        #     print("-" * 20, "DQN Atari using make evolvable", "-" * 20)
-        #     main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=None)
-        #     print("-" * 20, "DQN Atari using net_config", "-" * 20)
-        #     main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=net_config_cnn)
 
     if ppo:
         with open("configs/training/ppo/ppo.yaml") as file:
@@ -432,7 +406,7 @@ if __name__ == "__main__":
             td3_config = yaml.safe_load(file)
         INIT_HP = td3_config["INIT_HP"]
         MUTATION_PARAMS = td3_config["MUTATION_PARAMS"]
-        # net_config_mlp = td3_config["MLP"]
+        net_config_mlp = td3_config["MLP"]
         if standard:
             print("-" * 20, "TD3 Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)

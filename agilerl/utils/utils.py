@@ -10,12 +10,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -752,6 +752,7 @@ def tournament_selection_and_mutation(
             save_llm_checkpoint(elite, elite_path)
         return population
 
+    elite = None
     if accelerator is not None:
         # Save temporary models for accelerator processes
         accel_temp_models_path = f"models/{env_name}"
@@ -784,7 +785,7 @@ def tournament_selection_and_mutation(
         elite, population = tournament.select(population)
         population = mutation.mutation(population)
 
-    if save_elite:
+    if save_elite and elite is not None:
         elite_save_path = (
             elite_path.split(".pt")[0]
             if elite_path is not None

@@ -1,5 +1,6 @@
 import copy
 import glob
+import importlib
 import os
 import sys
 import types
@@ -203,11 +204,6 @@ def test_different_ranges():
     np.testing.assert_array_almost_equal(result, expected)
 
 
-# Helper function to check warning was raised
-def assert_warning_raised(warning_list, expected_message):
-    assert any(expected_message in str(w.message) for w in warning_list)
-
-
 def test_is_image_space():
     # Test identifying image spaces
     image_space = spaces.Box(low=0, high=255, shape=(84, 84, 3))
@@ -381,21 +377,21 @@ class DummyEvolvableModule(EvolvableNetwork):
         test_space = spaces.Box(low=0, high=1, shape=(10,))
         super().__init__(test_space)
         self.layer = nn.Linear(10, 10)
-        self.device = "cpu"
+        self._test_device = "cpu"
 
     def forward(self, x):
         return self.layer(x)
 
     def cpu(self):
-        self.device = "cpu"
+        self._test_device = "cpu"
         return self
 
     def to(self, device):
-        self.device = device
+        self._test_device = device
         return self
 
     def get_init_dict(self):
-        return {"device": self.device}
+        return {"device": self._test_device}
 
     def clone(self):
         return copy.deepcopy(self)
@@ -527,21 +523,21 @@ class MockEvolvableNetwork(EvolvableNetwork):
         test_space = spaces.Box(low=0, high=1, shape=(10,))
         super().__init__(test_space, latent_dim=10)
         self.head_net = nn.Linear(10, 10)
-        self.device = "cpu"
+        self._test_device = "cpu"
 
     def forward(self, x):
         return self.head_net(self.encoder(x))
 
     def cpu(self):
-        self.device = "cpu"
+        self._test_device = "cpu"
         return self
 
     def to(self, device):
-        self.device = device
+        self._test_device = device
         return self
 
     def get_init_dict(self):
-        return {"device": self.device}
+        return {"device": self._test_device}
 
 
 def test_share_encoder_parameters():
@@ -907,7 +903,7 @@ def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
         # Patch HAS_LLM_DEPENDENCIES before reimporting
         with patch("agilerl.HAS_LLM_DEPENDENCIES", False):
             # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
-            import agilerl.utils.algo_utils as algo_utils_reloaded
+            algo_utils_reloaded = importlib.import_module("agilerl.utils.algo_utils")
 
             pt_type = algo_utils_reloaded.PreTrainedModelType
             assert get_origin(pt_type) in (types.UnionType, Union)

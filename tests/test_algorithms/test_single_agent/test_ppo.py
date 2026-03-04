@@ -80,6 +80,10 @@ def get_batch_states(observation_space, num_steps) -> tuple[torch.Tensor, torch.
         next_states = tuple(
             torch.rand(1, *space.shape) for space in observation_space.spaces
         )
+    else:
+        raise NotImplementedError(
+            f"Unsupported observation space: {type(observation_space)}"
+        )
     return states, next_states
 
 
@@ -335,13 +339,12 @@ def test_initialize_ppo_with_actor_network_no_critic(
     actor_network = MakeEvolvable(actor_network, input_tensor)
     observation_space = request.getfixturevalue(observation_space)
     with pytest.raises(TypeError):
-        ppo = PPO(
+        PPO(
             observation_space,
             discrete_space,
             actor_network=actor_network,
             critic_network=critic_network,
         )
-        assert ppo
 
 
 @pytest.mark.parametrize(
@@ -521,7 +524,7 @@ def test_returns_expected_action_mask_vectorized(
     request,
 ):
     observation_space = request.getfixturevalue(observation_space)
-    action_space = request.getfixturevalue(action_space)
+    request.getfixturevalue(action_space)  # for parametrization
     state = np.stack([observation_space.sample(), observation_space.sample()])
     action_mask = np.stack([np.array([0, 1]), np.array([1, 0])])
     action, _, _, _ = build_ppo.get_action(state, action_mask=action_mask)
@@ -1110,7 +1113,7 @@ def test_ppo_with_hidden_states(
         ppo = make_ppo()
     else:
         with pytest.raises(ValueError):
-            ppo = make_ppo()
+            make_ppo()
         return
 
     # Get action with hidden state
@@ -1411,20 +1414,20 @@ def test_ppo_collect_rollouts(
     collect_rollouts(ppo, env, n_steps=learn_step)
 
     # Check if properties and weights are loaded correctly
-    assert ppo.observation_space == ppo.observation_space
-    assert ppo.action_space == ppo.action_space
+    assert ppo.observation_space is not None
+    assert ppo.action_space is not None
     assert isinstance(ppo.actor, nn.Module)
     assert isinstance(ppo.critic, nn.Module)
-    assert ppo.lr == ppo.lr
+    assert ppo.lr is not None
     assert str(ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
     assert str(ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
-    assert ppo.batch_size == ppo.batch_size
-    assert ppo.gamma == ppo.gamma
-    assert ppo.mut == ppo.mut
-    assert ppo.index == ppo.index
-    assert ppo.scores == ppo.scores
-    assert ppo.fitness == ppo.fitness
-    assert ppo.steps == ppo.steps
+    assert ppo.batch_size is not None
+    assert ppo.gamma is not None
+    assert ppo.mut is None
+    assert ppo.index is not None
+    assert ppo.scores is not None
+    assert ppo.fitness is not None
+    assert ppo.steps is not None
     ppo.clean_up()
 
 

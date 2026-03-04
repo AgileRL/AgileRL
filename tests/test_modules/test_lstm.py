@@ -85,7 +85,7 @@ def test_forward_with_states(device):
 
     with torch.no_grad():
         # Pass hidden states to forward manually
-        lstm_output, (hn, cn) = evolvable_lstm.model[f"{evolvable_lstm.name}_lstm"](
+        lstm_output, _ = evolvable_lstm.model[f"{evolvable_lstm.name}_lstm"](
             input_tensor,
             (h0, c0),
         )
@@ -97,7 +97,7 @@ def test_forward_with_states(device):
         )
 
         # Regular forward pass
-        output_tensor, (hn, cn) = evolvable_lstm.forward(
+        output_tensor, _ = evolvable_lstm.forward(
             input_tensor,
             hidden_state={
                 f"{evolvable_lstm.name}_h": h0,
@@ -197,12 +197,21 @@ def test_add_nodes(
     )
     original_hidden_size = copy.deepcopy(lstm.hidden_state_size)
     result = lstm.add_node(numb_new_nodes=numb_new_nodes)
-    if numb_new_nodes is None:
-        numb_new_nodes = result["numb_new_nodes"]
-    assert lstm.hidden_state_size == original_hidden_size + numb_new_nodes
+    effective_numb_new_nodes = (
+        result["numb_new_nodes"] if numb_new_nodes is None else numb_new_nodes
+    )
+    assert lstm.hidden_state_size == original_hidden_size + effective_numb_new_nodes
     assert lstm.hidden_state_architecture == {
-        "h": (lstm.num_layers, BatchDimension, original_hidden_size + numb_new_nodes),
-        "c": (lstm.num_layers, BatchDimension, original_hidden_size + numb_new_nodes),
+        "h": (
+            lstm.num_layers,
+            BatchDimension,
+            original_hidden_size + effective_numb_new_nodes,
+        ),
+        "c": (
+            lstm.num_layers,
+            BatchDimension,
+            original_hidden_size + effective_numb_new_nodes,
+        ),
     }
 
 
@@ -233,12 +242,21 @@ def test_remove_nodes(
     )
     original_hidden_size = copy.deepcopy(lstm.hidden_state_size)
     result = lstm.remove_node(numb_new_nodes=numb_new_nodes)
-    if numb_new_nodes is None:
-        numb_new_nodes = result["numb_new_nodes"]
-    assert lstm.hidden_state_size == original_hidden_size - numb_new_nodes
+    effective_numb_new_nodes = (
+        result["numb_new_nodes"] if numb_new_nodes is None else numb_new_nodes
+    )
+    assert lstm.hidden_state_size == original_hidden_size - effective_numb_new_nodes
     assert lstm.hidden_state_architecture == {
-        "h": (lstm.num_layers, BatchDimension, original_hidden_size - numb_new_nodes),
-        "c": (lstm.num_layers, BatchDimension, original_hidden_size - numb_new_nodes),
+        "h": (
+            lstm.num_layers,
+            BatchDimension,
+            original_hidden_size - effective_numb_new_nodes,
+        ),
+        "c": (
+            lstm.num_layers,
+            BatchDimension,
+            original_hidden_size - effective_numb_new_nodes,
+        ),
     }
 
 
@@ -263,7 +281,7 @@ def test_change_activation(device):
         input_tensor = torch.randn(1, 10).to(device)
         h0 = torch.zeros(1, 1, 64).to(device)
         c0 = torch.zeros(1, 1, 64).to(device)
-        output, (hn, cn) = lstm.forward(
+        output, _ = lstm.forward(
             input_tensor,
             hidden_state={
                 f"{lstm.name}_h": h0,
@@ -295,7 +313,7 @@ def test_clone_instance(input_size, hidden_size, num_outputs, num_layers, device
     assert_state_dicts_equal(clone.state_dict(), evolvable_lstm.state_dict())
 
     for key, param in clone_net.named_parameters():
-        torch.testing.assert_close(param, original_net_dict[key]), evolvable_lstm
+        torch.testing.assert_close(param, original_net_dict[key])
 
 
 def test_net_config_excludes_constructor_only_fields(device):

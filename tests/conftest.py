@@ -20,6 +20,9 @@ from tests.helper_functions import (
     generate_random_box_space,
 )
 
+if not torch.cuda.is_available():
+    os.environ.setdefault("ACCELERATE_USE_CPU", "true")
+
 
 # Only clear CUDA cache when actually needed
 @pytest.fixture(autouse=True, scope="function")
@@ -39,6 +42,18 @@ def cleanup():
     # Only run garbage collection every 10 tests
     if cleanup.call_count % 5 == 0:
         gc.collect()
+
+
+@pytest.fixture(autouse=True)
+def skip_cuda_parametrization_when_unavailable(request):
+    """Skip CUDA-specific parametrized tests on environments without CUDA."""
+    callspec = getattr(request.node, "callspec", None)
+    if (
+        callspec is not None
+        and callspec.params.get("device") == "cuda"
+        and not torch.cuda.is_available()
+    ):
+        pytest.skip("CUDA parametrization skipped because CUDA is unavailable.")
 
 
 # Shared device fixture to avoid repeated device checks

@@ -55,13 +55,17 @@ def set_seed():
     """Set random seeds for reproducibility."""
     SEED = 42
     torch.manual_seed(SEED)
-    torch.cuda.manual_seed(SEED)
-    torch.cuda.manual_seed_all(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(SEED)
+        torch.cuda.manual_seed_all(SEED)
     np.random.seed(SEED)
     random.seed(SEED)
 
 
 def generate_accelerator(use_deepspeed_optimizer, config):
+    if config is not None and not torch.cuda.is_available():
+        pytest.skip("DeepSpeed-configured LLM tests require CUDA support.")
+
     gc.collect()
     torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
@@ -104,7 +108,11 @@ def generate_model(pretrained_model_name_or_path):
     )
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=(
+            torch.bfloat16
+            if (torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+            else torch.float32
+        ),
         attn_implementation="sdpa",
     )
     model.gradient_checkpointing_enable()

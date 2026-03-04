@@ -255,6 +255,7 @@ class MakeEvolvable(EvolvableModule):
         batch_size = x.size(0)
 
         x = self.feature_net(x)
+        value: torch.Tensor | None = None
 
         # Check if there is a cnn
         if self.cnn_layer_info:
@@ -279,6 +280,9 @@ class MakeEvolvable(EvolvableModule):
                 x = value + advantage - advantage.mean(1, keepdim=True)
                 x = F.softmax(x, dim=-1)
             else:
+                if value is None:
+                    msg = "Rainbow value stream is not initialized."
+                    raise RuntimeError(msg)
                 value = value.view(batch_size, 1, self.num_atoms)
                 advantage = advantage.view(batch_size, self.num_outputs, self.num_atoms)
 
@@ -293,6 +297,9 @@ class MakeEvolvable(EvolvableModule):
             if q:
                 x = torch.sum(x * self.support, dim=2)
         elif self.cnn_layer_info:
+            if value is None:
+                msg = "Value stream is not initialized."
+                raise RuntimeError(msg)
             x = value
 
         return x
@@ -637,13 +644,6 @@ class MakeEvolvable(EvolvableModule):
         :type name: str
         """
         net_dict = OrderedDict()
-        # if self.cnn_layer_info["conv_layer_type"] == "Conv3d":
-        #     k_size = [
-        #         (self.input_tensor.shape[-3], k_size[1], k_size[2])
-        #         for k_size in kernel_size
-        #     ]
-        # else:
-
         net_dict[f"{name}_conv_layer_0"] = get_conv_layer(
             self.cnn_layer_info["conv_layer_type"],
             in_channels=input_size,

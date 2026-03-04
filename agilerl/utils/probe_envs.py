@@ -1316,7 +1316,7 @@ def check_policy_on_policy_with_probe_env(
             # Assumes it is always a discrete action space
             _, _, _ = agent.actor(state)
             # TorchDistribution uses raw tensors: logits -> probs via softmax
-            predicted_policy_values = (  # noqa: F841
+            _ = (
                 torch.softmax(agent.actor.head_net.dist.logits, dim=-1)
                 .detach()
                 .cpu()

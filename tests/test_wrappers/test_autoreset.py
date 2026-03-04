@@ -26,7 +26,7 @@ REWARD_MAP = {
 }
 
 
-class parallel_env(ParallelEnv):
+class RPSParallelEnv(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "rps_v2"}
 
     def __init__(self, render_mode=None):
@@ -123,8 +123,6 @@ class parallel_env(ParallelEnv):
             (actions[self.agents[0]], actions[self.agents[1]])
         ]
 
-        terminations = dict.fromkeys(self.agents, False)
-
         self.num_moves += 1
         env_truncation = self.num_moves >= NUM_ITERS
         truncations = dict.fromkeys(self.agents, env_truncation)
@@ -150,25 +148,25 @@ class parallel_env(ParallelEnv):
 
 def test_autoreset_wrapper_autoreset():
     """Tests the autoreset wrapper actually automatically resets correctly."""
-    env = parallel_env(render_mode="human")
+    env = RPSParallelEnv(render_mode="human")
     env = PettingZooAutoResetParallelWrapper(env)
-    observations, infos = env.reset()
+    env.reset()
     with patch(
-        f"{__name__}.parallel_env.reset",
+        f"{__name__}.RPSParallelEnv.reset",
         wraps=env.env.reset,
     ) as autoreset_patch:
         # Environment truncates after 100 steps, so we expect 1 reset.
         for _ in range(100):
             # this is where you would insert your policy
             actions = {agent: env.action_space(agent).sample() for agent in env.agents}
-            observations, rewards, terminations, truncations, infos = env.step(actions)
+            _ = env.step(actions)
         autoreset_patch.assert_called()
         autoreset_patch.reset_mock()
         # Environment truncates after 100 steps, so we expect 5 resets.
         for _ in range(500):
             # this is where you would insert your policy
             actions = {agent: env.action_space(agent).sample() for agent in env.agents}
-            observations, rewards, terminations, truncations, infos = env.step(actions)
+            _ = env.step(actions)
         autoreset_patch.assert_called()
         assert autoreset_patch.call_count == 5
         autoreset_patch.reset_mock()
@@ -176,22 +174,22 @@ def test_autoreset_wrapper_autoreset():
         for _ in range(99):
             # this is where you would insert your policy
             actions = {agent: env.action_space(agent).sample() for agent in env.agents}
-            observations, rewards, terminations, truncations, infos = env.step(actions)
+            _ = env.step(actions)
         autoreset_patch.assert_not_called()
 
 
 def test_return_unwrapped():
-    env = parallel_env(render_mode="human")
+    env = RPSParallelEnv(render_mode="human")
     env = PettingZooAutoResetParallelWrapper(env)
-    observations, infos = env.reset()
+    env.reset()
     unwrapped = env.unwrapped
     assert isinstance(unwrapped, ParallelEnv)
 
 
 def test_return_state():
-    env = parallel_env(render_mode="human")
+    env = RPSParallelEnv(render_mode="human")
     env = PettingZooAutoResetParallelWrapper(env)
-    observations, infos = env.reset()
+    observations, _ = env.reset()
     state = env.state
     assert state == observations
 

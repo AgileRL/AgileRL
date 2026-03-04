@@ -4,8 +4,6 @@ import multiprocessing as mp
 import os
 import signal
 import time
-from multiprocessing import Process
-from multiprocessing.sharedctypes import SynchronizedArray
 from unittest.mock import patch
 
 import gymnasium as gym
@@ -322,11 +320,6 @@ def actions_to_list_helper(actions):
     return passed_actions_list
 
 
-# @pytest.fixture
-# def pz_experience_spec():
-#     return PettingZooExperienceSpec(8)
-
-
 @pytest.fixture(autouse=True)
 def clean_process_fixture():
     """Fixture to ensure processes are cleaned up between tests"""
@@ -350,7 +343,7 @@ def test_create_async_pz_vector_env(env_fns):
     assert env.observation_space
     assert env.num_envs == 8
     for val in env._obs_buffer.values():
-        assert isinstance(val, SynchronizedArray)
+        assert isinstance(val, mp.sharedctypes.SynchronizedArray)
     assert isinstance(env.observations, Observations)
     assert env.processes
     env.reset()
@@ -630,7 +623,7 @@ def test_reset_async_exception(env_fns):
     env._state = AsyncState.WAITING_RESET
     with pytest.raises(AlreadyPendingCallError):
         env.reset_async()
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -643,7 +636,7 @@ def test_reset_wait_exception(env_fns):
         env.reset_async()
         env._state = AsyncState.DEFAULT
         env.reset_wait()
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -655,7 +648,7 @@ def test_step_async_exception(env_fns):
     env._state = AsyncState.WAITING_RESET
     with pytest.raises(AlreadyPendingCallError):
         env.step_async(actions=None)
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -667,7 +660,7 @@ def test_step_wait_exception(env_fns):
     env._state = AsyncState.DEFAULT
     with pytest.raises(NoAsyncCallError):
         env.step_wait()
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -679,7 +672,7 @@ def test_call_async_exception(env_fns):
     env._state = AsyncState.WAITING_CALL
     with pytest.raises(AlreadyPendingCallError):
         env.call_async("test")
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -691,7 +684,7 @@ def test_call_wait_exception(env_fns):
     env._state = AsyncState.DEFAULT
     with pytest.raises(NoAsyncCallError):
         env.call_wait()
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -702,7 +695,7 @@ def test_call_exception_worker(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
     with pytest.raises(ValueError):
         env.call("reset")
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -713,7 +706,7 @@ def test_set_attr_val_error(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
     with pytest.raises(ValueError):
         env.set_attr("test", values=[1, 2, 3])
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -725,7 +718,7 @@ def test_set_attr_exception(env_fns):
     env._state = AsyncState.WAITING_CALL
     with pytest.raises(AlreadyPendingCallError):
         env.set_attr("test", values=[1, 2])
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -767,7 +760,7 @@ def test_poll_pipe_envs(env_fns):
     env.parent_pipes[0] = None
     result = env._poll_pipe_envs(timeout=1)
     assert not result
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -779,7 +772,7 @@ def test_assert_is_running(env_fns):
     env.closed = True
     with pytest.raises(ClosedEnvironmentError):
         env._assert_is_running()
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -793,7 +786,7 @@ def test_step_wait_timeout_async_pz_vector_env(env_fns):
         env.parent_pipes[0] = None
         env.step_wait(timeout=1)
         env.close()
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -807,7 +800,7 @@ def test_call_wait_timeout_async_pz_vector_env(env_fns):
         env.parent_pipes[0] = None
         env.call_wait(timeout=1)
         env.close()
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -916,7 +909,7 @@ def test_worker_reset():
     vec_env = AsyncPettingZooVecEnv(env_fns)
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
-    p = Process(
+    p = mp.Process(
         target=_async_worker,
         args=(
             0,
@@ -956,7 +949,7 @@ def test_worker_step_simple():
     vec_env.close()
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
-    p = Process(
+    p = mp.Process(
         target=_async_worker,
         args=(
             0,
@@ -1018,7 +1011,7 @@ def test_worker_step_autoreset():
     vec_env.close()
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
-    p = Process(
+    p = mp.Process(
         target=_async_worker,
         args=(
             0,
@@ -1060,7 +1053,7 @@ def test_worker_runtime_error():
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
     try:
-        p = Process(
+        p = mp.Process(
             target=_async_worker,
             args=(
                 0,
@@ -1316,7 +1309,7 @@ def test_delete_async_pz_vec_env():
     for process in env.processes:
         assert process.is_alive()
     processes = env.processes
-    env.__del__()
+    env.close()
     for p in processes:
         assert not p.is_alive()
 

@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import asdict
 from importlib.metadata import version
+from itertools import repeat
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -113,8 +114,7 @@ if HAS_LLM_DEPENDENCIES:
 __all__ = ["EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
-SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
-SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapperProtocol")
+SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
 
 
 class _RegistryMeta(type):
@@ -137,7 +137,8 @@ class _RegistryMeta(type):
         return instance
 
 
-class RegistryMeta(_RegistryMeta, ABCMeta): ...
+class RegistryMeta(_RegistryMeta, ABCMeta):
+    """Metaclass combining registry initialization with ABC support."""
 
 
 def get_checkpoint_dict(
@@ -1220,8 +1221,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :return: None
         :rtype: None
         """
-        for evo_attr in self.evolvable_attributes().values():
-            del evo_attr
+        for attr_name in self.evolvable_attributes():
+            delattr(self, attr_name)
 
 
 class RLAlgorithm(EvolvableAlgorithm, ABC):
@@ -2348,8 +2349,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             del self.llm.llm_engine.model_executor
             del self.llm
         gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if torch.cuda.is_initialized():
+                torch.cuda.synchronize()
 
     def clone(self, index: int | None = None, wrap: bool = True) -> Self:
         """Create a clone of the algorithm.
@@ -2413,9 +2416,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
             # Clone attributes
             accelerator = clone.accelerator
-            lr_scheduler = clone.lr_scheduler
             cloned_lr_scheduler = clone.lr_scheduler
             original_lr_scheduler = self.lr_scheduler
+            original_llm = None
+            cloned_llm = None
             clone.lr_scheduler = None
             self.lr_scheduler = None
             if self.use_vllm:
@@ -2425,7 +2429,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.llm = None
             clone = EvolvableAlgorithm.copy_attributes(self, clone)
             clone.accelerator = accelerator
-            clone.lr_scheduler = lr_scheduler
             clone.lr_scheduler = cloned_lr_scheduler
             self.lr_scheduler = original_lr_scheduler
             if self.use_vllm:
@@ -2452,7 +2455,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             elif self.accelerator is not None:
                 self.accelerator.wait_for_everyone()
 
-        return clone
+            return clone
 
     @staticmethod
     def update_lr(
@@ -2789,7 +2792,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         # The below line returns a list: [prompt1 * group_size, ..., promptN * group_size],
         # where N is the data batch size per gpu, list length is group_size * N
-        group_prompts = [prompt for prompt in prompts for _ in range(group_size)]
+        group_prompts = [p for prompt in prompts for p in repeat(prompt, group_size)]
         prompts_ids = [prompt["input_ids"] for prompt in group_prompts]
         prompts_text = [prompt["text"] for prompt in group_prompts]
         prompts_text = [
@@ -2896,7 +2899,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 ],
                 dim=1,
             )
-            for i, _ in enumerate(prompts)
+            for i in range(len(prompts))
         ]
 
         num_input_tokens = [prompt_ids.shape[1] for prompt_ids in prompts_ids][

@@ -67,11 +67,9 @@ if __name__ == "__main__":
         accelerator=accelerator,  # Accelerator
     )
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,
-    )  # Field names to store in memory
+        max_size=10000,  # Max replay buffer size
+    )
 
     if accelerator.is_main_process:
         print("Filling replay buffer with dataset...")
@@ -97,7 +95,6 @@ if __name__ == "__main__":
     replay_dataloader = DataLoader(replay_dataset, batch_size=None)
     replay_dataloader = accelerator.prepare(replay_dataloader)
     sampler = Sampler(
-        distributed=True,
         dataset=replay_dataset,
         dataloader=replay_dataloader,
     )
@@ -110,15 +107,13 @@ if __name__ == "__main__":
     )
 
     mutations = Mutations(
-        algo="CQN",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.2,  # New layer mutation
         parameters=0.2,  # Network parameters mutation
         activation=0,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
-        mutation_sd=0.1,  # Mutation strength  # Network architecture
+        mutation_sd=0.1,  # Mutation strength
         rand_seed=1,  # Random seed
         accelerator=accelerator,  # Accelerator
     )
@@ -144,7 +139,7 @@ if __name__ == "__main__":
         if accelerator is not None:
             accelerator.wait_for_everyone()
         for agent in pop:  # Loop through population
-            for _idx_step in range(evo_steps):
+            for _ in range(evo_steps):
                 # Sample dataloader
                 experiences = sampler.sample(agent.batch_size)
                 # Learn according to agent's RL algorithm
@@ -177,7 +172,7 @@ if __name__ == "__main__":
             model.unwrap_models()
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
-            elite, pop = tournament.select(pop)
+            _, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
             for pop_i, model in enumerate(pop):
                 model.save_checkpoint(f"{accel_temp_models_path}/CQN_{pop_i}.pt")

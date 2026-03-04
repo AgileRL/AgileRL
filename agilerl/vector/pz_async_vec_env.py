@@ -100,23 +100,22 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         # Core class attributes
         ctx = mp.get_context(context)
         self.env_fns = env_fns
-        self.num_envs = len(env_fns)
         dummy_env = env_fns[0]()
-        self.metadata = (
+        metadata = (
             dummy_env.metadata
             if hasattr(dummy_env, "metadata")
             else dummy_env.unwrapped.metadata
         )
-        self.render_mode = (
+        render_mode = (
             dummy_env.render_mode
             if hasattr(dummy_env, "render_mode")
             else dummy_env.unwrapped.render_mode
         )
-        self.possible_agents = dummy_env.possible_agents
+        possible_agents = dummy_env.possible_agents
+        self.possible_agents = possible_agents
         self.active_agents = None
         self.previous_active = None
         self.copy = copy
-        self.agents = dummy_env.possible_agents[:]
         action_spaces = {
             agent: dummy_env.action_space(agent) for agent in dummy_env.possible_agents
         }
@@ -130,7 +129,9 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             len(env_fns),
             observation_spaces,
             action_spaces,
-            self.possible_agents,
+            possible_agents,
+            metadata=metadata,
+            render_mode=render_mode,
         )
 
         # Create the shared memory for sharing observations between subprocesses
@@ -472,8 +473,10 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
     def close_extras(
         self,
+        *,
         timeout: float | None = None,
         terminate: bool = False,
+        **kwargs: Any,
     ) -> None:
         """Close the environments & clean up the extra resources (processes and pipes).
 
@@ -615,15 +618,6 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             vector_infos[key], vector_infos[f"_{key}"] = array, array_mask
 
         return vector_infos
-
-    def __del__(self) -> None:
-        """On deleting the object, checks that the vector environment is closed."""
-        if not getattr(self, "closed", True) and hasattr(self, "_state"):
-            self.close(terminate=True)
-        if hasattr(self, "_obs_buffer"):
-            del self._obs_buffer
-        if hasattr(self, "observations"):
-            del self.observations
 
 
 class Observations:
@@ -783,28 +777,28 @@ def get_placeholder_value(
     :return: Placeholder value
     :rtype: Any
     """
-    match transition_name:
-        case "reward":
-            return np.nan
-        case "truncated":
-            return np.nan
-        case "terminated":
-            return np.nan
-        case "info":
-            return {}
-        case "observation":
-            if obs_spaces is None:
-                return None
+    if transition_name == "reward":
+        return np.nan
+    if transition_name == "truncated":
+        return np.nan
+    if transition_name == "terminated":
+        return np.nan
+    if transition_name == "info":
+        return {}
+    if transition_name == "observation":
+        if obs_spaces is None:
+            return None
 
-            agent_space = obs_spaces[agent]
-            if isinstance(agent_space, spaces.Dict):
-                # For Dict spaces, create a dictionary of -1 arrays
-                return {k: np.full(v.shape, np.nan) for k, v in agent_space.items()}
-            if isinstance(agent_space, spaces.Tuple):
-                # For Tuple spaces, create a tuple of -1 arrays
-                return tuple(np.full(s.shape, np.nan) for s in agent_space)
-            # For normal spaces
-            return np.full(agent_space.shape, np.nan)
+        agent_space = obs_spaces[agent]
+        if isinstance(agent_space, spaces.Dict):
+            # For Dict spaces, create a dictionary of -1 arrays
+            return {k: np.full(v.shape, np.nan) for k, v in agent_space.items()}
+        if isinstance(agent_space, spaces.Tuple):
+            # For Tuple spaces, create a tuple of -1 arrays
+            return tuple(np.full(s.shape, np.nan) for s in agent_space)
+        # For normal spaces
+        return np.full(agent_space.shape, np.nan)
+    return None
 
 
 def process_transition(

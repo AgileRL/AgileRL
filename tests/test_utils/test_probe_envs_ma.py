@@ -67,7 +67,7 @@ def test_constant_reward_envs(
     exp_infos,
 ):
     env = env_class()
-    states, infos = env.reset()
+    states, _ = env.reset()
     for _ in range(20):
         actions = {
             env.agents[0]: env.action_space[env.agents[0]].sample(),
@@ -106,7 +106,7 @@ def test_constant_reward_envs(
             assert info == exp_info
 
         if terminateds[env.agents[0]] or truncateds[env.agents[0]]:
-            states, infos = env.reset()
+            states, _ = env.reset()
 
 
 @pytest.mark.parametrize(
@@ -159,7 +159,7 @@ def test_observation_dependent_reward_envs(
     exp_infos,
 ):
     env = env_class()
-    states, info = env.reset()
+    states, _ = env.reset()
     for _ in range(20):
         actions = {
             env.agents[0]: env.action_space[env.agents[0]].sample(),
@@ -198,7 +198,7 @@ def test_observation_dependent_reward_envs(
             assert info == exp_info
 
         if terminateds[env.agents[0]] or truncateds[env.agents[0]]:
-            states, infos = env.reset()
+            states, _ = env.reset()
 
 
 @pytest.mark.parametrize(
@@ -222,7 +222,7 @@ def test_discounted_reward_envs(
     exp_infos,
 ):
     env = env_class()
-    states, info = env.reset()
+    states, _ = env.reset()
     for _ in range(20):
         actions = {
             env.agents[0]: env.action_space[env.agents[0]].sample(),
@@ -261,7 +261,7 @@ def test_discounted_reward_envs(
         states = next_states
 
         if terminateds[env.agents[0]] or truncateds[env.agents[0]]:
-            states, infos = env.reset()
+            states, _ = env.reset()
 
 
 @pytest.mark.parametrize(
@@ -299,7 +299,7 @@ def test_discrete_actions_fixed_observation_policy_reward_envs(
     exp_infos,
 ):
     env = env_class()
-    states, info = env.reset()
+    states, _ = env.reset()
     for _ in range(20):
         actions = {
             env.agents[0]: env.action_space[env.agents[0]].sample(),
@@ -343,7 +343,7 @@ def test_discrete_actions_fixed_observation_policy_reward_envs(
             assert info == exp_info
 
         if terminateds[env.agents[0]] or truncateds[env.agents[0]]:
-            states, infos = env.reset()
+            states, _ = env.reset()
 
 
 @pytest.mark.parametrize(
@@ -376,7 +376,7 @@ def test_continuous_actions_fixed_observation_policy_reward_envs(
     exp_infos,
 ):
     env = env_class()
-    states, info = env.reset()
+    states, _ = env.reset()
     for _ in range(20):
         actions = {
             env.agents[0]: env.action_space[env.agents[0]].sample(),
@@ -417,7 +417,7 @@ def test_continuous_actions_fixed_observation_policy_reward_envs(
             assert info == exp_info
 
         if terminateds[env.agents[0]] or truncateds[env.agents[0]]:
-            states, infos = env.reset()
+            states, _ = env.reset()
 
 
 @pytest.mark.parametrize(
@@ -436,7 +436,7 @@ def test_discrete_actions_policy_envs(
     exp_infos,
 ):
     env = env_class()
-    states, info = env.reset()
+    states, _ = env.reset()
     for _ in range(20):
         actions = {
             env.agents[0]: env.action_space[env.agents[0]].sample(),
@@ -479,7 +479,7 @@ def test_discrete_actions_policy_envs(
             assert info == exp_info
 
         if terminateds[env.agents[0]] or truncateds[env.agents[0]]:
-            states, infos = env.reset()
+            states, _ = env.reset()
 
 
 @pytest.mark.parametrize(
@@ -498,7 +498,7 @@ def test_continuous_actions_policy_envs(
     exp_infos,
 ):
     env = env_class()
-    states, info = env.reset()
+    states, _ = env.reset()
     for _ in range(60):
         actions = {
             env.agents[0]: env.action_space[env.agents[0]].sample(),
@@ -549,7 +549,7 @@ def test_continuous_actions_policy_envs(
             assert info == exp_info
 
         if terminateds[env.agents[0]] or truncateds[env.agents[0]]:
-            states, infos = env.reset()
+            states, _ = env.reset()
 
 
 @pytest.mark.parametrize(
@@ -568,7 +568,7 @@ def test_discrete_actions_multi_policy_envs(
     exp_infos,
 ):
     env = env_class()
-    states, info = env.reset()
+    states, _ = env.reset()
     for _ in range(20):
         actions = {
             env.agents[0]: env.action_space[env.agents[0]].sample(),
@@ -611,7 +611,7 @@ def test_discrete_actions_multi_policy_envs(
             assert info == exp_info
 
         if terminateds[env.agents[0]] or truncateds[env.agents[0]]:
-            states, infos = env.reset()
+            states, _ = env.reset()
 
 
 def test_policy_q_learning_with_probe_env():

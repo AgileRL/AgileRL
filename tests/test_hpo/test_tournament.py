@@ -78,7 +78,6 @@ def test_returns_best_agent_and_new_population():
     discrete_action_space = generate_discrete_space(2)
     continuous_action_space = generate_random_box_space((2,))
     net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-    population_size = 4
     device = "cpu"
     population_size = 5
 
@@ -135,7 +134,6 @@ def test_returns_best_agent_and_new_population_without_elitism():
     discrete_action_space = generate_discrete_space(2)
     continuous_action_space = generate_random_box_space((2,))
     net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-    population_size = 4
     device = "cpu"
     population_size = 5
 
@@ -190,7 +188,6 @@ def test_returns_best_agent_and_new_population_multi_agent():
     observation_space = generate_multi_agent_box_spaces(2, (4,))
     action_space = generate_multi_agent_discrete_spaces(2, 2)
     net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-    population_size = 4
     device = "cpu"
     population_size = 5
 
@@ -234,7 +231,6 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
     observation_space = generate_multi_agent_box_spaces(2, (4,))
     action_space = generate_multi_agent_discrete_spaces(2, 2)
     net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-    population_size = 4
     device = "cpu"
     population_size = 5
 
