@@ -10,6 +10,9 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import numpy as np
 import pytest
 import torch
+
+pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
+pytest.importorskip("vllm", reason="LLM tests require vllm.")
 import vllm
 from accelerate import Accelerator
 from accelerate.scheduler import AcceleratedScheduler

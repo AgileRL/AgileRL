@@ -4,6 +4,8 @@ import gc
 import numpy as np
 import pytest
 import torch
+
+pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
