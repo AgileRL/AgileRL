@@ -1,5 +1,5 @@
 ---
-name: Linux Tests
+name: Linux
 
 on:
     push:
@@ -15,7 +15,7 @@ permissions:
     contents: read
 
 jobs:
-    build:
+    tests:
         runs-on: gha-runner-scale-set
         strategy:
             fail-fast: false

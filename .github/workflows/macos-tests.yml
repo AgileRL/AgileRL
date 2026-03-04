@@ -1,5 +1,5 @@
 ---
-name: macOS Tests
+name: macOS
 
 on:
     push:
@@ -15,13 +15,13 @@ permissions:
     contents: read
 
 jobs:
-    build:
+    tests:
         runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false
             max-parallel: 4
             matrix:
-                os: [macos-15, macos-26]
+                os: [macos-26]
                 python-version: ['3.10', '3.11', '3.12', '3.13']
 
         steps:
@@ -33,6 +33,7 @@ jobs:
 
             - name: Install dependencies
               run: |
+                  pip install uv
                   uv sync --locked --all-groups --extra all
 
             - name: Test with pytest
