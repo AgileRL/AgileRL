@@ -1,6 +1,8 @@
 import gc
 import os
+import shutil
 import socket
+import sys
 
 import numpy as np
 import pytest
@@ -54,6 +56,20 @@ def skip_cuda_parametrization_when_unavailable(request):
         and not torch.cuda.is_available()
     ):
         pytest.skip("CUDA parametrization skipped because CUDA is unavailable.")
+
+
+@pytest.fixture(autouse=True)
+def skip_torch_compile_parametrization_when_windows_compiler_unavailable(request):
+    """Skip torch.compile parametrized tests on Windows without MSVC compiler."""
+    callspec = getattr(request.node, "callspec", None)
+    if callspec is None or sys.platform != "win32":
+        return
+
+    compile_mode = callspec.params.get("compile_mode")
+    if compile_mode is not None and shutil.which("cl") is None:
+        pytest.skip(
+            "torch.compile parametrization skipped: MSVC compiler (`cl`) is unavailable on Windows runner."
+        )
 
 
 # Shared device fixture to avoid repeated device checks
