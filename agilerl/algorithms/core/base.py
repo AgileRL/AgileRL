@@ -101,10 +101,25 @@ if TYPE_CHECKING:
     from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 
 if HAS_LLM_DEPENDENCIES:
-    from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+    try:
+        from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+    except ImportError:
+
+        def clone_tensors_for_torch_save(
+            item: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            return item
+
     from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
     from safetensors.torch import load_file
-    from vllm import LLM, SamplingParams
+
+    try:
+        from vllm import LLM, SamplingParams
+    except ImportError:
+        LLM = None
+        SamplingParams = None
 
     from agilerl.utils.llm_utils import (
         create_model_from_name_or_path,
@@ -2786,6 +2801,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         prompts: list[dict[str, int]],
         group_size: int,
     ) -> list[torch.Tensor]:
+        if SamplingParams is None:
+            msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform."
+            raise ImportError(msg)
 
         # I need to make the following happen
         # prompts = [prompt1, prompt1, ..., prompt1 (group_size times), prompt2, prompt2, ..., prompt2 (group_size times), ...]
@@ -3082,6 +3100,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _configure_vllm(self) -> None:
         """Configure vLLM for efficient inference during generation in 'get_action'."""
+        if LLM is None:
+            msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform."
+            raise ImportError(msg)
         if self.vllm_config is None:
             warnings.warn(
                 "No VLLM config provided. Using default VLLM configuration for generation.",

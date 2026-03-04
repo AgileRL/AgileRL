@@ -15,12 +15,16 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.typing import PreferencePrompts, ReasoningPrompts
 
 if HAS_LLM_DEPENDENCIES:
-    import deepspeed
+    try:
+        import deepspeed
+    except ImportError:
+        deepspeed = None
     from datasets import Dataset
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.modeling_utils import PreTrainedModel
     from transformers.tokenization_utils_base import BatchEncoding
 else:
+    deepspeed = None
     AutoTokenizer = Any
     PreTrainedModel = Any
     BatchEncoding = Any
@@ -655,6 +659,12 @@ def gather_if_zero3(
     :type modifier_rank: int | None
     """
     if zero_stage == 3:
+        if deepspeed is None:
+            msg = (
+                "DeepSpeed is required for ZeRO stage 3 parameter gathering, but it "
+                "is not installed."
+            )
+            raise ImportError(msg)
         with deepspeed.zero.GatheredParameters(
             params=params,
             modifier_rank=modifier_rank,
