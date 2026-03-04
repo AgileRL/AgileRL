@@ -32,9 +32,7 @@ def map_pytree(
 
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
-    if isinstance(item, (list, tuple)):
-        return [map_pytree(f, v) for v in item]
-    if isinstance(item, set):
+    if isinstance(item, (list, set, tuple)):
         return [map_pytree(f, v) for v in item]
     if isinstance(item, (np.ndarray, torch.Tensor)):
         return f(item)

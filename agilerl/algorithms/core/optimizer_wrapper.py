@@ -6,7 +6,7 @@ from torch.optim import Optimizer
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.modules import EvolvableModule, ModuleDict
-from agilerl.protocols import EvolvableAlgorithmProtocol
+from agilerl.protocols import EvolvableAlgorithmProtocol, OptimizerLikeClass
 from agilerl.typing import OptimizerType, StateDict
 
 if HAS_LLM_DEPENDENCIES:
@@ -17,7 +17,7 @@ else:
     PeftModelType = "PeftModel"
 
 ModuleList = list[EvolvableModule]
-_Optimizer = type[OptimizerType] | dict[str, type[OptimizerType]] | type[Any]
+_Optimizer = type[OptimizerType] | dict[str, type[OptimizerType]] | OptimizerLikeClass
 _Module = Union[EvolvableModule, ModuleDict, ModuleList, PeftModelType]
 
 
