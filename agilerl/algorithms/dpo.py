@@ -566,9 +566,8 @@ class DPO(LLMAlgorithm):
             for _ in range(loop):
                 _, chosen_reward, rejected_reward = self.learn(prompts, training=False)
                 reward_margin = chosen_reward - rejected_reward
-                rewards.append(reward_margin)
+                rewards.append(np.asarray(reward_margin).item())
                 prompts = env.step()
-            reward_tensor = torch.stack(rewards)
-            mean_fit = torch.mean(reward_tensor).item()
+            mean_fit = float(np.mean(rewards))
         self.fitness.append(mean_fit)
         return np.array(mean_fit)
