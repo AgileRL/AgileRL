@@ -643,7 +643,7 @@ def test_reset_async_exception(env_fns):
     env._state = AsyncState.WAITING_RESET
     with pytest.raises(AlreadyPendingCallError):
         env.reset_async()
-    env.close()
+    env.close(terminate=True)
 
 
 @pytest.mark.parametrize(
@@ -668,7 +668,7 @@ def test_step_async_exception(env_fns):
     env._state = AsyncState.WAITING_RESET
     with pytest.raises(AlreadyPendingCallError):
         env.step_async(actions=None)
-    env.close()
+    env.close(terminate=True)
 
 
 @pytest.mark.parametrize(
@@ -692,7 +692,7 @@ def test_call_async_exception(env_fns):
     env._state = AsyncState.WAITING_CALL
     with pytest.raises(AlreadyPendingCallError):
         env.call_async("test")
-    env.close()
+    env.close(terminate=True)
 
 
 @pytest.mark.parametrize(
@@ -738,7 +738,7 @@ def test_set_attr_exception(env_fns):
     env._state = AsyncState.WAITING_CALL
     with pytest.raises(AlreadyPendingCallError):
         env.set_attr("test", values=[1, 2])
-    env.close()
+    env.close(terminate=True)
 
 
 @pytest.mark.parametrize(
@@ -1263,7 +1263,8 @@ def test_vec_env_reset():
         dummy_action_spaces,
         ["agent_0"],
     )
-    vec_env.reset()
+    with pytest.raises(NotImplementedError, match="Subclasses must implement reset"):
+        vec_env.reset()
 
 
 def test_vec_env_step():
@@ -1273,8 +1274,14 @@ def test_vec_env_step():
         dummy_action_spaces,
         ["agent_0"],
     )
-    vec_env.step_async([])
-    vec_env.step_wait()
+    with pytest.raises(
+        NotImplementedError, match="Subclasses must implement step_async"
+    ):
+        vec_env.step_async([])
+    with pytest.raises(
+        NotImplementedError, match="Subclasses must implement step_wait"
+    ):
+        vec_env.step_wait()
 
 
 def test_vec_env_render():

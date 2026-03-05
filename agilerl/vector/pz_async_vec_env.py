@@ -496,10 +496,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                     f"Calling `close` while waiting for a pending call to `{self._state.value}` to complete.",
                 )
                 function = getattr(self, f"{self._state.value}_wait")
-                # Avoid hanging forever if `_state` was manually set
-                # or a worker died before responding.
-                pending_timeout = 1.0 if timeout is None else timeout
-                function(pending_timeout)
+                function(timeout)
         except mp.TimeoutError:
             terminate = True
 
