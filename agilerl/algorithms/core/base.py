@@ -2802,7 +2802,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         group_size: int,
     ) -> list[torch.Tensor]:
         if SamplingParams is None:
-            msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform."
+            msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
             raise ImportError(msg)
 
         # I need to make the following happen
@@ -3101,7 +3101,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _configure_vllm(self) -> None:
         """Configure vLLM for efficient inference during generation in 'get_action'."""
         if LLM is None:
-            msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform."
+            msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
             raise ImportError(msg)
         if self.vllm_config is None:
             warnings.warn(
@@ -3144,20 +3144,33 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
             os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
 
-            self.llm = LLM(
-                model=self.pretrained_model_name_or_path,
-                tensor_parallel_size=self.vllm_config.tensor_parallel_size,
-                gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
-                max_num_seqs=self.vllm_config.max_num_seqs,
-                max_model_len=self.max_model_len,
-                distributed_executor_backend="external_launcher",
-                seed=self.accelerator.process_index
+            llm_kwargs = {
+                "model": self.pretrained_model_name_or_path,
+                "tensor_parallel_size": self.vllm_config.tensor_parallel_size,
+                "gpu_memory_utilization": self.vllm_config.gpu_memory_utilization,
+                "max_num_seqs": self.vllm_config.max_num_seqs,
+                "max_model_len": self.max_model_len,
+                "distributed_executor_backend": "external_launcher",
+                "seed": self.accelerator.process_index
                 // self.vllm_config.tensor_parallel_size,
-                max_num_batched_tokens=self.vllm_config.max_num_seqs
+                "max_num_batched_tokens": self.vllm_config.max_num_seqs
                 * self.max_model_len,
-                model_impl="vllm",
-                enable_sleep_mode=self.vllm_config.sleep_mode,
-            )
+                "model_impl": "vllm",
+                "enable_sleep_mode": self.vllm_config.sleep_mode,
+            }
+            try:
+                self.llm = LLM(**llm_kwargs)
+            except ValueError as err:
+                backend_env = os.environ.get("VLLM_ATTENTION_BACKEND")
+                if backend_env is not None and "backend" in str(err).lower():
+                    msg = (
+                        "vLLM initialization failed due to unsupported "
+                        f"VLLM_ATTENTION_BACKEND={backend_env!r}. "
+                        "Please unset VLLM_ATTENTION_BACKEND or set it to a backend "
+                        "supported by your installed vLLM build."
+                    )
+                    raise ValueError(msg) from err
+                raise
             if self.vllm_config.sleep_mode:
                 self.llm.sleep(level=2)
 

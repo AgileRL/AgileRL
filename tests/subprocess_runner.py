@@ -54,7 +54,8 @@ def setup_deepspeed_env():
 def setup_test_env_vars():
     """Set pytest ini env vars that would normally be set by pytest."""
     os.environ.setdefault("PYTHONHASHSEED", "0")
-    os.environ.setdefault("VLLM_ATTENTION_BACKEND", "TORCH_SDPA")
+    # Let vLLM select a compatible backend for the installed version/platform.
+    os.environ.pop("VLLM_ATTENTION_BACKEND", None)
     os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
     if not torch.cuda.is_available():
         os.environ.setdefault("ACCELERATE_USE_CPU", "true")

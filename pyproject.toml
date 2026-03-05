@@ -78,7 +78,6 @@ docs = [
 # Deterministic ordering for tests; useful for pytest-xdist.
 env = [
     "PYTHONHASHSEED=0",
-    "VLLM_ATTENTION_BACKEND=TORCH_SDPA",
     "VLLM_USE_FLASHINFER_SAMPLER=0",
     "PYTORCH_ENABLE_MPS_FALLBACK=1",
 ]
