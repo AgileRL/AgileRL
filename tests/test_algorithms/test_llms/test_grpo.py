@@ -1842,7 +1842,7 @@ def test_get_action_grpo_vllm_multiple_gpus(
     pretrained_model_name_or_path,
     tensor_parallel_size,
 ):
-    def mock_all_gather_object(gathered_prompts_ids, prompts_ids, _group):
+    def mock_all_gather_object(gathered_prompts_ids, prompts_ids, **_kwargs):
         for idx, _ in enumerate(gathered_prompts_ids):
             gathered_prompts_ids[idx] = prompts_ids
 

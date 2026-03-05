@@ -14,11 +14,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = Path(tempfile.gettempdir()) / "agilerl-codeql-db"
 DEFAULT_CONFIG_PATH = REPO_ROOT / ".github" / "codeql" / "codeql-config.yml"
 DEFAULT_CODEQL_INSTALL_DIR = Path("/tmp/codeql")  # noqa: S108
-INSTALL_SCRIPT_PATH = REPO_ROOT / "scripts" / "install_codeql.sh"
+INSTALL_SCRIPT_PATH = Path(__file__).with_name("install_codeql.sh")
 CSV_FILE_COL_IDX = 4
 PYTHON_QUERY_SUITE = (
     "codeql/python-queries:codeql-suites/python-security-and-quality.qls"

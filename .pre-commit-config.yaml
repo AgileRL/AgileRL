@@ -3,6 +3,7 @@
 # See https://pre-commit.com/hooks.html for more hooks
 ci:
     autoupdate_branch: nightly
+    skip: [codeql-python]
 repos:
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v6.0.0
@@ -53,8 +54,9 @@ repos:
     - repo: local
       hooks:
           - id: codeql-python
-            name: CodeQL Python Security & Quality
-            entry: python scripts/run_codeql.py
+            name: CodeQL Python Security & Quality (manual)
+            entry: python .github/codeql/run_codeql.py
             language: system
             pass_filenames: false
             always_run: true
+            stages: [manual]
