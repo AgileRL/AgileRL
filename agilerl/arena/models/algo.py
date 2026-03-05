@@ -14,14 +14,14 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 
 
 class AlgorithmSpec(BaseModel):
-    """Pydantic model for EvolvableAlgorithm object."""
+    """Pydantic model for `EvolvableAlgorithm` objects."""
 
     batch_size: int = Field(default=64, ge=1)
     hp_config: HyperparameterConfig | None = None
 
 
 class RLAlgorithmSpec(AlgorithmSpec):
-    """Pydantic model for RLAlgorithm object."""
+    """Pydantic model for `RLAlgorithm` and `MultiAgentRLAlgorithm` objects."""
 
     net_config: NetworkSpec
     learn_step: int = Field(..., ge=1)
@@ -43,7 +43,7 @@ class LoraConfigDict(TypedDict):
 
 
 class LLMAlgorithmSpec(AlgorithmSpec):
-    """Pydantic model for LLMAlgorithm objects.
+    """Pydantic model for `LLMAlgorithm` objects.
 
     Extends AlgorithmSpec with LLM-specific fields including LoRA configuration,
     model parameters, and training hyperparameters.
@@ -60,7 +60,9 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     calc_position_embeddings: bool
 
 
-### ----- Arena Algorithms ----- ###
+# ---------------------------------------- #
+# --------- Algorithms in Arena ---------- #
+# ---------------------------------------- #
 
 
 class DDPGSpec(RLAlgorithmSpec):
