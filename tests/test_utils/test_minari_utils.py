@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import gymnasium as gym
 import minari
 import pytest
@@ -5,6 +7,7 @@ import torch
 from accelerate import Accelerator
 from minari import MinariDataset
 from minari.data_collector import EpisodeBuffer
+from minari.storage.datasets_root_dir import get_dataset_path
 from requests import HTTPError
 from requests.exceptions import ReadTimeout
 
@@ -18,22 +21,20 @@ def check_delete_dataset(dataset_id: str) -> None:
     :param dataset_id: name of Minari dataset to test
     :type dataset_id: str
     """
-    # check dataset name is present in local database
-    local_datasets = minari.list_local_datasets()
-    assert dataset_id in local_datasets
+    # Check dataset path exists locally.
+    dataset_path = Path(get_dataset_path(dataset_id))
+    assert dataset_path.exists()
 
     # delete dataset and check that it's no longer present in local database
     minari.delete_dataset(dataset_id)
-    local_datasets = minari.list_local_datasets()
-    assert dataset_id not in local_datasets
+    assert not dataset_path.exists()
 
 
 def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
     buffer = []
 
-    # delete the test dataset if it already exists
-    local_datasets = minari.list_local_datasets()
-    if dataset_id in local_datasets:
+    # Delete the test dataset if it already exists.
+    if Path(get_dataset_path(dataset_id)).exists():
         minari.delete_dataset(dataset_id)
 
     env = gym.make(env_id)
