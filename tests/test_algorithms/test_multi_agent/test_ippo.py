@@ -1879,3 +1879,193 @@ def test_get_action_distributed(compile_mode, ma_vector_space, ma_discrete_space
         assert agent_id in log_probs
         assert agent_id in dist_entropy
         assert agent_id in state_values
+
+
+def test_initialize_ippo_with_valid_actors_invalid_critics_raises_type_error(
+    ma_vector_space,
+    ma_discrete_space,
+):
+    actors = [EvolvableMLP(6, 2, [32]) for _ in range(2)]
+    critics = ModuleDict({"agent": nn.Linear(6, 1), "other_agent": nn.Linear(6, 1)})
+    with pytest.raises(TypeError, match="All critic networks must be instances"):
+        IPPO(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            actor_networks=actors,
+            critic_networks=critics,
+            torch_compiler=None,
+        )
+
+
+def test_initialize_ippo_with_invalid_actor_modules_raises_type_error(
+    ma_vector_space,
+    ma_discrete_space,
+):
+    actors = ModuleDict({"agent": nn.Linear(6, 2), "other_agent": nn.Linear(6, 2)})
+    critics = ModuleDict(
+        {"agent": EvolvableMLP(6, 1, [32]), "other_agent": EvolvableMLP(6, 1, [32])},
+    )
+    with pytest.raises(TypeError, match="All actor networks must be instances"):
+        IPPO(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            actor_networks=actors,
+            critic_networks=critics,
+            torch_compiler=None,
+        )
+
+
+def test_ippo_compiler_falls_back_to_default_for_gumbel_softmax(
+    ma_vector_space,
+    ma_discrete_space,
+    monkeypatch,
+):
+    monkeypatch.setattr(IPPO, "recompile", lambda self: None)
+    actor_networks = ModuleDict(
+        {
+            "agent": EvolvableMLP(6, 2, [32], output_activation="GumbelSoftmax"),
+            "other_agent": EvolvableMLP(6, 2, [32], output_activation="GumbelSoftmax"),
+        },
+    )
+    critic_networks = ModuleDict(
+        {
+            "agent": EvolvableMLP(6, 1, [32]),
+            "other_agent": EvolvableMLP(6, 1, [32]),
+        },
+    )
+    with pytest.warns(UserWarning, match="not compatible with GumbelSoftmax"):
+        ippo = IPPO(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            actor_networks=actor_networks,
+            critic_networks=critic_networks,
+            torch_compiler="reduce-overhead",
+            device="cpu",
+        )
+    assert ippo.torch_compiler == "default"
+
+
+def test_preprocess_observation_handles_empty_group(ma_vector_space, ma_discrete_space):
+    ippo = IPPO(
+        observation_spaces=ma_vector_space,
+        action_spaces=ma_discrete_space,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+        device="cpu",
+        torch_compiler=None,
+    )
+    obs = {
+        "agent_0": np.random.randn(*ma_vector_space[0].shape).astype(np.float32),
+        "agent_1": np.random.randn(*ma_vector_space[1].shape).astype(np.float32),
+    }
+    preprocessed = ippo.preprocess_observation(obs, ["agent", "other_agent"])
+    assert "agent" in preprocessed
+    assert "other_agent" in preprocessed
+    assert preprocessed["other_agent"] == []
+
+
+def test_get_action_and_values_batch_mask_branch(ma_vector_space, ma_discrete_space):
+    ippo = IPPO(
+        observation_spaces=ma_vector_space,
+        action_spaces=ma_discrete_space,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+        device="cpu",
+        torch_compiler=None,
+    )
+    obs = torch.randn(5, ma_vector_space[0].shape[0])
+    mask = torch.ones(5, ma_discrete_space[0].n)
+    action, log_prob, entropy, values = ippo._get_action_and_values(
+        obs=obs,
+        actor=ippo.actors["agent"],
+        critic=ippo.critics["agent"],
+        action_mask=mask,
+        batch_size=2,
+    )
+    assert action.shape[0] == 5
+    assert log_prob.shape[0] == 5
+    assert entropy.shape[0] == 5
+    assert values.shape[0] == 5
+
+
+def test_get_action_clips_inference_actions_for_box_spaces(ma_vector_space):
+    action_spaces = [Box(-1, 1, (2,), dtype=np.float32) for _ in range(3)]
+    ippo = IPPO(
+        observation_spaces=ma_vector_space,
+        action_spaces=action_spaces,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+        device="cpu",
+        torch_compiler=None,
+    )
+    ippo.set_training_mode(False)
+
+    def fake_get_action_and_values(*args, **kwargs):
+        n = kwargs["obs"].shape[0]
+        return (
+            torch.full((n, 2), 10.0),
+            torch.zeros(n),
+            torch.zeros(n),
+            torch.zeros(n),
+        )
+
+    ippo._get_action_and_values = fake_get_action_and_values
+    obs = {
+        "agent_0": np.random.randn(*ma_vector_space[0].shape).astype(np.float32),
+        "agent_1": np.random.randn(*ma_vector_space[1].shape).astype(np.float32),
+        "other_agent_0": np.random.randn(*ma_vector_space[2].shape).astype(np.float32),
+    }
+    actions, _, _, _ = ippo.get_action(obs, infos=None)
+    for action in actions.values():
+        assert np.all(action <= 1.0)
+        assert np.all(action >= -1.0)
+
+
+def test_learn_individual_unsqueezes_box_single_action(ma_vector_space):
+    action_spaces = [Box(-1, 1, (1,), dtype=np.float32) for _ in range(3)]
+    ippo = IPPO(
+        observation_spaces=ma_vector_space,
+        action_spaces=action_spaces,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+        batch_size=4,
+        device="cpu",
+        torch_compiler=None,
+    )
+    experiences = (
+        {"agent_0": np.random.randn(8, ma_vector_space[0].shape[0])},
+        {"agent_0": np.random.randn(8, 1)},
+        {"agent": np.random.randn(8, 1)},
+        {"agent": np.random.randn(8)},
+        {"agent": np.random.randint(0, 2, 8)},
+        {"agent": np.random.randn(8, 1)},
+        {"agent": np.random.randn(ma_vector_space[0].shape[0])},
+        {"agent": np.array([0])},
+    )
+    loss = ippo._learn_individual(
+        experiences=experiences,
+        actor=ippo.actors["agent"],
+        critic=ippo.critics["agent"],
+        actor_optimizer=ippo.actor_optimizers["agent"],
+        critic_optimizer=ippo.critic_optimizers["agent"],
+        obs_space=ma_vector_space[0],
+        action_space=action_spaces[0],
+    )
+    assert isinstance(loss, float)
+
+
+def test_ippo_test_with_swap_channels_path(
+    ma_image_space, ma_discrete_space, monkeypatch
+):
+    env = DummyMultiEnv(ma_image_space, ma_discrete_space)
+    monkeypatch.setattr("agilerl.algorithms.ippo.obs_channels_to_first", lambda x: x)
+    ippo = IPPO(
+        observation_spaces=ma_image_space,
+        action_spaces=ma_discrete_space,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+        device="cpu",
+        torch_compiler=None,
+    )
+    mean_score = ippo.test(
+        env, swap_channels=True, max_steps=1, loop=1, sum_scores=True
+    )
+    assert isinstance(mean_score, float)

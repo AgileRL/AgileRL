@@ -15,7 +15,11 @@ from agilerl.modules import (
     EvolvableSimBa,
 )
 from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.actors import DeterministicActor, StochasticActor
+from agilerl.networks.actors import (
+    DeterministicActor,
+    StochasticActor,
+    get_output_bounds,
+)
 from agilerl.networks.base import EvolvableNetwork
 from tests.helper_functions import (
     assert_close_dict,
@@ -249,6 +253,30 @@ def test_deterministic_actor_rescale_action():
     )
     torch.testing.assert_close(rescaled, expected)
     assert rescaled.dtype == action_low.dtype
+
+
+def test_get_output_bounds_invalid_activation():
+    with pytest.raises(ValueError, match="Received invalid output activation function"):
+        get_output_bounds("InvalidActivation")
+
+
+def test_deterministic_actor_discrete_output_defaults():
+    observation_space = spaces.Box(low=-1, high=1, shape=(4,))
+    action_space = spaces.Discrete(3)
+    actor = DeterministicActor(observation_space, action_space)
+
+    assert actor.output_activation == "GumbelSoftmax"
+    assert actor.action_low is None
+    assert actor.action_high is None
+
+
+def test_deterministic_actor_rescale_action_unbounded_space():
+    action = torch.tensor([[0.2, -0.1]], dtype=torch.float32)
+    low = torch.tensor([-float("inf"), -1.0], dtype=torch.float32)
+    high = torch.tensor([1.0, float("inf")], dtype=torch.float32)
+
+    rescaled = DeterministicActor.rescale_action(action, low, high, "Tanh")
+    torch.testing.assert_close(rescaled, action)
 
 
 def test_distribution_mutation_methods(dummy_rng, head_config):

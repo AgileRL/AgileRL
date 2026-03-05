@@ -7,6 +7,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from tensordict import TensorDict
 from torch import nn, optim
 
 from agilerl.algorithms.ppo import PPO
@@ -1454,4 +1455,371 @@ def test_collect_rollouts_requires_rollout_buffer(
             collect_rollouts(ppo, env, n_steps=5)
     else:
         collect_rollouts(ppo, env, n_steps=5)
+    ppo.clean_up()
+
+
+def test_ppo_init_negative_target_kl_assert(vector_space, discrete_space):
+    with pytest.raises(
+        AssertionError,
+        match="Target KL divergence threshold must be greater than or equal to zero",
+    ):
+        PPO(
+            observation_space=vector_space,
+            action_space=discrete_space,
+            target_kl=-1.0,
+        )
+
+
+def test_ppo_init_head_config_path(vector_space, discrete_space):
+    net_config = {
+        "head_config": {"hidden_size": [8], "output_activation": "Tanh"},
+        "squash_output": True,
+    }
+    ppo = PPO(
+        observation_space=vector_space,
+        action_space=discrete_space,
+        net_config=net_config,
+    )
+    assert ppo.critic.head_net.net_config["output_activation"] is None
+    ppo.clean_up()
+
+
+def test_share_encoder_parameters_warns_for_non_evolvable(vector_space, discrete_space):
+    ppo = PPO(vector_space, discrete_space)
+    ppo.actor = nn.Linear(4, 2)
+    ppo.critic = nn.Linear(4, 1)
+    with pytest.warns(UserWarning, match="Encoder sharing is disabled"):
+        ppo.share_encoder_parameters()
+    ppo.clean_up()
+
+
+def test_evaluate_actions_uses_negative_log_prob_when_entropy_none(
+    vector_space,
+    discrete_space,
+    monkeypatch,
+):
+    ppo = PPO(vector_space, discrete_space)
+    monkeypatch.setattr(
+        ppo,
+        "_get_action_and_values",
+        lambda *args, **kwargs: (
+            torch.zeros(1),
+            torch.zeros(1),
+            None,
+            torch.zeros(1),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        ppo.actor,
+        "action_log_prob",
+        lambda actions: torch.tensor([2.0]),
+    )
+    log_prob, entropy, _ = ppo.evaluate_actions(
+        obs=np.zeros((1, *vector_space.shape), dtype=np.float32),
+        actions=torch.tensor([0]),
+    )
+    assert log_prob.item() == 2.0
+    assert entropy.item() == -2.0
+    ppo.clean_up()
+
+
+def test_get_action_clips_unsquashed_box_actions(vector_space):
+    box_action = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+    ppo = PPO(vector_space, box_action)
+    ppo.set_training_mode(False)
+    ppo.actor.squash_output = False
+
+    ppo._get_action_and_values = lambda *args, **kwargs: (
+        torch.tensor([[5.0, -5.0]]),
+        torch.tensor([0.0]),
+        torch.tensor([0.0]),
+        torch.tensor([0.0]),
+        None,
+    )
+    action, *_ = ppo.get_action(np.zeros((1, vector_space.shape[0]), dtype=np.float32))
+    assert np.all(action <= 1.0)
+    assert np.all(action >= -1.0)
+    ppo.clean_up()
+
+
+def test_learn_raises_without_experiences_when_no_rollout_buffer(
+    vector_space, discrete_space
+):
+    ppo = PPO(vector_space, discrete_space, use_rollout_buffer=False)
+    with pytest.raises(ValueError, match="Experiences must be provided"):
+        ppo.learn(None)
+    ppo.clean_up()
+
+
+def test_rollout_buffer_flat_external_empty_returns_zero(vector_space, discrete_space):
+    ppo = PPO(vector_space, discrete_space, use_rollout_buffer=True)
+    empty_td = TensorDict({}, batch_size=[0])
+    with pytest.warns(UserWarning, match="Buffer data is empty"):
+        loss = ppo._learn_from_rollout_buffer_flat(buffer_td_external=empty_td)
+    assert loss == 0.0
+    ppo.clean_up()
+
+
+def test_rollout_buffer_flat_external_uses_accelerator_and_early_stops(
+    vector_space,
+    discrete_space,
+    monkeypatch,
+):
+    class DummyAccel:
+        def __init__(self):
+            self.calls = 0
+
+        def backward(self, loss):
+            self.calls += 1
+            loss.backward()
+
+    ppo = PPO(
+        vector_space,
+        discrete_space,
+        use_rollout_buffer=True,
+        target_kl=1e-6,
+        update_epochs=2,
+        batch_size=2,
+    )
+    ppo.accelerator = DummyAccel()
+    ppo.rollout_buffer = type("RB", (), {"size": lambda self: 4})()
+
+    td = TensorDict(
+        {
+            "observations": torch.randn(4, *vector_space.shape),
+            "actions": torch.randint(0, discrete_space.n, (4, 1)),
+            "log_probs": torch.zeros(4),
+            "advantages": torch.ones(4),
+            "returns": torch.zeros(4),
+            "values": torch.zeros(4),
+        },
+        batch_size=[4],
+    )
+
+    monkeypatch.setattr(
+        ppo,
+        "evaluate_actions",
+        lambda obs, actions, hidden_state=None: (
+            torch.full((actions.shape[0],), 10.0, requires_grad=True),
+            torch.ones(actions.shape[0], requires_grad=True),
+            torch.zeros(actions.shape[0], requires_grad=True),
+        ),
+    )
+    loss = ppo._learn_from_rollout_buffer_flat(buffer_td_external=td)
+    assert isinstance(loss, float)
+    assert ppo.accelerator.calls > 0
+    ppo.clean_up()
+
+
+def test_rollout_buffer_bptt_kl_warning_and_break_paths(
+    vector_space,
+    discrete_space,
+    monkeypatch,
+):
+    class DummyAccel:
+        def __init__(self):
+            self.calls = 0
+
+        def backward(self, loss):
+            self.calls += 1
+            loss.backward()
+
+    class FakeRolloutBuffer:
+        def __init__(self):
+            self.capacity = 1
+            self.pos = 1
+            self.full = False
+            self.buffer = TensorDict(
+                {"advantages": torch.ones(1, 2)}, batch_size=[1, 2]
+            )
+
+        def prepare_sequence_tensors(self, device="cpu"):
+            return None
+
+        def get_minibatch_sequences(self, batch_size=1):
+            padded = TensorDict(
+                {
+                    "observations": torch.randn(2, *vector_space.shape),
+                    "actions": torch.randint(0, discrete_space.n, (2, 1)),
+                    "pad_mask": torch.tensor([True, True]),
+                },
+                batch_size=[2],
+            )
+            unpadded = TensorDict(
+                {
+                    "log_probs": torch.zeros(2),
+                    "advantages": torch.ones(2),
+                    "values": torch.zeros(2),
+                    "returns": torch.zeros(2),
+                },
+                batch_size=[2],
+            )
+            return [(padded, unpadded)]
+
+    ppo = PPO(
+        vector_space,
+        discrete_space,
+        use_rollout_buffer=True,
+        recurrent=True,
+        target_kl=0.5,
+        update_epochs=2,
+        batch_size=1,
+    )
+    ppo.rollout_buffer = FakeRolloutBuffer()
+    ppo.accelerator = DummyAccel()
+
+    monkeypatch.setattr(
+        ppo,
+        "evaluate_actions",
+        lambda obs, actions, hidden_state=None: (
+            torch.full((actions.shape[0],), 10.0, requires_grad=True),
+            torch.ones(actions.shape[0], requires_grad=True),
+            torch.zeros(actions.shape[0], requires_grad=True),
+        ),
+    )
+
+    with pytest.warns(UserWarning, match="KL divergence .* exceeded target"):
+        loss = ppo._learn_from_rollout_buffer_bptt()
+    assert isinstance(loss, float)
+    assert ppo.accelerator.calls > 0
+    ppo.clean_up()
+
+
+def test_rollout_buffer_bptt_epoch_avg_kl_warning_branch(
+    vector_space,
+    discrete_space,
+    monkeypatch,
+):
+    class FakeRolloutBuffer:
+        def __init__(self):
+            self.capacity = 1
+            self.pos = 1
+            self.full = False
+            self.buffer = TensorDict(
+                {"advantages": torch.ones(1, 2)}, batch_size=[1, 2]
+            )
+
+        def prepare_sequence_tensors(self, device="cpu"):
+            return None
+
+        def get_minibatch_sequences(self, batch_size=1):
+            padded = TensorDict(
+                {
+                    "observations": torch.randn(2, *vector_space.shape),
+                    "actions": torch.randint(0, discrete_space.n, (2, 1)),
+                    "pad_mask": torch.tensor([True, True]),
+                },
+                batch_size=[2],
+            )
+            unpadded = TensorDict(
+                {
+                    "log_probs": torch.zeros(2),
+                    "advantages": torch.ones(2),
+                    "values": torch.zeros(2),
+                    "returns": torch.zeros(2),
+                },
+                batch_size=[2],
+            )
+            return [(padded, unpadded)]
+
+    ppo = PPO(
+        vector_space,
+        discrete_space,
+        use_rollout_buffer=True,
+        recurrent=True,
+        target_kl=0.5,
+        update_epochs=1,
+        batch_size=1,
+    )
+    ppo.rollout_buffer = FakeRolloutBuffer()
+
+    monkeypatch.setattr(
+        ppo,
+        "evaluate_actions",
+        lambda obs, actions, hidden_state=None: (
+            torch.zeros(actions.shape[0], requires_grad=True),
+            torch.ones(actions.shape[0], requires_grad=True),
+            torch.zeros(actions.shape[0], requires_grad=True),
+        ),
+    )
+    values = iter([0.1, 1.0, 0.1])  # minibatch KL, epoch avg KL, latest minibatch KL
+    monkeypatch.setattr(
+        "agilerl.algorithms.ppo.np.mean", lambda *_args, **_kwargs: next(values)
+    )
+
+    with pytest.warns(UserWarning, match="Average KL divergence .* exceeded target"):
+        _ = ppo._learn_from_rollout_buffer_bptt()
+    ppo.clean_up()
+
+
+def test_ppo_test_loop_masks_callbacks_and_non_vectorized_paths(
+    vector_space, discrete_space
+):
+    class VecEnv:
+        def __init__(self):
+            self.num_envs = 2
+            self._steps = 0
+
+        def reset(self):
+            self._steps = 0
+            obs = np.zeros((self.num_envs, *vector_space.shape), dtype=np.float32)
+            info = [{"action_mask": np.array([1, 0])}, {"action_mask": None}]
+            return obs, info
+
+        def step(self, _action):
+            self._steps += 1
+            obs = np.zeros((self.num_envs, *vector_space.shape), dtype=np.float32)
+            reward = np.array([1.0, 1.0])
+            done = (
+                np.array([False, False]) if self._steps == 1 else np.array([True, True])
+            )
+            trunc = np.array([False, False])
+            info = {"action_mask": np.array([[1, 0], [0, 1]])}
+            return obs, reward, done, trunc, info
+
+    class NonVecEnv:
+        def __init__(self):
+            self._done = False
+
+        def reset(self):
+            self._done = False
+            return np.zeros(vector_space.shape, dtype=np.float32), {
+                "action_mask": np.array([1, 0])
+            }
+
+        def step(self, _action):
+            self._done = True
+            return (
+                np.zeros(vector_space.shape, dtype=np.float32),
+                1.0,
+                True,
+                False,
+                {"k": 1.0},
+            )
+
+    ppo = PPO(vector_space, discrete_space)
+    callback_calls = []
+    with pytest.warns(
+        UserWarning, match="Action masks not provided for all vectorized environments"
+    ):
+        _ = ppo.test(
+            VecEnv(),
+            swap_channels=True,
+            vectorized=True,
+            loop=1,
+            callback=lambda score, info: callback_calls.append((score, info)),
+        )
+    assert len(callback_calls) == 1
+    assert isinstance(callback_calls[0][1], dict)
+
+    callback_calls.clear()
+    _ = ppo.test(
+        NonVecEnv(),
+        vectorized=False,
+        loop=1,
+        callback=lambda score, info: callback_calls.append((score, info)),
+    )
+    assert len(callback_calls) == 1
+    assert "final_info" in callback_calls[0][1]
     ppo.clean_up()

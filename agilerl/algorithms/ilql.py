@@ -1476,7 +1476,6 @@ class ILQL_Policy:
                 qv_kwargs={"past_key_values": curr_kvs},
                 policy_kwargs={"past_key_values": curr_policy_kvs},
                 target_kwargs={"past_key_values": curr_target_kvs},
-                is_causal=False,
             )
             model_outputs, logits = iql_outputs["model_outputs"], iql_outputs["logits"]
 

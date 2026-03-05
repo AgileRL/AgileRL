@@ -1,7 +1,18 @@
 import pytest
 from unittest.mock import Mock
+import numpy as np
+import torch
+from torch import nn
 
-from agilerl.modules.base import EvolvableModule, EvolvableWrapper, ModuleDict, mutation
+from agilerl.modules.base import (
+    EvolvableModule,
+    EvolvableWrapper,
+    ModuleDict,
+    MutationContext,
+    _mutation_wrapper,
+    mutation,
+)
+from agilerl.modules.custom_components import NoisyLinear
 from agilerl.protocols import MutationType
 
 
@@ -570,3 +581,311 @@ def test_evolvable_wrapper_forward():
 
     # Verify the result
     assert result == "forwarded"
+
+
+def test_mutation_context_filters_recreate_kwargs_and_calls_hooks():
+    class Dummy(EvolvableModule):
+        def __init__(self, device="cpu"):
+            super().__init__(device)
+            self.recreated_with = None
+
+        @mutation(MutationType.NODE, shrink_params=True, ignored=True)
+        def mut(self):
+            return {}
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self, shrink_params=False):
+            self.recreated_with = shrink_params
+
+    module = Dummy(device="cpu")
+    hook = Mock()
+    module.register_mutation_hook(hook)
+    module.mut()
+    assert module.recreated_with is True
+    hook.assert_called_once()
+
+
+def test_mutation_context_resolve_nested_and_wrapper_paths():
+    class Child(EvolvableModule):
+        @mutation(MutationType.NODE)
+        def mut(self):
+            return {}
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+    class Parent(EvolvableModule):
+        def __init__(self, device="cpu"):
+            super().__init__(device)
+            self.child = Child(device=device)
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+    parent = Parent(device="cpu")
+    ctx = MutationContext(parent, parent.child.mut, "child.mut")
+    parent.last_mutation_attr = "child.mut"
+    parent.child.last_mutation_attr = None
+    assert ctx._resolve_final_mutation_attr() is None
+
+    simple_child = Child(device="cpu")
+    wrapper = EvolvableWrapper(simple_child)
+    wrapper.wrapped.last_mutation_attr = "mut"
+    wctx = MutationContext(wrapper, wrapper.mut, "mut")
+    assert wctx._resolve_final_mutation_attr() == "mut"
+
+
+def test_mutation_wrapper_returns_none_for_disabled_attr():
+    class Dummy(EvolvableModule):
+        @mutation(MutationType.NODE)
+        def mut(self):
+            return {}
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+    module = Dummy(device="cpu")
+    wrapped = _mutation_wrapper(module, module.mut, "missing_attr")
+    assert wrapped() is None
+    assert module.last_mutation is None
+    assert module.last_mutation_attr is None
+
+
+def test_base_properties_setters_and_errors():
+    class Child(EvolvableModule):
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+    class Parent(EvolvableModule):
+        @mutation(MutationType.NODE)
+        def mut(self):
+            return {}
+
+        def __init__(self, device="cpu"):
+            super().__init__(device)
+            self.child = Child(device=device)
+
+        def forward(self, x):
+            return x
+
+    module = Parent(device="cpu")
+    assert module.net_config == module.get_init_dict()
+    assert module.activation is None
+    module.rng = np.random.default_rng(123)
+    module.device = "cpu:new"
+    assert module.child.device == "cpu:new"
+    assert module.child.rng is module.rng
+
+    with pytest.raises(
+        NotImplementedError, match="must implement the recreate_network"
+    ):
+        module.recreate_network()
+
+    class NoForward(EvolvableModule):
+        def recreate_network(self):
+            pass
+
+    with pytest.raises(NotImplementedError, match="forward method must be implemented"):
+        NoForward(device="cpu").forward(torch.tensor([1.0]))
+
+    class ArgsKw(EvolvableModule):
+        def __init__(self, device="cpu", *args, **kwargs):
+            super().__init__(device)
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+    with pytest.raises(AttributeError, match="constructor arguments"):
+        ArgsKw(device="cpu").get_init_dict()
+
+    class NoChange(EvolvableModule):
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+    with pytest.raises(
+        NotImplementedError, match="change_activation method must be implemented"
+    ):
+        NoChange(device="cpu").change_activation("ReLU", output=False)
+
+
+def test_setattr_invalid_mutation_type_raises():
+    class BadMethod:
+        _mutation_type = "invalid"
+
+    class BadChild(EvolvableModule):
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+        def get_mutation_methods(self):
+            return {"bad": BadMethod()}
+
+    class Parent(EvolvableModule):
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+    parent = Parent(device="cpu")
+    with pytest.raises(ValueError, match="Invalid mutation type"):
+        parent.bad = BadChild(device="cpu")
+
+
+def test_module_utilities_and_noise_and_probs():
+    class MutModule(EvolvableModule):
+        @mutation(MutationType.NODE)
+        def node_mut(self):
+            return {}
+
+        @mutation(MutationType.LAYER)
+        def layer_mut(self):
+            return {}
+
+        def __init__(self, device="cpu"):
+            super().__init__(device)
+            self.noisy = NoisyLinear(4, 4)
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+    module = MutModule(device="cpu")
+    assert module.get_output_dense() is None
+    assert len(module.get_mutation_probs(0.6)) == 2
+
+    module.disable_mutations(MutationType.LAYER)
+    assert module.layer_mutation_methods == []
+    module._layer_mutation_methods = ["layer_mut"]
+    module.disable_mutations(MutationType.NODE)
+    assert module.node_mutation_methods == []
+
+    reset_mock = Mock()
+    module.noisy.reset_noise = reset_mock
+    module.reset_noise()
+    reset_mock.assert_called_once()
+
+    it = module.torch_modules()
+    assert hasattr(it, "__iter__")
+
+
+def test_preserve_parameters_and_init_weights_gaussian():
+    old = nn.Sequential(nn.Linear(4, 3), nn.LayerNorm(3))
+    new = nn.Sequential(nn.Linear(5, 2), nn.LayerNorm(2))
+    new = EvolvableModule.preserve_parameters(old, new)
+    assert new[0].weight.shape == torch.Size([2, 5])
+
+    lin = nn.Linear(4, 2)
+    EvolvableModule.init_weights_gaussian(lin, std_coeff=1.0)
+    seq = nn.Sequential(nn.Linear(4, 2), nn.ReLU(), nn.Linear(2, 1))
+    EvolvableModule.init_weights_gaussian(seq, std_coeff=1.0)
+
+
+def test_clone_nested_mutation_methods_and_wrapper_change_activation():
+    class Child(EvolvableModule):
+        @mutation(MutationType.NODE)
+        def child_mut(self):
+            return {}
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+    class Parent(EvolvableModule):
+        @mutation(MutationType.LAYER)
+        def layer_mut(self):
+            return {}
+
+        def __init__(self, device="cpu"):
+            super().__init__(device)
+            self.child = Child(device=device)
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+        def change_activation(self, activation, output):
+            self.changed = (activation, output)
+
+    module = Parent(device="cpu")
+    clone = module.clone()
+    assert clone.child._node_mutation_methods == module.child._node_mutation_methods
+
+    wrapper = EvolvableWrapper(Child(device="cpu"))
+    wrapper.wrapped.changed = None
+    wrapper.wrapped.change_activation = lambda activation, output: setattr(
+        wrapper.wrapped,
+        "changed",
+        (activation, output),
+    )
+    wrapper.change_activation("ReLU", output=True)
+    assert wrapper.wrapped.changed == ("ReLU", True)
+
+
+def test_module_dict_additional_branches():
+    class A(EvolvableModule):
+        @mutation(MutationType.NODE)
+        def mut(self):
+            return {}
+
+        def __init__(self, device="cpu", activation="ReLU"):
+            super().__init__(device)
+            self._activation = activation
+            self.filtered = False
+            self.changed = False
+
+        @property
+        def activation(self):
+            return self._activation
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+        def filter_mutation_methods(self, remove):
+            self.filtered = True
+            super().filter_mutation_methods(remove)
+
+        def change_activation(self, activation, output):
+            self.changed = True
+            self._activation = activation
+
+    m1, m2 = A(device="cpu", activation="ReLU"), A(device="cpu", activation="Tanh")
+    md = ModuleDict({"m1": m1, "m2": m2})
+    assert md.activation is None
+    methods = md.get_mutation_methods()
+    assert "m1.mut" in methods
+    md.change_activation("Sigmoid", output=False)
+    md.filter_mutation_methods("mut")
+    assert md["m1"].changed and md["m2"].changed
+    assert md["m1"].filtered and md["m2"].filtered
