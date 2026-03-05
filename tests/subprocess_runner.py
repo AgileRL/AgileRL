@@ -84,14 +84,13 @@ def cleanup_after_test(test_name):
     """Run cleanup after the test, replicating conftest autouse fixtures."""
     try:
         import deepspeed.comm.comm as ds_comm
-        import deepspeed.utils.groups as ds_groups
     except ImportError:
         ds_comm = None
-        ds_groups = None
 
     from tests.utils import force_gpu_memory_release
 
-    if "vllm" in test_name and ds_comm is not None and ds_groups is not None:
+    if "vllm" in test_name and ds_comm is not None:
+        import deepspeed.utils.groups as ds_groups
         from vllm.distributed import cleanup_dist_env_and_memory
         from vllm.distributed.parallel_state import destroy_model_parallel
 

@@ -49,3 +49,12 @@ repos:
       rev: 0.10.7
       hooks:
           - id: uv-lock
+
+    - repo: local
+      hooks:
+          - id: codeql-python
+            name: CodeQL Python Security & Quality
+            entry: python scripts/run_codeql.py
+            language: system
+            pass_filenames: false
+            always_run: true

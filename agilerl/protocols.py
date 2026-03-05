@@ -61,8 +61,7 @@ class MutationMethodProtocol(Protocol):
     _recreate_kwargs: dict[str, Any]
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
 
 @runtime_checkable
@@ -75,8 +74,7 @@ class OptimizerLikeClass(Protocol):
         lr: float,
         **kwargs: Any,
     ) -> Optimizer | Any:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
 
 @runtime_checkable
@@ -113,54 +111,48 @@ class EvolvableModuleProtocol(Protocol):
 
     @property
     def activation(self) -> str | None:
-        """Protocol stub."""
+        pass
 
     def change_activation(self, activation: str, output: bool) -> None:
-        """Protocol stub."""
+        pass
 
     def forward(self, x: Any) -> Any:
-        """Protocol stub."""
+        pass
 
     def parameters(self) -> Generator:
-        """Protocol stub."""
+        pass
 
     def to(self, device: DeviceType) -> None:
-        """Protocol stub."""
+        pass
 
     def state_dict(self) -> dict[str, Any]:
-        """Protocol stub."""
+        pass
 
     def disable_mutations(self) -> None:
-        """Protocol stub."""
+        pass
 
     def get_mutation_methods(self) -> dict[str, MutationMethodProtocol]:
-        """Protocol stub."""
+        pass
 
     def get_mutation_probs(self, new_layer_prob: float) -> list[float]:
-        """Protocol stub."""
+        pass
 
     def sample_mutation_method(
         self,
         new_layer_prob: float,
         rng: Generator | None,
     ) -> str:
-        """Sample a mutation method."""
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def clone(self) -> "EvolvableModuleProtocol":
-        """Clone the module."""
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def load_state_dict(
         self,
         state_dict: dict[str, Any],
         strict: bool = True,
     ) -> None:
-        """Load state dict."""
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
 
 @runtime_checkable
@@ -178,50 +170,41 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
         *args: Any,
         **kwargs: Any,
     ) -> torch.Tensor:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def extract_features(self, x: TorchObsType) -> torch.Tensor:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def build_network_head(self, *args: Any, **kwargs: Any) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def remove_latent_node(
         self,
         numb_new_nodes: int | None = None,
     ) -> dict[str, Any]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def recreate_encoder(self) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def initialize_hidden_state(
         self,
         batch_size: int = 1,
     ) -> dict[str, torch.Tensor]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def init_weights_gaussian(
         self,
         std_coeff: float = 4.0,
         output_coeff: float = 2.0,
     ) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def _build_encoder(self, *args: Any, **kwargs: Any) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
 
 T = TypeVar("T", bound=EvolvableModuleProtocol | EvolvableNetworkProtocol)
@@ -238,47 +221,37 @@ class ModuleDictProtocol(Protocol, Generic[T]):
     device: DeviceType
 
     def __getitem__(self, key: str) -> T:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def keys(self) -> Iterable[str]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def values(self) -> Iterable[T]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def items(self) -> Iterable[tuple[str, T]]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def modules(self) -> dict[str, T]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def get_mutation_methods(self) -> dict[str, MutationMethodProtocol]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def filter_mutation_methods(self, method: str) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     @property
     def mutation_methods(self) -> list[str]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     @property
     def layer_mutation_methods(self) -> list[str]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     @property
     def node_mutation_methods(self) -> list[str]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
 
 EvolvableNetworkType = EvolvableModuleProtocol | ModuleDictProtocol
@@ -331,8 +304,7 @@ class OptimizerConfig(Protocol):
     multiagent: bool
 
     def get_optimizer_cls(self) -> type[Optimizer] | list[type[Optimizer]]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
 
 @runtime_checkable
@@ -348,8 +320,7 @@ class MutationRegistryProtocol(Protocol):
     hooks: list[Callable[[], None]]
 
     def networks(self) -> list[NetworkConfigProtocol]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
 
 SelfEvolvableAlgorithm = TypeVar(
@@ -378,19 +349,16 @@ class EvolvableAlgorithmProtocol(Protocol):
     torch_compiler: str | None
 
     def unwrap_models(self) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def wrap_models(self) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def load(
         self: type[SelfEvolvableAlgorithm],
         path: str,
     ) -> SelfEvolvableAlgorithm:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def load_checkpoint(
         self,
@@ -398,58 +366,48 @@ class EvolvableAlgorithmProtocol(Protocol):
         device: str,
         accelerator: Accelerator | None,
     ) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def save_checkpoint(self, path: str) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def learn(
         self,
         experiences: tuple[Iterable[ObservationType], ...],
         **kwargs,
     ) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def get_action(self, obs: ObservationType, **kwargs) -> Any:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def test(self, *args: Any, **kwargs: Any) -> np.ndarray:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def evolvable_attributes(
         self,
         networks_only: bool = False,
     ) -> EvolvableAttributeDict:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def inspect_attributes(
         self,
         input_args_only: bool = False,
     ) -> dict[str, Any]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def clone(
         self,
         index: int | None,
         wrap: bool,
     ) -> "EvolvableAlgorithmProtocol":
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def recompile(self) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def mutation_hook(self) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
 
 # Define a TypeVar for EvolvableAlgorithm that can be used for generic typing
@@ -467,16 +425,14 @@ class AgentWrapperProtocol(Protocol, Generic[T_EvolvableAlgorithm]):
     agent: T_EvolvableAlgorithm
 
     def get_action(self, obs: ObservationType, **kwargs) -> Any:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def learn(
         self,
         experiences: tuple[Iterable[ObservationType], ...],
         **kwargs,
     ) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
 
 @runtime_checkable
@@ -508,16 +464,13 @@ class PretrainedConfigProtocol(Protocol):
     num_hidden_layers: int
 
     def to_dict(self) -> dict[str, Any]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def to_json_string(self) -> str:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def save_pretrained(self, save_directory: str, **kwargs: Any) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     @classmethod
     def from_pretrained(
@@ -525,8 +478,7 @@ class PretrainedConfigProtocol(Protocol):
         pretrained_model_name_or_path: str,
         **kwargs: Any,
     ) -> "PretrainedConfigProtocol":
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     @classmethod
     def from_dict(
@@ -534,13 +486,11 @@ class PretrainedConfigProtocol(Protocol):
         config_dict: dict[str, Any],
         **kwargs: Any,
     ) -> "PretrainedConfigProtocol":
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     @classmethod
     def from_json_file(cls, json_file: str) -> "PretrainedConfigProtocol":
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
 
 @runtime_checkable
@@ -574,12 +524,10 @@ class PreTrainedModelProtocol(Protocol):
     config: Any
 
     def eval(self) -> "PreTrainedModelProtocol":
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def train(self, mode: bool = True) -> "PreTrainedModelProtocol":
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def generate(
         self,
@@ -588,32 +536,26 @@ class PreTrainedModelProtocol(Protocol):
         generation_config: GenerationConfigProtocol | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def parameters(self) -> Generator:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def state_dict(self) -> dict[str, Any]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def load_state_dict(
         self,
         state_dict: dict[str, Any],
         strict: bool = True,
     ) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def to(self, device: DeviceType) -> "PreTrainedModelProtocol":
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
 
 @runtime_checkable
@@ -627,12 +569,10 @@ class PeftModelProtocol(Protocol):
     peft_config: dict[str, Any]
 
     def eval(self) -> "PeftModelProtocol":
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def train(self, mode: bool = True) -> "PeftModelProtocol":
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def generate(
         self,
@@ -641,32 +581,26 @@ class PeftModelProtocol(Protocol):
         generation_config: GenerationConfigProtocol | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def parameters(self) -> Generator:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def state_dict(self) -> dict[str, Any]:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def load_state_dict(
         self,
         state_dict: dict[str, Any],
         strict: bool = True,
     ) -> None:
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     def to(self, device: DeviceType) -> "PeftModelProtocol":
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
 
     @classmethod
     def from_pretrained(
@@ -675,5 +609,4 @@ class PeftModelProtocol(Protocol):
         adapter_path: str,
         **kwargs: Any,
     ) -> "PeftModelProtocol":
-        msg = "Protocol method"
-        raise NotImplementedError(msg)
+        pass
