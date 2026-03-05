@@ -259,6 +259,7 @@ class GRPO(LLMAlgorithm):
     def get_action(
         self,
         obs: LLMObsType,
+        training: bool = True,
         *args: Any,
         **kwargs: Any,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
@@ -266,12 +267,13 @@ class GRPO(LLMAlgorithm):
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
+        :param training: Whether action generation is for training (uses group) or eval (single sample), defaults to True
+        :type training: bool, optional
         :param args: Additional positional arguments (unused; for base contract)
         :param kwargs: Additional keyword arguments (e.g. training; defaults True)
         :return: Completion IDs and action masks
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
-        training = kwargs.get("training", True)
         group_size = self.group_size if training else 1
         self.actor.eval()
         if not self.use_vllm:

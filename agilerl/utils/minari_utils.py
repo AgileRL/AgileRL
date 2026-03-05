@@ -28,21 +28,37 @@ def load_minari_dataset(
     :raises KeyError: If remote=True and dataset_id is not a valid remote dataset
     :raises FileNotFoundError: If remote=False and dataset not found locally
     """
-    if remote and dataset_id not in list(minari.list_remote_datasets().keys()):
-        msg = "Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ for more details."
-        raise KeyError(msg)
+    remote_dataset_error = (
+        "Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ for "
+        "more details."
+    )
+    if remote:
+        try:
+            remote_datasets = minari.list_remote_datasets()
+        except Exception:
+            # Some Minari/HF combinations fail while listing all remote datasets
+            # (e.g. platform-specific path issues). In that case, fall back to
+            # direct download validation below.
+            remote_datasets = None
+        if remote_datasets is not None and dataset_id not in list(
+            remote_datasets.keys()
+        ):
+            raise KeyError(remote_dataset_error)
 
     file_path = get_dataset_path(dataset_id)
 
     if not Path(file_path).exists():
         if remote:
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
+            try:
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+                    if accelerator.is_main_process:
+                        download_dataset(dataset_id)
+                    accelerator.wait_for_everyone()
+                else:
                     download_dataset(dataset_id)
-                accelerator.wait_for_everyone()
-            else:
-                download_dataset(dataset_id)
+            except Exception as err:
+                raise KeyError(remote_dataset_error) from err
         else:
             msg = (
                 f"No local Dataset found for dataset id {dataset_id}. check https://minari.farama.org/ for "

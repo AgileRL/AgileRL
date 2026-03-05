@@ -135,7 +135,7 @@ def generate_model(pretrained_model_name_or_path):
     )
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        torch_dtype=(
+        dtype=(
             torch.bfloat16
             if (torch.cuda.is_available() and torch.cuda.is_bf16_supported())
             else torch.float32

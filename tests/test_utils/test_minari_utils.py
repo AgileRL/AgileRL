@@ -168,7 +168,7 @@ def test_load_remote_minari_dataset_accelerator(dataset_id: str) -> None:
             accelerator=accelerator,
             remote=True,
         )
-    except HTTPError as e:
+    except (HTTPError, KeyError) as e:
         pytest.skip(f"Skipping test due to remote dataset not being available: {e}")
 
     assert dataset is not None

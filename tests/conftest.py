@@ -316,7 +316,7 @@ dist_env = {
     "RANK": "0",
     "LOCAL_RANK": "0",
     "WORLD_SIZE": "1",
-    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    "PYTORCH_ALLOC_CONF": "expandable_segments:True",
     "CUDA_VISIBLE_DEVICES": "0",
 }
 
