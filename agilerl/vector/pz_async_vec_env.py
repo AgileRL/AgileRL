@@ -4,6 +4,7 @@ import time
 import traceback
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable
+from contextlib import suppress
 from copy import deepcopy
 from enum import Enum
 from multiprocessing.connection import Connection
@@ -495,7 +496,10 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                     f"Calling `close` while waiting for a pending call to `{self._state.value}` to complete.",
                 )
                 function = getattr(self, f"{self._state.value}_wait")
-                function(timeout)
+                # Avoid hanging forever if `_state` was manually set (common in tests)
+                # or a worker died before responding.
+                pending_timeout = 1.0 if timeout is None else timeout
+                function(pending_timeout)
         except mp.TimeoutError:
             terminate = True
 
@@ -516,7 +520,10 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             if pipe is not None:
                 pipe.close()
         for process in self.processes:
-            process.join()
+            process.join(timeout=1.0)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=1.0)
 
     def _poll_pipe_envs(self, timeout: float | None = None) -> bool:
         self._assert_is_running()
@@ -932,12 +939,13 @@ def _async_worker(
     :type agents: str
 
     """
-    env = env_fn()
-    observation_space = {agent: env.observation_space(agent) for agent in agents}
-    parent_pipe.close()
-
-    # Need to keep track of the active agents in the environment
+    env = None
     try:
+        env = env_fn()
+        observation_space = {agent: env.observation_space(agent) for agent in agents}
+        parent_pipe.close()
+
+        # Need to keep track of the active agents in the environment
         while True:
             command, data = pipe.recv()
             if command == "reset":
@@ -1024,7 +1032,9 @@ def _async_worker(
         error_type, error_message, _ = sys.exc_info()
         trace = traceback.format_exc()
         error_queue.put((index, error_type, error_message, trace))
-        pipe.send((None, False))
+        with suppress(Exception):
+            pipe.send((None, False))
 
     finally:
-        env.close()
+        if env is not None:
+            env.close()

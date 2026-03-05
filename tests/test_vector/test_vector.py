@@ -586,6 +586,13 @@ def raise_error_step(self, action):
     )
 
 
+def raising_worker_env_constructor():
+    if mp.current_process().name != "MainProcess":
+        msg = "Error creating env"
+        raise RuntimeError(msg)
+    return GenericTestEnv()
+
+
 def test_async_vector_subenv_error():
     env_list = [
         lambda: GenericTestEnv(
@@ -599,6 +606,19 @@ def test_async_vector_subenv_error():
         envs.reset(seed=[1, 0])
 
     envs.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[raising_worker_env_constructor for _ in range(2)]],
+)
+def test_async_vector_subenv_init_error(env_fns):
+    envs = AsyncPettingZooVecEnv(env_fns)
+
+    with pytest.raises(RuntimeError, match="Error creating env"):
+        envs.reset()
+
+    envs.close(terminate=True)
     env_list = [
         lambda: GenericTestEnv(
             reset_func=raise_error_reset,
