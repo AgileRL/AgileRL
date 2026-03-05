@@ -11,7 +11,6 @@ from pettingzoo.mpe import simple_speaker_listener_v4
 from agilerl.components import MultiAgentReplayBuffer, ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
@@ -27,6 +26,8 @@ from agilerl.utils.utils import (
 )
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from benchmarking.networks import (
+    BasicNetActor,
+    BasicNetActorDQN,
     BasicNetCritic,
     ClipReward,
     SimpleCNNActor,
@@ -86,56 +87,63 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             else:
                 # DQN
                 if INIT_HP["ALGO"] == "DQN":
-                    actor = EvolvableMLP(
-                        num_inputs=state_dims[0],
-                        num_outputs=action_dims,
+                    network_actor_dqn = BasicNetActorDQN(
+                        state_dims[0], [64, 64], action_dims
+                    )
+                    actor = MakeEvolvable(
+                        network_actor_dqn,
+                        input_tensor=torch.ones(state_dims[0]),
                         device=device,
-                        hidden_size=[64, 64],
-                        activation="ReLU",
                     )
 
                     critic = None
                 elif INIT_HP["ALGO"] == "DDPG":
-                    actor = EvolvableMLP(
-                        num_inputs=state_dims[0],
-                        num_outputs=action_dims,
-                        device=device,
-                        hidden_size=[64, 64],
-                        activation="ReLU",
-                        output_activation="Tanh",
+                    network_actor_ddpg = BasicNetActor(
+                        state_dims[0],
+                        [64, 64],
+                        action_dims,
                     )
-
-                    critic = EvolvableMLP(
-                        num_inputs=state_dims[0] + action_dims,
-                        num_outputs=action_dims,
+                    actor = MakeEvolvable(
+                        network_actor_ddpg,
+                        input_tensor=torch.ones(state_dims[0]),
                         device=device,
-                        hidden_size=[64, 64],
-                        activation="ReLU",
+                    )
+                    network_critic = BasicNetCritic(
+                        state_dims[0] + action_dims,
+                        [64, 64],
+                        1,
+                    )
+                    critic = MakeEvolvable(
+                        network_critic,
+                        torch.ones(state_dims[0] + action_dims),
+                        device=device,
                     )
 
                 elif INIT_HP["ALGO"] == "TD3":
-                    actor = EvolvableMLP(
-                        num_inputs=state_dims[0],
-                        num_outputs=action_dims,
-                        device=device,
-                        hidden_size=[64, 64],
-                        activation="ReLU",
-                        output_activation="Tanh",
+                    network_actor_td3 = BasicNetActor(
+                        state_dims[0],
+                        [64, 64],
+                        action_dims,
                     )
-
-                    critic_1 = EvolvableMLP(
-                        num_inputs=state_dims[0] + action_dims,
-                        num_outputs=1,
+                    actor = MakeEvolvable(
+                        network_actor_td3,
+                        input_tensor=torch.ones(state_dims[0]),
                         device=device,
-                        hidden_size=[64, 64],
-                        activation="ReLU",
                     )
-                    critic_2 = EvolvableMLP(
-                        num_inputs=state_dims[0] + action_dims,
-                        num_outputs=1,
+                    network_critic = BasicNetCritic(
+                        state_dims[0] + action_dims,
+                        [64, 64],
+                        1,
+                    )
+                    critic_1 = MakeEvolvable(
+                        network_critic,
+                        torch.ones(state_dims[0] + action_dims),
                         device=device,
-                        hidden_size=[64, 64],
-                        activation="ReLU",
+                    )
+                    critic_2 = MakeEvolvable(
+                        network_critic,
+                        torch.ones(state_dims[0] + action_dims),
+                        device=device,
                     )
                     critic = [critic_1, critic_2]
                 elif INIT_HP["ALGO"] == "PPO":
