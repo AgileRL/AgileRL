@@ -367,6 +367,52 @@ def test_clone_new_index(vector_space, discrete_space):
     clone_agent.clean_up()
 
 
+def test_algorithm_test_loop_swap_channels(image_space, discrete_space, monkeypatch):
+    monkeypatch.setattr(
+        "agilerl.algorithms.neural_ucb_bandit.obs_channels_to_first", lambda x: x
+    )
+    env = DummyBanditEnv(state_size=image_space.shape, arms=discrete_space.n)
+    agent = NeuralUCB(observation_space=image_space, action_space=discrete_space)
+    mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+    assert isinstance(mean_score, float)
+    agent.clean_up()
+
+
+def test_init_raises_on_invalid_learn_step(vector_space, discrete_space):
+    with pytest.raises(
+        AssertionError, match="Learn step must be greater than or equal to one"
+    ):
+        NeuralUCB(vector_space, discrete_space, learn_step=0)
+
+
+def test_init_raises_on_invalid_gamma(vector_space, discrete_space):
+    with pytest.raises(AssertionError, match="Scaling factor must be positive"):
+        NeuralUCB(vector_space, discrete_space, gamma=0)
+
+
+def test_init_raises_on_invalid_reg(vector_space, discrete_space):
+    with pytest.raises(
+        AssertionError, match="Loss regularization parameter must be greater than zero"
+    ):
+        NeuralUCB(vector_space, discrete_space, reg=0.0)
+
+
+def test_get_action_single_output_multi_arm_branch(vector_space):
+    action_space = spaces.Discrete(3)
+    actor = EvolvableMLP(
+        num_inputs=vector_space.shape[0],
+        num_outputs=1,
+        hidden_size=[16],
+        layer_norm=False,
+    )
+    bandit = NeuralUCB(vector_space, action_space, actor_network=actor)
+    state = np.array([1.0, 0.5, -0.5, 0.0], dtype=np.float32)
+    action = bandit.get_action(state, action_mask=None)
+    assert isinstance(action, (int, np.integer))
+    assert 0 <= action < 3
+    bandit.clean_up()
+
+
 def test_clone_after_learning(vector_space, discrete_space):
     batch_size = 4
     states = torch.randn(batch_size, vector_space.shape[0])

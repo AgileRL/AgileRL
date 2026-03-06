@@ -182,6 +182,43 @@ class TestOptimizerWrapper:
                 lr_name="lr",
             )
 
+    def test_init_raises_when_network_names_without_lr_name(self):
+        """OptimizerWrapper raises AssertionError when network_names passed without lr_name."""
+        network = MockEvolvableNetwork()
+        with pytest.raises(
+            AssertionError, match="Learning rate attribute name must be passed"
+        ):
+            OptimizerWrapper(
+                torch.optim.Adam,
+                network,
+                0.001,
+                network_names=["network"],
+                lr_name=None,
+            )
+
+    def test_init_raises_when_no_networks_found(self):
+        """OptimizerWrapper raises AssertionError when _infer_network_attr_names returns empty."""
+        network = MockEvolvableNetwork()
+        with (
+            patch.object(OptimizerWrapper, "_infer_parent_container"),
+            patch.object(
+                OptimizerWrapper,
+                "_infer_network_attr_names",
+                return_value=[],
+            ),
+            patch.object(
+                OptimizerWrapper,
+                "_infer_lr_name",
+                return_value="lr",
+            ),
+        ):
+            with pytest.raises(AssertionError, match="No networks found"):
+                OptimizerWrapper(
+                    torch.optim.Adam,
+                    network,
+                    0.001,
+                )
+
     def test_init_single_network(self):
         """Test initializing with a single network like in DQN."""
         network = MockEvolvableNetwork()
@@ -246,6 +283,77 @@ class TestOptimizerWrapper:
         # Each group should have the same learning rate
         assert param_groups[0]["lr"] == lr
         assert param_groups[1]["lr"] == lr
+
+    def test_init_multiple_networks_with_list_optimizer_kwargs(self):
+        """Test init_from_multiple with per-network optimizer_kwargs as list."""
+        actor = MockEvolvableNetwork(name="actor")
+        critic = MockEvolvableNetwork(name="critic")
+        optimizer_kwargs = [{"weight_decay": 0.01}, {"weight_decay": 0.02}]
+
+        wrapper = OptimizerWrapper(
+            torch.optim.Adam,
+            [actor, critic],
+            0.001,
+            optimizer_kwargs=optimizer_kwargs,
+            network_names=["actor", "critic"],
+            lr_name="lr",
+        )
+
+        param_groups = wrapper.optimizer.param_groups
+        assert len(param_groups) == 2
+        assert param_groups[0]["weight_decay"] == 0.01
+        assert param_groups[1]["weight_decay"] == 0.02
+
+    def test_init_raises_when_networks_network_names_mismatch(self):
+        """OptimizerWrapper raises when len(networks) != len(network_names)."""
+        actor = MockEvolvableNetwork(name="actor")
+        critic = MockEvolvableNetwork(name="critic")
+        with pytest.raises(AssertionError, match="do not match"):
+            OptimizerWrapper(
+                torch.optim.Adam,
+                [actor, critic],
+                0.001,
+                network_names=["actor", "critic", "extra"],
+                lr_name="lr",
+            )
+
+    def test_init_raises_when_multiple_networks_optimizer_cls_is_dict(self):
+        """OptimizerWrapper raises when multiple networks but optimizer_cls is dict."""
+        actor = MockEvolvableNetwork(name="actor")
+        critic = MockEvolvableNetwork(name="critic")
+        with pytest.raises(AssertionError, match="single optimizer class"):
+            OptimizerWrapper(
+                {"actor": torch.optim.Adam, "critic": torch.optim.Adam},
+                [actor, critic],
+                0.001,
+                network_names=["actor", "critic"],
+                lr_name="lr",
+            )
+
+    def test_init_raises_when_single_network_optimizer_cls_is_dict(self):
+        """OptimizerWrapper raises when single network but optimizer_cls is dict."""
+        network = MockEvolvableNetwork()
+        with pytest.raises(AssertionError, match="single optimizer class"):
+            OptimizerWrapper(
+                {"net": torch.optim.Adam},
+                network,
+                0.001,
+                network_names=["network"],
+                lr_name="lr",
+            )
+
+    def test_init_raises_when_single_network_optimizer_kwargs_not_dict(self):
+        """OptimizerWrapper raises when single network but optimizer_kwargs is not dict."""
+        network = MockEvolvableNetwork()
+        with pytest.raises(AssertionError, match="single dictionary of optimizer"):
+            OptimizerWrapper(
+                torch.optim.Adam,
+                network,
+                0.001,
+                optimizer_kwargs=[{"bad": "list"}],
+                network_names=["network"],
+                lr_name="lr",
+            )
 
     def test_init_with_multiagent(self):
         """Test initializing with multiagent=True like in MADDPG."""
@@ -658,6 +766,39 @@ class TestOptimizerWrapper:
         with pytest.raises(AssertionError):
             multi_wrapper.load_state_dict([{}])
 
+    def test_load_state_dict_multiagent_keys_mismatch(self):
+        """Multi-agent load_state_dict raises when state_dict keys != optimizer keys."""
+        networks = ModuleDict(
+            {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(2)},
+        )
+        multi_wrapper = OptimizerWrapper(
+            torch.optim.Adam,
+            networks,
+            0.001,
+            network_names=["networks"],
+            lr_name="lr",
+        )
+        # Pass dict with wrong keys
+        wrong_state = {
+            "net_0": multi_wrapper.optimizer["net_0"].state_dict(),
+            "wrong_key": multi_wrapper.optimizer["net_1"].state_dict(),
+        }
+        with pytest.raises(AssertionError, match="Expected a dictionary"):
+            multi_wrapper.load_state_dict(wrong_state)
+
+    def test_load_state_dict_single_agent_non_dict_raises(self):
+        """Single-agent load_state_dict raises when state_dict is not a dict."""
+        network = MockEvolvableNetwork()
+        wrapper = OptimizerWrapper(
+            torch.optim.Adam,
+            network,
+            0.001,
+            network_names=["network"],
+            lr_name="lr",
+        )
+        with pytest.raises(AssertionError, match="single optimizer state dictionary"):
+            wrapper.load_state_dict("not a dict")
+
     def test_actual_learning(self):
         """Test that the optimizer actually performs gradient descent."""
         # Create a simple network and test data
@@ -921,6 +1062,25 @@ class TestOptimizerWrapper:
         assert wrapper.optimizer["net_0"].defaults["momentum"] == 0.9
         assert wrapper.optimizer["net_1"].defaults["betas"] == (0.9, 0.999)
 
+    def test_items_multiagent(self):
+        """Test items() returns key-optimizer pairs in multi-agent setup."""
+        networks = ModuleDict(
+            {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(2)},
+        )
+        wrapper = OptimizerWrapper(
+            torch.optim.Adam,
+            networks,
+            lr=0.01,
+            network_names=["networks"],
+            lr_name="lr",
+        )
+        items = wrapper.items()
+        assert len(items) == 2
+        keys = [k for k, _ in items]
+        assert set(keys) == {"net_0", "net_1"}
+        for k, opt in items:
+            assert isinstance(opt, torch.optim.Adam)
+
     def test_iteration_multiagent(self):
         """Test iteration through optimizers in multiagent setting."""
         networks = ModuleDict(
@@ -957,3 +1117,216 @@ def test_optimizer_wrapper_fallback_peft_type_when_no_llm_dependencies():
     finally:
         # Restore original module to avoid affecting other tests
         sys.modules["agilerl.algorithms.core.optimizer_wrapper"] = original_module
+
+
+def test_optimizer_wrapper_peft_type_when_llm_dependencies_available():
+    original_module = sys.modules.pop("agilerl.algorithms.core.optimizer_wrapper", None)
+    try:
+        with patch("agilerl.HAS_LLM_DEPENDENCIES", True):
+            import agilerl.algorithms.core.optimizer_wrapper as optimizer_wrapper_reloaded
+
+            assert optimizer_wrapper_reloaded.PeftModelType.__name__ == "PeftModel"
+    finally:
+        sys.modules["agilerl.algorithms.core.optimizer_wrapper"] = original_module
+
+
+def test_infer_lr_name_multiple_matches_without_lr_keyword_raises():
+    network = MockEvolvableNetwork()
+    wrapper = OptimizerWrapper(
+        torch.optim.Adam,
+        network,
+        0.001,
+        network_names=["network"],
+        lr_name="lr",
+    )
+
+    class Container:
+        pass
+
+    container = Container()
+    container.alpha = 0.001
+    container.beta = 0.001
+
+    with pytest.raises(AttributeError, match="Multiple attributes matched"):
+        wrapper._infer_lr_name(container)
+
+
+def test_infer_lr_name_not_found_raises():
+    network = MockEvolvableNetwork()
+    wrapper = OptimizerWrapper(
+        torch.optim.Adam,
+        network,
+        0.001,
+        network_names=["network"],
+        lr_name="lr",
+    )
+
+    class Container:
+        pass
+
+    container = Container()
+    container.some_value = 1.0
+
+    with pytest.raises(AttributeError, match="Learning rate attribute not found"):
+        wrapper._infer_lr_name(container)
+
+
+def test_infer_lr_name_multiple_matches_with_lr_keyword_returns_correct():
+    """When multiple attrs match lr value, return the one with 'lr' or 'learning_rate' in name."""
+    network = MockEvolvableNetwork()
+    wrapper = OptimizerWrapper(
+        torch.optim.Adam,
+        network,
+        0.001,
+        network_names=["network"],
+        lr_name="lr",
+    )
+
+    class Container:
+        pass
+
+    container = Container()
+    container.alpha = 0.001
+    container.learning_rate = 0.001
+    container.beta = 0.001
+
+    result = wrapper._infer_lr_name(container)
+    assert result == "learning_rate"
+
+
+def test_infer_lr_name_single_match_returns_it():
+    """When exactly one attr matches lr value, return it."""
+    network = MockEvolvableNetwork()
+    wrapper = OptimizerWrapper(
+        torch.optim.Adam,
+        network,
+        0.001,
+        network_names=["network"],
+        lr_name="lr",
+    )
+
+    class Container:
+        pass
+
+    container = Container()
+    container.lr = 0.001
+
+    result = wrapper._infer_lr_name(container)
+    assert result == "lr"
+
+
+def test_checkpoint_dict():
+    """Test checkpoint_dict returns expected structure for single and multi-agent."""
+    network = MockEvolvableNetwork()
+    wrapper = OptimizerWrapper(
+        torch.optim.Adam,
+        network,
+        0.001,
+        optimizer_kwargs={"betas": (0.9, 0.999)},
+        network_names=["network"],
+        lr_name="lr",
+    )
+
+    ckpt = wrapper.checkpoint_dict("optimizer")
+    assert ckpt["optimizer_cls"] == "Adam"
+    assert "optimizer_state_dict" in ckpt
+    assert ckpt["optimizer_networks"] == ["network"]
+    assert ckpt["optimizer_lr"] == "lr"
+    assert ckpt["optimizer_kwargs"] == {"betas": (0.9, 0.999)}
+
+    # Multi-agent
+    networks = ModuleDict(
+        {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(2)},
+    )
+    multi_wrapper = OptimizerWrapper(
+        torch.optim.Adam,
+        networks,
+        0.001,
+        network_names=["networks"],
+        lr_name="lr",
+    )
+    multi_ckpt = multi_wrapper.checkpoint_dict("actor_opt")
+    assert isinstance(multi_ckpt["actor_opt_cls"], dict)
+    assert set(multi_ckpt["actor_opt_cls"].keys()) == {"net_0", "net_1"}
+    assert "actor_opt_state_dict" in multi_ckpt
+    assert multi_ckpt["actor_opt_networks"] == ["networks"]
+    assert multi_ckpt["actor_opt_lr"] == "lr"
+
+
+def test_getattr_delegates_to_optimizer_when_attr_missing_on_self():
+    """__getattr__ delegates to underlying optimizer when attribute missing on wrapper."""
+    network = MockEvolvableNetwork()
+    wrapper = OptimizerWrapper(
+        torch.optim.Adam,
+        network,
+        0.001,
+        network_names=["network"],
+        lr_name="lr",
+    )
+    assert wrapper.defaults == wrapper.optimizer.defaults
+    assert wrapper.param_groups == wrapper.optimizer.param_groups
+
+
+def test_getattr_raises_when_attr_missing_on_optimizer_too():
+    """__getattr__ raises AttributeError when attribute missing on both wrapper and optimizer."""
+    network = MockEvolvableNetwork()
+    wrapper = OptimizerWrapper(
+        torch.optim.Adam,
+        network,
+        0.001,
+        network_names=["network"],
+        lr_name="lr",
+    )
+    with pytest.raises(AttributeError):
+        _ = wrapper.nonexistent_attr_xyz
+
+
+def test_infer_network_attr_names():
+    """_infer_network_attr_names returns attr names matching networks by id."""
+    network = MockEvolvableNetwork()
+    wrapper = OptimizerWrapper(
+        torch.optim.Adam,
+        network,
+        0.001,
+        network_names=["network"],
+        lr_name="lr",
+    )
+
+    class Container:
+        pass
+
+    container = Container()
+    container.actor = MockEvolvableNetwork()
+    container.my_net = network
+    container.other = "not a module"
+
+    result = wrapper._infer_network_attr_names(container)
+    assert result == ["my_net"]
+
+
+def test_optimizer_cls_names_single_vs_multiagent():
+    """optimizer_cls_names returns str for single-agent, dict for multi-agent."""
+    network = MockEvolvableNetwork()
+    single_wrapper = OptimizerWrapper(
+        torch.optim.SGD,
+        network,
+        0.001,
+        network_names=["network"],
+        lr_name="lr",
+    )
+    assert single_wrapper.optimizer_cls_names() == "SGD"
+
+    networks = ModuleDict(
+        {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(2)},
+    )
+    multi_wrapper = OptimizerWrapper(
+        torch.optim.Adam,
+        networks,
+        0.001,
+        network_names=["networks"],
+        lr_name="lr",
+    )
+    names = multi_wrapper.optimizer_cls_names()
+    assert isinstance(names, dict)
+    assert set(names.keys()) == {"net_0", "net_1"}
+    assert all(v == "Adam" for v in names.values())

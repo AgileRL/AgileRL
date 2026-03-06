@@ -727,6 +727,26 @@ def test_share_encoder_parameters_incompatible_architectures_raises_key_error(
         )
 
 
+def test_reset_action_noise(vector_space):
+    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+    ddpg = DDPG(vector_space, action_space)
+    indices = np.array([0])
+    ddpg.reset_action_noise(indices)
+    assert np.allclose(ddpg.current_noise[indices], ddpg.mean_noise[indices])
+    ddpg.clean_up()
+
+
+def test_learn_returns_none_actor_loss_when_policy_freq_not_met(vector_space):
+    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+    batch_size = 4
+    ddpg = DDPG(vector_space, action_space, batch_size=batch_size, policy_freq=4)
+    experiences = get_experiences_batch(vector_space, action_space, batch_size)
+    actor_loss, critic_loss = ddpg.learn(experiences)
+    assert actor_loss is None
+    assert isinstance(critic_loss, float)
+    ddpg.clean_up()
+
+
 def test_share_encoder_parameters_non_evolvable_network_emits_warning(
     vector_space,
     simple_mlp,

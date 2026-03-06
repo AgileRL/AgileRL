@@ -248,6 +248,15 @@ def test_returns_expected_action(
     dqn.clean_up()
 
 
+def test_get_action_training_false(vector_space, discrete_space):
+    dqn = RainbowDQN(vector_space, discrete_space)
+    state = get_sample_from_space(vector_space)
+    action = dqn.get_action(state, training=False)
+    assert action.shape == (1,) or np.ndim(action) >= 1
+    assert 0 <= action.flatten()[0] < discrete_space.n
+    dqn.clean_up()
+
+
 def test_returns_expected_action_mask_vectorized(vector_space, discrete_space):
     accelerator = Accelerator()
 

@@ -1756,6 +1756,23 @@ def test_rollout_buffer_bptt_epoch_avg_kl_warning_branch(
     ppo.clean_up()
 
 
+def test_get_action_and_values_share_encoders_false(vector_space, discrete_space):
+    ppo = PPO(
+        vector_space,
+        discrete_space,
+        share_encoders=False,
+        use_rollout_buffer=False,
+    )
+    obs = np.zeros((1, *vector_space.shape), dtype=np.float32)
+    action, log_prob, entropy, values, next_hidden = ppo._get_action_and_values(
+        obs, sample=True
+    )
+    assert action is not None
+    assert values is not None
+    assert next_hidden is None
+    ppo.clean_up()
+
+
 def test_ppo_test_loop_masks_callbacks_and_non_vectorized_paths(
     vector_space, discrete_space
 ):

@@ -858,6 +858,14 @@ def test_single_q_update_checkpoint_and_cleanup(tmpdir):
     loaded.clean_up()
 
 
+def test_clip_values_returns_unchanged_when_bounds_none():
+    algo = _make_algo(double_q=False)
+    values = torch.tensor([[1.0, 2.0, 3.0]])
+    result = algo.clip_values(values)
+    assert torch.equal(result, values)
+    algo.clean_up()
+
+
 @pytest.mark.parametrize("double_q", [True, False])
 def test_loss_helpers_return_scalar(double_q):
     algo = _make_algo(double_q=double_q)

@@ -122,7 +122,7 @@ class _DummyModule(EvolvableModule):
 
 
 # --------------------------------------------------------------------------- #
-# EvolvableDistribution: get_distribution unsupported space (line 212-213)
+# EvolvableDistribution: get_distribution unsupported space
 # --------------------------------------------------------------------------- #
 
 
@@ -136,7 +136,7 @@ def test_evolvable_distribution_get_distribution_unsupported_raises():
 
 
 # --------------------------------------------------------------------------- #
-# EvolvableDistribution: apply_mask unsupported space (lines 285-286)
+# EvolvableDistribution: apply_mask unsupported space
 # --------------------------------------------------------------------------- #
 
 
@@ -150,7 +150,7 @@ def test_evolvable_distribution_apply_mask_unsupported_raises():
 
 
 # --------------------------------------------------------------------------- #
-# EvolvableDistribution: forward with list-of-arrays action_mask (lines 318-324)
+# EvolvableDistribution: forward with list-of-arrays action_mask
 # --------------------------------------------------------------------------- #
 
 

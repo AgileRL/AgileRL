@@ -7,9 +7,6 @@ from agilerl.modules.lstm import EvolvableLSTM
 from agilerl.typing import BatchDimension
 from tests.helper_functions import assert_state_dicts_equal
 
-######### Define fixtures #########
-# Device fixture moved to conftest.py
-
 
 ######### Test instantiation #########
 @pytest.mark.parametrize(

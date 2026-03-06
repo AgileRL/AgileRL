@@ -2,6 +2,7 @@ import functools
 from unittest.mock import patch
 
 import gymnasium
+import pytest
 from gymnasium.spaces import Discrete
 from pettingzoo import ParallelEnv
 
@@ -192,6 +193,75 @@ def test_return_state():
     observations, _ = env.reset()
     state = env.state
     assert state == observations
+
+
+def test_pettingzoo_wrapper_close():
+    """Test PettingZooAutoResetParallelWrapper.close()."""
+    env = RPSParallelEnv(render_mode=None)
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    wrapped.reset()
+    result = wrapped.close()
+    assert result is None
+
+
+def test_pettingzoo_wrapper_state_property():
+    """Test PettingZooAutoResetParallelWrapper.state property."""
+    env = RPSParallelEnv(render_mode=None)
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    observations, _ = wrapped.reset()
+    state = wrapped.state
+    assert state is not None
+    assert state == observations
+
+
+@pytest.mark.parametrize("agent_id", ["player_0", "player_1"])
+def test_pettingzoo_wrapper_autoreset_on_all_done(agent_id):
+    """Test autoreset when all terminations/truncations."""
+    env = RPSParallelEnv(render_mode=None)
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    wrapped.reset()
+    # Step until truncation (100 steps) to trigger autoreset
+    for _ in range(101):
+        actions = {
+            agent: wrapped.action_space(agent).sample() for agent in wrapped.agents
+        }
+        _, _, _, _, _ = wrapped.step(actions)
+        if not wrapped.agents:
+            break
+    assert len(wrapped.agents) == 2
+    assert wrapped.observation_space(agent_id) is not None
+    assert wrapped.action_space(agent_id) is not None
+
+
+@pytest.mark.parametrize("agent_id", ["player_0", "player_1"])
+def test_pettingzoo_wrapper_delegates_spaces(agent_id):
+    env = RPSParallelEnv(render_mode=None)
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    obs_space = wrapped.observation_space(agent_id)
+    act_space = wrapped.action_space(agent_id)
+    assert obs_space == env.observation_space(agent_id)
+    assert act_space == env.action_space(agent_id)
+
+
+def test_pettingzoo_wrapper_render():
+    env = RPSParallelEnv(render_mode=None)
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    result = wrapped.render()
+    assert result is None
+
+
+def test_pettingzoo_wrapper_init_suppresses_missing_state_space():
+    env = RPSParallelEnv(render_mode=None)
+    assert not hasattr(env, "state_space")
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    assert not hasattr(wrapped, "state_space")
+
+
+def test_pettingzoo_wrapper_init_sets_state_space_when_present():
+    env = RPSParallelEnv(render_mode=None)
+    env.state_space = "custom_state"
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    assert wrapped.state_space == "custom_state"
 
 
 if __name__ == "__main__":

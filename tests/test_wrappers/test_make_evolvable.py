@@ -1152,3 +1152,111 @@ def test_clone_method_with_equal_state_dicts(
     clone_network = evolvable_network.clone()
     assert isinstance(clone_network, MakeEvolvable)
     assert_state_dicts_equal(evolvable_network.state_dict(), clone_network.state_dict())
+
+
+@pytest.fixture
+def mlp_net():
+    return nn.Sequential(
+        nn.Linear(10, 32),
+        nn.ReLU(),
+        nn.Linear(32, 32),
+        nn.ReLU(),
+        nn.Linear(32, 1),
+        nn.Tanh(),
+    )
+
+
+@pytest.fixture
+def cnn_net():
+    return nn.Sequential(
+        nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
+        nn.ReLU(),
+        nn.MaxPool2d(kernel_size=2, stride=2),
+        nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
+        nn.ReLU(),
+        nn.MaxPool2d(kernel_size=2, stride=2),
+        nn.Flatten(),
+        nn.Linear(32 * 16 * 16, 128),
+        nn.ReLU(),
+        nn.Linear(128, 1),
+    )
+
+
+def test_change_activation_output_false(mlp_net, device):
+    evolvable = MakeEvolvable(mlp_net, torch.randn(1, 10), device=device)
+    evolvable.change_activation("LeakyReLU", output=False)
+    assert evolvable.mlp_activation == "LeakyReLU"
+
+
+def test_change_activation_output_true(mlp_net, device):
+    evolvable = MakeEvolvable(mlp_net, torch.randn(1, 10), device=device)
+    evolvable.change_activation("LeakyReLU", output=True)
+    assert evolvable.mlp_activation == "LeakyReLU"
+    assert evolvable.mlp_output_activation == "LeakyReLU"
+
+
+def test_init_weights_gaussian_cnn(cnn_net, device):
+    evolvable = MakeEvolvable(cnn_net, torch.randn(1, 3, 64, 64), device=device)
+    evolvable.init_weights_gaussian(std_coeff=2.0, output_coeff=1.0)
+    assert evolvable.feature_net is not None
+    assert evolvable.value_net is not None
+
+
+def test_make_evolvable_init_layers_output_vanish(device):
+    net = nn.Sequential(
+        nn.Linear(10, 32),
+        nn.ReLU(),
+        nn.Linear(32, 32),
+        nn.ReLU(),
+        nn.Linear(32, 1),
+        nn.Tanh(),
+    )
+    evolvable = MakeEvolvable(
+        net,
+        torch.randn(1, 10),
+        device=device,
+        init_layers=True,
+        output_vanish=True,
+    )
+    with torch.no_grad():
+        out = evolvable(torch.randn(2, 10))
+    assert out.shape == (2, 1)
+
+
+def test_calc_stride_size_ranges_conv3d(device):
+    net = nn.Sequential(
+        nn.Conv3d(3, 16, kernel_size=(1, 3, 3), stride=(1, 3, 3), padding=1),
+        nn.ReLU(),
+        nn.Conv3d(16, 32, kernel_size=(1, 3, 3), stride=(1, 3, 3), padding=1),
+        nn.ReLU(),
+        nn.Flatten(),
+        nn.Linear(69120, 128),
+        nn.ReLU(),
+        nn.Linear(128, 1),
+    )
+    input_tensor = torch.randn(1, 3, 1, 210, 160)
+    evolvable = MakeEvolvable(
+        net,
+        input_tensor,
+        device=device,
+        min_cnn_hidden_layers=1,
+        max_cnn_hidden_layers=4,
+    )
+    strides = evolvable.calc_stride_size_ranges()
+    assert len(strides) == len(evolvable.channel_size)
+    assert all(isinstance(s, tuple) and len(s) == 2 for s in strides)
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["add_mlp_layer", "remove_mlp_layer", "add_mlp_node", "remove_mlp_node"],
+)
+def test_make_evolvable_mlp_mutations(mlp_net, device, method):
+    evolvable = MakeEvolvable(mlp_net, torch.randn(1, 10), device=device)
+    getattr(evolvable, method)()
+
+
+def test_make_evolvable_get_output_dense(mlp_net, device):
+    evolvable = MakeEvolvable(mlp_net, torch.randn(1, 10), device=device)
+    layer = evolvable.get_output_dense()
+    assert isinstance(layer, nn.Linear)

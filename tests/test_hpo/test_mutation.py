@@ -12,11 +12,21 @@ from gymnasium import spaces
 from peft import LoraConfig
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.hpo.mutation import MutationError, Mutations, get_exp_layer
+from agilerl.hpo.mutation import (
+    MutationError,
+    Mutations,
+    get_exp_layer,
+    get_offspring_eval_modules,
+    set_global_seed,
+)
 from agilerl.modules import EvolvableBERT, EvolvableModule, ModuleDict
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
-from tests.helper_functions import assert_state_dicts_equal
+from tests.helper_functions import (
+    assert_state_dicts_equal,
+    generate_discrete_space,
+    generate_random_box_space,
+)
 from tests.test_algorithms.test_llms.test_grpo import create_module
 
 if TYPE_CHECKING:
@@ -910,6 +920,129 @@ def test_get_exp_layer_raises_for_non_evolvable_module():
     """get_exp_layer raises TypeError when offspring is not an EvolvableModule."""
     with pytest.raises(TypeError, match="Bandit algorithm architecture.*not supported"):
         get_exp_layer(torch.nn.Linear(2, 2))
+
+
+@pytest.mark.parametrize("seed", [None, 42])
+def test_set_global_seed(seed):
+    set_global_seed(seed)
+    if seed is not None:
+        state = np.random.get_state()
+        assert state is not None
+
+
+def test_get_exp_layer_returns_output_layer_for_evolvable_module(
+    vector_space, discrete_space, encoder_mlp_config
+):
+    from agilerl.utils.utils import create_population
+
+    pop = create_population(
+        algo="NeuralUCB",
+        observation_space=vector_space,
+        action_space=discrete_space,
+        net_config=encoder_mlp_config,
+        INIT_HP=SHARED_INIT_HP,
+        population_size=1,
+        device="cpu",
+    )
+    offspring = pop[0].actor.clone()
+    exp_layer = get_exp_layer(offspring)
+    assert exp_layer is not None
+    assert hasattr(exp_layer, "parameters")
+
+
+def test_get_offspring_eval_modules_returns_policy_and_modules(
+    vector_space, discrete_space, encoder_mlp_config
+):
+    from agilerl.utils.utils import create_population
+
+    pop = create_population(
+        algo="DQN",
+        observation_space=vector_space,
+        action_space=discrete_space,
+        net_config=encoder_mlp_config,
+        INIT_HP=SHARED_INIT_HP,
+        population_size=1,
+        device="cpu",
+    )
+    policy, offspring_evals = get_offspring_eval_modules(pop[0])
+    assert isinstance(policy, dict)
+    assert isinstance(offspring_evals, dict)
+    assert len(policy) >= 1
+
+
+def test_no_mutation_sets_mut_none():
+    class DummyIndividual:
+        mut = None
+
+    muts = Mutations(1, 0, 0, 0, 0, 0, 0.1, device="cpu")
+    ind = DummyIndividual()
+    out = muts.no_mutation(ind)
+    assert out.mut == "None"
+
+
+@pytest.mark.parametrize("algo", ["PPO", "DDPG", "TD3"])
+def test_activation_mutation_warns_for_policy_gradient_algos(
+    algo, vector_space, encoder_mlp_config, device
+):
+    from agilerl.utils.utils import create_population
+
+    action_space = (
+        generate_random_box_space((2,))
+        if algo in ("DDPG", "TD3")
+        else generate_discrete_space(2)
+    )
+    pop = create_population(
+        algo=algo,
+        observation_space=vector_space,
+        action_space=action_space,
+        net_config=encoder_mlp_config,
+        INIT_HP=SHARED_INIT_HP,
+        population_size=1,
+        device=device,
+    )
+    muts = Mutations(0, 0, 0, 0, 1, 0, 0.1, device=device)
+    with pytest.warns(UserWarning, match="Activation mutations are not supported"):
+        out = muts.activation_mutation(pop[0].clone(wrap=False))
+    assert out.mut == "None"
+
+
+def test_rl_hyperparam_mutation_returns_none_when_hp_config_empty(device):
+    class DummyIndividual:
+        mut = None
+        registry = type("R", (), {"hp_config": None})()
+
+    muts = Mutations(0, 0, 0, 0, 0, 1, 0.1, device=device)
+    ind = DummyIndividual()
+    out = muts.rl_hyperparam_mutation(ind)
+    assert out.mut == "None"
+
+
+@pytest.mark.parametrize("pretraining", [True, False])
+def test_get_mutations_options_pretraining_fallback(pretraining):
+    muts = Mutations(1, 0, 0, 0, 0, 0, 0.1, device="cpu")
+    opts, proba = muts._get_mutations_options(pretraining=pretraining)
+    assert len(opts) >= 1
+    assert muts.no_mutation in opts
+    if pretraining:
+        assert sum(1 for p in proba if p == 1.0) >= 0
+
+
+def test_get_mutations_options_all_zero_uses_no_mutation():
+    muts = Mutations(0, 0, 0, 0, 0, 0, 0.1, device="cpu")
+    opts, proba = muts._get_mutations_options(pretraining=True)
+    assert muts.no_mutation in opts
+    assert len(opts) == 1
+    assert proba[0] == 1.0
+
+
+def test_mutations_init_raises_for_negative_no_mutation():
+    with pytest.raises(AssertionError, match="greater than or equal to zero"):
+        Mutations(-0.1, 0, 0.5, 0, 0, 0, 0.1, device="cpu")
+
+
+def test_mutations_init_raises_for_invalid_new_layer_prob():
+    with pytest.raises(AssertionError, match="between zero and one"):
+        Mutations(0, 0, 1.5, 0, 0, 0, 0.1, device="cpu")
 
 
 def test_architecture_mutate_raises_for_unsupported_individual():
@@ -1846,6 +1979,7 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
         old_agent.clean_up()
     if use_accelerator:
         AcceleratorState._reset_state(True)
+        Accelerator()
 
 
 @pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])

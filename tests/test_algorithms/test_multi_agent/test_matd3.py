@@ -1478,6 +1478,8 @@ def test_matd3_algorithm_test_loop(
     else:
         assert isinstance(mean_score, np.ndarray)
         assert len(mean_score) == 3
+    env.close()
+    matd3.clean_up()
 
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])

@@ -1,5 +1,6 @@
 # Mock NetworkGroup for testing (avoids frame inspection issues)
 from dataclasses import dataclass, field
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -9,9 +10,11 @@ from torch import nn, optim
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     MutationRegistry,
+    NetworkGroup,
     NetworkConfig,
     OptimizerConfig,
     RLParameter,
+    make_network_group,
 )
 from agilerl.modules import EvolvableModule
 
@@ -208,6 +211,67 @@ class TestRLParameter:
 
         with pytest.raises(AssertionError, match="Hyperparameter value is not set"):
             param.mutate()
+
+    def test_rlparameter_mutate_scalar_shrink_hits_min(self):
+        param = RLParameter(min=1.0, max=10.0, shrink_factor=0.5, dtype=float)
+        param.value = 1.0
+        with patch("torch.rand", return_value=torch.tensor([0.1])):
+            assert param.mutate() == 1.0
+
+    def test_rlparameter_mutate_scalar_grow_hits_max(self):
+        param = RLParameter(min=1.0, max=10.0, grow_factor=2.0, dtype=float)
+        param.value = 10.0
+        with patch("torch.rand", return_value=torch.tensor([0.9])):
+            assert param.mutate() == 10.0
+
+    def test_rlparameter_mutate_int_shrink_boundary(self):
+        """Shrink path for int at/near min boundary."""
+        param = RLParameter(min=1, max=100, shrink_factor=0.5, dtype=int)
+        param.value = 1
+        with patch("torch.rand", return_value=torch.tensor([0.0])):  # shrink
+            assert param.mutate() == 1
+
+    def test_rlparameter_mutate_int_grow_boundary(self):
+        """Grow path for int at max boundary."""
+        param = RLParameter(min=1, max=100, grow_factor=2.0, dtype=int)
+        param.value = 100
+        with patch("torch.rand", return_value=torch.tensor([1.0])):  # grow
+            assert param.mutate() == 100
+
+    def test_rlparameter_mutate_numpy_shrink_boundary(self):
+        """Numpy array shrink path with elements at min."""
+        torch.manual_seed(42)
+        param = RLParameter(min=0.0, max=1.0, shrink_factor=0.5, dtype=np.ndarray)
+        param.value = np.array([0.0, 0.5])  # first element at min
+        with patch("torch.rand", return_value=torch.tensor([0.2])):  # shrink
+            mutated = param.mutate()
+        assert np.all(mutated >= param.min)
+        assert np.all(mutated <= param.max)
+        assert mutated[0] == 0.0
+
+    def test_rlparameter_mutate_numpy_grow_boundary(self):
+        """Numpy array grow path with elements at max."""
+        param = RLParameter(min=0.0, max=1.0, grow_factor=2.0, dtype=np.ndarray)
+        param.value = np.array([0.5, 1.0])  # second at max
+        with patch("torch.rand", return_value=torch.tensor([0.8])):  # grow
+            mutated = param.mutate()
+        assert np.all(mutated >= param.min)
+        assert np.all(mutated <= param.max)
+        assert mutated[1] == 1.0
+
+    def test_rlparameter_mutate_float_shrink_above_min(self):
+        """Shrink when value*shrink_factor would fall below min."""
+        param = RLParameter(min=1.0, max=10.0, shrink_factor=0.5, dtype=float)
+        param.value = 1.1  # 1.1 * 0.5 = 0.55 < 1.0 -> clamp to 1.0
+        with patch("torch.rand", return_value=torch.tensor([0.1])):
+            assert param.mutate() == 1.0
+
+    def test_rlparameter_mutate_float_grow_below_max(self):
+        """Grow when value*grow_factor would exceed max."""
+        param = RLParameter(min=1.0, max=10.0, grow_factor=2.0, dtype=float)
+        param.value = 6.0  # 6.0 * 2 = 12 > 10 -> clamp to 10.0
+        with patch("torch.rand", return_value=torch.tensor([0.9])):
+            assert param.mutate() == 10.0
 
 
 class TestHyperparameterConfig:
@@ -489,6 +553,114 @@ class TestNetworkGroup:
         assert group.shared_networks is None
         assert group.policy is True
 
+    def test_make_network_group_factory_invokes_network_group(self):
+        with patch.object(NetworkGroup, "__post_init__", lambda self: None):
+            group = make_network_group(
+                eval_network="actor",
+                shared_networks=["target_actor"],
+                policy=True,
+            )
+        assert group.eval_network == "actor"
+        assert group.shared_networks == ["target_actor"]
+        assert group.policy is True
+
+    def test_network_group_hash_and_eq_non_matching_type(self):
+        group = object.__new__(NetworkGroup)
+        group.eval_network = "actor"
+        group.shared_networks = None
+        group.policy = True
+        assert isinstance(hash(group), int)
+        assert (group == object()) is False
+
+    def test_network_group_eq_with_none(self):
+        """NetworkGroup __eq__ returns False for None."""
+        group = object.__new__(NetworkGroup)
+        group.eval_network = "actor"
+        group.shared_networks = None
+        group.policy = True
+        assert group.__eq__(None) is False
+
+    def test_network_group_eq_same_attrs(self):
+        """Equal NetworkGroups compare equal."""
+        g1 = object.__new__(NetworkGroup)
+        g1.eval_network = "actor"
+        g1.shared_networks = ["target_actor"]
+        g1.policy = True
+        g2 = object.__new__(NetworkGroup)
+        g2.eval_network = "actor"
+        g2.shared_networks = ["target_actor"]
+        g2.policy = True
+        assert g1 == g2
+        with pytest.raises(TypeError, match="unhashable type"):
+            hash(g1)
+        with pytest.raises(TypeError, match="unhashable type"):
+            hash(g2)
+
+    def test_network_group_eq_different_shared_str_vs_list(self):
+        """NetworkGroup with shared as str vs same name in list differ."""
+        g1 = object.__new__(NetworkGroup)
+        g1.eval_network = "actor"
+        g1.shared_networks = "target"  # str
+        g1.policy = True
+        g2 = object.__new__(NetworkGroup)
+        g2.eval_network = "actor"
+        g2.shared_networks = ["target"]  # list
+        g2.policy = True
+        assert g1 != g2
+        assert isinstance(hash(g1), int)
+        with pytest.raises(TypeError, match="unhashable type"):
+            hash(g2)
+
+    def test_network_group_infer_attribute_names_single(self):
+        """_infer_attribute_names returns correct name for single object match."""
+        group = object.__new__(NetworkGroup)
+        obj = object()
+        container = type("C", (), {})()
+        container.my_net = obj
+        names = group._infer_attribute_names(container, obj)
+        assert names == ["my_net"]
+
+    def test_network_group_infer_attribute_names_list(self):
+        """_infer_attribute_names returns names for list of objects."""
+        group = object.__new__(NetworkGroup)
+        obj1, obj2 = object(), object()
+        container = type("C", (), {})()
+        container.net_a = obj1
+        container.net_b = obj2
+        names = group._infer_attribute_names(container, [obj1, obj2])
+        assert set(names) == {"net_a", "net_b"}
+
+    def test_network_group_infer_attribute_names_no_match(self):
+        """_infer_attribute_names returns empty when no match."""
+        group = object.__new__(NetworkGroup)
+        obj = object()
+        container = type("C", (), {})()
+        container.other = object()  # different object
+        names = group._infer_attribute_names(container, obj)
+        assert names == []
+
+    def test_make_network_group_shared_str(self):
+        """make_network_group with shared_networks as single string."""
+        with patch.object(NetworkGroup, "__post_init__", lambda self: None):
+            group = make_network_group("actor", "target_actor", policy=True)
+        assert group.eval_network == "actor"
+        assert group.shared_networks == "target_actor"
+        assert group.policy is True
+
+    def test_make_network_group_shared_empty_list(self):
+        """make_network_group with shared_networks as empty list."""
+        with patch.object(NetworkGroup, "__post_init__", lambda self: None):
+            group = make_network_group("critic", [], policy=False)
+        assert group.eval_network == "critic"
+        assert group.shared_networks == []
+        assert group.policy is False
+
+    def test_make_network_group_returns_network_group_instance(self):
+        """make_network_group returns NetworkGroup instance."""
+        with patch.object(NetworkGroup, "__post_init__", lambda self: None):
+            group = make_network_group("net", None, policy=False)
+        assert isinstance(group, NetworkGroup)
+
 
 class TestMutationRegistry:
     """Test suite for MutationRegistry class."""
@@ -729,6 +901,107 @@ class TestMutationRegistry:
         assert "actor" in repr_str
         assert "target_actor" in repr_str
         assert "actor_opt" in repr_str
+
+    def test_mutation_registry_policy_empty_returns_none(self):
+        """policy() with no groups returns None."""
+        registry = MutationRegistry()
+        assert registry.policy() is None
+        assert registry.policy(return_group=True) is None
+
+    def test_mutation_registry_policy_first_wins_when_multiple(self):
+        """When multiple groups have policy=True, first registered wins."""
+        registry = MutationRegistry()
+        g1 = MockNetworkGroup("actor1", None, policy=True)
+        g2 = MockNetworkGroup("actor2", None, policy=True)
+        registry.register_group(g1)
+        registry.register_group(g2)
+        assert registry.policy() == "actor1"
+        assert registry.policy(return_group=True).eval_network == "actor1"
+
+    def test_mutation_registry_all_registered_empty(self):
+        """all_registered() with no groups or optimizers returns empty."""
+        registry = MutationRegistry()
+        result = registry.all_registered()
+        assert len(result) == 0
+
+    def test_mutation_registry_all_registered_shared_as_str(self):
+        """all_registered() includes shared network when it's a single str."""
+        registry = MutationRegistry()
+        group = MockNetworkGroup("actor", "target_actor", policy=True)
+        registry.register_group(group)
+        registered = registry.all_registered()
+        assert "actor" in registered
+        assert "target_actor" in registered
+
+    def test_mutation_registry_all_registered_shared_as_list(self):
+        """all_registered() includes all shared networks when list."""
+        registry = MutationRegistry()
+        group = MockNetworkGroup("critic", ["t1", "t2"], policy=False)
+        registry.register_group(group)
+        registered = registry.all_registered()
+        assert "critic" in registered
+        assert "t1" in registered
+        assert "t2" in registered
+
+    def test_mutation_registry_networks_empty(self):
+        """networks() with no groups returns empty list."""
+        registry = MutationRegistry()
+        assert registry.networks() == []
+
+    def test_mutation_registry_networks_single_net_optimizer_config(self):
+        """networks() with optimizer config using str (single net)."""
+        registry = MutationRegistry()
+        group = MockNetworkGroup("actor", None, policy=True)
+        opt = OptimizerConfig(
+            name="actor_opt",
+            networks="actor",
+            lr="lr",
+            optimizer_cls=optim.Adam,
+            optimizer_kwargs={},
+        )
+        registry.register_group(group)
+        registry.register_optimizer(opt)
+        with pytest.raises(
+            ValueError,
+            match="Evaluation network must have an optimizer associated with it",
+        ):
+            registry.networks()
+
+    def test_mutation_registry_eq_with_none(self):
+        """Current __eq__ implementation raises on None."""
+        registry = MutationRegistry(hp_config=self.hp_config)
+        with pytest.raises(AttributeError):
+            _ = registry.__eq__(None)
+
+    def test_mutation_registry_eq_different_groups_order(self):
+        """Registries with same content but different group order differ."""
+        r1 = MutationRegistry()
+        r2 = MutationRegistry()
+        g1 = MockNetworkGroup("a", None, policy=True)
+        g2 = MockNetworkGroup("b", None, policy=False)
+        r1.register_group(g1)
+        r1.register_group(g2)
+        r2.register_group(g2)
+        r2.register_group(g1)
+        assert r1 != r2
+
+    def test_mutation_registry_eq_same_content_same_order(self):
+        """Registries with same groups and optimizers in same order are equal."""
+        r1 = MutationRegistry(hp_config=self.hp_config)
+        r2 = MutationRegistry(hp_config=self.hp_config)
+        g = MockNetworkGroup("actor", None, policy=True)
+        opt = OptimizerConfig(
+            name="opt",
+            networks="actor",
+            lr="lr",
+            optimizer_cls=optim.Adam,
+            optimizer_kwargs={},
+        )
+        r1.register_group(g)
+        r1.register_optimizer(opt)
+        r2.register_group(g)
+        r2.register_optimizer(opt)
+        assert r1 == r2
 
 
 class TestIntegration:

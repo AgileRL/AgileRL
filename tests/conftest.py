@@ -192,11 +192,6 @@ def simple_cnn():
     )
 
 
-########################################################
-################# MUTATIONS ############################
-########################################################
-
-
 @pytest.fixture(scope="session")
 def ac_hp_config():
     return HyperparameterConfig(

@@ -1,7 +1,6 @@
 import copy
 import glob
 import importlib
-import os
 import sys
 import types
 from collections import OrderedDict
@@ -15,23 +14,44 @@ from gymnasium import spaces
 from torch import nn
 from torch.optim.lr_scheduler import SequentialLR
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.modules import EvolvableModule
+from agilerl.modules.dummy import DummyEvolvable
 from agilerl.networks import EvolvableNetwork
 from agilerl.utils.algo_utils import (
+    check_supported_space,
+    clone_llm,
     CosineLRScheduleConfig,
+    DummyOptimizer,
+    VLLMConfig,
     _reconcile_shapes,
+    apply_env_defined_actions,
     apply_image_normalization,
     chkpt_attribute_to_device,
+    concatenate_experiences_into_batches,
     concatenate_spaces,
+    concatenate_tensors,
     create_warmup_cosine_scheduler,
+    experience_to_tensors,
+    extract_sequences_from_episode,
+    filter_init_dict,
     flatten_experiences,
+    get_hidden_states_shape_from_model,
+    get_input_size_from_space,
+    get_output_size_from_space,
+    format_shared_critic_encoder,
     get_experiences_samples,
+    get_num_actions,
+    get_obs_shape,
+    get_vect_dim,
     is_image_space,
+    is_peft_model,
     is_vectorized_experiences,
     isroutine,
     key_in_nested_dict,
     make_safe_deepcopies,
     maybe_add_batch_dim,
+    module_checkpoint_single,
     multi_dim_clamp,
     obs_channels_to_first,
     obs_to_tensor,
@@ -39,9 +59,11 @@ from agilerl.utils.algo_utils import (
     recursive_check_module_attrs,
     remove_compile_prefix,
     remove_nested_files,
+    reshape_from_space,
     share_encoder_parameters,
     stack_and_pad_experiences,
     stack_experiences,
+    vectorize_experiences_by_agent,
 )
 
 
@@ -872,27 +894,21 @@ def test_create_warmup_cosine_scheduler():
     assert isinstance(lr_scheduler, SequentialLR)
 
 
-def test_remove_nested_files():
-    """Test the remove_nested_files function"""
-    # Create test directory structure
-    os.makedirs("test_dir/nested_dir", exist_ok=True)
+def test_remove_nested_files(tmp_path):
+    """Test the remove_nested_files function."""
+    nested = tmp_path / "nested_dir"
+    nested.mkdir()
+    file1 = tmp_path / "file1.txt"
+    file2 = nested / "file2.txt"
+    file1.write_text("test1")
+    file2.write_text("test2")
 
-    # Create some test files
-    with open("test_dir/file1.txt", "w") as f:
-        f.write("test1")
-    with open("test_dir/nested_dir/file2.txt", "w") as f:
-        f.write("test2")
-
-    # Test removing the directory structure
-    files = glob.glob("test_dir/*")
+    files = glob.glob(str(tmp_path / "*"))
     remove_nested_files(files)
 
-    # Verify files and directories were removed
-    assert not os.path.exists("test_dir/file1.txt")
-    assert not os.path.exists("test_dir/nested_dir/file2.txt")
-    assert not os.path.exists("test_dir/nested_dir")
-
-    os.rmdir("test_dir/")
+    assert not file1.exists()
+    assert not file2.exists()
+    assert not nested.exists()
 
 
 def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
@@ -990,3 +1006,553 @@ class TestReconcileShapes:
         other = np.array([10, 20])  # (2,)
         _r, o = _reconcile_shapes(ref, other, discrete_actions=False)
         assert not o.flags.writeable
+
+
+def test_flatten_experiences_tuple():
+    t1, t2 = torch.ones(5, 10, 8), torch.zeros(5, 10, 4)
+    f1, f2 = flatten_experiences(t1, t2)
+    assert f1.shape == (50, 8)
+    assert f2.shape == (50, 4)
+
+
+def test_vectorize_experiences_by_agent_skips_none():
+    exp = {"a": np.ones((2, 3)), "b": None}
+    result = vectorize_experiences_by_agent(exp)
+    assert isinstance(result, torch.Tensor)
+
+
+@pytest.mark.parametrize(
+    "exp_type,space",
+    [
+        (
+            {"a": np.ones((2, 3)), "b": np.zeros((2, 2))},
+            spaces.Dict({"a": spaces.Box(0, 1, (3,)), "b": spaces.Box(0, 1, (2,))}),
+        ),
+        (
+            (np.ones((2, 3)), np.zeros((2, 2))),
+            spaces.Tuple((spaces.Box(0, 1, (3,)), spaces.Box(0, 1, (2,)))),
+        ),
+    ],
+)
+def test_experience_to_tensors_structured(exp_type, space):
+    result = experience_to_tensors(exp_type, space)
+    if isinstance(exp_type, dict):
+        assert set(result) == set(exp_type)
+    else:
+        assert len(result) == len(exp_type)
+
+
+def test_module_checkpoint_single():
+    mod = DummyEvolvableModule()
+    out = module_checkpoint_single(mod, "actor")
+    assert "actor_cls" in out and "actor_init_dict" in out and "actor_state_dict" in out
+
+
+def test_format_shared_critic_encoder_mlp_config():
+    config = {
+        "mlp_config": {
+            "hidden_size": [32, 64],
+            "min_mlp_nodes": 8,
+            "max_mlp_nodes": 512,
+        }
+    }
+    result = format_shared_critic_encoder(config)
+    assert result["latent_dim"] == 64
+    assert result["min_latent_dim"] == 8
+    assert result["max_latent_dim"] == 512
+
+
+def test_concatenate_spaces_unsupported_raises():
+    with pytest.raises(TypeError, match="Unsupported space"):
+        concatenate_spaces([spaces.Text(5), spaces.Text(5)])
+
+
+def test_stack_experiences_torch_tensors():
+    exps = [torch.ones(5), torch.zeros(5), torch.ones(5) * 0.5]
+    stacked = stack_experiences(exps)
+    assert stacked[0].shape == (3, 5)
+
+
+def test_get_hidden_states_shape_from_model():
+    """get_hidden_states_shape_from_model extracts hidden state architecture."""
+
+    class ModWithHiddenArch(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.name = "rnn"
+            self.hidden_state_architecture = {"h": 64, "c": 32}
+
+    model = nn.Sequential(ModWithHiddenArch())
+    result = get_hidden_states_shape_from_model(model)
+    assert result == {"rnn_h": 64, "rnn_c": 32}
+
+
+def test_concatenate_spaces_image_different_shapes_raises():
+    """AssertionError when concatenating image spaces with different shapes."""
+    img1 = spaces.Box(low=0, high=255, shape=(84, 84, 3))
+    img2 = spaces.Box(low=0, high=255, shape=(64, 64, 3))
+    with pytest.raises(AssertionError, match="different CxHxW"):
+        concatenate_spaces([img1, img2])
+
+
+def test_preprocess_discrete_observation_n_gt_1():
+    """Discrete n>1 triggers squeeze and maybe_add_batch_dim."""
+    space = spaces.Discrete(5)
+    obs = np.array([3])
+    result = preprocess_observation(space, obs, "cpu")
+    assert isinstance(result, torch.Tensor)
+    assert result.shape == (1, 5)
+    assert result[0, 3] == 1.0
+
+
+def test_key_in_nested_dict_recursion():
+    """key_in_nested_dict recurses into nested dict."""
+    nested = {"a": {"b": {"target": 1}}}
+    assert key_in_nested_dict(nested, "target")
+    assert not key_in_nested_dict(nested, "missing")
+
+
+def test_remove_compile_prefix_preserves_non_orig_mod_keys():
+    """remove_compile_prefix else branch for keys without _orig_mod."""
+    state_dict = OrderedDict(
+        [
+            ("_orig_mod.a", torch.ones(1)),
+            ("b", torch.zeros(1)),
+        ]
+    )
+    result = remove_compile_prefix(state_dict)
+    assert "a" in result
+    assert "b" in result
+    assert torch.equal(result["b"], torch.zeros(1))
+
+
+def test_stack_and_pad_experiences_list_tuple_branch():
+    """stack_and_pad with list/tuple of lists."""
+    exp = [[1, 2], [3, 4], [5, 6]]
+    (result,) = stack_and_pad_experiences(exp, padding_values=[0])
+    assert isinstance(result, torch.Tensor)
+    assert result.shape[0] == 3
+
+
+def test_extract_sequences_from_episode_unrecognized_type():
+    """NotImplementedError for unrecognized sequence type."""
+    episode = torch.ones(10, 4)
+    with pytest.raises(NotImplementedError, match="unrecognized sequence type"):
+        extract_sequences_from_episode(episode, 4, sequence_type="invalid")
+
+
+def test_multi_dim_clamp_tensor_device_mismatch():
+    """min/max tensors on different device than input."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    input_tensor = torch.tensor([0.5], device="cuda")
+    min_t = torch.tensor([0.0], device="cpu")
+    max_t = torch.tensor([1.0], device="cpu")
+    result = multi_dim_clamp(min_t, max_t, input_tensor)
+    assert result.device.type == "cuda"
+    assert torch.allclose(result, torch.tensor([0.5], device="cuda"))
+
+
+def test_get_obs_shape_unsupported():
+    """NotImplementedError for unsupported space."""
+    with pytest.raises(NotImplementedError, match="not supported"):
+        get_obs_shape(spaces.Text(5))
+
+
+def test_get_num_actions_unsupported():
+    """NotImplementedError for unsupported action space."""
+    with pytest.raises(NotImplementedError, match="not supported"):
+        get_num_actions(spaces.Text(5))
+
+
+def test_filter_init_dict():
+    """filter init dict to valid params."""
+
+    class Foo:
+        def __init__(self, a: int, b: int):
+            pass
+
+    result = filter_init_dict({"a": 1, "b": 2, "c": 3}, Foo)
+    assert result == {"a": 1, "b": 2}
+
+
+@pytest.mark.parametrize("use_np", [True, False])
+def test_maybe_add_batch_dim_wrong_dims_raises(use_np):
+    """ValueError for wrong observation dimensions."""
+    space = spaces.Box(low=0, high=1, shape=(10,))
+    if use_np:
+        arr = np.ones((2, 3, 4, 5))  # 4D for 1D space -> wrong
+        with pytest.raises(ValueError, match="Expected observation"):
+            maybe_add_batch_dim(arr, space)
+    else:
+        arr = torch.ones(2, 3, 4, 5)
+        with pytest.raises(ValueError, match="Expected observation"):
+            maybe_add_batch_dim(arr, space)
+
+
+def test_preprocess_observation_unsupported_space():
+    """TypeError for unsupported observation space type."""
+    with pytest.raises(TypeError, match="doesn't support"):
+        preprocess_observation(spaces.Text(5), "hello", "cpu")
+
+
+def test_preprocess_dict_observation_assert_non_dict():
+    """assert dict/TensorDict for preprocess_dict."""
+    dict_space = spaces.Dict({"a": spaces.Box(0, 1, (2,))})
+    with pytest.raises(AssertionError, match="Expected dict"):
+        preprocess_observation(dict_space, "not_a_dict", "cpu")
+
+
+def test_preprocess_tuple_observation_tensordict():
+    """TensorDict converted to tuple, then preprocessed."""
+    from tensordict import TensorDict
+
+    tuple_space = spaces.Tuple((spaces.Box(0, 1, (2,)), spaces.Box(0, 1, (3,))))
+    td = TensorDict({"0": torch.ones(2), "1": torch.ones(3)}, batch_size=[])
+    result = preprocess_observation(tuple_space, td, "cpu")
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    assert result[0].shape == (1, 2)
+    assert result[1].shape == (1, 3)
+
+
+@pytest.mark.parametrize(
+    "space_factory,obs_factory",
+    [
+        (lambda: spaces.Box(0, 1, (2,)), lambda: np.array([[np.nan, 0.5]])),
+        (lambda: spaces.MultiBinary(2), lambda: np.array([[np.nan, 0]])),
+    ],
+)
+def test_preprocess_observation_placeholder_value(space_factory, obs_factory):
+    """placeholder_value replaces NaNs (Box, MultiBinary)."""
+    space = space_factory()
+    obs = obs_factory()
+    result = preprocess_observation(space, obs, "cpu", placeholder_value=-1.0)
+    assert isinstance(result, torch.Tensor)
+    assert not torch.any(torch.isnan(result))
+
+
+def test_preprocess_observation_placeholder_value_box_only():
+    """Box with placeholder_value."""
+    space = spaces.Box(0, 1, (2,))
+    obs = np.array([[np.nan, 0.5]])
+    result = preprocess_observation(space, obs, "cpu", placeholder_value=-1.0)
+    assert isinstance(result, torch.Tensor)
+    assert not torch.any(torch.isnan(result))
+
+
+def test_preprocess_observation_placeholder_value_multibinary():
+    """MultiBinary with placeholder_value."""
+    space = spaces.MultiBinary(2)
+    obs = np.array([[np.nan, 0]])
+    result = preprocess_observation(space, obs, "cpu", placeholder_value=-1.0)
+    assert isinstance(result, torch.Tensor)
+    assert not torch.any(torch.isnan(result))
+
+
+def test_apply_image_normalization_inf_in_high():
+    """np.inf in observation_space.high bypasses normalization."""
+    obs_space = spaces.Box(low=np.array([0, 0]), high=np.array([np.inf, 1]))
+    obs = np.array([100.0, 0.5])
+    with pytest.warns(UserWarning, match="np.inf detected"):
+        result = apply_image_normalization(obs, obs_space)
+    np.testing.assert_array_equal(result, obs)
+
+
+def test_get_experiences_samples_with_none():
+    """None experience yields None in sampled output."""
+    idx = np.array([0, 1])
+    tensor_exp = torch.ones(4, 3)
+    sampled_tensor, sampled_none = get_experiences_samples(idx, tensor_exp, None)
+    assert sampled_tensor.shape == (2, 3)
+    assert sampled_none is None
+
+
+def test_stack_experiences_unsupported_type():
+    """TypeError for unsupported experience element type."""
+    with pytest.raises(TypeError, match="Unsupported experience type"):
+        stack_experiences([[b"bytes"], [b"bytes"]])  # bytes not in supported types
+
+
+def test_stack_experiences_tuple_branch():
+    """stack tuple experiences with to_torch."""
+    tuple_exps = [
+        (np.ones(3), np.zeros(2)),
+        (np.ones(3) * 0.5, np.ones(2) * 0.5),
+    ]
+    stacked = stack_experiences(tuple_exps, to_torch=True)
+    assert isinstance(stacked[0], tuple)
+    assert len(stacked[0]) == 2
+    assert stacked[0][0].shape == (2, 3)
+    assert stacked[0][1].shape == (2, 2)
+    assert isinstance(stacked[0][0], torch.Tensor)
+
+
+def test_stack_and_pad_experiences_with_device():
+    """device arg moves stacked tensor to device."""
+    tensors = [torch.tensor([[1, 2]]), torch.tensor([[3, 4, 5]])]
+    (result,) = stack_and_pad_experiences(
+        tensors, padding_values=[0], device="cpu", padding_side="right"
+    )
+    assert result.device.type == "cpu"
+    assert result.shape == (2, 3)
+
+
+def test_stack_and_pad_tensor_list_with_padding():
+    """_stack_and_pad_tensor_list when padding_sizes != 0."""
+    from agilerl.utils.algo_utils import _stack_and_pad_tensor_list
+
+    tensors = [
+        torch.tensor([[1, 2, 3]]),
+        torch.tensor([[4, 5]]),
+        torch.tensor([[6, 7, 8, 9]]),
+    ]
+    result = _stack_and_pad_tensor_list(tensors, padding=0, padding_side="right")
+    assert result.shape == (3, 4)
+    assert torch.equal(result[0], torch.tensor([1.0, 2.0, 3.0, 0.0]))
+    assert torch.equal(result[1], torch.tensor([4.0, 5.0, 0.0, 0.0]))
+
+
+def test_flatten_experiences_numpy():
+    """flatten numpy array experiences."""
+    np_exp = np.ones((5, 10, 8))
+    (flat,) = flatten_experiences(np_exp)
+    assert isinstance(flat, np.ndarray)
+    assert flat.shape == (50, 8)
+
+
+def test_is_vectorized_experiences_tuple():
+    """is_vectorized with tuple of tensors."""
+    tup = (torch.ones(4, 5), torch.zeros(4, 3))
+    assert is_vectorized_experiences(tup)
+    tup_single = (torch.ones(5),)
+    assert not is_vectorized_experiences(tup_single)
+
+
+def test_vllm_config_sleep_mode_warns():
+    """VLLMConfig sleep_mode triggers warning."""
+    with pytest.warns(UserWarning, match="sleep mode"):
+        VLLMConfig(sleep_mode=True)
+
+
+def test_remove_nested_files_removes_file(tmp_path):
+    """remove_nested_files uses os.remove for files."""
+    f = tmp_path / "single_file.txt"
+    f.write_text("x")
+    remove_nested_files([str(f)])
+    assert not f.exists()
+
+
+def test_vectorize_experiences_by_agent_different_shapes():
+    """torch.cat when tensor shapes differ (concat along dim 0)."""
+    exp = {"a": np.ones((2, 3)), "b": np.ones((3, 3))}
+    result = vectorize_experiences_by_agent(exp)
+    assert isinstance(result, torch.Tensor)
+    assert result.shape == (5, 3)
+
+
+def test_experience_to_tensors_tuple():
+    """experience_to_tensors tuple branch."""
+    space = spaces.Tuple((spaces.Box(0, 1, (2,)), spaces.Box(0, 1, (3,))))
+    exp = (np.ones((1, 2)), np.zeros((1, 3)))
+    result = experience_to_tensors(exp, space)
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    assert result[0].shape == (1, 2)
+    assert result[1].shape == (1, 3)
+
+
+def test_concatenate_tensors_plain():
+    """concatenate_tensors torch.cat for plain tensors."""
+    tensors = [torch.ones(2, 4), torch.zeros(3, 4)]
+    result = concatenate_tensors(tensors)
+    assert result.shape == (5, 4)
+
+
+def test_reshape_from_space_squeeze():
+    """reshape_from_space squeeze dims."""
+    space = spaces.Box(0, 1, (4,))
+    tensor = torch.ones(1, 4)
+    result = reshape_from_space(tensor, space)
+    assert result.dim() <= 2
+    assert result.numel() == 4
+
+
+def test_concatenate_experiences_into_batches():
+    """concatenate_experiences_into_batches."""
+    space = spaces.Box(0, 1, (3,))
+    experiences = {
+        "agent_0": np.ones((2, 3)),
+        "agent_1": np.zeros((2, 3)),
+    }
+    result = concatenate_experiences_into_batches(experiences, space)
+    assert isinstance(result, torch.Tensor)
+    assert result.shape[0] == 4
+    assert result.shape[-1] == 3
+
+
+def test_dummy_optimizer_step_raises():
+    """DummyOptimizer.step raises RuntimeError."""
+    opt = DummyOptimizer([], 0.01)
+    with pytest.raises(RuntimeError, match="DummyOptimizer"):
+        opt.step()
+
+
+def test_dummy_optimizer_load_state_dict_raises():
+    """DummyOptimizer.load_state_dict raises RuntimeError."""
+    opt = DummyOptimizer([], 0.01)
+    with pytest.raises(RuntimeError, match="DummyOptimizer"):
+        opt.load_state_dict({})
+
+
+def test_apply_env_defined_actions():
+    """apply_env_defined_actions in-place update."""
+    agent_ids = ["a", "b"]
+    action_dict = {"a": np.array([1, 2]), "b": np.array([3, 4])}
+    env_defined = {"a": np.array([10, 20]), "b": np.array([30, 40])}
+    masks = {"a": np.array([True, False]), "b": np.array([False, True])}
+    result = apply_env_defined_actions(
+        agent_ids, action_dict, env_defined, masks, discrete_actions=False
+    )
+    assert result is action_dict
+    assert action_dict["a"][0] == 10 and action_dict["a"][1] == 2
+    assert action_dict["b"][0] == 3 and action_dict["b"][1] == 40
+
+
+@pytest.mark.skipif(
+    not HAS_LLM_DEPENDENCIES, reason="LLM deps required for is_peft_model"
+)
+def test_is_peft_model():
+    """is_peft_model returns True for PeftModel, False otherwise."""
+    from peft import PeftModel
+
+    # Non-PEFT module returns False
+    assert is_peft_model(nn.Linear(10, 10)) is False
+    # We need an actual PeftModel to test True - use a mock that subclasses PeftModel
+    # or skip if we can't easily construct one. For coverage we need the isinstance
+    # to return True. Create minimal mock that passes isinstance(., PeftModel)
+    mock_peft = MagicMock(spec=PeftModel)
+    assert is_peft_model(mock_peft) is True
+
+
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps required for clone_llm")
+def test_clone_llm_dummy_evolvable():
+    """clone_llm with DummyEvolvable unwraps and clones."""
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    # DummyEvolvable wraps a PeftModel (which has .model); use LoRA to create one
+    config = AutoConfig.from_pretrained("gpt2", vocab_size=100, n_positions=64)
+    base = AutoModelForCausalLM.from_config(config)
+    lora_config = LoraConfig(r=2, lora_alpha=4, target_modules=["c_proj"])
+    peft_model = get_peft_model(base, lora_config)
+    dummy = DummyEvolvable(device="cpu", module=peft_model)
+
+    with patch("agilerl.utils.algo_utils.gather_if_zero3") as mock_gather:
+        mock_gather.return_value.__enter__ = MagicMock(return_value=None)
+        mock_gather.return_value.__exit__ = MagicMock(return_value=False)
+        result = clone_llm(dummy, 0)
+    assert result is not None
+    mock_gather.assert_called_once()
+
+
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps required for clone_llm")
+def test_clone_llm_invalid_type_raises():
+    """clone_llm raises ValueError for invalid type."""
+    with pytest.raises(ValueError, match="Invalid 'original_model' type"):
+        clone_llm("invalid_model", 0)
+
+
+def test_obs_channels_to_first_expand_dims():
+    """obs_channels_to_first with expand_dims=True."""
+    obs = np.ones((84, 84, 3))
+    result = obs_channels_to_first(obs, expand_dims=True)
+    assert result.shape == (1, 3, 84, 84)
+
+
+def test_obs_channels_to_first_unsupported_type():
+    """obs_channels_to_first raises for non-ndarray/dict."""
+    with pytest.raises(TypeError, match="Expected np.ndarray or dict"):
+        obs_channels_to_first("invalid")
+
+
+def test_obs_to_tensor_tensordict():
+    """obs_to_tensor with TensorDict."""
+    from tensordict import TensorDict
+
+    td = TensorDict({"obs": torch.ones(5)}, batch_size=[])
+    result = obs_to_tensor(td, "cpu")
+    assert isinstance(result, TensorDict)
+    assert result["obs"].shape == (5,)
+
+
+def test_obs_to_tensor_list():
+    """obs_to_tensor with list (Number branch)."""
+    result = obs_to_tensor([1.0, 2.0, 3.0], "cpu")
+    assert isinstance(result, torch.Tensor)
+    assert result.shape == (3,)
+    assert torch.allclose(result, torch.tensor([1.0, 2.0, 3.0]))
+
+
+def test_get_vect_dim():
+    """get_vect_dim for Dict, Tuple, MultiBinary, and Box."""
+    # Dict
+    obs_dict = {"a": np.ones((4, 3))}
+    space_dict = spaces.Dict({"a": spaces.Box(0, 1, (3,))})
+    assert get_vect_dim(obs_dict, space_dict) == 4
+    # Tuple
+    obs_tup = (np.ones((4, 2)), np.ones((4, 3)))
+    space_tup = spaces.Tuple((spaces.Box(0, 1, (2,)), spaces.Box(0, 1, (3,))))
+    assert get_vect_dim(obs_tup, space_tup) == 4
+    # MultiBinary
+    assert get_vect_dim(np.ones((4, 2)), spaces.MultiBinary(2)) == 4
+    assert get_vect_dim(np.ones(2), spaces.MultiBinary(2)) == 1
+    # Box
+    assert get_vect_dim(np.ones((4, 3)), spaces.Box(0, 1, (3,))) == 4
+    assert get_vect_dim(np.ones(3), spaces.Box(0, 1, (3,))) == 1
+
+
+def test_check_supported_space():
+    """check_supported_space accepts Box, Dict, Tuple, Discrete, MultiDiscrete."""
+    check_supported_space(spaces.Box(0, 1, (2,)))
+    check_supported_space(spaces.Dict({"a": spaces.Box(0, 1, (2,))}))
+    check_supported_space(spaces.Tuple((spaces.Box(0, 1, (2,)),)))
+    check_supported_space(spaces.Discrete(5))
+    check_supported_space(spaces.MultiDiscrete([2, 3]))
+    with pytest.raises(AssertionError, match="must be an instance"):
+        check_supported_space("not a space")
+    with pytest.raises(AssertionError, match="Graph"):
+        check_supported_space(spaces.Graph(spaces.Box(0, 1, (5,)), spaces.Discrete(3)))
+    with pytest.raises(AssertionError, match="nested Tuple"):
+        check_supported_space(
+            spaces.Dict({"a": spaces.Tuple((spaces.Box(0, 1, (1,)),))})
+        )
+
+
+def test_get_input_size_from_space():
+    """get_input_size_from_space for list, Dict, Discrete, Box, MultiBinary, MultiDiscrete, Tuple."""
+    assert get_input_size_from_space([spaces.Box(0, 1, (2,))]) == ((2,),)
+    assert get_input_size_from_space(spaces.Dict({"a": spaces.Box(0, 1, (3,))})) == {
+        "a": (3,)
+    }
+    assert get_input_size_from_space(spaces.Discrete(5)) == (5,)
+    assert get_input_size_from_space(spaces.Box(0, 1, (4, 4))) == (4, 4)
+    assert get_input_size_from_space(spaces.MultiBinary(3)) == (3,)
+    assert get_input_size_from_space(spaces.MultiDiscrete([2, 3])) == (5,)
+    assert get_input_size_from_space(spaces.Tuple((spaces.Box(0, 1, (2,)),))) == ((2,),)
+    with pytest.raises(AttributeError, match="Can't access"):
+        get_input_size_from_space(spaces.Text(5))
+
+
+def test_get_output_size_from_space():
+    """get_output_size_from_space for tuple, Dict, Discrete, Box, MultiBinary, MultiDiscrete."""
+    assert get_output_size_from_space((spaces.Discrete(2),)) == (2,)
+    assert get_output_size_from_space(spaces.Dict({"a": spaces.Discrete(3)})) == {
+        "a": 3
+    }
+    assert get_output_size_from_space(spaces.Discrete(4)) == 4
+    assert get_output_size_from_space(spaces.Box(0, 1, (2,))) == 2
+    assert get_output_size_from_space(spaces.MultiBinary(4)) == 4
+    assert get_output_size_from_space(spaces.MultiDiscrete([2, 3])) == 5
+    with pytest.raises(AttributeError, match="Can't access"):
+        get_output_size_from_space(spaces.Text(5))

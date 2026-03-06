@@ -434,6 +434,44 @@ def test_remove_nodes(
     )
 
 
+def test_multi_input_activation_setter(device, default_cnn_config, default_mlp_config):
+    evolvable = EvolvableMultiInput(
+        observation_space=generate_dict_or_tuple_space(2, 3),
+        num_outputs=10,
+        cnn_config=default_cnn_config,
+        mlp_config=default_mlp_config,
+        device=device,
+    )
+    evolvable.activation = "GELU"
+    assert evolvable._activation == "GELU"
+
+
+def test_multi_input_init_weights_gaussian(
+    device, default_cnn_config, default_mlp_config
+):
+    evolvable = EvolvableMultiInput(
+        observation_space=generate_dict_or_tuple_space(2, 3),
+        num_outputs=10,
+        cnn_config=default_cnn_config,
+        mlp_config=default_mlp_config,
+        device=device,
+    )
+    evolvable.init_weights_gaussian(std_coeff=2, output_coeff=2)
+
+
+def test_multi_input_change_activation_output(
+    device, default_cnn_config, default_mlp_config
+):
+    evolvable = EvolvableMultiInput(
+        observation_space=generate_dict_or_tuple_space(2, 3),
+        num_outputs=10,
+        cnn_config=default_cnn_config,
+        mlp_config=default_mlp_config,
+        device=device,
+    )
+    evolvable.change_activation("Tanh", output=True)
+
+
 ######### Test add_cnn_layer #########
 @pytest.mark.parametrize(
     "observation_space, num_outputs",

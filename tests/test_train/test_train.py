@@ -2129,8 +2129,9 @@ def test_train_off_policy_save_elite(
     tournament,
     mutations,
     memory,
+    tmp_path,
 ):
-    elite_path = "checkpoint.pt"
+    elite_path = str(tmp_path / "checkpoint.pt")
     pop, _ = train_off_policy(
         env,
         "env_name",
@@ -2153,7 +2154,6 @@ def test_train_off_policy_save_elite(
         elite_path=elite_path,
     )
     assert os.path.isfile(elite_path)
-    os.remove(elite_path)
 
 
 @pytest.mark.parametrize(
@@ -2195,7 +2195,6 @@ def test_train_save_checkpoint(
     )
     for i in range(6):  # iterate through the population indices
         assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
 
 
 @pytest.mark.parametrize("state_size, action_size, vect, algo", [((6,), 2, True, PPO)])
@@ -2561,9 +2560,10 @@ def test_train_on_policy_save_elite(
     tournament,
     mutations,
     accelerator_flag,
+    tmp_path,
 ):
     accelerator = Accelerator() if accelerator_flag else None
-    elite_path = "elite"
+    elite_path = str(tmp_path / "elite")
     pop, _ = train_on_policy(
         env,
         "env_name",
@@ -2583,7 +2583,6 @@ def test_train_on_policy_save_elite(
         accelerator=accelerator,
     )
     assert os.path.isfile(f"{elite_path}.pt")
-    os.remove(f"{elite_path}.pt")
 
 
 @pytest.mark.parametrize(
@@ -2620,7 +2619,6 @@ def test_train_on_policy_save_checkpoint(
     )
     for i in range(6):  # iterate through the population indices
         assert os.path.isfile(f"{checkpoint_path}_{i}_{512}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{512}.pt")
 
 
 @pytest.mark.parametrize("on_policy", [False])
@@ -3533,9 +3531,10 @@ def test_train_multi_save_elite(
     multi_memory,
     on_policy,
     accelerator_flag,
+    tmp_path,
 ):
     accelerator = Accelerator() if accelerator_flag else None
-    elite_path = "elite"
+    elite_path = str(tmp_path / "elite")
     pop, _ = train_multi_agent_off_policy(
         multi_env,
         "env_name",
@@ -3556,7 +3555,6 @@ def test_train_multi_save_elite(
         accelerator=accelerator,
     )
     assert os.path.isfile(f"{elite_path}.pt")
-    os.remove(f"{elite_path}.pt")
 
 
 @pytest.mark.parametrize("on_policy", [True])
@@ -3572,9 +3570,10 @@ def test_train_multi_save_elite_on_policy(
     multi_memory,
     on_policy,
     accelerator_flag,
+    tmp_path,
 ):
     accelerator = Accelerator() if accelerator_flag else None
-    elite_path = "elite"
+    elite_path = str(tmp_path / "elite")
     pop, _ = train_multi_agent_on_policy(
         multi_env,
         "env_name",
@@ -3594,7 +3593,6 @@ def test_train_multi_save_elite_on_policy(
         accelerator=accelerator,
     )
     assert os.path.isfile(f"{elite_path}.pt")
-    os.remove(f"{elite_path}.pt")
 
 
 @pytest.mark.parametrize("on_policy", [False])
@@ -3634,7 +3632,6 @@ def test_train_multi_save_checkpoint(
     )
     for i in range(6):  # iterate through the population indices
         assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
 
 
 @pytest.mark.parametrize("on_policy", [True])
@@ -3673,7 +3670,6 @@ def test_train_multi_save_checkpoint_on_policy(
     )
     for i in range(6):  # iterate through the population indices
         assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
 
 
 @pytest.mark.parametrize(
@@ -4055,9 +4051,10 @@ def test_train_offline_save_elite(
     offline_init_hp,
     dummy_h5py_data,
     accelerator_flag,
+    tmp_path,
 ):
     accelerator = Accelerator() if accelerator_flag else None
-    elite_path = "elite"
+    elite_path = str(tmp_path / "elite")
     pop, _ = train_offline(
         env,
         "env_name",
@@ -4079,7 +4076,6 @@ def test_train_offline_save_elite(
         elite_path=elite_path,
     )
     assert os.path.isfile(f"{elite_path}.pt")
-    os.remove(f"{elite_path}.pt")
 
 
 @pytest.mark.parametrize(
@@ -4121,7 +4117,6 @@ def test_train_offline_save_checkpoint(
     )
     for i in range(6):  # iterate through the population indices
         assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
 
 
 @pytest.mark.parametrize(
@@ -4756,8 +4751,9 @@ def test_train_bandit_save_elite(
     tournament,
     mutations,
     bandit_memory,
+    tmp_path,
 ):
-    elite_path = "checkpoint.pt"
+    elite_path = str(tmp_path / "checkpoint.pt")
     pop, _ = train_bandits(
         bandit_env,
         "bandit_env_name",
@@ -4779,7 +4775,6 @@ def test_train_bandit_save_elite(
         elite_path=elite_path,
     )
     assert os.path.isfile(elite_path)
-    os.remove(elite_path)
 
 
 @pytest.mark.parametrize(
@@ -4821,7 +4816,6 @@ def test_bandit_train_save_checkpoint(
     for i in range(6):  # iterate through the population indices
         for s in range(5):
             assert os.path.isfile(f"{checkpoint_path}_{i}_{10 * (s + 1)}.pt")
-            os.remove(f"{checkpoint_path}_{i}_{10 * (s + 1)}.pt")
 
 
 @pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])

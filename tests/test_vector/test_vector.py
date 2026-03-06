@@ -787,6 +787,28 @@ def test_poll_pipe_envs(env_fns):
     "env_fns",
     [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
 )
+def test_poll_pipe_envs_ready(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    original_pipes = env.parent_pipes
+
+    class ReadyPipe:
+        closed = False
+
+        def poll(self, _timeout):
+            return True
+
+    env.parent_pipes = [ReadyPipe() for _ in original_pipes]
+    try:
+        assert env._poll_pipe_envs(timeout=1.0)
+    finally:
+        env.parent_pipes = original_pipes
+        env.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+)
 def test_assert_is_running(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
     env.closed = True
@@ -849,6 +871,20 @@ def test_get_placeholder_value(transition_name):
         )
         assert isinstance(output, np.ndarray)
     env.close()
+
+
+def test_get_placeholder_value_observation_without_spaces():
+    output = get_placeholder_value(
+        agent="speaker_0",
+        transition_name="observation",
+        obs_spaces=None,
+    )
+    assert output is None
+
+
+def test_get_placeholder_value_unknown_transition():
+    output = get_placeholder_value(agent="speaker_0", transition_name="unknown")
+    assert output is None
 
 
 def test_add_info_dictionaries():
@@ -1256,7 +1292,7 @@ dummy_observation_spaces = {"agent_0": gym.spaces.Box(0, 1, (4,))}
 
 
 # Test for pz_vec_env.py
-def test_vec_env_reset():
+def test_vec_env_reset_not_implemented():
     vec_env = PettingZooVecEnv(
         3,
         dummy_observation_spaces,
@@ -1267,7 +1303,7 @@ def test_vec_env_reset():
         vec_env.reset()
 
 
-def test_vec_env_step():
+def test_vec_env_step_not_implemented():
     vec_env = PettingZooVecEnv(
         3,
         dummy_observation_spaces,
@@ -1282,6 +1318,29 @@ def test_vec_env_step():
         NotImplementedError, match="Subclasses must implement step_wait"
     ):
         vec_env.step_wait()
+
+
+def test_vec_env_step_skips_nan_actions():
+    class DummyStepVecEnv(PettingZooVecEnv):
+        def __init__(self):
+            super().__init__(
+                3,
+                dummy_observation_spaces,
+                dummy_action_spaces,
+                ["agent_0"],
+            )
+            self.passed_actions = None
+
+        def step_async(self, actions):
+            self.passed_actions = actions
+
+        def step_wait(self):
+            return {}, {}, {}, {}, {}
+
+    vec_env = DummyStepVecEnv()
+    actions = {"agent_0": np.array([np.nan, 1.0, np.nan], dtype=np.float32)}
+    vec_env.step(actions)
+    assert vec_env.passed_actions == [{}, {"agent_0": 1}, {}]
 
 
 def test_vec_env_render():
