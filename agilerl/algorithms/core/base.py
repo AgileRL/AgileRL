@@ -2093,7 +2093,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
         if self.accelerator is not None:
             if self.accelerator.is_main_process:
-                seed = np.random.randint(0, 2**32 - 1)
+                seed = np.random.randint(0, 2**31 - 1)
             if self.accelerator.num_processes > 1:
                 seed = broadcast_object_list([seed], from_process=0)[0]
         self.rng = np.random.RandomState(seed)

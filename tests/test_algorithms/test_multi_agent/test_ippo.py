@@ -1039,16 +1039,17 @@ def test_ippo_get_action_agent_masking_batched(
 )
 @pytest.mark.parametrize("action_batch_size", [None, 16])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_ippo_get_action(
     observation_spaces,
     action_spaces,
     device,
     compile_mode,
-    accelerator,
+    accelerator_flag,
     action_batch_size,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -1569,7 +1570,7 @@ def test_initialize_ippo_with_cnn_networks(
         ("ma_vector_space", "mlp"),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_ippo_with_evo_networks(
     observation_spaces,
@@ -1577,9 +1578,10 @@ def test_initialize_ippo_with_evo_networks(
     net,
     device,
     compile_mode,
-    accelerator,
+    accelerator_flag,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_spaces = request.getfixturevalue(observation_spaces)
     net_config = get_default_encoder_config(observation_spaces[0])
 

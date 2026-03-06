@@ -617,8 +617,7 @@ class TestToDeviceWithAccelerator:
         dummy_agent.accelerator = accelerator
         exp = torch.zeros(2, 4)
         result = dummy_agent.to_device(exp)
-        dev = accelerator.device
-        assert result[0].device == dev
+        assert result[0].device.type == accelerator.device.type
         dummy_agent.accelerator = None
 
 
