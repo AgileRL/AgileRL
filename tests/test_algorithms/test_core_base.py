@@ -2190,10 +2190,9 @@ class TestLLMSaveLoadCheckpoint:
     def test_load_checkpoint_without_accelerator(self, tmp_path):
         agent = _make_llm_agent(accelerator=None)
         agent.accelerator = None
-        path = tmp_path / "attributes.pt"
         with patch.object(EvolvableAlgorithm, "load_checkpoint") as mock_load:
             agent.load_checkpoint(str(tmp_path))
-            mock_load.assert_called_once_with(str(path))
+            mock_load.assert_called_once_with(str(tmp_path) + "/attributes.pt")
 
 
 class TestLLMClone:
