@@ -2047,8 +2047,9 @@ class TestLLMConfigureVllm:
         agent = _make_llm_agent(accelerator=acc)
         agent.vllm_config = MagicMock()
         agent.vllm_config.tensor_parallel_size = 2
-        with pytest.raises(ValueError, match="Tensor parallel size"):
-            agent._configure_vllm()
+        with patch("agilerl.algorithms.core.base.LLM", MagicMock()):
+            with pytest.raises(ValueError, match="Tensor parallel size"):
+                agent._configure_vllm()
 
 
 class TestLLMSetReferencePolicy:
