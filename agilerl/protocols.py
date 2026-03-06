@@ -60,7 +60,21 @@ class MutationMethodProtocol(Protocol):
     _mutation_type: MutationType
     _recreate_kwargs: dict[str, Any]
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        pass
+
+
+@runtime_checkable
+class OptimizerLikeClass(Protocol):
+    """Protocol for optimizer-like constructor callables/classes."""
+
+    def __call__(
+        self,
+        params: Any,
+        lr: float,
+        **kwargs: Any,
+    ) -> Optimizer | Any:
+        pass
 
 
 @runtime_checkable
@@ -72,7 +86,7 @@ class OptimizerWrapperProtocol(Protocol):
     """
 
     optimizer: Optimizer | dict[str, Optimizer]
-    optimizer_cls: type[Optimizer] | dict[str, type[Optimizer]]
+    optimizer_cls: type[Optimizer] | dict[str, type[Optimizer]] | OptimizerLikeClass
     lr: Callable[[], float]
     optimizer_kwargs: dict[str, Any]
 
@@ -96,26 +110,49 @@ class EvolvableModuleProtocol(Protocol):
     rng: Generator | None
 
     @property
-    def activation(self) -> str | None: ...
-    def change_activation(self, activation: str, output: bool) -> None: ...
-    def forward(self, x: Any) -> Any: ...
-    def parameters(self) -> Generator: ...
-    def to(self, device: DeviceType) -> None: ...
-    def state_dict(self) -> dict[str, Any]: ...
-    def disable_mutations(self) -> None: ...
-    def get_mutation_methods(self) -> dict[str, MutationMethodProtocol]: ...
-    def get_mutation_probs(self, new_layer_prob: float) -> list[float]: ...
+    def activation(self) -> str | None:
+        pass
+
+    def change_activation(self, activation: str, output: bool) -> None:
+        pass
+
+    def forward(self, x: Any) -> Any:
+        pass
+
+    def parameters(self) -> Generator:
+        pass
+
+    def to(self, device: DeviceType) -> None:
+        pass
+
+    def state_dict(self) -> dict[str, Any]:
+        pass
+
+    def disable_mutations(self) -> None:
+        pass
+
+    def get_mutation_methods(self) -> dict[str, MutationMethodProtocol]:
+        pass
+
+    def get_mutation_probs(self, new_layer_prob: float) -> list[float]:
+        pass
+
     def sample_mutation_method(
         self,
         new_layer_prob: float,
         rng: Generator | None,
-    ) -> str: ...
-    def clone(self) -> "EvolvableModuleProtocol": ...
+    ) -> str:
+        pass
+
+    def clone(self) -> "EvolvableModuleProtocol":
+        pass
+
     def load_state_dict(
         self,
         state_dict: dict[str, Any],
         strict: bool = True,
-    ) -> None: ...
+    ) -> None:
+        pass
 
 
 @runtime_checkable
@@ -132,25 +169,42 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
         latent: torch.Tensor,
         *args: Any,
         **kwargs: Any,
-    ) -> torch.Tensor: ...
-    def extract_features(self, x: TorchObsType) -> torch.Tensor: ...
-    def build_network_head(self, *args: Any, **kwargs: Any) -> None: ...
-    def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]: ...
+    ) -> torch.Tensor:
+        pass
+
+    def extract_features(self, x: TorchObsType) -> torch.Tensor:
+        pass
+
+    def build_network_head(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
+        pass
+
     def remove_latent_node(
         self,
         numb_new_nodes: int | None = None,
-    ) -> dict[str, Any]: ...
-    def recreate_encoder(self) -> None: ...
+    ) -> dict[str, Any]:
+        pass
+
+    def recreate_encoder(self) -> None:
+        pass
+
     def initialize_hidden_state(
         self,
         batch_size: int = 1,
-    ) -> dict[str, torch.Tensor]: ...
+    ) -> dict[str, torch.Tensor]:
+        pass
+
     def init_weights_gaussian(
         self,
         std_coeff: float = 4.0,
         output_coeff: float = 2.0,
-    ) -> None: ...
-    def _build_encoder(self, *args: Any, **kwargs: Any) -> None: ...
+    ) -> None:
+        pass
+
+    def _build_encoder(self, *args: Any, **kwargs: Any) -> None:
+        pass
 
 
 T = TypeVar("T", bound=EvolvableModuleProtocol | EvolvableNetworkProtocol)
@@ -166,20 +220,38 @@ class ModuleDictProtocol(Protocol, Generic[T]):
 
     device: DeviceType
 
-    def __getitem__(self, key: str) -> T: ...
-    def keys(self) -> Iterable[str]: ...
-    def values(self) -> Iterable[T]: ...
-    def items(self) -> Iterable[tuple[str, T]]: ...
-    def modules(self) -> dict[str, T]: ...
-    def get_mutation_methods(self) -> dict[str, MutationMethodProtocol]: ...
-    def filter_mutation_methods(self, method: str) -> None: ...
+    def __getitem__(self, key: str) -> T:
+        pass
+
+    def keys(self) -> Iterable[str]:
+        pass
+
+    def values(self) -> Iterable[T]:
+        pass
+
+    def items(self) -> Iterable[tuple[str, T]]:
+        pass
+
+    def modules(self) -> dict[str, T]:
+        pass
+
+    def get_mutation_methods(self) -> dict[str, MutationMethodProtocol]:
+        pass
+
+    def filter_mutation_methods(self, method: str) -> None:
+        pass
 
     @property
-    def mutation_methods(self) -> list[str]: ...
+    def mutation_methods(self) -> list[str]:
+        pass
+
     @property
-    def layer_mutation_methods(self) -> list[str]: ...
+    def layer_mutation_methods(self) -> list[str]:
+        pass
+
     @property
-    def node_mutation_methods(self) -> list[str]: ...
+    def node_mutation_methods(self) -> list[str]:
+        pass
 
 
 EvolvableNetworkType = EvolvableModuleProtocol | ModuleDictProtocol
@@ -231,7 +303,8 @@ class OptimizerConfig(Protocol):
     optimizer_kwargs: dict[str, Any] | list[dict[str, Any]]
     multiagent: bool
 
-    def get_optimizer_cls(self) -> type[Optimizer] | list[type[Optimizer]]: ...
+    def get_optimizer_cls(self) -> type[Optimizer] | list[type[Optimizer]]:
+        pass
 
 
 @runtime_checkable
@@ -246,7 +319,8 @@ class MutationRegistryProtocol(Protocol):
     optimizers: list[OptimizerConfig]
     hooks: list[Callable[[], None]]
 
-    def networks(self) -> list[NetworkConfigProtocol]: ...
+    def networks(self) -> list[NetworkConfigProtocol]:
+        pass
 
 
 SelfEvolvableAlgorithm = TypeVar(
@@ -274,41 +348,66 @@ class EvolvableAlgorithmProtocol(Protocol):
     steps: list[int]
     torch_compiler: str | None
 
-    def unwrap_models(self) -> None: ...
-    def wrap_models(self) -> None: ...
+    def unwrap_models(self) -> None:
+        pass
+
+    def wrap_models(self) -> None:
+        pass
+
     def load(
         self: type[SelfEvolvableAlgorithm],
         path: str,
-    ) -> SelfEvolvableAlgorithm: ...
+    ) -> SelfEvolvableAlgorithm:
+        pass
+
     def load_checkpoint(
         self,
         path: str,
         device: str,
         accelerator: Accelerator | None,
-    ) -> None: ...
-    def save_checkpoint(self, path: str) -> None: ...
+    ) -> None:
+        pass
+
+    def save_checkpoint(self, path: str) -> None:
+        pass
+
     def learn(
         self,
         experiences: tuple[Iterable[ObservationType], ...],
         **kwargs,
-    ) -> None: ...
-    def get_action(self, obs: ObservationType, **kwargs) -> Any: ...
-    def test(self, *args: Any, **kwargs: Any) -> np.ndarray: ...
+    ) -> None:
+        pass
+
+    def get_action(self, obs: ObservationType, **kwargs) -> Any:
+        pass
+
+    def test(self, *args: Any, **kwargs: Any) -> np.ndarray:
+        pass
+
     def evolvable_attributes(
         self,
         networks_only: bool = False,
-    ) -> EvolvableAttributeDict: ...
+    ) -> EvolvableAttributeDict:
+        pass
+
     def inspect_attributes(
         self,
         input_args_only: bool = False,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        pass
+
     def clone(
         self,
         index: int | None,
         wrap: bool,
-    ) -> "EvolvableAlgorithmProtocol": ...
-    def recompile(self) -> None: ...
-    def mutation_hook(self) -> None: ...
+    ) -> "EvolvableAlgorithmProtocol":
+        pass
+
+    def recompile(self) -> None:
+        pass
+
+    def mutation_hook(self) -> None:
+        pass
 
 
 # Define a TypeVar for EvolvableAlgorithm that can be used for generic typing
@@ -325,12 +424,15 @@ class AgentWrapperProtocol(Protocol, Generic[T_EvolvableAlgorithm]):
 
     agent: T_EvolvableAlgorithm
 
-    def get_action(self, obs: ObservationType, **kwargs) -> Any: ...
+    def get_action(self, obs: ObservationType, **kwargs) -> Any:
+        pass
+
     def learn(
         self,
         experiences: tuple[Iterable[ObservationType], ...],
         **kwargs,
-    ) -> None: ...
+    ) -> None:
+        pass
 
 
 @runtime_checkable
@@ -361,26 +463,34 @@ class PretrainedConfigProtocol(Protocol):
     num_attention_heads: int
     num_hidden_layers: int
 
-    def to_dict(self) -> dict[str, Any]: ...
-    def to_json_string(self) -> str: ...
-    def save_pretrained(self, save_directory: str, **kwargs: Any) -> None: ...
+    def to_dict(self) -> dict[str, Any]:
+        pass
+
+    def to_json_string(self) -> str:
+        pass
+
+    def save_pretrained(self, save_directory: str, **kwargs: Any) -> None:
+        pass
 
     @classmethod
     def from_pretrained(
         cls,
         pretrained_model_name_or_path: str,
         **kwargs: Any,
-    ) -> "PretrainedConfigProtocol": ...
+    ) -> "PretrainedConfigProtocol":
+        pass
 
     @classmethod
     def from_dict(
         cls,
         config_dict: dict[str, Any],
         **kwargs: Any,
-    ) -> "PretrainedConfigProtocol": ...
+    ) -> "PretrainedConfigProtocol":
+        pass
 
     @classmethod
-    def from_json_file(cls, json_file: str) -> "PretrainedConfigProtocol": ...
+    def from_json_file(cls, json_file: str) -> "PretrainedConfigProtocol":
+        pass
 
 
 @runtime_checkable
@@ -413,24 +523,39 @@ class PreTrainedModelProtocol(Protocol):
     device: DeviceType
     config: Any
 
-    def eval(self) -> "PreTrainedModelProtocol": ...
-    def train(self, mode: bool = True) -> "PreTrainedModelProtocol": ...
+    def eval(self) -> "PreTrainedModelProtocol":
+        pass
+
+    def train(self, mode: bool = True) -> "PreTrainedModelProtocol":
+        pass
+
     def generate(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         generation_config: GenerationConfigProtocol | None = None,
         **kwargs: Any,
-    ) -> torch.Tensor: ...
-    def forward(self, *args: Any, **kwargs: Any) -> Any: ...
-    def parameters(self) -> Generator: ...
-    def state_dict(self) -> dict[str, Any]: ...
+    ) -> torch.Tensor:
+        pass
+
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
+        pass
+
+    def parameters(self) -> Generator:
+        pass
+
+    def state_dict(self) -> dict[str, Any]:
+        pass
+
     def load_state_dict(
         self,
         state_dict: dict[str, Any],
         strict: bool = True,
-    ) -> None: ...
-    def to(self, device: DeviceType) -> "PreTrainedModelProtocol": ...
+    ) -> None:
+        pass
+
+    def to(self, device: DeviceType) -> "PreTrainedModelProtocol":
+        pass
 
 
 @runtime_checkable
@@ -443,24 +568,39 @@ class PeftModelProtocol(Protocol):
 
     peft_config: dict[str, Any]
 
-    def eval(self) -> "PeftModelProtocol": ...
-    def train(self, mode: bool = True) -> "PeftModelProtocol": ...
+    def eval(self) -> "PeftModelProtocol":
+        pass
+
+    def train(self, mode: bool = True) -> "PeftModelProtocol":
+        pass
+
     def generate(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         generation_config: GenerationConfigProtocol | None = None,
         **kwargs: Any,
-    ) -> torch.Tensor: ...
-    def forward(self, *args: Any, **kwargs: Any) -> Any: ...
-    def parameters(self) -> Generator: ...
-    def state_dict(self) -> dict[str, Any]: ...
+    ) -> torch.Tensor:
+        pass
+
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
+        pass
+
+    def parameters(self) -> Generator:
+        pass
+
+    def state_dict(self) -> dict[str, Any]:
+        pass
+
     def load_state_dict(
         self,
         state_dict: dict[str, Any],
         strict: bool = True,
-    ) -> None: ...
-    def to(self, device: DeviceType) -> "PeftModelProtocol": ...
+    ) -> None:
+        pass
+
+    def to(self, device: DeviceType) -> "PeftModelProtocol":
+        pass
 
     @classmethod
     def from_pretrained(
@@ -468,4 +608,5 @@ class PeftModelProtocol(Protocol):
         base_model: PreTrainedModelProtocol,
         adapter_path: str,
         **kwargs: Any,
-    ) -> "PeftModelProtocol": ...
+    ) -> "PeftModelProtocol":
+        pass

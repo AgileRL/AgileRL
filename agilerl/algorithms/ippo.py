@@ -35,8 +35,10 @@ from agilerl.utils.algo_utils import (
     key_in_nested_dict,
     make_safe_deepcopies,
     obs_channels_to_first,
-    preprocess_observation,
     vectorize_experiences_by_agent,
+)
+from agilerl.utils.algo_utils import (
+    preprocess_observation as preprocess_observation_fn,
 )
 
 
@@ -432,7 +434,9 @@ class IPPO(MultiAgentRLAlgorithm):
     def preprocess_observation(
         self,
         observation: ObservationType,
-        group_ids: list[str],
+        group_ids: list[str] | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
 
@@ -444,13 +448,15 @@ class IPPO(MultiAgentRLAlgorithm):
         :return: Preprocessed observations
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
+        if group_ids is None:
+            group_ids = list(observation.keys())
         preprocessed = {group_id: [] for group_id in group_ids}
         for agent_id, agent_obs in observation.items():
             group_id = (
                 self.get_group_id(agent_id) if self.has_grouped_agents() else agent_id
             )
             preprocessed[group_id].append(
-                preprocess_observation(
+                preprocess_observation_fn(
                     self.observation_space.get(group_id),
                     observation=agent_obs,
                     device=self.device,
@@ -535,6 +541,8 @@ class IPPO(MultiAgentRLAlgorithm):
         self,
         obs: dict[str, ObservationType],
         infos: InfosDict | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[ArrayDict, ArrayDict, ArrayDict, ArrayDict]:
         """Return the next action to take in the environment.
 
@@ -727,7 +735,7 @@ class IPPO(MultiAgentRLAlgorithm):
             values = values.reshape(num_steps, -1)
             next_done = next_done.reshape(1, -1)
 
-            next_state = preprocess_observation(
+            next_state = preprocess_observation_fn(
                 obs_space,
                 next_state,
                 self.device,
@@ -774,6 +782,7 @@ class IPPO(MultiAgentRLAlgorithm):
         num_samples = experiences[4].size(0)
         batch_idxs = np.arange(num_samples)
         mean_loss = 0
+        approx_kl = torch.tensor(float("inf"))
         for _ in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
@@ -794,7 +803,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 batch_values = batch_values.squeeze()
 
                 if len(minibatch_idxs) > 1:
-                    batch_states = preprocess_observation(
+                    batch_states = preprocess_observation_fn(
                         obs_space,
                         batch_states,
                         self.device,
@@ -804,11 +813,6 @@ class IPPO(MultiAgentRLAlgorithm):
                     value = critic(batch_states).squeeze(-1)
 
                     log_prob = actor.action_log_prob(batch_actions)
-
-                    if isinstance(action_space, spaces.Box) and action_space.shape == (
-                        1,
-                    ):
-                        batch_actions = batch_actions.unsqueeze(1)
 
                     logratio = log_prob - batch_log_probs
                     ratio = logratio.exp()
@@ -992,4 +996,4 @@ class IPPO(MultiAgentRLAlgorithm):
         mean_fit = np.mean(rewards, axis=0)
         mean_fit = mean_fit[0] if sum_scores else mean_fit
         self.fitness.append(mean_fit)
-        return mean_fit
+        return float(mean_fit) if sum_scores else mean_fit

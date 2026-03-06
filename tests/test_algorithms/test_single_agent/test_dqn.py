@@ -273,6 +273,34 @@ def test_returns_expected_action_mask(vector_space, discrete_space):
     dqn.clean_up()
 
 
+def test_get_action_dict_obs_without_mask(dict_space, discrete_space):
+    dqn = DQN(dict_space, discrete_space)
+    state = get_sample_from_space(dict_space, batch_size=2)
+    action = dqn.get_action(state, epsilon=0.0, action_mask=None)
+    assert len(action) == 2
+    dqn.clean_up()
+
+
+def test_learn_handles_actions_ndim_1(vector_space, discrete_space):
+    batch_size = 64
+    dqn = DQN(vector_space, discrete_space, batch_size=batch_size)
+    states = torch.randn(batch_size, vector_space.shape[0])
+    actions = torch.randint(0, discrete_space.n, (batch_size,))
+    rewards = torch.rand(batch_size, 1)
+    next_states = torch.randn(batch_size, vector_space.shape[0])
+    dones = torch.zeros(batch_size, 1)
+    experiences = Transition(
+        obs=states,
+        action=actions,
+        reward=rewards,
+        next_obs=next_states,
+        done=dones,
+    ).to_tensordict()
+    loss = dqn.learn(experiences)
+    assert isinstance(loss, float)
+    dqn.clean_up()
+
+
 def test_returns_expected_action_mask_vectorized(vector_space, discrete_space):
     accelerator = Accelerator()
     dqn = DQN(vector_space, discrete_space, accelerator=accelerator)

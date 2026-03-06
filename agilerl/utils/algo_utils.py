@@ -687,7 +687,7 @@ def concatenate_spaces(space_list: list[SupportedObsSpaces]) -> spaces.Space:
         nvec = np.concatenate([space.nvec for space in space_list], axis=0)
         return spaces.MultiDiscrete(nvec)
 
-    msg = f"Unsupported space types: { {type(space) for space in spaces} }"
+    msg = f"Unsupported space types: { {type(space) for space in space_list} }"
     raise TypeError(
         msg,
     )
@@ -773,7 +773,7 @@ def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> 
         )
         return (
             observation.shape[0]
-            if len(observation.shape) > observation_space.shape
+            if len(observation.shape) > len(observation_space.shape)
             else 1
         )
     observation = (

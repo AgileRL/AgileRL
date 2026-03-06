@@ -358,6 +358,62 @@ class TestRolloutBufferDataAddition:
             torch.tensor(next_obs, dtype=torch.float32),
         )
 
+    def test_add_episode_start_explicit_none(self):
+        """Test add() when episode_start=None hits the else branch (zeros)."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+        )
+        obs = np.array([[1.0, 2.0], [3.0, 4.0]])
+        action = np.array([0, 1])
+        reward = np.array([1.0, -1.0])
+        done = np.array([False, True])
+        value = np.array([0.5, -0.5])
+        log_prob = np.array([0.1, 0.2])
+        buffer.add(
+            obs,
+            action,
+            reward,
+            done,
+            value,
+            log_prob,
+            episode_start=None,
+        )
+        assert buffer.pos == 1
+
+    def test_add_episode_start_provided(self):
+        """Test add() when episode_start is provided."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+        )
+        obs = np.array([[1.0, 2.0], [3.0, 4.0]])
+        action = np.array([0, 1])
+        reward = np.array([1.0, -1.0])
+        done = np.array([False, True])
+        value = np.array([0.5, -0.5])
+        log_prob = np.array([0.1, 0.2])
+        buffer.add(
+            obs,
+            action,
+            reward,
+            done,
+            value,
+            log_prob,
+            episode_start=np.array([True, False]),
+        )
+        assert buffer.pos == 1
+
     def test_add_recurrent_data(self):
         """Test adding data with hidden states."""
         obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
@@ -592,6 +648,90 @@ class TestRolloutBufferReturnsAndAdvantages:
 
 class TestRolloutBufferDataRetrieval:
     """Test retrieving data from the buffer."""
+
+    def test_get_empty_buffer(self):
+        """Test get() returns empty dict when buffer is empty."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+        )
+        data = buffer.get()
+        assert data == {}
+
+    def test_get_tensor_batch_empty_buffer(self):
+        """Test get_tensor_batch() returns empty dict when buffer is empty."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+        )
+        batch = buffer.get_tensor_batch()
+        assert batch == {}
+
+    def test_get_batch_size_larger_than_total(self):
+        """Test get() with batch_size > total_samples triggers warning and returns all data."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+        )
+        obs = np.array([[1.0, 2.0], [3.0, 4.0]])
+        action = np.array([0, 1])
+        reward = np.array([1.0, -1.0])
+        done = np.array([False, True])
+        value = np.array([0.5, -0.5])
+        log_prob = np.array([0.1, 0.2])
+        buffer.add(obs, action, reward, done, value, log_prob)
+        buffer.compute_returns_and_advantages(
+            np.array([0.8, 0.0]),
+            np.array([False, True]),
+        )
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            data = buffer.get(batch_size=100)
+            assert len(w) >= 1
+            assert "larger than buffer size" in str(w[0].message)
+        assert "observations" in data
+        assert len(data["observations"]) == 2  # All samples returned
+
+    def test_get_tensor_batch_batch_size_larger_than_total(self):
+        """Test get_tensor_batch() with batch_size > total_samples returns all data."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+        )
+        obs = np.array([[1.0, 2.0], [3.0, 4.0]])
+        action = np.array([0, 1])
+        reward = np.array([1.0, -1.0])
+        done = np.array([False, True])
+        value = np.array([0.5, -0.5])
+        log_prob = np.array([0.1, 0.2])
+        buffer.add(obs, action, reward, done, value, log_prob)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            batch = buffer.get_tensor_batch(batch_size=100)
+            assert len(w) >= 1
+            assert "larger than" in str(w[0].message)
+        assert "observations" in batch
+        assert batch["observations"].shape[0] == 2
 
     def test_get_numpy_data(self):
         """Test getting data as numpy arrays."""
@@ -1069,6 +1209,12 @@ class TestRolloutBufferSequences:
         )  # (batch_size, max_seq_len, feature_dim)
         assert padded_td["act"].shape == (2, 2)  # (batch_size, max_seq_len)
 
+        # Test TensorDict sequences with target_length (hits recursive target_length path)
+        padded_td_target = RolloutBuffer._pad_sequences(td_sequences, target_length=4)
+        assert isinstance(padded_td_target, TensorDict)
+        assert padded_td_target["obs"].shape == (2, 4, 2)
+        assert padded_td_target["act"].shape == (2, 4)
+
     def test_different_bptt_sequence_types(self):
         """Test different BPTT sequence types."""
         from agilerl.typing import BPTTSequenceType
@@ -1453,6 +1599,37 @@ class TestRolloutBufferUtilities:
         assert isinstance(np_dict["hidden_states"], dict)
         assert isinstance(np_dict["hidden_states"]["h_actor"], np.ndarray)
 
+    def test_convert_td_to_np_dict_observations_dict_branch(self):
+        """Test _convert_td_to_np_dict with observations/next_observations as plain dict."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=1,
+            device="cpu",
+        )
+        # Create TensorDict with observations as dict (plain dict of tensors)
+        # TensorDict may store nested dict as-is in some structures
+        td = TensorDict(
+            {
+                "observations": {"vec": torch.randn(2, 2)},
+                "next_observations": {"vec": torch.randn(2, 2)},
+                "actions": torch.randn(2, 1),
+            },
+            batch_size=[2],
+        )
+        # If TensorDict converts nested dict to TensorDict, this branch may not run.
+        # Try update to force dict - some tensordict versions keep dict for nested.
+        np_dict = buffer._convert_td_to_np_dict(td)
+        assert isinstance(np_dict, dict)
+        assert "observations" in np_dict
+        assert "actions" in np_dict
+        if isinstance(np_dict["observations"], dict):
+            assert "vec" in np_dict["observations"]
+            assert isinstance(np_dict["observations"]["vec"], np.ndarray)
+
     def test_sequence_preparation_with_multiple_episodes_per_env(self):
         """Test sequence preparation with multiple episodes per environment."""
         obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
@@ -1727,6 +1904,129 @@ class TestRolloutBufferUtilities:
         assert new_buffer.pos == buffer.pos
         assert new_buffer.full == buffer.full
         assert new_buffer.size() == buffer.size()
+
+    def test_setstate_buffer_invalid_missing_buffer(self):
+        """Test __setstate__ when buffer is missing triggers re-init (unpickle path)."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+        )
+        state = buffer.__getstate__()
+        del state["buffer"]
+        new_buffer = object.__new__(RolloutBuffer)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            new_buffer.__setstate__(state)
+            assert any(
+                "TensorDict" in str(m.message) or "unpickling" in str(m.message).lower()
+                for m in w
+            )
+        assert new_buffer.buffer is not None
+        assert isinstance(new_buffer.buffer, TensorDict)
+
+    def test_setstate_buffer_invalid_not_tensordict(self):
+        """Test __setstate__ when buffer is not TensorDict triggers re-init."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+        )
+        state = buffer.__getstate__()
+        state["buffer"] = "invalid"  # Not a TensorDict
+        new_buffer = object.__new__(RolloutBuffer)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            new_buffer.__setstate__(state)
+            assert any(
+                "TensorDict" in str(m.message) or "unpickling" in str(m.message).lower()
+                for m in w
+            )
+        assert isinstance(new_buffer.buffer, TensorDict)
+
+    def test_setstate_missing_observation_space(self):
+        """Test __setstate__ when observation_space missing returns early (unpickle path)."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+        )
+        state = buffer.__getstate__()
+        state["buffer"] = "invalid"
+        del state["observation_space"]  # Simulate corrupted/incomplete pickled state
+        # Simulate unpickling: object created without __init__, then __setstate__
+        new_buffer = object.__new__(RolloutBuffer)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            new_buffer.__setstate__(state)
+            assert any(
+                "Observation" in str(m.message) or "action" in str(m.message).lower()
+                for m in w
+            )
+        # Early return - no _initialize_buffers called
+        assert new_buffer.buffer == "invalid"
+
+    def test_setstate_batch_size_mismatch(self):
+        """Test __setstate__ when buffer batch_size mismatches triggers re-init."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+        )
+        buffer.add(
+            np.array([[1.0, 2.0], [3.0, 4.0]]),
+            np.array([0, 1]),
+            np.array([1.0, -1.0]),
+            np.array([False, True]),
+            np.array([0.5, -0.5]),
+            np.array([0.1, 0.2]),
+        )
+        state = buffer.__getstate__()
+        # Corrupt buffer to have wrong batch_size (e.g. 3 envs instead of 2)
+        wrong_buffer = TensorDict(
+            {
+                "observations": torch.zeros(5, 3, 2),
+                "next_observations": torch.zeros(5, 3, 2),
+                "actions": torch.zeros(5, 3, 1),
+                "rewards": torch.zeros(5, 3),
+                "dones": torch.zeros(5, 3, dtype=torch.bool),
+                "values": torch.zeros(5, 3),
+                "log_probs": torch.zeros(5, 3),
+                "advantages": torch.zeros(5, 3),
+                "returns": torch.zeros(5, 3),
+            },
+            batch_size=[5, 3],
+        )
+        state["buffer"] = wrong_buffer
+        state["num_envs"] = 2  # Mismatch: buffer has 3, expected 2
+        new_buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=2,
+            device="cpu",
+        )
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            new_buffer.__setstate__(state)
+            assert any("batch_size" in str(m.message) for m in w)
+        assert new_buffer.buffer.batch_size == torch.Size([5, 2])
 
     def test_different_action_spaces(self):
         """Test with different action spaces."""

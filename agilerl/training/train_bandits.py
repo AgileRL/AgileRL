@@ -238,7 +238,8 @@ def train_bandits(
             pop_episode_scores.append(score)
             pop_loss[agent_idx].append(np.mean(losses))
             agent.steps[-1] += episode_steps
-            fps = episode_steps / (time.time() - start_time)
+            elapsed = max(time.time() - start_time, 1e-12)
+            fps = episode_steps / elapsed
             pop_fps.append(fps)
             total_steps += episode_steps
             pbar.update(episode_steps // len(pop))
@@ -312,7 +313,7 @@ def train_bandits(
                 evo_count += 1
 
         if verbose:
-            regret = [f"{float(regret):.2f}" for regret in regrets]
+            regret = [f"{np.asarray(value).item():.2f}" for value in regrets]
             avg_regret = f"{np.mean(np.array(regrets)):.2f}"
             fitness = [f"{fitness:.2f}" for fitness in fitnesses]
             avg_fitness = [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]

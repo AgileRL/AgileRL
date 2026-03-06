@@ -51,10 +51,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         activation=MUTATION_PARAMS["ACT_MUT"],
         rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
-        min_lr=MUTATION_PARAMS["MIN_LR"],
-        max_lr=MUTATION_PARAMS["MAX_LR"],
-        min_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-        max_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         accelerator=accelerator,
     )

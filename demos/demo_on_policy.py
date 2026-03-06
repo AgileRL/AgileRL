@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import torch
 
@@ -105,7 +107,7 @@ if __name__ == "__main__":
                     )
                 )
 
-                loss = agent.learn()  # Learn from rollout buffer
+                agent.learn()  # Learn from rollout buffer
 
                 # Update step counter and scores
                 total_steps += agent.learn_step
@@ -140,9 +142,10 @@ if __name__ == "__main__":
             f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n",
         )
 
-        # Tournament selection and population mutation
-        # elite, pop = tournament.select(pop)
-        # pop = mutations.mutation(pop)
+        # Tournament selection and population mutation (enable via AGILERL_DEMO_EVOLUTION=1)
+        if os.environ.get("AGILERL_DEMO_EVOLUTION", "0") == "1":
+            _, pop = tournament.select(pop)
+            pop = mutations.mutation(pop)
 
         # Update step counter
         for agent in pop:

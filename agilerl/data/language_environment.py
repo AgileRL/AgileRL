@@ -38,7 +38,6 @@ class Language_Environment(ABC):
 
 class Policy(ABC):
     def __init__(self) -> None:
-        super().__init__()
         self.cache = Cache()
 
     @abstractmethod
@@ -48,12 +47,12 @@ class Policy(ABC):
     @abstractmethod
     def train(self) -> None:
         """Set policy to training mode; override in subclasses if needed."""
-        ...
+        pass
 
     @abstractmethod
     def eval(self) -> None:
         """Set policy to eval mode; override in subclasses if needed."""
-        ...
+        pass
 
 
 def interact_environment(

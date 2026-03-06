@@ -23,6 +23,7 @@ develop *agency* and can be described as **agents**.
      - --
 
 .. _rl_for_reasoning:
+.. _rlhf:
 
 Reinforcement Learning for Reasoning
 ------------------------------------
@@ -53,5 +54,5 @@ This example demonstrates how to use the GRPO algorithm to finetune a LLM on a r
 
 .. collapse:: Example
 
-  .. literalinclude:: ../../tutorials/LLM_Finetuning/grpo_reasoning.py
+  .. literalinclude:: ../../tutorials/llm_finetuning/grpo_reasoning.py
       :language: python

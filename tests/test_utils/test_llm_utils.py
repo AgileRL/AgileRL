@@ -1,3 +1,4 @@
+import importlib
 import sys
 from contextlib import contextmanager
 from typing import Any
@@ -275,7 +276,7 @@ def test_reasoning_gym_reset_dataloaders(
     )  # use test_dataloader_iter as it is not shuffled
     env._reset_dataloaders()
     first_data_point_reset = next(env.test_dataloader_iter)
-    for key1, _key2 in zip(
+    for key1, _ in zip(
         first_data_point.keys(),
         first_data_point_reset.keys(),
         strict=False,
@@ -336,7 +337,6 @@ def test_create_chat_collate_fn(reasoning_dataset, num_samples):
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
 
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
     data_batch_size = 8
 
     env = ReasoningGym(
@@ -397,10 +397,8 @@ def test_reset_dataloaders_when_train_dataloader_exhausted(
         conversation_template=DUMMY_CONVERSATION_TEMPLATE,
         data_batch_size_per_gpu=data_batch_size,
     )
-    total_sampled = 0
     for _ in range(3):
         env._get_next_batch()
-        total_sampled += data_batch_size
 
     assert env.num_epochs == 1
 
@@ -422,12 +420,10 @@ def test_not_reset_dataloaders_when_test_dataloader_exhausted(
         conversation_template=DUMMY_CONVERSATION_TEMPLATE,
         data_batch_size_per_gpu=data_batch_size,
     )
-    total_sampled = 0
     env.reset()
     for _ in range(10):
         with env.eval_mode():
             env._get_next_batch()
-            total_sampled += data_batch_size
 
     assert env.num_epochs == 0
 
@@ -545,7 +541,6 @@ def test_preference_gym_init(
     assert hasattr(env, "tokenizer")
     assert isinstance(env.train_dataloader, DataLoader)
     assert isinstance(env.test_dataloader, DataLoader)
-    print("KEYS", next(env.train_dataloader_iter).keys())
     assert list(next(env.train_dataloader_iter).keys()) == [
         "prompt",
         "prompt_lengths",
@@ -923,7 +918,7 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
         # Patch HAS_LLM_DEPENDENCIES before reimporting
         with patch("agilerl.HAS_LLM_DEPENDENCIES", False):
             # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
-            import agilerl.utils.llm_utils as llm_utils_reloaded
+            llm_utils_reloaded = importlib.import_module("agilerl.utils.llm_utils")
 
             # Verify the fallback type aliases are set to Any
             assert llm_utils_reloaded.AutoTokenizer is Any

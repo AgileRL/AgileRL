@@ -155,8 +155,6 @@ class MATD3(MultiAgentRLAlgorithm):
         assert lr_actor > 0, "Actor learning rate must be greater than zero."
         assert isinstance(lr_critic, float), "Critic learning rate must be a float."
         assert lr_critic > 0, "Critic learning rate must be greater than zero."
-        assert isinstance(learn_step, int), "Learn step rate must be an integer."
-        assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(gamma, float), "Gamma must be a float."
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
@@ -488,6 +486,8 @@ class MATD3(MultiAgentRLAlgorithm):
         self,
         obs: dict[str, ObservationType],
         infos: InfosDict | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[ArrayDict, ArrayDict]:
         """Return the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.

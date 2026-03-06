@@ -3,7 +3,7 @@
 Multi-Agent Twin-Delayed Deep Deterministic Policy Gradient (MATD3)
 ===================================================================
 
-`MATD3 <https://arxiv.org/abs/1910.01465>`_ (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the MADDPG algorithm
+`MATD3 <https://arxiv.org/abs/1910.01465>`__ (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the MADDPG algorithm
 to reduce overestimation bias in multi-agent domains through the use of a second set of critic networks and delayed updates of the policy
 networks. This enables superior performance when compared to MADDPG.
 
@@ -230,7 +230,7 @@ For dictionary / tuple observations containing any combination of image, discret
     )
 
 Evolutionary Hyperparameter Optimization
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 AgileRL allows for efficient hyperparameter optimization during training to provide state-of-the-art results in a fraction of the time.
 For more information on how this is done, please refer to the :ref:`Evolutionary Hyperparameter Optimization <evo_hyperparam_opt>` documentation.

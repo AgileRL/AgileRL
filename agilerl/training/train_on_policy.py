@@ -354,7 +354,8 @@ def train_on_policy(
                     pop_loss[agent_idx].append(loss)
 
             agent.steps[-1] += steps
-            fps = steps / (time.time() - start_time)
+            elapsed = max(time.time() - start_time, 1e-12)
+            fps = steps / elapsed
             pop_fps.append(fps)
             pbar.update(steps // len(pop))
             pop_episode_scores.append(completed_episode_scores)

@@ -15,14 +15,16 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.typing import PreferencePrompts, ReasoningPrompts
 
 if HAS_LLM_DEPENDENCIES:
-    import deepspeed
+    try:
+        import deepspeed
+    except ImportError:
+        deepspeed = None
     from datasets import Dataset
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.modeling_utils import PreTrainedModel
     from transformers.tokenization_utils_base import BatchEncoding
-
-    AutoTokenizer = AutoTokenizer
 else:
+    deepspeed = None
     AutoTokenizer = Any
     PreTrainedModel = Any
     BatchEncoding = Any
@@ -176,6 +178,7 @@ class HuggingFaceGym(gym.Env, ABC):
         """Context manager to switch to evaluation mode."""
         self.dataloader = self.test_dataloader_iter
         self.evaluation_mode = True
+        last_tokenized_prompts = None
         if hasattr(self, "last_tokenized_prompts"):
             last_tokenized_prompts = copy.deepcopy(self.last_tokenized_prompts)
         try:
@@ -183,7 +186,7 @@ class HuggingFaceGym(gym.Env, ABC):
         finally:
             self.dataloader = self.train_dataloader_iter
             self.evaluation_mode = False
-            if hasattr(self, "last_tokenized_prompts"):
+            if last_tokenized_prompts is not None:
                 self.last_tokenized_prompts = last_tokenized_prompts
 
     @abstractmethod
@@ -524,9 +527,14 @@ class PreferenceGym(HuggingFaceGym):
         self.reset_called = True
         return self._get_next_batch()
 
-    def step(self) -> PreferencePrompts:
+    def step(
+        self,
+        completions: torch.Tensor | None = None,
+    ) -> PreferencePrompts:
         """Take a step in the PreferenceGym environment, calculate rewards from completions generated from previous prompt and provide new batch
         of prompts.
+
+        :param completions: Completions from the model (unused in PreferenceGym; kept for signature compatibility with HuggingFaceGym).
         """
         self.reset_called = False
         return self._get_next_batch()
@@ -651,6 +659,12 @@ def gather_if_zero3(
     :type modifier_rank: int | None
     """
     if zero_stage == 3:
+        if deepspeed is None:
+            msg = (
+                "DeepSpeed is required for ZeRO stage 3 parameter gathering, but it "
+                "is not installed."
+            )
+            raise ImportError(msg)
         with deepspeed.zero.GatheredParameters(
             params=params,
             modifier_rank=modifier_rank,

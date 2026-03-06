@@ -118,8 +118,6 @@ class RainbowDQN(RLAlgorithm):
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
         assert lr > 0, "Learning rate must be greater than zero."
-        assert isinstance(learn_step, int), "Learn step rate must be an integer."
-        assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
@@ -243,6 +241,8 @@ class RainbowDQN(RLAlgorithm):
         obs: ObservationType,
         action_mask: np.ndarray | None = None,
         training: bool = True,
+        *args: Any,
+        **kwargs: Any,
     ) -> np.ndarray:
         """Return the next action to take in the environment.
 
@@ -390,15 +390,19 @@ class RainbowDQN(RLAlgorithm):
         rewards = experiences["reward"]
         next_obs = experiences["next_obs"]
         dones = experiences["done"]
+
+        # Initialize n-step variables if n_step is True
+        if n_step:
+            n_obs = n_experiences["obs"]
+            n_actions = n_experiences["action"]
+            n_rewards = n_experiences["reward"]
+            n_next_obs = n_experiences["next_obs"]
+            n_dones = n_experiences["done"]
+
+        elementwise_loss: torch.Tensor | None = None
         if per:
             weights = experiences["weights"]
             idxs = experiences["idxs"]
-            if n_step:
-                n_obs = n_experiences["obs"]
-                n_actions = n_experiences["action"]
-                n_rewards = n_experiences["reward"]
-                n_next_obs = n_experiences["next_obs"]
-                n_dones = n_experiences["done"]
 
             if self.combined_reward or not n_step:
                 elementwise_loss = self._dqn_loss(
@@ -424,16 +428,14 @@ class RainbowDQN(RLAlgorithm):
                 else:
                     elementwise_loss = n_step_elementwise_loss
 
+            if elementwise_loss is None:
+                msg = "Elementwise loss was not computed for prioritized replay."
+                raise RuntimeError(msg)
             loss = torch.mean(elementwise_loss * weights)
 
         else:
             if n_step:
                 idxs = experiences["idxs"]
-                n_obs = n_experiences["obs"]
-                n_actions = n_experiences["action"]
-                n_rewards = n_experiences["reward"]
-                n_next_obs = n_experiences["next_obs"]
-                n_dones = n_experiences["done"]
             else:
                 idxs = None
 
@@ -463,6 +465,9 @@ class RainbowDQN(RLAlgorithm):
                 else:
                     elementwise_loss = n_step_elementwise_loss
 
+            if elementwise_loss is None:
+                msg = "Elementwise loss was not computed."
+                raise RuntimeError(msg)
             loss = torch.mean(elementwise_loss)
 
         self.optimizer.zero_grad()

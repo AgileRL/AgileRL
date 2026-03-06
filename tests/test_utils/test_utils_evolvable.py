@@ -12,12 +12,205 @@ from agilerl.utils.algo_utils import (
     get_input_size_from_space,
     get_output_size_from_space,
 )
+from agilerl.modules.custom_components import NoisyLinear
 from agilerl.utils.evolvable_networks import (
     compile_model,
+    config_from_dict,
+    contains_moduledict,
     create_cnn,
     create_mlp,
+    create_resnet,
+    create_simba,
     get_activation,
+    get_batch_norm_layer,
+    get_conv_layer,
+    get_default_encoder_config,
+    get_module_dict,
+    get_normalization,
+    get_pooling,
+    init_weights_gaussian,
+    is_box_space_ndim,
+    is_image_space,
+    is_mlp_net_config,
+    is_vector_space,
+    layer_init,
+    tuple_to_dict_obs,
+    tuple_to_dict_space,
 )
+
+
+######### Test evolvable_networks helpers #########
+def test_is_mlp_net_config():
+    assert is_mlp_net_config({"hidden_size": [64]}) is True
+    assert is_mlp_net_config({"hidden_size": [64], "num_blocks": 2}) is False
+    assert is_mlp_net_config({"channel_size": [32]}) is False
+
+
+def test_is_image_space():
+    image_space = spaces.Box(0, 255, shape=(3, 32, 32), dtype="uint8")
+    assert is_image_space(image_space) is True
+    assert is_image_space(spaces.Discrete(5)) is False
+    assert is_image_space(spaces.Box(0, 1, shape=(4,), dtype="float32")) is False
+
+
+def test_is_box_space_ndim():
+    box_2d = spaces.Box(0, 1, shape=(4, 4), dtype="float32")
+    assert is_box_space_ndim(box_2d, 2) is True
+    assert is_box_space_ndim(box_2d, 3) is False
+    assert is_box_space_ndim(spaces.Discrete(5), 1) is False
+
+
+def test_is_vector_space():
+    assert is_vector_space(spaces.Box(0, 1, shape=(4,), dtype="float32")) is True
+    assert is_vector_space(spaces.Discrete(5)) is True
+    assert is_vector_space(spaces.MultiDiscrete([2, 3])) is True
+    assert is_vector_space(spaces.Box(0, 1, shape=(3, 32, 32), dtype="uint8")) is False
+
+
+def test_config_from_dict():
+    cfg = config_from_dict({"hidden_size": [64, 64], "output_activation": "ReLU"})
+    assert cfg is not None
+    cfg = config_from_dict(
+        {"hidden_size": 128, "num_blocks": 2, "output_activation": "ReLU"}
+    )
+    assert cfg is not None
+    cfg = config_from_dict(
+        {"channel_size": [32, 32], "kernel_size": [3, 3], "stride_size": [1, 1]}
+    )
+    assert cfg is not None
+    cfg = config_from_dict({"latent_dim": 16, "output_activation": "ReLU"})
+    assert cfg is not None
+    with pytest.raises(ValueError, match="Unable to determine net config class"):
+        config_from_dict({"unknown_key": 1})
+
+
+def test_tuple_to_dict_space():
+    tuple_space = spaces.Tuple(
+        (
+            spaces.Box(0, 1, shape=(2,), dtype="float32"),
+            spaces.Discrete(3),
+        ),
+    )
+    result = tuple_to_dict_space(tuple_space)
+    assert isinstance(result, spaces.Dict)
+    assert "0" in result.spaces and "1" in result.spaces
+
+
+def test_tuple_to_dict_obs():
+    obs = (np.array([1.0, 2.0]), 1)
+    result = tuple_to_dict_obs(obs)
+    assert list(result.keys()) == ["0", "1"]
+    np.testing.assert_array_equal(result["0"], np.array([1.0, 2.0]))
+    assert result["1"] == 1
+
+
+def test_get_default_encoder_config_branches():
+    dict_space = spaces.Dict({"a": spaces.Discrete(2)})
+    assert "output_activation" in get_default_encoder_config(dict_space)
+
+    tuple_space = spaces.Tuple((spaces.Discrete(2),))
+    assert "output_activation" in get_default_encoder_config(tuple_space)
+
+    image_space = spaces.Box(0, 255, shape=(3, 32, 32), dtype="uint8")
+    cfg = get_default_encoder_config(image_space)
+    assert "channel_size" in cfg
+
+    box_space = spaces.Box(0, 1, shape=(4,), dtype="float32")
+    cfg = get_default_encoder_config(box_space, simba=True)
+    assert "num_blocks" in cfg
+
+    cfg = get_default_encoder_config(box_space, recurrent=True)
+    assert "num_layers" in cfg
+
+    cfg = get_default_encoder_config(box_space)
+    assert "hidden_size" in cfg and "layer_norm" in cfg
+
+
+def test_contains_moduledict_and_get_module_dict():
+    linear = nn.Linear(4, 4)
+    assert contains_moduledict(linear) is False
+    assert get_module_dict(linear) is None
+
+    mod_dict = nn.ModuleDict({"a": nn.Linear(2, 2)})
+    assert contains_moduledict(mod_dict) is True
+    assert get_module_dict(mod_dict) is mod_dict
+
+
+def test_get_batch_norm_layer():
+    bn1 = get_batch_norm_layer("1d", 32)
+    assert isinstance(bn1, nn.BatchNorm1d)
+    bn2 = get_batch_norm_layer("2d", 64)
+    assert isinstance(bn2, nn.BatchNorm2d)
+    bn3 = get_batch_norm_layer("3d", 16)
+    assert isinstance(bn3, nn.BatchNorm3d)
+
+
+def test_get_conv_layer():
+    conv = get_conv_layer("Conv2d", 3, 16, 3)
+    assert isinstance(conv, nn.Conv2d)
+    conv3 = get_conv_layer("Conv3d", 1, 8, 3)
+    assert isinstance(conv3, nn.Conv3d)
+    conv1 = get_conv_layer("Conv1d", 3, 16, 3)
+    assert isinstance(conv1, nn.Conv1d)
+    with pytest.raises(ValueError, match="Invalid convolutional layer"):
+        get_conv_layer("Invalid", 3, 16, 3)
+
+
+def test_get_normalization():
+    norm = get_normalization("LayerNorm", 64)
+    assert isinstance(norm, nn.LayerNorm)
+    norm2 = get_normalization("BatchNorm2d", 32)
+    assert isinstance(norm2, nn.BatchNorm2d)
+
+
+def test_get_activation_softmax_and_new_gelu():
+    softmax = get_activation("Softmax")
+    assert isinstance(softmax, nn.Module)
+    x = torch.randn(2, 4)
+    _ = softmax(x)
+    new_gelu = get_activation("GELU", new_gelu=True)
+    assert isinstance(new_gelu, nn.Module)
+    identity = get_activation(None)
+    assert isinstance(identity, nn.Identity)
+
+
+def test_get_pooling():
+    pool = get_pooling("MaxPool2d", 2, 2, 0)
+    assert isinstance(pool, nn.MaxPool2d)
+    pool_avg = get_pooling("AvgPool2d", 2, 2, 0)
+    assert isinstance(pool_avg, nn.AvgPool2d)
+
+
+def test_layer_init_noisy_linear():
+    noisy = NoisyLinear(4, 4, 0.1)
+    result = layer_init(noisy)
+    assert result is noisy
+    assert hasattr(noisy, "weight_mu")
+
+
+def test_init_weights_gaussian():
+    m = nn.Linear(4, 4)
+    init_weights_gaussian(m, 0.0, 0.1)
+    assert m.weight is not None
+    m2 = nn.Linear(4, 4)
+    m2.bias = None
+    init_weights_gaussian(m2, 0.0, 0.1)
+
+
+@pytest.mark.skip(
+    reason="SimbaResidualBlock nn.Linear(..., device=) raises on darwin/torch 2.8",
+)
+def test_create_simba():
+    net = create_simba(4, 2, 64, 2)
+    assert isinstance(net, nn.Sequential)
+    x = torch.randn(2, 4)
+    _ = net(x)
+
+
+def test_create_resnet():
+    net_dict = create_resnet(3, 32, 3, 1, 2)
+    assert isinstance(net_dict, dict)
+    assert "resnet_conv_input" in net_dict
 
 
 ######### Test get_activation #########

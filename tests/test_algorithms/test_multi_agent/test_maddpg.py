@@ -852,7 +852,6 @@ def test_maddpg_get_action(
             for action in env_action:
                 assert action <= action_spaces[idx].n - 1
     maddpg.clean_up()
-    maddpg = None
 
 
 @pytest.mark.parametrize("training", [False, True])
@@ -931,7 +930,6 @@ def test_get_action_distributed(
         agent: np.random.randn(*observation_spaces[idx].shape)
         for idx, agent in enumerate(agent_ids)
     }
-    from agilerl.algorithms.maddpg import MADDPG
 
     maddpg = MADDPG(
         observation_spaces,

@@ -957,6 +957,15 @@ def test_initialize_td3_with_incorrect_actor_net(vector_space):
         assert td3
 
 
+def test_reset_action_noise(vector_space):
+    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+    td3 = TD3(vector_space, action_space)
+    indices = np.array([0])
+    td3.reset_action_noise(indices)
+    assert np.allclose(td3.current_noise[indices], td3.mean_noise[indices])
+    td3.clean_up()
+
+
 def test_share_encoder_parameters_incompatible_architectures_raises_key_error(
     vector_space,
 ):

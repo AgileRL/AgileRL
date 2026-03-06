@@ -1,4 +1,5 @@
 .. _Custom_networks_tutorials:
+.. _custom_network_architectures:
 
 Creating Custom Networks Tutorials
 =====================================

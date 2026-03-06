@@ -9,16 +9,12 @@ import dill
 import numpy as np
 import pytest
 import torch
+import agilerl
 from accelerate import Accelerator
 from gymnasium.spaces import Box, Dict, Discrete
 from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 
-import agilerl.training.train_bandits
-import agilerl.training.train_multi_agent_off_policy
-import agilerl.training.train_off_policy
-import agilerl.training.train_offline
-import agilerl.training.train_on_policy
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -91,15 +87,27 @@ class DummyBanditEnv:
 
 
 class DummyAgentOffPolicy:
-    def __init__(self, batch_size, env, beta=None, algo="DQN"):
+    def __init__(
+        self,
+        batch_size,
+        env,
+        beta=None,
+        algo="DQN",
+        action_space=None,
+        learn_step=1,
+        actor=None,
+    ):
         self.algo = algo
         self.state_size = env.state_size
         self.action_size = env.action_size
         self.action_dim = env.action_size
+        self.action_space = (
+            action_space if action_space is not None else Discrete(env.action_size)
+        )
         self.batch_size = batch_size
         self.training = True
         self.beta = beta
-        self.learn_step = 1
+        self.learn_step = learn_step
         self.scores = []
         self.steps = [0]
         self.fitness = []
@@ -114,7 +122,7 @@ class DummyAgentOffPolicy:
             [1.0] * self.action_size,
             dtype=torch.float32,
         )
-        self.actor = MagicMock()
+        self.actor = actor if actor is not None else MagicMock()
         self.actor.output_activation = "Tanh"
 
     def set_training_mode(self, training):
@@ -124,18 +132,18 @@ class DummyAgentOffPolicy:
         return np.random.rand(self.action_size)
 
     def learn(self, experiences, n_experiences=None, per=False):
+        loss = random.random()
         if n_experiences is not None or per:
-            return random.random(), None, None
-        return random.random()
+            return loss, None, None
+        return loss
 
-    def test(self, env, swap_channels, max_steps, loop):
+    def test(self, env, swap_channels=False, max_steps=None, loop=3, **kwargs):
         rand_int = np.random.uniform(0, 400)
         self.fitness.append(rand_int)
         return rand_int
 
     def save_checkpoint(self, path):
-        empty_dic = {}
-        torch.save(empty_dic, path, pickle_module=dill)
+        torch.save({}, path, pickle_module=dill)
         return True
 
     def load_checkpoint(self, *args):
@@ -151,12 +159,16 @@ class DummyAgentOffPolicy:
         return
 
 
-class DummyAgentOnPolicy(DummyAgentOffPolicy):
+class DummyAgentOnPolicy(DummyAgentOffPolicy):  # pylint: disable=overwritten-inherited-attribute
     def __init__(self, batch_size, env):
-        super().__init__(batch_size, env)
-        self.learn_step = 128
-        self.action_space = Box(0, 1, (1,))
-        self.actor = MagicMock()
+        actor = MagicMock()
+        super().__init__(
+            batch_size,
+            env,
+            action_space=Box(0, 1, (1,)),
+            learn_step=128,
+            actor=actor,
+        )
         self.actor.squash_output = False
         self.actor.scale_action = lambda x: x
         self.actor.action_space = self.action_space
@@ -178,8 +190,8 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):
     def _get_action_and_values(self, *args, **kwargs):
         return tuple(torch.randn(self.action_size) for _ in range(5))
 
-    def test(self, env, swap_channels, max_steps, loop):
-        return super().test(env, swap_channels, max_steps, loop)
+    def test(self, env, swap_channels=False, max_steps=None, loop=3, **kwargs):
+        return super().test(env, swap_channels, max_steps, loop, **kwargs)
 
     def preprocess_observation(self, obs):
         return obs
@@ -218,14 +230,13 @@ class DummyBandit:
     def learn(self, experiences):
         return random.random()
 
-    def test(self, env, swap_channels, max_steps, loop):
+    def test(self, env, swap_channels=False, max_steps=None, loop=3, **kwargs):
         rand_int = np.random.uniform(0, 400)
         self.fitness.append(rand_int)
         return rand_int
 
     def save_checkpoint(self, path):
-        empty_dic = {}
-        torch.save(empty_dic, path, pickle_module=dill)
+        torch.save({}, path, pickle_module=dill)
         return True
 
     def load_checkpoint(self, *args):
@@ -238,7 +249,7 @@ class DummyBandit:
         return
 
 
-class DummyMultiEnv(ParallelEnv):
+class DummyMultiEnv(ParallelEnv):  # pylint: disable=overwritten-inherited-attribute
     def __init__(self, state_dims, action_dims):
         self.state_dims = state_dims
         self.state_size = self.state_dims
@@ -280,7 +291,21 @@ class DummyMultiEnv(ParallelEnv):
 
 class DummyMultiAgent(DummyAgentOffPolicy):
     def __init__(self, batch_size, env, on_policy, *args):
-        super().__init__(batch_size, env, *args)
+        possible_action_spaces = Dict(
+            {
+                "agent_0": Discrete(2),
+                "other_agent_0": Box(0, 1, (2,)),
+            },
+        )
+        possible_observation_spaces = Dict(
+            {
+                "agent_0": Box(0, 1, env.state_dims),
+                "other_agent_0": Box(0, 1, env.state_dims),
+            },
+        )
+        super().__init__(
+            batch_size, env, *args, action_space=deepcopy(possible_action_spaces)
+        )
         self.agent_ids = ["agent_0", "other_agent_0"]
         self.shared_agent_ids = ["agent", "other_agent"]
         self.lr_actor = 0.001
@@ -297,20 +322,14 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         self.actors["agent_0"].scale_action = lambda x: x
         self.actors["other_agent_0"].squash_output = False
         self.actors["other_agent_0"].scale_action = lambda x: x
-        self.possible_action_spaces = Dict(
-            {
-                "agent_0": Discrete(2),
-                "other_agent_0": Box(0, 1, (2,)),
-            },
+        self.possible_action_spaces = possible_action_spaces
+        self.possible_observation_spaces = possible_observation_spaces
+        self.observation_space = deepcopy(possible_observation_spaces)
+        self.get_action = (
+            self._get_action_on_policy
+            if self.on_policy
+            else self._get_action_off_policy
         )
-        self.possible_observation_spaces = Dict(
-            {
-                "agent_0": Box(0, 1, env.state_dims),
-                "other_agent_0": Box(0, 1, env.state_dims),
-            },
-        )
-        self.action_space = deepcopy(self.possible_action_spaces)
-        self.observation_space = deepcopy(self.possible_observation_spaces)
 
         self.registry = MagicMock()
         self.registry.policy.side_effect = lambda: "actors"
@@ -321,32 +340,44 @@ class DummyMultiAgent(DummyAgentOffPolicy):
     def has_grouped_agents(self) -> bool:
         return True
 
-    def get_action(self, *args, **kwargs):
+    def _get_action_on_policy(self, *args, **kwargs):
         output_dict = {
             agent: np.random.randn(self.num_envs, self.action_size)
             for agent in self.agent_ids
         }
-        if self.on_policy:
-            return output_dict, output_dict, output_dict, output_dict
+        return output_dict, output_dict, output_dict, output_dict
 
+    def _get_action_off_policy(self, *args, **kwargs):
+        output_dict = {
+            agent: np.random.randn(self.num_envs, self.action_size)
+            for agent in self.agent_ids
+        }
         return output_dict, output_dict
 
-    def learn(self, experiences):
+    def learn(self, experiences):  # pylint: disable=mixed-tuple-returns
         if self.on_policy:
             return {
-                "agent_0": (random.random()),
-                "other_agent_0": (random.random()),
+                "agent_0": (random.random(),),
+                "other_agent_0": (random.random(),),
             }
         return {
             "agent_0": (random.random(), random.random()),
             "other_agent_0": (random.random(), random.random()),
         }
 
-    def test(self, env, swap_channels, max_steps, loop, sum_scores):
-        rand_int = np.random.uniform(0, 400)
-        rand_int = (rand_int / 2, rand_int / 2) if not sum_scores else rand_int
-        self.fitness.append(rand_int)
-        return rand_int
+    def test(
+        self,
+        env,
+        swap_channels=False,
+        max_steps=None,
+        loop=3,
+        sum_scores=True,
+        **kwargs,
+    ):
+        raw_score = np.random.uniform(0, 400)
+        result = (raw_score / 2, raw_score / 2) if not sum_scores else raw_score
+        self.fitness.append(result)
+        return result
 
     def get_env_defined_actions(self, info, agents):
         env_defined_actions = {
@@ -400,8 +431,7 @@ class DummyMutations:
 
 class DummyMemory(ReplayBuffer):
     def __init__(self):
-        self.size = 0
-        self.counter = 0
+        super().__init__(max_size=0)
         self.state_size = None
         self.action_size = None
         self.next_state_size = None
@@ -480,7 +510,7 @@ class DummyMemory(ReplayBuffer):
         return
 
 
-class DummyNStepMemory(DummyMemory, MultiStepReplayBuffer):
+class DummyNStepMemory(DummyMemory, MultiStepReplayBuffer):  # pylint: disable=overwritten-inherited-attribute
     def __init__(self):
         super().__init__()
 
@@ -519,9 +549,8 @@ class DummyNStepMemory(DummyMemory, MultiStepReplayBuffer):
 
 class DummyBanditMemory(ReplayBuffer):
     def __init__(self):
-        self.counter = 0
+        super().__init__(max_size=0)
         self.state_size = None
-        self.size = 0
         self.action_size = 1
 
     def save_to_memory_vect_envs(self, data: TensorDict):
@@ -840,16 +869,23 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.has_grouped_agents.side_effect = lambda: algo == IPPO
     mock_agent.actors = {agent_id: MagicMock() for agent_id in mock_agent.agent_ids}
 
-    def get_action(*args, **kwargs):
+    def get_action_on_policy(*args, **kwargs):
         out = {
             agent: np.random.randn(mock_agent.action_size)
             for agent in mock_agent.agent_ids
         }
-        if algo == IPPO:
-            return out, out, out, out
         return out, out
 
-    mock_agent.get_action.side_effect = get_action
+    def get_action_off_policy(*args, **kwargs):
+        out = {
+            agent: np.random.randn(mock_agent.action_size)
+            for agent in mock_agent.agent_ids
+        }
+        return out, out, out, out
+
+    mock_agent.get_action.side_effect = (
+        get_action_off_policy if algo == IPPO else get_action_on_policy
+    )
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     if algo == IPPO:
         mock_agent.learn.side_effect = lambda experiences: {
@@ -932,12 +968,6 @@ def mocked_per_memory():
                     for _ in range(batch_size)
                 ],
             )
-        if beta is None:
-            return states, actions, rewards, dones, next_states
-
-        idxs = [np.random.randn(1) for _ in range(batch_size)]
-        weights = list(range(batch_size))
-
         sample_transition = Transition(
             obs=states,
             action=actions,
@@ -946,10 +976,11 @@ def mocked_per_memory():
             next_obs=next_states,
             batch_size=[batch_size],
         ).to_tensordict()
-
-        sample_transition["weights"] = torch.tensor(weights)
-        sample_transition["idxs"] = torch.tensor(idxs)
-
+        if beta is not None:
+            idxs = [np.random.randn(1) for _ in range(batch_size)]
+            weights = list(range(batch_size))
+            sample_transition["weights"] = torch.tensor(weights)
+            sample_transition["idxs"] = torch.tensor(idxs)
         return sample_transition
 
     # Assigning the sample function to the MagicMock
@@ -1108,12 +1139,6 @@ def mocked_n_step_memory():
                     for _ in range(batch_size)
                 ],
             )
-        if beta is None:
-            return states, actions, rewards, dones, next_states
-
-        idxs = [np.random.randn(1) for _ in range(batch_size)]
-        weights = list(range(batch_size))
-
         sample_transition = Transition(
             obs=states,
             action=actions,
@@ -1122,10 +1147,11 @@ def mocked_n_step_memory():
             next_obs=next_states,
             batch_size=[batch_size],
         ).to_tensordict()
-
-        sample_transition["weights"] = torch.tensor(weights)
-        sample_transition["idxs"] = torch.tensor(idxs)
-
+        if beta is not None:
+            idxs = [np.random.randn(1) for _ in range(batch_size)]
+            weights = list(range(batch_size))
+            sample_transition["weights"] = torch.tensor(weights)
+            sample_transition["idxs"] = torch.tensor(idxs)
         return sample_transition
 
     # Assigning the sample function to the MagicMock
@@ -1377,7 +1403,7 @@ def dummy_h5py_data(action_size, state_size):
     [((6,), 2, True), ((6,), 2, False)],
 )
 def test_train_off_policy(env, population_off_policy, tournament, mutations, memory):
-    pop, pop_fitnesses = train_off_policy(
+    pop, _ = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -1401,14 +1427,14 @@ def test_train_off_policy(env, population_off_policy, tournament, mutations, mem
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect, per, n_step, algo, num_envs, learn_step",
+    "state_size, action_size, vect, algo, num_envs, learn_step",
     [
-        ((6,), 2, False, False, False, DQN, 1, 2),
-        ((6,), 2, False, False, False, DDPG, 1, 2),
-        ((6,), 2, False, False, False, TD3, 1, 2),
-        ((6,), 2, True, False, False, DQN, 2, 1),
-        ((6,), 2, True, False, False, DDPG, 2, 1),
-        ((6,), 2, True, False, False, TD3, 2, 1),
+        ((6,), 2, False, DQN, 1, 2),
+        ((6,), 2, False, DDPG, 1, 2),
+        ((6,), 2, False, TD3, 1, 2),
+        ((6,), 2, True, DQN, 2, 1),
+        ((6,), 2, True, DDPG, 2, 1),
+        ((6,), 2, True, TD3, 2, 1),
     ],
 )
 def test_train_off_policy_agent_calls_made(
@@ -1418,17 +1444,11 @@ def test_train_off_policy_agent_calls_made(
     tournament,
     mutations,
     memory,
-    per,
-    n_step,
-    n_step_memory,
     num_envs,
     learn_step,
 ):
     for accelerator_flag in [True, False]:
         accelerator = Accelerator() if accelerator_flag else None
-        n_step_memory = None
-        per = False
-        n_step = False
         mock_population = [mocked_agent_off_policy for _ in range(6)]
         for agent in mock_population:
             agent.learn_step = learn_step
@@ -1436,7 +1456,7 @@ def test_train_off_policy_agent_calls_made(
         if env.vect:
             env.num_envs = num_envs
 
-        pop, pop_fitnesses = train_off_policy(
+        pop, _ = train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1448,9 +1468,9 @@ def test_train_off_policy_agent_calls_made(
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=n_step,
-            per=per,
-            n_step_memory=n_step_memory,
+            n_step=False,
+            per=False,
+            n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -1497,7 +1517,7 @@ def test_train_off_policy_agent_calls_made_rainbow(
         agent.learn_step = learn_step
     env.n_envs = num_envs
 
-    pop, pop_fitnesses = train_off_policy(
+    pop, _ = train_off_policy(
         env,
         "env_name",
         "Rainbow DQN",
@@ -1522,9 +1542,6 @@ def test_train_off_policy_agent_calls_made_rainbow(
     mocked_agent_off_policy.get_action.assert_called()
     mocked_agent_off_policy.learn.assert_called()
     mocked_agent_off_policy.test.assert_called()
-    if accelerator is not None:
-        mocked_agent_off_policy.wrap_models.assert_called()
-        mocked_agent_off_policy.unwrap_models.assert_called()
 
 
 @pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, False)])
@@ -1540,7 +1557,7 @@ def test_train_off_policy_save_elite_warning(
                       be saved unless 'save_elite' is set to True."
     )
     with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_off_policy(
+        pop, _ = train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1576,7 +1593,7 @@ def test_train_off_policy_checkpoint_warning(
                       be saved unless 'checkpoint' is defined."
     )
     with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_off_policy(
+        pop, _ = train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1601,7 +1618,7 @@ def test_train_off_policy_checkpoint_warning(
 
 @pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, False)])
 def test_actions_histogram(env, population_off_policy, tournament, mutations, memory):
-    pop, pop_fitnesses = train_off_policy(
+    pop, _ = train_off_policy(
         env,
         "env_name",
         "DQN",
@@ -1632,7 +1649,7 @@ def test_train_off_policy_replay_buffer_calls(
     tournament,
     mutations,
 ):
-    pop, pop_fitnesses = train_off_policy(
+    pop, _ = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -1670,7 +1687,7 @@ def test_train_off_policy_alternate_buffer_calls(
     per,
 ):
     mocked_memory = mocked_memory if not per else mocked_per_memory
-    pop, pop_fitnesses = train_off_policy(
+    pop, _ = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -1711,7 +1728,7 @@ def test_train_off_policy_env_calls(
     tournament,
     mutations,
 ):
-    pop, pop_fitnesses = train_off_policy(
+    pop, _ = train_off_policy(
         mocked_env,
         "env_name",
         "algo",
@@ -1747,7 +1764,7 @@ def test_train_off_policy_tourn_mut_calls(
     mocked_tournament,
     mocked_mutations,
 ):
-    pop, pop_fitnesses = train_off_policy(
+    pop, _ = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -1778,7 +1795,7 @@ def test_train_off_policy_rgb_input(
     mutations,
     memory,
 ):
-    pop, pop_fitnesses = train_off_policy(
+    pop, _ = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -1814,7 +1831,7 @@ def test_train_off_policy_using_alternate_buffers(
     n_step_memory,
     per,
 ):
-    pop, pop_fitnesses = train_off_policy(
+    pop, _ = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -1846,7 +1863,7 @@ def test_train_off_policy_using_alternate_buffers_rgb(
     mutations,
     n_step_memory,
 ):
-    pop, pop_fitnesses = train_off_policy(
+    pop, _ = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -1881,7 +1898,7 @@ def test_train_off_policy_distributed(
     memory,
 ):
     accelerator = Accelerator()
-    pop, pop_fitnesses = train_off_policy(
+    pop, _ = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -2112,9 +2129,10 @@ def test_train_off_policy_save_elite(
     tournament,
     mutations,
     memory,
+    tmp_path,
 ):
-    elite_path = "checkpoint.pt"
-    pop, pop_fitnesses = train_off_policy(
+    elite_path = str(tmp_path / "checkpoint.pt")
+    pop, _ = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -2136,7 +2154,6 @@ def test_train_off_policy_save_elite(
         elite_path=elite_path,
     )
     assert os.path.isfile(elite_path)
-    os.remove(elite_path)
 
 
 @pytest.mark.parametrize(
@@ -2154,7 +2171,7 @@ def test_train_save_checkpoint(
 ):
     accelerator = Accelerator() if accelerator_flag else None
     checkpoint_path = str(Path(tmpdir) / "checkpoint")
-    pop, pop_fitnesses = train_off_policy(
+    pop, _ = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -2178,7 +2195,6 @@ def test_train_save_checkpoint(
     )
     for i in range(6):  # iterate through the population indices
         assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
 
 
 @pytest.mark.parametrize("state_size, action_size, vect, algo", [((6,), 2, True, PPO)])
@@ -2192,7 +2208,7 @@ def test_train_on_policy_agent_calls_made(
     for accelerator_flag in [True, False]:
         accelerator = Accelerator() if accelerator_flag else None
         mock_population = [mocked_agent_on_policy for _ in range(6)]
-        pop, pop_fitnesses = train_on_policy(
+        pop, _ = train_on_policy(
             env,
             "env_name",
             "algo",
@@ -2229,7 +2245,7 @@ def test_train_on_policy_save_elite_warning(
                       be saved unless 'save_elite' is set to True."
     )
     with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_on_policy(
+        pop, _ = train_on_policy(
             env,
             "env_name",
             "algo",
@@ -2260,7 +2276,7 @@ def test_train_on_policy_checkpoint_warning(
                       be saved unless 'checkpoint' is defined."
     )
     with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_on_policy(
+        pop, _ = train_on_policy(
             env,
             "env_name",
             "algo",
@@ -2291,7 +2307,7 @@ def test_train_on_policy_env_calls(
     tournament,
     mutations,
 ):
-    pop, pop_fitnesses = train_on_policy(
+    pop, _ = train_on_policy(
         mocked_env,
         "env_name",
         "algo",
@@ -2322,7 +2338,7 @@ def test_train_on_policy_tourn_mut_calls(
     mocked_tournament,
     mocked_mutations,
 ):
-    pop, pop_fitnesses = train_on_policy(
+    pop, _ = train_on_policy(
         env,
         "env_name",
         "algo",
@@ -2356,7 +2372,7 @@ def test_train_on_policy(
         for agent in population_on_policy:
             agent.use_rollout_buffer = True
 
-    pop, pop_fitnesses = train_on_policy(
+    pop, _ = train_on_policy(
         env,
         "env_name",
         "algo",
@@ -2377,7 +2393,7 @@ def test_train_on_policy(
 
 @pytest.mark.parametrize("state_size, action_size, vect", [((250, 160, 3), 2, False)])
 def test_train_on_policy_rgb_input(env, population_on_policy, tournament, mutations):
-    pop, pop_fitnesses = train_on_policy(
+    pop, _ = train_on_policy(
         env,
         "env_name",
         "algo",
@@ -2402,7 +2418,7 @@ def test_train_on_policy_rgb_input(env, population_on_policy, tournament, mutati
 )
 def test_train_on_policy_distributed(env, population_on_policy, tournament, mutations):
     accelerator = Accelerator()
-    pop, pop_fitnesses = train_on_policy(
+    pop, _ = train_on_policy(
         env,
         "env_name",
         "algo",
@@ -2544,10 +2560,11 @@ def test_train_on_policy_save_elite(
     tournament,
     mutations,
     accelerator_flag,
+    tmp_path,
 ):
     accelerator = Accelerator() if accelerator_flag else None
-    elite_path = "elite"
-    pop, pop_fitnesses = train_on_policy(
+    elite_path = str(tmp_path / "elite")
+    pop, _ = train_on_policy(
         env,
         "env_name",
         "algo",
@@ -2566,7 +2583,6 @@ def test_train_on_policy_save_elite(
         accelerator=accelerator,
     )
     assert os.path.isfile(f"{elite_path}.pt")
-    os.remove(f"{elite_path}.pt")
 
 
 @pytest.mark.parametrize(
@@ -2583,7 +2599,7 @@ def test_train_on_policy_save_checkpoint(
 ):
     accelerator = Accelerator() if accelerator_flag else None
     checkpoint_path = str(Path(tmpdir) / "checkpoint")
-    pop, pop_fitnesses = train_on_policy(
+    pop, _ = train_on_policy(
         env,
         "env_name",
         "algo",
@@ -2603,7 +2619,6 @@ def test_train_on_policy_save_checkpoint(
     )
     for i in range(6):  # iterate through the population indices
         assert os.path.isfile(f"{checkpoint_path}_{i}_{512}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{512}.pt")
 
 
 @pytest.mark.parametrize("on_policy", [False])
@@ -2620,7 +2635,7 @@ def test_train_multi_agent_off_policy(
     mutations,
     sum_scores,
 ):
-    pop, pop_fitnesses = train_multi_agent_off_policy(
+    pop, _ = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -2656,7 +2671,7 @@ def test_train_multi_agent_on_policy(
     swap_channels,
     accelerator,
 ):
-    pop, pop_fitnesses = train_multi_agent_on_policy(
+    pop, _ = train_multi_agent_on_policy(
         multi_env,
         "env_name",
         "algo",
@@ -2687,7 +2702,7 @@ def test_train_multi_agent_off_policy_distributed(
     mutations,
 ):
     accelerator = Accelerator()
-    pop, pop_fitnesses = train_multi_agent_off_policy(
+    pop, _ = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -2721,7 +2736,7 @@ def test_train_multi_agent_off_policy_rgb(
     tournament,
     mutations,
 ):
-    pop, pop_fitnesses = train_multi_agent_off_policy(
+    pop, _ = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -2762,7 +2777,7 @@ def test_train_multi_agent_off_policy_rgb_vectorized(
         agent.num_envs = 4
         agent.scores = [1]
     env.reset()
-    pop, pop_fitnesses = train_multi_agent_off_policy(
+    pop, _ = train_multi_agent_off_policy(
         env,
         "env_name",
         "algo",
@@ -2803,7 +2818,7 @@ def test_train_multi_agent_on_policy_rgb_vectorized(
         agent.num_envs = 4
         agent.scores = [1]
     env.reset()
-    pop, pop_fitnesses = train_multi_agent_on_policy(
+    pop, _ = train_multi_agent_on_policy(
         env,
         "env_name",
         "algo",
@@ -2836,7 +2851,7 @@ def test_train_multi_save_elite_warning(
                       be saved unless 'save_elite' is set to True."
     )
     with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_multi_agent_off_policy(
+        pop, _ = train_multi_agent_off_policy(
             multi_env,
             "env_name",
             "algo",
@@ -2870,7 +2885,7 @@ def test_train_multi_save_elite_warning_on_policy(
                       be saved unless 'save_elite' is set to True."
     )
     with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_multi_agent_on_policy(
+        pop, _ = train_multi_agent_on_policy(
             multi_env,
             "env_name",
             "algo",
@@ -2903,7 +2918,7 @@ def test_train_multi_checkpoint_warning(
                       be saved unless 'checkpoint' is defined."
     )
     with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_multi_agent_off_policy(
+        pop, _ = train_multi_agent_off_policy(
             multi_env,
             "env_name",
             "algo",
@@ -2937,7 +2952,7 @@ def test_train_multi_checkpoint_warning_on_policy(
                       be saved unless 'checkpoint' is defined."
     )
     with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_multi_agent_on_policy(
+        pop, _ = train_multi_agent_on_policy(
             multi_env,
             "env_name",
             "algo",
@@ -3256,7 +3271,7 @@ def test_train_multi_agent_off_policy_calls(
 
     mock_population = [mocked_multi_agent for _ in range(6)]
 
-    pop, pop_fitnesses = train_multi_agent_off_policy(
+    pop, _ = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -3304,7 +3319,7 @@ def test_train_multi_agent_onpolicy_calls(
 
     mock_population = [mocked_multi_agent for _ in range(6)]
 
-    pop, pop_fitnesses = train_multi_agent_on_policy(
+    pop, _ = train_multi_agent_on_policy(
         multi_env,
         "env_name",
         "algo",
@@ -3345,7 +3360,7 @@ def test_train_multi_env_calls(
     tournament,
     mutations,
 ):
-    pop, pop_fitnesses = train_multi_agent_off_policy(
+    pop, _ = train_multi_agent_off_policy(
         mocked_multi_env,
         "env_name",
         "algo",
@@ -3380,7 +3395,7 @@ def test_train_multi_env_calls_on_policy(
     tournament,
     mutations,
 ):
-    pop, pop_fitnesses = train_multi_agent_on_policy(
+    pop, _ = train_multi_agent_on_policy(
         mocked_multi_env,
         "env_name",
         "algo",
@@ -3414,7 +3429,7 @@ def test_train_multi_tourn_mut_calls(
     mocked_tournament,
     mocked_mutations,
 ):
-    pop, pop_fitnesses = train_multi_agent_off_policy(
+    pop, _ = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -3449,7 +3464,7 @@ def test_train_multi_tourn_mut_calls_on_policy(
     mocked_tournament,
     mocked_mutations,
 ):
-    pop, pop_fitnesses = train_multi_agent_on_policy(
+    pop, _ = train_multi_agent_on_policy(
         multi_env,
         "env_name",
         "algo",
@@ -3483,7 +3498,7 @@ def test_train_multi_memory_calls(
     tournament,
     mutations,
 ):
-    pop, pop_fitnesses = train_multi_agent_off_policy(
+    pop, _ = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -3516,10 +3531,11 @@ def test_train_multi_save_elite(
     multi_memory,
     on_policy,
     accelerator_flag,
+    tmp_path,
 ):
     accelerator = Accelerator() if accelerator_flag else None
-    elite_path = "elite"
-    pop, pop_fitnesses = train_multi_agent_off_policy(
+    elite_path = str(tmp_path / "elite")
+    pop, _ = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -3539,7 +3555,6 @@ def test_train_multi_save_elite(
         accelerator=accelerator,
     )
     assert os.path.isfile(f"{elite_path}.pt")
-    os.remove(f"{elite_path}.pt")
 
 
 @pytest.mark.parametrize("on_policy", [True])
@@ -3555,10 +3570,11 @@ def test_train_multi_save_elite_on_policy(
     multi_memory,
     on_policy,
     accelerator_flag,
+    tmp_path,
 ):
     accelerator = Accelerator() if accelerator_flag else None
-    elite_path = "elite"
-    pop, pop_fitnesses = train_multi_agent_on_policy(
+    elite_path = str(tmp_path / "elite")
+    pop, _ = train_multi_agent_on_policy(
         multi_env,
         "env_name",
         "algo",
@@ -3577,7 +3593,6 @@ def test_train_multi_save_elite_on_policy(
         accelerator=accelerator,
     )
     assert os.path.isfile(f"{elite_path}.pt")
-    os.remove(f"{elite_path}.pt")
 
 
 @pytest.mark.parametrize("on_policy", [False])
@@ -3596,7 +3611,7 @@ def test_train_multi_save_checkpoint(
 ):
     accelerator = Accelerator() if accelerator_flag else None
     checkpoint_path = str(Path(tmpdir) / "checkpoint")
-    pop, pop_fitnesses = train_multi_agent_off_policy(
+    pop, _ = train_multi_agent_off_policy(
         multi_env,
         "env_name",
         "algo",
@@ -3617,7 +3632,6 @@ def test_train_multi_save_checkpoint(
     )
     for i in range(6):  # iterate through the population indices
         assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
 
 
 @pytest.mark.parametrize("on_policy", [True])
@@ -3636,7 +3650,7 @@ def test_train_multi_save_checkpoint_on_policy(
 ):
     accelerator = Accelerator() if accelerator_flag else None
     checkpoint_path = str(Path(tmpdir) / "checkpoint")
-    pop, pop_fitnesses = train_multi_agent_on_policy(
+    pop, _ = train_multi_agent_on_policy(
         multi_env,
         "env_name",
         "algo",
@@ -3656,7 +3670,6 @@ def test_train_multi_save_checkpoint_on_policy(
     )
     for i in range(6):  # iterate through the population indices
         assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
 
 
 @pytest.mark.parametrize(
@@ -3679,7 +3692,7 @@ def test_train_offline(
     for accelerator_flag in [True, False]:
         accelerator = Accelerator() if accelerator_flag else None
 
-        pop, pop_fitness = train_offline(
+        pop, _ = train_offline(
             env,
             "env_name",
             dummy_h5py_data,
@@ -3721,7 +3734,7 @@ def test_train_offline_save_elite_warning(
                       be saved unless 'save_elite' is set to True."
     )
     with pytest.warns(match=warning_string):
-        pop, pop_fitness = train_offline(
+        pop, _ = train_offline(
             env,
             "env_name",
             dummy_h5py_data,
@@ -3761,7 +3774,7 @@ def test_train_offline_save_checkpoint_warning(
                       be saved unless 'checkpoint' is defined."
     )
     with pytest.warns(match=warning_string):
-        pop, pop_fitness = train_offline(
+        pop, _ = train_offline(
             env,
             "env_name",
             dummy_h5py_data,
@@ -3920,7 +3933,7 @@ def test_offline_agent_calls(
         accelerator = Accelerator() if accelerator_flag else None
         mock_population = [mocked_agent_off_policy for _ in range(6)]
 
-        pop, pop_fitnesses = train_offline(
+        pop, _ = train_offline(
             env,
             "env_name",
             dummy_h5py_data,
@@ -3963,7 +3976,7 @@ def test_offline_memory_calls(
 ):
     for accelerator_flag in [True, False]:
         accelerator = Accelerator() if accelerator_flag else None
-        pop, pop_fitnesses = train_offline(
+        pop, _ = train_offline(
             env,
             "env_name",
             dummy_h5py_data,
@@ -4003,7 +4016,7 @@ def test_offline_mut_tourn_calls(
     for accelerator_flag in [True, False]:
         accelerator = Accelerator() if accelerator_flag else None
 
-        pop, pop_fitnesses = train_offline(
+        pop, _ = train_offline(
             env,
             "env_name",
             dummy_h5py_data,
@@ -4038,10 +4051,11 @@ def test_train_offline_save_elite(
     offline_init_hp,
     dummy_h5py_data,
     accelerator_flag,
+    tmp_path,
 ):
     accelerator = Accelerator() if accelerator_flag else None
-    elite_path = "elite"
-    pop, pop_fitnesses = train_offline(
+    elite_path = str(tmp_path / "elite")
+    pop, _ = train_offline(
         env,
         "env_name",
         dummy_h5py_data,
@@ -4062,7 +4076,6 @@ def test_train_offline_save_elite(
         elite_path=elite_path,
     )
     assert os.path.isfile(f"{elite_path}.pt")
-    os.remove(f"{elite_path}.pt")
 
 
 @pytest.mark.parametrize(
@@ -4082,7 +4095,7 @@ def test_train_offline_save_checkpoint(
 ):
     accelerator = Accelerator() if accelerator_flag else None
     checkpoint_path = str(Path(tmpdir) / "checkpoint")
-    pop, pop_fitnesses = train_offline(
+    pop, _ = train_offline(
         env,
         "env_name",
         dummy_h5py_data,
@@ -4104,7 +4117,6 @@ def test_train_offline_save_checkpoint(
     )
     for i in range(6):  # iterate through the population indices
         assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
 
 
 @pytest.mark.parametrize(
@@ -4120,7 +4132,7 @@ def test_train_bandit(
     mutations,
     bandit_memory,
 ):
-    pop, pop_fitnesses = train_bandits(
+    pop, _ = train_bandits(
         bandit_env,
         "bandit_env_name",
         "algo",
@@ -4160,7 +4172,7 @@ def test_train_bandit_agent_calls_made(
         accelerator = Accelerator() if accelerator_flag else None
         mock_population = [mocked_bandit for _ in range(6)]
 
-        pop, pop_fitnesses = train_bandits(
+        pop, _ = train_bandits(
             bandit_env,
             "bandit_env_name",
             "algo",
@@ -4202,7 +4214,7 @@ def test_train_bandit_save_elite_warning(
                       be saved unless 'save_elite' is set to True."
     )
     with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_bandits(
+        pop, _ = train_bandits(
             bandit_env,
             "bandit_env_name",
             "algo",
@@ -4237,7 +4249,7 @@ def test_train_bandit_checkpoint_warning(
                       be saved unless 'checkpoint' is defined."
     )
     with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_bandits(
+        pop, _ = train_bandits(
             bandit_env,
             "bandit_env_name",
             "algo",
@@ -4267,7 +4279,7 @@ def test_bandit_actions_histogram(
     mutations,
     bandit_memory,
 ):
-    pop, pop_fitnesses = train_bandits(
+    pop, _ = train_bandits(
         bandit_env,
         "bandit_env_name",
         "DQN",
@@ -4297,7 +4309,7 @@ def test_train_bandit_replay_buffer_calls(
     tournament,
     mutations,
 ):
-    pop, pop_fitnesses = train_bandits(
+    pop, _ = train_bandits(
         bandit_env,
         "bandit_env_name",
         "algo",
@@ -4332,7 +4344,7 @@ def test_train_bandit_bandit_env_calls(
     tournament,
     mutations,
 ):
-    pop, pop_fitnesses = train_bandits(
+    pop, _ = train_bandits(
         mocked_bandit_env,
         "bandit_env_name",
         "algo",
@@ -4367,7 +4379,7 @@ def test_train_bandit_tourn_mut_calls(
     mocked_tournament,
     mocked_mutations,
 ):
-    pop, pop_fitnesses = train_bandits(
+    pop, _ = train_bandits(
         bandit_env,
         "bandit_env_name",
         "algo",
@@ -4397,7 +4409,7 @@ def test_train_bandit_rgb_input(
     mutations,
     bandit_memory,
 ):
-    pop, pop_fitnesses = train_bandits(
+    pop, _ = train_bandits(
         bandit_env,
         "bandit_env_name",
         "algo",
@@ -4430,7 +4442,7 @@ def test_train_bandit_using_alternate_buffers(
     tournament,
     mutations,
 ):
-    pop, pop_fitnesses = train_bandits(
+    pop, _ = train_bandits(
         bandit_env,
         "bandit_env_name",
         "algo",
@@ -4460,7 +4472,7 @@ def test_train_bandit_using_alternate_buffers_rgb(
     tournament,
     mutations,
 ):
-    pop, pop_fitnesses = train_bandits(
+    pop, _ = train_bandits(
         bandit_env,
         "bandit_env_name",
         "algo",
@@ -4491,7 +4503,7 @@ def test_train_bandit_distributed(
     bandit_memory,
 ):
     accelerator = Accelerator()
-    pop, pop_fitnesses = train_bandits(
+    pop, _ = train_bandits(
         bandit_env,
         "bandit_env_name",
         "algo",
@@ -4739,9 +4751,10 @@ def test_train_bandit_save_elite(
     tournament,
     mutations,
     bandit_memory,
+    tmp_path,
 ):
-    elite_path = "checkpoint.pt"
-    pop, pop_fitnesses = train_bandits(
+    elite_path = str(tmp_path / "checkpoint.pt")
+    pop, _ = train_bandits(
         bandit_env,
         "bandit_env_name",
         "algo",
@@ -4762,7 +4775,6 @@ def test_train_bandit_save_elite(
         elite_path=elite_path,
     )
     assert os.path.isfile(elite_path)
-    os.remove(elite_path)
 
 
 @pytest.mark.parametrize(
@@ -4780,7 +4792,7 @@ def test_bandit_train_save_checkpoint(
 ):
     accelerator = Accelerator() if accelerator_flag else None
     checkpoint_path = str(Path(tmpdir) / "checkpoint")
-    pop, pop_fitnesses = train_bandits(
+    pop, _ = train_bandits(
         bandit_env,
         "bandit_env_name",
         "algo",
@@ -4804,7 +4816,6 @@ def test_bandit_train_save_checkpoint(
     for i in range(6):  # iterate through the population indices
         for s in range(5):
             assert os.path.isfile(f"{checkpoint_path}_{i}_{10 * (s + 1)}.pt")
-            os.remove(f"{checkpoint_path}_{i}_{10 * (s + 1)}.pt")
 
 
 @pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])

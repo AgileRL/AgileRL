@@ -2,6 +2,7 @@ import functools
 from unittest.mock import patch
 
 import gymnasium
+import pytest
 from gymnasium.spaces import Discrete
 from pettingzoo import ParallelEnv
 
@@ -26,7 +27,7 @@ REWARD_MAP = {
 }
 
 
-class parallel_env(ParallelEnv):
+class RPSParallelEnv(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "rps_v2"}
 
     def __init__(self, render_mode=None):
@@ -123,8 +124,6 @@ class parallel_env(ParallelEnv):
             (actions[self.agents[0]], actions[self.agents[1]])
         ]
 
-        terminations = dict.fromkeys(self.agents, False)
-
         self.num_moves += 1
         env_truncation = self.num_moves >= NUM_ITERS
         truncations = dict.fromkeys(self.agents, env_truncation)
@@ -150,25 +149,25 @@ class parallel_env(ParallelEnv):
 
 def test_autoreset_wrapper_autoreset():
     """Tests the autoreset wrapper actually automatically resets correctly."""
-    env = parallel_env(render_mode="human")
+    env = RPSParallelEnv(render_mode="human")
     env = PettingZooAutoResetParallelWrapper(env)
-    observations, infos = env.reset()
+    env.reset()
     with patch(
-        f"{__name__}.parallel_env.reset",
+        f"{__name__}.RPSParallelEnv.reset",
         wraps=env.env.reset,
     ) as autoreset_patch:
         # Environment truncates after 100 steps, so we expect 1 reset.
         for _ in range(100):
             # this is where you would insert your policy
             actions = {agent: env.action_space(agent).sample() for agent in env.agents}
-            observations, rewards, terminations, truncations, infos = env.step(actions)
+            _ = env.step(actions)
         autoreset_patch.assert_called()
         autoreset_patch.reset_mock()
         # Environment truncates after 100 steps, so we expect 5 resets.
         for _ in range(500):
             # this is where you would insert your policy
             actions = {agent: env.action_space(agent).sample() for agent in env.agents}
-            observations, rewards, terminations, truncations, infos = env.step(actions)
+            _ = env.step(actions)
         autoreset_patch.assert_called()
         assert autoreset_patch.call_count == 5
         autoreset_patch.reset_mock()
@@ -176,24 +175,93 @@ def test_autoreset_wrapper_autoreset():
         for _ in range(99):
             # this is where you would insert your policy
             actions = {agent: env.action_space(agent).sample() for agent in env.agents}
-            observations, rewards, terminations, truncations, infos = env.step(actions)
+            _ = env.step(actions)
         autoreset_patch.assert_not_called()
 
 
 def test_return_unwrapped():
-    env = parallel_env(render_mode="human")
+    env = RPSParallelEnv(render_mode="human")
     env = PettingZooAutoResetParallelWrapper(env)
-    observations, infos = env.reset()
+    env.reset()
     unwrapped = env.unwrapped
     assert isinstance(unwrapped, ParallelEnv)
 
 
 def test_return_state():
-    env = parallel_env(render_mode="human")
+    env = RPSParallelEnv(render_mode="human")
     env = PettingZooAutoResetParallelWrapper(env)
-    observations, infos = env.reset()
+    observations, _ = env.reset()
     state = env.state
     assert state == observations
+
+
+def test_pettingzoo_wrapper_close():
+    """Test PettingZooAutoResetParallelWrapper.close()."""
+    env = RPSParallelEnv(render_mode=None)
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    wrapped.reset()
+    result = wrapped.close()
+    assert result is None
+
+
+def test_pettingzoo_wrapper_state_property():
+    """Test PettingZooAutoResetParallelWrapper.state property."""
+    env = RPSParallelEnv(render_mode=None)
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    observations, _ = wrapped.reset()
+    state = wrapped.state
+    assert state is not None
+    assert state == observations
+
+
+@pytest.mark.parametrize("agent_id", ["player_0", "player_1"])
+def test_pettingzoo_wrapper_autoreset_on_all_done(agent_id):
+    """Test autoreset when all terminations/truncations."""
+    env = RPSParallelEnv(render_mode=None)
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    wrapped.reset()
+    # Step until truncation (100 steps) to trigger autoreset
+    for _ in range(101):
+        actions = {
+            agent: wrapped.action_space(agent).sample() for agent in wrapped.agents
+        }
+        _, _, _, _, _ = wrapped.step(actions)
+        if not wrapped.agents:
+            break
+    assert len(wrapped.agents) == 2
+    assert wrapped.observation_space(agent_id) is not None
+    assert wrapped.action_space(agent_id) is not None
+
+
+@pytest.mark.parametrize("agent_id", ["player_0", "player_1"])
+def test_pettingzoo_wrapper_delegates_spaces(agent_id):
+    env = RPSParallelEnv(render_mode=None)
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    obs_space = wrapped.observation_space(agent_id)
+    act_space = wrapped.action_space(agent_id)
+    assert obs_space == env.observation_space(agent_id)
+    assert act_space == env.action_space(agent_id)
+
+
+def test_pettingzoo_wrapper_render():
+    env = RPSParallelEnv(render_mode=None)
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    result = wrapped.render()
+    assert result is None
+
+
+def test_pettingzoo_wrapper_init_suppresses_missing_state_space():
+    env = RPSParallelEnv(render_mode=None)
+    assert not hasattr(env, "state_space")
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    assert not hasattr(wrapped, "state_space")
+
+
+def test_pettingzoo_wrapper_init_sets_state_space_when_present():
+    env = RPSParallelEnv(render_mode=None)
+    env.state_space = "custom_state"
+    wrapped = PettingZooAutoResetParallelWrapper(env)
+    assert wrapped.state_space == "custom_state"
 
 
 if __name__ == "__main__":

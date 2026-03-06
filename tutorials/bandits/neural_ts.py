@@ -125,9 +125,8 @@ if __name__ == "__main__":
     pbar = default_progress_bar(max_steps)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         for i, agent in enumerate(pop):  # Loop through population
-            losses = []
             context = env.reset()  # Reset environment at start of episode
-            for _idx_step in range(episode_steps):
+            for _ in range(episode_steps):
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment
@@ -150,8 +149,7 @@ if __name__ == "__main__":
                         # Sample replay buffer
                         # Learn according to agent's RL algorithm
                         experiences = memory.sample(agent.batch_size)
-                        loss = agent.learn(experiences)
-                        losses.append(loss)
+                        agent.learn(experiences)
 
                 context = next_context
                 score[i].append(reward)
