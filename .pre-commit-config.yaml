@@ -24,14 +24,14 @@ repos:
           - id: mixed-line-ending
             args: [--fix=lf]
     - repo: https://github.com/codespell-project/codespell
-      rev: v2.4.1
+      rev: v2.4.2
       hooks:
           - id: codespell
             args:
                 - --skip=*.css,*.js,*.map,*.scss,*.svg
                 - --ignore-words-list=magent,pres,roate
     - repo: https://github.com/astral-sh/ruff-pre-commit
-      rev: v0.15.4
+      rev: v0.15.5
       hooks:
           - id: ruff
             name: Ruff Linter
@@ -46,6 +46,6 @@ repos:
 
     - repo: https://github.com/astral-sh/uv-pre-commit
       # uv version.
-      rev: 0.10.7
+      rev: 0.10.9
       hooks:
           - id: uv-lock
