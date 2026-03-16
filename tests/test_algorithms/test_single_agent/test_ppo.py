@@ -160,7 +160,8 @@ class SimpleCNN(nn.Module):
 
 
 @pytest.fixture(scope="function")
-def build_ppo(observation_space, action_space, recurrent, accelerator, request):
+def build_ppo(observation_space, action_space, recurrent, accelerator_flag, request):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
     use_rollout_buffer = recurrent
@@ -191,14 +192,15 @@ def build_ppo(observation_space, action_space, recurrent, accelerator, request):
         "multibinary_space",
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_initialize_ppo(
     observation_space,
     action_space,
     encoder_cls,
-    accelerator,
+    accelerator_flag,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
     ppo = PPO(
@@ -355,7 +357,7 @@ def test_initialize_ppo_with_actor_network_no_critic(
     "action_space",
     ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("recurrent", [False])
 # Returns the expected action when given a state observation.
 def test_returns_expected_action(
@@ -364,6 +366,7 @@ def test_returns_expected_action(
     build_ppo,
     request,
     recurrent,
+    accelerator_flag,
 ):
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
@@ -426,13 +429,13 @@ def test_returns_expected_action(
     ],
 )
 @pytest.mark.parametrize("recurrent", [True])
-@pytest.mark.parametrize("accelerator", [None])
+@pytest.mark.parametrize("accelerator_flag", [False])
 # Returns the expected action when given a state observation.
 def test_returns_expected_action_recurrent(
     observation_space,
     action_space,
     recurrent,
-    accelerator,
+    accelerator_flag,
     build_ppo,
     request,
 ):
@@ -514,7 +517,7 @@ def test_ppo_optimizer_parameters(vector_space, discrete_space):
 
 @pytest.mark.parametrize("observation_space", ["vector_space"])
 @pytest.mark.parametrize("action_space", ["discrete_space"])
-@pytest.mark.parametrize("accelerator", [None])
+@pytest.mark.parametrize("accelerator_flag", [False])
 @pytest.mark.parametrize("recurrent", [False])
 def test_returns_expected_action_mask_vectorized(
     build_ppo,
@@ -522,6 +525,7 @@ def test_returns_expected_action_mask_vectorized(
     action_space,
     recurrent,
     request,
+    accelerator_flag,
 ):
     observation_space = request.getfixturevalue(observation_space)
     request.getfixturevalue(action_space)  # for parametrization
@@ -536,13 +540,14 @@ def test_returns_expected_action_mask_vectorized(
     "observation_space",
     ["vector_space", "image_space", "dict_space"],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_learns_from_experiences(
     observation_space,
     discrete_space,
-    accelerator,
+    accelerator_flag,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     batch_size = 45
     observation_space = request.getfixturevalue(observation_space)
     ppo = PPO(

@@ -99,8 +99,9 @@ def simple_cnn():
         ("multidiscrete_space", EvolvableMLP),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
-def test_initialize_cqn(observation_space, encoder_cls, accelerator, request):
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+def test_initialize_cqn(observation_space, encoder_cls, accelerator_flag, request):
+    accelerator = Accelerator() if accelerator_flag else None
     action_space = spaces.Discrete(2)
     observation_space = request.getfixturevalue(observation_space)
     cqn = CQN(observation_space, action_space, accelerator=accelerator)

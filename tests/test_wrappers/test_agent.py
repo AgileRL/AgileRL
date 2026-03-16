@@ -432,8 +432,9 @@ def test_rsnorm_get_action(observation_space, request):
     "observation_space",
     ["vector_space", "discrete_space", "multidiscrete_space", "dict_space"],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
-def test_rsnorm_learn(observation_space, vector_space, request, accelerator):
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+def test_rsnorm_learn(observation_space, vector_space, request, accelerator_flag):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     action_space = vector_space
     batch_size = 4

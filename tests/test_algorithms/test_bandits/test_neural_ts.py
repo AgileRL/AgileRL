@@ -61,8 +61,9 @@ class DummyBanditEnv:
         ("dict_space", EvolvableMultiInput),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
-def test_initialize_bandit(observation_space, encoder_cls, accelerator, request):
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+def test_initialize_bandit(observation_space, encoder_cls, accelerator_flag, request):
+    accelerator = Accelerator() if accelerator_flag else None
     action_space = spaces.Discrete(2)
     observation_space = request.getfixturevalue(observation_space)
     device = accelerator.device if accelerator else "cpu"
@@ -207,13 +208,14 @@ def test_returns_expected_action_mask(vector_space, discrete_space):
 
 # learns from experiences and updates network parameters
 @pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_learns_from_experiences(
     observation_space,
     discrete_space,
-    accelerator,
+    accelerator_flag,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     batch_size = 64
 

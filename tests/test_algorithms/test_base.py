@@ -835,7 +835,7 @@ def test_save_load_checkpoint_single_agent(
         ("ma_dict_space", EvolvableMultiInput),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None])
 def test_save_load_checkpoint_multi_agent(
     tmpdir,
@@ -843,10 +843,11 @@ def test_save_load_checkpoint_multi_agent(
     observation_spaces,
     encoder_cls,
     ma_discrete_space,
-    accelerator,
+    accelerator_flag,
     compile_mode,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     # Initialize the dummy multi-agent
     obs_spaces = request.getfixturevalue(observation_spaces)
     agent_ids = ["agent_0", "agent_1", "agent_2"]
@@ -981,7 +982,7 @@ def test_load_from_pretrained_single_agent(
     ],
 )
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None])
 def test_load_from_pretrained_multi_agent(
     device,
@@ -990,10 +991,11 @@ def test_load_from_pretrained_multi_agent(
     observation_spaces,
     encoder_cls,
     action_spaces,
-    accelerator,
+    accelerator_flag,
     compile_mode,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     # Initialize the dummy multi-agent
     obs_spaces = request.getfixturevalue(observation_spaces)
     act_spaces = request.getfixturevalue(action_spaces)

@@ -2660,7 +2660,7 @@ def test_train_multi_agent_off_policy(
     "state_size, action_size, sum_scores, swap_channels",
     [((6,), 2, True, False), ((6,), 2, False, False), ((250, 160, 3), 2, False, True)],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_train_multi_agent_on_policy(
     multi_env,
     population_multi_agent,
@@ -2669,8 +2669,9 @@ def test_train_multi_agent_on_policy(
     mutations,
     sum_scores,
     swap_channels,
-    accelerator,
+    accelerator_flag,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     pop, _ = train_multi_agent_on_policy(
         multi_env,
         "env_name",

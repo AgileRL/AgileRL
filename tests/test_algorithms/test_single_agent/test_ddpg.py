@@ -103,8 +103,9 @@ class SimpleCNN(nn.Module):
         ("multidiscrete_space", EvolvableMLP),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
-def test_initialize_ddpg(observation_space, encoder_cls, accelerator, request):
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+def test_initialize_ddpg(observation_space, encoder_cls, accelerator_flag, request):
+    accelerator = Accelerator() if accelerator_flag else None
     action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
     observation_space = request.getfixturevalue(observation_space)
     ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
@@ -368,8 +369,9 @@ def test_returns_expected_action_training(observation_space, request, action_dty
         "multidiscrete_space",
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
-def test_learns_from_experiences(observation_space, accelerator, request):
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+def test_learns_from_experiences(observation_space, accelerator_flag, request):
+    accelerator = Accelerator() if accelerator_flag else None
     action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
     observation_space = request.getfixturevalue(observation_space)
     batch_size = 4

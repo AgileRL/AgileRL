@@ -61,14 +61,15 @@ class DummyEnv:
         ("multidiscrete_space", EvolvableMLP),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_initialize_dqn(
     observation_space,
     encoder_cls,
-    accelerator,
+    accelerator_flag,
     discrete_space,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     action_space = discrete_space
     observation_space = request.getfixturevalue(observation_space)
     dqn = DQN(observation_space, action_space, accelerator=accelerator)
@@ -360,15 +361,16 @@ def test_dqn_optimizer_parameters(vector_space, discrete_space):
         "dict_space",
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("double", [False, True])
 def test_learns_from_experiences(
     observation_space,
-    accelerator,
+    accelerator_flag,
     double,
     discrete_space,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     action_space = discrete_space
     observation_space = request.getfixturevalue(observation_space)
     batch_size = 64
