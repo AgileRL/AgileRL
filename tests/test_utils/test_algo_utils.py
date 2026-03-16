@@ -928,8 +928,14 @@ def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
             forward_names = {getattr(a, "__forward_arg__", None) for a in args}
             assert forward_names == {"PeftModel", "PreTrainedModel"}
     finally:
-        # Restore original module to avoid affecting other tests
+        # Restore original module in both sys.modules and the parent package
+        # to avoid affecting other tests (importlib.import_module sets the
+        # attribute on the parent package, which won't be undone by just
+        # restoring sys.modules).
         sys.modules["agilerl.utils.algo_utils"] = original_module
+        import agilerl.utils as _utils_pkg
+
+        _utils_pkg.algo_utils = original_module
 
 
 class TestReconcileShapes:
