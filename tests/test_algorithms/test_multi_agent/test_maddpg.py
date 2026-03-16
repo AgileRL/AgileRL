@@ -1169,7 +1169,7 @@ def test_maddpg_get_action_vectorized_agent_masking(
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
 @pytest.mark.parametrize("compile_mode", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("batch_size", [64])
 def test_maddpg_learns_from_experiences(
     observation_spaces,
@@ -1179,12 +1179,13 @@ def test_maddpg_learns_from_experiences(
     agent_ids,
     device,
     compile_mode,
-    accelerator,
+    accelerator_flag,
     request,
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
