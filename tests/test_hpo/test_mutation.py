@@ -1891,6 +1891,18 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
     pre_training_mut = False
 
     if use_accelerator:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        try:
+            import deepspeed.comm.comm as ds_comm
+            import deepspeed.utils.groups as ds_groups
+
+            for attr in dir(ds_groups):
+                if attr.startswith("_") and attr.endswith("_GROUP"):
+                    setattr(ds_groups, attr, None)
+            ds_comm.cdb = None
+        except ImportError:
+            pass
         AcceleratorState._reset_state(True)
 
         deepspeed_config = {
@@ -2002,8 +2014,19 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
         mut_agent.clean_up()
         old_agent.clean_up()
     if use_accelerator:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        try:
+            import deepspeed.comm.comm as ds_comm
+            import deepspeed.utils.groups as ds_groups
+
+            for attr in dir(ds_groups):
+                if attr.startswith("_") and attr.endswith("_GROUP"):
+                    setattr(ds_groups, attr, None)
+            ds_comm.cdb = None
+        except ImportError:
+            pass
         AcceleratorState._reset_state(True)
-        Accelerator()
 
 
 @pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])
