@@ -65,6 +65,9 @@ def cleanup_after_test(request):
                 setattr(ds_groups, attr, None)
         ds_comm.cdb = None
 
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+
     torch._dynamo.reset()
     force_gpu_memory_release()
     AcceleratorState._reset_state(True)
