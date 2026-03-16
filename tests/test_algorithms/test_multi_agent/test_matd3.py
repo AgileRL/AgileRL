@@ -558,7 +558,7 @@ def test_initialize_matd3_with_cnn_networks(
     assert isinstance(matd3.criterion, nn.MSELoss)
 
 
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
     "observation_spaces, encoder_cls",
@@ -573,11 +573,12 @@ def test_initialize_matd3_with_evo_networks(
     encoder_cls,
     device,
     compile_mode,
-    accelerator,
+    accelerator_flag,
     request,
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     observation_space = spaces.Dict(
         {agent_id: observation_spaces[idx] for idx, agent_id in enumerate(agent_ids)},
     )
