@@ -461,5 +461,5 @@ Full Training Code
 ------------------
 .. collapse:: Full code
 
-   .. literalinclude:: ../../../tutorials/LLM_Finetuning/grpo_reasoning.py
+   .. literalinclude:: ../../../tutorials/llm_finetuning/grpo_reasoning.py
       :language: python

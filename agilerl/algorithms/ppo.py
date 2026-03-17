@@ -101,8 +101,7 @@ class PPO(RLAlgorithm):
     :type wrap: bool, optional
     :param bptt_sequence_type: Type of sequence for BPTT learning, defaults to BPTTSequenceType.CHUNKED
     :type bptt_sequence_type: BPTTSequenceType, optional
-    :param max_seq_len: Maximum sequence length for truncated BPTT, defaults to None, where complete episodes
-    are used as sequences.
+    :param max_seq_len: Maximum sequence length for truncated BPTT, defaults to None, where complete episodes are used as sequences.
     :type max_seq_len: int, optional
     """
 
@@ -565,6 +564,8 @@ class PPO(RLAlgorithm):
         obs: ArrayOrTensor,
         action_mask: ArrayOrTensor | None = None,
         hidden_state: dict[str, ArrayOrTensor] | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> ActionReturnType | RecurrentActionReturnType:
         """Return the next action to take in the environment.
 

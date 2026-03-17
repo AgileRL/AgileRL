@@ -35,8 +35,6 @@ if __name__ == "__main__":
     )
     env.reset()
 
-    # Append number of agents and agent IDs to the initial hyperparameter dictionary
-    n_agents = env.num_agents
     agent_ids = env.agents
 
     # Load the saved agent
@@ -46,12 +44,6 @@ if __name__ == "__main__":
     # Define test loop parameters
     episodes = 10  # Number of episodes to test agent on
     max_steps = 25  # Max number of steps to take in the environment in each episode
-
-    rewards = []  # List to collect total episodic reward
-    frames = []  # List to collect frames
-    indi_agent_rewards = {
-        agent_id: [] for agent_id in agent_ids
-    }  # Dictionary to collect inidivdual agent rewards
 
     rewards = []  # List to collect total episodic reward
     frames = []  # List to collect frames

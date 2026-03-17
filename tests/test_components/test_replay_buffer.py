@@ -141,6 +141,81 @@ def test_add_experience_when_buffer_full():
     )
 
 
+def test_add_experience_when_cursor_wraps():
+    """Test add() wrap-around path when end > max_size."""
+    buffer = ReplayBuffer(max_size=3)
+
+    # Add 2 transitions: cursor=2, size=2
+    data1 = TensorDict(
+        {
+            "state": torch.tensor([[1, 2, 3], [4, 5, 6]]),
+            "action": torch.tensor([[0], [1]]),
+            "reward": torch.tensor([[1.0], [2.0]]),
+        },
+    )
+    data1.batch_size = [2]
+    buffer.add(data1)
+    assert len(buffer) == 2
+    assert buffer._cursor == 2
+
+    # Add 2 more: start=2, end=4 > 3, triggers wrap-around split
+    data2 = TensorDict(
+        {
+            "state": torch.tensor([[7, 8, 9], [10, 11, 12]]),
+            "action": torch.tensor([[2], [3]]),
+            "reward": torch.tensor([[3.0], [4.0]]),
+        },
+    )
+    data2.batch_size = [2]
+    buffer.add(data2)
+    assert len(buffer) == 3
+    assert buffer._cursor == 1  # (2+2) % 3 = 1
+
+    # Verify storage layout deterministically: [data2[1], data1[1], data2[0]]
+    storage = buffer.storage[: buffer.size]
+    expected = torch.tensor([[10.0, 11.0, 12.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
+    assert torch.allclose(storage["state"].float(), expected)
+
+
+def test_add_with_1d_tensors_reshaped_to_batch_1():
+    buffer = ReplayBuffer(max_size=10)
+
+    # Batch of 2 with 1D reward/action (shape (2,) instead of (2,1))
+    data = TensorDict(
+        {
+            "state": torch.tensor([[1, 2, 3], [4, 5, 6]]),
+            "action": torch.tensor([0.0, 1.0]),
+            "reward": torch.tensor([1.0, 2.0]),
+        },
+    )
+    data.batch_size = [2]
+    buffer.add(data)
+    assert len(buffer) == 2
+    sample = buffer.sample(2)
+    assert sample["reward"].shape == (2, 1)
+    assert sample["action"].shape == (2, 1)
+
+
+def test_add_with_nested_tensordict_1d_values_reshaped():
+    """Test add() reshapes 1D values inside nested TensorDict."""
+    buffer = ReplayBuffer(max_size=10)
+
+    # Nested TensorDict: inner "scalar" has shape (2,) -> reshaped to (2, 1)
+    inner = TensorDict({"scalar": torch.tensor([1.0, 2.0])}, batch_size=[2])
+    data = TensorDict(
+        {
+            "state": inner,
+            "action": torch.tensor([[0], [1]]),
+            "reward": torch.tensor([[1.0], [2.0]]),
+        },
+    )
+    data.batch_size = [2]
+    buffer.add(data)
+    assert len(buffer) == 2
+    sample = buffer.sample(2)
+    assert sample["state"]["scalar"].shape == (2, 1)
+
+
 def test_add_vectorized_experiences():
     """Test adding vectorized experiences."""
     buffer = ReplayBuffer(max_size=10)
@@ -844,3 +919,133 @@ def test_weight_calculation():
         )
 
         assert torch.isclose(weight, torch.tensor(expected_weight), rtol=1e-5)
+
+
+def test_replay_buffer_size_setter():
+    buffer = ReplayBuffer(max_size=10)
+    data = TensorDict(
+        {
+            "state": torch.tensor([1]),
+            "action": torch.tensor([0]),
+            "reward": torch.tensor([1.0]),
+        },
+    )
+    data = data.unsqueeze(0)
+    data.batch_size = [1]
+    buffer.add(data)
+    buffer.size = 5
+    assert buffer._size == 5
+
+
+def test_replay_buffer_storage_property_after_init():
+    buffer = ReplayBuffer(max_size=10)
+    data = TensorDict(
+        {
+            "state": torch.tensor([1]),
+            "action": torch.tensor([0]),
+            "reward": torch.tensor([1.0]),
+        },
+    )
+    data = data.unsqueeze(0)
+    data.batch_size = [1]
+    buffer.add(data)
+    assert buffer.storage is not None
+    assert buffer.storage.batch_size[0] == 10
+
+
+def test_prioritized_replay_buffer_update_priority_assert():
+    buffer = PrioritizedReplayBuffer(max_size=10, alpha=0.6)
+    data = TensorDict(
+        {
+            "state": torch.tensor([1]),
+            "action": torch.tensor([0]),
+            "reward": torch.tensor([1.0]),
+        },
+    )
+    data = data.unsqueeze(0)
+    data.batch_size = [1]
+    buffer.add(data)
+    with pytest.raises(AssertionError):
+        buffer._update_priority(100, 1.0)
+
+
+def test_multistep_buffer_sample_from_indices():
+    buffer = MultiStepReplayBuffer(max_size=100, n_step=3, gamma=0.99)
+    buffer.reward_key = "reward"
+    buffer.done_key = "done"
+    buffer.ns_key = "next_state"
+    for i in range(6):
+        data = TensorDict(
+            {
+                "state": torch.tensor([i]),
+                "action": torch.tensor([i % 2]),
+                "reward": torch.tensor([float(i)]),
+                "next_state": torch.tensor([i + 1]),
+                "done": torch.tensor([i == 5]),
+            },
+        )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
+        buffer.add(data)
+    if len(buffer) > 0:
+        idxs = torch.tensor([0])
+        samples = buffer.sample_from_indices(idxs)
+        assert "state" in samples
+        assert samples.batch_size[0] == 1
+
+
+def test_multistep_buffer_get_n_step_info_termination_key():
+    buffer = MultiStepReplayBuffer(max_size=100, n_step=3, gamma=0.99)
+    buffer.reward_key = "reward"
+    buffer.ns_key = "next_obs"
+    for i in range(3):
+        data = TensorDict(
+            {
+                "state": torch.tensor([i]),
+                "action": torch.tensor([i]),
+                "reward": torch.tensor([float(i + 1)]),
+                "next_obs": torch.tensor([i + 1]),
+                "termination": torch.tensor([False]),
+            },
+        )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
+        buffer.add(data)
+    assert buffer.done_key == "termination"
+
+
+def test_multistep_buffer_get_n_step_info_terminated_key():
+    buffer = MultiStepReplayBuffer(max_size=100, n_step=3, gamma=0.99)
+    buffer.reward_key = "reward"
+    buffer.ns_key = "next_obs"
+    for i in range(3):
+        data = TensorDict(
+            {
+                "state": torch.tensor([i]),
+                "action": torch.tensor([i]),
+                "reward": torch.tensor([float(i + 1)]),
+                "next_obs": torch.tensor([i + 1]),
+                "terminated": torch.tensor([False]),
+            },
+        )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
+        buffer.add(data)
+    assert buffer.done_key == "terminated"
+
+
+def test_prioritized_buffer_update_priorities_small_priority_clamped():
+    buffer = PrioritizedReplayBuffer(max_size=10, alpha=0.6)
+    for i in range(3):
+        data = TensorDict(
+            {
+                "state": torch.tensor([i]),
+                "action": torch.tensor([0]),
+                "reward": torch.tensor([1.0]),
+            },
+        )
+        data = data.unsqueeze(0)
+        data.batch_size = [1]
+        buffer.add(data)
+    buffer.update_priorities(torch.tensor([0, 1]), torch.tensor([1e-10, 1e-10]))
+    assert buffer.sum_tree[0] >= 1e-5**buffer.alpha

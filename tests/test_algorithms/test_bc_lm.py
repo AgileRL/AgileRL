@@ -265,7 +265,7 @@ class TestBC_LM:
         attn_mask = torch.ones(2, 5, dtype=torch.float)
         prefix_embs = torch.randn(2, 3, 64)
         prefix_attn_mask = torch.ones(2, 3, dtype=torch.float)
-        # This should hit lines 70, 75 if position_ids is long
+        # Trigger prefix-position handling path with long position ids.
         try:
             bc_lm(
                 tokens,
@@ -312,7 +312,7 @@ class TestBC_LM:
         )  # Remaining positions should be transition_weight
 
     def test_get_weights_scatter_line_231(self, bc_lm):
-        """Test specifically to cover line 231 (torch.scatter)"""
+        """Test torch.scatter behavior in get_weights."""
         tokens = torch.randint(0, 9, (1, 3), dtype=torch.long)
         # Single action index to ensure n[0] = argmax([0]) + 1 = 0 + 1 = 1 > 0
         action_idxs = torch.tensor([[0]], dtype=torch.long)
@@ -768,7 +768,7 @@ class TestBC_Policy:
         assert probs is not None
 
     def test_beam_raw_termination_mask_update_deterministic(self, bc_policy):
-        """Deterministic test to ensure line 494 (termination_mask update) is hit"""
+        """Deterministic test for termination_mask update path."""
         tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
         attn_mask = torch.ones(1, 1, dtype=torch.float)
 
@@ -778,11 +778,11 @@ class TestBC_Policy:
         # Force beam search to run multiple iterations by setting a longer max_generation_len
         bc_policy.kind = "beam"
         bc_policy.generation_kwargs["beam_width"] = 1
-        # This should run the while loop long enough to hit line 494
+        # Run enough iterations to update termination mask.
         bc_policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=5)
 
     def test_generate_valid_sample_deterministic(self, bc_policy):
-        """Deterministic test to ensure line 522 (return generations, probs) is hit"""
+        """Deterministic test for generate return path."""
         tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
         attn_mask = torch.ones(1, 1, dtype=torch.float)
 
@@ -798,7 +798,7 @@ class TestBC_Policy:
         assert probs is not None
 
     def test_generate_valid_beam_deterministic(self, bc_lm):
-        """Deterministic test for beam generation to ensure line 522 is hit"""
+        """Deterministic test for beam generation return path."""
         policy = BC_Policy(bc_lm, "beam", beam_width=1)
         tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
         attn_mask = torch.ones(1, 1, dtype=torch.float)

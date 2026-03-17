@@ -784,3 +784,189 @@ def test_clone_instance(
     assert_state_dicts_equal(clone.state_dict(), evolvable_cnn.state_dict())
     for key, param in clone_net.named_parameters():
         torch.testing.assert_close(param, original_feature_net_dict[key])
+
+
+# Test change_kernel_size with explicit kernel_size (tuple / int branches)
+def test_change_kernel_size_with_tuple_kernel_size(device):
+    """Covers change_kernel_size when kernel_size is provided and tuple_sizes is True."""
+    from agilerl.modules.cnn import MutableKernelSizes
+
+    mut = MutableKernelSizes(
+        sizes=[(3, 3), (3, 3)],
+        cnn_block_type="Conv2d",
+        sample_input=torch.zeros(1, 1, 16, 16, device=device),
+        rng=np.random.default_rng(42),
+    )
+    result = mut.change_kernel_size(
+        hidden_layer=1,
+        channel_size=[32, 32],
+        stride_size=[1, 1],
+        input_shape=(1, 16, 16),
+        kernel_size=(5, 5),
+    )
+    assert result == (5, 5)
+    assert mut.sizes[1] != (3, 3)
+
+
+def test_change_kernel_size_with_int_kernel_size(device):
+    """Covers change_kernel_size when kernel_size is provided and tuple_sizes is False (int sizes)."""
+    _ = EvolvableCNN(
+        input_shape=[1, 16, 16],
+        channel_size=[32],
+        kernel_size=[3],
+        stride_size=[1],
+        num_outputs=4,
+        device=device,
+    )
+    # With single layer, change_kernel falls back to add_layer; use mut_kernel_size directly
+    from agilerl.modules.cnn import MutableKernelSizes
+
+    mut = MutableKernelSizes(
+        sizes=[3],
+        cnn_block_type="Conv2d",
+        sample_input=torch.zeros(1, 1, 16, 16, device=device),
+        rng=np.random.default_rng(42),
+    )
+    result = mut.change_kernel_size(
+        hidden_layer=0,
+        channel_size=[32],
+        stride_size=[1],
+        input_shape=(1, 16, 16),
+        kernel_size=5,
+    )
+    assert result == 5
+    assert mut.sizes[0] == 5
+
+
+def test_change_kernel_size_with_int_conversion(device):
+    """Covers change_kernel_size int conversion when kernel_size is float-like."""
+    from agilerl.modules.cnn import MutableKernelSizes
+
+    mut = MutableKernelSizes(
+        sizes=[3],
+        cnn_block_type="Conv2d",
+        sample_input=torch.zeros(1, 1, 16, 16, device=device),
+        rng=np.random.default_rng(42),
+    )
+    result = mut.change_kernel_size(
+        hidden_layer=0,
+        channel_size=[32],
+        stride_size=[1],
+        input_shape=(1, 16, 16),
+        kernel_size=5.0,
+    )
+    assert result == 5
+
+
+######### Test shrink_preserve_parameters branches #########
+def test_shrink_preserve_parameters_1d_and_2d_params(device):
+    """Covers shrink_preserve_parameters when old_size != new_size, norm not in key."""
+    evolvable_cnn = EvolvableCNN(
+        input_shape=[1, 16, 16],
+        channel_size=[32, 32],
+        kernel_size=[3, 3],
+        stride_size=[1, 1],
+        num_outputs=4,
+        device=device,
+    )
+    evolvable_cnn.add_layer()
+    evolvable_cnn.remove_layer()
+    output = evolvable_cnn(torch.ones(1, 1, 16, 16, device=device))
+    assert output.shape[1] == 4
+
+
+def test_add_layer_revert_l_in_too_small(device):
+    """Covers add_layer revert when l_in_for_new_layer < 2."""
+    evolvable_cnn = EvolvableCNN(
+        input_shape=[1, 8, 8],
+        channel_size=[32],
+        kernel_size=[2],
+        stride_size=[2],
+        num_outputs=4,
+        max_hidden_layers=3,
+        device=device,
+    )
+    initial_channels = len(evolvable_cnn.channel_size)
+    evolvable_cnn.add_layer()
+    assert len(evolvable_cnn.channel_size) >= initial_channels
+
+
+def test_cnn_change_activation_output(device):
+    cnn = EvolvableCNN(
+        input_shape=[1, 16, 16],
+        channel_size=[32, 32],
+        kernel_size=[3, 3],
+        stride_size=[1, 1],
+        num_outputs=4,
+        device=device,
+    )
+    cnn.change_activation("GELU", output=True)
+    assert cnn.output_activation == "GELU"
+
+
+def test_cnn_net_config(device):
+    cnn = EvolvableCNN(
+        input_shape=[1, 16, 16],
+        channel_size=[32],
+        kernel_size=[3],
+        stride_size=[1],
+        num_outputs=4,
+        device=device,
+    )
+    nc = cnn.net_config
+    assert "input_shape" not in nc
+    assert "num_outputs" not in nc
+    assert "device" not in nc
+    assert "name" not in nc
+
+
+def test_cnn_conv3d_forward_4d_input_unsqueeze(device):
+    cnn = EvolvableCNN(
+        input_shape=[1, 16, 16],
+        channel_size=[32],
+        kernel_size=[3],
+        stride_size=[1],
+        num_outputs=4,
+        block_type="Conv3d",
+        sample_input=torch.randn(1, 1, 1, 16, 16).to(device),
+        device=device,
+    )
+    x = torch.randn(1, 1, 16, 16).to(device)
+    out = cnn(x)
+    assert out.shape == (1, 4)
+
+
+def test_assert_correct_kernel_sizes_conv3d(device):
+    from agilerl.modules.cnn import MutableKernelSizes, _assert_correct_kernel_sizes
+
+    _assert_correct_kernel_sizes([(1, 3, 3), (1, 2, 2)], "Conv3d")
+
+
+def test_mutable_kernel_sizes_add_layer_conv1d(device):
+    from agilerl.modules.cnn import MutableKernelSizes
+
+    mut = MutableKernelSizes(
+        sizes=[(3,), (3,)],
+        cnn_block_type="Conv1d",
+        sample_input=torch.zeros(1, 1, 64, device=device),
+        rng=np.random.default_rng(42),
+    )
+    mut.add_layer(5)
+    assert mut.sizes[-1] == (5,)
+
+
+def test_add_layer_revert_max_s_new_lt_1(device):
+    """Covers add_layer revert when max_s_new < 1."""
+    evolvable_cnn = EvolvableCNN(
+        input_shape=[1, 4, 4],
+        channel_size=[32],
+        kernel_size=[4],
+        stride_size=[1],
+        num_outputs=4,
+        max_hidden_layers=3,
+        device=device,
+        random_seed=0,
+    )
+    evolvable_cnn.add_layer()
+    output = evolvable_cnn(torch.ones(1, 1, 4, 4, device=device))
+    assert output.shape[1] == 4

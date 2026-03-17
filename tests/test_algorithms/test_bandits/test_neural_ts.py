@@ -61,8 +61,9 @@ class DummyBanditEnv:
         ("dict_space", EvolvableMultiInput),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
-def test_initialize_bandit(observation_space, encoder_cls, accelerator, request):
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+def test_initialize_bandit(observation_space, encoder_cls, accelerator_flag, request):
+    accelerator = Accelerator() if accelerator_flag else None
     action_space = spaces.Discrete(2)
     observation_space = request.getfixturevalue(observation_space)
     device = accelerator.device if accelerator else "cpu"
@@ -207,13 +208,14 @@ def test_returns_expected_action_mask(vector_space, discrete_space):
 
 # learns from experiences and updates network parameters
 @pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_learns_from_experiences(
     observation_space,
     discrete_space,
-    accelerator,
+    accelerator_flag,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     batch_size = 64
 
@@ -395,6 +397,52 @@ def test_clone_new_index(vector_space, discrete_space):
     assert clone_agent.index == 100
     bandit.clean_up()
     clone_agent.clean_up()
+
+
+def test_algorithm_test_loop_swap_channels(image_space, discrete_space, monkeypatch):
+    monkeypatch.setattr(
+        "agilerl.algorithms.neural_ts_bandit.obs_channels_to_first", lambda x: x
+    )
+    env = DummyBanditEnv(state_size=image_space.shape, arms=discrete_space.n)
+    agent = NeuralTS(observation_space=image_space, action_space=discrete_space)
+    mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+    assert isinstance(mean_score, float)
+    agent.clean_up()
+
+
+def test_init_raises_on_invalid_learn_step(vector_space, discrete_space):
+    with pytest.raises(
+        AssertionError, match="Learn step must be greater than or equal to one"
+    ):
+        NeuralTS(vector_space, discrete_space, learn_step=0)
+
+
+def test_init_raises_on_invalid_gamma(vector_space, discrete_space):
+    with pytest.raises(AssertionError, match="Scaling factor must be positive"):
+        NeuralTS(vector_space, discrete_space, gamma=0)
+
+
+def test_init_raises_on_invalid_reg(vector_space, discrete_space):
+    with pytest.raises(
+        AssertionError, match="Loss regularization parameter must be greater than zero"
+    ):
+        NeuralTS(vector_space, discrete_space, reg=0.0)
+
+
+def test_get_action_single_output_multi_arm_branch(vector_space):
+    action_space = spaces.Discrete(3)
+    actor = EvolvableMLP(
+        num_inputs=vector_space.shape[0],
+        num_outputs=1,
+        hidden_size=[16],
+        layer_norm=False,
+    )
+    bandit = NeuralTS(vector_space, action_space, actor_network=actor)
+    state = np.array([1.0, 0.5, -0.5, 0.0], dtype=np.float32)
+    action = bandit.get_action(state, action_mask=None)
+    assert isinstance(action, (int, np.integer))
+    assert 0 <= action < 3
+    bandit.clean_up()
 
 
 def test_clone_after_learning(vector_space, discrete_space):

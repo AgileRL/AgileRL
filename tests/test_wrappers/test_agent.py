@@ -220,6 +220,20 @@ def test_set_get_state(setup_rs_norm):
     assert wrapper.obs_rms.epsilon == wrapper_2.obs_rms.epsilon
 
 
+def test_rsnorm_device_when_agent_has_rollout_buffer(vector_space):
+    """Test device property returns 'cpu' when agent has rollout_buffer."""
+    observation_space = vector_space
+    action_space = copy.deepcopy(vector_space)
+    ppo = PPO(
+        observation_space,
+        action_space,
+        use_rollout_buffer=True,
+        num_envs=1,
+    )
+    wrapper = RSNorm(ppo)
+    assert wrapper.device == "cpu"
+
+
 def test_normalize_observation(setup_rs_norm):
     wrapper, _ = setup_rs_norm
     obs = torch.tensor([1.0, 2.0, 3.0])
@@ -418,8 +432,9 @@ def test_rsnorm_get_action(observation_space, request):
     "observation_space",
     ["vector_space", "discrete_space", "multidiscrete_space", "dict_space"],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
-def test_rsnorm_learn(observation_space, vector_space, request, accelerator):
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+def test_rsnorm_learn(observation_space, vector_space, request, accelerator_flag):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     action_space = vector_space
     batch_size = 4
@@ -854,3 +869,398 @@ def test_ippo_custom_training_with_async_env(
     test_observations, test_infos = env.reset()
     test_actions, _, _, _ = async_agent.get_action(test_observations, test_infos)
     assert all(agent_id in test_observations for agent_id in test_actions)
+
+
+def test_agent_wrapper_base_get_action_learn(vector_space):
+    from agilerl.wrappers.agent import AgentWrapper
+
+    class MinimalWrapper(AgentWrapper):
+        pass
+
+    agent = DDPG(vector_space, copy.deepcopy(vector_space), batch_size=4)
+    wrapper = MinimalWrapper(agent)
+    obs = vector_space.sample()
+    action = wrapper.get_action(obs)
+    assert action is not None
+    experiences = get_experiences_batch(vector_space, vector_space, 4, "cpu")
+    result = wrapper.learn(experiences)
+    assert result is not None
+
+
+def test_rsnorm_build_rms_dict_norm_obs_keys_none():
+    obs_space = spaces.Dict(
+        {
+            "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+            "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
+            "other": spaces.Box(low=-1.0, high=1.0, shape=(1,)),
+        }
+    )
+    rms = RSNorm.build_rms(obs_space, norm_obs_keys=None, device="cpu")
+    assert isinstance(rms, dict)
+    assert set(rms) == {"sensor1", "sensor2", "other"}
+
+
+def test_async_extract_inactive_agents_dict_obs(ma_discrete_space):
+    dict_space = spaces.Dict(
+        {
+            "img": spaces.Box(low=0, high=1, shape=(4,)),
+            "vec": spaces.Box(low=-1, high=1, shape=(2,)),
+        }
+    )
+    agent = IPPO(
+        observation_spaces=[dict_space],
+        action_spaces=ma_discrete_space[:1],
+        agent_ids=["agent_0"],
+        device="cpu",
+    )
+    wrapper = AsyncAgentsWrapper(agent)
+    obs = {
+        "agent_0": {
+            "img": np.array(
+                [[1.0, 1.0, 1.0, 1.0], [np.nan, np.nan, np.nan, np.nan]],
+                dtype=np.float32,
+            ),
+            "vec": np.array([[1.0, 1.0], [np.nan, np.nan]], dtype=np.float32),
+        }
+    }
+    inactive, filtered = wrapper.extract_inactive_agents(obs)
+    assert "agent_0" in inactive
+
+
+def test_async_get_action_with_inactive_float_actions(
+    ma_vector_space, ma_discrete_space
+):
+    from gymnasium import spaces as gym_spaces
+
+    continuous_space = [
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,)) for _ in range(2)
+    ]
+    agent = IPPO(
+        observation_spaces=ma_vector_space[:2],
+        action_spaces=continuous_space,
+        agent_ids=["agent_0", "agent_1"],
+        device="cpu",
+    )
+    wrapper = AsyncAgentsWrapper(agent)
+    obs = {
+        "agent_0": np.array([[1.0] * 6, [np.nan] * 6], dtype=np.float32),
+        "agent_1": np.array([[1.0] * 6], dtype=np.float32),
+    }
+    action_dict, _, _, _ = wrapper.get_action(obs, {a: {} for a in obs})
+    assert "agent_0" in action_dict
+    assert "agent_1" in action_dict
+
+
+def test_async_stack_experiences_list_with_data(ma_vector_space, ma_discrete_space):
+    agent = IPPO(
+        observation_spaces=ma_vector_space[:2],
+        action_spaces=ma_discrete_space[:2],
+        agent_ids=["agent_0", "agent_1"],
+        device="cpu",
+    )
+    wrapper = AsyncAgentsWrapper(agent)
+    experience = {
+        "agent_0": [np.random.rand(3, 6).astype(np.float32)],
+        "agent_1": [np.random.rand(3, 6).astype(np.float32)],
+    }
+    stacked = wrapper.stack_experiences(experience)
+    assert stacked["agent_0"] is not None
+    assert stacked["agent_1"] is not None
+
+
+def test_async_extract_inactive_agents_all_inactive(ma_vector_space, ma_discrete_space):
+    """Test extract_inactive_agents when all agents inactive."""
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    agent = IPPO(
+        observation_spaces=ma_vector_space,
+        action_spaces=ma_discrete_space,
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+    wrapper = AsyncAgentsWrapper(agent)
+    obs = {
+        "agent_0": np.full((2, 6), np.nan),
+        "agent_1": np.full((2, 6), np.nan),
+        "other_agent_0": np.full((2, 6), np.nan),
+    }
+    inactive_agents, filtered_obs = wrapper.extract_inactive_agents(obs)
+    assert len(filtered_obs) == 0
+
+
+def test_async_stack_experiences_non_list_input(ma_vector_space, ma_discrete_space):
+    """Test stack_experiences when experience values are not lists."""
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    agent = IPPO(
+        observation_spaces=ma_vector_space,
+        action_spaces=ma_discrete_space,
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+    wrapper = AsyncAgentsWrapper(agent)
+    # Single arrays (not lists) - should pass through as-is
+    experience = {
+        "agent_0": np.random.rand(5, 6),
+        "agent_1": np.random.rand(5, 6),
+        "other_agent_0": np.random.rand(5, 6),
+    }
+    stacked = wrapper.stack_experiences(experience)
+    assert "agent_0" in stacked
+    assert "agent_1" in stacked
+    assert stacked["agent_0"] is experience["agent_0"]
+    assert stacked["agent_1"] is experience["agent_1"]
+
+
+@pytest.mark.parametrize(
+    "attr_name,on_agent", [("wrapper_only_attr", False), ("batch_size", True)]
+)
+def test_agent_wrapper_setattr_delegates_correctly(vector_space, attr_name, on_agent):
+    agent = DDPG(vector_space, copy.deepcopy(vector_space))
+    wrapper = RSNorm(agent)
+    setattr(wrapper, attr_name, 42)
+    target = wrapper.agent if on_agent else wrapper
+    assert getattr(target, attr_name) == 42
+
+
+def test_rsnorm_learn_tensordict_experiences(vector_space):
+    from tensordict import TensorDict
+
+    agent = DDPG(vector_space, copy.deepcopy(vector_space), batch_size=4)
+    wrapper = RSNorm(agent)
+    batch = 4
+    td = TensorDict(
+        {
+            "obs": torch.randn(batch, *vector_space.shape),
+            "next_obs": torch.randn(batch, *vector_space.shape),
+            "action": torch.randn(batch, vector_space.shape[0]),
+            "reward": torch.ones(batch),
+            "done": torch.zeros(batch),
+        },
+        batch_size=[batch],
+    )
+    loss_info = wrapper.learn(td)
+    assert isinstance(loss_info, (tuple, dict)) or isinstance(loss_info, float)
+
+
+def test_agent_wrapper_repr(vector_space):
+    agent = DDPG(vector_space, copy.deepcopy(vector_space))
+    wrapper = RSNorm(agent)
+    r = repr(wrapper)
+    assert "RSNorm" in r and "DDPG" in r
+
+
+def test_agent_wrapper_getattr_delegates_to_agent(vector_space):
+    agent = DDPG(vector_space, copy.deepcopy(vector_space))
+    wrapper = RSNorm(agent)
+    assert wrapper.batch_size == agent.batch_size
+
+
+def test_rsnorm_clone_with_index(vector_space):
+    ddpg = DDPG(vector_space, copy.deepcopy(vector_space))
+    wrapper = RSNorm(ddpg)
+    clone = wrapper.clone(index=0)
+    assert clone.agent.index == 0
+
+
+def test_rsnorm_get_action_skips_stats_when_not_training(setup_rs_norm):
+    wrapper, mock_agent = setup_rs_norm
+    mock_agent.training = False
+    obs = torch.tensor([1.0, 2.0, 3.0])
+    wrapper.get_action(obs)
+    wrapper.wrapped_get_action.assert_called_once()
+
+
+def test_rsnorm_build_rms_tuple_space():
+    obs_space = spaces.Tuple(
+        (
+            spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+            spaces.Box(low=-1.0, high=1.0, shape=(3,)),
+        )
+    )
+    rms = RSNorm.build_rms(obs_space, device="cpu")
+    assert isinstance(rms, tuple)
+    assert len(rms) == 2
+
+
+def test_rsnorm_build_rms_dict_space():
+    obs_space = spaces.Dict(
+        {
+            "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+            "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
+        }
+    )
+    rms = RSNorm.build_rms(obs_space, device="cpu")
+    assert isinstance(rms, dict)
+    assert set(rms) == {"sensor1", "sensor2"}
+
+
+def test_rsnorm_learn_rollout_buffer_full(vector_space):
+    obs_space = vector_space
+    action_space = copy.deepcopy(vector_space)
+    ppo = PPO(obs_space, action_space, use_rollout_buffer=True, num_envs=2)
+    ppo.rollout_buffer.full = True
+    ppo.rollout_buffer.pos = 10
+    wrapper = RSNorm(ppo)
+    valid_data = wrapper.agent.rollout_buffer.buffer[:10].clone()
+    valid_data["observations"] = torch.randn(10, 2, *obs_space.shape)
+    valid_data["next_observations"] = torch.randn(10, 2, *obs_space.shape)
+    wrapper.agent.rollout_buffer.buffer[:10] = valid_data
+    env = DummyEnv(state_size=obs_space.shape, vect=True, num_envs=2)
+    collect_rollouts(ppo, env, n_steps=40)
+    wrapper.agent.rollout_buffer.full = True
+    wrapper.agent.rollout_buffer.pos = 20
+    wrapper.learn()
+    assert True
+
+
+def test_async_extract_inactive_agents_ndarray_obs(ma_vector_space, ma_discrete_space):
+    agent = IPPO(
+        observation_spaces=ma_vector_space[:2],
+        action_spaces=ma_discrete_space[:2],
+        agent_ids=["agent_0", "agent_1"],
+        device="cpu",
+    )
+    wrapper = AsyncAgentsWrapper(agent)
+    obs = {
+        "agent_0": np.array(
+            [
+                [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan],
+            ]
+        ),
+        "agent_1": np.array([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]]),
+    }
+    inactive, filtered = wrapper.extract_inactive_agents(obs)
+    assert "agent_0" in inactive
+    assert inactive["agent_0"].shape[0] == 1
+    assert filtered["agent_0"].shape == (1, 6)
+    assert filtered["agent_1"].shape == (1, 6)
+
+
+def test_async_extract_inactive_agents_tuple_obs(ma_vector_space, ma_discrete_space):
+    tuple_space = [
+        spaces.Tuple(
+            (
+                spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+                spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+            )
+        )
+    ]
+    disc_space = [spaces.Discrete(2)]
+    agent = IPPO(
+        observation_spaces=tuple_space,
+        action_spaces=disc_space,
+        agent_ids=["agent_0"],
+        device="cpu",
+    )
+    wrapper = AsyncAgentsWrapper(agent)
+    obs = {
+        "agent_0": (
+            np.array([[1.0, 2.0, 3.0], [np.nan, np.nan, np.nan]]),
+            np.array([[4.0, 5.0, 6.0], [np.nan, np.nan, np.nan]]),
+        ),
+    }
+    inactive, filtered = wrapper.extract_inactive_agents(obs)
+    assert "agent_0" in inactive
+    assert isinstance(filtered["agent_0"], tuple)
+    assert len(filtered["agent_0"]) == 2
+
+
+def test_async_extract_inactive_non_vectorized_skipped(
+    ma_vector_space, ma_discrete_space
+):
+    agent = IPPO(
+        observation_spaces=ma_vector_space[:1],
+        action_spaces=ma_discrete_space[:1],
+        agent_ids=["agent_0"],
+        device="cpu",
+    )
+    wrapper = AsyncAgentsWrapper(agent)
+    obs = {"agent_0": np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])}
+    inactive, filtered = wrapper.extract_inactive_agents(obs)
+    assert len(inactive) == 0
+    assert "agent_0" in filtered
+
+
+def test_async_stack_experiences_empty_list(ma_vector_space, ma_discrete_space):
+    agent = IPPO(
+        observation_spaces=ma_vector_space[:2],
+        action_spaces=ma_discrete_space[:2],
+        agent_ids=["agent_0", "agent_1"],
+        device="cpu",
+    )
+    wrapper = AsyncAgentsWrapper(agent)
+    experience = {"agent_0": [], "agent_1": [np.random.rand(2, 6)]}
+    stacked = wrapper.stack_experiences(experience)
+    assert stacked["agent_0"] is None
+    assert stacked["agent_1"] is not None
+
+
+def test_async_get_action_with_partial_inactive(ma_vector_space, ma_discrete_space):
+    agent = IPPO(
+        observation_spaces=ma_vector_space[:2],
+        action_spaces=ma_discrete_space[:2],
+        agent_ids=["agent_0", "agent_1"],
+        device="cpu",
+    )
+    wrapper = AsyncAgentsWrapper(agent)
+    obs = {
+        "agent_0": np.array([[1.0] * 6]),
+        "agent_1": np.array([[1.0] * 6]),
+    }
+    action_dict, _, _, _ = wrapper.get_action(obs, {a: {} for a in obs})
+    assert "agent_0" in action_dict and "agent_1" in action_dict
+
+
+def test_async_learn_missing_next_state(ma_vector_space, ma_discrete_space):
+    """Test learn when agent has no next_state."""
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    agent = IPPO(
+        observation_spaces=ma_vector_space,
+        action_spaces=ma_discrete_space,
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+    wrapper = AsyncAgentsWrapper(agent)
+    n_steps = 4
+    obs_dim = ma_vector_space[0].shape[0]
+    states = {
+        "agent_0": [np.random.rand(obs_dim) for _ in range(n_steps)],
+        "agent_1": [np.random.rand(obs_dim) for _ in range(n_steps)],
+        "other_agent_0": [np.random.rand(obs_dim) for _ in range(n_steps)],
+    }
+    actions = {
+        "agent_0": [np.array(0) for _ in range(n_steps)],
+        "agent_1": [np.array(1) for _ in range(n_steps)],
+        "other_agent_0": [np.array(0) for _ in range(n_steps)],
+    }
+    log_probs = {a: [0.1] * n_steps for a in agent_ids}
+    rewards = {a: [1.0] * n_steps for a in agent_ids}
+    dones = {
+        "agent_0": [False] * (n_steps - 1) + [True],
+        "agent_1": [False] * n_steps,
+        "other_agent_0": [False] * n_steps,
+    }
+    values = {a: [0.5] * n_steps for a in agent_ids}
+    # other_agent_0 has no next_state (not in dict) - triggers None branch
+    next_state = {
+        "agent_0": np.random.rand(obs_dim),
+        "agent_1": np.random.rand(obs_dim),
+    }
+    next_done = {
+        "agent_0": np.array(True),
+        "agent_1": np.array(False),
+        "other_agent_0": np.array(False),
+    }
+
+    experiences = (
+        states,
+        actions,
+        log_probs,
+        rewards,
+        dones,
+        values,
+        next_state,
+        next_done,
+    )
+    loss_info = wrapper.learn(experiences)
+    assert isinstance(loss_info, dict)

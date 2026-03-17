@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import numpy as np
 import torch
 import wandb
-from tqdm import trange
+from gymnasium.spaces import Discrete
 
 from agilerl.algorithms.ppo import PPO
 from agilerl.training.train_on_policy import train_on_policy
@@ -21,7 +21,6 @@ class StabilizeSkill(Skill):
     def __init__(self, env):
         super().__init__(env)
 
-        self.theta_level = 0
         self.history = {"x": [], "y": [], "theta": []}
 
     def skill_reward(self, observation, reward, terminated, truncated, info):
@@ -170,10 +169,10 @@ if __name__ == "__main__":
         "landing": LandingSkill,
     }
 
-    for skill, skill_cfg in skills.items():
+    for skill in skills:
         env = make_skill_vect_envs(
             INIT_HP["ENV_NAME"],
-            skill_cfg,
+            skills[skill],
             num_envs=1,
         )  # Create environment
 
@@ -228,7 +227,6 @@ if __name__ == "__main__":
     env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=1)  # Create environment
 
     observation_space = env.single_observation_space
-    action_space = env.single_action_space
 
     action_dim = len(
         trained_skills,
@@ -240,7 +238,7 @@ if __name__ == "__main__":
     pop = create_population(
         algo="PPO",  # Algorithm
         observation_space=observation_space,  # Observation space
-        action_dim=action_dim,  # Action space
+        action_space=Discrete(action_dim),  # Action space
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
         population_size=INIT_HP["POPULATION_SIZE"],  # Population size
@@ -264,9 +262,6 @@ if __name__ == "__main__":
             },
         )
 
-    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    pbar = trange(INIT_HP["MAX_STEPS"], unit="step", bar_format=bar_format, ascii=True)
-
     total_steps = 0
 
     # RL training loop
@@ -284,7 +279,7 @@ if __name__ == "__main__":
 
             done = np.zeros(1)
 
-            for _idx_step in range(500):
+            for _ in range(500):
                 # Get next action from agent
                 action, log_prob, _, value = agent.get_action(state)
 
@@ -292,7 +287,8 @@ if __name__ == "__main__":
                 skill_agent = trained_skills[action[0]]["agent"]
                 skill_duration = trained_skills[action[0]]["skill_duration"]
                 reward = 0
-                for _skill_step in range(skill_duration):
+                next_state, next_done = state, done
+                for _ in range(skill_duration):
                     # If landed, do nothing
                     if state[0][6] or state[0][7]:
                         next_state, skill_reward, termination, truncation, _ = env.step(
@@ -334,8 +330,8 @@ if __name__ == "__main__":
                 ),
             )
 
-            agent.steps[-1] += _idx_step + 1
-            total_steps += _idx_step + 1
+            agent.steps[-1] += 500
+            total_steps += 500
 
         if (agent.steps[-1]) % INIT_HP["EVO_STEPS"] == 0:
             mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)

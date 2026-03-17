@@ -593,16 +593,12 @@ class EvolvableGPT(EvolvableModule):
         """Add a block layer to transformer."""
         if self.n_layer < self.max_layers:
             self.n_layer += 1
-        # else:
-        #     self.add_node()
 
     @mutation(MutationType.LAYER)
     def remove_layer(self) -> None:
         """Remove a block layer from transformer."""
         if self.n_layer > self.min_layers:
             self.n_layer -= 1
-        # else:
-        #     self.add_node()
 
     @mutation(MutationType.NODE)
     def add_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:

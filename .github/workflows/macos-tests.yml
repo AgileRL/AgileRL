@@ -1,5 +1,5 @@
 ---
-name: Tests
+name: macOS
 
 on:
     push:
@@ -15,22 +15,14 @@ permissions:
     contents: read
 
 jobs:
-    build:
-        runs-on: gha-runner-scale-set
+    tests:
+        runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false
             max-parallel: 4
             matrix:
+                os: [macos-26]
                 python-version: ['3.10', '3.11', '3.12', '3.13']
-
-        container:
-            image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-devel
-            options: --user root
-
-        # Workspace (/__w) is ~1GB with little free space; root (/) has plenty. Put cache and venv on /.
-        env:
-            UV_CACHE_DIR: /tmp/uv-cache
-            UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
 
         steps:
             - uses: actions/checkout@v4
@@ -41,16 +33,9 @@ jobs:
 
             - name: Install dependencies
               run: |
+                  pip install uv
                   uv sync --locked --all-groups --extra all
-                  echo "/tmp/agilerl-venv/bin" >> $GITHUB_PATH
-                  uv cache clean
-                  rm -rf /tmp/uv-cache
 
             - name: Test with pytest
               run: |
-                  uv run pytest --exitfirst --cov=agilerl --cov-report=xml
-
-            - name: Upload coverage reports to Codecov
-              uses: codecov/codecov-action@v3
-              env:
-                  CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+                  uv run pytest --exitfirst --cov=agilerl --cov-report=term-missing

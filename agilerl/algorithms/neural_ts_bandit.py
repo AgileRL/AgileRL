@@ -185,6 +185,8 @@ class NeuralTS(RLAlgorithm):
         self,
         obs: ObservationType,
         action_mask: np.ndarray | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> int:
         """Return the next action to take in the environment.
 
@@ -197,32 +199,47 @@ class NeuralTS(RLAlgorithm):
         """
         obs = self.preprocess_observation(obs)
 
-        mu = self.actor(obs)
-        g = torch.zeros((self.action_dim, self.numel)).to(self.device)
-        for k, fx in enumerate(mu):
+        mu_raw = self.actor(obs).reshape(-1)
+        mu = (
+            mu_raw.repeat(self.action_dim)
+            if (mu_raw.numel() == 1 and self.action_dim > 1)
+            else mu_raw
+        )
+        g = torch.zeros((self.action_dim, self.numel), device=self.device)
+        if mu_raw.numel() == 1 and self.action_dim > 1:
             self.optimizer.zero_grad()
-            fx.backward(retain_graph=True)
-            g[k] = torch.cat(
+            mu_raw[0].backward(retain_graph=True)
+            grad_vec = torch.cat(
                 [
                     w.grad.detach().flatten() / np.sqrt(self.exp_layer.weight.size(0))
                     for w in self.exp_layer.parameters()
                     if w.requires_grad
                 ],
             )
+            g[:] = grad_vec
+        else:
+            for k, fx in enumerate(mu):
+                self.optimizer.zero_grad()
+                fx.backward(retain_graph=True)
+                g[k] = torch.cat(
+                    [
+                        w.grad.detach().flatten()
+                        / np.sqrt(self.exp_layer.weight.size(0))
+                        for w in self.exp_layer.parameters()
+                        if w.requires_grad
+                    ],
+                )
 
         with torch.no_grad():
-            action_values = torch.normal(
-                mean=self.actor(obs),
-                std=self.gamma
-                * torch.sqrt(
-                    torch.matmul(
-                        torch.matmul(g[:, None, :], self.sigma_inv),
-                        g[:, :, None],
-                    )[:, 0, :],
-                ),
+            std = self.gamma * torch.sqrt(
+                torch.matmul(
+                    torch.matmul(g[:, None, :], self.sigma_inv),
+                    g[:, :, None],
+                )[:, 0, :].squeeze(-1),
             )
+            action_values = torch.normal(mean=mu, std=std)
 
-        action_values = action_values.cpu().numpy()
+        action_values = action_values.detach().cpu().numpy()
         if action_mask is None:
             action = np.argmax(action_values)
         else:

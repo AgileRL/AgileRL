@@ -856,8 +856,8 @@ class FixedObsPolicyEnv:
     ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {
-            "agent_0": [1, -1][action["agent_0"]],
-            "other_agent_0": [-1, 1][action["other_agent_0"]],
+            "agent_0": [1, -1][int(np.asarray(action["agent_0"]).flat[0])],
+            "other_agent_0": [-1, 1][int(np.asarray(action["other_agent_0"]).flat[0])],
         }  # Reward depends on action
         terminated = {"agent_0": True, "other_agent_0": True}
         truncated = {"agent_0": False, "other_agent_0": False}
@@ -926,8 +926,8 @@ class FixedObsPolicyImageEnv:
             "other_agent_0": np.zeros((1, 3, 3)),
         }
         reward = {
-            "agent_0": [1, -1][action["agent_0"]],
-            "other_agent_0": [-1, 1][action["other_agent_0"]],
+            "agent_0": [1, -1][int(np.asarray(action["agent_0"]).flat[0])],
+            "other_agent_0": [-1, 1][int(np.asarray(action["other_agent_0"]).flat[0])],
         }  # Reward depends on action
         terminated = {"agent_0": True, "other_agent_0": True}
         truncated = {"agent_0": False, "other_agent_0": False}
@@ -1966,7 +1966,7 @@ def check_on_policy_learning_with_probe_env(
 
     agent = algo_class(**algo_args, device=device)
 
-    for _i in trange(learn_steps):
+    for _ in trange(learn_steps):
         state, _ = env.reset()
         states = {agent_id: [] for agent_id in agent.agent_ids}
         actions = {agent_id: [] for agent_id in agent.agent_ids}
@@ -2002,15 +2002,10 @@ def check_on_policy_learning_with_probe_env(
                     truncation[agent_id],
                 ).astype(np.int8)
 
-            next_done = {agent: np.array([n_d]) for agent, n_d in next_done.items()}
+            next_done = {aid: np.array([n_d]) for aid, n_d in next_done.items()}
 
             state = next_state
             done = next_done
-
-            done = {
-                agent_id: np.expand_dims(np.array(d), 0)
-                for agent_id, d in termination.items()
-            }
             if done[agent.agent_ids[0]]:
                 state, _ = env.reset()
 
@@ -2025,9 +2020,7 @@ def check_on_policy_learning_with_probe_env(
             next_state,
             next_done,
         )
-        _loss = agent.learn(experiences)
-        # if i < 20:
-        #     print("Loss = ", _loss)
+        agent.learn(experiences)
 
     with torch.no_grad():
         for agent_id in agent.observation_space:
@@ -2068,18 +2061,15 @@ def check_on_policy_learning_with_probe_env(
                     if discrete:
                         _, _, _ = actor(state[agent_id])
                         # TorchDistribution uses raw tensors: logits -> probs via softmax
-                        predicted_policy_values = (
+                        _ = (
                             torch.softmax(actor.head_net.dist.logits, dim=-1)
                             .detach()
                             .cpu()
                             .numpy()
                         )
                     else:
-                        _, _, _ = actor(state[agent_id])
-                        # TorchDistribution uses mu (mean) for continuous
-                        predicted_policy_values = (  # noqa: F841
-                            actor.head_net.dist.mu.detach().cpu().numpy()
-                        )
+                        actor(state[agent_id])
+                        _ = actor.head_net.dist.mu.detach().cpu().numpy()
                     # assert np.allclose(policy_values[agent_id], predicted_policy_values, atol=0.1)
                     # if not np.allclose(
                     #     policy_values[agent_id], predicted_policy_values, atol=0.1

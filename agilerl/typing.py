@@ -123,16 +123,14 @@ EvolvableNetworkType = (
 )
 DeviceType = str | torch.device
 OptimizerType = Optimizer | AcceleratedOptimizer
-ConfigType = IsDataclass | NetConfigType
-StateDict = dict[str, Any] | dict[str, dict[str, Any]]
 
 SingleAgentMutReturnType = dict[str, Any]
 MultiAgentMutReturnType = dict[str, dict[str, Any]]
 MutationReturnType = SingleAgentMutReturnType | MultiAgentMutReturnType
 PopulationType = list[EvolvableAlgorithmProtocol]
 MutationMethod = Callable[[EvolvableAlgorithmProtocol], EvolvableAlgorithmProtocol]
-ConfigType = IsDataclass | dict[str, Any]
-StateDict = dict[str, Any] | list[dict[str, Any]]
+ConfigType = IsDataclass | NetConfigType
+StateDict = dict[str, Any] | dict[str, dict[str, Any]] | list[dict[str, Any]]
 
 
 class BatchDimension:

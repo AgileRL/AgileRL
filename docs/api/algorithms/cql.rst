@@ -3,7 +3,7 @@
 Conservative Q-Learning (CQL)
 =============================
 
-`CQL <https://arxiv.org/abs/2006.04779>`_ is an extension of Q-learning that addresses the typical overestimation of values induced by the distributional shift between
+`CQL <https://arxiv.org/abs/2006.04779>`__ is an extension of Q-learning that addresses the typical overestimation of values induced by the distributional shift between
 the dataset and the learned policy in offline RL algorithms. A conservative Q-function is learned, such that the expected value of a
 policy under this Q-function lower-bounds its true value.
 

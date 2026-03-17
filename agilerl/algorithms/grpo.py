@@ -1,10 +1,18 @@
 import gc
+import warnings
 from typing import Any
 
 import numpy as np
 import torch
 from accelerate import Accelerator
-from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
+
+try:
+    from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
+
+    HAS_LIGER_KERNEL = True
+except ImportError:
+    LigerFusedLinearGRPOFunction = None
+    HAS_LIGER_KERNEL = False
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
@@ -143,8 +151,15 @@ class GRPO(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         use_liger_loss: bool = False,
     ) -> None:
+        if use_liger_loss and not HAS_LIGER_KERNEL:
+            warnings.warn(
+                "use_liger_loss=True requested, but `liger-kernel` is not available on this platform/environment. "
+                "Falling back to standard loss.",
+                stacklevel=2,
+            )
+            use_liger_loss = False
 
-        device = (
+        resolved_device = (
             f"cuda:{accelerator.process_index}"
             if accelerator is not None
             else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -170,7 +185,7 @@ class GRPO(LLMAlgorithm):
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             wrap=wrap,
             hp_config=hp_config,
-            device=device,
+            device=resolved_device,
             accelerator=accelerator,
             name="GRPO",
             gradient_checkpointing=gradient_checkpointing,
@@ -245,13 +260,17 @@ class GRPO(LLMAlgorithm):
         self,
         obs: LLMObsType,
         training: bool = True,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Return the next action to take in the environment.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
-        :param training: Flag to indicate training mode, defaults to True
+        :param training: Whether action generation is for training (uses group) or eval (single sample), defaults to True
         :type training: bool, optional
+        :param args: Additional positional arguments (unused; for base contract)
+        :param kwargs: Additional keyword arguments (e.g. training; defaults True)
         :return: Completion IDs and action masks
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
@@ -362,15 +381,17 @@ class GRPO(LLMAlgorithm):
         self,
         env: ReasoningGym,
         loop: int = 1,
-    ) -> torch.Tensor:
-        """Return fitness (test) score tensor of llm on test sub-set.
+        *args: Any,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Return fitness (test) score of llm on test sub-set.
 
         :param env: The environment to be tested in
         :type env: ReasoningGym environment
-        :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
+        :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 1
         :type loop: int, optional
-        :return: Mean test score of the agent
-        :rtype: float
+        :return: Mean test score (numpy array)
+        :rtype: np.ndarray
         """
         with env.eval_mode(), torch.no_grad():
             prompts = env.reset()
@@ -380,10 +401,10 @@ class GRPO(LLMAlgorithm):
                 next_prompts, reward = env.step(completion_ids)
                 prompts = next_prompts
                 rewards.append(reward)
-        reward_tensor = torch.cat(rewards)
-        mean_fit = torch.mean(reward_tensor).item()
+            reward_tensor = torch.cat(rewards)
+            mean_fit = torch.mean(reward_tensor).item()
         self.fitness.append(mean_fit)
-        return reward_tensor
+        return np.array(mean_fit)
 
     def _calculate_advantage(
         self,
@@ -532,12 +553,6 @@ class GRPO(LLMAlgorithm):
             torch.ones_like(denominator),
         )
         loss = (loss * mask).sum(dim=-1) / denominator
-        log_probs_ratio, clipped_log_probs_ratio, surrogate, clipped_surrogate = (
-            None,
-            None,
-            None,
-            None,
-        )
         return loss.mean(), kl.mean()
 
     def _grpo_loss_liger(
@@ -563,6 +578,13 @@ class GRPO(LLMAlgorithm):
         :return: Mean loss and mean KL divergence.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
+        if LigerFusedLinearGRPOFunction is None:
+            msg = (
+                "Liger GRPO loss was requested but `liger-kernel` is not available. "
+                "Set use_liger_loss=False."
+            )
+            raise ImportError(msg)
+
         batch_ids = batch_ids.to(self.device)
         mask = action_mask.to(self.device).contiguous()  # (B, seq_len-1)
         adv = advantages.squeeze(-1).to(self.device).contiguous()  # (B,)

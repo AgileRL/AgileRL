@@ -95,8 +95,6 @@ class DQN(RLAlgorithm):
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
         assert lr > 0, "Learning rate must be greater than zero."
-        assert isinstance(learn_step, int), "Learn step rate must be an integer."
-        assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
@@ -191,6 +189,8 @@ class DQN(RLAlgorithm):
         obs: ObservationType,
         epsilon: float = 0.0,
         action_mask: np.ndarray | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> np.ndarray:
         """Return the next action to take in the environment.
 
