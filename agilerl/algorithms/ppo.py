@@ -477,6 +477,7 @@ class PPO(RLAlgorithm):
                     next_hidden_combined.update(next_hidden_critic)
 
             return action, log_prob, entropy, values, next_hidden_combined
+
         latent_pi = self.actor.extract_features(obs)
         action, log_prob, entropy = self.actor.forward_head(
             latent_pi,
@@ -530,6 +531,7 @@ class PPO(RLAlgorithm):
         obs: ArrayOrTensor,
         actions: ArrayOrTensor,
         hidden_state: dict[str, ArrayOrTensor] | None = None,
+        action_mask: ArrayOrTensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluate the actions.
 
@@ -539,6 +541,8 @@ class PPO(RLAlgorithm):
         :type actions: ArrayOrTensor
         :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
         :type hidden_state: dict[str, ArrayOrTensor] | None
+        :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
+        :type action_mask: ArrayOrTensor | None
         :return: Log probability, entropy, state values
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
@@ -547,6 +551,7 @@ class PPO(RLAlgorithm):
         # Get values from actor-critic
         _, _, entropy, values, _ = self._get_action_and_values(
             obs,
+            action_mask=action_mask,
             hidden_state=hidden_state,
             sample=False,
         )
@@ -848,6 +853,7 @@ class PPO(RLAlgorithm):
                 mb_advantages = minibatch_td["advantages"]
                 mb_returns = minibatch_td["returns"]
                 mb_old_values = minibatch_td["values"]
+                mb_action_masks = minibatch_td.get("action_masks", None)
 
                 if isinstance(self.action_space, spaces.Discrete):
                     mb_actions = mb_actions.squeeze(-1)
@@ -856,6 +862,7 @@ class PPO(RLAlgorithm):
                     obs=mb_obs,
                     actions=mb_actions,
                     hidden_state=None,
+                    action_mask=mb_action_masks,
                 )
 
                 # Policy loss
@@ -957,6 +964,7 @@ class PPO(RLAlgorithm):
                 mb_obs_seq = minibatch_padded["observations"]
                 mb_actions_seq = minibatch_padded["actions"]
                 mb_pad_mask = minibatch_padded["pad_mask"]
+                mb_action_masks_seq = minibatch_padded.get("action_masks", None)
                 mb_old_log_probs = minibatch_unpadded["log_probs"]
                 mb_advantages = minibatch_unpadded["advantages"]
                 mb_values = minibatch_unpadded["values"]
@@ -993,6 +1001,7 @@ class PPO(RLAlgorithm):
                     obs=mb_obs_seq,
                     actions=mb_actions_seq,
                     hidden_state=mb_initial_hidden_states_dict,
+                    action_mask=mb_action_masks_seq,
                 )
 
                 # Mask out padded values
