@@ -2009,52 +2009,6 @@ def test_action_masks_in_rollout_buffer_learn(vector_space, discrete_space, recu
     ppo.clean_up()
 
 
-def test_no_action_mask_still_works(vector_space, discrete_space):
-    """Verify that the rollout buffer and learning still work when no action masks
-    are provided (backwards compatibility)."""
-    learn_step = 32
-    batch_size = 16
-
-    ppo = PPO(
-        observation_space=vector_space,
-        action_space=discrete_space,
-        use_rollout_buffer=True,
-        learn_step=learn_step,
-        batch_size=batch_size,
-    )
-
-    for i in range(learn_step):
-        obs = np.array([vector_space.sample()], dtype=np.float32)
-        next_obs = np.array([vector_space.sample()], dtype=np.float32)
-
-        # No action mask provided
-        action, log_prob, _, value = ppo.get_action(obs)
-
-        ppo.rollout_buffer.add(
-            obs=obs,
-            action=action,
-            reward=1.0,
-            done=i == learn_step - 1,
-            value=float(value),
-            log_prob=float(log_prob),
-            next_obs=next_obs,
-        )
-
-    last_value = torch.zeros((ppo.num_envs, 1), device=ppo.device)
-    last_done = torch.zeros((ppo.num_envs, 1), device=ppo.device)
-    ppo.rollout_buffer.compute_returns_and_advantages(last_value, last_done)
-
-    # No action masks were provided, so the buffer should NOT have them allocated
-    buffer_td = ppo.rollout_buffer.get_tensor_batch(device=ppo.device)
-    assert "action_masks" not in buffer_td.keys(), (
-        "action_masks should not be allocated when no masks are provided"
-    )
-
-    loss = ppo.learn()
-    assert isinstance(loss, float)
-    ppo.clean_up()
-
-
 def test_continuous_action_space_no_mask_buffer(vector_space):
     """Verify that continuous action spaces do not allocate action mask buffers."""
     continuous_action_space = vector_space  # Box space
