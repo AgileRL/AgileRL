@@ -3,7 +3,6 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch._dynamo
 from gymnasium import spaces
 from tensordict.nn import CudaGraphModule
 from torch import nn, optim
@@ -41,6 +40,8 @@ class DQN(RLAlgorithm):
     :type gamma: float, optional
     :param tau: For soft update of target network parameters, defaults to 1e-3
     :type tau: float, optional
+    :param max_grad_norm: Maximum value for gradient clipping, defaults to 10.0
+    :type max_grad_norm: float, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
     :param double: Use double Q-learning, defaults to False

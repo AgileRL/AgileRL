@@ -174,7 +174,7 @@ class EvolvableSimBa(EvolvableModule):
         :type numb_new_nodes: int, optional
         """
         if numb_new_nodes is None:
-            numb_new_nodes = self.rng.choice([16, 32, 64])
+            numb_new_nodes = int(self.rng.choice([16, 32, 64]))
 
         if self.hidden_size + numb_new_nodes <= self.max_mlp_nodes:  # HARD LIMIT
             self.hidden_size += numb_new_nodes
@@ -191,7 +191,7 @@ class EvolvableSimBa(EvolvableModule):
         :type numb_new_nodes: int, optional
         """
         if numb_new_nodes is None:
-            numb_new_nodes = self.rng.choice([16, 32, 64])
+            numb_new_nodes = int(self.rng.choice([16, 32, 64]))
 
         # HARD LIMIT
         if self.hidden_size - numb_new_nodes > self.min_mlp_nodes:

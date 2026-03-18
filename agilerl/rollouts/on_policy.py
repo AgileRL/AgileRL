@@ -126,6 +126,7 @@ def _collect_rollouts(
         value_np = np.atleast_1d(value)
         log_prob_np = np.atleast_1d(log_prob)
 
+        current_action_mask = info.get("action_mask", None)
         agent.rollout_buffer.add(
             obs=obs,
             action=action,
@@ -135,6 +136,7 @@ def _collect_rollouts(
             log_prob=log_prob_np,
             next_obs=next_obs,
             hidden_state=current_hidden_state_for_buffer,
+            action_mask=current_action_mask,
         )
 
         scores += reward_np

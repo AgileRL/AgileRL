@@ -347,6 +347,26 @@ def get_num_actions(space: spaces.Space) -> int:
     raise NotImplementedError(msg)
 
 
+def get_action_mask_size(space: spaces.Space) -> int:
+    """Return the size of the action mask for a given action space.
+
+    Action masks are only applicable to discrete action spaces. For continuous
+    (Box) spaces, returns 0.
+
+    :param space: Action space
+    :type space: spaces.Space
+    :return: Size of the action mask, or 0 if masking is not applicable
+    :rtype: int
+    """
+    if isinstance(space, spaces.Discrete):
+        return space.n
+    if isinstance(space, spaces.MultiDiscrete):
+        return int(sum(space.nvec))
+    if isinstance(space, spaces.MultiBinary):
+        return space.n
+    return 0
+
+
 def make_safe_deepcopies(
     *args: EvolvableModuleProtocol | list[EvolvableModuleProtocol],
 ) -> list[EvolvableModuleProtocol]:

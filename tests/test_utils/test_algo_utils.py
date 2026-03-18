@@ -36,6 +36,7 @@ from agilerl.utils.algo_utils import (
     extract_sequences_from_episode,
     filter_init_dict,
     flatten_experiences,
+    get_action_mask_size,
     get_hidden_states_shape_from_model,
     get_input_size_from_space,
     get_output_size_from_space,
@@ -1548,6 +1549,20 @@ def test_get_input_size_from_space():
     assert get_input_size_from_space(spaces.Tuple((spaces.Box(0, 1, (2,)),))) == ((2,),)
     with pytest.raises(AttributeError, match="Can't access"):
         get_input_size_from_space(spaces.Text(5))
+
+
+@pytest.mark.parametrize(
+    "space,expected",
+    [
+        (spaces.Discrete(5), 5),
+        (spaces.MultiDiscrete([3, 4, 2]), 9),
+        (spaces.MultiBinary(6), 6),
+        (spaces.Box(low=0.0, high=1.0, shape=(4,)), 0),
+    ],
+)
+def test_get_action_mask_size(space, expected):
+    """get_action_mask_size returns correct size for discrete spaces and 0 otherwise."""
+    assert get_action_mask_size(space) == expected
 
 
 def test_get_output_size_from_space():
