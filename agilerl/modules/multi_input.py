@@ -490,7 +490,7 @@ class EvolvableMultiInput(EvolvableModule):
         :rtype: dict[str, Any]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = self.rng.choice([8, 16, 32])
+            numb_new_nodes = int(self.rng.choice([8, 16, 32]))
 
         if self.latent_dim + numb_new_nodes < self.max_latent_dim:
             self.latent_dim += numb_new_nodes
@@ -508,7 +508,7 @@ class EvolvableMultiInput(EvolvableModule):
         :rtype: dict[str, Any]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = self.rng.choice([8, 16, 32])
+            numb_new_nodes = int(self.rng.choice([8, 16, 32]))
 
         if self.latent_dim - numb_new_nodes > self.min_latent_dim:
             self.latent_dim -= numb_new_nodes

@@ -267,7 +267,7 @@ class EvolvableLSTM(EvolvableModule):
         :rtype: dict[str, int]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = self.rng.choice([16, 32, 64])
+            numb_new_nodes = int(self.rng.choice([16, 32, 64]))
 
         if (
             self.hidden_state_size + numb_new_nodes <= self.max_hidden_state_size
@@ -286,7 +286,7 @@ class EvolvableLSTM(EvolvableModule):
         :rtype: dict[str, int]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = self.rng.choice([16, 32, 64])
+            numb_new_nodes = int(self.rng.choice([16, 32, 64]))
 
         if (
             self.hidden_state_size - numb_new_nodes >= self.min_hidden_state_size

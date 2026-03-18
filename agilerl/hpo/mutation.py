@@ -725,7 +725,7 @@ class Mutations:
             possible_activations.remove(current_activation)
 
         # Select new activation and modify network
-        new_activation = self.rng.choice(possible_activations, size=1)[0]
+        new_activation = str(self.rng.choice(possible_activations, size=1)[0])
         network.change_activation(new_activation, output=False)
 
         return network
