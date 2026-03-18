@@ -41,7 +41,7 @@ class SpecifiedTokenReward(TokenReward):
             (
                 (self.token_data[tok] * self.scale + self.shift)
                 if tok in self.token_data
-                else (0.0 * self.scale + self.shift)
+                else self.shift
             )
             for tok in tokens[1:]
         ]
@@ -176,7 +176,7 @@ class RL_Dataset(ABC):
     @abstractmethod
     def __iter__(self) -> Iterator[DataPoint]:
         """Return an iterator over data points. Implemented by subclasses."""
-        ...
+        pass
 
     def __init__(
         self,

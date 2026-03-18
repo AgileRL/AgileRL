@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,12 +45,11 @@ def test_dump_load(tmpdir):
     assert new_cache.cache == cache.cache
 
 
-def test_dump_makedirs():
+def test_dump_makedirs(tmp_path):
     cache = Cache({"key": "value"})
-    cache_path = "no"
+    cache_path = str(tmp_path / "cache_test.pkl")
     with patch("pathlib.Path.mkdir") as mock_mkdir, patch("pickle.dump") as mock_dump:
         cache.dump(cache_path)
 
         mock_mkdir.assert_called_with(parents=True, exist_ok=True)
         mock_dump.assert_called()
-    os.remove(cache_path)

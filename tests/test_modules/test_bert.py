@@ -330,6 +330,22 @@ def test_tok_embedding():
     assert emb.shape == (1, 4, 3)
 
 
+def test_bert_activation_setter():
+    model = EvolvableBERT([4], [4])
+    model.activation = "gelu"
+    assert model._activation == "gelu"
+
+
+def test_bert_decode_with_decoder_norm():
+    src = torch.LongTensor([[1, 2, 4, 5]])
+    tgt = torch.LongTensor([[1, 2, 4, 5]])
+    model = EvolvableBERT([4, 4], [4, 4], encoder_norm=True, decoder_norm=True)
+    model.eval()
+    memory = model.encode(src)[0]
+    decoder_out, _ = model.decode(tgt, memory)
+    assert decoder_out.shape == (1, 4, 512)
+
+
 #### TESTING NONE OR DTYPE FUNCTION ####
 def test_non_or_dtype():
     func_input = None

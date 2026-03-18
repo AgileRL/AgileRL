@@ -43,7 +43,7 @@ Train multiple agents using MADDPG
 The following code should run without any issues. The comments are designed to help you understand how to use PettingZoo with AgileRL. If you have any questions, please feel free to ask in the
 `Discord server <https://discord.com/invite/eB8HyTA2ux>`_.
 
-.. literalinclude:: ../../../tutorials/PettingZoo/agilerl_matd3.py
+.. literalinclude:: ../../../tutorials/pettingzoo/matd3.py
    :language: python
 
 Watch the trained agents play
@@ -51,5 +51,5 @@ Watch the trained agents play
 
 The following code allows you to load your saved MATD3 algorithm from the previous training block, test the algorithms performance, and then visualise a number of episodes as a gif.
 
-.. literalinclude:: ../../../tutorials/PettingZoo/render_agilerl_matd3.py
+.. literalinclude:: ../../../tutorials/pettingzoo/render_matd3.py
    :language: python

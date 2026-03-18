@@ -502,7 +502,7 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
 Trained Model Weights
 ^^^^^^^^^^^^^^^^^^^^^
 
-Trained model weights are provided in our GitHub repository at ``AgileRL/tutorials/Skills/models``. Take a look and see if you can achieve better performance!
+Trained model weights are provided in our GitHub repository at ``AgileRL/tutorials/skills/models``. Take a look and see if you can achieve better performance!
 
 
 Rendering Agents
@@ -512,12 +512,12 @@ We can visualise the performance of the skills agents individually, or when comb
 
 .. collapse:: Rendering Individual Skills
 
-   .. literalinclude:: ../../../tutorials/Skills/render_agilerl_skills.py
+   .. literalinclude:: ../../../tutorials/skills/render_agilerl_skills.py
       :language: python
 
 .. collapse:: Rendering the Hierarchical Policy
 
-   .. literalinclude:: ../../../tutorials/Skills/render_agilerl_selector.py
+   .. literalinclude:: ../../../tutorials/skills/render_agilerl_selector.py
       :language: python
 
 Full Training Code
@@ -525,5 +525,5 @@ Full Training Code
 
 .. collapse:: Full Code
 
-   .. literalinclude:: ../../../tutorials/Skills/agilerl_skills_curriculum.py
+   .. literalinclude:: ../../../tutorials/skills/agilerl_skills_curriculum.py
       :language: python

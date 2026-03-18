@@ -548,6 +548,39 @@ def test_continuous_q_network_clone(
         torch.testing.assert_close(param, original_net_dict[key])
 
 
+def test_rainbow_q_network_head_config_net_config(discrete_space, vector_space):
+    support = torch.linspace(-10, 10, 51)
+    head_config = MlpNetConfig(
+        hidden_size=[16],
+        output_activation=None,
+        noisy=True,
+        noise_std=0.5,
+    )
+    network = RainbowQNetwork(
+        vector_space,
+        discrete_space,
+        support,
+        head_config=head_config,
+    )
+    assert network.num_actions == discrete_space.n
+
+
+def test_rainbow_q_network_head_config_dict_with_noise(discrete_space, vector_space):
+    support = torch.linspace(-10, 10, 51)
+    head_config = asdict(
+        MlpNetConfig(
+            hidden_size=[16], output_activation=None, noisy=True, noise_std=0.5
+        ),
+    )
+    network = RainbowQNetwork(
+        vector_space,
+        discrete_space,
+        support,
+        head_config=head_config,
+    )
+    assert network.num_actions == discrete_space.n
+
+
 def test_continuous_q_network_encoder_layer_norm_warning(vector_space):
     """ContinuousQNetwork warns and disables layer_norm when encoder_config has layer_norm=True (MLP encoder)."""
     encoder_config = asdict(MlpNetConfig(hidden_size=[64, 64], layer_norm=True))

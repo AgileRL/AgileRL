@@ -103,14 +103,15 @@ class SimpleCNN(nn.Module):
         ("dict_space", EvolvableMultiInput),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_initialize_td3(
     observation_space,
     vector_space,
     encoder_cls,
-    accelerator,
+    accelerator_flag,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
 
     # Initialize TD3 with default parameters
@@ -474,14 +475,15 @@ def test_returns_expected_action_float64(discrete_space):
     "min_action, max_action",
     [(-1, 1), ([-1, 0], [1, 1]), ([-1, -1], [0, 1]), ([-1, -2], [1, 0])],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_learns_from_experiences(
     observation_space,
     min_action,
     max_action,
-    accelerator,
+    accelerator_flag,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     # Continuous action space
     low = np.array(min_action) if isinstance(min_action, list) else min_action
@@ -955,6 +957,15 @@ def test_initialize_td3_with_incorrect_actor_net(vector_space):
             critic_networks=critic_networks,
         )
         assert td3
+
+
+def test_reset_action_noise(vector_space):
+    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+    td3 = TD3(vector_space, action_space)
+    indices = np.array([0])
+    td3.reset_action_noise(indices)
+    assert np.allclose(td3.current_noise[indices], td3.mean_noise[indices])
+    td3.clean_up()
 
 
 def test_share_encoder_parameters_incompatible_architectures_raises_key_error(

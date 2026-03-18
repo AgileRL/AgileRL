@@ -101,20 +101,13 @@ if __name__ == "__main__":
 
     # Instantiate a mutations object (used for HPO)
     mutations = Mutations(
-        algo="MADDPG",
         no_mutation=0.2,  # Probability of no mutation
         architecture=0.2,  # Probability of architecture mutation
         new_layer_prob=0.2,  # Probability of new layer mutation
         parameters=0.2,  # Probability of parameter mutation
         activation=0,  # Probability of activation function mutation
         rl_hp=0.2,  # Probability of RL hyperparameter mutation
-        rl_hp_selection=[
-            "lr",
-            "learn_step",
-            "batch_size",
-        ],  # RL hyperparams selected for mutation
         mutation_sd=0.1,  # Mutation strength
-        agent_ids=INIT_HP["AGENT_IDS"],
         rand_seed=1,
         device=device,
     )

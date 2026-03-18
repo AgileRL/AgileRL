@@ -90,7 +90,7 @@ class CurriculumEnv:
                 else:
                     p0_action = opponent.get_action(player=0)
                 self.step(p0_action)  # Act in environment
-                observation, env_reward, done, truncation, _ = self.last()
+                observation, _, done, truncation, _ = self.last()
                 p0_next_state, p0_next_state_flipped = transform_and_flip(
                     observation,
                     player=0,
@@ -108,9 +108,9 @@ class CurriculumEnv:
                         reward=np.array(
                             [
                                 reward,
-                                LESSON["rewards"]["lose"],
+                                self.lesson["rewards"]["lose"],
                                 reward,
-                                LESSON["rewards"]["lose"],
+                                self.lesson["rewards"]["lose"],
                             ],
                         ),
                         next_obs=np.concatenate(
@@ -154,12 +154,12 @@ class CurriculumEnv:
                         p1_action = opponent.get_action(
                             p1_action_mask,
                             p0_action,
-                            LESSON["block_vert_coef"],
+                            self.lesson["block_vert_coef"],
                         )
                     else:
                         p1_action = opponent.get_action(player=1)
                     self.step(p1_action)  # Act in environment
-                    observation, env_reward, done, truncation, _ = self.last()
+                    observation, _, done, truncation, _ = self.last()
                     p1_next_state, p1_next_state_flipped = transform_and_flip(
                         observation,
                         player=1,
@@ -181,9 +181,9 @@ class CurriculumEnv:
                             ),
                             reward=np.array(
                                 [
-                                    LESSON["rewards"]["lose"],
+                                    self.lesson["rewards"]["lose"],
                                     reward,
-                                    LESSON["rewards"]["lose"],
+                                    self.lesson["rewards"]["lose"],
                                     reward,
                                 ],
                             ),
@@ -468,7 +468,7 @@ class Opponent:
         :param player: Player who we are checking, 0 or 1
         :type player: int
         :param return_length: Return length of outcomes, defaults to False
-        :type player: bool, optional
+        :type return_length: bool, optional
         """
         if not (self.top[action] < self.num_rows):  # action column is full
             return (False, None, None) + ((None,) if return_length else ())
@@ -616,7 +616,6 @@ if __name__ == "__main__":
         observation_space = observation_space_channels_to_first(
             observation_spaces[0]["observation"],
         )
-        action_space = action_spaces[0]
 
         # Mutation config for RL hyperparameters
         hp_config = HyperparameterConfig(
@@ -717,7 +716,7 @@ if __name__ == "__main__":
                 print("Warming up agents ...")
                 agent = pop[0]
                 # Train on randomly collected samples
-                for _epoch in trange(LESSON["agent_warm_up"]):
+                for _ in trange(LESSON["agent_warm_up"]):
                     experiences = memory.sample(agent.batch_size)
                     agent.learn(experiences)
 
@@ -751,9 +750,8 @@ if __name__ == "__main__":
         # Training loop
         for idx_epi in pbar:
             turns_per_episode = []
-            train_actions_hist = [0] * action_spaces[0].n
             for agent in pop:  # Loop through population
-                for _episode in range(episodes_per_epoch):
+                for _ in range(episodes_per_epoch):
                     env.reset()  # Reset environment at start of episode
                     observation, cumulative_reward, done, truncation, _ = env.last()
 
@@ -777,7 +775,7 @@ if __name__ == "__main__":
 
                     score = 0
                     turns = 0  # Number of turns counter
-                    for _idx_step in range(max_steps):
+                    for idx_step in range(max_steps):
                         # Player 0"s turn
                         p0_action_mask = observation["action_mask"]
                         p0_state, p0_state_flipped = transform_and_flip(
@@ -806,8 +804,6 @@ if __name__ == "__main__":
                                 epsilon,
                                 p0_action_mask,
                             )[0]  # Get next action from agent
-                            train_actions_hist[p0_action] += 1
-
                         env.step(p0_action)  # Act in environment
                         observation, cumulative_reward, done, truncation, _ = env.last()
                         p0_next_state, p0_next_state_flipped = transform_and_flip(
@@ -901,8 +897,6 @@ if __name__ == "__main__":
                                     epsilon,
                                     p1_action_mask,
                                 )[0]  # Get next action from agent
-                                train_actions_hist[p1_action] += 1
-
                             env.step(p1_action)  # Act in environment
                             observation, cumulative_reward, done, truncation, _ = (
                                 env.last()
@@ -983,7 +977,7 @@ if __name__ == "__main__":
                         if done or truncation:
                             break
 
-                    total_steps += _idx_step + 1
+                    total_steps += idx_step + 1
                     total_episodes += 1
                     turns_per_episode.append(turns)
                     # Save the total episode reward
@@ -1008,13 +1002,11 @@ if __name__ == "__main__":
             if (idx_epi + 1) % evo_epochs == 0:
                 # Evaluate population vs random actions
                 fitnesses = []
-                win_rates = []
-                eval_actions_hist = [0] * action_spaces[0].n  # Eval actions histogram
                 eval_turns = 0  # Eval turns counter
                 for agent in pop:
                     with torch.no_grad():
                         rewards = []
-                        for _i in range(evo_loop):
+                        for _ in range(evo_loop):
                             env.reset()  # Reset environment at start of episode
                             observation, cumulative_reward, done, truncation, _ = (
                                 env.last()
@@ -1030,7 +1022,7 @@ if __name__ == "__main__":
 
                             score = 0
 
-                            for _idx_step in range(max_steps):
+                            for _ in range(max_steps):
                                 action_mask = observation["action_mask"]
                                 if player < 0:
                                     if opponent_first:
@@ -1050,7 +1042,6 @@ if __name__ == "__main__":
                                             0,
                                             action_mask,
                                         )[0]  # Get next action from agent
-                                        eval_actions_hist[action] += 1
                                 if player > 0:
                                     if not opponent_first:
                                         if LESSON["eval_opponent"] == "random":
@@ -1070,7 +1061,6 @@ if __name__ == "__main__":
                                             0,
                                             action_mask,
                                         )[0]  # Get next action from agent
-                                        eval_actions_hist[action] += 1
 
                                 env.step(action)  # Act in environment
                                 observation, cumulative_reward, done, truncation, _ = (

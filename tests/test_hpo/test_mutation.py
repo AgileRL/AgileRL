@@ -12,11 +12,21 @@ from gymnasium import spaces
 from peft import LoraConfig
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.hpo.mutation import MutationError, Mutations, get_exp_layer
+from agilerl.hpo.mutation import (
+    MutationError,
+    Mutations,
+    get_exp_layer,
+    get_offspring_eval_modules,
+    set_global_seed,
+)
 from agilerl.modules import EvolvableBERT, EvolvableModule, ModuleDict
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
-from tests.helper_functions import assert_state_dicts_equal
+from tests.helper_functions import (
+    assert_state_dicts_equal,
+    generate_discrete_space,
+    generate_random_box_space,
+)
 from tests.test_algorithms.test_llms.test_grpo import create_module
 
 if TYPE_CHECKING:
@@ -104,13 +114,14 @@ def init_pop(
     INIT_HP,
     population_size,
     device,
-    accelerator,
+    accelerator_flag,
     hp_config,
     torch_compiler,
     request,
     actor_network=None,
     critic_network=None,
 ):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
 
@@ -137,9 +148,6 @@ def init_pop(
         torch_compiler=torch_compiler,
     )
     yield pop
-    for agent in pop:
-        del agent
-    del pop
     gc.collect()
 
 
@@ -185,8 +193,6 @@ def test_constructor_initializes_attributes():
     assert mutations.mutate_elite == mutate_elite
     assert mutations.device == device
     assert mutations.accelerator == accelerator
-
-    del mutations
 
 
 def test_find_analogous_mutation_returns_none_for_empty_sampled():
@@ -471,7 +477,7 @@ def test_reinit_bandit_grads_error_and_matrix_resize_paths(device):
     [("vector_space", "encoder_mlp_config")],
 )
 @pytest.mark.parametrize("action_space", ["discrete_space"])
-@pytest.mark.parametrize("accelerator", [None])
+@pytest.mark.parametrize("accelerator_flag", [False])
 @pytest.mark.parametrize("torch_compiler", [None])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("population_size", [1])
@@ -487,8 +493,6 @@ def test_mutation_no_options(init_pop, device):
     assert len(mutated_population) == len(population)
     for old, individual in zip(population, mutated_population, strict=False):
         assert_state_dicts_equal(old.actor.state_dict(), individual.actor.state_dict())
-
-    del mutations, mutated_population, new_population
 
 
 #### Single-agent algorithm mutations ####
@@ -507,18 +511,17 @@ def test_mutation_no_options(init_pop, device):
     ],
 )
 @pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [("vector_space", "encoder_mlp_config")],
 )
 @pytest.mark.parametrize("population_size", [1])
-def test_mutation_applies_random_mutations(algo, init_pop, device, accelerator):
+def test_mutation_applies_random_mutations(algo, init_pop, device, accelerator_flag):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     population = init_pop
     pre_training_mut = True
-
-    population = init_pop
 
     mutations = Mutations(
         0,
@@ -556,8 +559,6 @@ def test_mutation_applies_random_mutations(algo, init_pop, device, accelerator):
             policy.last_mutation_attr,
         ]
 
-    del mutations, mutated_population
-
 
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -578,11 +579,12 @@ def test_mutation_applies_random_mutations(algo, init_pop, device, accelerator):
     [("vector_space", "encoder_mlp_config")],
 )
 @pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-def test_mutation_applies_no_mutations(init_pop, device, accelerator):
+def test_mutation_applies_no_mutations(init_pop, device, accelerator_flag):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     pre_training_mut = False
 
     population = init_pop
@@ -609,8 +611,6 @@ def test_mutation_applies_no_mutations(init_pop, device, accelerator):
         assert old.actor != individual.actor
         assert_state_dicts_equal(old.actor.state_dict(), individual.actor.state_dict())
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -630,12 +630,15 @@ def test_mutation_applies_no_mutations(init_pop, device, accelerator):
     "observation_space, net_config",
     [("vector_space", "encoder_mlp_config")],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("torch_compiler", [None])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-def test_mutation_applies_no_mutations_pre_training_mut(init_pop, device, accelerator):
+def test_mutation_applies_no_mutations_pre_training_mut(
+    init_pop, device, accelerator_flag
+):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     pre_training_mut = True
     population = init_pop
 
@@ -669,8 +672,6 @@ def test_mutation_applies_no_mutations_pre_training_mut(init_pop, device, accele
         assert old.actor != individual.actor
         assert_state_dicts_equal(old.actor.state_dict(), individual.actor.state_dict())
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -691,16 +692,17 @@ def test_mutation_applies_no_mutations_pre_training_mut(init_pop, device, accele
     [("vector_space", "encoder_mlp_config")],
 )
 @pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("population_size", [1])
 def test_mutation_applies_rl_hp_mutations(
     init_pop,
     device,
-    accelerator,
+    accelerator_flag,
     hp_config,
     request,
 ):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     pre_training_mut = False
     population = init_pop
     mutations = Mutations(
@@ -730,8 +732,6 @@ def test_mutation_applies_rl_hp_mutations(
         assert min_value <= new_value <= max_value
         assert old.index == individual.index
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -756,7 +756,7 @@ def test_mutation_applies_rl_hp_mutations(
     ],
 )
 @pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
@@ -764,8 +764,9 @@ def test_mutation_applies_activation_mutations(
     init_pop,
     observation_space,
     device,
-    accelerator,
+    accelerator_flag,
 ):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     pre_training_mut = False
     population = init_pop
 
@@ -798,8 +799,6 @@ def test_mutation_applies_activation_mutations(
             assert individual.actor.activation in activation_selection
         assert old.index == individual.index
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -812,12 +811,15 @@ def test_mutation_applies_activation_mutations(
     ],
 )
 @pytest.mark.parametrize("algo, action_space", [("DDPG", "vector_space")])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("torch_compiler", [None])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-def test_mutation_applies_activation_mutations_no_skip(init_pop, device, accelerator):
+def test_mutation_applies_activation_mutations_no_skip(
+    init_pop, device, accelerator_flag
+):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     pre_training_mut = False
     population = init_pop
     mutations = Mutations(
@@ -846,8 +848,6 @@ def test_mutation_applies_activation_mutations_no_skip(init_pop, device, acceler
             assert individual.actor.activation in ["ReLU", "ELU", "GELU"]
         assert old.index == individual.index
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -869,17 +869,18 @@ def test_mutation_applies_activation_mutations_no_skip(init_pop, device, acceler
     [("vector_space", "encoder_mlp_config")],
 )
 @pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
 def test_mutation_applies_parameter_mutations(
     algo,
     device,
-    accelerator,
+    accelerator_flag,
     init_pop,
     wrapper_cls,
 ):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     pre_training_mut = False
 
     population = init_pop
@@ -926,13 +927,134 @@ def test_mutation_applies_parameter_mutations(
 
         assert mutation_found, f"Mutation not applied for agent index {old.index}"
 
-    del mutations, mutated_population, new_population
-
 
 def test_get_exp_layer_raises_for_non_evolvable_module():
     """get_exp_layer raises TypeError when offspring is not an EvolvableModule."""
     with pytest.raises(TypeError, match="Bandit algorithm architecture.*not supported"):
         get_exp_layer(torch.nn.Linear(2, 2))
+
+
+@pytest.mark.parametrize("seed", [None, 42])
+def test_set_global_seed(seed):
+    set_global_seed(seed)
+    if seed is not None:
+        state = np.random.get_state()
+        assert state is not None
+
+
+def test_get_exp_layer_returns_output_layer_for_evolvable_module(
+    vector_space, discrete_space, encoder_mlp_config
+):
+    from agilerl.utils.utils import create_population
+
+    pop = create_population(
+        algo="NeuralUCB",
+        observation_space=vector_space,
+        action_space=discrete_space,
+        net_config=encoder_mlp_config,
+        INIT_HP=SHARED_INIT_HP,
+        population_size=1,
+        device="cpu",
+    )
+    offspring = pop[0].actor.clone()
+    exp_layer = get_exp_layer(offspring)
+    assert exp_layer is not None
+    assert hasattr(exp_layer, "parameters")
+
+
+def test_get_offspring_eval_modules_returns_policy_and_modules(
+    vector_space, discrete_space, encoder_mlp_config
+):
+    from agilerl.utils.utils import create_population
+
+    pop = create_population(
+        algo="DQN",
+        observation_space=vector_space,
+        action_space=discrete_space,
+        net_config=encoder_mlp_config,
+        INIT_HP=SHARED_INIT_HP,
+        population_size=1,
+        device="cpu",
+    )
+    policy, offspring_evals = get_offspring_eval_modules(pop[0])
+    assert isinstance(policy, dict)
+    assert isinstance(offspring_evals, dict)
+    assert len(policy) >= 1
+
+
+def test_no_mutation_sets_mut_none():
+    class DummyIndividual:
+        mut = None
+
+    muts = Mutations(1, 0, 0, 0, 0, 0, 0.1, device="cpu")
+    ind = DummyIndividual()
+    out = muts.no_mutation(ind)
+    assert out.mut == "None"
+
+
+@pytest.mark.parametrize("algo", ["PPO", "DDPG", "TD3"])
+def test_activation_mutation_warns_for_policy_gradient_algos(
+    algo, vector_space, encoder_mlp_config, device
+):
+    from agilerl.utils.utils import create_population
+
+    action_space = (
+        generate_random_box_space((2,))
+        if algo in ("DDPG", "TD3")
+        else generate_discrete_space(2)
+    )
+    pop = create_population(
+        algo=algo,
+        observation_space=vector_space,
+        action_space=action_space,
+        net_config=encoder_mlp_config,
+        INIT_HP=SHARED_INIT_HP,
+        population_size=1,
+        device=device,
+    )
+    muts = Mutations(0, 0, 0, 0, 1, 0, 0.1, device=device)
+    with pytest.warns(UserWarning, match="Activation mutations are not supported"):
+        out = muts.activation_mutation(pop[0].clone(wrap=False))
+    assert out.mut == "None"
+
+
+def test_rl_hyperparam_mutation_returns_none_when_hp_config_empty(device):
+    class DummyIndividual:
+        mut = None
+        registry = type("R", (), {"hp_config": None})()
+
+    muts = Mutations(0, 0, 0, 0, 0, 1, 0.1, device=device)
+    ind = DummyIndividual()
+    out = muts.rl_hyperparam_mutation(ind)
+    assert out.mut == "None"
+
+
+@pytest.mark.parametrize("pretraining", [True, False])
+def test_get_mutations_options_pretraining_fallback(pretraining):
+    muts = Mutations(1, 0, 0, 0, 0, 0, 0.1, device="cpu")
+    opts, proba = muts._get_mutations_options(pretraining=pretraining)
+    assert len(opts) >= 1
+    assert muts.no_mutation in opts
+    if pretraining:
+        assert sum(1 for p in proba if p == 1.0) >= 0
+
+
+def test_get_mutations_options_all_zero_uses_no_mutation():
+    muts = Mutations(0, 0, 0, 0, 0, 0, 0.1, device="cpu")
+    opts, proba = muts._get_mutations_options(pretraining=True)
+    assert muts.no_mutation in opts
+    assert len(opts) == 1
+    assert proba[0] == 1.0
+
+
+def test_mutations_init_raises_for_negative_no_mutation():
+    with pytest.raises(AssertionError, match="greater than or equal to zero"):
+        Mutations(-0.1, 0, 0.5, 0, 0, 0, 0.1, device="cpu")
+
+
+def test_mutations_init_raises_for_invalid_new_layer_prob():
+    with pytest.raises(AssertionError, match="between zero and one"):
+        Mutations(0, 0, 1.5, 0, 0, 0, 0.1, device="cpu")
 
 
 def test_architecture_mutate_raises_for_unsupported_individual():
@@ -966,16 +1088,17 @@ def test_architecture_mutate_raises_for_unsupported_individual():
     ],
 )
 @pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
 def test_mutation_applies_architecture_mutations(
     init_pop,
     device,
-    accelerator,
+    accelerator_flag,
     wrapper_cls,
 ):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     population: list[EvolvableAlgorithm] = init_pop
     if wrapper_cls is not None:
         population = [wrapper_cls(agent) for agent in population]
@@ -1059,8 +1182,6 @@ def test_mutation_applies_architecture_mutations(
         applied_mutations,
     )
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
 @pytest.mark.skip(reason="Skipping BERT architecture mutations test.")
@@ -1077,7 +1198,7 @@ def test_mutation_applies_architecture_mutations(
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=True)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize(
     "mut_method",
     [
@@ -1095,13 +1216,14 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
     observation_space,
     action_space,
     device,
-    accelerator,
+    accelerator_flag,
     mut_method,
     actor_network,
     critic_network,
     init_pop,
     request,
 ):
+    accelerator = Accelerator(device_placement=True) if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
 
@@ -1163,8 +1285,6 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 
     # assert_equal_state_dict(population, mutated_population)
 
-    del mutations, mutated_population, new_population
-
 
 #### Multi-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
@@ -1177,9 +1297,12 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
-def test_mutation_applies_random_mutations_multi_agent(init_pop, device, accelerator):
+def test_mutation_applies_random_mutations_multi_agent(
+    init_pop, device, accelerator_flag
+):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     pre_training_mut = False
     population = init_pop
 
@@ -1222,8 +1345,6 @@ def test_mutation_applies_random_mutations_multi_agent(init_pop, device, acceler
             sampled_mutation,
         ]
 
-    del mutations, mutated_population
-
 
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
@@ -1236,8 +1357,9 @@ def test_mutation_applies_random_mutations_multi_agent(init_pop, device, acceler
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
-def test_mutation_applies_no_mutations_multi_agent(init_pop, device, accelerator):
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+def test_mutation_applies_no_mutations_multi_agent(init_pop, device, accelerator_flag):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     pre_training_mut = False
     population = init_pop
 
@@ -1265,12 +1387,7 @@ def test_mutation_applies_no_mutations_multi_agent(init_pop, device, accelerator
         assert old.index == individual.index
         assert old.actors == individual.actors
 
-    del mutations
-    del population
-    del mutated_population
 
-
-# The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
     "algo, hp_config",
     [
@@ -1286,15 +1403,16 @@ def test_mutation_applies_no_mutations_multi_agent(init_pop, device, accelerator
 @pytest.mark.parametrize("action_space", ["ma_discrete_space"])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_rl_hp_mutations_multi_agent(
     init_pop,
     device,
-    accelerator,
+    accelerator_flag,
     hp_config,
     request,
 ):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     pre_training_mut = False
     population = init_pop
 
@@ -1326,8 +1444,6 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
         assert min_value <= new_value <= max_value
         assert old.index == individual.index
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
@@ -1343,13 +1459,14 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_activation_mutations_multi_agent(
     init_pop,
     device,
-    accelerator,
+    accelerator_flag,
 ):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     pre_training_mut = False
     population = init_pop
 
@@ -1381,8 +1498,6 @@ def test_mutation_applies_activation_mutations_multi_agent(
                 ]
         assert old.index == individual.index
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
@@ -1394,13 +1509,14 @@ def test_mutation_applies_activation_mutations_multi_agent(
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_activation_mutations_multi_agent_no_skip(
     init_pop,
     device,
-    accelerator,
+    accelerator_flag,
 ):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     pre_training_mut = False
     population = init_pop
 
@@ -1438,8 +1554,6 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
                 ]
         assert old.index == individual.index
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -1459,14 +1573,15 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("torch_compiler", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_parameter_mutations_multi_agent(
     init_pop,
     device,
-    accelerator,
+    accelerator_flag,
     wrapper_cls,
 ):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     pre_training_mut = False
     population = init_pop
 
@@ -1512,8 +1627,6 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 
         assert mutation_found, f"Mutation not applied for agent index {old.index}"
 
-    del mutations, mutated_population, new_population
-
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -1536,16 +1649,17 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 @pytest.mark.parametrize("action_space", ["ma_discrete_space"])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("torch_compiler", [None, "default"])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_architecture_mutations_multi_agent(
     algo,
     init_pop,
     device,
-    accelerator,
+    accelerator_flag,
     wrapper_cls,
 ):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     population: list[EvolvableAlgorithm] = init_pop
     mutations = Mutations(
         0,
@@ -1622,10 +1736,6 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
             assert old.index == individual.index
 
-        del new_population, mutated_population
-
-    del mutations
-
     assert all(mut in applied_mutations for mut in mut_methods), set(mut_methods) - set(
         applied_mutations,
     )
@@ -1648,12 +1758,12 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("torch_compiler", [None])
 def test_mutation_applies_bert_architecture_mutations_multi_agent(
     algo,
     device,
-    accelerator,
+    accelerator_flag,
     init_pop,
     observation_space,
     action_space,
@@ -1661,6 +1771,7 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     actor_network,
     critic_network,
 ):
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
 
@@ -1741,9 +1852,6 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
 
             assert old.index == individual.index
 
-        del new_population, mutated_population
-    del mutations, population
-
 
 @pytest.mark.parametrize(
     "use_accelerator, use_deepspeed_optimizer",
@@ -1772,6 +1880,8 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
     grpo_hp_config,
     deepspeed_env,
 ):
+    if use_accelerator and not torch.cuda.is_available():
+        pytest.skip("DeepSpeed accelerator LLM mutation tests require CUDA.")
 
     if hp_to_mutate == "max_grad_norm":
         grpo_hp_config = HyperparameterConfig(
@@ -1781,6 +1891,18 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
     pre_training_mut = False
 
     if use_accelerator:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        try:
+            import deepspeed.comm.comm as ds_comm
+            import deepspeed.utils.groups as ds_groups
+
+            for attr in dir(ds_groups):
+                if attr.startswith("_") and attr.endswith("_GROUP"):
+                    setattr(ds_groups, attr, None)
+            ds_comm.cdb = None
+        except ImportError:
+            pass
         AcceleratorState._reset_state(True)
 
         deepspeed_config = {
@@ -1892,6 +2014,18 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
         mut_agent.clean_up()
         old_agent.clean_up()
     if use_accelerator:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        try:
+            import deepspeed.comm.comm as ds_comm
+            import deepspeed.utils.groups as ds_groups
+
+            for attr in dir(ds_groups):
+                if attr.startswith("_") and attr.endswith("_GROUP"):
+                    setattr(ds_groups, attr, None)
+            ds_comm.cdb = None
+        except ImportError:
+            pass
         AcceleratorState._reset_state(True)
 
 
@@ -1976,7 +2110,3 @@ def test_mutations_warns_on_llm_algorithm(
     for mut_agent, old_agent in zip(mutated_population, new_population, strict=False):
         mut_agent.clean_up()
         old_agent.clean_up()
-    del mutations
-    del population
-    del mutated_population
-    del new_population

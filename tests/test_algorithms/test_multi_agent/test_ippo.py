@@ -122,6 +122,21 @@ class MultiAgentCNNCritic(nn.Module):
         return self.fc2(x)
 
 
+def _dummy_no_sync_context():
+    class DummyNoSync:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            pass
+
+    return DummyNoSync()
+
+
+def no_sync(_self):
+    return _dummy_no_sync_context()
+
+
 class DummyStochasticActor(StochasticActor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -130,14 +145,7 @@ class DummyStochasticActor(StochasticActor):
         return super().forward(*args, **kwargs)
 
     def no_sync(self):
-        class DummyNoSync:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc_value, traceback):
-                pass  # Add cleanup or handling if needed
-
-        return DummyNoSync()
+        return _dummy_no_sync_context()
 
 
 class DummyValueNetwork(ValueNetwork):
@@ -148,14 +156,7 @@ class DummyValueNetwork(ValueNetwork):
         return super().forward(*args, **kwargs)
 
     def no_sync(self):
-        class DummyNoSync:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc_value, traceback):
-                pass  # Add cleanup or handling if needed
-
-        return DummyNoSync()
+        return _dummy_no_sync_context()
 
 
 @pytest.fixture(scope="function")
@@ -192,7 +193,7 @@ def cnn_critic():
 
 @pytest.fixture(scope="module")
 def mocked_accelerator():
-    MagicMock(spec=Accelerator)
+    return MagicMock(spec=Accelerator)
 
 
 @pytest.fixture(scope="function")
@@ -688,6 +689,7 @@ def test_ippo_learns_from_experiences(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
         agent_ids=agent_ids,
+        batch_size=batch_size,
         device=device,
         torch_compiler=compile_mode,
     )
@@ -795,51 +797,54 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     states = {
-        agent: np.array(
-            [
-                [[1, 1, 1, 1, 1, 1], [2, 2, 2, 2, 2, 2], [3, 3, 3, 3, 3, 3]],
-                [[4, 4, 4, 4, 4, 4], [5, 5, 5, 5, 5, 5], [6, 6, 6, 6, 6, 6]],
-                [[7, 7, 7, 7, 7, 7], [8, 8, 8, 8, 8, 8], [9, 9, 9, 9, 9, 9]],
-            ],
+        agent: (
+            np.array(
+                [
+                    [[1, 1, 1, 1, 1, 1], [2, 2, 2, 2, 2, 2], [3, 3, 3, 3, 3, 3]],
+                    [[4, 4, 4, 4, 4, 4], [5, 5, 5, 5, 5, 5], [6, 6, 6, 6, 6, 6]],
+                    [[7, 7, 7, 7, 7, 7], [8, 8, 8, 8, 8, 8], [9, 9, 9, 9, 9, 9]],
+                ],
+            )
+            * idx
         )
-        * i
-        for i, agent in enumerate(agent_ids)
+        for idx, agent in enumerate(agent_ids)
     }
     actions = {
-        agent: np.array(
-            [
-                [[1, 1, 1, 1, 1, 1], [2, 2, 2, 2, 2, 2], [3, 3, 3, 3, 3, 3]],
-                [[4, 4, 4, 4, 4, 4], [5, 5, 5, 5, 5, 5], [6, 6, 6, 6, 6, 6]],
-                [[7, 7, 7, 7, 7, 7], [8, 8, 8, 8, 8, 8], [9, 9, 9, 9, 9, 9]],
-            ],
+        agent: (
+            np.array(
+                [
+                    [[1, 1, 1, 1, 1, 1], [2, 2, 2, 2, 2, 2], [3, 3, 3, 3, 3, 3]],
+                    [[4, 4, 4, 4, 4, 4], [5, 5, 5, 5, 5, 5], [6, 6, 6, 6, 6, 6]],
+                    [[7, 7, 7, 7, 7, 7], [8, 8, 8, 8, 8, 8], [9, 9, 9, 9, 9, 9]],
+                ],
+            )
+            * idx
         )
-        * i
-        for i, agent in enumerate(agent_ids)
+        for idx, agent in enumerate(agent_ids)
     }
     log_probs = {
-        agent: np.array([[[1], [2], [3]], [[4], [5], [6]], [[7], [8], [9]]]) * i
-        for i, agent in enumerate(agent_ids)
+        agent: np.array([[[1], [2], [3]], [[4], [5], [6]], [[7], [8], [9]]]) * idx
+        for idx, agent in enumerate(agent_ids)
     }
     rewards = {
-        agent: np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]]) * i
-        for i, agent in enumerate(agent_ids)
+        agent: np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]]) * idx
+        for idx, agent in enumerate(agent_ids)
     }
-    dones = {
-        agent: np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
-        for i, agent in enumerate(agent_ids)
-    }
+    dones = {agent: np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]]) for agent in agent_ids}
     values = {
-        agent: np.array([[[1], [2], [3]], [[4], [5], [6]], [[7], [8], [9]]]) * i
-        for i, agent in enumerate(agent_ids)
+        agent: np.array([[[1], [2], [3]], [[4], [5], [6]], [[7], [8], [9]]]) * idx
+        for idx, agent in enumerate(agent_ids)
     }
     next_state = {
-        agent: np.array(
-            [[4, 4, 4, 4, 4, 4], [7, 7, 7, 7, 7, 7], [10, 10, 10, 10, 10, 10]],
+        agent: (
+            np.array(
+                [[4, 4, 4, 4, 4, 4], [7, 7, 7, 7, 7, 7], [10, 10, 10, 10, 10, 10]],
+            )
+            * idx
         )
-        * i
-        for i, agent in enumerate(agent_ids)
+        for idx, agent in enumerate(agent_ids)
     }
-    next_done = {agent: np.array([[0, 1, 0]]) for i, agent in enumerate(agent_ids)}
+    next_done = {agent: np.array([[0, 1, 0]]) for agent in agent_ids}
 
     experiences = (
         states,
@@ -894,17 +899,6 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
         old_critic_state_dict = critics_pre_learn_sd[shared_id]
         assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
     ippo.clean_up()
-
-
-def no_sync(self):
-    class DummyNoSync:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc_value, traceback):
-            pass  # Add cleanup or handling if needed
-
-    return DummyNoSync()
 
 
 @pytest.mark.parametrize(
@@ -1045,21 +1039,23 @@ def test_ippo_get_action_agent_masking_batched(
 )
 @pytest.mark.parametrize("action_batch_size", [None, 16])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_ippo_get_action(
     observation_spaces,
     action_spaces,
     device,
     compile_mode,
-    accelerator,
+    accelerator_flag,
     action_batch_size,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
 
     state = {}
+    ippo_action_batch_size = action_batch_size
     for agent_id, obs_space in zip(agent_ids, observation_spaces, strict=False):
         sample_state = get_sample_from_space(obs_space)
 
@@ -1069,7 +1065,7 @@ def test_ippo_get_action(
         ):
             sample_state = np.stack([sample_state] * action_batch_size)
         else:
-            action_batch_size = None
+            ippo_action_batch_size = None
 
         state[agent_id] = sample_state
 
@@ -1081,7 +1077,7 @@ def test_ippo_get_action(
         device=device,
         torch_compiler=compile_mode,
         accelerator=accelerator,
-        action_batch_size=action_batch_size,
+        action_batch_size=ippo_action_batch_size,
     )
     actions, log_probs, dist_entropy, state_values = ippo.get_action(
         obs=state,
@@ -1184,7 +1180,7 @@ def test_ippo_get_action_action_masking_exception(
         device=device,
     )
     with pytest.raises(AssertionError):
-        actions, log_probs, dist_entropy, state_values = ippo.get_action(obs=state)
+        ippo.get_action(obs=state)
     ippo.clean_up()
 
 
@@ -1574,7 +1570,7 @@ def test_initialize_ippo_with_cnn_networks(
         ("ma_vector_space", "mlp"),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_ippo_with_evo_networks(
     observation_spaces,
@@ -1582,9 +1578,10 @@ def test_initialize_ippo_with_evo_networks(
     net,
     device,
     compile_mode,
-    accelerator,
+    accelerator_flag,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_spaces = request.getfixturevalue(observation_spaces)
     net_config = get_default_encoder_config(observation_spaces[0])
 
@@ -1693,7 +1690,7 @@ def test_initialize_ippo_with_incorrect_evo_networks(
     evo_critics = []
 
     with pytest.raises(AssertionError):
-        ippo = IPPO(
+        IPPO(
             observation_spaces=ma_vector_space,
             action_spaces=ma_discrete_space,
             agent_ids=agent_ids,
@@ -1701,7 +1698,6 @@ def test_initialize_ippo_with_incorrect_evo_networks(
             critic_networks=evo_critics,
             torch_compiler=compile_mode,
         )
-        assert ippo
 
 
 @pytest.mark.parametrize(
@@ -1731,14 +1727,13 @@ def test_initialize_ippo_with_incorrect_networks(
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
     with pytest.raises(TypeError):
-        ippo = IPPO(
+        IPPO(
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
             agent_ids=["agent_0", "agent_1", "other_agent_0"],
             actor_networks=actors,
             critic_networks=critics,
         )
-        assert ippo
 
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])

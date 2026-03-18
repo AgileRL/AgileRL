@@ -835,7 +835,7 @@ def test_save_load_checkpoint_single_agent(
         ("ma_dict_space", EvolvableMultiInput),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None])
 def test_save_load_checkpoint_multi_agent(
     tmpdir,
@@ -843,10 +843,11 @@ def test_save_load_checkpoint_multi_agent(
     observation_spaces,
     encoder_cls,
     ma_discrete_space,
-    accelerator,
+    accelerator_flag,
     compile_mode,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     # Initialize the dummy multi-agent
     obs_spaces = request.getfixturevalue(observation_spaces)
     agent_ids = ["agent_0", "agent_1", "agent_2"]
@@ -917,8 +918,6 @@ def test_save_load_checkpoint_multi_agent(
     assert new_agent.steps == agent.steps
     assert new_agent.agent_ids == agent.agent_ids
 
-    del new_agent
-
 
 @pytest.mark.parametrize("device, with_hp_config", [("cpu", False), ("cpu", True)])
 @pytest.mark.parametrize(
@@ -983,7 +982,7 @@ def test_load_from_pretrained_single_agent(
     ],
 )
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None])
 def test_load_from_pretrained_multi_agent(
     device,
@@ -992,10 +991,11 @@ def test_load_from_pretrained_multi_agent(
     observation_spaces,
     encoder_cls,
     action_spaces,
-    accelerator,
+    accelerator_flag,
     compile_mode,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     # Initialize the dummy multi-agent
     obs_spaces = request.getfixturevalue(observation_spaces)
     act_spaces = request.getfixturevalue(action_spaces)
@@ -1054,8 +1054,6 @@ def test_load_from_pretrained_multi_agent(
     assert new_agent.fitness == agent.fitness
     assert new_agent.steps == agent.steps
     assert new_agent.agent_ids == agent.agent_ids
-
-    del new_agent
 
 
 def test_gpu_to_no_cuda_transfer_single_agent(tmpdir, vector_space):
@@ -1576,13 +1574,12 @@ def test_build_net_config_heterogeneous_agent_level(
 def test_build_net_config_return_encoders(request, setup):
     """Test that build_net_config returns unique configs when requested."""
     agent = request.getfixturevalue(setup)
-
-    if setup == "homogeneous_agent":
-        setup_net_config = request.getfixturevalue("homogeneous_agent_net_config")
-    elif setup == "heterogeneous_agent":
-        setup_net_config = request.getfixturevalue("heterogeneous_agent_net_config")
-    elif setup == "mixed_agent":
-        setup_net_config = request.getfixturevalue("mixed_agent_net_config")
+    config_fixture = {
+        "homogeneous_agent": "homogeneous_agent_net_config",
+        "heterogeneous_agent": "heterogeneous_agent_net_config",
+        "mixed_agent": "mixed_agent_net_config",
+    }
+    setup_net_config = request.getfixturevalue(config_fixture[setup])
 
     result, unique_configs = agent.build_net_config(
         setup_net_config,
@@ -1612,7 +1609,6 @@ def test_build_net_config_grouped_agents(mixed_agent, mixed_group_net_config, fl
 
     # Each group should have its specified config or default
     for agent_id in agent_ids:
-        print(agent_id)
         group_id = mixed_agent.get_group_id(agent_id) if flatten else agent_id
         assert "encoder_config" in result[agent_id]
         assert (

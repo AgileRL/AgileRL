@@ -880,13 +880,16 @@ class RolloutBuffer:
                 self.unpadded_slices[idx].tolist() for idx in minibatch_seq_indices
             ]
             unpadded_indices = [
-                item for sublist in unpadded_indices for item in sublist
+                int(item) for sublist in unpadded_indices for item in sublist
             ]
+            unpadded_indices_tensor = torch.as_tensor(
+                unpadded_indices, device=indices.device
+            )
 
             padded: TensorDict = self.padded_data[padded_indices]
             if self.recurrent and padded.get("initial_hidden_states", None) is not None:
                 batch_hidden_states = {}
-                initial_hidden_states: TensorDict = padded.get_non_tensor(
+                initial_hidden_states: dict[str, Any] = padded.get_non_tensor(
                     "initial_hidden_states",
                 )
                 for key, value in initial_hidden_states.items():
@@ -894,7 +897,7 @@ class RolloutBuffer:
 
                 padded.set_non_tensor("initial_hidden_states", batch_hidden_states)
 
-            unpadded = self.unpadded_data[unpadded_indices]
+            unpadded = self.unpadded_data[unpadded_indices_tensor]
             start = end
             yield padded, unpadded
 

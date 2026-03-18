@@ -1,5 +1,6 @@
 import copy
 import gc
+import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -7,8 +8,12 @@ from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock, PropertyMock, patch
 
+import numpy as np
 import pytest
 import torch
+
+pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
+pytest.importorskip("vllm", reason="LLM tests require vllm.")
 import vllm
 from accelerate import Accelerator
 from accelerate.scheduler import AcceleratedScheduler
@@ -39,7 +44,7 @@ pytestmark = pytest.mark.llm
 
 deepspeed_base_config = {
     "bf16": {
-        "enabled": True,
+        "enabled": torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
     },
     "auto_cast": True,
     "gradient_clipping": 0.5,
@@ -248,16 +253,7 @@ class DummyVLLM:
         # Create dummy outputs that match VLLM's expected format
         all_outputs = []
 
-        for _i in range(num_prompts):
-            # Create a dummy output object with the expected structure
-            class DummyOutput:
-                def __init__(self, token_ids):
-                    self.token_ids = token_ids
-
-            class DummyRequestOutput:
-                def __init__(self, outputs):
-                    self.outputs = outputs
-
+        for _ in range(num_prompts):
             # Generate random token IDs for testing
             # Using a reasonable range for token IDs (0-1000 for testing)
             import random
@@ -311,6 +307,9 @@ def generate_grpo(
     from_name=False,
     use_liger_loss=False,
 ):
+    if config is not None and not torch.cuda.is_available():
+        pytest.skip("DeepSpeed-configured LLM tests require CUDA support.")
+
     gc.collect()
     torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
@@ -436,8 +435,8 @@ def test_grpo_save_load_checkpoint_vllm(
         micro_batch_size_per_gpu,
     )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with tempfile.TemporaryDirectory() as tmpdir:
-        grpo.save_checkpoint(tmpdir)
+    with tempfile.TemporaryDirectory() as checkpoint_dir:
+        grpo.save_checkpoint(checkpoint_dir)
         new_grpo = GRPO(
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
@@ -455,7 +454,7 @@ def test_grpo_save_load_checkpoint_vllm(
             use_separate_reference_adapter=use_separate_reference_adapter,
             max_output_tokens=max_tokens,
         )
-        new_grpo.load_checkpoint(tmpdir)
+        new_grpo.load_checkpoint(checkpoint_dir)
 
         assert isinstance(new_grpo.actor, DeepSpeedEngine)
         assert isinstance(new_grpo.actor.base_model, (PeftModel, LoraModel))
@@ -494,7 +493,6 @@ def test_grpo_save_load_checkpoint_vllm(
                     assert torch.equal(getattr(new_grpo, attr), getattr(grpo, attr))
     new_grpo.clean_up()
     grpo.clean_up()
-    del grpo, new_grpo
 
 
 @spawn_new_process_for_each_test
@@ -562,7 +560,6 @@ def test_grpo_clean_up_vllm(
     assert grpo.actor is None
     assert grpo.optimizer is None
     assert grpo.lr_scheduler is None
-    del grpo
 
 
 @spawn_new_process_for_each_test
@@ -655,7 +652,6 @@ def test_grpo_move_model_to_vllm(
         grpo._move_model_to_vllm()
 
     grpo.clean_up()
-    del grpo
 
 
 @spawn_new_process_for_each_test
@@ -727,14 +723,13 @@ def test_get_action_grpo_including_vllm(
     ]
 
     completion_ids, _ = grpo.get_action(states, training)
-    group_size = 1 if not training else group_size
+    expected_group_size = 1 if not training else group_size
     for ids in completion_ids:
-        assert ids.shape[0] == group_size
+        assert ids.shape[0] == expected_group_size
         assert ids.shape[1] <= max_tokens + input_size
     if grpo.accelerator is None:
         assert not grpo.actor.training
     grpo.clean_up()
-    del grpo
 
 
 @spawn_new_process_for_each_test
@@ -823,7 +818,6 @@ def test_get_action_grpo_vllm_sleep_mode(
     mock_instance.sleep.assert_called()
     mock_instance.wake_up.assert_called()
     grpo.clean_up()
-    del grpo
 
 
 @spawn_new_process_for_each_test
@@ -876,7 +870,7 @@ def test_grpo_test_vllm(
     )
     env = DummyReasoningEnv(vocab_size, input_size, batch_size, device=grpo.device)
     fitnesses = grpo.test(env)
-    assert isinstance(fitnesses, torch.Tensor)
+    assert isinstance(fitnesses, np.ndarray)
     grpo.clean_up()
 
 
@@ -1155,6 +1149,74 @@ def test_init_grpo_vllm_tp_value_error(
         )
 
 
+@spawn_new_process_for_each_test
+@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
+@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+@pytest.mark.parametrize("use_vllm", [True])
+@pytest.mark.parametrize(
+    "pretrained_model_name_or_path",
+    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+)
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("use_separate_reference_adapter", [True])
+@pytest.mark.parametrize("reduce_memory_peak", [True])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+def test_init_grpo_vllm_invalid_attention_backend_value_error(
+    deepspeed_env,
+    accelerator_factory,
+    model_factory,
+    vocab_size,
+    input_size,
+    max_tokens,
+    group_size,
+    use_separate_reference_adapter,
+    use_vllm,
+    pretrained_model_name_or_path,
+    use_deepspeed_optimizer,
+    config,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+):
+    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+    with (
+        patch.dict(os.environ, {"VLLM_ATTENTION_BACKEND": "TORCH_SDPA"}, clear=False),
+        patch.object(
+            vllm.LLM,
+            "__init__",
+            side_effect=ValueError("Backend TORCH_SDPA must be registered before use."),
+        ),
+        pytest.raises(
+            ValueError,
+            match=r"unsupported VLLM_ATTENTION_BACKEND='TORCH_SDPA'",
+        ),
+    ):
+        GRPO(
+            actor_network=model_factory(pretrained_model_name_or_path),
+            pad_token_id=vocab_size - 1,
+            pad_token="<pad>",
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            group_size=group_size,
+            cosine_lr_schedule_config=(
+                None
+                if accelerator is not None
+                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+            ),
+            use_vllm=use_vllm,
+            vllm_config=VLLMConfig(
+                gpu_memory_utilization=0.05,
+                max_num_seqs=1,
+            ),
+            accelerator=accelerator,
+            use_separate_reference_adapter=use_separate_reference_adapter,
+            max_output_tokens=max_tokens,
+            reduce_memory_peak=reduce_memory_peak,
+            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+        )
+
+
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False])
@@ -1423,7 +1485,7 @@ def test_init_grpo_with_no_accelerator(
     assert isinstance(grpo.cosine_lr_schedule_config, CosineLRScheduleConfig), type(
         grpo.cosine_lr_schedule_config,
     )
-    assert grpo.device == "cuda"
+    assert grpo.device == ("cuda" if torch.cuda.is_available() else "cpu")
     assert grpo.index == 0
     assert grpo.scores == []
     assert grpo.fitness == []
@@ -1780,7 +1842,7 @@ def test_get_action_grpo_vllm_multiple_gpus(
     pretrained_model_name_or_path,
     tensor_parallel_size,
 ):
-    def mock_all_gather_object(gathered_prompts_ids, prompts_ids, group):
+    def mock_all_gather_object(gathered_prompts_ids, prompts_ids, **_kwargs):
         for idx, _ in enumerate(gathered_prompts_ids):
             gathered_prompts_ids[idx] = prompts_ids
 
@@ -3018,7 +3080,7 @@ def test_grpo_test(
     )
     env = DummyReasoningEnv(vocab_size, input_size, batch_size, device=grpo.device)
     fitnesses = grpo.test(env)
-    assert isinstance(fitnesses, torch.Tensor)
+    assert isinstance(fitnesses, np.ndarray)
     grpo.clean_up()
 
 
@@ -3137,7 +3199,6 @@ def test_grpo_clean_up(
     assert grpo.actor is None
     assert grpo.optimizer is None
     assert grpo.lr_scheduler is None
-    del grpo
 
 
 @pytest.mark.parametrize("config", [None])
@@ -3540,7 +3601,7 @@ def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
     reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
-    grpo = grpo_factory(
+    grpo_factory(
         accelerator_factory,
         model_factory,
         config,
@@ -3764,6 +3825,73 @@ def test_grpo_no_llm_dependencies(grpo_factory, model_factory, accelerator_facto
             group_size=2,
             use_vllm=False,
         ).clean_up()
+    AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize("assertion_mode", ["warns_and_fallback", "private_guard"])
+def test_grpo_liger_unavailable_behaviour(
+    monkeypatch,
+    grpo_factory,
+    model_factory,
+    accelerator_factory,
+    assertion_mode,
+):
+    monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", False)
+    monkeypatch.setattr("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction", None)
+    if assertion_mode == "warns_and_fallback":
+        with pytest.warns(
+            UserWarning,
+            match=r"use_liger_loss=True requested.*Falling back to standard loss\.",
+        ):
+            grpo = grpo_factory(
+                accelerator_factory=accelerator_factory,
+                model_factory=model_factory,
+                config=None,
+                use_deepspeed_optimizer=False,
+                vocab_size=30,
+                input_size=5,
+                max_tokens=10,
+                use_separate_reference_adapter=False,
+                pretrained_model_name_or_path=None,
+                reduce_memory_peak=False,
+                micro_batch_size_per_gpu=None,
+                from_name=False,
+                group_size=2,
+                use_vllm=False,
+                use_liger_loss=True,
+            )
+        assert grpo.use_liger_loss is False
+    else:
+        grpo = grpo_factory(
+            accelerator_factory=accelerator_factory,
+            model_factory=model_factory,
+            config=None,
+            use_deepspeed_optimizer=False,
+            vocab_size=30,
+            input_size=5,
+            max_tokens=10,
+            use_separate_reference_adapter=False,
+            pretrained_model_name_or_path=None,
+            reduce_memory_peak=False,
+            micro_batch_size_per_gpu=None,
+            from_name=False,
+            group_size=2,
+            use_vllm=False,
+            use_liger_loss=False,
+        )
+        with pytest.raises(
+            ImportError,
+            match=r"Liger GRPO loss was requested but `liger-kernel` is not available\. Set use_liger_loss=False\.",
+        ):
+            grpo._grpo_loss_liger(
+                batch_ids=torch.ones((1, 2), dtype=torch.long),
+                action_mask=torch.ones((1, 1), dtype=torch.bool),
+                advantages=torch.ones((1,), dtype=torch.float32),
+                old_log_probs=torch.zeros((1, 1), dtype=torch.float32),
+                reference_log_probs=torch.zeros((1, 1), dtype=torch.float32),
+            )
+
+    grpo.clean_up()
     AcceleratorState._reset_state(True)
 
 

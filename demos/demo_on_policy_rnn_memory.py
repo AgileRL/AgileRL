@@ -106,13 +106,12 @@ class MemoryGameEnv(gym.Env):
         pass
 
 
-def run_demo():
+def run_demo(recurrent: bool = True) -> None:
     # --- Setup Configuration ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Toggle this to True for RNN (LSTM), False for MLP
-    recurrent = True  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
+    # Toggle this to True for RNN (LSTM), False for MLP.
     active_collect = collect_rollouts if not recurrent else collect_rollouts_recurrent
 
     # --- Create Environment and Population ---
@@ -285,12 +284,11 @@ def run_demo():
             )
             elite, _ = tournament.select(pop)
             training_complete = True
-            break
-
-        elite, pop = tournament.select(pop)
-        pop = mutations.mutation(pop)
-        for agent in pop:
-            agent.steps.append(agent.steps[-1])
+        else:
+            elite, pop = tournament.select(pop)
+            pop = mutations.mutation(pop)
+            for agent in pop:
+                agent.steps.append(agent.steps[-1])
 
     pbar.close()
     env.close()
@@ -299,15 +297,13 @@ def run_demo():
     print("Evaluating best agent...")
 
     if not training_complete:
-        fitnesses = [
+        for agent in pop:
             agent.test(
                 single_test_env,
                 max_steps=eval_steps,
                 loop=eval_loop,
                 vectorized=True,
             )
-            for agent in pop
-        ]
         elite, _ = tournament.select(pop)
 
     # --- Run a few episodes and print results ---

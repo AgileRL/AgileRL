@@ -61,14 +61,15 @@ class DummyEnv:
         ("multidiscrete_space", EvolvableMLP),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_initialize_dqn(
     observation_space,
     discrete_space,
     encoder_cls,
-    accelerator,
+    accelerator_flag,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     dqn = RainbowDQN(observation_space, discrete_space, accelerator=accelerator)
 
@@ -101,14 +102,15 @@ def test_initialize_dqn(
         ("vector_space", EvolvableMLP),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_initialize_dqn_with_actor_network_evo_net(
     observation_space,
     discrete_space,
     encoder_cls,
-    accelerator,
+    accelerator_flag,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     support = torch.linspace(0, 1, 51)
     device = accelerator.device if accelerator else "cpu"
@@ -221,13 +223,14 @@ def test_initialize_dqn_with_make_evolvable(
         "dict_space",
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_returns_expected_action(
-    accelerator,
+    accelerator_flag,
     observation_space,
     discrete_space,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     dqn = RainbowDQN(observation_space, discrete_space, accelerator=accelerator)
     state = get_sample_from_space(observation_space)
@@ -245,6 +248,15 @@ def test_returns_expected_action(
 
     assert action.is_integer()
     assert action == 1
+    dqn.clean_up()
+
+
+def test_get_action_training_false(vector_space, discrete_space):
+    dqn = RainbowDQN(vector_space, discrete_space)
+    state = get_sample_from_space(vector_space)
+    action = dqn.get_action(state, training=False)
+    assert action.shape == (1,) or np.ndim(action) >= 1
+    assert 0 <= action.flatten()[0] < discrete_space.n
     dqn.clean_up()
 
 
@@ -271,14 +283,15 @@ def test_returns_expected_action_mask_vectorized(vector_space, discrete_space):
         "multidiscrete_space",
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 # learns from experiences and updates network parameters
 def test_learns_from_experiences(
-    accelerator,
+    accelerator_flag,
     observation_space,
     discrete_space,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     torch.autograd.set_detect_anomaly(True)
     batch_size = 64
@@ -322,15 +335,16 @@ def test_learns_from_experiences(
     dqn.clean_up()
 
 
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("combined", [True, False])
 # learns from experiences and updates network parameters
 def test_learns_from_experiences_n_step(
-    accelerator,
+    accelerator_flag,
     combined,
     vector_space,
     discrete_space,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     batch_size = 64
 
     # Create an instance of the DQN class
@@ -404,14 +418,15 @@ def test_learns_from_experiences_n_step(
 
 
 # learns from experiences and updates network parameters
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("combined", [True, False])
 def test_learns_from_experiences_per(
-    accelerator,
+    accelerator_flag,
     combined,
     vector_space,
     discrete_space,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     batch_size = 64
 
     # Create an instance of the DQN class
@@ -470,14 +485,15 @@ def test_learns_from_experiences_per(
 
 
 # learns from experiences and updates network parameters
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("combined", [True, False])
 def test_learns_from_experiences_per_n_step(
-    accelerator,
+    accelerator_flag,
     combined,
     vector_space,
     discrete_space,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     batch_size = 64
 
     # Create an instance of the DQN class

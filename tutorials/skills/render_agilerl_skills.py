@@ -3,7 +3,6 @@ import os
 import gymnasium as gym
 import imageio
 import numpy as np
-import torch
 from PIL import Image
 
 from agilerl.algorithms.ppo import PPO
@@ -23,8 +22,6 @@ def resize_frames(frames, fraction):
 
 
 if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     env = gym.make("LunarLander-v3", render_mode="rgb_array")
 
     skills = ["stabilize", "center", "landing"]
@@ -40,7 +37,6 @@ if __name__ == "__main__":
             500  # Max number of steps to take in the environment in each episode
         )
 
-        rewards = []  # List to collect total episodic reward
         frames = []  # List to collect frames
 
         print("============================================")
@@ -51,12 +47,12 @@ if __name__ == "__main__":
             state, _ = env.reset()  # Reset environment at start of episode
             frames.append(env.render())
             score = 0
-            for _idx_step in range(max_steps):
+            for step in range(max_steps):
                 # Get next action from agent
                 if state[6] or state[7]:
                     action = [0]
                 else:
-                    action, log_prob, _, value = agent.get_action(state)
+                    action, _, _, _ = agent.get_action(state)
                 next_state, reward, termination, truncation, _ = env.step(
                     action[0],
                 )  # Act in environment
@@ -73,7 +69,7 @@ if __name__ == "__main__":
                 state = next_state
 
             print("-" * 15, f"Episode: {ep + 1}", "-" * 15)
-            print(f"Episode length: {_idx_step}")
+            print(f"Episode length: {step}")
             print(f"Score: {score}")
 
         print("============================================")

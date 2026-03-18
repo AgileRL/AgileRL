@@ -513,32 +513,24 @@ class EvolvableBERT(EvolvableModule):
         """Add an encoder layer to transformer."""
         if len(self.encoder_layers) < self.max_encoder_layers:
             self.encoder_layers += [self.encoder_layers[-1]]
-        # else:
-        #     self.add_node()
 
     @mutation(MutationType.LAYER)
     def add_decoder_layer(self) -> None:
         """Add a decoder layer to transformer."""
         if len(self.decoder_layers) < self.max_decoder_layers:
             self.decoder_layers += [self.decoder_layers[-1]]
-        # else:
-        #     self.add_node()
 
     @mutation(MutationType.LAYER)
     def remove_encoder_layer(self) -> None:
         """Remove an encoder layer from transformer."""
         if len(self.encoder_layers) > 1:
             self.encoder_layers = self.encoder_layers[:-1]
-        # else:
-        #     self.add_node()
 
     @mutation(MutationType.LAYER)
     def remove_decoder_layer(self) -> None:
         """Remove a decoder layer from transformer."""
         if len(self.decoder_layers) > 1:
             self.decoder_layers = self.decoder_layers[:-1]
-        # else:
-        #     self.add_node()
 
     @mutation(MutationType.NODE)
     def add_node(

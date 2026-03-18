@@ -345,7 +345,9 @@ def train_multi_agent_off_policy(
                 for idx, agent_dones in enumerate(zip(*dones.values(), strict=False)):
                     if all(agent_dones):
                         completed_score = (
-                            float(scores[idx]) if sum_scores else list(scores[idx])
+                            np.asarray(scores[idx]).item()
+                            if sum_scores
+                            else list(scores[idx])
                         )
                         completed_episode_scores.append(completed_score)
                         agent.scores.append(completed_score)
@@ -369,7 +371,8 @@ def train_multi_agent_off_policy(
             pbar.update(evo_steps // len(pop))
 
             agent.steps[-1] += steps
-            fps = steps / (time.time() - start_time)
+            elapsed = max(time.time() - start_time, 1e-12)
+            fps = steps / elapsed
             pop_fps.append(fps)
             pop_episode_scores.append(completed_episode_scores)
             if len(losses[agent_ids[0]]) > 0:

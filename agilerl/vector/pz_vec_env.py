@@ -1,4 +1,4 @@
-from typing import Any, ClassVar
+from typing import Any
 
 import numpy as np
 from gymnasium.spaces import Space
@@ -18,27 +18,26 @@ class PettingZooVecEnv:
     :type num_envs: int
     :param observation_spaces: Dictionary of observation spaces
     :type observation_spaces: dict[str, gymnasium.spaces.Space]
-    :param action_spaces: List of action spaces
-    :type action_spaces: list[gymnasium.spaces.Space]
+    :param action_spaces: Dictionary of action spaces keyed by agent
+    :type action_spaces: dict[str, gymnasium.spaces.Space]
     :param possible_agents: List of possible agents
     :type possible_agents: list[str]
 
     """
 
-    metadata: ClassVar[dict[str, Any]] = {}
-    render_mode: ClassVar[str | None] = None
-    closed: ClassVar[bool] = False
-    num_envs: int
-    agents: list[str]
-    num_agents: int
-
     def __init__(
         self,
         num_envs: int,
         observation_spaces: dict[str, Space],
-        action_spaces: list[Space],
+        action_spaces: dict[str, Space],
         possible_agents: list[str],
+        *,
+        metadata: dict[str, Any] | None = None,
+        render_mode: str | None = None,
     ) -> None:
+        self.metadata = metadata if metadata is not None else {}
+        self.render_mode = render_mode
+        self.closed = False
         self.num_envs = num_envs
         self.agents = possible_agents
         self.num_agents = len(self.agents)
@@ -52,23 +51,44 @@ class PettingZooVecEnv:
             agent: batch_space(space, self.num_envs)
             for agent, space in action_spaces.items()
         }
-        self.action_space = self._get_action_space
-        self.observation_space = self._get_observation_space
-        self.single_action_space = self._get_single_action_space
-        self.single_observation_space = self._get_single_observation_space
+
+    @property
+    def action_space(self):
+        """Return callable to get an agent's action space."""
+        return self._get_action_space
+
+    @property
+    def observation_space(self):
+        """Return callable to get an agent's observation space."""
+        return self._get_observation_space
+
+    @property
+    def single_action_space(self):
+        """Return callable to get an agent's single action space."""
+        return self._get_single_action_space
+
+    @property
+    def single_observation_space(self):
+        """Return callable to get an agent's single observation space."""
+        return self._get_single_observation_space
 
     def reset(
         self,
+        *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
         """Reset all the environments and return two dictionaries of batched observations and infos.
 
         :param seed: Random seed, defaults to None
         :type seed: None | int, optional
         :param options: Options dictionary
         :type options: dict[str, Any]
+        :return: Tuple of (observations, infos)
+        :rtype: tuple[dict[str, np.ndarray], dict[str, Any]]
         """
+        msg = "Subclasses must implement reset()"
+        raise NotImplementedError(msg)
 
     def step_async(self, actions: list[dict[str, ActionType]]) -> None:
         """Tell all the environments to start taking a step
@@ -81,11 +101,23 @@ class PettingZooVecEnv:
         actions for each agent in a given environment
         :type actions: list[dict[str, int | float | np.ndarray]]
         """
+        msg = "Subclasses must implement step_async()"
+        raise NotImplementedError(msg)
 
-    def step_wait(self) -> PzStepReturn:
-        """Wait for the step taken with step_async()."""
+    def step_wait(self, timeout: float | None = None) -> PzStepReturn:
+        """Wait for the step taken with step_async().
 
-    def step(self, actions: dict[str, np.ndarray]) -> PzStepReturn:
+        :param timeout: Number of seconds before the call times out. If ``None``, never times out.
+        """
+        msg = "Subclasses must implement step_wait()"
+        raise NotImplementedError(msg)
+
+    def step(
+        self,
+        actions: dict[str, np.ndarray],
+        *args: Any,
+        **kwargs: Any,
+    ) -> PzStepReturn:
         """Take an action for each parallel environment.
 
         :param actions: Dictionary of vectorized actions for each agent.
@@ -95,7 +127,8 @@ class PettingZooVecEnv:
         :rtype: tuple[dict[str, np.ndarray], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]
         """
         passed_actions_list = []
-        for env_idx, _ in enumerate(next(iter(actions.values()))):
+        num_actions = len(next(iter(actions.values())))
+        for env_idx in range(num_actions):
             env_actions = {}
             for agent_id, action in actions.items():
                 agent_action = action[env_idx]
@@ -132,8 +165,18 @@ class PettingZooVecEnv:
         self.close_extras(**kwargs)
         self.closed = True
 
-    def close_extras(self, **kwargs: Any) -> None:
-        """Clean up the extra resources e.g. beyond what's in this base class."""
+    def close_extras(
+        self,
+        *,
+        timeout: float | None = None,
+        terminate: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        """Clean up the extra resources e.g. beyond what's in this base class.
+
+        Subclasses may override with compatible signatures (same params or wider).
+        """
+        _ = timeout, terminate, kwargs  # Base does nothing; subclasses may override
 
     @property
     def unwrapped(self) -> "PettingZooVecEnv":

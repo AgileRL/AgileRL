@@ -26,6 +26,10 @@ def map_pytree(
     :return: Data structure with function applied to all arrays/tensors
     :rtype: Any
     """
+    if not callable(f):
+        msg = "f must be callable."
+        raise TypeError(msg)
+
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
     if isinstance(item, (list, set, tuple)):

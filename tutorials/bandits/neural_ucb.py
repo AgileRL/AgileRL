@@ -124,7 +124,7 @@ if __name__ == "__main__":
         for i, agent in enumerate(pop):  # Loop through population
             losses = []
             context = env.reset()  # Reset environment at start of episode
-            for _idx_step in range(episode_steps):
+            for _ in range(episode_steps):
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment

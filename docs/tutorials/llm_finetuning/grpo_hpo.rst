@@ -579,5 +579,5 @@ Full Training Code
 ------------------
 .. collapse:: Full code
 
-   .. literalinclude:: ../../../tutorials/LLM_Finetuning/grpo_reasoning_hpo.py
+   .. literalinclude:: ../../../tutorials/llm_finetuning/grpo_reasoning_hpo.py
       :language: python

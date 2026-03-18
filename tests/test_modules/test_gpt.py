@@ -238,6 +238,32 @@ def test_remove_nodes():
         assert block.mlp.hidden_size[0] < initial_dim_feedfwd
 
 
+# The model can set activation
+def test_activation_setter():
+    model = EvolvableGPT()
+    model.activation = "ReLU"
+    assert model._activation == "ReLU"
+
+
+# The model can use CausalSelfAttention without flash (coverage for non-flash path)
+def test_causal_self_attention_no_flash():
+    block_size = 64
+    attn = CausalSelfAttention(96, 4, True, 0.1, block_size, device="cpu")
+    attn.flash = False
+    attn.register_buffer(
+        "attention_bias",
+        torch.tril(torch.ones(block_size, block_size)).view(
+            1,
+            1,
+            block_size,
+            block_size,
+        ),
+    )
+    x = torch.randn(2, 32, 96)
+    y, present = attn(x, attn_mask=None, is_causal=True)
+    assert y.shape == (2, 32, 96)
+
+
 # The model can clone itself.
 def test_model_clone():
     model = EvolvableGPT()
