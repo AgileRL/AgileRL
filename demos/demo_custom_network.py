@@ -53,6 +53,7 @@ if __name__ == "__main__":
         "GAMMA": 0.99,  # Discount factor
         "LEARN_STEP": 1,  # Learning frequency
         "TAU": 1e-3,  # For soft update of target network parameters
+        "MEMORY_SIZE": 10000,  # Max replay buffer size
         "POP_SIZE": 4,  # Population size
     }
 
@@ -95,7 +96,6 @@ if __name__ == "__main__":
     )
 
     mutations = Mutations(
-        algo="DQN",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.2,  # New layer mutation
@@ -134,7 +134,7 @@ if __name__ == "__main__":
             steps = 0
             epsilon = eps_start
 
-            for _idx_step in range(evo_steps // num_envs):
+            for _ in range(evo_steps // num_envs):
                 action = agent.get_action(obs, epsilon)  # Get next action from agent
                 epsilon = max(
                     eps_end,
@@ -142,7 +142,7 @@ if __name__ == "__main__":
                 )  # Decay epsilon for exploration
 
                 # Act in environment
-                next_obs, reward, terminated, truncated, info = env.step(action)
+                next_obs, reward, terminated, truncated, _ = env.step(action)
                 scores += np.array(reward)
                 steps += num_envs
                 total_steps += num_envs
@@ -211,7 +211,7 @@ if __name__ == "__main__":
         )
 
         # Tournament selection and population mutation
-        elite, pop = tournament.select(pop)
+        _, pop = tournament.select(pop)
         pop = mutations.mutation(pop)
 
         # Update step counter

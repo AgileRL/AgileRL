@@ -1,5 +1,5 @@
 Algorithm Utils
-==============
+===============
 
 Space and Observation Utilities
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -32,7 +32,7 @@ Network and Model Utilities
 .. autofunction:: agilerl.utils.algo_utils.clone_llm
 
 Observation Processing
-~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~
 
 .. autofunction:: agilerl.utils.algo_utils.obs_channels_to_first
 
@@ -49,7 +49,7 @@ Observation Processing
 .. autofunction:: agilerl.utils.algo_utils.apply_image_normalization
 
 Experience Handling
-~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~
 
 .. autofunction:: agilerl.utils.algo_utils.get_experiences_samples
 
@@ -72,7 +72,7 @@ Experience Handling
 .. autofunction:: agilerl.utils.algo_utils.concatenate_experiences_into_batches
 
 Checkpoint and Serialization
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. autofunction:: agilerl.utils.algo_utils.make_safe_deepcopies
 

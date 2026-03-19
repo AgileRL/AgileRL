@@ -198,7 +198,6 @@ class ArenaClient:
         multi_agent: bool = False,
         rollouts: bool = False,
         max_steps: int = 200,
-        stream: bool = False,
     ) -> dict[str, Any]:
         """Create and validate a custom environment on Arena.
 
@@ -221,8 +220,6 @@ class ArenaClient:
         :type rollouts: bool
         :param max_steps: Maximum steps per rollout episode.
         :type max_steps: int
-        :param stream: If ``True``, stream validation logs to the terminal in real time and block until the operation finishes.
-        :type stream: bool
         :returns: Validation report from the Arena API.
         :rtype: dict[str, Any]
         """
@@ -242,7 +239,7 @@ class ArenaClient:
         # Send the environment to Arena for validation
         resp = self._request(
             "POST",
-            "arena/environments/create-and-validate",
+            "api/v1/custom-gym-env-impls/create-and-validate",
             files={"archive": ("environment.tar.gz", payload, "application/gzip")},
             data={
                 "name": name,
@@ -255,9 +252,6 @@ class ArenaClient:
             timeout=self._upload_timeout,
         )
         self._check_validation_result(resp)
-
-        if stream and "operation_id" in resp:
-            return self.stream_logs(resp["operation_id"])
 
         return resp
 
@@ -289,7 +283,7 @@ class ArenaClient:
         """
         resp = self._request(
             "GET",
-            "arena/environments/validate",
+            "api/v1/custom-gym-env-impls/validate",
             params={
                 "name": name,
                 "version": version,
@@ -308,7 +302,7 @@ class ArenaClient:
     # TODO: Print the environments in a table format using rich
     def list_environments(self) -> None:
         """List all custom environments registered in Arena."""
-        self._request("GET", "arena/environments/list")
+        self._request("GET", "api/v1/custom-gym-env-impls/list")
 
     def list_entrypoints(self, name: str, version: str = "latest") -> list[str]:
         """List all entrypoints available for a custom environment version.
@@ -317,9 +311,23 @@ class ArenaClient:
         :param version: The version of the environment. Defaults to "latest".
         :returns: List of entrypoints for the given environment.
         """
+        resp = self._request(
+            "GET",
+            "api/v1/custom-gym-env-impls/list-entrypoints",
+            params={"name": name, "version": version},
+        )
+        return resp["entrypoints"]
+
+    def _is_arena_environment(self, name: str, version: str = "latest") -> bool:
+        """Check if a custom environment is registered in Arena.
+
+        :param name: The name of the environment.
+        :param version: The version of the environment. Defaults to "latest".
+        :returns: True if the environment is registered in Arena, False otherwise.
+        """
         return self._request(
             "GET",
-            "arena/environments/list-entrypoints",
+            "api/v1/custom-gym-env-impls/is-registered",
             params={"name": name, "version": version},
         )
 
@@ -417,7 +425,7 @@ class ArenaClient:
             payload["cluster"] = cluster.model_dump(mode="json")
         resp = self._request(
             "POST",
-            "arena/jobs/submit",
+            "api/v1/jobs/submit",
             json=payload,
         )
 
@@ -433,7 +441,7 @@ class ArenaClient:
         :returns: The current status of the job.
         :rtype: JobStatus
         """
-        status = self._request("GET", "arena/jobs/status", params={"job_id": job_id})
+        status = self._request("GET", "api/v1/jobs/status", params={"job_id": job_id})
         return JobStatus(status)
 
     def stop_job(self, job_id: str) -> None:
@@ -441,7 +449,7 @@ class ArenaClient:
 
         :param job_id: Identifier returned by :meth:`submit_job`.
         """
-        return self._request("POST", "arena/jobs/stop", params={"job_id": job_id})
+        return self._request("POST", "api/v1/jobs/stop", params={"job_id": job_id})
 
     def iter_events(
         self,
@@ -460,7 +468,7 @@ class ArenaClient:
         """
         return EventStream(
             http=self._http,
-            path=f"arena/operations/{operation_id}/events",
+            path=f"api/v1/operations/{operation_id}/events",
             auth_headers=self._auth_headers(),
             max_retries=max_retries,
         )

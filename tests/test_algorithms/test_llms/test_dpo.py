@@ -1,8 +1,11 @@
 import copy
 import gc
 
+import numpy as np
 import pytest
 import torch
+
+pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
@@ -76,6 +79,9 @@ def generate_dpo(
     from_name=False,
     use_liger_loss=False,
 ):
+    if config is not None and not torch.cuda.is_available():
+        pytest.skip("DeepSpeed-configured LLM tests require CUDA support.")
+
     gc.collect()
     torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
@@ -493,6 +499,70 @@ def test_dpo_test(
         accelerator=dpo.accelerator,
     )
     fitness = dpo.test(env)
-    assert isinstance(fitness, float)
+    assert isinstance(fitness, np.ndarray)
+    dpo.clean_up()
+    AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize("assertion_mode", ["warns_and_fallback", "private_guard"])
+def test_dpo_liger_unavailable_behaviour(
+    monkeypatch,
+    dpo_factory,
+    accelerator_factory,
+    model_factory,
+    assertion_mode,
+):
+    monkeypatch.setattr("agilerl.algorithms.dpo.HAS_LIGER_KERNEL", False)
+    monkeypatch.setattr("agilerl.algorithms.dpo.LigerFusedLinearDPOFunction", None)
+    if assertion_mode == "warns_and_fallback":
+        with pytest.warns(
+            UserWarning,
+            match=r"use_liger_loss=True requested.*Falling back to standard loss\.",
+        ):
+            dpo = dpo_factory(
+                accelerator_factory=accelerator_factory,
+                model_factory=model_factory,
+                config=None,
+                use_deepspeed_optimizer=False,
+                vocab_size=30,
+                input_size=5,
+                max_tokens=10,
+                use_separate_reference_adapter=False,
+                pretrained_model_name_or_path=None,
+                reduce_memory_peak=False,
+                micro_batch_size_per_gpu=None,
+                from_name=False,
+                use_liger_loss=True,
+            )
+        assert dpo.use_liger_loss is False
+    else:
+        dpo = dpo_factory(
+            accelerator_factory=accelerator_factory,
+            model_factory=model_factory,
+            config=None,
+            use_deepspeed_optimizer=False,
+            vocab_size=30,
+            input_size=5,
+            max_tokens=10,
+            use_separate_reference_adapter=False,
+            pretrained_model_name_or_path=None,
+            reduce_memory_peak=False,
+            micro_batch_size_per_gpu=None,
+            from_name=False,
+            use_liger_loss=False,
+        )
+        with pytest.raises(
+            ImportError,
+            match=r"Liger DPO loss was requested but `liger-kernel` is not available\. Set use_liger_loss=False\.",
+        ):
+            dpo._dpo_loss_liger(
+                chosen_ids=torch.ones((1, 2), dtype=torch.long),
+                rejected_ids=torch.ones((1, 2), dtype=torch.long),
+                chosen_attn=torch.ones((1, 2), dtype=torch.long),
+                rejected_attn=torch.ones((1, 2), dtype=torch.long),
+                chosen_mask=torch.ones((1, 1), dtype=torch.long),
+                rejected_mask=torch.ones((1, 1), dtype=torch.long),
+            )
+
     dpo.clean_up()
     AcceleratorState._reset_state(True)

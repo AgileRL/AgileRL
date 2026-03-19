@@ -118,18 +118,18 @@ curriculum can be defined as follows:
 
 .. collapse:: Lesson 1
 
-   .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson1.yaml
+   .. literalinclude:: ../../../tutorials/pettingzoo/curriculums/connect_four/lesson1.yaml
       :language: yaml
 
 
 .. collapse:: Lesson 2
 
-   .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson2.yaml
+   .. literalinclude:: ../../../tutorials/pettingzoo/curriculums/connect_four/lesson2.yaml
       :language: yaml
 
 .. collapse:: Lesson 3
 
-   .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson3.yaml
+   .. literalinclude:: ../../../tutorials/pettingzoo/curriculums/connect_four/lesson3.yaml
       :language: yaml
 
 To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a wrapper on top of our Connect Four environment and enables us
@@ -876,7 +876,7 @@ A sample lesson config for self-play training could be defined as follows:
 
 .. collapse:: Lesson 4
 
-   .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson4.yaml
+   .. literalinclude:: ../../../tutorials/pettingzoo/curriculums/connect_four/lesson4.yaml
       :language: yaml
 
 It could also be possible to train an agent through self-play only, without using any previous lessons in the curriculum. This would require significant
@@ -1284,7 +1284,7 @@ to optimize hyperparameters and maximise the performance of our agents in a sing
 Trained Model Weights
 ^^^^^^^^^^^^^^^^^^^^^
 
-Trained model weights are provided at ``AgileRL/tutorials/PettingZoo/models``. Take a look, train against these models, and see if you can beat them!
+Trained model weights are provided at ``AgileRL/tutorials/pettingzoo/models``. Take a look, train against these models, and see if you can beat them!
 
 
 Watch the Trained Agents Play
@@ -1294,7 +1294,7 @@ The following code allows you to load your saved DQN agent from the previous tra
 
 .. collapse:: Render Trained Agents
 
-   .. literalinclude:: ../../../tutorials/PettingZoo/render_agilerl_dqn.py
+   .. literalinclude:: ../../../tutorials/pettingzoo/render_dqn.py
       :language: python
 
 
@@ -1305,5 +1305,5 @@ Full Training Code
 
 .. collapse:: Full code
 
-   .. literalinclude:: ../../../tutorials/PettingZoo/agilerl_dqn_curriculum.py
+   .. literalinclude:: ../../../tutorials/pettingzoo/dqn_curriculum.py
       :language: python

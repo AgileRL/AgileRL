@@ -436,7 +436,8 @@ def train_off_policy(
             pbar.update(evo_steps // len(pop))
 
             agent.steps[-1] += steps
-            fps = steps / (time.time() - start_time)
+            elapsed = max(time.time() - start_time, 1e-12)
+            fps = steps / elapsed
             pop_fps.append(fps)
             pop_episode_scores.append(completed_episode_scores)
 

@@ -559,7 +559,7 @@ def test_initialize_maddpg_with_cnn_networks(
     maddpg.clean_up()
 
 
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
     "observation_spaces, encoder_cls",
@@ -573,12 +573,13 @@ def test_initialize_maddpg_with_evo_networks(
     encoder_cls,
     device,
     compile_mode,
-    accelerator,
+    accelerator_flag,
     ma_discrete_space,
     request,
 ):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     observation_spaces = request.getfixturevalue(observation_spaces)
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     observation_space = spaces.Dict(
         {agent_id: observation_spaces[idx] for idx, agent_id in enumerate(agent_ids)},
     )
@@ -852,7 +853,6 @@ def test_maddpg_get_action(
             for action in env_action:
                 assert action <= action_spaces[idx].n - 1
     maddpg.clean_up()
-    maddpg = None
 
 
 @pytest.mark.parametrize("training", [False, True])
@@ -931,7 +931,6 @@ def test_get_action_distributed(
         agent: np.random.randn(*observation_spaces[idx].shape)
         for idx, agent in enumerate(agent_ids)
     }
-    from agilerl.algorithms.maddpg import MADDPG
 
     maddpg = MADDPG(
         observation_spaces,
@@ -1170,7 +1169,7 @@ def test_maddpg_get_action_vectorized_agent_masking(
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
 @pytest.mark.parametrize("compile_mode", [None])
-@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("batch_size", [64])
 def test_maddpg_learns_from_experiences(
     observation_spaces,
@@ -1180,12 +1179,13 @@ def test_maddpg_learns_from_experiences(
     agent_ids,
     device,
     compile_mode,
-    accelerator,
+    accelerator_flag,
     request,
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,

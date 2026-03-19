@@ -34,6 +34,19 @@ def test_instantiation_without_errors(
     assert isinstance(evolvable_resnet, EvolvableResNet)
 
 
+def test_resnet_change_activation_noop(device):
+    evolvable_resnet = EvolvableResNet(
+        input_shape=[3, 32, 32],
+        channel_size=64,
+        kernel_size=3,
+        stride_size=1,
+        num_outputs=10,
+        num_blocks=2,
+        device=device,
+    )
+    evolvable_resnet.change_activation("ReLU", output=True)
+
+
 @pytest.mark.parametrize(
     "input_shape, channel_size, kernel_size, stride_size, num_outputs, num_blocks",
     [
@@ -218,6 +231,112 @@ def test_remove_channel(
     result = evolvable_resnet.remove_channel()
     numb_new_channels = result["numb_new_channels"]
     assert evolvable_resnet.channel_size == initial_channel_size - numb_new_channels
+
+
+######### Test net_config #########
+def test_net_config_excludes_attrs(device):
+    """Covers net_config property popping num_inputs, num_outputs, device, name."""
+    evolvable_resnet = EvolvableResNet(
+        input_shape=[3, 32, 32],
+        channel_size=64,
+        kernel_size=3,
+        stride_size=1,
+        num_outputs=10,
+        num_blocks=2,
+        device=device,
+    )
+    net_config = evolvable_resnet.net_config
+    assert "num_outputs" not in net_config
+    assert "device" not in net_config
+    assert "name" not in net_config
+    assert "input_shape" in net_config or "channel_size" in net_config
+
+
+######### Test add_block / remove_block fallbacks #########
+def test_add_block_fallback_add_channel_when_max_blocks(device):
+    """Covers add_block when num_blocks >= max_blocks, falls back to add_channel."""
+    evolvable_resnet = EvolvableResNet(
+        input_shape=[3, 32, 32],
+        channel_size=64,
+        kernel_size=3,
+        stride_size=1,
+        num_outputs=10,
+        num_blocks=4,
+        max_blocks=4,
+        device=device,
+    )
+    initial_channels = evolvable_resnet.channel_size
+    evolvable_resnet.add_block()
+    assert evolvable_resnet.channel_size >= initial_channels
+
+
+def test_remove_block_fallback_add_channel_when_min_blocks(device):
+    """Covers remove_block when num_blocks <= min_blocks, falls back to add_channel."""
+    evolvable_resnet = EvolvableResNet(
+        input_shape=[3, 32, 32],
+        channel_size=64,
+        kernel_size=3,
+        stride_size=1,
+        num_outputs=10,
+        num_blocks=1,
+        min_blocks=1,
+        device=device,
+    )
+    initial_channels = evolvable_resnet.channel_size
+    evolvable_resnet.remove_block()
+    assert evolvable_resnet.channel_size >= initial_channels
+
+
+def test_add_channel_hard_limit_not_exceeded(device):
+    """Covers add_channel when channel_size + numb_new_channels >= max_channel_size."""
+    evolvable_resnet = EvolvableResNet(
+        input_shape=[3, 32, 32],
+        channel_size=248,
+        kernel_size=3,
+        stride_size=1,
+        num_outputs=10,
+        num_blocks=2,
+        max_channel_size=256,
+        device=device,
+    )
+    evolvable_resnet.add_channel(numb_new_channels=32)
+    assert evolvable_resnet.channel_size <= 256
+
+
+def test_remove_channel_hard_limit_not_below_min(device):
+    """Covers remove_channel when channel_size - numb_new_channels <= min_channel_size."""
+    evolvable_resnet = EvolvableResNet(
+        input_shape=[3, 32, 32],
+        channel_size=40,
+        kernel_size=3,
+        stride_size=1,
+        num_outputs=10,
+        num_blocks=2,
+        min_channel_size=32,
+        device=device,
+    )
+    initial = evolvable_resnet.channel_size
+    evolvable_resnet.remove_channel(numb_new_channels=16)
+    assert evolvable_resnet.channel_size == initial
+
+
+######### Test forward with numpy input #########
+def test_forward_numpy_input(device):
+    """Covers forward when x is not torch.Tensor."""
+    import numpy as np
+
+    evolvable_resnet = EvolvableResNet(
+        input_shape=[3, 32, 32],
+        channel_size=64,
+        kernel_size=3,
+        stride_size=1,
+        num_outputs=10,
+        num_blocks=2,
+        device=device,
+    )
+    x = np.random.randn(3, 32, 32).astype(np.float32)
+    output = evolvable_resnet.forward(x)
+    assert output.shape == (1, 10)
 
 
 ######### Test clone #########

@@ -335,7 +335,7 @@ class ILQL(nn.Module):
 
         # Model forward passes
         (
-            model_outputs,
+            _model_outputs,
             model_hidden_states,
             model_past_key_values,
             _model_loss,
@@ -363,7 +363,6 @@ class ILQL(nn.Module):
 
         # Prepare policy inputs
         if skip_policy_on_train and self.training:
-            _policy_outputs = model_outputs
             policy_hidden_states = hidden_states
             policy_past_key_values = model_past_key_values
         else:
@@ -434,6 +433,7 @@ class ILQL(nn.Module):
         qs = self.q(
             action_hidden_states.detach() if self.detach_q else action_hidden_states,
         )
+        qs2 = None
         if self.double_q:
             qs2 = self.q2(
                 (
@@ -444,6 +444,7 @@ class ILQL(nn.Module):
             )
         with torch.no_grad():
             target_qs = self.target_q(action_target_hidden_states)
+            target_qs2 = None
             if self.double_q:
                 target_qs2 = self.target_q2(action_target_hidden_states)
         if skip_policy_on_train and self.training and self.actor is not None:
@@ -784,14 +785,6 @@ class ILQL(nn.Module):
 
         logs = {}
         transformer_logs = {}
-        # transformer_logs['qv_transformer_logs'] = get_transformer_logs(
-        #     model_outputs['qv_model_outputs'].attentions, self.model, attn_mask)
-        # if self.actor is not None and (not (self.training and awac_weight == 0.0)):
-        #     transformer_logs['policy_transformer_logs'] = get_transformer_logs(
-        #         model_outputs['policy_model_outputs'].attentions, self.actor, attn_mask)
-        # if self.actor_target is not None:
-        #     transformer_logs['target_transformer_logs'] = get_transformer_logs(
-        #         model_outputs['target_model_outputs'].attentions, self.actor_target, attn_mask)
         n = (1 - terminals[:, :-1]).sum().item()
         rs_downstream = self.get_downstream_rs(rs, self.gamma)
         if mc_returns:
@@ -1618,7 +1611,6 @@ class ILQL_Policy:
                     ].strip()
                 temp_outputs.append(processed_str)
             processed_outputs.append(temp_outputs)
-        scores = torch.gather(scores, dim=1, index=order)
         log_probs = torch.gather(
             log_probs.reshape(-1, num_generations),
             dim=1,
@@ -2193,7 +2185,7 @@ class TopAdvantageNGrams:
                 if token.item() == self.data.tokenizer.eoa_token_id:
                     curr_idx = x + 1
             if i % self.print_every == 0:
-                sorted(
+                _ = sorted(
                     {
                         k: top_actions[k] / total_actions[k] for k in total_actions
                     }.items(),

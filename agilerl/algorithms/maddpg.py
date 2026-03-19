@@ -429,6 +429,8 @@ class MADDPG(MultiAgentRLAlgorithm):
         self,
         obs: dict[str, ObservationType],
         infos: InfosDict | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[ArrayDict, ArrayDict]:
         """Return the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.

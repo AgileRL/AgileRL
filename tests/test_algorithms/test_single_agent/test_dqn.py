@@ -61,14 +61,15 @@ class DummyEnv:
         ("multidiscrete_space", EvolvableMLP),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_initialize_dqn(
     observation_space,
     encoder_cls,
-    accelerator,
+    accelerator_flag,
     discrete_space,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     action_space = discrete_space
     observation_space = request.getfixturevalue(observation_space)
     dqn = DQN(observation_space, action_space, accelerator=accelerator)
@@ -273,6 +274,34 @@ def test_returns_expected_action_mask(vector_space, discrete_space):
     dqn.clean_up()
 
 
+def test_get_action_dict_obs_without_mask(dict_space, discrete_space):
+    dqn = DQN(dict_space, discrete_space)
+    state = get_sample_from_space(dict_space, batch_size=2)
+    action = dqn.get_action(state, epsilon=0.0, action_mask=None)
+    assert len(action) == 2
+    dqn.clean_up()
+
+
+def test_learn_handles_actions_ndim_1(vector_space, discrete_space):
+    batch_size = 64
+    dqn = DQN(vector_space, discrete_space, batch_size=batch_size)
+    states = torch.randn(batch_size, vector_space.shape[0])
+    actions = torch.randint(0, discrete_space.n, (batch_size,))
+    rewards = torch.rand(batch_size, 1)
+    next_states = torch.randn(batch_size, vector_space.shape[0])
+    dones = torch.zeros(batch_size, 1)
+    experiences = Transition(
+        obs=states,
+        action=actions,
+        reward=rewards,
+        next_obs=next_states,
+        done=dones,
+    ).to_tensordict()
+    loss = dqn.learn(experiences)
+    assert isinstance(loss, float)
+    dqn.clean_up()
+
+
 def test_returns_expected_action_mask_vectorized(vector_space, discrete_space):
     accelerator = Accelerator()
     dqn = DQN(vector_space, discrete_space, accelerator=accelerator)
@@ -332,15 +361,16 @@ def test_dqn_optimizer_parameters(vector_space, discrete_space):
         "dict_space",
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("double", [False, True])
 def test_learns_from_experiences(
     observation_space,
-    accelerator,
+    accelerator_flag,
     double,
     discrete_space,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     action_space = discrete_space
     observation_space = request.getfixturevalue(observation_space)
     batch_size = 64

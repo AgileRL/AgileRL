@@ -3,6 +3,7 @@
 # See https://pre-commit.com/hooks.html for more hooks
 ci:
     autoupdate_branch: nightly
+    skip: [codeql-python]
 repos:
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v6.0.0
@@ -24,14 +25,14 @@ repos:
           - id: mixed-line-ending
             args: [--fix=lf]
     - repo: https://github.com/codespell-project/codespell
-      rev: v2.4.1
+      rev: v2.4.2
       hooks:
           - id: codespell
             args:
                 - --skip=*.css,*.js,*.map,*.scss,*.svg
                 - --ignore-words-list=magent,pres,roate
     - repo: https://github.com/astral-sh/ruff-pre-commit
-      rev: v0.15.4
+      rev: v0.15.6
       hooks:
           - id: ruff
             name: Ruff Linter
@@ -46,6 +47,16 @@ repos:
 
     - repo: https://github.com/astral-sh/uv-pre-commit
       # uv version.
-      rev: 0.10.7
+      rev: 0.10.10
       hooks:
           - id: uv-lock
+
+    - repo: local
+      hooks:
+          - id: codeql-python
+            name: CodeQL Python Security & Quality (manual)
+            entry: python .github/codeql/run_codeql.py
+            language: system
+            pass_filenames: false
+            always_run: true
+            stages: [manual]

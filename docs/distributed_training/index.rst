@@ -97,7 +97,8 @@ Below is an example of a distributed training loop.
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
         replay_dataloader = accelerator.prepare(replay_dataloader)
         sampler = Sampler(
-            distributed=True, dataset=replay_dataset, dataloader=replay_dataloader
+            dataset=replay_dataset,
+            dataloader=replay_dataloader,
         )
 
         tournament = TournamentSelection(

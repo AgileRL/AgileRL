@@ -131,10 +131,12 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
 
         try:
             returned.check_returncode()
-        except Exception as e:
+        except subprocess.CalledProcessError as err:
             raise RuntimeError(
                 f"Error in subprocess:\nstdout:\n{returned.stdout.decode()}\nstderr:\n{returned.stderr.decode()}"
-            ) from e
+            ) from err
+
+        return None
 
     return wrapper
 
@@ -197,8 +199,8 @@ def force_gpu_memory_release() -> None:
     try:
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.reset_accumulated_memory_stats()
-    except Exception:
-        pass
+    except Exception:  # CUDA not available or older PyTorch
+        return
 
 
 def wait_for_gpu_memory_to_clear(

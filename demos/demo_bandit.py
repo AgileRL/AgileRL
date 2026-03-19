@@ -37,6 +37,7 @@ if __name__ == "__main__":
 
     INIT_HP = {
         "BATCH_SIZE": 64,  # Batch size
+        "MEMORY_SIZE": 10000,  # Max replay buffer size
         "LR": 1e-3,  # Learning rate
         "GAMMA": 1.0,  # Scaling factor
         "LAMBDA": 1.0,  # Regularization factor
@@ -51,8 +52,6 @@ if __name__ == "__main__":
     targets = iris.data.targets
 
     env = BanditEnv(features, targets)  # Create environment
-    context_dim = env.context_dim
-    action_dim = env.arms
 
     observation_space = spaces.Box(
         low=features.values.min(),
@@ -78,15 +77,13 @@ if __name__ == "__main__":
         eval_loop=1,  # Evaluate using last N fitness scores
     )
     mutations = Mutations(
-        algo="NeuralUCB",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.5,  # New layer mutation
         parameters=0.2,  # Network parameters mutation
         activation=0.2,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
-        mutation_sd=0.1,  # Mutation strength  # Network architecture
+        mutation_sd=0.1,  # Mutation strength
         rand_seed=1,  # Random seed
         device=device,
     )
@@ -96,8 +93,6 @@ if __name__ == "__main__":
     evo_steps = 500  # Evolution frequency
     eval_steps = 500  # Evaluation steps per episode
     eval_loop = 1  # Number of evaluation episodes
-
-    print("Training...")
 
     wandb.init(
         # set the wandb project where this run will be logged
@@ -116,12 +111,11 @@ if __name__ == "__main__":
     print("Training...")
     pbar = default_progress_bar(max_steps)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
-        pop_episode_scores = []
-        for _agent_idx, agent in enumerate(pop):  # Loop through population
+        for agent in pop:  # Loop through population
             score = 0
             losses = []
             context = env.reset()  # Reset environment at start of episode
-            for _idx_step in range(episode_steps):
+            for _ in range(episode_steps):
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment
@@ -150,7 +144,6 @@ if __name__ == "__main__":
                 agent.regret.append(agent.regret[-1] + 1 - reward)
 
             agent.scores.append(score)
-            pop_episode_scores.append(score)
             agent.steps[-1] += episode_steps
             total_steps += episode_steps
             pbar.update(episode_steps // len(pop))
@@ -183,7 +176,7 @@ if __name__ == "__main__":
 
         if pop[0].steps[-1] // evo_steps > evo_count:
             # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
+            _, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
             evo_count += 1
 

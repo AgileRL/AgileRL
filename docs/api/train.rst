@@ -20,4 +20,6 @@ with DPO, and one for reinforcement learning with verifiable rewards (``finetune
 
 .. autofunction:: agilerl.training.train_llm.finetune_llm_reasoning
 
+.. _finetune_llm_preference:
+
 .. autofunction:: agilerl.training.train_llm.finetune_llm_preference

@@ -80,6 +80,10 @@ def get_batch_states(observation_space, num_steps) -> tuple[torch.Tensor, torch.
         next_states = tuple(
             torch.rand(1, *space.shape) for space in observation_space.spaces
         )
+    else:
+        raise NotImplementedError(
+            f"Unsupported observation space: {type(observation_space)}"
+        )
     return states, next_states
 
 
@@ -156,7 +160,8 @@ class SimpleCNN(nn.Module):
 
 
 @pytest.fixture(scope="function")
-def build_ppo(observation_space, action_space, recurrent, accelerator, request):
+def build_ppo(observation_space, action_space, recurrent, accelerator_flag, request):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
     use_rollout_buffer = recurrent
@@ -187,14 +192,15 @@ def build_ppo(observation_space, action_space, recurrent, accelerator, request):
         "multibinary_space",
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_initialize_ppo(
     observation_space,
     action_space,
     encoder_cls,
-    accelerator,
+    accelerator_flag,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
     ppo = PPO(
@@ -335,13 +341,12 @@ def test_initialize_ppo_with_actor_network_no_critic(
     actor_network = MakeEvolvable(actor_network, input_tensor)
     observation_space = request.getfixturevalue(observation_space)
     with pytest.raises(TypeError):
-        ppo = PPO(
+        PPO(
             observation_space,
             discrete_space,
             actor_network=actor_network,
             critic_network=critic_network,
         )
-        assert ppo
 
 
 @pytest.mark.parametrize(
@@ -352,7 +357,7 @@ def test_initialize_ppo_with_actor_network_no_critic(
     "action_space",
     ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("recurrent", [False])
 # Returns the expected action when given a state observation.
 def test_returns_expected_action(
@@ -361,6 +366,7 @@ def test_returns_expected_action(
     build_ppo,
     request,
     recurrent,
+    accelerator_flag,
 ):
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
@@ -423,13 +429,13 @@ def test_returns_expected_action(
     ],
 )
 @pytest.mark.parametrize("recurrent", [True])
-@pytest.mark.parametrize("accelerator", [None])
+@pytest.mark.parametrize("accelerator_flag", [False])
 # Returns the expected action when given a state observation.
 def test_returns_expected_action_recurrent(
     observation_space,
     action_space,
     recurrent,
-    accelerator,
+    accelerator_flag,
     build_ppo,
     request,
 ):
@@ -511,7 +517,7 @@ def test_ppo_optimizer_parameters(vector_space, discrete_space):
 
 @pytest.mark.parametrize("observation_space", ["vector_space"])
 @pytest.mark.parametrize("action_space", ["discrete_space"])
-@pytest.mark.parametrize("accelerator", [None])
+@pytest.mark.parametrize("accelerator_flag", [False])
 @pytest.mark.parametrize("recurrent", [False])
 def test_returns_expected_action_mask_vectorized(
     build_ppo,
@@ -519,9 +525,10 @@ def test_returns_expected_action_mask_vectorized(
     action_space,
     recurrent,
     request,
+    accelerator_flag,
 ):
     observation_space = request.getfixturevalue(observation_space)
-    action_space = request.getfixturevalue(action_space)
+    request.getfixturevalue(action_space)  # for parametrization
     state = np.stack([observation_space.sample(), observation_space.sample()])
     action_mask = np.stack([np.array([0, 1]), np.array([1, 0])])
     action, _, _, _ = build_ppo.get_action(state, action_mask=action_mask)
@@ -533,13 +540,14 @@ def test_returns_expected_action_mask_vectorized(
     "observation_space",
     ["vector_space", "image_space", "dict_space"],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_learns_from_experiences(
     observation_space,
     discrete_space,
-    accelerator,
+    accelerator_flag,
     request,
 ):
+    accelerator = Accelerator() if accelerator_flag else None
     batch_size = 45
     observation_space = request.getfixturevalue(observation_space)
     ppo = PPO(
@@ -1110,7 +1118,7 @@ def test_ppo_with_hidden_states(
         ppo = make_ppo()
     else:
         with pytest.raises(ValueError):
-            ppo = make_ppo()
+            make_ppo()
         return
 
     # Get action with hidden state
@@ -1411,20 +1419,20 @@ def test_ppo_collect_rollouts(
     collect_rollouts(ppo, env, n_steps=learn_step)
 
     # Check if properties and weights are loaded correctly
-    assert ppo.observation_space == ppo.observation_space
-    assert ppo.action_space == ppo.action_space
+    assert ppo.observation_space is not None
+    assert ppo.action_space is not None
     assert isinstance(ppo.actor, nn.Module)
     assert isinstance(ppo.critic, nn.Module)
-    assert ppo.lr == ppo.lr
+    assert ppo.lr is not None
     assert str(ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
     assert str(ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
-    assert ppo.batch_size == ppo.batch_size
-    assert ppo.gamma == ppo.gamma
-    assert ppo.mut == ppo.mut
-    assert ppo.index == ppo.index
-    assert ppo.scores == ppo.scores
-    assert ppo.fitness == ppo.fitness
-    assert ppo.steps == ppo.steps
+    assert ppo.batch_size is not None
+    assert ppo.gamma is not None
+    assert ppo.mut is None
+    assert ppo.index is not None
+    assert ppo.scores is not None
+    assert ppo.fitness is not None
+    assert ppo.steps is not None
     ppo.clean_up()
 
 
@@ -1600,7 +1608,7 @@ def test_rollout_buffer_flat_external_uses_accelerator_and_early_stops(
     monkeypatch.setattr(
         ppo,
         "evaluate_actions",
-        lambda obs, actions, hidden_state=None: (
+        lambda obs, actions, hidden_state=None, action_mask=None: (
             torch.full((actions.shape[0],), 10.0, requires_grad=True),
             torch.ones(actions.shape[0], requires_grad=True),
             torch.zeros(actions.shape[0], requires_grad=True),
@@ -1672,7 +1680,7 @@ def test_rollout_buffer_bptt_kl_warning_and_break_paths(
     monkeypatch.setattr(
         ppo,
         "evaluate_actions",
-        lambda obs, actions, hidden_state=None: (
+        lambda obs, actions, hidden_state=None, action_mask=None: (
             torch.full((actions.shape[0],), 10.0, requires_grad=True),
             torch.ones(actions.shape[0], requires_grad=True),
             torch.zeros(actions.shape[0], requires_grad=True),
@@ -1737,7 +1745,7 @@ def test_rollout_buffer_bptt_epoch_avg_kl_warning_branch(
     monkeypatch.setattr(
         ppo,
         "evaluate_actions",
-        lambda obs, actions, hidden_state=None: (
+        lambda obs, actions, hidden_state=None, action_mask=None: (
             torch.zeros(actions.shape[0], requires_grad=True),
             torch.ones(actions.shape[0], requires_grad=True),
             torch.zeros(actions.shape[0], requires_grad=True),
@@ -1750,6 +1758,23 @@ def test_rollout_buffer_bptt_epoch_avg_kl_warning_branch(
 
     with pytest.warns(UserWarning, match="Average KL divergence .* exceeded target"):
         _ = ppo._learn_from_rollout_buffer_bptt()
+    ppo.clean_up()
+
+
+def test_get_action_and_values_share_encoders_false(vector_space, discrete_space):
+    ppo = PPO(
+        vector_space,
+        discrete_space,
+        share_encoders=False,
+        use_rollout_buffer=False,
+    )
+    obs = np.zeros((1, *vector_space.shape), dtype=np.float32)
+    action, log_prob, entropy, values, next_hidden = ppo._get_action_and_values(
+        obs, sample=True
+    )
+    assert action is not None
+    assert values is not None
+    assert next_hidden is None
     ppo.clean_up()
 
 
@@ -1822,4 +1847,181 @@ def test_ppo_test_loop_masks_callbacks_and_non_vectorized_paths(
     )
     assert len(callback_calls) == 1
     assert "final_info" in callback_calls[0][1]
+    ppo.clean_up()
+
+
+@pytest.mark.parametrize(
+    "action_space",
+    ["discrete_space", "multidiscrete_space"],
+)
+def test_action_masks_applied_during_learning(action_space, vector_space, request):
+    """Verify that action masks stored in the rollout buffer are used during learning.
+
+    This ensures that log_probs computed during evaluate_actions (in learn) use the
+    same masked distribution as get_action, preventing the PPO ratio from being biased
+    by probability mass assigned to illegal actions.
+    """
+    action_space = request.getfixturevalue(action_space)
+    learn_step = 32
+    batch_size = 16
+
+    ppo = PPO(
+        observation_space=vector_space,
+        action_space=action_space,
+        use_rollout_buffer=True,
+        learn_step=learn_step,
+        batch_size=batch_size,
+    )
+
+    # Determine mask size based on action space
+    if isinstance(action_space, spaces.Discrete):
+        mask_size = action_space.n
+    elif isinstance(action_space, spaces.MultiDiscrete):
+        mask_size = int(sum(action_space.nvec))
+    else:
+        pytest.skip("Action masks only apply to discrete action spaces")
+
+    # Fill the buffer with experiences that include action masks
+    for i in range(learn_step):
+        obs = np.array([vector_space.sample()], dtype=np.float32)
+        next_obs = np.array([vector_space.sample()], dtype=np.float32)
+
+        # Create a mask that blocks some actions
+        action_mask = np.ones(mask_size, dtype=bool)
+        action_mask[0] = False  # Block the first action
+
+        # Get action with the mask applied
+        action, log_prob, _, value = ppo.get_action(obs, action_mask=action_mask)
+
+        ppo.rollout_buffer.add(
+            obs=obs,
+            action=action,
+            reward=1.0,
+            done=i == learn_step - 1,
+            value=float(value),
+            log_prob=float(log_prob),
+            next_obs=next_obs,
+            action_mask=np.array([action_mask]),
+        )
+
+    # Compute returns and advantages
+    last_value = torch.zeros((ppo.num_envs, 1), device=ppo.device)
+    last_done = torch.zeros((ppo.num_envs, 1), device=ppo.device)
+    ppo.rollout_buffer.compute_returns_and_advantages(last_value, last_done)
+
+    # Verify action masks are stored in the buffer
+    buffer_td = ppo.rollout_buffer.get_tensor_batch(device=ppo.device)
+    assert "action_masks" in buffer_td.keys(), (
+        "action_masks should be stored in rollout buffer"
+    )
+
+    # Compare log_probs: evaluate_actions with mask should match get_action with mask
+    sample_obs = buffer_td["observations"][:4]
+    sample_actions = buffer_td["actions"][:4]
+    sample_masks = buffer_td["action_masks"][:4]
+
+    if isinstance(action_space, spaces.Discrete):
+        sample_actions = sample_actions.squeeze(-1)
+
+    # Evaluate with mask (correct behavior)
+    with torch.no_grad():
+        log_prob_masked, _, _ = ppo.evaluate_actions(
+            obs=sample_obs,
+            actions=sample_actions,
+            action_mask=sample_masks,
+        )
+        # Evaluate without mask (old buggy behavior)
+        log_prob_unmasked, _, _ = ppo.evaluate_actions(
+            obs=sample_obs,
+            actions=sample_actions,
+        )
+
+    # The masked log_probs should differ from unmasked ones because the masked
+    # distribution renormalizes probability mass over legal actions only.
+    # If they were the same, that would mean masking had no effect during learning.
+    assert not torch.allclose(log_prob_masked, log_prob_unmasked, atol=1e-6), (
+        "Action masks should affect log_probs during evaluate_actions. "
+        "Masked and unmasked log_probs should differ."
+    )
+
+    # Learn should complete without errors when masks are in the buffer
+    loss = ppo.learn()
+    assert isinstance(loss, float)
+    ppo.clean_up()
+
+
+@pytest.mark.parametrize("recurrent", [True, False])
+def test_action_masks_in_rollout_buffer_learn(vector_space, discrete_space, recurrent):
+    """Test that the full learn pipeline works with action masks in the rollout buffer."""
+    learn_step = 32
+    batch_size = 16
+
+    net_config = {"encoder_config": {"hidden_state_size": 32}} if recurrent else {}
+
+    ppo = PPO(
+        observation_space=vector_space,
+        action_space=discrete_space,
+        use_rollout_buffer=True,
+        learn_step=learn_step,
+        batch_size=batch_size,
+        recurrent=recurrent,
+        net_config=net_config,
+    )
+
+    mask_size = discrete_space.n
+    hidden_state = ppo.get_initial_hidden_state() if recurrent else None
+
+    for i in range(learn_step):
+        obs = np.array([vector_space.sample()], dtype=np.float32)
+        next_obs = np.array([vector_space.sample()], dtype=np.float32)
+
+        # Alternate which action is blocked
+        action_mask = np.ones(mask_size, dtype=bool)
+        action_mask[i % mask_size] = False
+
+        if recurrent:
+            action, log_prob, _, value, hidden_state = ppo.get_action(
+                obs, action_mask=action_mask, hidden_state=hidden_state
+            )
+        else:
+            action, log_prob, _, value = ppo.get_action(obs, action_mask=action_mask)
+
+        add_kwargs = {
+            "obs": obs,
+            "action": action,
+            "reward": 1.0,
+            "done": i == learn_step - 1,
+            "value": float(value),
+            "log_prob": float(log_prob),
+            "next_obs": next_obs,
+            "action_mask": np.array([action_mask]),
+        }
+        if recurrent:
+            add_kwargs["hidden_state"] = hidden_state
+        ppo.rollout_buffer.add(**add_kwargs)
+
+    last_value = torch.zeros((ppo.num_envs, 1), device=ppo.device)
+    last_done = torch.zeros((ppo.num_envs, 1), device=ppo.device)
+    ppo.rollout_buffer.compute_returns_and_advantages(last_value, last_done)
+
+    loss = ppo.learn()
+    assert isinstance(loss, float)
+    ppo.clean_up()
+
+
+def test_continuous_action_space_no_mask_buffer(vector_space):
+    """Verify that continuous action spaces do not allocate action mask buffers."""
+    continuous_action_space = vector_space  # Box space
+
+    ppo = PPO(
+        observation_space=vector_space,
+        action_space=continuous_action_space,
+        use_rollout_buffer=True,
+        learn_step=16,
+        batch_size=8,
+    )
+
+    assert "action_masks" not in ppo.rollout_buffer.buffer.keys(), (
+        "Continuous action spaces should not have action_masks in the buffer"
+    )
     ppo.clean_up()

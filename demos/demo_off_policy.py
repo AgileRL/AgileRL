@@ -70,15 +70,13 @@ if __name__ == "__main__":
     )
 
     mutations = Mutations(
-        algo="DQN",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.2,  # New layer mutation
         parameters=0.2,  # Network parameters mutation
         activation=0,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
-        mutation_sd=0.1,  # Mutation strength  # Network architecture
+        mutation_sd=0.1,  # Mutation strength
         rand_seed=1,  # Random seed
         device=device,
     )
@@ -104,12 +102,12 @@ if __name__ == "__main__":
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []
         for agent in pop:  # Loop through population
-            obs, info = env.reset()  # Reset environment at start of episode
+            obs, _ = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
             epsilon = eps_start
-            for _idx_step in range(evo_steps // num_envs):
+            for _ in range(evo_steps // num_envs):
                 action = agent.get_action(obs, epsilon)  # Get next action from agent
                 epsilon = max(
                     eps_end,
@@ -117,7 +115,7 @@ if __name__ == "__main__":
                 )  # Decay epsilon for exploration
 
                 # Act in environment
-                next_obs, reward, terminated, truncated, info = env.step(action)
+                next_obs, reward, terminated, truncated, _ = env.step(action)
                 scores += np.array(reward)
                 steps += num_envs
                 total_steps += num_envs
@@ -187,7 +185,7 @@ if __name__ == "__main__":
         )
 
         # Tournament selection and population mutation
-        elite, pop = tournament.select(pop)
+        _, pop = tournament.select(pop)
         pop = mutations.mutation(pop)
 
         # Update step counter

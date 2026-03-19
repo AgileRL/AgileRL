@@ -1,6 +1,8 @@
 import gc
 import os
+import shutil
 import socket
+import sys
 
 import numpy as np
 import pytest
@@ -19,6 +21,9 @@ from tests.helper_functions import (
     generate_multidiscrete_space,
     generate_random_box_space,
 )
+
+if not torch.cuda.is_available():
+    os.environ.setdefault("ACCELERATE_USE_CPU", "true")
 
 
 # Only clear CUDA cache when actually needed
@@ -39,6 +44,32 @@ def cleanup():
     # Only run garbage collection every 10 tests
     if cleanup.call_count % 5 == 0:
         gc.collect()
+
+
+@pytest.fixture(autouse=True)
+def skip_cuda_parametrization_when_unavailable(request):
+    """Skip CUDA-specific parametrized tests on environments without CUDA."""
+    callspec = getattr(request.node, "callspec", None)
+    if (
+        callspec is not None
+        and callspec.params.get("device") == "cuda"
+        and not torch.cuda.is_available()
+    ):
+        pytest.skip("CUDA parametrization skipped because CUDA is unavailable.")
+
+
+@pytest.fixture(autouse=True)
+def skip_torch_compile_parametrization_when_windows_compiler_unavailable(request):
+    """Skip torch.compile parametrized tests on Windows without MSVC compiler."""
+    callspec = getattr(request.node, "callspec", None)
+    if callspec is None or sys.platform != "win32":
+        return
+
+    compile_mode = callspec.params.get("compile_mode")
+    if compile_mode is not None and shutil.which("cl") is None:
+        pytest.skip(
+            "torch.compile parametrization skipped: MSVC compiler (`cl`) is unavailable on Windows runner."
+        )
 
 
 # Shared device fixture to avoid repeated device checks
@@ -161,11 +192,6 @@ def simple_cnn():
     )
 
 
-########################################################
-################# MUTATIONS ############################
-########################################################
-
-
 @pytest.fixture(scope="session")
 def ac_hp_config():
     return HyperparameterConfig(
@@ -285,7 +311,7 @@ dist_env = {
     "RANK": "0",
     "LOCAL_RANK": "0",
     "WORLD_SIZE": "1",
-    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    "PYTORCH_ALLOC_CONF": "expandable_segments:True",
     "CUDA_VISIBLE_DEVICES": "0",
 }
 

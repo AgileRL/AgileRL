@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import asdict
 from importlib.metadata import version
+from itertools import repeat
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -100,10 +101,25 @@ if TYPE_CHECKING:
     from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 
 if HAS_LLM_DEPENDENCIES:
-    from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+    try:
+        from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+    except ImportError:
+
+        def clone_tensors_for_torch_save(
+            item: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            return item
+
     from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
     from safetensors.torch import load_file
-    from vllm import LLM, SamplingParams
+
+    try:
+        from vllm import LLM, SamplingParams
+    except ImportError:
+        LLM = None
+        SamplingParams = None
 
     from agilerl.utils.llm_utils import (
         create_model_from_name_or_path,
@@ -113,8 +129,7 @@ if HAS_LLM_DEPENDENCIES:
 __all__ = ["EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
-SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
-SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound="AgentWrapperProtocol")
+SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
 
 
 class _RegistryMeta(type):
@@ -137,7 +152,8 @@ class _RegistryMeta(type):
         return instance
 
 
-class RegistryMeta(_RegistryMeta, ABCMeta): ...
+class RegistryMeta(_RegistryMeta, ABCMeta):
+    """Metaclass combining registry initialization with ABC support."""
 
 
 def get_checkpoint_dict(
@@ -1220,8 +1236,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :return: None
         :rtype: None
         """
-        for evo_attr in self.evolvable_attributes().values():
-            del evo_attr
+        for attr_name in self.evolvable_attributes():
+            delattr(self, attr_name)
 
 
 class RLAlgorithm(EvolvableAlgorithm, ABC):
@@ -2077,7 +2093,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
         if self.accelerator is not None:
             if self.accelerator.is_main_process:
-                seed = np.random.randint(0, 2**32 - 1)
+                seed = np.random.randint(0, 2**31 - 1)
             if self.accelerator.num_processes > 1:
                 seed = broadcast_object_list([seed], from_process=0)[0]
         self.rng = np.random.RandomState(seed)
@@ -2348,8 +2364,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             del self.llm.llm_engine.model_executor
             del self.llm
         gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if torch.cuda.is_initialized():
+                torch.cuda.synchronize()
 
     def clone(self, index: int | None = None, wrap: bool = True) -> Self:
         """Create a clone of the algorithm.
@@ -2413,9 +2431,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
             # Clone attributes
             accelerator = clone.accelerator
-            lr_scheduler = clone.lr_scheduler
             cloned_lr_scheduler = clone.lr_scheduler
             original_lr_scheduler = self.lr_scheduler
+            original_llm = None
+            cloned_llm = None
             clone.lr_scheduler = None
             self.lr_scheduler = None
             if self.use_vllm:
@@ -2425,7 +2444,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.llm = None
             clone = EvolvableAlgorithm.copy_attributes(self, clone)
             clone.accelerator = accelerator
-            clone.lr_scheduler = lr_scheduler
             clone.lr_scheduler = cloned_lr_scheduler
             self.lr_scheduler = original_lr_scheduler
             if self.use_vllm:
@@ -2452,7 +2470,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             elif self.accelerator is not None:
                 self.accelerator.wait_for_everyone()
 
-        return clone
+            return clone
 
     @staticmethod
     def update_lr(
@@ -2783,13 +2801,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         prompts: list[dict[str, int]],
         group_size: int,
     ) -> list[torch.Tensor]:
+        if SamplingParams is None:
+            msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
+            raise ImportError(msg)
 
         # I need to make the following happen
         # prompts = [prompt1, prompt1, ..., prompt1 (group_size times), prompt2, prompt2, ..., prompt2 (group_size times), ...]
 
         # The below line returns a list: [prompt1 * group_size, ..., promptN * group_size],
         # where N is the data batch size per gpu, list length is group_size * N
-        group_prompts = [prompt for prompt in prompts for _ in range(group_size)]
+        group_prompts = [p for prompt in prompts for p in repeat(prompt, group_size)]
         prompts_ids = [prompt["input_ids"] for prompt in group_prompts]
         prompts_text = [prompt["text"] for prompt in group_prompts]
         prompts_text = [
@@ -2896,7 +2917,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 ],
                 dim=1,
             )
-            for i, _ in enumerate(prompts)
+            for i in range(len(prompts))
         ]
 
         num_input_tokens = [prompt_ids.shape[1] for prompt_ids in prompts_ids][
@@ -3079,6 +3100,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _configure_vllm(self) -> None:
         """Configure vLLM for efficient inference during generation in 'get_action'."""
+        if LLM is None:
+            msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
+            raise ImportError(msg)
         if self.vllm_config is None:
             warnings.warn(
                 "No VLLM config provided. Using default VLLM configuration for generation.",
@@ -3120,20 +3144,33 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
             os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
 
-            self.llm = LLM(
-                model=self.pretrained_model_name_or_path,
-                tensor_parallel_size=self.vllm_config.tensor_parallel_size,
-                gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
-                max_num_seqs=self.vllm_config.max_num_seqs,
-                max_model_len=self.max_model_len,
-                distributed_executor_backend="external_launcher",
-                seed=self.accelerator.process_index
+            llm_kwargs = {
+                "model": self.pretrained_model_name_or_path,
+                "tensor_parallel_size": self.vllm_config.tensor_parallel_size,
+                "gpu_memory_utilization": self.vllm_config.gpu_memory_utilization,
+                "max_num_seqs": self.vllm_config.max_num_seqs,
+                "max_model_len": self.max_model_len,
+                "distributed_executor_backend": "external_launcher",
+                "seed": self.accelerator.process_index
                 // self.vllm_config.tensor_parallel_size,
-                max_num_batched_tokens=self.vllm_config.max_num_seqs
+                "max_num_batched_tokens": self.vllm_config.max_num_seqs
                 * self.max_model_len,
-                model_impl="vllm",
-                enable_sleep_mode=self.vllm_config.sleep_mode,
-            )
+                "model_impl": "vllm",
+                "enable_sleep_mode": self.vllm_config.sleep_mode,
+            }
+            try:
+                self.llm = LLM(**llm_kwargs)
+            except ValueError as err:
+                backend_env = os.environ.get("VLLM_ATTENTION_BACKEND")
+                if backend_env is not None and "backend" in str(err).lower():
+                    msg = (
+                        "vLLM initialization failed due to unsupported "
+                        f"VLLM_ATTENTION_BACKEND={backend_env!r}. "
+                        "Please unset VLLM_ATTENTION_BACKEND or set it to a backend "
+                        "supported by your installed vLLM build."
+                    )
+                    raise ValueError(msg) from err
+                raise
             if self.vllm_config.sleep_mode:
                 self.llm.sleep(level=2)
 

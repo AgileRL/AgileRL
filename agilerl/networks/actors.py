@@ -1,5 +1,5 @@
 import warnings
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 from gymnasium import spaces
@@ -113,6 +113,7 @@ class DeterministicActor(EvolvableNetwork):
             self.action_low, self.action_high = None, None
 
         # Set output activation based on action space
+        output_activation = None
         if isinstance(action_space, spaces.Box):
             output_activation = "Tanh"
         elif isinstance(action_space, spaces.Discrete):
@@ -181,11 +182,13 @@ class DeterministicActor(EvolvableNetwork):
         )
         return rescaled_action.to(low.dtype)
 
-    def build_network_head(self, net_config: NetConfigType | None = None) -> None:
+    def build_network_head(
+        self, net_config: NetConfigType | None = None, **kwargs: Any
+    ) -> None:
         """Build the head of the network.
 
         :param net_config: Configuration of the head.
-        :type net_config: ConfigType | None
+        :type net_config: NetConfigType | None
         """
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
@@ -307,7 +310,6 @@ class StochasticActor(EvolvableNetwork):
 
         self.action_std_init = action_std_init
         self.squash_output = squash_output
-        self.action_space = action_space
         self.output_size = get_output_size_from_space(self.action_space)
 
         self.build_network_head(head_config)

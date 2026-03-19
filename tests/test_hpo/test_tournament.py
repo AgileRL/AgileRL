@@ -2,7 +2,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from accelerate import Accelerator
-from accelerate.state import AcceleratorState
 from peft import LoraConfig
 
 from agilerl.algorithms import CQN, DDPG, DQN, GRPO, MADDPG, MATD3, PPO, TD3, RainbowDQN
@@ -78,7 +77,6 @@ def test_returns_best_agent_and_new_population():
     discrete_action_space = generate_discrete_space(2)
     continuous_action_space = generate_random_box_space((2,))
     net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-    population_size = 4
     device = "cpu"
     population_size = 5
 
@@ -135,7 +133,6 @@ def test_returns_best_agent_and_new_population_without_elitism():
     discrete_action_space = generate_discrete_space(2)
     continuous_action_space = generate_random_box_space((2,))
     net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-    population_size = 4
     device = "cpu"
     population_size = 5
 
@@ -190,7 +187,6 @@ def test_returns_best_agent_and_new_population_multi_agent():
     observation_space = generate_multi_agent_box_spaces(2, (4,))
     action_space = generate_multi_agent_discrete_spaces(2, 2)
     net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-    population_size = 4
     device = "cpu"
     population_size = 5
 
@@ -234,7 +230,6 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
     observation_space = generate_multi_agent_box_spaces(2, (4,))
     action_space = generate_multi_agent_discrete_spaces(2, 2)
     net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-    population_size = 4
     device = "cpu"
     population_size = 5
 
@@ -275,7 +270,6 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
 @pytest.mark.parametrize("elitism", [True, False])
 @pytest.mark.parametrize("num_processes", [1, 2])
 def test_language_model_tournament(use_accelerator, elitism, num_processes):
-    AcceleratorState._reset_state(True)
     tournament_selection = TournamentSelection(3, elitism, 4, 2)
     population_size = 4
 
@@ -380,3 +374,74 @@ def test_language_model_tournament(use_accelerator, elitism, num_processes):
 
     # Check if the new population has the correct length
     assert len(new_population) == population_size
+
+
+@pytest.mark.parametrize(
+    "fitness_values,tournament_size",
+    [
+        ([1.0, 2.0, 3.0], 2),
+        ([10.0, 5.0, 0.0], 3),
+        ([0.5, 1.0, 0.5], 2),
+    ],
+)
+def test_tournament_returns_valid_winner_index(fitness_values, tournament_size):
+    import numpy as np
+
+    np.random.seed(0)
+    ts = TournamentSelection(
+        tournament_size=tournament_size,
+        elitism=True,
+        population_size=len(fitness_values) + 1,
+        eval_loop=1,
+    )
+    winner = ts._tournament(fitness_values)
+    assert 0 <= winner < len(fitness_values)
+
+
+def test_tournament_elitism_returns_elite_rank_max_id():
+    import numpy as np
+
+    observation_space = generate_random_box_space((4,))
+    discrete_action_space = generate_discrete_space(2)
+    net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
+    population = create_population(
+        algo="DQN",
+        observation_space=observation_space,
+        action_space=discrete_action_space,
+        net_config=net_config,
+        INIT_HP=INIT_HP,
+        population_size=4,
+        device="cpu",
+    )
+    population[0].fitness = [1, 2]
+    population[1].fitness = [3, 4]
+    population[2].fitness = [5, 6]
+    population[3].fitness = [7, 8]
+
+    ts = TournamentSelection(3, True, 4, 2)
+    elite, rank, max_id = ts._elitism(population)
+    assert elite.fitness == [7, 8]
+    assert rank.shape == (4,)
+    assert max_id == 3
+    assert elite.index == 3
+
+
+@pytest.mark.parametrize(
+    "tournament_size,elitism,population_size,eval_loop,match",
+    [
+        (0, True, 4, 2, "greater than zero"),
+        (2, "invalid", 4, 2, "boolean"),
+        (2, True, 0, 2, "greater than zero"),
+        (2, True, 4, 0, "greater than zero"),
+    ],
+)
+def test_tournament_init_validation(
+    tournament_size, elitism, population_size, eval_loop, match
+):
+    with pytest.raises(AssertionError, match=match):
+        TournamentSelection(
+            tournament_size=tournament_size,
+            elitism=elitism,
+            population_size=population_size,
+            eval_loop=eval_loop,
+        )

@@ -347,6 +347,26 @@ def get_num_actions(space: spaces.Space) -> int:
     raise NotImplementedError(msg)
 
 
+def get_action_mask_size(space: spaces.Space) -> int:
+    """Return the size of the action mask for a given action space.
+
+    Action masks are only applicable to discrete action spaces. For continuous
+    (Box) spaces, returns 0.
+
+    :param space: Action space
+    :type space: spaces.Space
+    :return: Size of the action mask, or 0 if masking is not applicable
+    :rtype: int
+    """
+    if isinstance(space, spaces.Discrete):
+        return space.n
+    if isinstance(space, spaces.MultiDiscrete):
+        return int(sum(space.nvec))
+    if isinstance(space, spaces.MultiBinary):
+        return space.n
+    return 0
+
+
 def make_safe_deepcopies(
     *args: EvolvableModuleProtocol | list[EvolvableModuleProtocol],
 ) -> list[EvolvableModuleProtocol]:
@@ -687,7 +707,7 @@ def concatenate_spaces(space_list: list[SupportedObsSpaces]) -> spaces.Space:
         nvec = np.concatenate([space.nvec for space in space_list], axis=0)
         return spaces.MultiDiscrete(nvec)
 
-    msg = f"Unsupported space types: { {type(space) for space in spaces} }"
+    msg = f"Unsupported space types: { {type(space) for space in space_list} }"
     raise TypeError(
         msg,
     )
@@ -773,7 +793,7 @@ def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> 
         )
         return (
             observation.shape[0]
-            if len(observation.shape) > observation_space.shape
+            if len(observation.shape) > len(observation_space.shape)
             else 1
         )
     observation = (
