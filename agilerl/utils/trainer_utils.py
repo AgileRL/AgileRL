@@ -96,8 +96,8 @@ def create_population_from_spec(
     if net_config is not None:
         kwargs["net_config"] = net_config
 
-    kwargs["observation_space"] = env.observation_space
-    kwargs["action_space"] = env.action_space
+    kwargs["observation_space"] = env.single_observation_space
+    kwargs["action_space"] = env.single_action_space
     kwargs["device"] = device
 
     if spec.hp_config is not None:

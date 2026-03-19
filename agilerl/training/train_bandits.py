@@ -54,6 +54,7 @@ def train_bandits(
     verbose: bool = True,
     accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
+    wandb_kwargs: dict[str, Any] | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
     """Run the general bandit training; returns trained population of agents
     and their fitnesses.
@@ -110,6 +111,8 @@ def train_bandits(
     :type accelerator: accelerate.Accelerator(), optional
     :param wandb_api_key: API key for Weights & Biases, defaults to None
     :type wandb_api_key: str, optional
+    :param wandb_kwargs: Additional kwargs to pass to wandb.init()
+    :type wandb_kwargs: dict, optional
     """
     assert isinstance(
         algo,
@@ -143,15 +146,19 @@ def train_bandits(
         )
 
     if wb:
-        init_wandb(
-            algo=algo,
-            env_name=env_name,
-            init_hyperparams=INIT_HP,
-            mutation_hyperparams=MUT_P,
-            wandb_api_key=wandb_api_key,
-            accelerator=accelerator,
-            project="AgileRL-Bandits",
-        )
+        init_wandb_kwargs = {
+            "algo": algo,
+            "env_name": env_name,
+            "init_hyperparams": INIT_HP,
+            "mutation_hyperparams": MUT_P,
+            "wandb_api_key": wandb_api_key,
+            "accelerator": accelerator,
+            "project": "AgileRL-Bandits",
+        }
+        if wandb_kwargs is not None:
+            init_wandb_kwargs.update(wandb_kwargs)
+
+        init_wandb(**init_wandb_kwargs)
 
     save_path = (
         checkpoint_path.split(".pt")[0]

@@ -56,6 +56,7 @@ def train_multi_agent_off_policy(
     verbose: bool = True,
     accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
+    wandb_kwargs: dict[str, Any] | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
     """Run the general off-policy multi-agent RL training; returns trained population of agents
     and their fitnesses.
@@ -115,6 +116,8 @@ def train_multi_agent_off_policy(
     :type accelerator: accelerate.Accelerator(), optional
     :param wandb_api_key: API key for Weights & Biases, defaults to None
     :type wandb_api_key: str, optional
+    :param wandb_kwargs: Additional kwargs to pass to wandb.init()
+    :type wandb_kwargs: dict, optional
     """
     assert isinstance(
         algo,
@@ -149,15 +152,19 @@ def train_multi_agent_off_policy(
 
     start_time = time.time()
     if wb:
-        init_wandb(
-            algo=algo,
-            env_name=env_name,
-            init_hyperparams=INIT_HP,
-            mutation_hyperparams=MUT_P,
-            wandb_api_key=wandb_api_key,
-            project="AgileRLMultiAgent",
-            accelerator=accelerator,
-        )
+        init_wandb_kwargs = {
+            "algo": algo,
+            "env_name": env_name,
+            "init_hyperparams": INIT_HP,
+            "mutation_hyperparams": MUT_P,
+            "wandb_api_key": wandb_api_key,
+            "project": "AgileRLMultiAgent",
+            "accelerator": accelerator,
+        }
+        if wandb_kwargs is not None:
+            init_wandb_kwargs.update(wandb_kwargs)
+
+        init_wandb(**init_wandb_kwargs)
 
     if hasattr(env, "num_envs"):
         is_vectorised = True

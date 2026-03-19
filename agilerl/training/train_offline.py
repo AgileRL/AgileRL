@@ -2,7 +2,6 @@ import warnings
 from datetime import datetime
 from typing import Any
 
-import gymnasium as gym
 import numpy as np
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
@@ -14,6 +13,7 @@ from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.typing import GymEnvType
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.minari_utils import minari_to_agile_buffer
 from agilerl.utils.utils import (
@@ -28,7 +28,7 @@ PopulationType = list[RLAlgorithm]
 
 
 def train_offline(
-    env: gym.Env,
+    env: GymEnvType,
     env_name: str,
     dataset: ReplayDataset,
     algo: str,
@@ -55,6 +55,7 @@ def train_offline(
     minari_dataset_id: str | None = None,
     remote: bool = False,
     wandb_api_key: str | None = None,
+    wandb_kwargs: dict[str, Any] | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
     """Run the general offline RL training; returns trained population of agents and their fitnesses.
 
@@ -111,6 +112,8 @@ def train_offline(
     :type accelerator: accelerate.Accelerator(), optional
     :param wandb_api_key: API key for Weights & Biases, defaults to None
     :type wandb_api_key: str, optional
+    :param wandb_kwargs: Additional kwargs to pass to wandb.init()
+    :type wandb_kwargs: dict, optional
     """
     assert isinstance(
         algo,
@@ -144,14 +147,18 @@ def train_offline(
         )
 
     if wb:
-        init_wandb(
-            algo=algo,
-            env_name=env_name,
-            init_hyperparams=INIT_HP,
-            mutation_hyperparams=MUT_P,
-            wandb_api_key=wandb_api_key,
-            accelerator=accelerator,
-        )
+        init_wandb_kwargs = {
+            "algo": algo,
+            "env_name": env_name,
+            "init_hyperparams": INIT_HP,
+            "mutation_hyperparams": MUT_P,
+            "wandb_api_key": wandb_api_key,
+            "accelerator": accelerator,
+        }
+        if wandb_kwargs is not None:
+            init_wandb_kwargs.update(wandb_kwargs)
+
+        init_wandb(**init_wandb_kwargs)
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -176,11 +183,11 @@ def train_offline(
     else:
         dataset_length = dataset["rewards"].shape[0]
         for i in range(dataset_length - 1):
-            state = dataset["observations"][i]
-            next_state = dataset["observations"][i + 1]
+            obs = dataset["observations"][i]
+            next_obs = dataset["observations"][i + 1]
             if swap_channels:
-                state = obs_channels_to_first(state)
-                next_state = obs_channels_to_first(next_state)
+                obs = obs_channels_to_first(obs)
+                next_obs = obs_channels_to_first(next_obs)
             action = dataset["actions"][i]
             reward = dataset["rewards"][i]
             done = bool(dataset["terminals"][i])
@@ -188,10 +195,10 @@ def train_offline(
             # Add transition to memory
             transition = (
                 Transition(
-                    obs=state,
+                    obs=obs,
                     action=action,
                     reward=reward,
-                    next_obs=next_state,
+                    next_obs=next_obs,
                     done=done,
                 )
                 .to_tensordict()
@@ -215,11 +222,6 @@ def train_offline(
         sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
     else:
         sampler = Sampler(memory=memory)
-
-    if accelerator is not None:
-        pass
-    else:
-        pass
 
     # Format progress bar
     pbar = default_progress_bar(max_steps, accelerator)

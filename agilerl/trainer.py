@@ -25,6 +25,7 @@ from agilerl.utils.trainer_utils import (
     get_training_fn,
     resolve_algo_name,
 )
+from agilerl.vector import DummyVecEnv
 
 if TYPE_CHECKING:
     import gymnasium as gym
@@ -165,6 +166,9 @@ class LocalTrainer(Trainer):
         env_name: str | None = None,
         device: str = "cpu",
     ) -> None:
+        if not hasattr(environment, "num_envs"):
+            environment = DummyVecEnv(environment)
+
         super().__init__(
             algorithm,
             environment,

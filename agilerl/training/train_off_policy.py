@@ -3,7 +3,6 @@ import warnings
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-import gymnasium as gym
 import numpy as np
 import torch
 from accelerate import Accelerator
@@ -22,6 +21,7 @@ from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.actors import DeterministicActor
+from agilerl.typing import GymEnvType
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -29,6 +29,7 @@ from agilerl.utils.utils import (
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
+from agilerl.vector import DummyVecEnv
 
 if TYPE_CHECKING:
     from tensordict import TensorDictBase
@@ -39,7 +40,7 @@ BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer
 
 
 def train_off_policy(
-    env: gym.Env,
+    env: GymEnvType,
     env_name: str,
     algo: str,
     pop: PopulationType,
@@ -192,13 +193,10 @@ def train_off_policy(
             init_wandb_kwargs.update(wandb_kwargs)
         init_wandb(**init_wandb_kwargs)
 
-    # Detect if environment is vectorised
-    if hasattr(env, "num_envs"):
-        num_envs = env.num_envs
-        is_vectorised = True
-    else:
-        num_envs = 1
-        is_vectorised = False
+    if not hasattr(env, "num_envs"):
+        env = DummyVecEnv(env)
+
+    num_envs = env.num_envs
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -290,16 +288,9 @@ def train_off_policy(
                             a = int(a)
                         train_actions_hist[a] += 1
 
-                if not is_vectorised:
-                    action = action[0]
-
                 # Act in environment
                 next_obs, reward, done, trunc, info = env.step(action)
                 scores += np.array(reward)
-
-                if not is_vectorised:
-                    done = np.array([done])
-                    trunc = np.array([trunc])
 
                 reset_noise_indices = []
                 for idx, (d, t) in enumerate(zip(done, trunc, strict=False)):
@@ -331,8 +322,6 @@ def train_off_policy(
                     next_obs=next_obs,
                     done=done,
                 )
-                if not is_vectorised:
-                    transition = transition.unsqueeze(0)
 
                 # Add transition to replay buffer
                 transition = transition.to_tensordict()

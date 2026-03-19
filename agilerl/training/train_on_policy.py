@@ -4,7 +4,6 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-import gymnasium as gym
 import numpy as np
 from accelerate import Accelerator
 from gymnasium import spaces
@@ -14,6 +13,7 @@ from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
+from agilerl.typing import GymEnvType
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -21,6 +21,7 @@ from agilerl.utils.utils import (
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
+from agilerl.vector import DummyVecEnv
 
 InitDictType = dict[str, Any] | None
 OnPolicyAlgorithms = PPO
@@ -28,7 +29,7 @@ PopulationType = list[OnPolicyAlgorithms]
 
 
 def train_on_policy(
-    env: gym.Env,
+    env: GymEnvType,
     env_name: str,
     algo: str,
     pop: PopulationType,
@@ -53,7 +54,7 @@ def train_on_policy(
     wandb_api_key: str | None = None,
     wandb_kwargs: dict[str, Any] | None = None,
     collect_rollouts_fn: (
-        Callable[[OnPolicyAlgorithms, gym.Env, int], None] | None
+        Callable[[OnPolicyAlgorithms, GymEnvType, int], None] | None
     ) = None,
 ) -> tuple[PopulationType, list[list[float]]]:
     """Run the general on-policy RL training; returns trained population of agents
@@ -163,13 +164,10 @@ def train_on_policy(
 
         init_wandb(**init_wandb_kwargs)
 
-    # Detect if environment is vectorised
-    if hasattr(env, "num_envs"):
-        is_vectorised = True
-        num_envs = env.num_envs
-    else:
-        is_vectorised = False
-        num_envs = 1
+    if not hasattr(env, "num_envs"):
+        env = DummyVecEnv(env)
+
+    num_envs = env.num_envs
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -272,14 +270,6 @@ def train_on_policy(
                             obs,
                             action_mask=action_mask,
                         )
-
-                        if not is_vectorised:
-                            action = action[0]
-                            log_prob = log_prob[0]
-                            value = value[0]
-                            entropy = (
-                                entropy[0] if hasattr(entropy, "__len__") else entropy
-                            )
 
                         pop_entropy[agent_idx].append(entropy)
 

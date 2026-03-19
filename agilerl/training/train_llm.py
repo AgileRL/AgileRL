@@ -34,6 +34,7 @@ def finetune_llm_reasoning(
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
+    wandb_kwargs: dict[str, Any] | None = None,
     evaluation_interval: int = 10,
     max_reward: int | None = None,
     verbose: bool = True,
@@ -63,6 +64,8 @@ def finetune_llm_reasoning(
     :type mutation: Mutations, optional
     :param wandb_api_key: Wandb API key, defaults to None
     :type wandb_api_key: str, optional
+    :param wandb_kwargs: Additional kwargs to pass to wandb.init()
+    :type wandb_kwargs: dict, optional
     :param evaluation_interval: Number of steps between evaluation, defaults to 10
     :type evaluation_interval: int, optional
     :param max_reward: Maximum reward to aim for, defaults to None
@@ -131,12 +134,16 @@ def finetune_llm_reasoning(
         init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
         init_hp["distributed_training"] = accelerator is not None
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
-        init_wandb(
-            algo=init_hp["ALGO"],
-            env_name=env.name,
-            wandb_api_key=wandb_api_key,
-            init_hyperparams=init_hp,
-        )
+        init_wandb_kwargs = {
+            "algo": init_hp["ALGO"],
+            "env_name": env.name,
+            "wandb_api_key": wandb_api_key,
+            "init_hyperparams": init_hp,
+        }
+        if wandb_kwargs is not None:
+            init_wandb_kwargs.update(wandb_kwargs)
+
+        init_wandb(**init_wandb_kwargs)
 
     if accelerator is None or accelerator.is_main_process:
         print("\nTraining...")
@@ -426,6 +433,7 @@ def finetune_llm_preference(
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
+    wandb_kwargs: dict[str, Any] | None = None,
     evaluation_interval: int = 10,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
@@ -484,12 +492,16 @@ def finetune_llm_preference(
         init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
         init_hp["distributed_training"] = accelerator is not None
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
-        init_wandb(
-            algo=init_hp["ALGO"],
-            env_name=env.name,
-            wandb_api_key=wandb_api_key,
-            init_hyperparams=init_hp,
-        )
+        init_wandb_kwargs = {
+            "algo": init_hp["ALGO"],
+            "env_name": env.name,
+            "wandb_api_key": wandb_api_key,
+            "init_hyperparams": init_hp,
+        }
+        if wandb_kwargs is not None:
+            init_wandb_kwargs.update(wandb_kwargs)
+
+        init_wandb(**init_wandb_kwargs)
 
     if accelerator is None or accelerator.is_main_process:
         pass
