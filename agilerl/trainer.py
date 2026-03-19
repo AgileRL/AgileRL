@@ -1,222 +1,157 @@
+"""Trainer abstraction for AgileRL evolutionary training.
+
+Provides :class:`LocalTrainer` for local training and :class:`ArenaTrainer`
+for submitting jobs to the Arena RLOps platform.  Both accept Pydantic spec
+objects as their primary configuration interface.
+"""
+
 from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from agilerl.algorithms.core import (
-    EvolvableAlgorithm,
+from agilerl.models.algo import AlgorithmMeta, RLAlgorithmSpec
+from agilerl.models.env import EnvironmentSpec
+from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.models.training import ReplayBufferSpec, TrainingSpec
+from agilerl.utils.trainer_utils import (
+    build_mutations,
+    build_replay_buffer,
+    build_tournament,
+    build_train_kwargs,
+    create_population_from_spec,
+    get_algo_meta,
+    get_training_fn,
+    resolve_algo_name,
 )
-from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.components.replay_buffer import (
-    MultiStepReplayBuffer,
-    ReplayBuffer,
-)
-from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_bandits import train_bandits
-from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
-from agilerl.training.train_multi_agent_on_policy import train_multi_agent_on_policy
-from agilerl.training.train_off_policy import train_off_policy
-from agilerl.training.train_offline import train_offline
-from agilerl.training.train_on_policy import train_on_policy
 
 if TYPE_CHECKING:
     import gymnasium as gym
 
+    from agilerl.algorithms.core import EvolvableAlgorithm
+    from agilerl.arena.client import ArenaClient
     from agilerl.typing import PopulationType
 
 logger = logging.getLogger(__name__)
-
-_TRAINING_FN_REGISTRY: dict[str, Callable[..., Any]] = {
-    "PPO": train_on_policy,
-    "DQN": train_off_policy,
-    "DDPG": train_off_policy,
-    "TD3": train_off_policy,
-    "RainbowDQN": train_off_policy,
-    "CQN": train_offline,
-    "NeuralUCB": train_bandits,
-    "NeuralTS": train_bandits,
-    "IPPO": train_multi_agent_on_policy,
-    "MADDPG": train_multi_agent_off_policy,
-    "MATD3": train_multi_agent_off_policy,
-}
-
-_OFF_POLICY_ALGOS = frozenset({"DQN", "DDPG", "TD3", "RainbowDQN"})
-_BANDIT_ALGOS = frozenset({"NeuralUCB", "NeuralTS"})
-_OFFLINE_ALGOS = frozenset({"CQN"})
-
-_TRAINING_LOOP_NAMES: dict[str, str] = {
-    "PPO": "train_on_policy",
-    "DQN": "train_off_policy",
-    "DDPG": "train_off_policy",
-    "TD3": "train_off_policy",
-    "RainbowDQN": "train_off_policy",
-    "CQN": "train_offline",
-    "NeuralUCB": "train_bandits",
-    "NeuralTS": "train_bandits",
-    "IPPO": "train_multi_agent_on_policy",
-    "MADDPG": "train_multi_agent_off_policy",
-    "MATD3": "train_multi_agent_off_policy",
-}
-
-
-def _resolve_algo_name(algorithm: EvolvableAlgorithm | dict[str, Any] | str) -> str:
-    """Extract the algorithm name from an instance, dict, or string."""
-    if isinstance(algorithm, str):
-        return algorithm
-    if isinstance(algorithm, dict):
-        name = algorithm.get("name") or algorithm.get("algo")
-        if name is None:
-            msg = "Algorithm dict must contain a 'name' key."
-            raise ValueError(msg)
-        return name
-    return algorithm.algo
 
 
 class Trainer(ABC):
     """Abstract base trainer for AgileRL evolutionary training.
 
-    Accepts either instantiated AgileRL objects or plain configuration
-    dicts for each component.  Subclasses resolve these into the form
-    they need (live objects for :class:`LocalTrainer`, a manifest for
-    :class:`ArenaTrainer`).
-
-    :param algorithm: An algorithm instance or a dict describing the
-        algorithm (must include ``"name"`` and hyperparameters).
-    :param environment: A ``gym.Env`` instance, or an env-name string
-        (for Arena).
-    :param env_name: Human-readable environment name forwarded to the
-        training loop.
-    :param mutations: A :class:`Mutations` instance or a config dict.
-    :param tournament: A :class:`TournamentSelection` instance or a
-        config dict.
-    :param replay_buffer: A :class:`ReplayBuffer` (or subclass)
-        instance, or a config dict.
-    :param hp_config: A :class:`HyperparameterConfig` for RL-HP
-        mutation ranges, or a dict mapping param names to range dicts.
-    :param network_config: Network architecture config dict.
-    :param pop_size: Population size.
-    :param max_steps: Total environment steps.
-    :param evo_steps: Steps between evolutionary events.
-    :param eval_loop: Evaluation episodes per agent per evo step.
-    :param learning_delay: Steps before learning begins (off-policy).
-    :param target_score: Optional early-stopping fitness target.
-    :param swap_channels: Whether to swap observation channels.
-    :param device: Torch device string.
+    :param algorithm: An :class:`~agilerl.algorithms.core.EvolvableAlgorithm`
+        instance, an :class:`RLAlgorithmSpec`, or a string algorithm name
+        (e.g. ``"PPO"``).
+    :type algorithm: EvolvableAlgorithm | RLAlgorithmSpec | str
+    :param environment: A ``gymnasium.Env`` instance, an
+        :class:`EnvironmentSpec`, or an env-name string (for Arena).
+    :type environment: gym.Env | EnvironmentSpec | str
+    :param training: Training loop parameters (max steps, population size,
+        etc.).  Defaults to :class:`TrainingSpec` with sensible values.
+    :type training: TrainingSpec | None
+    :param mutation: Mutation probabilities and RL-HP ranges.
+    :type mutation: MutationSpec | None
+    :param tournament: Tournament selection configuration.
+    :type tournament: TournamentSelectionSpec | None
+    :param replay_buffer: Replay buffer configuration.  Off-policy algorithms
+        auto-create a default buffer when this is ``None``.
+    :type replay_buffer: ReplayBufferSpec | None
+    :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
+    :type device: str
     """
 
     def __init__(
         self,
-        algorithm: EvolvableAlgorithm | dict[str, Any] | str,
-        environment: gym.Env | str | Any,
+        algorithm: EvolvableAlgorithm | RLAlgorithmSpec | str,
+        environment: gym.Env | EnvironmentSpec | str,
         *,
-        env_name: str | None = None,
-        mutations: Mutations | dict[str, Any] | None = None,
-        tournament: TournamentSelection | dict[str, Any] | None = None,
-        replay_buffer: ReplayBuffer | dict[str, Any] | None = None,
-        hp_config: HyperparameterConfig | dict[str, Any] | None = None,
-        network_config: dict[str, Any] | None = None,
-        pop_size: int = 4,
-        max_steps: int = 1_000_000,
-        evo_steps: int = 10_000,
-        eval_loop: int = 1,
-        learning_delay: int = 0,
-        target_score: float | None = None,
-        swap_channels: bool = False,
+        training: TrainingSpec | None = None,
+        mutation: MutationSpec | None = None,
+        tournament: TournamentSelectionSpec | None = None,
+        replay_buffer: ReplayBufferSpec | None = None,
         device: str = "cpu",
     ) -> None:
         self.algorithm = algorithm
         self.environment = environment
-        self.env_name = env_name
-        self.mutations = mutations
+        self.training = training or TrainingSpec()
+        self.mutation = mutation
         self.tournament = tournament
         self.replay_buffer = replay_buffer
-        self.hp_config = hp_config
-        self.network_config = network_config
-        self.pop_size = pop_size
-        self.max_steps = max_steps
-        self.evo_steps = evo_steps
-        self.eval_loop = eval_loop
-        self.learning_delay = learning_delay
-        self.target_score = target_score
-        self.swap_channels = swap_channels
         self.device = device
 
-        self._algo_name = _resolve_algo_name(algorithm)
+        self._algo_name = resolve_algo_name(algorithm)
+        self._algo_meta: AlgorithmMeta = get_algo_meta(self._algo_name)
 
     @abstractmethod
     def train(self) -> Any:
         """Run the training loop.  Return type varies by subclass."""
         ...
 
-    # -- Helpers for normalizing hp_config -----------------------------------
-
-    @staticmethod
-    def _build_hp_config(
-        raw: dict[str, Any],
-    ) -> HyperparameterConfig:
-        """Convert a plain dict into a :class:`HyperparameterConfig`.
-
-        Each value should be a dict with ``min``, ``max``, and
-        optionally ``grow_factor``, ``shrink_factor``, ``dtype``.
-        """
-        params: dict[str, RLParameter] = {}
-        for name, spec in raw.items():
-            if isinstance(spec, RLParameter):
-                params[name] = spec
-            elif isinstance(spec, dict):
-                dtype_val = spec.get("dtype", float)
-                if dtype_val == "int" or dtype_val is int:
-                    dtype_val = int
-                else:
-                    dtype_val = float
-                params[name] = RLParameter(
-                    min=spec["min"],
-                    max=spec["max"],
-                    grow_factor=spec.get("grow_factor", 1.2),
-                    shrink_factor=spec.get("shrink_factor", 0.8),
-                    dtype=dtype_val,
-                )
-            else:
-                msg = (
-                    f"Expected dict or RLParameter for hp_config[{name!r}], "
-                    f"got {type(spec).__name__}"
-                )
-                raise TypeError(msg)
-        return HyperparameterConfig(**params)
-
 
 class LocalTrainer(Trainer):
     """Trains a population of agents locally using AgileRL training loops.
 
-    Resolves the appropriate training function based on the algorithm
-    name and delegates to it.
+    Resolves the appropriate training function from :data:`ALGO_REGISTRY`
+    and delegates to it.
 
-    :param algorithm: An algorithm instance (one member of the
-        population) **or** a config dict for population creation.
+    :param algorithm: An :class:`~agilerl.algorithms.core.EvolvableAlgorithm`
+        instance (cloned to build the population), an
+        :class:`RLAlgorithmSpec` (used to construct agents from scratch),
+        or a string name (uses the default spec for that algorithm).
+    :type algorithm: EvolvableAlgorithm | RLAlgorithmSpec | str
+    :param environment: A ``gymnasium.Env`` instance.
+    :type environment: gym.Env
     :param population: Pre-built population list.  When provided,
         *algorithm* is used only for name resolution.
-    :param environment: A ``gym.Env`` instance.
+    :type population: PopulationType | None
+    :param training: Training loop parameters.  Defaults to
+        :class:`TrainingSpec` with sensible values.
+    :type training: TrainingSpec | None
+    :param mutation: Mutation probabilities and RL-HP ranges.
+    :type mutation: MutationSpec | None
+    :param tournament: Tournament selection configuration.
+    :type tournament: TournamentSelectionSpec | None
+    :param replay_buffer: Replay buffer configuration.
+    :type replay_buffer: ReplayBufferSpec | None
     :param verbose: Print progress during training.
+    :type verbose: bool
     :param accelerator: Optional HuggingFace ``Accelerator``.
+    :type accelerator: Any | None
     :param checkpoint: Save a checkpoint every *n* steps (``None`` to
         disable).
+    :type checkpoint: int | None
     :param checkpoint_path: Directory for checkpoint files.
+    :type checkpoint_path: str | None
+    :param save_elite: Save the elite agent after training.
+    :type save_elite: bool
+    :param elite_path: Directory for elite agent files.
+    :type elite_path: str | None
     :param wb: Enable Weights & Biases logging.
+    :type wb: bool
     :param wandb_api_key: W&B API key.
+    :type wandb_api_key: str | None
     :param wandb_kwargs: Extra kwargs forwarded to ``wandb.init``.
-
-    All other keyword arguments are forwarded to :class:`Trainer`.
+    :type wandb_kwargs: dict[str, Any] | None
+    :param swap_channels: Whether to swap observation channels (e.g. for
+        Atari image observations).
+    :type swap_channels: bool
+    :param env_name: Human-readable environment name forwarded to the
+        training loop for logging.
+    :type env_name: str | None
+    :param device: Torch device string.
+    :type device: str
     """
 
     def __init__(
         self,
-        algorithm: EvolvableAlgorithm | dict[str, Any] | str,
-        environment: gym.Env | Any,
+        algorithm: EvolvableAlgorithm | RLAlgorithmSpec | str,
+        environment: gym.Env,
         *,
         population: PopulationType | None = None,
+        training: TrainingSpec | None = None,
+        mutation: MutationSpec | None = None,
+        tournament: TournamentSelectionSpec | None = None,
+        replay_buffer: ReplayBufferSpec | None = None,
         verbose: bool = True,
         accelerator: Any | None = None,
         checkpoint: int | None = None,
@@ -226,9 +161,19 @@ class LocalTrainer(Trainer):
         wb: bool = False,
         wandb_api_key: str | None = None,
         wandb_kwargs: dict[str, Any] | None = None,
-        **kwargs: Any,
+        swap_channels: bool = False,
+        env_name: str | None = None,
+        device: str = "cpu",
     ) -> None:
-        super().__init__(algorithm, environment, **kwargs)
+        super().__init__(
+            algorithm,
+            environment,
+            training=training,
+            mutation=mutation,
+            tournament=tournament,
+            replay_buffer=replay_buffer,
+            device=device,
+        )
         self.population = population
         self.verbose = verbose
         self.accelerator = accelerator
@@ -239,433 +184,223 @@ class LocalTrainer(Trainer):
         self.wb = wb
         self.wandb_api_key = wandb_api_key
         self.wandb_kwargs = wandb_kwargs
+        self.swap_channels = swap_channels
+        self.env_name = env_name
 
     def train(self) -> tuple[PopulationType, list[list[float]]]:
-        """Run local evolutionary training and return the final population
-        and fitness history.
+        """Run local evolutionary training.
+
+        :returns: A tuple of ``(population, fitness_history)`` where
+            *population* is the final evolved population and
+            *fitness_history* is a list of per-generation fitness scores.
+        :rtype: tuple[PopulationType, list[list[float]]]
         """
         pop = self._resolve_population()
-        mutations = self._resolve_mutations()
-        tournament = self._resolve_tournament()
-        memory = self._resolve_replay_buffer()
-        train_fn = self._resolve_training_fn()
+        mutations = build_mutations(self.mutation, self.device)
+        tournament = build_tournament(self.tournament, self.training)
+        memory = build_replay_buffer(self.replay_buffer, self._algo_meta, self.device)
+        train_fn = get_training_fn(self._algo_meta)
 
         env_name = self.env_name or str(self.environment)
 
-        common_kwargs: dict[str, Any] = {
-            "env": self.environment,
-            "env_name": env_name,
-            "algo": self._algo_name,
-            "pop": pop,
-            "swap_channels": self.swap_channels,
-            "max_steps": self.max_steps,
-            "evo_steps": self.evo_steps,
-            "eval_loop": self.eval_loop,
-            "target": self.target_score,
-            "tournament": tournament,
-            "mutation": mutations,
-            "checkpoint": self.checkpoint,
-            "checkpoint_path": self.checkpoint_path,
-            "save_elite": self.save_elite,
-            "elite_path": self.elite_path,
-            "wb": self.wb,
-            "verbose": self.verbose,
-            "accelerator": self.accelerator,
-            "wandb_api_key": self.wandb_api_key,
-        }
+        kwargs = build_train_kwargs(
+            algo_meta=self._algo_meta,
+            algo_name=self._algo_name,
+            env=self.environment,
+            env_name=env_name,
+            pop=pop,
+            training=self.training,
+            tournament=tournament,
+            mutations=mutations,
+            memory=memory,
+            swap_channels=self.swap_channels,
+            checkpoint=self.checkpoint,
+            checkpoint_path=self.checkpoint_path,
+            save_elite=self.save_elite,
+            elite_path=self.elite_path,
+            wb=self.wb,
+            verbose=self.verbose,
+            accelerator=self.accelerator,
+            wandb_api_key=self.wandb_api_key,
+            wandb_kwargs=self.wandb_kwargs,
+        )
 
-        if self._algo_name in _OFF_POLICY_ALGOS:
-            if memory is None:
-                msg = f"A replay buffer is required for off-policy algorithm {self._algo_name!r}."
-                raise ValueError(msg)
-            common_kwargs["memory"] = memory
-            common_kwargs["learning_delay"] = self.learning_delay
-            common_kwargs["wandb_kwargs"] = self.wandb_kwargs
-
-        elif self._algo_name in _BANDIT_ALGOS:
-            if memory is None:
-                msg = f"A replay buffer is required for bandit algorithm {self._algo_name!r}."
-                raise ValueError(msg)
-            common_kwargs["memory"] = memory
-
-        elif self._algo_name in _OFFLINE_ALGOS:
-            if memory is None:
-                msg = f"A replay buffer is required for offline algorithm {self._algo_name!r}."
-                raise ValueError(msg)
-            common_kwargs["memory"] = memory
-
-        elif self._algo_name == "PPO":
-            common_kwargs["wandb_kwargs"] = self.wandb_kwargs
-
-        elif self._algo_name in {"MADDPG", "MATD3"}:
-            if memory is None:
-                msg = f"A replay buffer is required for multi-agent off-policy algorithm {self._algo_name!r}."
-                raise ValueError(msg)
-            common_kwargs["memory"] = memory
-            common_kwargs["learning_delay"] = self.learning_delay
-
-        return train_fn(**common_kwargs)
-
-    # -- Resolution helpers --------------------------------------------------
+        return train_fn(**kwargs)
 
     def _resolve_population(self) -> PopulationType:
+        """Build or return the agent population.
+
+        Resolution order:
+
+        1. Pre-built *population* (returned as-is).
+        2. :class:`EvolvableAlgorithm` instance (cloned *pop_size* times).
+        3. :class:`RLAlgorithmSpec` (constructs agents from the spec).
+        4. String name (uses the default spec from the registry).
+
+        :returns: A list of algorithm instances.
+        :rtype: PopulationType
+        :raises TypeError: If *algorithm* is not a supported type and no
+            *population* was provided.
+        """
         if self.population is not None:
             return self.population
 
+        from agilerl.algorithms.core import EvolvableAlgorithm
+
         if isinstance(self.algorithm, EvolvableAlgorithm):
-            return [self.algorithm.clone(index=i) for i in range(self.pop_size)]
+            return [
+                self.algorithm.clone(index=i) for i in range(self.training.pop_size)
+            ]
+
+        if isinstance(self.algorithm, RLAlgorithmSpec):
+            return create_population_from_spec(
+                self.algorithm,
+                self._algo_meta,
+                self.environment,
+                self.training.pop_size,
+                self.device,
+            )
+
+        if isinstance(self.algorithm, str):
+            spec = self._algo_meta.spec_cls()
+            return create_population_from_spec(
+                spec,
+                self._algo_meta,
+                self.environment,
+                self.training.pop_size,
+                self.device,
+            )
 
         msg = (
-            "Pass either a pre-built population or an algorithm instance "
-            "to LocalTrainer.  Config-dict population creation is not "
-            "yet supported; use agilerl.utils.utils.create_population "
-            "to build the population, then pass it via the 'population' parameter."
+            f"Cannot create population from algorithm of type "
+            f"{type(self.algorithm).__name__}. Pass an EvolvableAlgorithm "
+            f"instance, an RLAlgorithmSpec, a string name, or a pre-built "
+            f"population via the 'population' parameter."
         )
         raise TypeError(msg)
-
-    def _resolve_mutations(self) -> Mutations | None:
-        if self.mutations is None:
-            return None
-        if isinstance(self.mutations, Mutations):
-            return self.mutations
-        if isinstance(self.mutations, dict):
-            d = self.mutations
-            return Mutations(
-                no_mutation=d.get("no_mutation", d.get("no_mut", 0.4)),
-                architecture=d.get("architecture", d.get("arch_mut", 0.2)),
-                new_layer_prob=d.get("new_layer_prob", d.get("new_layer", 0.2)),
-                parameters=d.get("parameters", d.get("params_mut", 0.2)),
-                activation=d.get("activation", d.get("act_mut", 0.0)),
-                rl_hp=d.get("rl_hp", d.get("rl_hp_mut", 0.2)),
-                mutation_sd=d.get("mutation_sd", 0.1),
-                rand_seed=d.get("rand_seed"),
-                device=self.device,
-            )
-        msg = f"Expected Mutations or dict, got {type(self.mutations).__name__}"
-        raise TypeError(msg)
-
-    def _resolve_tournament(self) -> TournamentSelection | None:
-        if self.tournament is None:
-            return None
-        if isinstance(self.tournament, TournamentSelection):
-            return self.tournament
-        if isinstance(self.tournament, dict):
-            d = self.tournament
-            return TournamentSelection(
-                tournament_size=d.get("tournament_size", 2),
-                elitism=d.get("elitism", True),
-                population_size=self.pop_size,
-                eval_loop=self.eval_loop,
-            )
-        msg = f"Expected TournamentSelection or dict, got {type(self.tournament).__name__}"
-        raise TypeError(msg)
-
-    def _resolve_replay_buffer(self) -> ReplayBuffer | None:
-        if self.replay_buffer is None:
-            return None
-        if isinstance(self.replay_buffer, ReplayBuffer):
-            return self.replay_buffer
-        if isinstance(self.replay_buffer, dict):
-            d = self.replay_buffer
-            max_size = d.get("memory_size", d.get("max_size", 100_000))
-            if d.get("n_step_buffer"):
-                n_step = d.get("n_step", 3)
-                gamma = d.get("gamma", 0.99)
-                return MultiStepReplayBuffer(
-                    max_size=max_size, n_step=n_step, gamma=gamma, device=self.device
-                )
-            return ReplayBuffer(max_size=max_size, device=self.device)
-        msg = f"Expected ReplayBuffer or dict, got {type(self.replay_buffer).__name__}"
-        raise TypeError(msg)
-
-    def _resolve_training_fn(self) -> Callable[..., Any]:
-        fn = _TRAINING_FN_REGISTRY.get(self._algo_name)
-        if fn is None:
-            supported = ", ".join(sorted(_TRAINING_FN_REGISTRY))
-            msg = (
-                f"No training loop registered for algorithm {self._algo_name!r}. "
-                f"Supported: {supported}"
-            )
-            raise ValueError(msg)
-        return fn
 
 
 class ArenaTrainer(Trainer):
     """Submits evolutionary training jobs to the Arena RLOps platform.
 
-    Mirrors the :class:`LocalTrainer` interface but, instead of running
-    training locally, builds an Arena manifest from the provided objects
-    and submits it via :class:`~agilerl.arena.client.ArenaClient`.
+    Builds an :class:`~agilerl.models.ArenaTrainingManifest` from the
+    provided specs and submits it via
+    :class:`~agilerl.arena.client.ArenaClient`.
 
-    :param algorithm: An algorithm instance or config dict.
-    :param env_name: Registered Arena environment name.
-    :param env_version: Environment version.
-    :param client: An authenticated :class:`ArenaClient`.  One is
-        created automatically if not provided.
-    :param num_envs: Number of parallel environments.
-    :param channels_last: Whether observations use channels-last layout.
-    :param custom_env: Whether this is a custom (user-uploaded)
-        environment.
-    :param env_config: Optional environment configuration dict.
-    :param env_entrypoint: Entrypoint for custom environments.
-    :param reporting_interval: Steps between progress reports.
-    :param experience_sharing: Share experience across the population.
-
-    All other keyword arguments are forwarded to :class:`Trainer`.
+    :param algorithm: An :class:`RLAlgorithmSpec` or a string algorithm
+        name (uses the default spec from the registry).
+    :type algorithm: RLAlgorithmSpec | str
+    :param environment: An :class:`EnvironmentSpec` or a string env name.
+    :type environment: EnvironmentSpec | str
+    :param training: Training loop parameters.  Defaults to
+        :class:`TrainingSpec` with sensible values.
+    :type training: TrainingSpec | None
+    :param mutation: Mutation probabilities and RL-HP ranges.
+    :type mutation: MutationSpec | None
+    :param tournament: Tournament selection configuration.
+    :type tournament: TournamentSelectionSpec | None
+    :param replay_buffer: Replay buffer configuration.
+    :type replay_buffer: ReplayBufferSpec | None
+    :param client: An authenticated :class:`ArenaClient`.  One is created
+        automatically if not provided.
+    :type client: ArenaClient | None
+    :param device: Torch device string.
+    :type device: str
     """
 
     def __init__(
         self,
-        algorithm: EvolvableAlgorithm | dict[str, Any] | str,
-        env_name: str,
-        env_version: int | str,
+        algorithm: RLAlgorithmSpec | str,
+        environment: EnvironmentSpec | str,
         *,
-        client: Any | None = None,
-        num_envs: int = 16,
-        channels_last: bool = False,
-        custom_env: bool = False,
-        env_config: dict[str, Any] | None = None,
-        env_entrypoint: str | None = None,
-        reporting_interval: int = 4096,
-        experience_sharing: bool = True,
-        **kwargs: Any,
+        training: TrainingSpec | None = None,
+        mutation: MutationSpec | None = None,
+        tournament: TournamentSelectionSpec | None = None,
+        replay_buffer: ReplayBufferSpec | None = None,
+        client: ArenaClient | None = None,
+        device: str = "cpu",
     ) -> None:
         super().__init__(
             algorithm,
-            env_name,
-            env_name=env_name,
-            **kwargs,
+            environment,
+            training=training,
+            mutation=mutation,
+            tournament=tournament,
+            replay_buffer=replay_buffer,
+            device=device,
         )
-        self.env_version = env_version
-        self.num_envs = num_envs
-        self.channels_last = channels_last
-        self.custom_env = custom_env
-        self.env_config = env_config
-        self.env_entrypoint = env_entrypoint
-        self.reporting_interval = reporting_interval
-        self.experience_sharing = experience_sharing
 
         if client is not None:
             self._client = client
         else:
-            from agilerl.arena.client import ArenaClient
+            from agilerl.arena.client import ArenaClient as _ArenaClient
 
-            self._client = ArenaClient()
+            self._client = _ArenaClient()
 
     def train(self, *, stream: bool = False) -> dict[str, Any]:
         """Build the manifest and submit the training job to Arena.
 
-        :param stream: If ``True``, stream logs and block until
-            completion.
-        :returns: Arena API response (includes ``job_id``).
+        :param stream: If ``True``, stream logs to the terminal and block
+            until the job finishes.
+        :type stream: bool
+        :returns: Arena API response including ``job_id`` and ``status``.
+            When *stream* is ``True``, returns the final result payload.
+        :rtype: dict[str, Any]
         """
         manifest = self.to_manifest()
-        return self._client.submit_training_job(manifest, stream=stream)
+        return self._client.submit_job(manifest, stream=stream)
 
     def to_manifest(self) -> Any:
-        """Build a :class:`TrainingJobManifest` from the trainer state."""
-        from agilerl.arena.models import (
-            AlgorithmManifest,
-            EnvironmentManifest,
-            MutationManifest,
-            MutationProbabilities,
-            NetworkManifest,
-            ReplayBufferManifest,
-            RLHPRange,
-            TournamentManifest,
-            TrainingJobManifest,
-            TrainingManifest,
+        """Build an :class:`~agilerl.models.ArenaTrainingManifest`.
+
+        Assembles the manifest directly from the spec objects stored on
+        this trainer, without any intermediate dict parsing.
+
+        :returns: A fully validated manifest ready for submission.
+        :rtype: ArenaTrainingManifest
+        """
+        from agilerl.models import ArenaTrainingManifest
+
+        algo_spec = self._resolve_algo_spec()
+        env_spec = self._resolve_env_spec()
+
+        return ArenaTrainingManifest(
+            algorithm=algo_spec,
+            environment=env_spec,
+            mutation=self.mutation,
+            network=algo_spec.net_config,
+            replay_buffer=self.replay_buffer,
+            tournament_selection=self.tournament,
+            training=self.training,
         )
 
-        algo_manifest = self._build_algorithm_manifest(AlgorithmManifest)
-        env_manifest = self._build_environment_manifest(EnvironmentManifest)
-        mutation_manifest = self._build_mutation_manifest(
-            MutationManifest, MutationProbabilities, RLHPRange
+    def _resolve_algo_spec(self) -> RLAlgorithmSpec:
+        """Return the algorithm as an :class:`RLAlgorithmSpec`.
+
+        If the algorithm was provided as a string, the default spec for
+        that algorithm is created from the registry.
+
+        :returns: Algorithm spec instance.
+        :rtype: RLAlgorithmSpec
+        """
+        if isinstance(self.algorithm, RLAlgorithmSpec):
+            return self.algorithm
+        return self._algo_meta.spec_cls()
+
+    def _resolve_env_spec(self) -> EnvironmentSpec:
+        """Return the environment as an :class:`EnvironmentSpec`.
+
+        :returns: Environment spec instance.
+        :rtype: EnvironmentSpec
+        :raises TypeError: If the environment is not a string or
+            :class:`EnvironmentSpec`.
+        """
+        if isinstance(self.environment, EnvironmentSpec):
+            return self.environment
+        if isinstance(self.environment, str):
+            return EnvironmentSpec(name=self.environment)
+        msg = (
+            f"ArenaTrainer requires an EnvironmentSpec or a string env name, "
+            f"got {type(self.environment).__name__}"
         )
-        tournament_manifest = self._build_tournament_manifest(TournamentManifest)
-        network_manifest = self._build_network_manifest(NetworkManifest)
-        buffer_manifest = self._build_replay_buffer_manifest(ReplayBufferManifest)
-        training_manifest = self._build_training_manifest(TrainingManifest)
-
-        return TrainingJobManifest(
-            algorithm=algo_manifest,
-            environment=env_manifest,
-            mutation=mutation_manifest,
-            network=network_manifest,
-            replay_buffer=buffer_manifest,
-            tournament_selection=tournament_manifest,
-            training=training_manifest,
-        )
-
-    # -- Manifest section builders -------------------------------------------
-
-    def _build_algorithm_manifest(self, cls: type) -> Any:
-        if isinstance(self.algorithm, dict):
-            return cls.from_flat_dict(self.algorithm)
-
-        if isinstance(self.algorithm, str):
-            return cls(name=self.algorithm)
-
-        attrs = EvolvableAlgorithm.inspect_attributes(
-            self.algorithm, input_args_only=True
-        )
-        attrs["name"] = self._algo_name
-        attrs.pop("index", None)
-        attrs.pop("hp_config", None)
-        attrs.pop("device", None)
-        attrs.pop("accelerator", None)
-        attrs.pop("wrap", None)
-        attrs.pop("observation_space", None)
-        attrs.pop("action_space", None)
-        attrs.pop("normalize_images", None)
-        attrs.pop("net_config", None)
-        attrs.pop("mut", None)
-        attrs.pop("actor_network", None)
-        attrs.pop("critic_network", None)
-        attrs.pop("torch_compiler", None)
-        return cls.from_flat_dict(attrs)
-
-    def _build_environment_manifest(self, cls: type) -> Any:
-        return cls(
-            name=self.env_name,
-            version=self.env_version,
-            num_envs=self.num_envs,
-            channels_last=self.channels_last,
-            custom=self.custom_env,
-            config=self.env_config,
-            entrypoint=self.env_entrypoint,
-        )
-
-    def _build_mutation_manifest(
-        self, manifest_cls: type, prob_cls: type, range_cls: type
-    ) -> Any:
-        if self.mutations is None:
-            return manifest_cls()
-
-        if isinstance(self.mutations, dict):
-            d = self.mutations
-            probs = prob_cls(
-                no_mut=d.get("no_mutation", d.get("no_mut", 0.4)),
-                arch_mut=d.get("architecture", d.get("arch_mut", 0.2)),
-                new_layer=d.get("new_layer_prob", d.get("new_layer", 0.2)),
-                params_mut=d.get("parameters", d.get("params_mut", 0.2)),
-                act_mut=d.get("activation", d.get("act_mut", 0.0)),
-                rl_hp_mut=d.get("rl_hp", d.get("rl_hp_mut", 0.2)),
-            )
-            rl_hp_selection = self._extract_rl_hp_selection(range_cls)
-            return manifest_cls(
-                probabilities=probs,
-                rl_hp_selection=rl_hp_selection,
-                mutation_sd=d.get("mutation_sd", 0.1),
-                rand_seed=d.get("rand_seed"),
-            )
-
-        m: Mutations = self.mutations
-        probs = prob_cls(
-            no_mut=m.no_mutation,
-            arch_mut=m.architecture,
-            new_layer=m.new_layer_prob,
-            params_mut=m.parameters,
-            act_mut=m.activation,
-            rl_hp_mut=m.rl_hp,
-        )
-        rl_hp_selection = self._extract_rl_hp_selection(range_cls)
-        return manifest_cls(
-            probabilities=probs,
-            rl_hp_selection=rl_hp_selection,
-            mutation_sd=m.mutation_sd,
-            rand_seed=getattr(m, "rand_seed", None),
-        )
-
-    def _extract_rl_hp_selection(self, range_cls: type) -> dict[str, Any]:
-        """Extract RL hyperparameter mutation ranges from hp_config."""
-        selection: dict[str, Any] = {}
-        source = self.hp_config
-
-        if source is None and isinstance(self.algorithm, EvolvableAlgorithm):
-            source = self.algorithm.registry.hp_config
-
-        if source is None:
-            return selection
-
-        if isinstance(source, dict):
-            for name, spec in source.items():
-                if isinstance(spec, dict):
-                    selection[name] = range_cls(
-                        min=spec["min"],
-                        max=spec["max"],
-                        grow_factor=spec.get("grow_factor", 1.2),
-                        shrink_factor=spec.get("shrink_factor", 0.8),
-                    )
-                elif isinstance(spec, RLParameter):
-                    selection[name] = range_cls(
-                        min=spec.min,
-                        max=spec.max,
-                        grow_factor=spec.grow_factor,
-                        shrink_factor=spec.shrink_factor,
-                    )
-            return selection
-
-        if isinstance(source, HyperparameterConfig):
-            for name, param in source.config.items():
-                selection[name] = range_cls(
-                    min=param.min,
-                    max=param.max,
-                    grow_factor=param.grow_factor,
-                    shrink_factor=param.shrink_factor,
-                )
-            return selection
-
-        return selection
-
-    def _build_tournament_manifest(self, cls: type) -> Any:
-        if self.tournament is None:
-            return cls()
-
-        if isinstance(self.tournament, dict):
-            return cls(
-                tournament_size=self.tournament.get("tournament_size", 2),
-                elitism=self.tournament.get("elitism", True),
-            )
-
-        t: TournamentSelection = self.tournament
-        return cls(
-            tournament_size=t.tournament_size,
-            elitism=t.elitism,
-        )
-
-    def _build_network_manifest(self, cls: type) -> Any:
-        if self.network_config is not None:
-            return cls.model_validate(self.network_config)
-        return cls()
-
-    def _build_replay_buffer_manifest(self, cls: type) -> Any:
-        if self.replay_buffer is None:
-            return cls()
-
-        if isinstance(self.replay_buffer, dict):
-            return cls.model_validate(self.replay_buffer)
-
-        buf = self.replay_buffer
-        is_n_step = isinstance(buf, MultiStepReplayBuffer)
-        name = type(buf).__name__
-        return cls(
-            name=name,
-            memory_size=buf.max_size,
-            standard_buffer=not is_n_step,
-            n_step_buffer=is_n_step,
-        )
-
-    def _build_training_manifest(self, cls: type) -> Any:
-        loop_name = _TRAINING_LOOP_NAMES.get(self._algo_name, "train_off_policy")
-        return cls(
-            name=loop_name,
-            max_steps=self.max_steps,
-            pop_size=self.pop_size,
-            evo_steps=self.evo_steps,
-            eval_loop=self.eval_loop,
-            learning_delay=self.learning_delay,
-            reporting_interval=self.reporting_interval,
-            experience_sharing=self.experience_sharing,
-            target_score=self.target_score,
-        )
+        raise TypeError(msg)

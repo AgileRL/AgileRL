@@ -5,6 +5,8 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 from .algo import (
+    ALGO_REGISTRY,
+    AlgorithmMeta,
     AlgorithmSpec,
     DDPGSpec,
     DPOSpec,
@@ -15,6 +17,7 @@ from .algo import (
     MATD3Spec,
     PPOSpec,
     RainbowDQNSpec,
+    RLAlgorithmSpec,
     TD3Spec,
 )
 from .env import EnvironmentSpec
@@ -90,7 +93,10 @@ class ArenaTrainingManifest(BaseModel):
 
 
 __all__ = [
-    "ArenaMachine",
+    "ALGO_REGISTRY",
+    "AlgorithmMeta",
+    "AlgorithmSpec",
+    "ArenaCluster",
     "ArenaResource",
     "ArenaTrainingManifest",
     "DDPGSpec",
@@ -105,6 +111,7 @@ __all__ = [
     "MutationSpec",
     "NetworkSpec",
     "PPOSpec",
+    "RLAlgorithmSpec",
     "RainbowDQNSpec",
     "ReplayBufferSpec",
     "TD3Spec",

@@ -15,7 +15,7 @@ from agilerl.arena.exceptions import (
     ArenaValidationError,
 )
 from agilerl.arena.logs import EventStream, LogDisplay
-from agilerl.arena.models import ArenaCluster, ArenaTrainingManifest, JobStatus
+from agilerl.models import ArenaCluster, ArenaTrainingManifest, JobStatus
 from agilerl.utils.arena_utils import (
     prepare_env_upload,
 )
@@ -186,7 +186,7 @@ class ArenaClient:
     ### Custom Environments ###
     # -------------------------------------------------------------------------
 
-    def _create_and_validate(
+    def _register_environment(
         self,
         name: str,
         source: str | os.PathLike[str] | None = None,
@@ -199,7 +199,7 @@ class ArenaClient:
         rollouts: bool = False,
         max_steps: int = 200,
     ) -> dict[str, Any]:
-        """Create and validate a custom environment on Arena.
+        """Register a custom environment on Arena.
 
         :param name: The name of the environment.
         :type name: str
@@ -220,13 +220,17 @@ class ArenaClient:
         :type rollouts: bool
         :param max_steps: Maximum steps per rollout episode.
         :type max_steps: int
-        :returns: Validation report from the Arena API.
+        :returns: Registration report from the Arena API.
         :rtype: dict[str, Any]
         """
         src = Path(os.fspath(source)).resolve()
         if not src.exists():
             msg = f"Environment source not found: {src}"
             raise FileNotFoundError(msg)
+
+        logger.info(
+            "Creating .tar.gz archive for environment %s version %s...", name, version
+        )
 
         # Convert the environment source to a tar.gz archive
         payload = prepare_env_upload(
@@ -236,10 +240,12 @@ class ArenaClient:
             description=description,
         )
 
-        # Send the environment to Arena for validation
-        resp = self._request(
+        logger.info("Uploading environment %s version %s to Arena...", name, version)
+
+        # Send the environment to Arena for registration
+        return self._request(
             "POST",
-            "api/v1/custom-gym-env-impls/create-and-validate",
+            "api/v1/custom-gym-env-impls/create",
             files={"archive": ("environment.tar.gz", payload, "application/gzip")},
             data={
                 "name": name,
@@ -251,9 +257,6 @@ class ArenaClient:
             },
             timeout=self._upload_timeout,
         )
-        self._check_validation_result(resp)
-
-        return resp
 
     def _validate(
         self,
@@ -262,7 +265,6 @@ class ArenaClient:
         entrypoint: str | None = None,
         rollouts: bool = False,
         max_steps: int = 200,
-        stream: bool = False,
     ) -> dict[str, Any]:
         """Validate a custom environment on Arena.
 
@@ -276,8 +278,6 @@ class ArenaClient:
         :type rollouts: bool
         :param max_steps: Maximum steps per rollout episode.
         :type max_steps: int
-        :param stream: If ``True``, stream validation logs to the terminal in real time and block until the operation finishes.
-        :type stream: bool
         :returns: Validation report from the Arena API.
         :rtype: dict[str, Any]
         """
@@ -294,7 +294,7 @@ class ArenaClient:
         )
         self._check_validation_result(resp)
 
-        if stream and "operation_id" in resp:
+        if "operation_id" in resp:
             return self.stream_logs(resp["operation_id"])
 
         return resp
@@ -318,18 +318,19 @@ class ArenaClient:
         )
         return resp["entrypoints"]
 
-    def _is_arena_environment(self, name: str, version: str = "latest") -> bool:
+    def is_registered_environment(self, name: str, version: str = "latest") -> bool:
         """Check if a custom environment is registered in Arena.
 
         :param name: The name of the environment.
         :param version: The version of the environment. Defaults to "latest".
         :returns: True if the environment is registered in Arena, False otherwise.
         """
-        return self._request(
+        resp = self._request(
             "GET",
             "api/v1/custom-gym-env-impls/is-registered",
             params={"name": name, "version": version},
         )
+        return resp["is_registered"]
 
     def validate_environment(
         self,
@@ -377,24 +378,34 @@ class ArenaClient:
         :rtype: dict[str, Any]
         """
         common_kwargs = {
-            "name": name,
             "version": version,
             "entrypoint": entrypoint,
             "rollouts": str(rollouts).lower(),
             "max_steps": str(max_steps),
-            "stream": str(stream).lower(),
         }
         if source is not None:
-            return self._create_and_validate(
-                source=source,
-                config=config,
-                requirements=requirements,
-                description=description,
-                multi_agent=multi_agent,
-                **common_kwargs,
-            )
+            if self.is_registered_environment(name, version):
+                logger.info(
+                    "Environment %s version %s is already registered, validating...",
+                    name,
+                    version,
+                )
+            else:
+                return self._register_environment(
+                    name=name,
+                    source=source,
+                    config=config,
+                    requirements=requirements,
+                    description=description,
+                    multi_agent=multi_agent,
+                    **common_kwargs,
+                )
 
-        return self._validate(**common_kwargs)
+        # Validate the registered environment on Arena
+        logger.info(
+            "Validating registered environment %s version %s on Arena...", name, version
+        )
+        return self._validate(name=name, **common_kwargs)
 
     # -------------------------------------------------------------------------
     ### Training Jobs ###

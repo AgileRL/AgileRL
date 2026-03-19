@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypedDict
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from pydantic import BaseModel, Field
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.registry import HyperparameterConfig
-from agilerl.arena.models.networks import NetworkSpec
-from agilerl.typing import BPTTSequenceType, ConfigType
+from agilerl.typing import BPTTSequenceType
+
+from .networks import MlpSpec, NetworkSpec
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import LoraConfig  # noqa: TC002
@@ -16,15 +18,25 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 class AlgorithmSpec(BaseModel):
     """Pydantic model for `EvolvableAlgorithm` objects."""
 
+    model_config = {"arbitrary_types_allowed": True}
+
     batch_size: int = Field(default=64, ge=1)
     hp_config: HyperparameterConfig | None = None
+
+
+def _default_net_config() -> NetworkSpec:
+    """Sensible MLP [64, 64] default for zero-config usage."""
+    return NetworkSpec(
+        encoder_config=MlpSpec(hidden_size=[64, 64]),
+        head_config=MlpSpec(hidden_size=[64, 64]),
+    )
 
 
 class RLAlgorithmSpec(AlgorithmSpec):
     """Pydantic model for `RLAlgorithm` and `MultiAgentRLAlgorithm` objects."""
 
-    net_config: NetworkSpec
-    learn_step: int = Field(..., ge=1)
+    net_config: NetworkSpec = Field(default_factory=_default_net_config)
+    learn_step: int = Field(default=5, ge=1)
     gamma: float = Field(default=0.99, ge=0.0, le=1.0)
 
 
@@ -58,11 +70,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     use_separate_reference_adapter: bool
     pretrained_model_name_or_path: str
     calc_position_embeddings: bool
-
-
-# ---------------------------------------- #
-# --------- Algorithms in Arena ---------- #
-# ---------------------------------------- #
 
 
 class DDPGSpec(RLAlgorithmSpec):
@@ -121,7 +128,8 @@ class RainbowDQNSpec(RLAlgorithmSpec):
 class PPOSpec(RLAlgorithmSpec):
     """Pydantic model for PPO algorithm specification."""
 
-    num_envs: int = Field(..., ge=1)
+    learn_step: int = Field(default=2048, ge=1)
+    num_envs: int = Field(default=1, ge=1)
     gae_lambda: float = Field(default=0.95, ge=0.0, le=1.0)
     action_std_init: float = Field(default=0.6, ge=0.0)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0)
@@ -131,7 +139,7 @@ class PPOSpec(RLAlgorithmSpec):
     target_kl: float | None = Field(default=None, ge=0.0)
     update_epochs: int = Field(default=4, ge=1)
     use_rollout_buffer: bool = Field(default=True)
-    rollout_buffer_config: ConfigType | None = Field(default_factory=dict)
+    rollout_buffer_config: dict[str, Any] | None = Field(default_factory=dict)
     recurrent: bool = Field(default=False)
     max_seq_len: int | None = Field(default=32, ge=1)
     share_encoders: bool = Field(default=True)
@@ -173,6 +181,7 @@ class MATD3Spec(RLAlgorithmSpec):
 class IPPOSpec(RLAlgorithmSpec):
     """Pydantic model for IPPO algorithm specification."""
 
+    learn_step: int = Field(default=2048, ge=1)
     gae_lambda: float = Field(default=0.95, ge=0.0, le=1.0)
     action_std_init: float = Field(default=0.0)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0)
@@ -186,6 +195,82 @@ class IPPOSpec(RLAlgorithmSpec):
     torch_compiler: str | None = Field(default=None)
 
 
+@dataclass(frozen=True, slots=True)
+class AlgorithmMeta:
+    """Metadata for a registered algorithm.
+
+    Used by the Trainer to look up the correct spec class, training
+    function, and whether a replay buffer is required.
+    """
+
+    name: str
+    spec_cls: type[RLAlgorithmSpec]
+    algo_path: str
+    train_fn_name: str
+    requires_buffer: bool
+
+
+ALGO_REGISTRY: dict[str, AlgorithmMeta] = {
+    "PPO": AlgorithmMeta(
+        "PPO", PPOSpec, "agilerl.algorithms.PPO", "train_on_policy", False
+    ),
+    "DQN": AlgorithmMeta(
+        "DQN", DQNSpec, "agilerl.algorithms.DQN", "train_off_policy", True
+    ),
+    "DDPG": AlgorithmMeta(
+        "DDPG", DDPGSpec, "agilerl.algorithms.DDPG", "train_off_policy", True
+    ),
+    "TD3": AlgorithmMeta(
+        "TD3", TD3Spec, "agilerl.algorithms.TD3", "train_off_policy", True
+    ),
+    "RainbowDQN": AlgorithmMeta(
+        "RainbowDQN",
+        RainbowDQNSpec,
+        "agilerl.algorithms.RainbowDQN",
+        "train_off_policy",
+        True,
+    ),
+    "CQN": AlgorithmMeta(
+        "CQN", RLAlgorithmSpec, "agilerl.algorithms.CQN", "train_offline", True
+    ),
+    "NeuralUCB": AlgorithmMeta(
+        "NeuralUCB",
+        RLAlgorithmSpec,
+        "agilerl.algorithms.NeuralUCB",
+        "train_bandits",
+        True,
+    ),
+    "NeuralTS": AlgorithmMeta(
+        "NeuralTS",
+        RLAlgorithmSpec,
+        "agilerl.algorithms.NeuralTS",
+        "train_bandits",
+        True,
+    ),
+    "IPPO": AlgorithmMeta(
+        "IPPO",
+        IPPOSpec,
+        "agilerl.algorithms.IPPO",
+        "train_multi_agent_on_policy",
+        False,
+    ),
+    "MADDPG": AlgorithmMeta(
+        "MADDPG",
+        MADDPGSpec,
+        "agilerl.algorithms.MADDPG",
+        "train_multi_agent_off_policy",
+        True,
+    ),
+    "MATD3": AlgorithmMeta(
+        "MATD3",
+        MATD3Spec,
+        "agilerl.algorithms.MATD3",
+        "train_multi_agent_off_policy",
+        True,
+    ),
+}
+
+
 class GRPOSpec(LLMAlgorithmSpec):
     """Pydantic model for GRPO algorithm specification."""
 
@@ -193,7 +278,7 @@ class GRPOSpec(LLMAlgorithmSpec):
     lr: float = Field(default=0.0001, ge=0.0)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0)
     temperature: float
-    vllm_config: ConfigType = Field(
+    vllm_config: dict[str, Any] = Field(
         default_factory=lambda: {
             "max_num_seqs": 16,
             "gpu_memory_utilization": 0.4,
