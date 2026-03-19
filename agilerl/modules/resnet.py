@@ -229,7 +229,7 @@ class EvolvableResNet(EvolvableModule):
         :rtype: dict[str, int | None]
         """
         if numb_new_channels is None:
-            numb_new_channels = self.rng.choice([8, 16, 32])
+            numb_new_channels = int(self.rng.choice([8, 16, 32]))
 
         # HARD LIMIT
         if self.channel_size + numb_new_channels < self.max_channel_size:
@@ -250,7 +250,7 @@ class EvolvableResNet(EvolvableModule):
         :rtype: dict[str, int | None]
         """
         if numb_new_channels is None:
-            numb_new_channels = self.rng.choice([8, 16, 32])
+            numb_new_channels = int(self.rng.choice([8, 16, 32]))
 
         # HARD LIMIT
         if self.channel_size - numb_new_channels > self.min_channel_size:
