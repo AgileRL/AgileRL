@@ -183,6 +183,9 @@ class DQN(RLAlgorithm):
             ),
         )
 
+        # Register metrics to keep track of during training
+        self.metrics.register("loss")
+
     def get_action(
         self,
         obs: ObservationType,
@@ -342,7 +345,10 @@ class DQN(RLAlgorithm):
 
         # soft update target network
         self.soft_update()
-        return loss.item()
+
+        loss = loss.item()
+        self.metrics.log("loss", loss)
+        return loss
 
     def soft_update(self) -> None:
         """Soft updates target network."""
@@ -372,7 +378,6 @@ class DQN(RLAlgorithm):
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 1
         :type loop: int, optional
-
         :return: Mean test score of agent in environment
         :rtype: float
         """
@@ -403,5 +408,5 @@ class DQN(RLAlgorithm):
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
         mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

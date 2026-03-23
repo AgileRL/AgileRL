@@ -231,6 +231,8 @@ def build_train_kwargs(
     save_elite: bool = False,
     elite_path: str | None = None,
     wb: bool = False,
+    tensorboard: bool = False,
+    tensorboard_log_dir: str | None = None,
     verbose: bool = True,
     accelerator: Any | None = None,
     wandb_api_key: str | None = None,
@@ -271,6 +273,10 @@ def build_train_kwargs(
     :type elite_path: str | None
     :param wb: Enable Weights & Biases logging.
     :type wb: bool
+    :param tensorboard: Enable TensorBoard logging.
+    :type tensorboard: bool
+    :param tensorboard_log_dir: Directory for TensorBoard logs.
+    :type tensorboard_log_dir: str | None
     :param verbose: Print progress during training.
     :type verbose: bool
     :param accelerator: Optional HuggingFace ``Accelerator``.
@@ -299,6 +305,8 @@ def build_train_kwargs(
         "save_elite": save_elite,
         "elite_path": elite_path,
         "wb": wb,
+        "tensorboard": tensorboard,
+        "tensorboard_log_dir": tensorboard_log_dir,
         "verbose": verbose,
         "accelerator": accelerator,
         "wandb_api_key": wandb_api_key,

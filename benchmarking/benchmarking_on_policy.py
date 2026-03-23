@@ -1,10 +1,3 @@
-"""On-policy (PPO) benchmarking script using :class:`~agilerl.trainer.LocalTrainer`.
-
-Usage::
-
-    python benchmarking_on_policy.py
-"""
-
 import gymnasium as gym
 import torch
 
@@ -17,7 +10,7 @@ from agilerl.models.hpo import (
 )
 from agilerl.models.networks import MlpSpec, NetworkSpec
 from agilerl.trainer import LocalTrainer
-from agilerl.utils.utils import make_vect_envs, print_hyperparams
+from agilerl.utils.utils import make_vect_envs
 
 
 def main() -> None:
@@ -43,17 +36,18 @@ def main() -> None:
         max_grad_norm=0.5,
         update_epochs=4,
         net_config=NetworkSpec(
-            encoder_config=MlpSpec(hidden_size=[64, 64]),
-            head_config=MlpSpec(hidden_size=[64, 64]),
+            latent_dim=128,
+            encoder_config=MlpSpec(hidden_size=[128]),
+            head_config=MlpSpec(hidden_size=[128]),
         ),
     )
 
     training = TrainingSpec(
-        max_steps=200_000,
-        pop_size=6,
+        max_steps=2_000_000,
+        pop_size=4,
         evo_steps=10_000,
         eval_loop=1,
-        target_score=200,
+        target_score=250,
     )
 
     mutation = MutationSpec(
@@ -74,21 +68,24 @@ def main() -> None:
         rand_seed=42,
     )
 
-    tournament = TournamentSelectionSpec(tournament_size=2, elitism=True)
+    tournament = TournamentSelectionSpec(
+        tournament_size=2,
+        elitism=True,
+    )
 
     trainer = LocalTrainer(
-        algorithm=algorithm,
+        algorithm=algorithm,  # "PPO"
         environment=env,
         training=training,
         mutation=mutation,
         tournament=tournament,
         env_name=env_name,
+        tensorboard=True,
+        tensorboard_log_dir="tensorboard_logs",
         device=str(device),
     )
 
     trained_pop, _pop_fitnesses = trainer.train()
-
-    print_hyperparams(trained_pop)
 
     if str(device) == "cuda":
         torch.cuda.empty_cache()

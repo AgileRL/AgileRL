@@ -347,6 +347,12 @@ class PPO(RLAlgorithm):
 
         self.hidden_state = None
 
+        # Register metrics to keep track of during training
+        self.metrics.register("total_loss")
+        self.metrics.register("policy_loss")
+        self.metrics.register("value_loss")
+        self.metrics.register("entropy_loss")
+
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""
         if all(isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]):
@@ -724,7 +730,10 @@ class PPO(RLAlgorithm):
         # Get number of samples from the returns tensor
         num_samples = experiences[4].size(0)
         batch_idxs = np.arange(num_samples)
-        mean_loss = 0
+        mean_loss = 0.0
+        mean_pg_loss = 0.0
+        mean_v_loss = 0.0
+        mean_entropy_loss = 0.0
         for _ in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
@@ -804,11 +813,22 @@ class PPO(RLAlgorithm):
                     self.optimizer.step()
 
                     mean_loss += loss.item()
+                    mean_pg_loss += pg_loss.item()
+                    mean_v_loss += v_loss.item()
+                    mean_entropy_loss += entropy_loss.item()
 
             if self.target_kl is not None and approx_kl > self.target_kl:
                 break
 
-        mean_loss /= num_samples * self.update_epochs
+        divisor = num_samples * self.update_epochs
+        mean_loss /= divisor
+        mean_pg_loss /= divisor
+        mean_v_loss /= divisor
+        mean_entropy_loss /= divisor
+        self.metrics.log("total_loss", mean_loss)
+        self.metrics.log("policy_loss", mean_pg_loss)
+        self.metrics.log("value_loss", mean_v_loss)
+        self.metrics.log("entropy_loss", mean_entropy_loss)
         return mean_loss
 
     def _learn_from_rollout_buffer_flat(
@@ -824,6 +844,8 @@ class PPO(RLAlgorithm):
 
         if buffer_td.is_empty():
             warnings.warn("Buffer data is empty. Skipping learning step.", stacklevel=2)
+            for metric_name in ("loss", "policy_loss", "value_loss", "entropy_loss"):
+                self.metrics.log(metric_name, 0.0)
             return 0.0
 
         # Normalize advantages globally
@@ -837,6 +859,9 @@ class PPO(RLAlgorithm):
         num_samples = self.rollout_buffer.size()
         indices = np.arange(num_samples)
         mean_loss = 0.0
+        mean_policy_loss = 0.0
+        mean_v_loss = 0.0
+        mean_entropy_loss = 0.0
         approx_kl_divs = []
         for _ in range(self.update_epochs):
             np.random.shuffle(indices)
@@ -913,11 +938,22 @@ class PPO(RLAlgorithm):
                 self.optimizer.step()
 
                 mean_loss += loss.item()
+                mean_policy_loss += policy_loss.item()
+                mean_v_loss += v_loss.item()
+                mean_entropy_loss += entropy_loss.item()
 
             if self.target_kl is not None and np.mean(approx_kl_divs) > self.target_kl:
                 break  # Early stopping for the epoch if KL divergence target is exceeded
 
-        mean_loss /= num_samples * self.update_epochs
+        divisor = num_samples * self.update_epochs
+        mean_loss /= divisor
+        mean_policy_loss /= divisor
+        mean_v_loss /= divisor
+        mean_entropy_loss /= divisor
+        self.metrics.log("total_loss", mean_loss)
+        self.metrics.log("policy_loss", mean_policy_loss)
+        self.metrics.log("value_loss", mean_v_loss)
+        self.metrics.log("entropy_loss", mean_entropy_loss)
         return mean_loss
 
     def _learn_from_rollout_buffer_bptt(self) -> float:
@@ -948,6 +984,9 @@ class PPO(RLAlgorithm):
 
         # Here, batch_size means number of sequences per minibatch
         mean_loss = 0.0
+        mean_policy_loss = 0.0
+        mean_value_loss = 0.0
+        mean_entropy_loss = 0.0
         total_minibatch_updates_total = 0
         for epoch in range(self.update_epochs):
             approx_kl_divs_epoch = []  # KL divergences for this epoch's minibatches
@@ -1060,6 +1099,9 @@ class PPO(RLAlgorithm):
                 self.optimizer.step()
 
                 mean_loss += loss.item()
+                mean_policy_loss += policy_loss.item()
+                mean_value_loss += value_loss.item()
+                mean_entropy_loss += entropy_loss.item()
                 num_minibatches_this_epoch += 1
 
                 if (
@@ -1108,7 +1150,13 @@ class PPO(RLAlgorithm):
             ):
                 break
 
-        return mean_loss / max(1e-8, total_minibatch_updates_total)
+        divisor = max(1e-8, total_minibatch_updates_total)
+        final_loss = mean_loss / divisor
+        self.metrics.log("total_loss", final_loss)
+        self.metrics.log("policy_loss", mean_policy_loss / divisor)
+        self.metrics.log("value_loss", mean_value_loss / divisor)
+        self.metrics.log("entropy_loss", mean_entropy_loss / divisor)
+        return final_loss
 
     def test(
         self,
@@ -1156,10 +1204,8 @@ class PPO(RLAlgorithm):
                     self.get_initial_hidden_state(num_envs) if self.recurrent else None
                 )
 
-                last_infos = (
-                    [{}] * num_envs if vectorized else {}
-                )  # Initialize last_info holder
-
+                # Initialize last_info holder
+                last_infos = [{}] * num_envs if vectorized else {}
                 while not np.all(finished):
                     if swap_channels:
                         obs = obs_channels_to_first(obs)
@@ -1276,10 +1322,11 @@ class PPO(RLAlgorithm):
                 if callback is not None:
                     callback(loop_reward_sum, final_info_for_callback)
 
-                rewards.append(np.mean(completed_episode_scores))
+                eval_fitness = np.mean(completed_episode_scores)
+                rewards.append(eval_fitness)
 
         mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
 
         # cleanup evaluation mode back into the default training mode (e.g. batch norm and dropout layers)
         self.set_training_mode(True)

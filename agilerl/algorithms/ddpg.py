@@ -316,6 +316,11 @@ class DDPG(RLAlgorithm):
 
         self.criterion = nn.MSELoss()
 
+        # Register metrics to keep track of during training
+        self.metrics.register("total_loss")
+        self.metrics.register("actor_loss")
+        self.metrics.register("critic_loss")
+
         # Register network groups for actor and critic
         self.register_network_group(
             NetworkGroup(
@@ -469,6 +474,9 @@ class DDPG(RLAlgorithm):
 
         self.critic_optimizer.step()
 
+        critic_loss = critic_loss.item()
+        self.metrics.log("critic_loss", critic_loss)
+
         # update actor and targets every policy_freq learn steps
         self.learn_counter += 1
         if self.learn_counter % self.policy_freq == 0:
@@ -489,11 +497,9 @@ class DDPG(RLAlgorithm):
             self.soft_update(self.critic, self.critic_target)
 
             actor_loss = actor_loss.item()
-            critic_loss = critic_loss.item()
-
+            self.metrics.log("actor_loss", actor_loss)
         else:
             actor_loss = None
-            critic_loss = critic_loss.item()
 
         return actor_loss, critic_loss
 
@@ -558,5 +564,5 @@ class DDPG(RLAlgorithm):
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
         mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

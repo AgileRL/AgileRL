@@ -131,6 +131,7 @@ dmypy.json
 
 # Saved models
 outputs/
+tensorboard_logs/
 
 # Ruff
 .ruff_cache/

@@ -1,4 +1,3 @@
-import time
 import warnings
 from collections.abc import Callable
 from datetime import datetime
@@ -8,11 +7,12 @@ import numpy as np
 from accelerate import Accelerator
 from gymnasium import spaces
 
-import wandb
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.logger import StdOutLogger, TensorboardLogger, WandbLogger
 from agilerl.networks import StochasticActor
+from agilerl.population import Population
 from agilerl.typing import GymEnvType
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
@@ -49,6 +49,8 @@ def train_on_policy(
     save_elite: bool = False,
     elite_path: str | None = None,
     wb: bool = False,
+    tensorboard: bool = False,
+    tensorboard_log_dir: str | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
@@ -103,6 +105,10 @@ def train_on_policy(
     :type elite_path: str, optional
     :param wb: Weights & Biases tracking, defaults to False
     :type wb: bool, optional
+    :param tensorboard: TensorBoard tracking, defaults to False
+    :type tensorboard: bool, optional
+    :param tensorboard_log_dir: Directory for TensorBoard logs, defaults to None
+    :type tensorboard_log_dir: str, optional
     :param verbose: Display training stats, defaults to True
     :type verbose: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -184,34 +190,42 @@ def train_on_policy(
     else:
         print("\nTraining...")
 
-    # Format progress bar
     pbar = default_progress_bar(max_steps, accelerator)
 
-    pop_loss = [[] for _ in pop]
-    pop_entropy = [[] for _ in pop]
-    pop_fitnesses = []
-    total_steps = 0
-    loss = None
+    # Define logger configuration
+    loggers = [StdOutLogger(pbar)]
+    if wb:
+        loggers.append(WandbLogger(accelerator))
+    if tensorboard:
+        loggers.append(
+            TensorboardLogger(log_dir=tensorboard_log_dir, accelerator=accelerator)
+        )
+
+    # Initialize population wrapper
+    population = Population(
+        agents=pop,
+        accelerator=accelerator,
+        loggers=loggers,
+    )
+
     checkpoint_count = 0
 
     # Pre-training mutation
     if accelerator is None and mutation is not None:
-        pop = mutation.mutation(pop, pre_training_mut=True)
+        population.update(mutation.mutation(population.agents, pre_training_mut=True))
 
     # RL training loop
     active_collect = collect_rollouts_fn
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+    while population.all_below(max_steps):
         if accelerator is not None:
             accelerator.wait_for_everyone()
-        pop_episode_scores = []
-        pop_fps = []
-        for agent_idx, agent in enumerate(pop):  # Loop through population
+
+        for agent in population.agents:
             agent.set_training_mode(True)
+            agent.init_evo_step()
 
-            completed_episode_scores = []
             steps = 0
-            start_time = time.time()
-
+            completed_episode_scores: list[float] = []
             n_steps = -(agent.learn_step // -num_envs)
             if active_collect is None and getattr(agent, "use_rollout_buffer", False):
                 if getattr(agent, "recurrent", False):
@@ -240,12 +254,10 @@ def train_on_policy(
                         )
                     )
 
-                    loss = agent.learn()  # Learn from rollout buffer
-                    pop_loss[agent_idx].append(loss)
+                    agent.learn()
 
                     # Update step counter and scores
                     steps += n_steps * num_envs
-                    total_steps += n_steps * num_envs
                     completed_episode_scores += episode_scores
 
             # Collect rollouts explicitly without saving to rollout buffer
@@ -266,12 +278,10 @@ def train_on_policy(
                             obs = obs_channels_to_first(obs)
 
                         action_mask = info.get("action_mask", None)
-                        action, log_prob, entropy, value = agent.get_action(
+                        action, log_prob, _entropy, value = agent.get_action(
                             obs,
                             action_mask=action_mask,
                         )
-
-                        pop_entropy[agent_idx].append(entropy)
 
                         # Clip action to action space
                         policy = getattr(agent, agent.registry.policy())
@@ -318,13 +328,11 @@ def train_on_policy(
                         done = next_done
 
                         scores += reward_np
-                        total_steps += num_envs
                         steps += num_envs
 
                         for idx, env_done in enumerate(next_done_np):
                             if env_done:
                                 completed_episode_scores.append(scores[idx])
-                                agent.scores.append(scores[idx])
                                 scores[idx] = 0
 
                     if swap_channels:
@@ -340,162 +348,59 @@ def train_on_policy(
                         next_obs,
                         next_done,
                     )
-                    loss = agent.learn(experiences)
-                    pop_loss[agent_idx].append(loss)
+                    agent.learn(experiences)
 
-            agent.steps[-1] += steps
-            elapsed = max(time.time() - start_time, 1e-12)
-            fps = steps / elapsed
-            pop_fps.append(fps)
-            pbar.update(steps // len(pop))
-            pop_episode_scores.append(completed_episode_scores)
+            agent.add_scores(completed_episode_scores)
+            agent.finalize_evo_step(steps)
+            pbar.update(steps // population.size)
+
+        population.increment_evo_step()
 
         # Evaluate population
-        fitnesses = [
+        for agent in population.agents:
             agent.test(
                 env,
                 swap_channels=swap_channels,
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
-            for agent in pop
-        ]
-        pop_fitnesses.append(fitnesses)
-        mean_scores = [
-            (
-                np.mean(episode_scores)
-                if len(episode_scores) > 0
-                else "0 completed episodes"
-            )
-            for episode_scores in pop_episode_scores
-        ]
 
-        if wb:
-            wandb_dict = {
-                "global_step": (
-                    total_steps * accelerator.state.num_processes
-                    if accelerator is not None and accelerator.is_main_process
-                    else total_steps
-                ),
-                "fps": np.mean(pop_fps),
-                "train/mean_score": np.mean(
-                    [
-                        mean_score
-                        for mean_score in mean_scores
-                        if not isinstance(mean_score, str)
-                    ],
-                ),
-                "eval/mean_fitness": np.mean(fitnesses),
-                "eval/best_fitness": np.max(fitnesses),
-            }
+        # Aggregate metrics from all agents and log
+        population.report_metrics()
 
-            agent_loss_dict = {
-                f"train/agent_{index}_loss": np.mean(loss_[-10:])
-                for index, loss_ in enumerate(pop_loss)
-            }
-            wandb_dict.update(agent_loss_dict)
+        if population.should_stop(target):
+            population.finish()
+            pbar.close()
+            return population.agents, population.last_fitnesses
 
-            # Add entropy metrics to wandb
-            agent_entropy_dict = {
-                f"train/agent_{index}_entropy": (
-                    np.mean(entropy_[-100:]) if len(entropy_) > 0 else 0
-                )
-                for index, entropy_ in enumerate(pop_entropy)
-            }
-            wandb_dict.update(agent_entropy_dict)
-
-            # Add mean entropy across all agents
-            all_entropies = [
-                np.mean(entropy_[-100:]) if len(entropy_) > 0 else 0
-                for entropy_ in pop_entropy
-            ]
-            if all_entropies:
-                wandb_dict["train/mean_entropy"] = np.mean(all_entropies)
-
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    wandb.log(wandb_dict)
-                accelerator.wait_for_everyone()
-            else:
-                wandb.log(wandb_dict)
-
-        # Update step counter
-        for agent in pop:
-            agent.steps.append(agent.steps[-1])
-
-        # Early stop if consistently reaches target
-        if target is not None and (
-            np.all(
-                np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
-            )
-            and len(pop[0].steps) >= 100
-        ):
-            if wb:
-                wandb.finish()
-            return pop, pop_fitnesses
+        population.clear_agent_metrics()
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
-            pop = tournament_selection_and_mutation(
-                population=pop,
-                tournament=tournament,
-                mutation=mutation,
-                env_name=env_name,
-                algo=algo,
-                elite_path=elite_path,
-                save_elite=save_elite,
-                accelerator=accelerator,
-            )
-
-        if verbose:
-            fitness = [f"{fitness:.2f}" for fitness in fitnesses]
-            avg_fitness = [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
-            avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
-            mean_scores = [
-                f"{mean_score:.2f}" if not isinstance(mean_score, str) else mean_score
-                for mean_score in mean_scores
-            ]
-            agents = [agent.index for agent in pop]
-            num_steps = [agent.steps[-1] for agent in pop]
-            muts = [agent.mut for agent in pop]
-
-            banner_text = f"Global Steps {total_steps}"
-            banner_width = max(len(banner_text) + 8, 35)
-            border = "=" * banner_width
-            centered_text = f"{banner_text}".center(banner_width)
-            pbar.write(
-                f"{border}\n"
-                f"{centered_text}\n"
-                f"{border}\n"
-                f"Fitness:\t{fitness}\n"
-                f"Score:\t\t{mean_scores}\n"
-                f"5 fitness avgs:\t{avg_fitness}\n"
-                f"10 score avgs:\t{avg_score}\n"
-                f"Agents:\t\t{agents}\n"
-                f"Steps:\t\t{num_steps}\n"
-                f"Mutations:\t{muts}",
+            population.update(
+                tournament_selection_and_mutation(
+                    population=population.agents,
+                    tournament=tournament,
+                    mutation=mutation,
+                    env_name=env_name,
+                    algo=algo,
+                    elite_path=elite_path,
+                    save_elite=save_elite,
+                    accelerator=accelerator,
+                ),
             )
 
         # Save model checkpoint
         if checkpoint is not None:
-            if pop[0].steps[-1] // checkpoint > checkpoint_count:
+            if population.agents[0].metrics.steps // checkpoint > checkpoint_count:
                 save_population_checkpoint(
-                    population=pop,
+                    population=population.agents,
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
                     accelerator=accelerator,
                 )
                 checkpoint_count += 1
 
-    if wb:
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-            if accelerator.is_main_process:
-                wandb.finish()
-            accelerator.wait_for_everyone()
-        else:
-            wandb.finish()
-
+    population.finish()
     pbar.close()
-    return pop, pop_fitnesses
+    return population.agents, population.last_fitnesses

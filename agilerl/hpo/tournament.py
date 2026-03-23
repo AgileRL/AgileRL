@@ -61,7 +61,7 @@ class TournamentSelection:
         :return: Elite member of population, rank array, and max id
         :rtype: tuple[EvolvableAlgorithm, np.ndarray, int]
         """
-        last_fitness = [np.mean(indi.fitness[-self.eval_loop :]) for indi in population]
+        last_fitness = [indi.fitness[-1] for indi in population]
         rank = np.argsort(last_fitness).argsort()
         max_id = max([ind.index for ind in population])
         model = population[int(np.argsort(rank)[-1])]

@@ -130,11 +130,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         device=device,
     )
 
-    print("Actor network:")
-    print(agent_pop[0].actor)
-    print("Critic network:")
-    print(agent_pop[0].critic)
-
     trained_pop, pop_fitnesses = train_off_policy(
         env,
         INIT_HP["ENV_NAME"],
@@ -156,6 +151,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         tournament=tournament,
         mutation=mutations,
         wb=INIT_HP["WANDB"],
+        tensorboard=True,
+        tensorboard_log_dir="tensorboard_logs",
     )
 
     print_hyperparams(trained_pop)

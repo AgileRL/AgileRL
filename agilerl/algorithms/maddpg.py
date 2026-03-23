@@ -407,6 +407,10 @@ class MADDPG(MultiAgentRLAlgorithm):
             ),
         )
 
+        # Register metrics to keep track of during training
+        self.metrics.register("actor_loss")
+        self.metrics.register("critic_loss")
+
     def process_infos(
         self,
         infos: InfosDict | None,
@@ -699,7 +703,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
         )
 
-        critic_loss = self.criterion(q_value, y_j)
+        critic_loss: torch.Tensor = self.criterion(q_value, y_j)
 
         # critic loss backprop
         critic_optimizer.zero_grad()
@@ -736,7 +740,11 @@ class MADDPG(MultiAgentRLAlgorithm):
             actor_loss.backward()
         actor_optimizer.step()
 
-        return actor_loss.item(), critic_loss.item()
+        actor_loss = actor_loss.item()
+        critic_loss = critic_loss.item()
+        self.metrics.log("actor_loss", agent_id, actor_loss)
+        self.metrics.log("critic_loss", agent_id, critic_loss)
+        return actor_loss, critic_loss
 
     def soft_update(self, net: nn.Module, target: nn.Module) -> None:
         """Soft updates target network.
@@ -872,5 +880,5 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         mean_fit = np.mean(rewards, axis=0)
         mean_fit = mean_fit[0] if sum_scores else mean_fit
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

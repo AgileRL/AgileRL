@@ -90,10 +90,7 @@ class Trainer(ABC):
 
 
 class LocalTrainer(Trainer):
-    """Trains a population of agents locally using AgileRL training loops.
-
-    Resolves the appropriate training function from :data:`ALGO_REGISTRY`
-    and delegates to it.
+    """Local trainer that streamlines the AgileRL evolutionary training process.
 
     :param algorithm: An :class:`~agilerl.algorithms.core.EvolvableAlgorithm`
         instance (cloned to build the population), an
@@ -129,6 +126,10 @@ class LocalTrainer(Trainer):
     :type elite_path: str | None
     :param wb: Enable Weights & Biases logging.
     :type wb: bool
+    :param tensorboard: Enable TensorBoard logging.
+    :type tensorboard: bool
+    :param tensorboard_log_dir: Directory for TensorBoard logs.
+    :type tensorboard_log_dir: str | None
     :param wandb_api_key: W&B API key.
     :type wandb_api_key: str | None
     :param wandb_kwargs: Extra kwargs forwarded to ``wandb.init``.
@@ -153,18 +154,6 @@ class LocalTrainer(Trainer):
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
         replay_buffer: ReplayBufferSpec | None = None,
-        verbose: bool = True,
-        accelerator: Any | None = None,
-        checkpoint: int | None = None,
-        checkpoint_path: str | None = None,
-        save_elite: bool = False,
-        elite_path: str | None = None,
-        wb: bool = False,
-        wandb_api_key: str | None = None,
-        wandb_kwargs: dict[str, Any] | None = None,
-        swap_channels: bool = False,
-        env_name: str | None = None,
-        device: str = "cpu",
     ) -> None:
         if not hasattr(environment, "num_envs"):
             environment = DummyVecEnv(environment)
@@ -176,23 +165,27 @@ class LocalTrainer(Trainer):
             mutation=mutation,
             tournament=tournament,
             replay_buffer=replay_buffer,
-            device=device,
         )
-        self.population = population
-        self.verbose = verbose
-        self.accelerator = accelerator
-        self.checkpoint = checkpoint
-        self.checkpoint_path = checkpoint_path
-        self.save_elite = save_elite
-        self.elite_path = elite_path
-        self.wb = wb
-        self.wandb_api_key = wandb_api_key
-        self.wandb_kwargs = wandb_kwargs
-        self.swap_channels = swap_channels
-        self.env_name = env_name
 
-    def train(self) -> tuple[PopulationType, list[list[float]]]:
-        """Run local evolutionary training.
+    def train(
+        self,
+        *,
+        verbose: bool = True,
+        accelerator: Any | None = None,
+        checkpoint: int | None = None,
+        checkpoint_path: str | None = None,
+        save_elite: bool = False,
+        elite_path: str | None = None,
+        wb: bool = False,
+        tensorboard: bool = False,
+        tensorboard_log_dir: str | None = None,
+        wandb_api_key: str | None = None,
+        wandb_kwargs: dict[str, Any] | None = None,
+        swap_channels: bool = False,
+        env_name: str | None = None,
+        device: str = "cpu",
+    ) -> tuple[PopulationType, list[list[float]]]:
+        """Run local training.
 
         :returns: A tuple of ``(population, fitness_history)`` where
             *population* is the final evolved population and
@@ -223,6 +216,8 @@ class LocalTrainer(Trainer):
             save_elite=self.save_elite,
             elite_path=self.elite_path,
             wb=self.wb,
+            tensorboard=self.tensorboard,
+            tensorboard_log_dir=self.tensorboard_log_dir,
             verbose=self.verbose,
             accelerator=self.accelerator,
             wandb_api_key=self.wandb_api_key,

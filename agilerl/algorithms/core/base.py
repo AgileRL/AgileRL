@@ -6,7 +6,7 @@ import re
 import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -42,6 +42,7 @@ from agilerl.algorithms.core.registry import (
     NetworkGroup,
     OptimizerConfig,
 )
+from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
@@ -251,6 +252,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     :type name: str | None, optional
     """
 
+    metrics: AgentMetrics | MultiAgentMetrics
+
     def __init__(
         self,
         index: int,
@@ -274,7 +277,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 "reduce-overhead",
                 "max-autotune",
             ], (
-                "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
+                "Choose between torch compiler modes: 'default', 'reduce-overhead', 'max-autotune' or None"
             )
 
         self.accelerator = accelerator
@@ -284,9 +287,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         self._mut = None
         self._index = index
-        self.scores = []
-        self.fitness = []
-        self.steps = [0]
         self.registry = MutationRegistry(hp_config)
         self.training = True
 
@@ -309,6 +309,54 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     def mut(self, value: str | None) -> None:
         """Set the mutation object of the algorithm."""
         self._mut = value
+
+    @property
+    def steps(self) -> int:
+        """Cumulative global step count."""
+        return self.metrics.steps
+
+    @steps.setter
+    def steps(self, value: int) -> None:
+        self.metrics.steps = value
+
+    @property
+    def scores(self) -> list[float]:
+        """Per-episode scores."""
+        return self.metrics.scores
+
+    @scores.setter
+    def scores(self, value: list[float]) -> None:
+        self.metrics.scores = value
+
+    @property
+    def fitness(self) -> list[float]:
+        """Fitness history."""
+        return list(self.metrics.fitness)
+
+    @fitness.setter
+    def fitness(self, value: Iterable[float]) -> None:
+        maxlen = self.metrics.fitness.maxlen
+        self.metrics.fitness = deque(value, maxlen=maxlen)
+
+    def add_scores(self, scores: list[float]) -> None:
+        """Add scores to the metrics.
+
+        :param scores: List of scores to add.
+        :type scores: list[float]
+        """
+        self.metrics.add_scores(scores)
+
+    def init_evo_step(self) -> None:
+        """Initialize the evo step for metrics tracking."""
+        self.metrics.init_evo_step()
+
+    def finalize_evo_step(self, num_steps: int) -> None:
+        """Finalize the evo step for metrics tracking.
+
+        :param num_steps: Number of steps taken during the evo step.
+        :type num_steps: int
+        """
+        self.metrics.finalize_evo_step(num_steps)
 
     @abstractmethod
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
@@ -1283,6 +1331,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.action_space = action_space
         self.normalize_images = normalize_images
         self.action_dim = get_output_size_from_space(self.action_space)
+        self.metrics = AgentMetrics()
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.
@@ -1391,6 +1440,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         self.agent_ids = list(self.possible_observation_spaces.keys())
         self.n_agents = len(self.agent_ids)
+        self.metrics = MultiAgentMetrics(self.agent_ids)
         self.placeholder_value = placeholder_value
         self.normalize_images = normalize_images
         self.observation_spaces = list(self.possible_observation_spaces.values())

@@ -51,18 +51,16 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 16
 
 NET_CONFIG:
-    latent_dim: 64
-    clip_actions: false
-    normalize_actions: false   # keep actions unscaled for bounded (e.g. Tanh) action spaces
+    latent_dim: 128
 
     encoder_config:
-        hidden_size: [64]
+        hidden_size: [128]
         activation: ReLU
         min_mlp_nodes: 64
         max_mlp_nodes: 500
 
     head_config:
-        hidden_size: [64]
+        hidden_size: [128]
         activation: ReLU
         min_hidden_layers: 1
         max_hidden_layers: 3
