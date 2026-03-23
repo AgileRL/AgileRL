@@ -58,7 +58,19 @@ def init_from_single(
     optimizer_kwargs: dict[str, Any],
 ) -> Optimizer:
     """Initialize an optimizer from a single network."""
+    # FIXME test for 
+    # params = [
+    #     {"params": [param for name, param in network.named_parameters() if "actor" in name and "lora" in name], "lr": lr},
+    #     {"params":  [
+    #     param for name, param in network.named_parameters()
+    #     if "v_head" in name and "modules_to_save.actor" in name
+    # ], "lr": 0.00001},
+    # ]
+    # print("PARAMS", params)
+    # print("NETWORK", network)
+    # return optimizer_cls(params, **optimizer_kwargs)
     return optimizer_cls(network.parameters(), lr=lr, **optimizer_kwargs)
+    
 
 
 class OptimizerWrapper:

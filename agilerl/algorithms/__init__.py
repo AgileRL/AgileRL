@@ -12,6 +12,7 @@ from .matd3 import MATD3
 from .neural_ts_bandit import NeuralTS
 from .neural_ucb_bandit import NeuralUCB
 from .ppo import PPO
+from .ppo_llm import PPO as LLMPPO
 from .td3 import TD3
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "MADDPG",
     "MATD3",
     "PPO",
+    "LLMPPO",
     "TD3",
     "BC_Evaluator",
     "BC_Policy",

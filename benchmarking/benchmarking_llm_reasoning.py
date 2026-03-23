@@ -15,17 +15,16 @@ from peft import LoraConfig
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
-from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
+from agilerl.algorithms import LLMPPO
 from agilerl.training.train_llm import finetune_llm_reasoning
 from agilerl.utils.llm_utils import ReasoningGym
+from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.utils import create_population
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 USE_VLLM = True
-MAX_CONTEXT_LENGTH = 1024
+MAX_CONTEXT_LENGTH = 756
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
@@ -95,6 +94,7 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
 def combined_rewards(completion, solution, prompt):
 
+
     return (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
@@ -104,6 +104,10 @@ def combined_rewards(completion, solution, prompt):
 def main(init_hp, mut_p):
     # Instantiate the model and the associated tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    print(tokenizer.encode("."))
+    print("decoded", tokenizer.decode([13]))  # should print \n or newline
+
+
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
@@ -128,29 +132,56 @@ def main(init_hp, mut_p):
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         conversation_template=conversation_template,
-        data_batch_size_per_gpu=10,
+        data_batch_size_per_gpu=init_hp["BATCH_SIZE"], # FIXME this needs fixing
         accelerator=accelerator,
         max_context_length=MAX_CONTEXT_LENGTH,
         return_raw_completions=USE_VLLM,
     )
 
     # Add the zero stage to the initialization hyperparameters
+    init_hp["ALGO"] = "LLMPPO"
     init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
         "zero_optimization"
     ]["stage"]
     init_hp["MAX_MODEL_LEN"] = MAX_CONTEXT_LENGTH
 
-    hp_config = HyperparameterConfig(
-        beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
-        lr=RLParameter(min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]),
-        group_size=RLParameter(
-            min=mut_p["MIN_GROUP_SIZE"],
-            max=mut_p["MAX_GROUP_SIZE"],
-            dtype=int,
+    llm_ppo = LLMPPO(
+        model_name=MODEL_PATH,
+        lora_config=LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["q_proj","k_proj","v_proj","o_proj","up_proj","down_proj","gate_proj"],
+            bias="none",
+            modules_to_save=["summary"],
+            task_type="CAUSAL_LM",
         ),
+        micro_batch_size_per_gpu=8,
+        use_vllm=USE_VLLM,
+        pad_token_id=tokenizer.pad_token_id,
+        pad_token=tokenizer.pad_token,
+        use_separate_reference_adapter=False,
+        batch_size=init_hp["BATCH_SIZE"],
+        beta=init_hp["BETA"],
+        lr=init_hp["LR"],
+        clip_coef=init_hp["CLIP_COEF"],
+        max_grad_norm=init_hp["MAX_GRAD_NORM"],
+        update_epochs=init_hp["UPDATE_EPOCHS"],
+        temperature=init_hp["TEMPERATURE"],
+        max_model_len=init_hp["MAX_MODEL_LEN"],
+        accelerator=accelerator,
+        vf_coef=init_hp["VF_COEF"],
+        gamma=init_hp["GAMMA"],
+        gae_lambda=init_hp["GAE_LAMBDA"],
+        vllm_config=VLLMConfig(
+            tensor_parallel_size=1,
+            gpu_memory_utilization=0.5,
+            max_num_seqs=2,
+            sleep_mode=True,
+        )
     )
 
-    # Define the algorithm kwargs
+    print("llm_ppo.lr", llm_ppo.lr)
+
     algo_kwargs = {
         "model_name": MODEL_PATH,
         "lora_config": LoraConfig(
@@ -165,47 +196,29 @@ def main(init_hp, mut_p):
         "pad_token": tokenizer.pad_token,
     }
 
-    pop = create_population(
-        algo=init_hp["ALGO"],
-        net_config=None,
-        INIT_HP=init_hp,
-        hp_config=hp_config,
-        population_size=init_hp["POP_SIZE"],
-        accelerator=accelerator,
-        algo_kwargs=algo_kwargs,
-    )
+    # pop = create_population(
+    #     algo=init_hp["ALGO"],
+    #     net_config=None,
+    #     INIT_HP=init_hp,
+    #     hp_config=None,
+    #     population_size=init_hp["POP_SIZE"],
+    #     accelerator=accelerator,
+    #     algo_kwargs=algo_kwargs,
+    # )
 
-    tournament = TournamentSelection(
-        init_hp["TOURN_SIZE"],
-        init_hp["ELITISM"],
-        init_hp["POP_SIZE"],
-        init_hp["EVAL_LOOP"],
-    )
-
-    mutations = Mutations(
-        no_mutation=mut_p["NO_MUT"],
-        architecture=0,
-        new_layer_prob=0,
-        parameters=0,
-        activation=0,
-        rl_hp=mut_p["RL_HP_MUT"],
-        mutation_sd=mut_p["MUT_SD"],
-        rand_seed=mut_p["RAND_SEED"],
-        accelerator=accelerator,
-    )
 
     finetune_llm_reasoning(
-        pop=pop,
+        pop=[llm_ppo],
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
         wb=True,
         save_elite=True,
-        elite_path="saved_llms",
+        elite_path="saved_llms",    
         max_reward=2.0,
-        evo_steps=10,
-        mutation=mutations,
-        tournament=tournament,
+        evo_steps=None,
+        mutation=None,
+        tournament=None,
         accelerator=accelerator,
         verbose=True,
     )
@@ -213,8 +226,9 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
-    with open("configs/training/grpo.yaml") as file:
+    with open("configs/training/llm_finetuning/ppo_llm.yaml") as file:
         config = yaml.safe_load(file)
+        print(config)
     init_hp = config["INIT_HP"]
     mut_p = config["MUTATION_PARAMS"]
     main(init_hp, mut_p)

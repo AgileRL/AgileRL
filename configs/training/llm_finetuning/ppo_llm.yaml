@@ -1,0 +1,31 @@
+---
+MUTATION_PARAMS:
+    NO_MUT: 0.1                          # No mutation
+    RL_HP_MUT: 0.6                       # Learning HP mutation
+    MUT_SD: 0.1                          # Mutation strength
+    RAND_SEED: 42                        # Random seed
+    MIN_LR: 0.0000001
+    MAX_LR: 0.00001
+    MIN_BETA: 0.0001
+    MAX_BETA: 0.01
+    MIN_GROUP_SIZE: 4
+    MAX_GROUP_SIZE: 12
+
+
+INIT_HP:
+    ALGO: LLMPPO
+    BATCH_SIZE: 32         # Increased from 16 — larger rollout batches stabilize reward estimates
+    BETA: 0.001             # Increased from 0.001 — entropy bonus was too weak to prevent collapse
+    LR: 0.000001            # Reduced from 5e-6 → 1.5e-6 — safer for LLM finetuning
+    CLIP_COEF: 0.2          # Fine, keep as-is
+    MAX_GRAD_NORM: 1.0      # Increased from 0.1 — too aggressive, was likely blocking learning
+    UPDATE_EPOCHS: 1        # Increased from 1 — get more use out of each rollout batch
+    TEMPERATURE: 0.9        # Fine, keep as-is
+    MAX_MODEL_LEN: 1024     # Fine, keep as-is
+    TOURN_SIZE: 2           # Fine for POP_SIZE 4
+    GAMMA: 1.0
+    VF_COEF: 0.5
+    GAE_LAMBDA: 1.0
+    ELITISM: true           # Fine
+    POP_SIZE: 4             # Fine
+    EVAL_LOOP: 1            # Fine

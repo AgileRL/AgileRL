@@ -20,6 +20,7 @@ if HAS_LLM_DEPENDENCIES:
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.modeling_utils import PreTrainedModel
     from transformers.tokenization_utils_base import BatchEncoding
+    from trl.experimental.ppo.modeling_value_head import AutoModelForCausalLMWithValueHead
 
     AutoTokenizer = AutoTokenizer
 else:
@@ -675,6 +676,7 @@ def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
 def create_model_from_name_or_path(
     model_name_or_path: str,
     model_config: dict[str, Any] | None = None,
+    add_value_head: bool = False,
 ) -> PreTrainedModel:
     """Create a model from a name or path.
 
@@ -682,6 +684,8 @@ def create_model_from_name_or_path(
     :type model_name_or_path: str
     :param model_config: The configuration of the model to create.
     :type model_config: dict[str, Any ] | None
+    :param use_value_head: Flag to indicate if a value head should be added to the model, defaults to False
+    :type use_value_head: bool, optional
     :return: The created model.
     :rtype: PreTrainedModel
     """
@@ -690,7 +694,73 @@ def create_model_from_name_or_path(
             "torch_dtype": torch.bfloat16,
             "attn_implementation": "sdpa",
         }
+    if add_value_head:
+        return AutoModelForCausalLMWithValueHead.from_pretrained(
+            pretrained_model_name_or_path=model_name_or_path,
+            **model_config,
+        )
     return AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=model_name_or_path,
         **model_config,
     )
+
+
+def masked_mean(tensor, mask, dim=None, keepdim=False):
+    """Calculate the mean of a tensor along a dimension, ignoring the values where the mask is False.
+
+    :param tensor: The tensor to calculate the mean of.
+    :type tensor: torch.Tensor
+    :param mask: The mask to use.
+    :type mask: torch.Tensor
+    :param dim: The dimension to calculate the mean along, defaults to None
+    :type dim: int | None, optional
+    :param keepdim: Whether to keep the dimension of the tensor, defaults to False
+    :type keepdim: bool, optional
+    :return: The mean of the tensor along the dimension, ignoring the values where the mask is False.
+    :rtype: torch.Tensor
+    """
+    mask = mask.float()
+    masked_sum = (tensor * mask).sum(dim=dim, keepdim=keepdim)
+    denom = mask.sum(dim=dim, keepdim=keepdim)
+    return masked_sum / denom.clamp(min=1)
+
+
+def masked_var(tensor, mask, dim=None, keepdim=False):
+    """Calculate the variance of a tensor along a dimension, ignoring the values where the mask is False.
+
+    :param tensor: The tensor to calculate the variance of.
+    :type tensor: torch.Tensor
+    :param mask: The mask to use.
+    :type mask: torch.Tensor
+    :param dim: The dimension to calculate the variance along, defaults to None
+    :type dim: int | None, optional
+    :param keepdim: Whether to keep the dimension of the tensor, defaults to False
+    :type keepdim: bool, optional
+    :return: The variance of the tensor along the dimension, ignoring the values where the mask is False.
+    :rtype: torch.Tensor
+    """
+    mask = mask.float()
+    mean = masked_mean(tensor, mask, dim=dim, keepdim=True)
+    centered = tensor - mean
+    var = masked_mean(centered ** 2, mask, dim=dim, keepdim=keepdim)
+    return var
+
+
+def masked_whiten(tensor, mask, dim=None):
+    """Whiten a tensor along a dimension, ignoring the values where the mask is False.
+
+    :param tensor: The tensor to whiten.
+    :type tensor: torch.Tensor
+    :param mask: The mask to use.
+    :type mask: torch.Tensor
+    :param dim: The dimension to whiten along, defaults to None
+    :type dim: int | None, optional
+    :return: The whitened tensor along the dimension, ignoring the values where the mask is False.
+    :rtype: torch.Tensor
+    """
+    mask = mask.float()
+    mean = masked_mean(tensor, mask, dim=dim, keepdim=True)
+    var = masked_var(tensor, mask, dim=dim, keepdim=True)
+
+    whitened = (tensor - mean) / torch.sqrt(var + 1e-8)
+    return whitened * mask

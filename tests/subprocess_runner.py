@@ -144,6 +144,8 @@ def resolve_fixtures(fixture_names, test_module, test_name):
             fixtures[name] = generate_model
         elif name == "grpo_factory":
             fixtures[name] = getattr(test_module, "generate_grpo")
+        elif name == "ppo_factory":
+            fixtures[name] = getattr(test_module, "generate_ppo")
         elif name == "dpo_factory":
             fixtures[name] = getattr(test_module, "generate_dpo")
         elif name == "preference_dataset_factory":

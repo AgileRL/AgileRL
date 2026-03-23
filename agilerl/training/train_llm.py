@@ -4,10 +4,12 @@ from typing import Any
 import numpy as np
 import torch.distributed as dist
 import wandb
+import torch
+from contextlib import contextmanager
 from accelerate import Accelerator
 from tqdm import trange
 
-from agilerl.algorithms import DPO, GRPO
+from agilerl.algorithms import DPO, GRPO, LLMPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import PopulationType
@@ -20,6 +22,51 @@ from agilerl.utils.utils import (
 )
 
 InitDictType = dict[str, Any] | None
+
+
+def move_params_to_gpu(unwrapped_model: torch.nn.Module, device: torch.device) -> None:
+    """Move params to GPU.
+
+    :param agent: Distributed agent
+    :type agent: DistributedLLMAgent
+    :return: None
+    :rtype: None
+    """
+    unwrapped_model.to(device, non_blocking=True)
+    torch.cuda.synchronize()
+
+
+def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> None:
+    """Move params to CPU.
+
+    :param agent: Distributed agent
+    :type agent: DistributedLLMAgent
+    :return: None
+    :rtype: None
+    """
+    unwrapped_model.to("cpu", non_blocking=True)
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+
+
+@contextmanager
+def memory_efficient_params(agent) -> None:
+    """Memory efficient params context manager.
+
+    :param agent: Distributed agent
+    :type agent: DistributedLLMAgent
+    :return: None
+    :rtype: None
+    """
+    # FIXME add in zero 3 compatibilitys
+    vllm_cfg = getattr(agent, "vllm_config", None)
+    sleep_mode = vllm_cfg is not None and vllm_cfg.sleep_mode
+    if sleep_mode:
+        unwrapped_model = agent.accelerator.unwrap_model(agent.actor) if agent.accelerator is not None else agent.actor
+        move_params_to_gpu(unwrapped_model, agent.device)
+    yield
+    if sleep_mode:
+        move_params_to_cpu(unwrapped_model)
 
 
 def finetune_llm_reasoning(
@@ -41,10 +88,10 @@ def finetune_llm_reasoning(
     max_steps: int | None = None,
     num_epochs: int | None = None,
 ) -> None:
-    """Finetunes a population of GRPOs on a ReasoningGym environment.
+    """Finetunes a population of GRPO/LLMPPO agents on a ReasoningGym environment.
 
-    :param pop: Population of GRPOs to finetune
-    :type pop: list[GRPO]
+    :param pop: Population of GRPO/LLMPPO agents to finetune
+    :type pop: list[GRPO | LLMPPO]
     :param env: ReasoningGym environment to finetune on
     :type env: ReasoningGym
     :param init_hp: Initial hyperparameters for the population
@@ -108,9 +155,9 @@ def finetune_llm_reasoning(
             "Probability of activation mutation must be 0 for LLM finetuning."
         )
 
-    if not isinstance(pop[0], GRPO):
+    if not isinstance(pop[0], (GRPO, LLMPPO)):
         msg = (
-            "The algorithm must be GRPO for reasoning-based reinforcement learning."
+            "The algorithm must be GRPO or LLMPPO for reasoning-based reinforcement learning."
             f"Got {type(pop[0])} instead."
         )
         raise ValueError(
@@ -177,7 +224,8 @@ def finetune_llm_reasoning(
                 action_masks,
                 rewards,
             )
-            loss, kl = agent.learn(experiences)
+            with memory_efficient_params(agent):
+                loss, kl, pg_loss, critic_loss, entropy = agent.learn(experiences)
             metrics = [loss, kl, rewards, completion_lengths]
             if max_reward is not None:
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
@@ -213,6 +261,9 @@ def finetune_llm_reasoning(
                     "Train/KL-divergence": agg_metrics[1],
                     "Train/Mean reward": agg_metrics[2],
                     "Train/Average completion length": int(agg_metrics[3]),
+                    "Train/PG loss": pg_loss,
+                    "Train/Critic loss": critic_loss,
+                    "Train/Entropy": entropy,
                 }
                 if max_reward is not None:
                     metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
@@ -253,6 +304,22 @@ def finetune_llm_reasoning(
 
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb_dict = {
+                "Train/Mean population PG loss": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/PG loss"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
+                "Train/Mean population critic loss": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Critic loss"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
                 "Train/Best reward": np.max(
                     [
                         agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
@@ -289,6 +356,14 @@ def finetune_llm_reasoning(
                     [
                         agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
                             "Train/Average completion length"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
+                "Train/Mean population entropy": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Entropy"
                         ]
                         for agent_idx, _ in enumerate(pop)
                     ],

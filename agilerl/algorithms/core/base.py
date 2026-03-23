@@ -108,6 +108,7 @@ if HAS_LLM_DEPENDENCIES:
     from agilerl.utils.llm_utils import (
         create_model_from_name_or_path,
         gather_if_zero3,
+        masked_mean,
     )
 
 __all__ = ["EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
@@ -1904,6 +1905,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :type lora_config: LoraConfigProtocol | None
     :param use_separate_reference_adapter: Whether to use a separate reference adapter.
     :type use_separate_reference_adapter: bool
+    :param use_value_head: Whether to use a separate value head.
+    :type use_value_head: bool
     :param model_name: The name of the model.
     :type model_name: str | None
     :param actor_network: The actor network.
@@ -1943,6 +1946,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         use_liger_loss: bool,
         lora_config: LoraConfigProtocol | None,
         use_separate_reference_adapter: bool,
+        use_value_head: bool = False,
         model_name: str | None = None,
         actor_network: PreTrainedModelProtocol | None = None,
         micro_batch_size_per_gpu: int | None = None,
@@ -1985,9 +1989,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.calc_position_embeddings = calc_position_embeddings
         self.pad_token_id = pad_token_id
         self.pad_token = pad_token
-        self.pretrained_model_name_or_path = (
-            model_name if model_name is not None else actor_network.name_or_path
-        )
+
+        if model_name is not None:
+            self.pretrained_model_name_or_path = model_name
+        elif hasattr(actor_network, "name_or_path"):
+            self.pretrained_model_name_or_path = actor_network.name_or_path
+        elif hasattr(actor_network.base_model, "name_or_path"):
+            self.pretrained_model_name_or_path = actor_network.base_model.name_or_path
+        elif hasattr(actor_network.base_model, "pretrained_model"):
+            self.pretrained_model_name_or_path = actor_network.base_model.pretrained_model.name_or_path
+        else:
+            raise ValueError("Actor network name or path not found.")
+
         self.model_config = model_config
 
         if not clone and reduce_memory_peak and micro_batch_size_per_gpu is not None:
@@ -2045,7 +2058,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
-
+        self.use_value_head = use_value_head
         if max_grad_norm and (accelerator is not None):
             if accelerator.is_main_process:
                 warnings.warn(
@@ -2106,11 +2119,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if not weights_only:
                 self._save_distributed_actor(path, tag="save_checkpoint")
             else:
-                selected_adapters = (
-                    ["actor", "reference"]
-                    if self.use_separate_reference_adapter
-                    else ["actor"]
-                )
+                selected_adapters = self._get_selected_adapter_names()
                 model_ref = self.accelerator.unwrap_model(self.actor)
                 with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
                     model_ref.save_pretrained(
@@ -2538,25 +2547,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             # Merge adapter into base model
             # Update the reference update tracker
             if self.use_separate_reference_adapter:
-                # Activate both adapters
-                # Iterate over the params
-                ref_param = None
-                actor_param = None
-                for name, param in self.actor.named_parameters():
-                    if "lora" in name:
-                        if "reference" in name:
-                            ref_param = param
-                        elif "actor" in name:
-                            actor_param = param
-                        else:
-                            msg = f"Only adapter names 'actor' and 'reference' are allowed, nether was found in {name}"
-                            raise ValueError(
-                                msg,
-                            )
-                    if ref_param is not None and actor_param is not None:
-                        ref_param.data.copy_(actor_param.data)
-                        ref_param = None
-                        actor_param = None
+                self._copy_adapter_weights(source_adapter="actor", target_adapter="reference")
             else:
                 if self.accelerator is not None:
                     merged_base_model = self.accelerator.unwrap_model(
@@ -2599,6 +2590,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if base_model is None:
             base_model = create_model_from_name_or_path(
                 self.pretrained_model_name_or_path,
+                add_value_head=self.use_value_head,
             )
 
         if isinstance(base_model, PeftModelProtocol) and add_adapters:
@@ -2634,6 +2626,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             networks=[self.actor],
             lr=self.lr,
         )
+
         self.lr_scheduler = (
             create_warmup_cosine_scheduler(
                 (
@@ -2696,7 +2689,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 if self.calc_position_embeddings:
                     batch_position_ids = position_ids[batch:end_idx, :]
                     batch_model_kwargs |= {"position_ids": batch_position_ids}
-                logits = self.actor.forward(**batch_model_kwargs).logits
+                output = self.actor.forward(**batch_model_kwargs)
+                logits = output[0] if isinstance(output, tuple) else output.logits
                 logits = logits / self.temperature
                 log_prob = LLMAlgorithm._memory_efficient_logits(
                     logits[:, :-1],
@@ -2734,6 +2728,24 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         yield
         self._use_policy()
 
+    @contextmanager
+    def select_adapter(self, adapter_name: str) -> None:
+        """Select the adapter."""
+        if adapter_name == "actor":
+            self.actor.set_adapter("actor")
+            yield
+            self._use_policy()
+        elif adapter_name == "reference":
+            self._use_reference_policy()
+            yield
+            self._use_policy()
+        # elif adapter_name == "critic":
+        #     self.actor.set_adapter("critic")
+        #     yield
+        #     self._use_policy()
+        else:
+            raise ValueError(f"Invalid adapter name: {adapter_name}")
+
     def _use_reference_policy(self) -> None:
         """Use the reference policy."""
         if self.use_separate_reference_adapter:
@@ -2764,15 +2776,22 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     ".base_layer",
                     "",
                 )
+                # TRL value-head wrappers expose the underlying CausalLM as
+                # `pretrained_model.*`; vLLM expects raw model names.
+                weight_name = weight_name.removeprefix("pretrained_model.")
                 if model_ref.prefix in weight_name:
                     continue
 
                 if "original_module" in weight_name:
                     continue
 
+                if "summary" in weight_name:
+                    continue
+
                 llm_model = (
                     self.llm.llm_engine.model_executor.driver_worker.model_runner.model
                 )
+
                 llm_model.load_weights([(weight_name, param.data)])
             model_ref.unmerge_adapter()
 
@@ -2917,6 +2936,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _memory_efficient_logits(
         logits: torch.Tensor,
         index: torch.Tensor,
+        calc_entropy: bool = False,
     ) -> torch.Tensor:
         """Calculate the log probabilities for a set of previously generated ids, looping to reduce peak memory consumption.
 
@@ -2928,14 +2948,22 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: torch.Tensor
         """
         per_token_logps = []
+        per_token_entropies = []
         for row_logits, row_labels in zip(logits, index, strict=False):
             row_logps = F.log_softmax(row_logits, dim=-1)
             row_per_token_logps = row_logps.gather(
                 dim=-1,
                 index=row_labels.unsqueeze(-1),
             ).squeeze(-1)
+            row_probs = torch.exp(row_logps)
+            if calc_entropy:
+                row_entropy = -(row_probs * row_logps).sum(dim=-1)
+            else:
+                row_entropy = None
             per_token_logps.append(row_per_token_logps)
-        return torch.stack(per_token_logps)
+            per_token_entropies.append(row_entropy)
+        return torch.stack(per_token_logps), (torch.stack(per_token_entropies) if calc_entropy else None)
+
 
     def _configure_batch_size(
         self,
@@ -3060,7 +3088,55 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             for name, param in base_model.named_parameters():
                 if "reference" in name:
                     param.requires_grad = False
+                elif "actor" in name or "critic" in name:
+                    param.requires_grad = True
         self.accelerator.wait_for_everyone()
+
+    def _get_selected_adapter_names(self) -> list[str]:
+        """Return adapter names to include in adapter-only checkpoints."""
+        selected_adapters = ["actor"]
+        if self.use_separate_reference_adapter:
+            selected_adapters.append("reference")
+        return selected_adapters
+
+    def _copy_adapter_weights(self, source_adapter: str, target_adapter: str) -> None:
+        """Copy LoRA weights from source adapter to target adapter."""
+        # FIXME might need to think about gathering weights here for the distributed context
+        source_params = {}
+        target_params = {}
+        for name, param in self.actor.named_parameters():
+            if "lora" not in name:
+                continue
+            if f".{source_adapter}." in name:
+                key = name.replace(f".{source_adapter}.", ".", 1)
+                source_params[key] = param
+            elif f".{target_adapter}." in name:
+                key = name.replace(f".{target_adapter}.", ".", 1)
+                target_params[key] = param
+
+        if not source_params:
+            msg = f"No LoRA tensors found for source adapter '{source_adapter}'."
+            raise ValueError(
+                msg,
+            )
+        if not target_params:
+            msg = f"No LoRA tensors found for target adapter '{target_adapter}'."
+            raise ValueError(
+                msg,
+            )
+
+        missing = [key for key in source_params if key not in target_params]
+        if missing:
+            msg = (
+                f"Target adapter '{target_adapter}' is missing {len(missing)} LoRA tensors "
+                f"present in source adapter '{source_adapter}'."
+            )
+            raise ValueError(
+                msg,
+            )
+
+        for key, src_param in source_params.items():
+            target_params[key].data.copy_(src_param.data)
 
     @staticmethod
     def create_prompt_masks(prompt_lengths: list[int], max_length: int) -> torch.Tensor:

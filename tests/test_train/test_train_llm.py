@@ -24,7 +24,7 @@ def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
         [torch.ones(1, 100) for _ in range(2)],
         Mock(),
     )
-    mock_agent.learn.return_value = (0.5, 0.2)
+    mock_agent.learn.return_value = (0.5, 0.2, 0.1, 0.1, 1.0)
     mock_agent.test.return_value = torch.tensor([0.8])
     mock_agent.algo = "GRPO"
     mock_agent.batch_size_per_process = 32
@@ -84,7 +84,7 @@ def test_finetune_llm_reasoning_with_wandb_and_checkpoints(use_accelerator):
         [torch.ones(1, 100) for _ in range(2)],
         Mock(),
     )
-    mock_agent.learn.return_value = (0.5, 0.2)
+    mock_agent.learn.return_value = (0.5, 0.2, 0.1, 0.1, 1.0)
     mock_agent.test.return_value = torch.tensor([0.8])
     mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
@@ -149,7 +149,7 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
         [torch.ones(1, 100) for _ in range(2)],
         Mock(),
     )
-    mock_agent.learn.return_value = (0.5, 0.2)
+    mock_agent.learn.return_value = (0.5, 0.2, 0.1, 0.1, 1.0)
     mock_agent.test.return_value = torch.tensor([0.8])
     mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
@@ -264,7 +264,7 @@ def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps():
         [torch.ones(1, 100) for _ in range(2)],
         Mock(),
     )
-    mock_agent.learn.return_value = (0.5, 0.2)
+    mock_agent.learn.return_value = (0.5, 0.2, 0.1, 0.1, 1.0)
     mock_agent.test.return_value = torch.tensor([0.8])
     mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
@@ -316,7 +316,7 @@ def test_finetune_llm_reasoning_max_steps_set_from_num_epochs():
         [torch.ones(1, 100) for _ in range(2)],
         Mock(),
     )
-    mock_agent.learn.return_value = (0.5, 0.2)
+    mock_agent.learn.return_value = (0.5, 0.2, 0.1, 0.1, 1.0)
     mock_agent.test.return_value = torch.tensor([0.8])
     mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
@@ -370,7 +370,7 @@ def test_finetune_llm_reasoning_break_on_num_epochs():
         [torch.ones(1, 100) for _ in range(2)],
         Mock(),
     )
-    mock_agent.learn.return_value = (0.5, 0.2)
+    mock_agent.learn.return_value = (0.5, 0.2, 0.1, 0.1, 1.0)
     mock_agent.test.return_value = torch.tensor([0.8])
     mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
@@ -766,7 +766,7 @@ def test_finetune_llm_reasoning_value_error_if_algo_not_grpo():
     mock_agent.scores = [0.0]
     with pytest.raises(
         ValueError,
-        match="The algorithm must be GRPO for reasoning-based reinforcement learning.",
+        match="The algorithm must be GRPO or LLMPPO for reasoning-based reinforcement learning.",
     ):
         finetune_llm_reasoning(
             pop=[mock_agent],

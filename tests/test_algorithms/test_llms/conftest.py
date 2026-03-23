@@ -12,6 +12,8 @@ from accelerate.utils import DeepSpeedPlugin
 from peft import LoraConfig, get_peft_model
 from torch._inductor.utils import fresh_cache
 from transformers import AutoModelForCausalLM
+
+from trl.experimental.ppo.modeling_value_head import AutoModelForCausalLMWithValueHead
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.parallel_state import destroy_model_parallel
 
@@ -87,7 +89,7 @@ def accelerator_factory():
     return generate_accelerator
 
 
-def generate_model(pretrained_model_name_or_path):
+def generate_model(pretrained_model_name_or_path, add_value_head=False):
     peft_config = LoraConfig(
         task_type="CAUSAL_LM",
         r=16,
@@ -102,6 +104,16 @@ def generate_model(pretrained_model_name_or_path):
             "down_proj",
         ],
     )
+    if add_value_head:
+        peft_config.modules_to_save = ["summary"]
+        model = AutoModelForCausalLMWithValueHead.from_pretrained(
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            torch_dtype=torch.bfloat16,
+            attn_implementation="sdpa",
+        )
+        model.gradient_checkpointing_enable()
+        model = get_peft_model(model, peft_config) 
+        return model
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
