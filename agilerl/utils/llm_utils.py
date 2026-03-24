@@ -177,6 +177,7 @@ class HuggingFaceGym(gym.Env, ABC):
         """Context manager to switch to evaluation mode."""
         self.dataloader = self.test_dataloader_iter
         self.evaluation_mode = True
+        last_tokenized_prompts = None
         if hasattr(self, "last_tokenized_prompts"):
             last_tokenized_prompts = copy.deepcopy(self.last_tokenized_prompts)
         try:
@@ -694,6 +695,7 @@ def create_model_from_name_or_path(
             "torch_dtype": torch.bfloat16,
             "attn_implementation": "sdpa",
         }
+    print("model_config", model_config)
     if add_value_head:
         return AutoModelForCausalLMWithValueHead.from_pretrained(
             pretrained_model_name_or_path=model_name_or_path,
@@ -705,62 +707,38 @@ def create_model_from_name_or_path(
     )
 
 
-def masked_mean(tensor, mask, dim=None, keepdim=False):
-    """Calculate the mean of a tensor along a dimension, ignoring the values where the mask is False.
 
-    :param tensor: The tensor to calculate the mean of.
-    :type tensor: torch.Tensor
-    :param mask: The mask to use.
-    :type mask: torch.Tensor
-    :param dim: The dimension to calculate the mean along, defaults to None
-    :type dim: int | None, optional
-    :param keepdim: Whether to keep the dimension of the tensor, defaults to False
-    :type keepdim: bool, optional
-    :return: The mean of the tensor along the dimension, ignoring the values where the mask is False.
-    :rtype: torch.Tensor
-    """
-    mask = mask.float()
-    masked_sum = (tensor * mask).sum(dim=dim, keepdim=keepdim)
-    denom = mask.sum(dim=dim, keepdim=keepdim)
-    return masked_sum / denom.clamp(min=1)
+def masked_mean(values: torch.Tensor, mask: torch.Tensor, axis: bool | None = None) -> torch.Tensor:
+    """Compute mean of tensor with a masked values."""
+    if axis is not None:
+        return (values * mask).sum(axis=axis) / mask.sum(axis=axis)
+    else:
+        return (values * mask).sum() / mask.sum()
 
 
-def masked_var(tensor, mask, dim=None, keepdim=False):
-    """Calculate the variance of a tensor along a dimension, ignoring the values where the mask is False.
-
-    :param tensor: The tensor to calculate the variance of.
-    :type tensor: torch.Tensor
-    :param mask: The mask to use.
-    :type mask: torch.Tensor
-    :param dim: The dimension to calculate the variance along, defaults to None
-    :type dim: int | None, optional
-    :param keepdim: Whether to keep the dimension of the tensor, defaults to False
-    :type keepdim: bool, optional
-    :return: The variance of the tensor along the dimension, ignoring the values where the mask is False.
-    :rtype: torch.Tensor
-    """
-    mask = mask.float()
-    mean = masked_mean(tensor, mask, dim=dim, keepdim=True)
-    centered = tensor - mean
-    var = masked_mean(centered ** 2, mask, dim=dim, keepdim=keepdim)
-    return var
+def masked_var(values: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) -> torch.Tensor:
+    """Compute variance of tensor with masked values."""
+    mean = masked_mean(values, mask)
+    centered_values = values - mean
+    variance = masked_mean(centered_values**2, mask)
+    if unbiased:
+        mask_sum = mask.sum()
+        if mask_sum == 0:
+            raise ValueError(
+                "The sum of the mask is zero, which can happen when `mini_batch_size=1`;"
+                "try increase the `mini_batch_size` or `gradient_accumulation_steps`"
+            )
+        # note that if mask_sum == 1, then there is a division by zero issue
+        # to avoid it you just need to use a larger minibatch_size
+        bessel_correction = mask_sum / (mask_sum - 1)
+        variance = variance * bessel_correction
+    return variance
 
 
-def masked_whiten(tensor, mask, dim=None):
-    """Whiten a tensor along a dimension, ignoring the values where the mask is False.
-
-    :param tensor: The tensor to whiten.
-    :type tensor: torch.Tensor
-    :param mask: The mask to use.
-    :type mask: torch.Tensor
-    :param dim: The dimension to whiten along, defaults to None
-    :type dim: int | None, optional
-    :return: The whitened tensor along the dimension, ignoring the values where the mask is False.
-    :rtype: torch.Tensor
-    """
-    mask = mask.float()
-    mean = masked_mean(tensor, mask, dim=dim, keepdim=True)
-    var = masked_var(tensor, mask, dim=dim, keepdim=True)
-
-    whitened = (tensor - mean) / torch.sqrt(var + 1e-8)
-    return whitened * mask
+def masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True) -> torch.Tensor:
+    """Whiten values with masked values."""
+    mean, var = masked_mean(values, mask), masked_var(values, mask)
+    whitened = (values - mean) * torch.rsqrt(var + 1e-8)
+    if not shift_mean:
+        whitened += mean
+    return whitened 

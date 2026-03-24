@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+import statistics
+from agilerl import HAS_LLM_DEPENDENCIES
+
+if not HAS_LLM_DEPENDENCIES:
+    msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
+    raise ImportError(
+        msg,
+    )
+
+import yaml
+from datasets import Dataset
+from peft import LoraConfig
+import torch
+
+from agilerl.algorithms import LLMPPO
+from agilerl.training import train_llm
+from agilerl.training.train_llm import finetune_llm_reasoning
+from agilerl.utils.llm_utils import ReasoningGym
+from benchmarking.tiny_model import (
+    build_tiny_actor_network,
+    TinyDigitTokenizer,
+)
+
+MAX_CONTEXT_LENGTH = 128
+MAX_OUTPUT_TOKENS = 1
+# Must be non-pad and non-eos for a meaningful smoke test.
+TARGET_TOKEN_ID = 3
+TARGET_TOKEN = str(TARGET_TOKEN_ID)
+
+
+def make_dataset(
+    train_size: int = 4096,
+    test_size: int = 512,
+    seed: int = 42,
+) -> tuple[Dataset, Dataset]:
+    del seed
+
+    def build_split(size: int) -> Dataset:
+        # Keep prompts fixed and avoid the target token in context to create
+        # a near-bandit objective: policy should learn to emit token 3.
+        questions = ["11"] * size
+        answers = [TARGET_TOKEN] * size
+        return Dataset.from_dict({"question": questions, "answer": answers})
+
+    return build_split(train_size), build_split(test_size)
+
+
+def token_target_reward(completion: str, _answer: str, _question: str) -> float:
+    # With max_new_tokens=1, reward only exact target-token generation.
+    return 1.0 if completion == TARGET_TOKEN else -1.0
+
+
+def evaluate_target_token_rate(agent: LLMPPO, env: ReasoningGym, batches: int = 4) -> float:
+    total = 0
+    hits = 0
+    with env.eval_mode():
+        prompts = env.reset(reset_dataloaders=True)
+        for _ in range(batches):
+            completion_ids, _ = agent.get_action(prompts, training=False)
+            for prompt, group_completion in zip(prompts, completion_ids, strict=False):
+                prompt_len = prompt["input_ids"].shape[1]
+                first_generated = group_completion[:, prompt_len]
+                total += first_generated.shape[0]
+                hits += int((first_generated == TARGET_TOKEN_ID).sum().item())
+            prompts, _ = env.step(completion_ids)
+
+    return hits / max(total, 1)
+
+
+def evaluate_target_token_rate_greedy_like(
+    agent: LLMPPO,
+    env: ReasoningGym,
+    batches: int = 4,
+) -> float:
+    # PPO path uses sampling; temporarily make it near-greedy for evaluation.
+    original_temperature = agent.generation_config.temperature
+    original_top_k = agent.generation_config.top_k
+    original_top_p = agent.generation_config.top_p
+    agent.generation_config.temperature = 1e-3
+    agent.generation_config.top_k = 1
+    agent.generation_config.top_p = 1.0
+    try:
+        return evaluate_target_token_rate(agent, env, batches=batches)
+    finally:
+        agent.generation_config.temperature = original_temperature
+        agent.generation_config.top_k = original_top_k
+        agent.generation_config.top_p = original_top_p
+
+
+def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
+    torch.manual_seed(seed)
+    actor_network = build_tiny_actor_network()
+    tokenizer = TinyDigitTokenizer()
+    if TARGET_TOKEN_ID in (tokenizer.pad_token_id, tokenizer.eos_token_id):
+        msg = (
+            f"TARGET_TOKEN_ID={TARGET_TOKEN_ID} must not be pad/eos token "
+            f"(pad={tokenizer.pad_token_id}, eos={tokenizer.eos_token_id})."
+        )
+        raise ValueError(msg)
+    train_dataset, test_dataset = make_dataset(seed=seed)
+
+    conversation_template = [
+        {"role": "system", "content": "Output one digit."},
+        {"role": "user", "content": "{question}"},
+        {"role": "assistant", "content": ""},
+    ]
+
+    env = ReasoningGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        reward_fn=token_target_reward,
+        conversation_template=conversation_template,
+        data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
+        accelerator=None,
+        max_context_length=MAX_CONTEXT_LENGTH,
+        return_raw_completions=False,
+        seed=seed,
+    )
+
+    llm_ppo = LLMPPO(
+        model_name=None,
+        actor_network=actor_network,
+        lora_config=LoraConfig(
+            r=8,
+            lora_alpha=16,
+            target_modules=["c_attn", "c_proj", "c_fc"],
+            bias="none",
+            modules_to_save=["summary"],
+            task_type="CAUSAL_LM",
+        ),
+        micro_batch_size_per_gpu=min(8, init_hp["BATCH_SIZE"]),
+        use_vllm=False,
+        pad_token_id=tokenizer.pad_token_id,
+        pad_token=tokenizer.pad_token,
+        use_separate_reference_adapter=True,
+        batch_size=init_hp["BATCH_SIZE"],
+        beta=init_hp["BETA"],
+        lr=init_hp["LR"],
+        clip_coef=init_hp["CLIP_COEF"],
+        max_grad_norm=init_hp["MAX_GRAD_NORM"],
+        update_epochs=init_hp["UPDATE_EPOCHS"],
+        temperature=init_hp["TEMPERATURE"],
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+        max_model_len=MAX_CONTEXT_LENGTH,
+        accelerator=None,
+        vf_coef=init_hp["VF_COEF"],
+        gamma=init_hp["GAMMA"],
+        gae_lambda=init_hp["GAE_LAMBDA"],
+        seed=seed,
+    )
+
+    pre_rate = evaluate_target_token_rate(llm_ppo, env, batches=4)
+    pre_rate_greedy = evaluate_target_token_rate_greedy_like(llm_ppo, env, batches=4)
+    print(
+        f"[seed={seed}] pre-train token-{TARGET_TOKEN} hit rate "
+        f"(sampled/greedy-like): {pre_rate:.3f}/{pre_rate_greedy:.3f}"
+    )
+
+    original_save_checkpoint = train_llm.save_llm_checkpoint
+    train_llm.save_llm_checkpoint = lambda *args, **kwargs: None
+    try:
+        finetune_llm_reasoning(
+            pop=[llm_ppo],
+            env=env,
+            init_hp={"ALGO": "LLMPPO", **init_hp},
+            evaluation_interval=20,
+            wb=False,
+            save_elite=False,
+            elite_path="saved_llms",
+            max_reward=1.0,
+            evo_steps=None,
+            mutation=None,
+            tournament=None,
+            accelerator=None,
+            checkpoint_steps=999999,
+            verbose=True,
+            max_steps=4096,
+        )
+    finally:
+        train_llm.save_llm_checkpoint = original_save_checkpoint
+
+    post_rate = evaluate_target_token_rate(llm_ppo, env, batches=4)
+    post_rate_greedy = evaluate_target_token_rate_greedy_like(llm_ppo, env, batches=4)
+    print(
+        f"[seed={seed}] post-train token-{TARGET_TOKEN} hit rate "
+        f"(sampled/greedy-like): {post_rate:.3f}/{post_rate_greedy:.3f}"
+    )
+    print(
+        f"[seed={seed}] improvement (sampled/greedy-like): "
+        f"{post_rate - pre_rate:+.3f}/{post_rate_greedy - pre_rate_greedy:+.3f}"
+    )
+    return pre_rate, post_rate
+
+
+def main(init_hp: dict, seeds: tuple[int, ...] = (0, 1, 2)) -> None:
+    improvements = []
+    for seed in seeds:
+        pre_rate, post_rate = run_single_seed(dict(init_hp), seed)
+        improvements.append(post_rate - pre_rate)
+    mean_imp = statistics.mean(improvements)
+    std_imp = statistics.stdev(improvements) if len(improvements) > 1 else 0.0
+    print(
+        f"[summary] mean improvement over {len(seeds)} seeds: "
+        f"{mean_imp:+.3f} +/- {std_imp:.3f}"
+    )
+
+
+if __name__ == "__main__":
+    with open("configs/training/llm_finetuning/ppo_llm.yaml") as file:
+        config = yaml.safe_load(file)
+
+    init_hp = config["INIT_HP"]
+    # Explicit smoke-test settings to make policy improvement easier to observe.
+    init_hp["BATCH_SIZE"] = 32
+    init_hp["UPDATE_EPOCHS"] = 2
+    init_hp["LR"] = 1e-3
+    init_hp["BETA"] = 0.0
+    init_hp["TEMPERATURE"] = 0.8
+    init_hp["VF_COEF"] = 0.0
+    init_hp["GAMMA"] = 1.0
+    init_hp["GAE_LAMBDA"] = 1.0
+    main(init_hp)

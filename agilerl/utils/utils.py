@@ -1013,6 +1013,8 @@ def aggregate_metrics_across_gpus(
     :return: Mean metric
     :rtype: float
     """
+    if accelerator is None:
+        return metric_tensor.mean().item() if isinstance(metric_tensor, torch.Tensor) else metric_tensor
     all_metrics = gather_tensor(metric_tensor, accelerator)
     return all_metrics.mean().item()
 

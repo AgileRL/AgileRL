@@ -60,7 +60,10 @@ def memory_efficient_params(agent) -> None:
     """
     # FIXME add in zero 3 compatibilitys
     vllm_cfg = getattr(agent, "vllm_config", None)
-    sleep_mode = vllm_cfg is not None and vllm_cfg.sleep_mode
+    use_vllm = getattr(agent, "use_vllm", False)
+    # Only offload params for vLLM colocate mode. If use_vllm is False,
+    # moving params to CPU between updates causes generate() device mismatches.
+    sleep_mode = use_vllm and vllm_cfg is not None and vllm_cfg.sleep_mode
     if sleep_mode:
         unwrapped_model = agent.accelerator.unwrap_model(agent.actor) if agent.accelerator is not None else agent.actor
         move_params_to_gpu(unwrapped_model, agent.device)

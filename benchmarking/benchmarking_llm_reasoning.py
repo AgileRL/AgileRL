@@ -23,9 +23,9 @@ from agilerl.utils.utils import create_population
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
-USE_VLLM = True
 MAX_CONTEXT_LENGTH = 756
-
+USE_TINY_DEBUG_MODEL = False
+USE_VLLM = not USE_TINY_DEBUG_MODEL
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
     raw_dataset = (
@@ -102,13 +102,20 @@ def combined_rewards(completion, solution, prompt):
 
 
 def main(init_hp, mut_p):
-    # Instantiate the model and the associated tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    print(tokenizer.encode("."))
-    print("decoded", tokenizer.decode([13]))  # should print \n or newline
 
+    if USE_TINY_DEBUG_MODEL:
+        from benchmarking.tiny_model import build_tiny_actor_network, TinyDigitTokenizer
+        actor_network = build_tiny_actor_network()
+        tokenizer = TinyDigitTokenizer()
+        model_name = None
+        target_modules=["c_attn", "c_proj", "c_fc"]
+    else:
+        actor_network = None
+        model_name = MODEL_PATH
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+        target_modules = ["q_proj","k_proj","v_proj","o_proj","up_proj","down_proj","gate_proj"]
 
-    tokenizer.pad_token = tokenizer.eos_token
+    # tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
     # Define a conversation template for the reasoning task, refer to questions and answers as q and a respectively
@@ -125,7 +132,7 @@ def main(init_hp, mut_p):
     ]
 
     # Convert the HuggingFace dataset into a Gymnasium environment
-    accelerator = Accelerator()
+    accelerator = Accelerator() if not USE_TINY_DEBUG_MODEL else None
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -140,17 +147,19 @@ def main(init_hp, mut_p):
 
     # Add the zero stage to the initialization hyperparameters
     init_hp["ALGO"] = "LLMPPO"
-    init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
-        "zero_optimization"
-    ]["stage"]
+    # init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
+    #     "zero_optimization"
+    # ]["stage"]
     init_hp["MAX_MODEL_LEN"] = MAX_CONTEXT_LENGTH
 
+
     llm_ppo = LLMPPO(
-        model_name=MODEL_PATH,
+        model_name=model_name,
+        actor_network=actor_network,
         lora_config=LoraConfig(
             r=16,
             lora_alpha=64,
-            target_modules=["q_proj","k_proj","v_proj","o_proj","up_proj","down_proj","gate_proj"],
+            target_modules=target_modules,
             bias="none",
             modules_to_save=["summary"],
             task_type="CAUSAL_LM",

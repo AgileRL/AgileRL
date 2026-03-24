@@ -14,9 +14,9 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: LLMPPO
-    BATCH_SIZE: 32         # Increased from 16 — larger rollout batches stabilize reward estimates
+    BATCH_SIZE: 256          # Increased from 16 — larger rollout batches stabilize reward estimates
     BETA: 0.001             # Increased from 0.001 — entropy bonus was too weak to prevent collapse
-    LR: 0.000001            # Reduced from 5e-6 → 1.5e-6 — safer for LLM finetuning
+    LR: 0.000005              # Reduced from 5e-6 → 1.5e-6 — safer for LLM finetuning
     CLIP_COEF: 0.2          # Fine, keep as-is
     MAX_GRAD_NORM: 1.0      # Increased from 0.1 — too aggressive, was likely blocking learning
     UPDATE_EPOCHS: 1        # Increased from 1 — get more use out of each rollout batch

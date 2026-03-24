@@ -2936,7 +2936,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _memory_efficient_logits(
         logits: torch.Tensor,
         index: torch.Tensor,
-        calc_entropy: bool = False,
     ) -> torch.Tensor:
         """Calculate the log probabilities for a set of previously generated ids, looping to reduce peak memory consumption.
 
@@ -2948,21 +2947,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: torch.Tensor
         """
         per_token_logps = []
-        per_token_entropies = []
         for row_logits, row_labels in zip(logits, index, strict=False):
             row_logps = F.log_softmax(row_logits, dim=-1)
             row_per_token_logps = row_logps.gather(
                 dim=-1,
                 index=row_labels.unsqueeze(-1),
             ).squeeze(-1)
-            row_probs = torch.exp(row_logps)
-            if calc_entropy:
-                row_entropy = -(row_probs * row_logps).sum(dim=-1)
-            else:
-                row_entropy = None
             per_token_logps.append(row_per_token_logps)
-            per_token_entropies.append(row_entropy)
-        return torch.stack(per_token_logps), (torch.stack(per_token_entropies) if calc_entropy else None)
+        return torch.stack(per_token_logps)
 
 
     def _configure_batch_size(
