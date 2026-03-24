@@ -50,7 +50,7 @@ NET_CONFIG:
     latent_dim: 128
 
     encoder_config:
-        hidden_size: [256]
+        hidden_size: [128]
 
     head_config:
-        hidden_size: [256]
+        hidden_size: [128]

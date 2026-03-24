@@ -22,6 +22,7 @@ from agilerl.utils.utils import (
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
+from agilerl.vector import PzDummyVecEnv
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 InitDictType = dict[str, Any] | None
@@ -175,12 +176,10 @@ def train_multi_agent_off_policy(
 
         init_wandb(**init_wandb_kwargs)
 
-    if hasattr(env, "num_envs"):
-        is_vectorised = True
-        num_envs = env.num_envs
-    else:
-        is_vectorised = False
-        num_envs = 1
+    if not hasattr(env, "num_envs"):
+        env = PzDummyVecEnv(env)
+
+    num_envs = env.num_envs
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -201,12 +200,9 @@ def train_multi_agent_off_policy(
     else:
         sampler = Sampler(memory=memory)
 
-    if accelerator is not None:
-        print(f"\nDistributed training on {accelerator.device}...")
-    else:
-        print("\nTraining...")
-
     pbar = default_progress_bar(max_steps, accelerator)
+
+    # Define logger configuration
     loggers = [StdOutLogger(pbar)]
     if wb:
         loggers.append(WandbLogger(accelerator))
@@ -215,9 +211,9 @@ def train_multi_agent_off_policy(
             TensorboardLogger(log_dir=tensorboard_log_dir, accelerator=accelerator)
         )
 
+    # Initialize population wrapper for metrics reporting
     population = Population(
         agents=pop,
-        sum_scores=sum_scores,
         accelerator=accelerator,
         loggers=loggers,
     )
@@ -247,18 +243,13 @@ def train_multi_agent_off_policy(
             steps = 0
 
             if swap_channels:
-                expand_dims = not is_vectorised
                 obs = {
-                    agent_id: obs_channels_to_first(s, expand_dims=expand_dims)
-                    for agent_id, s in obs.items()
+                    agent_id: obs_channels_to_first(s) for agent_id, s in obs.items()
                 }
 
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
                 action, raw_action = agent.get_action(obs=obs, infos=info)
-
-                if not is_vectorised:
-                    action = {a_id: act[0] for a_id, act in action.items()}
 
                 # Act in environment
                 next_obs, reward, termination, truncation, info = env.step(action)
@@ -267,11 +258,7 @@ def train_multi_agent_off_policy(
                 agent_rewards = np.array(list(reward.values())).transpose()
                 agent_rewards = np.where(np.isnan(agent_rewards), 0, agent_rewards)
                 score_increment = (
-                    (
-                        np.sum(agent_rewards, axis=-1)[:, np.newaxis]
-                        if is_vectorised
-                        else np.sum(agent_rewards, axis=-1)
-                    )
+                    np.sum(agent_rewards, axis=-1)[:, np.newaxis]
                     if sum_scores
                     else agent_rewards
                 )
@@ -281,21 +268,17 @@ def train_multi_agent_off_policy(
 
                 # Save experience to replay buffer
                 if swap_channels:
-                    if not is_vectorised:
-                        obs = {agent_id: np.squeeze(s) for agent_id, s in obs.items()}
-
                     next_obs = {
                         agent_id: obs_channels_to_first(ns)
                         for agent_id, ns in next_obs.items()
                     }
 
-                memory.save_to_memory(
+                memory.save_to_memory_vect_envs(
                     obs,
                     raw_action,
                     reward,
                     next_obs,
                     termination,
-                    is_vectorised=is_vectorised,
                 )
 
                 # Learn according to learning frequency
@@ -315,13 +298,6 @@ def train_multi_agent_off_policy(
                     for _ in range(num_envs // agent.learn_step):
                         experiences = sampler.sample(agent.batch_size)
                         agent.learn(experiences)
-
-                # Update the state
-                if swap_channels and not is_vectorised:
-                    next_obs = {
-                        agent_id: np.expand_dims(ns, 0)
-                        for agent_id, ns in next_obs.items()
-                    }
 
                 obs = next_obs
 
@@ -345,9 +321,6 @@ def train_multi_agent_off_policy(
 
                     dones[agent_id] = terminated | truncated
 
-                if not is_vectorised:
-                    dones = {a_id: np.array([dones[a_id]]) for a_id in agent.agent_ids}
-
                 for idx, agent_dones in enumerate(zip(*dones.values(), strict=False)):
                     if all(agent_dones):
                         completed_score = (
@@ -358,18 +331,6 @@ def train_multi_agent_off_policy(
                         completed_episode_scores.append(completed_score)
                         scores[idx].fill(0)
                         reset_noise_indices.append(idx)
-                        if not is_vectorised:
-                            obs, info = env.reset()
-
-                            if swap_channels:
-                                expand_dims = not is_vectorised
-                                obs = {
-                                    agent_id: obs_channels_to_first(
-                                        s,
-                                        expand_dims=expand_dims,
-                                    )
-                                    for agent_id, s in obs.items()
-                                }
 
                 agent.reset_action_noise(reset_noise_indices)
 

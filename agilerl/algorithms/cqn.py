@@ -162,6 +162,9 @@ class CQN(RLAlgorithm):
             ),
         )
 
+        # Register metrics to keep track of during training
+        self.metrics.register("loss")
+
     def get_action(
         self,
         obs: ObservationType,
@@ -262,7 +265,9 @@ class CQN(RLAlgorithm):
         # soft update target network
         self.soft_update()
 
-        return q1_loss.item()
+        loss = q1_loss.item()
+        self.metrics.log("loss", loss)
+        return loss
 
     def soft_update(self) -> None:
         """Soft updates target network."""
@@ -321,5 +326,5 @@ class CQN(RLAlgorithm):
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
         mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

@@ -169,6 +169,9 @@ class NeuralTS(RLAlgorithm):
             NetworkGroup(eval_network=self.actor, shared_networks=None, policy=True),
         )
 
+        # Register metrics to keep track of during training
+        self.metrics.register("loss")
+
     def init_params(self) -> None:
         """Initialize parameters for the agent network."""
         self.exp_layer = self.actor.get_output_dense()
@@ -290,7 +293,9 @@ class NeuralTS(RLAlgorithm):
 
         self.optimizer.step()
 
-        return loss.item()
+        loss = loss.item()
+        self.metrics.log("loss", loss)
+        return loss
 
     def test(
         self,
@@ -326,5 +331,5 @@ class NeuralTS(RLAlgorithm):
                     score += reward
                 rewards.append(score)
         mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

@@ -148,6 +148,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
             tournament=tournament,
             mutation=mutations,
             wb=INIT_HP["WANDB"],
+            tensorboard=True,
+            tensorboard_log_dir="tensorboard_logs",
             accelerator=accelerator,
         )
     except Exception as e:

@@ -185,6 +185,7 @@ class DQN(RLAlgorithm):
 
         # Register metrics to keep track of during training
         self.metrics.register("loss")
+        self.metrics.register_histogram("action_dist")
 
     def get_action(
         self,
@@ -228,7 +229,11 @@ class DQN(RLAlgorithm):
 
             action_mask = torch.ones((batch_size, self.action_dim), device=device)
 
-        return self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
+        action = self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
+        if self.training:
+            self.metrics.log_histogram("action_dist", action)
+
+        return action
 
     def _get_action(
         self,

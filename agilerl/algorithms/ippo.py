@@ -373,6 +373,12 @@ class IPPO(MultiAgentRLAlgorithm):
             ),
         )
 
+        # Register metrics to keep track of during training
+        self.metrics.register("total_loss")
+        self.metrics.register("policy_loss")
+        self.metrics.register("value_loss")
+        self.metrics.register("entropy_loss")
+
     def process_infos(
         self,
         infos: InfosDict | None,
@@ -664,6 +670,7 @@ class IPPO(MultiAgentRLAlgorithm):
             action_space = self.action_space[agent_id]
 
             loss_dict[f"{agent_id}"] = self._learn_individual(
+                agent_id=agent_id,
                 experiences=(
                     state,
                     actions[agent_id],
@@ -686,6 +693,7 @@ class IPPO(MultiAgentRLAlgorithm):
 
     def _learn_individual(
         self,
+        agent_id: str,
         experiences: ExperiencesType,
         actor: EvolvableModule | StochasticActor,
         critic: EvolvableModule | ValueNetwork,
@@ -697,6 +705,8 @@ class IPPO(MultiAgentRLAlgorithm):
         """Inner call to each agent for the learning/algo training steps,
         essentially the PPO learn method. Applies all forward/backward props.
 
+        :param agent_id: ID of the agent
+        :type agent_id: str
         :param experience: States, actions, log_probs, rewards, dones, values, next_state, next_done in
             that order, organised by shared agent id
         :type experience: tuple[numpy.ndarray | dict[str, numpy.ndarray], ...]
@@ -713,7 +723,7 @@ class IPPO(MultiAgentRLAlgorithm):
         :param action_space: Action space for the agent
         :type action_space: gymnasium.spaces
         """
-        states, actions, log_probs, rewards, dones, values, next_state, next_done = (
+        obs, actions, log_probs, rewards, dones, values, next_obs, next_done = (
             experiences
         )
 
@@ -725,7 +735,7 @@ class IPPO(MultiAgentRLAlgorithm):
         rewards = rewards.squeeze()
         dones = dones.squeeze()
         values = values.squeeze()
-        next_state = vectorize_experiences_by_agent(next_state, dim=0)
+        next_obs = vectorize_experiences_by_agent(next_obs, dim=0)
         next_done = vectorize_experiences_by_agent(next_done, dim=0)
 
         with torch.no_grad():
@@ -735,13 +745,13 @@ class IPPO(MultiAgentRLAlgorithm):
             values = values.reshape(num_steps, -1)
             next_done = next_done.reshape(1, -1)
 
-            next_state = preprocess_observation_fn(
+            next_obs = preprocess_observation_fn(
                 obs_space,
-                next_state,
+                next_obs,
                 self.device,
                 self.normalize_images,
             )
-            next_value = critic(next_state).reshape(1, -1).cpu()
+            next_value = critic(next_obs).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
             last_gae_lambda = 0
             for t in reversed(range(num_steps)):
@@ -767,28 +777,31 @@ class IPPO(MultiAgentRLAlgorithm):
             values = values.reshape((-1,))
             returns = advantages + values
 
-        states = concatenate_experiences_into_batches(states, obs_space)
+        obs = concatenate_experiences_into_batches(obs, obs_space)
         actions = concatenate_experiences_into_batches(
             actions,
             action_space,
             actions=True,
         )
         log_probs = log_probs.reshape((-1,))
-        experiences = (states, actions, log_probs, advantages, returns, values)
+        experiences = (obs, actions, log_probs, advantages, returns, values)
 
         # Move experiences to algo device
         experiences = self.to_device(*experiences)
 
         num_samples = experiences[4].size(0)
         batch_idxs = np.arange(num_samples)
-        mean_loss = 0
+        mean_loss = 0.0
+        mean_pg_loss = 0.0
+        mean_vf_loss = 0.0
+        mean_ent_loss = 0.0
         approx_kl = torch.tensor(float("inf"))
         for _ in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
                 (
-                    batch_states,
+                    batch_obs,
                     batch_actions,
                     batch_log_probs,
                     batch_advantages,
@@ -803,14 +816,14 @@ class IPPO(MultiAgentRLAlgorithm):
                 batch_values = batch_values.squeeze()
 
                 if len(minibatch_idxs) > 1:
-                    batch_states = preprocess_observation_fn(
+                    batch_obs = preprocess_observation_fn(
                         obs_space,
-                        batch_states,
+                        batch_obs,
                         self.device,
                         self.normalize_images,
                     )
-                    _, _, entropy = actor(batch_states)
-                    value = critic(batch_states).squeeze(-1)
+                    _, _, entropy = actor(batch_obs)
+                    value = critic(batch_obs).squeeze(-1)
 
                     log_prob = actor.action_log_prob(batch_actions)
 
@@ -871,11 +884,21 @@ class IPPO(MultiAgentRLAlgorithm):
                     critic_optimizer.step()
 
                     mean_loss += actor_loss.item() + critic_loss.item()
+                    mean_pg_loss += pg_loss.item()
+                    mean_vf_loss += v_loss.item()
+                    mean_ent_loss += entropy_loss.item()
 
             if self.target_kl is not None and approx_kl > self.target_kl:
                 break
 
         mean_loss /= num_samples * self.update_epochs
+        mean_pg_loss /= num_samples * self.update_epochs
+        mean_vf_loss /= num_samples * self.update_epochs
+        mean_ent_loss /= num_samples * self.update_epochs
+        self.metrics.log("total_loss", agent_id, mean_loss)
+        self.metrics.log("policy_loss", agent_id, mean_pg_loss)
+        self.metrics.log("value_loss", agent_id, mean_vf_loss)
+        self.metrics.log("entropy_loss", agent_id, mean_ent_loss)
         return mean_loss
 
     def test(
@@ -995,5 +1018,5 @@ class IPPO(MultiAgentRLAlgorithm):
 
         mean_fit = np.mean(rewards, axis=0)
         mean_fit = mean_fit[0] if sum_scores else mean_fit
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return float(mean_fit) if sum_scores else mean_fit

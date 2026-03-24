@@ -236,6 +236,10 @@ class RainbowDQN(RLAlgorithm):
             ),
         )
 
+        # Register metrics to keep track of during training
+        self.metrics.register("loss")
+        self.metrics.register_histogram("action_dist")
+
     def get_action(
         self,
         obs: ObservationType,
@@ -278,6 +282,9 @@ class RainbowDQN(RLAlgorithm):
             action = np.argmax(masked_action_values, axis=-1)
 
         self.actor.train()
+
+        if self.training:
+            self.metrics.log_histogram("action_dist", action)
 
         return action
 

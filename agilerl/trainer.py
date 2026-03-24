@@ -11,10 +11,19 @@ import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from agilerl.models.algo import AlgorithmMeta, RLAlgorithmSpec
+from agilerl.algorithms.core import (
+    EvolvableAlgorithm,
+)
+from agilerl.arena.client import ArenaClient
+from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
+from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.models.algo import AlgorithmMeta, LLMAlgorithmSpec, RLAlgorithmSpec
 from agilerl.models.env import EnvironmentSpec
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
+from agilerl.typing import GymEnvType, PopulationType, PzEnvType
 from agilerl.utils.trainer_utils import (
     build_mutations,
     build_replay_buffer,
@@ -25,16 +34,18 @@ from agilerl.utils.trainer_utils import (
     get_training_fn,
     resolve_algo_name,
 )
-from agilerl.vector import DummyVecEnv
-
-if TYPE_CHECKING:
-    import gymnasium as gym
-
-    from agilerl.algorithms.core import EvolvableAlgorithm
-    from agilerl.arena.client import ArenaClient
-    from agilerl.typing import PopulationType
+from agilerl.vector import DummyVecEnv, PzDummyVecEnv
 
 logger = logging.getLogger(__name__)
+
+AlgorithmT = EvolvableAlgorithm | RLAlgorithmSpec | LLMAlgorithmSpec | str
+EnvironmentT = GymEnvType | PzEnvType | EnvironmentSpec
+ReplayBufferT = ReplayBuffer | MultiAgentReplayBuffer | ReplayBufferSpec
+TournamentSelectionT = TournamentSelectionSpec | TournamentSelection
+MutationT = MutationSpec | Mutations
+
+if TYPE_CHECKING:
+    import torch
 
 
 class Trainer(ABC):
@@ -43,34 +54,33 @@ class Trainer(ABC):
     :param algorithm: An :class:`~agilerl.algorithms.core.EvolvableAlgorithm`
         instance, an :class:`RLAlgorithmSpec`, or a string algorithm name
         (e.g. ``"PPO"``).
-    :type algorithm: EvolvableAlgorithm | RLAlgorithmSpec | str
+    :type algorithm: AlgorithmType
     :param environment: A ``gymnasium.Env`` instance, an
         :class:`EnvironmentSpec`, or an env-name string (for Arena).
-    :type environment: gym.Env | EnvironmentSpec | str
+    :type environment: EnvironmentType
     :param training: Training loop parameters (max steps, population size,
         etc.).  Defaults to :class:`TrainingSpec` with sensible values.
-    :type training: TrainingSpec | None
+    :type training: TrainingT | None
     :param mutation: Mutation probabilities and RL-HP ranges.
-    :type mutation: MutationSpec | None
+    :type mutation: MutationT | None
     :param tournament: Tournament selection configuration.
-    :type tournament: TournamentSelectionSpec | None
+    :type tournament: TournamentSelectionT | None
     :param replay_buffer: Replay buffer configuration.  Off-policy algorithms
         auto-create a default buffer when this is ``None``.
-    :type replay_buffer: ReplayBufferSpec | None
+    :type replay_buffer: ReplayBufferT | None
     :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
     :type device: str
     """
 
     def __init__(
         self,
-        algorithm: EvolvableAlgorithm | RLAlgorithmSpec | str,
-        environment: gym.Env | EnvironmentSpec | str,
-        *,
+        algorithm: AlgorithmT,
+        environment: EnvironmentT,
         training: TrainingSpec | None = None,
-        mutation: MutationSpec | None = None,
-        tournament: TournamentSelectionSpec | None = None,
-        replay_buffer: ReplayBufferSpec | None = None,
-        device: str = "cpu",
+        mutation: MutationT | None = None,
+        tournament: TournamentSelectionT | None = None,
+        replay_buffer: ReplayBufferT | None = None,
+        device: str | torch.device = "cpu",
     ) -> None:
         self.algorithm = algorithm
         self.environment = environment
@@ -82,6 +92,11 @@ class Trainer(ABC):
 
         self._algo_name = resolve_algo_name(algorithm)
         self._algo_meta: AlgorithmMeta = get_algo_meta(self._algo_name)
+
+    @property
+    def algo_meta(self) -> AlgorithmMeta:
+        """Return the metadata of the algorithm."""
+        return self._algo_meta
 
     @abstractmethod
     def train(self) -> Any:
@@ -97,75 +112,109 @@ class LocalTrainer(Trainer):
         :class:`RLAlgorithmSpec` (used to construct agents from scratch),
         or a string name (uses the default spec for that algorithm).
     :type algorithm: EvolvableAlgorithm | RLAlgorithmSpec | str
-    :param environment: A ``gymnasium.Env`` instance.
-    :type environment: gym.Env
+    :param environment: A vectorized ``gymnasium.Env``, a bare ``gym.Env``
+        (auto-wrapped with :class:`DummyVecEnv`), a string env name (auto-
+        created via :func:`make_vect_envs`), or an :class:`EnvironmentSpec`.
+    :type environment: EnvironmentT
     :param population: Pre-built population list.  When provided,
         *algorithm* is used only for name resolution.
     :type population: PopulationType | None
     :param training: Training loop parameters.  Defaults to
         :class:`TrainingSpec` with sensible values.
     :type training: TrainingSpec | None
-    :param mutation: Mutation probabilities and RL-HP ranges.
-    :type mutation: MutationSpec | None
+    :param mutation: Mutation probabilities and RL-HP ranges.  When an
+        :class:`RLAlgorithmSpec` is used and ``hp_config`` is not set on it,
+        HP ranges are derived from ``mutation.rl_hp_selection``.
+    :type mutation: MutationSpec | Mutations | None
     :param tournament: Tournament selection configuration.
-    :type tournament: TournamentSelectionSpec | None
+    :type tournament: TournamentSelectionSpec | TournamentSelection | None
     :param replay_buffer: Replay buffer configuration.
-    :type replay_buffer: ReplayBufferSpec | None
-    :param verbose: Print progress during training.
-    :type verbose: bool
-    :param accelerator: Optional HuggingFace ``Accelerator``.
-    :type accelerator: Any | None
-    :param checkpoint: Save a checkpoint every *n* steps (``None`` to
-        disable).
-    :type checkpoint: int | None
-    :param checkpoint_path: Directory for checkpoint files.
-    :type checkpoint_path: str | None
-    :param save_elite: Save the elite agent after training.
-    :type save_elite: bool
-    :param elite_path: Directory for elite agent files.
-    :type elite_path: str | None
-    :param wb: Enable Weights & Biases logging.
-    :type wb: bool
-    :param tensorboard: Enable TensorBoard logging.
-    :type tensorboard: bool
-    :param tensorboard_log_dir: Directory for TensorBoard logs.
-    :type tensorboard_log_dir: str | None
-    :param wandb_api_key: W&B API key.
-    :type wandb_api_key: str | None
-    :param wandb_kwargs: Extra kwargs forwarded to ``wandb.init``.
-    :type wandb_kwargs: dict[str, Any] | None
-    :param swap_channels: Whether to swap observation channels (e.g. for
-        Atari image observations).
-    :type swap_channels: bool
-    :param env_name: Human-readable environment name forwarded to the
-        training loop for logging.
-    :type env_name: str | None
+    :type replay_buffer: ReplayBufferSpec | ReplayBuffer | None
     :param device: Torch device string.
     :type device: str
     """
 
     def __init__(
         self,
-        algorithm: EvolvableAlgorithm | RLAlgorithmSpec | str,
-        environment: gym.Env,
-        *,
+        algorithm: AlgorithmT,
+        environment: EnvironmentT,
         population: PopulationType | None = None,
         training: TrainingSpec | None = None,
-        mutation: MutationSpec | None = None,
-        tournament: TournamentSelectionSpec | None = None,
-        replay_buffer: ReplayBufferSpec | None = None,
+        mutation: MutationT | None = None,
+        tournament: TournamentSelectionT | None = None,
+        replay_buffer: ReplayBufferT | None = None,
+        device: str | torch.device = "cpu",
     ) -> None:
-        if not hasattr(environment, "num_envs"):
-            environment = DummyVecEnv(environment)
+        env = self._resolve_environment(environment)
 
         super().__init__(
             algorithm,
-            environment,
+            env,
             training=training,
             mutation=mutation,
             tournament=tournament,
             replay_buffer=replay_buffer,
+            device=device,
         )
+        self.population = population
+        self._env_name = self._infer_env_name(environment)
+
+    @staticmethod
+    def _resolve_environment(environment: EnvironmentT) -> GymEnvType | PzDummyVecEnv:
+        """Ensure *environment* is a vectorized environment.
+
+        Resolution order:
+
+        1. String name — created via :func:`make_vect_envs`.
+        2. :class:`EnvironmentSpec` — created via :func:`make_vect_envs`
+           using the spec's ``name`` and ``num_envs``.
+        3. Already-vectorized env (has ``num_envs``) — returned as-is.
+        4. PettingZoo ``ParallelEnv`` — wrapped with :class:`PzDummyVecEnv`.
+        5. Bare ``gym.Env`` — wrapped with :class:`DummyVecEnv`.
+
+        :param environment: Environment input.
+        :type environment: EnvironmentT
+        :returns: A vectorized environment.
+        :rtype: GymEnvType | PzDummyVecEnv
+        """
+        from pettingzoo import ParallelEnv
+
+        from agilerl.utils.utils import make_vect_envs
+
+        if isinstance(environment, str):
+            return make_vect_envs(env_name=environment)
+
+        if isinstance(environment, EnvironmentSpec):
+            return make_vect_envs(
+                env_name=environment.name,
+                num_envs=environment.num_envs,
+            )
+
+        if hasattr(environment, "num_envs"):
+            return environment
+
+        if isinstance(environment, ParallelEnv):
+            return PzDummyVecEnv(environment)
+
+        return DummyVecEnv(environment)
+
+    @staticmethod
+    def _infer_env_name(environment: EnvironmentT) -> str:
+        """Extract a human-readable name from the environment input.
+
+        :param environment: Original environment input (before resolution).
+        :type environment: EnvironmentT
+        :returns: Environment name string.
+        :rtype: str
+        """
+        if isinstance(environment, str):
+            return environment
+        if isinstance(environment, EnvironmentSpec):
+            return environment.name
+        spec = getattr(environment, "spec", None)
+        if spec is not None and hasattr(spec, "id"):
+            return spec.id
+        return type(environment).__name__
 
     def train(
         self,
@@ -182,8 +231,7 @@ class LocalTrainer(Trainer):
         wandb_api_key: str | None = None,
         wandb_kwargs: dict[str, Any] | None = None,
         swap_channels: bool = False,
-        env_name: str | None = None,
-        device: str = "cpu",
+        device: str | torch.device = "cpu",
     ) -> tuple[PopulationType, list[list[float]]]:
         """Run local training.
 
@@ -194,34 +242,32 @@ class LocalTrainer(Trainer):
         """
         pop = self._resolve_population()
         mutations = build_mutations(self.mutation, self.device)
-        tournament = build_tournament(self.tournament, self.training)
+        tourn = build_tournament(self.tournament, self.training)
         memory = build_replay_buffer(self.replay_buffer, self._algo_meta, self.device)
         train_fn = get_training_fn(self._algo_meta)
-
-        env_name = self.env_name or str(self.environment)
 
         kwargs = build_train_kwargs(
             algo_meta=self._algo_meta,
             algo_name=self._algo_name,
             env=self.environment,
-            env_name=env_name,
+            env_name=self._env_name,
             pop=pop,
             training=self.training,
-            tournament=tournament,
+            tournament=tourn,
             mutations=mutations,
             memory=memory,
-            swap_channels=self.swap_channels,
-            checkpoint=self.checkpoint,
-            checkpoint_path=self.checkpoint_path,
-            save_elite=self.save_elite,
-            elite_path=self.elite_path,
-            wb=self.wb,
-            tensorboard=self.tensorboard,
-            tensorboard_log_dir=self.tensorboard_log_dir,
-            verbose=self.verbose,
-            accelerator=self.accelerator,
-            wandb_api_key=self.wandb_api_key,
-            wandb_kwargs=self.wandb_kwargs,
+            swap_channels=swap_channels,
+            checkpoint=checkpoint,
+            checkpoint_path=checkpoint_path,
+            save_elite=save_elite,
+            elite_path=elite_path,
+            wb=wb,
+            tensorboard=tensorboard,
+            tensorboard_log_dir=tensorboard_log_dir,
+            verbose=verbose,
+            accelerator=accelerator,
+            wandb_api_key=wandb_api_key,
+            wandb_kwargs=wandb_kwargs,
         )
 
         return train_fn(**kwargs)
@@ -244,6 +290,10 @@ class LocalTrainer(Trainer):
         if self.population is not None:
             return self.population
 
+        mutation_spec = (
+            self.mutation if isinstance(self.mutation, MutationSpec) else None
+        )
+
         from agilerl.algorithms.core import EvolvableAlgorithm
 
         if isinstance(self.algorithm, EvolvableAlgorithm):
@@ -258,6 +308,7 @@ class LocalTrainer(Trainer):
                 self.environment,
                 self.training.pop_size,
                 self.device,
+                mutation_spec=mutation_spec,
             )
 
         if isinstance(self.algorithm, str):
@@ -268,6 +319,7 @@ class LocalTrainer(Trainer):
                 self.environment,
                 self.training.pop_size,
                 self.device,
+                mutation_spec=mutation_spec,
             )
 
         msg = (
@@ -288,36 +340,35 @@ class ArenaTrainer(Trainer):
 
     :param algorithm: An :class:`RLAlgorithmSpec` or a string algorithm
         name (uses the default spec from the registry).
-    :type algorithm: RLAlgorithmSpec | str
+    :type algorithm: AlgorithmT
     :param environment: An :class:`EnvironmentSpec` or a string env name.
-    :type environment: EnvironmentSpec | str
+    :type environment: EnvironmentT
     :param training: Training loop parameters.  Defaults to
         :class:`TrainingSpec` with sensible values.
-    :type training: TrainingSpec | None
+    :type training: TrainingT | None
     :param mutation: Mutation probabilities and RL-HP ranges.
-    :type mutation: MutationSpec | None
+    :type mutation: MutationT | None
     :param tournament: Tournament selection configuration.
-    :type tournament: TournamentSelectionSpec | None
+    :type tournament: TournamentSelectionT | None
     :param replay_buffer: Replay buffer configuration.
-    :type replay_buffer: ReplayBufferSpec | None
+    :type replay_buffer: ReplayBufferT | None
     :param client: An authenticated :class:`ArenaClient`.  One is created
         automatically if not provided.
     :type client: ArenaClient | None
     :param device: Torch device string.
-    :type device: str
+    :type device: str | torch.device
     """
 
     def __init__(
         self,
-        algorithm: RLAlgorithmSpec | str,
-        environment: EnvironmentSpec | str,
-        *,
+        algorithm: AlgorithmT,
+        environment: EnvironmentT,
         training: TrainingSpec | None = None,
-        mutation: MutationSpec | None = None,
-        tournament: TournamentSelectionSpec | None = None,
-        replay_buffer: ReplayBufferSpec | None = None,
+        mutation: MutationT | None = None,
+        tournament: TournamentSelectionT | None = None,
+        replay_buffer: ReplayBufferT | None = None,
         client: ArenaClient | None = None,
-        device: str = "cpu",
+        device: str | torch.device = "cpu",
     ) -> None:
         super().__init__(
             algorithm,

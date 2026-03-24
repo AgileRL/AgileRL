@@ -2,17 +2,17 @@ import warnings
 from datetime import datetime
 from typing import Any
 
-import numpy as np
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
-import wandb
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.logger import StdOutLogger, TensorboardLogger, WandbLogger
+from agilerl.population import Population
 from agilerl.typing import GymEnvType
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.minari_utils import minari_to_agile_buffer
@@ -50,13 +50,15 @@ def train_offline(
     save_elite: bool = False,
     elite_path: str | None = None,
     wb: bool = False,
+    tensorboard: bool = False,
+    tensorboard_log_dir: str | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
     minari_dataset_id: str | None = None,
     remote: bool = False,
     wandb_api_key: str | None = None,
     wandb_kwargs: dict[str, Any] | None = None,
-) -> tuple[PopulationType, list[list[float]]]:
+) -> tuple[PopulationType, list[float]]:
     """Run the general offline RL training; returns trained population of agents and their fitnesses.
 
     :param env: The environment to train in
@@ -106,14 +108,25 @@ def train_offline(
     :type elite_path: str, optional
     :param wb: Weights & Biases tracking, defaults to False
     :type wb: bool, optional
+    :param tensorboard: TensorBoard tracking, defaults to False
+    :type tensorboard: bool, optional
+    :param tensorboard_log_dir: Directory for TensorBoard logs, defaults to None
+    :type tensorboard_log_dir: str, optional
     :param verbose: Display training stats, defaults to True
     :type verbose: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
+    :param minari_dataset_id: Minari dataset ID for loading data, defaults to None
+    :type minari_dataset_id: str, optional
+    :param remote: Load Minari dataset from remote, defaults to False
+    :type remote: bool, optional
     :param wandb_api_key: API key for Weights & Biases, defaults to None
     :type wandb_api_key: str, optional
     :param wandb_kwargs: Additional kwargs to pass to wandb.init()
     :type wandb_kwargs: dict, optional
+
+    :return: Trained population of agents and their fitnesses
+    :rtype: tuple[list[RLAlgorithm], list[float]]
     """
     assert isinstance(
         algo,
@@ -208,11 +221,7 @@ def train_offline(
             memory.add(transition)
 
         if accelerator is not None:
-            if accelerator.is_main_process:
-                pass
             accelerator.wait_for_everyone()
-        else:
-            pass
 
     if accelerator is not None:
         # Create dataloader from replay buffer
@@ -226,141 +235,90 @@ def train_offline(
     # Format progress bar
     pbar = default_progress_bar(max_steps, accelerator)
 
-    pop_loss = [[] for _ in pop]
-    pop_fitnesses = []
-    total_steps = 0
-    loss = None
+    # Define logger configuration
+    loggers = [StdOutLogger(pbar)]
+    if wb:
+        loggers.append(WandbLogger(accelerator))
+    if tensorboard:
+        loggers.append(
+            TensorboardLogger(log_dir=tensorboard_log_dir, accelerator=accelerator)
+        )
+
+    # Initialize population wrapper for metrics reporting
+    population = Population(
+        agents=pop,
+        accelerator=accelerator,
+        loggers=loggers,
+    )
+
     checkpoint_count = 0
 
     # Pre-training mutation
     if accelerator is None and mutation is not None:
-        pop = mutation.mutation(pop, pre_training_mut=True)
+        population.update(mutation.mutation(population.agents, pre_training_mut=True))
 
     # RL training loop
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+    while population.all_below(max_steps):
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
-        for agent_idx, agent in enumerate(pop):  # Loop through population
-            losses = []
-            for _idx_step in range(evo_steps):
-                experiences = sampler.sample(agent.batch_size)  # Sample replay buffer
-                # Learn according to agent's RL algorithm
-                loss = agent.learn(experiences)
-                losses.append(loss)
+        for agent in population.agents:
+            agent.set_training_mode(True)
+            agent.init_evo_step()
 
-            mean_loss = np.mean(losses)
-            pop_loss[agent_idx].append(mean_loss)
-            agent.steps[-1] += evo_steps
-            total_steps += evo_steps
-            pbar.update(evo_steps // len(pop))
+            for _idx_step in range(evo_steps):
+                experiences = sampler.sample(agent.batch_size)
+                agent.learn(experiences)
+
+            agent.finalize_evo_step(evo_steps)
+            pbar.update(evo_steps // population.size)
+
+        population.increment_evo_step()
 
         # Evaluate population
-        fitnesses = [
+        for agent in population.agents:
             agent.test(
                 env,
                 swap_channels=swap_channels,
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
-            for agent in pop
-        ]
-        pop_fitnesses.append(fitnesses)
 
-        if wb:
-            wandb_dict = {
-                "global_step": (
-                    total_steps * accelerator.state.num_processes
-                    if accelerator is not None and accelerator.is_main_process
-                    else total_steps
-                ),
-                "eval/mean_fitness": np.mean(fitnesses),
-                "eval/best_fitness": np.max(fitnesses),
-            }
+        population.report_metrics()
 
-            agent_loss_dict = {
-                f"train/agent_{index}_loss": np.mean(loss[-10:])
-                for index, loss in enumerate(pop_loss)
-            }
+        if population.should_stop(target):
+            population.finish()
+            pbar.close()
+            return population.agents, population.last_fitnesses
 
-            wandb_dict.update(agent_loss_dict)
-
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    wandb.log(wandb_dict)
-                accelerator.wait_for_everyone()
-            else:
-                wandb.log(wandb_dict)
-
-        # Update step counter
-        for agent in pop:
-            agent.steps.append(agent.steps[-1])
-
-        # Early stop if consistently reaches target
-        if target is not None and (
-            np.all(
-                np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
-            )
-            and len(pop[0].steps) >= 100
-        ):
-            if wb:
-                wandb.finish()
-            return pop, pop_fitnesses
+        population.clear_agent_metrics()
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
-            pop = tournament_selection_and_mutation(
-                population=pop,
-                tournament=tournament,
-                mutation=mutation,
-                env_name=env_name,
-                algo=algo,
-                elite_path=elite_path,
-                save_elite=save_elite,
-                accelerator=accelerator,
+            population.update(
+                tournament_selection_and_mutation(
+                    population=population.agents,
+                    tournament=tournament,
+                    mutation=mutation,
+                    env_name=env_name,
+                    algo=algo,
+                    elite_path=elite_path,
+                    save_elite=save_elite,
+                    accelerator=accelerator,
+                ),
             )
 
-        if verbose:
-            fitness = [f"{fitness:.2f}" for fitness in fitnesses]
-            avg_fitness = [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
-            agents = [agent.index for agent in pop]
-            num_steps = [agent.steps[-1] for agent in pop]
-            muts = [agent.mut for agent in pop]
-
-            banner_text = f"Global Steps {total_steps}"
-            banner_width = max(len(banner_text) + 8, 35)
-            border = "=" * banner_width
-            centered_text = f"{banner_text}".center(banner_width)
-            pbar.write(
-                f"{border}\n"
-                f"{centered_text}\n"
-                f"{border}\n"
-                f"Fitness:\t\t{fitness}\n"
-                f"5 fitness avgs:\t{avg_fitness}\n"
-                f"Agents:\t\t{agents}\n"
-                f"Steps:\t\t{num_steps}\n"
-                f"Mutations:\t\t{muts}",
-            )
-
+        # Save model checkpoint
         if checkpoint is not None:
-            if pop[0].steps[-1] // checkpoint > checkpoint_count:
+            if population.agents[0].metrics.steps // checkpoint > checkpoint_count:
                 save_population_checkpoint(
-                    population=pop,
+                    population=population.agents,
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
                     accelerator=accelerator,
                 )
                 checkpoint_count += 1
 
-    if wb:
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-            if accelerator.is_main_process:
-                wandb.finish()
-            accelerator.wait_for_everyone()
-        else:
-            wandb.finish()
-
+    population.finish()
     pbar.close()
-    return pop, pop_fitnesses
+    return population.agents, population.last_fitnesses

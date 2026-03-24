@@ -1,21 +1,20 @@
-import time
 import warnings
 from datetime import datetime
 from typing import Any
 
-import gymnasium as gym
-import numpy as np
 from accelerate import Accelerator
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
-import wandb
-from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.algorithms import NeuralTS, NeuralUCB
 from agilerl.components.data import ReplayDataset
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.logger import StdOutLogger, TensorboardLogger, WandbLogger
+from agilerl.population import Population
+from agilerl.typing import GymEnvType
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -25,11 +24,11 @@ from agilerl.utils.utils import (
 )
 
 InitDictType = dict[str, Any] | None
-PopulationType = list[RLAlgorithm]
+PopulationType = list[NeuralTS | NeuralUCB]
 
 
 def train_bandits(
-    env: gym.Env,
+    env: GymEnvType,
     env_name: str,
     algo: str,
     pop: PopulationType,
@@ -51,11 +50,13 @@ def train_bandits(
     save_elite: bool = False,
     elite_path: str | None = None,
     wb: bool = False,
+    tensorboard: bool = False,
+    tensorboard_log_dir: str | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
     wandb_kwargs: dict[str, Any] | None = None,
-) -> tuple[PopulationType, list[list[float]]]:
+) -> tuple[PopulationType, list[float]]:
     """Run the general bandit training; returns trained population of agents
     and their fitnesses.
 
@@ -105,6 +106,10 @@ def train_bandits(
     :type elite_path: str, optional
     :param wb: Weights & Biases tracking, defaults to False
     :type wb: bool, optional
+    :param tensorboard: TensorBoard tracking, defaults to False
+    :type tensorboard: bool, optional
+    :param tensorboard_log_dir: Directory for TensorBoard logs, defaults to None
+    :type tensorboard_log_dir: str, optional
     :param verbose: Display training stats, defaults to True
     :type verbose: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -113,6 +118,9 @@ def train_bandits(
     :type wandb_api_key: str, optional
     :param wandb_kwargs: Additional kwargs to pass to wandb.init()
     :type wandb_kwargs: dict, optional
+
+    :return: Trained population of agents and their fitnesses
+    :rtype: tuple[list[RLAlgorithm], list[float]]
     """
     assert isinstance(
         algo,
@@ -191,30 +199,43 @@ def train_bandits(
     # Format progress bar
     pbar = default_progress_bar(max_steps, accelerator)
 
-    pop_loss = [[] for _ in pop]
-    pop_fitnesses = []
-    total_steps = 0
+    # Define logger configuration
+    loggers = [StdOutLogger(pbar)]
+    if wb:
+        loggers.append(WandbLogger(accelerator))
+    if tensorboard:
+        loggers.append(
+            TensorboardLogger(log_dir=tensorboard_log_dir, accelerator=accelerator)
+        )
+
+    # Initialize population wrapper for metrics reporting
+    population = Population(
+        agents=pop,
+        accelerator=accelerator,
+        loggers=loggers,
+    )
+
     checkpoint_count = 0
     evo_count = 0
 
     # RL training loop
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+    while population.all_below(max_steps):
         if accelerator is not None:
             accelerator.wait_for_everyone()
-        pop_episode_scores = []
-        pop_fps = []
-        for agent_idx, agent in enumerate(pop):  # Loop through population
-            score = 0
-            losses = []
-            context = env.reset()  # Reset environment at start of episode
 
-            start_time = time.time()
+        for agent in population.agents:
+            agent.set_training_mode(True)
+            agent.init_evo_step()
+
+            score = 0
+            context = env.reset()
+
             for _idx_step in range(episode_steps):
                 if swap_channels:
                     context = obs_channels_to_first(context)
                 # Get next action from agent
                 action = agent.get_action(context)
-                next_context, reward = env.step(action)  # Act in environment
+                next_context, reward = env.step(action)
 
                 # Save experience to replay buffer
                 transition = TensorDict(
@@ -230,142 +251,66 @@ def train_bandits(
                 # Learn according to learning frequency
                 if len(memory) >= agent.batch_size:
                     for _ in range(agent.learn_step):
-                        # Sample replay buffer
-                        # Learn according to agent's RL algorithm
                         experiences = sampler.sample(agent.batch_size)
-                        loss = agent.learn(experiences)
-                        losses.append(loss)
+                        agent.learn(experiences)
 
                 score += reward
                 agent.regret.append(agent.regret[-1] + 1 - reward)
 
                 context = next_context
 
-            agent.scores.append(score)
-            pop_episode_scores.append(score)
-            pop_loss[agent_idx].append(np.mean(losses))
-            agent.steps[-1] += episode_steps
-            elapsed = max(time.time() - start_time, 1e-12)
-            fps = episode_steps / elapsed
-            pop_fps.append(fps)
-            total_steps += episode_steps
-            pbar.update(episode_steps // len(pop))
+            agent.add_scores([score])
+            agent.finalize_evo_step(episode_steps)
+            pbar.update(episode_steps // population.size)
+
+        population.increment_evo_step()
 
         # Evaluate population
-        fitnesses = [
+        for agent in population.agents:
             agent.test(
                 env,
                 swap_channels=swap_channels,
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
-            for agent in pop
-        ]
-        pop_fitnesses.append(fitnesses)
-        mean_scores = np.mean(pop_episode_scores)
-        regrets = [agent.regret[-1] for agent in pop]
-        mean_losses = np.mean([losses[-10:] for losses in pop_loss], axis=1)
 
-        if wb:
-            wandb_dict = {
-                "global_step": (
-                    total_steps * accelerator.state.num_processes
-                    if accelerator is not None and accelerator.is_main_process
-                    else total_steps
-                ),
-                "steps_per_agent": total_steps / len(pop),
-                "train/mean_score": np.mean(mean_scores),
-                "train/mean_regret": np.mean(regrets),
-                "train/best_regret": np.min(regrets),
-                "train/mean_loss": np.mean(mean_losses),
-                "eval/mean_fitness": np.mean(fitnesses),
-                "eval/best_fitness": np.max(fitnesses),
-            }
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    wandb.log(wandb_dict)
-                accelerator.wait_for_everyone()
-            else:
-                wandb.log(wandb_dict)
+        population.report_metrics()
 
-        # Update step counter
-        for agent in pop:
-            agent.steps.append(agent.steps[-1])
+        if population.should_stop(target):
+            population.finish()
+            pbar.close()
+            return population.agents, population.last_fitnesses
 
-        # Early stop if consistently reaches target
-        if target is not None and (
-            np.all(
-                np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target),
-            )
-            and len(pop[0].steps) >= 100
-        ):
-            if wb:
-                wandb.finish()
-            return pop, pop_fitnesses
+        population.clear_agent_metrics()
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
-            if pop[0].steps[-1] // evo_steps > evo_count:
-                pop = tournament_selection_and_mutation(
-                    population=pop,
-                    tournament=tournament,
-                    mutation=mutation,
-                    env_name=env_name,
-                    algo=algo,
-                    elite_path=elite_path,
-                    save_elite=save_elite,
-                    accelerator=accelerator,
+            if population.agents[0].metrics.steps // evo_steps > evo_count:
+                population.update(
+                    tournament_selection_and_mutation(
+                        population=population.agents,
+                        tournament=tournament,
+                        mutation=mutation,
+                        env_name=env_name,
+                        algo=algo,
+                        elite_path=elite_path,
+                        save_elite=save_elite,
+                        accelerator=accelerator,
+                    ),
                 )
                 evo_count += 1
 
-        if verbose:
-            regret = [f"{np.asarray(value).item():.2f}" for value in regrets]
-            avg_regret = f"{np.mean(np.array(regrets)):.2f}"
-            fitness = [f"{fitness:.2f}" for fitness in fitnesses]
-            avg_fitness = [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
-            avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
-            agents = [agent.index for agent in pop]
-            num_steps = [agent.steps[-1] for agent in pop]
-            muts = [agent.mut for agent in pop]
-
-            banner_text = f"Global Steps {total_steps}"
-            banner_width = max(len(banner_text) + 8, 35)
-            border = "=" * banner_width
-            centered_text = f"{banner_text}".center(banner_width)
-            pbar.write(
-                f"{border}\n"
-                f"{centered_text}\n"
-                f"{border}\n"
-                f"Regret:\t\t{regret}\n"
-                f"Mean regret:\t{avg_regret}\n"
-                f"Fitness:\t\t{fitness}\n"
-                f"5 fitness avgs:\t{avg_fitness}\n"
-                f"10 score avgs:\t{avg_score}\n"
-                f"Agents:\t\t{agents}\n"
-                f"Steps:\t\t{num_steps}\n"
-                f"Mutations:\t\t{muts}",
-            )
-
         # Save model checkpoint
         if checkpoint is not None:
-            if pop[0].steps[-1] // checkpoint > checkpoint_count:
+            if population.agents[0].metrics.steps // checkpoint > checkpoint_count:
                 save_population_checkpoint(
-                    population=pop,
+                    population=population.agents,
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
                     accelerator=accelerator,
                 )
                 checkpoint_count += 1
 
-    if wb:
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-            if accelerator.is_main_process:
-                wandb.finish()
-            accelerator.wait_for_everyone()
-        else:
-            wandb.finish()
-
+    population.finish()
     pbar.close()
-    return pop, pop_fitnesses
+    return population.agents, population.last_fitnesses

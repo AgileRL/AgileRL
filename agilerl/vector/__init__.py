@@ -1,3 +1,3 @@
-from agilerl.vector.dummy_vec_env import DummyVecEnv
+from agilerl.vector.dummy_vec_env import DummyVecEnv, PzDummyVecEnv
 
-__all__ = ["DummyVecEnv"]
+__all__ = ["DummyVecEnv", "PzDummyVecEnv"]

@@ -8,6 +8,8 @@ from collections import deque
 
 import numpy as np
 
+AdditionalMetricType = list[float] | dict[str, list[float]]
+
 
 class BaseMetrics(ABC):
     """Base class for per-agent metrics.
@@ -17,7 +19,8 @@ class BaseMetrics(ABC):
     """
 
     def __init__(self, *, fitness_window: int = 100) -> None:
-        self._additional_metrics: dict[str, list[float] | dict[str, list[float]]] = {}
+        self._additional_metrics: dict[str, AdditionalMetricType] = {}
+        self._nonscalar_metrics: dict[str, list | dict[str, list]] = {}
         self._hyperparameters: dict[str, float] = {}
         self._evo_start_time: float = 0.0
         self.steps_per_second: float = 0.0
@@ -30,26 +33,66 @@ class BaseMetrics(ABC):
         """Initialize storage for a newly registered metric."""
         raise NotImplementedError
 
+    @abstractmethod
+    def _init_nonscalar_metric(self, name: str) -> None:
+        """Initialize storage for a newly registered non-scalar metric."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def log(self, name: str, *, value: float) -> None:
+        """Log a value to the accumulator for a registered metric."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def log_histogram(self, name: str, values: np.ndarray) -> None:
+        """Extend the accumulator with raw sample values for a histogram metric."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_histogram(self, name: str, *args: str) -> np.ndarray | None:
+        """Return accumulated raw values for a histogram metric."""
+        raise NotImplementedError
+
     @property
     def additional_metrics(self) -> list[str]:
-        """All registered metric names."""
+        """All registered scalar metric names."""
         return list(self._additional_metrics.keys())
+
+    @property
+    def nonscalar_metrics(self) -> list[str]:
+        """All registered non-scalar metric names."""
+        return list(self._nonscalar_metrics.keys())
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.clear()
 
-    def register_metric(self, name: str) -> None:
-        """Register a named metric to be tracked.
+    def _check_name_available(self, name: str) -> None:
+        if name in self._additional_metrics or name in self._nonscalar_metrics:
+            msg = f"Metric '{name}' is already registered."
+            raise ValueError(msg)
+
+    def register(self, name: str) -> None:
+        """Register a named scalar metric to be tracked.
 
         :param name: Unique metric name (e.g. ``"loss"``, ``"entropy"``).
         :type name: str
         :raises ValueError: If *name* is already registered.
         """
-        if name in self._additional_metrics:
-            msg = f"Metric '{name}' is already registered."
-            raise ValueError(msg)
-
+        self._check_name_available(name)
         self._init_metric(name)
+
+    def register_histogram(self, name: str) -> None:
+        """Register a named non-scalar (histogram) metric.
+
+        Non-scalar metrics store array data (e.g. action distributions) and
+        are only reported by loggers that support them (TensorBoard).
+
+        :param name: Unique metric name (e.g. ``"action_distribution"``).
+        :type name: str
+        :raises ValueError: If *name* is already registered.
+        """
+        self._check_name_available(name)
+        self._init_nonscalar_metric(name)
 
     def clear(self) -> None:
         """Clear scores and all additional metric accumulators."""
@@ -107,6 +150,9 @@ class AgentMetrics(BaseMetrics):
         """Initialize storage for a newly registered metric."""
         self._additional_metrics[name] = []
 
+    def _init_nonscalar_metric(self, name: str) -> None:
+        self._nonscalar_metrics[name] = []
+
     def log(self, name: str, value: float) -> None:
         """Append a value to the accumulator for a registered metric.
 
@@ -123,6 +169,19 @@ class AgentMetrics(BaseMetrics):
         """
         self._additional_metrics[name].append(float(value))
 
+    def log_histogram(self, name: str, values: np.ndarray) -> None:
+        """Extend the accumulator with raw sample values for a histogram metric.
+
+        Values are accumulated across calls so that :meth:`get_histogram`
+        returns the full distribution for the entire evo step.
+
+        :param name: Previously registered non-scalar metric name.
+        :type name: str
+        :param values: Array of raw sample values (e.g. action indices).
+        :type values: numpy.ndarray
+        """
+        self._nonscalar_metrics[name].extend(values.tolist())
+
     def get_mean(self, name: str) -> float:
         """Return the mean of accumulated values for a registered metric.
 
@@ -137,11 +196,26 @@ class AgentMetrics(BaseMetrics):
 
         return np.mean(values)
 
+    def get_histogram(self, name: str) -> np.ndarray | None:
+        """Return the accumulated raw values for a histogram metric.
+
+        :param name: Previously registered non-scalar metric name.
+        :type name: str
+        :returns: Array of all accumulated values, or ``None`` if empty.
+        :rtype: numpy.ndarray | None
+        """
+        values = self._nonscalar_metrics[name]
+        if not values:
+            return None
+        return np.asarray(values)
+
     def clear(self) -> None:
         """Clear scores and all additional metric accumulators."""
         super().clear()
         for name in self._additional_metrics:
             self._additional_metrics[name] = []
+        for name in self._nonscalar_metrics:
+            self._nonscalar_metrics[name] = []
 
 
 class MultiAgentMetrics(BaseMetrics):
@@ -167,6 +241,9 @@ class MultiAgentMetrics(BaseMetrics):
         """
         self._additional_metrics[name] = {agent_id: [] for agent_id in self.agent_ids}
 
+    def _init_nonscalar_metric(self, name: str) -> None:
+        self._nonscalar_metrics[name] = {agent_id: [] for agent_id in self.agent_ids}
+
     def log(self, name: str, agent_id: str, value: float) -> None:
         """Append a value to the accumulator for a registered metric and sub-agent.
 
@@ -185,6 +262,18 @@ class MultiAgentMetrics(BaseMetrics):
         """
         self._additional_metrics[name][agent_id].append(float(value))
 
+    def log_histogram(self, name: str, agent_id: str, values: np.ndarray) -> None:
+        """Extend the accumulator with raw sample values for a histogram metric.
+
+        :param name: Previously registered non-scalar metric name.
+        :type name: str
+        :param agent_id: Sub-agent identifier.
+        :type agent_id: str
+        :param values: Array of raw sample values (e.g. action indices).
+        :type values: numpy.ndarray
+        """
+        self._nonscalar_metrics[name][agent_id].extend(values.tolist())
+
     def get_mean(self, name: str, agent_id: str) -> float:
         """Return the mean of accumulated values for a registered metric and sub-agent.
 
@@ -201,10 +290,29 @@ class MultiAgentMetrics(BaseMetrics):
 
         return np.mean(values)
 
+    def get_histogram(self, name: str, agent_id: str) -> np.ndarray | None:
+        """Return accumulated raw values for a histogram metric and sub-agent.
+
+        :param name: Previously registered non-scalar metric name.
+        :type name: str
+        :param agent_id: Sub-agent identifier.
+        :type agent_id: str
+        :returns: Array of all accumulated values, or ``None`` if empty.
+        :rtype: numpy.ndarray | None
+        """
+        values = self._nonscalar_metrics[name][agent_id]
+        if not values:
+            return None
+        return np.asarray(values)
+
     def clear(self) -> None:
         """Clear scores and all additional metric accumulators."""
         super().clear()
         for name in self._additional_metrics:
             self._additional_metrics[name] = {
+                agent_id: [] for agent_id in self.agent_ids
+            }
+        for name in self._nonscalar_metrics:
+            self._nonscalar_metrics[name] = {
                 agent_id: [] for agent_id in self.agent_ids
             }

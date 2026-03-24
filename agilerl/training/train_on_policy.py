@@ -3,18 +3,14 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-import numpy as np
 from accelerate import Accelerator
-from gymnasium import spaces
 
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.logger import StdOutLogger, TensorboardLogger, WandbLogger
-from agilerl.networks import StochasticActor
 from agilerl.population import Population
 from agilerl.typing import GymEnvType
-from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     default_progress_bar,
     init_wandb,
@@ -174,7 +170,6 @@ def train_on_policy(
         env = DummyVecEnv(env)
 
     num_envs = env.num_envs
-
     save_path = (
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
@@ -184,11 +179,6 @@ def train_on_policy(
             datetime.now().strftime("%m%d%Y%H%M%S"),
         )
     )
-
-    if accelerator is not None:
-        print(f"\nDistributed training on {accelerator.device}...")
-    else:
-        print("\nTraining...")
 
     pbar = default_progress_bar(max_steps, accelerator)
 
@@ -227,7 +217,7 @@ def train_on_policy(
             steps = 0
             completed_episode_scores: list[float] = []
             n_steps = -(agent.learn_step // -num_envs)
-            if active_collect is None and getattr(agent, "use_rollout_buffer", False):
+            if active_collect is None:
                 if getattr(agent, "recurrent", False):
                     from agilerl.rollouts import (
                         collect_rollouts_recurrent as active_collect,
@@ -235,120 +225,27 @@ def train_on_policy(
                 else:
                     from agilerl.rollouts import collect_rollouts as active_collect
 
-            if (
-                getattr(agent, "use_rollout_buffer", False)
-                and active_collect is not None
-            ):
-                last_obs, last_done, last_scores, last_info = None, None, None, None
-                for _ in range(-(evo_steps // -agent.learn_step)):
-                    # Collect rollouts and save in buffer
-                    episode_scores, last_obs, last_done, last_scores, last_info = (
-                        active_collect(
-                            agent,
-                            env,
-                            n_steps=n_steps,
-                            last_obs=last_obs,
-                            last_done=last_done,
-                            last_scores=last_scores,
-                            last_info=last_info,
-                        )
+            # Collect rollouts and learn until evo_steps is reached
+            last_obs, last_done, last_scores, last_info = None, None, None, None
+            for _ in range(-(evo_steps // -agent.learn_step)):
+                # Collect rollouts and save in buffer
+                episode_scores, last_obs, last_done, last_scores, last_info = (
+                    active_collect(
+                        agent,
+                        env,
+                        n_steps=n_steps,
+                        last_obs=last_obs,
+                        last_done=last_done,
+                        last_scores=last_scores,
+                        last_info=last_info,
                     )
+                )
 
-                    agent.learn()
+                agent.learn()
 
-                    # Update step counter and scores
-                    steps += n_steps * num_envs
-                    completed_episode_scores += episode_scores
-
-            # Collect rollouts explicitly without saving to rollout buffer
-            else:
-                obs, info = env.reset()
-                scores = np.zeros(num_envs)
-                for _ in range(-(evo_steps // -agent.learn_step)):
-                    observations = []
-                    actions = []
-                    log_probs = []
-                    rewards = []
-                    dones = []
-                    values = []
-
-                    done = np.zeros(num_envs)
-                    for _ in range(-(agent.learn_step // -num_envs)):
-                        if swap_channels:
-                            obs = obs_channels_to_first(obs)
-
-                        action_mask = info.get("action_mask", None)
-                        action, log_prob, _entropy, value = agent.get_action(
-                            obs,
-                            action_mask=action_mask,
-                        )
-
-                        # Clip action to action space
-                        policy = getattr(agent, agent.registry.policy())
-                        if isinstance(policy, StochasticActor) and isinstance(
-                            agent.action_space,
-                            spaces.Box,
-                        ):
-                            if policy.squash_output:
-                                clipped_action = policy.scale_action(action)
-                            else:
-                                clipped_action = np.clip(
-                                    action,
-                                    agent.action_space.low,
-                                    agent.action_space.high,
-                                )
-                        else:
-                            clipped_action = action
-
-                        next_obs, reward, term, trunc, info = env.step(clipped_action)
-
-                        # Check if termination condition is met
-                        if isinstance(term, (list, np.ndarray)):
-                            next_done = (
-                                np.logical_or(term, trunc).astype(np.int8)
-                                if isinstance(trunc, (list, np.ndarray))
-                                else term
-                            )
-                        else:
-                            next_done = term or trunc
-
-                        reward_np = np.atleast_1d(reward)
-                        next_done_np = np.atleast_1d(next_done)
-                        value_np = np.atleast_1d(value)
-                        log_prob_np = np.atleast_1d(log_prob)
-
-                        observations.append(obs)
-                        actions.append(action)
-                        log_probs.append(log_prob_np)
-                        rewards.append(reward_np)
-                        dones.append(done)
-                        values.append(value_np)
-
-                        obs = next_obs
-                        done = next_done
-
-                        scores += reward_np
-                        steps += num_envs
-
-                        for idx, env_done in enumerate(next_done_np):
-                            if env_done:
-                                completed_episode_scores.append(scores[idx])
-                                scores[idx] = 0
-
-                    if swap_channels:
-                        next_obs = obs_channels_to_first(next_obs)
-
-                    experiences = (
-                        observations,
-                        actions,
-                        log_probs,
-                        rewards,
-                        dones,
-                        values,
-                        next_obs,
-                        next_done,
-                    )
-                    agent.learn(experiences)
+                # Update step counter and scores
+                steps += n_steps * num_envs
+                completed_episode_scores += episode_scores
 
             agent.add_scores(completed_episode_scores)
             agent.finalize_evo_step(steps)

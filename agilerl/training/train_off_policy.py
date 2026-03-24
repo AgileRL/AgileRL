@@ -263,12 +263,9 @@ def train_off_policy(
         if n_step_memory is not None:
             n_step_sampler = Sampler(memory=n_step_memory)
 
-    if accelerator is not None:
-        print(f"\nDistributed training on {accelerator.device}...")
-    else:
-        print("\nTraining...")
-
     pbar = default_progress_bar(max_steps, accelerator)
+
+    # Define logger configuration
     loggers = [StdOutLogger(pbar)]
     if wb:
         loggers.append(WandbLogger(accelerator))
@@ -277,6 +274,7 @@ def train_off_policy(
             TensorboardLogger(log_dir=tensorboard_log_dir, accelerator=accelerator)
         )
 
+    # Initialize population wrapper for metrics reporting
     population = Population(
         agents=pop,
         accelerator=accelerator,
@@ -303,9 +301,6 @@ def train_off_policy(
             completed_episode_scores: list[float] = []
             steps = 0
 
-            if isinstance(agent, (DQN, RainbowDQN)):
-                train_actions_hist = [0] * agent.action_dim
-
             if isinstance(agent, DQN):
                 epsilon = eps_start
 
@@ -330,12 +325,6 @@ def train_off_policy(
                         output_activation=agent.actor.output_activation,
                     )
                     action = action.cpu().numpy()
-
-                if isinstance(agent, (DQN, RainbowDQN)):
-                    for a in action:
-                        if not isinstance(a, int):
-                            a = int(a)
-                        train_actions_hist[a] += 1
 
                 # Act in environment
                 next_obs, reward, done, trunc, info = env.step(action)

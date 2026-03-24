@@ -362,6 +362,10 @@ class TD3(RLAlgorithm):
             ),
         )
 
+        # Register metrics to keep track of during training
+        self.metrics.register("actor_loss")
+        self.metrics.register("critic_loss")
+
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critics.
         Registered as a mutation hook when share_encoders=True.
@@ -522,6 +526,9 @@ class TD3(RLAlgorithm):
         else:
             critic_loss.backward()
 
+        critic_loss = critic_loss.item()
+        self.metrics.log("critic_loss", critic_loss)
+
         self.critic_1_optimizer.step()
         self.critic_2_optimizer.step()
 
@@ -547,8 +554,11 @@ class TD3(RLAlgorithm):
             self.soft_update(self.critic_1, self.critic_target_1)
             self.soft_update(self.critic_2, self.critic_target_2)
 
-            return actor_loss.item(), critic_loss.item()
-        return None, critic_loss.item()
+            actor_loss = actor_loss.item()
+            self.metrics.log("actor_loss", actor_loss)
+            return actor_loss, critic_loss
+
+        return None, critic_loss
 
     def soft_update(self, net: EvolvableModule, target: EvolvableModule) -> None:
         """Soft updates target network parameters.
@@ -612,5 +622,5 @@ class TD3(RLAlgorithm):
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
         mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

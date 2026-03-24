@@ -17,15 +17,11 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks import EvolvableNetwork, StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
-from agilerl.typing import ArrayOrTensor, BPTTSequenceType, ExperiencesType, GymEnvType
+from agilerl.typing import ArrayOrTensor, BPTTSequenceType, GymEnvType
 from agilerl.utils.algo_utils import (
-    flatten_experiences,
-    get_experiences_samples,
-    is_vectorized_experiences,
     make_safe_deepcopies,
     obs_channels_to_first,
     share_encoder_parameters,
-    stack_experiences,
 )
 
 ActionReturnType = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
@@ -89,8 +85,6 @@ class PPO(RLAlgorithm):
     :type share_encoders: bool, optional
     :param num_envs: Number of parallel environments, defaults to 1
     :type num_envs: int, optional
-    :param use_rollout_buffer: Flag to use the rollout buffer instead of tuple experiences, defaults to False
-    :type use_rollout_buffer: bool, optional
     :param recurrent: Flag to use hidden states for recurrent policies, defaults to False
     :type recurrent: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -130,7 +124,6 @@ class PPO(RLAlgorithm):
         critic_network: EvolvableModule | None = None,
         share_encoders: bool = True,
         num_envs: int = 1,
-        use_rollout_buffer: bool = False,
         rollout_buffer_config: dict[str, Any] | None = None,
         recurrent: bool = False,
         device: str = "cpu",
@@ -215,11 +208,6 @@ class PPO(RLAlgorithm):
             bool,
         ), "Wrap models flag must be boolean value True or False."
 
-        # New parameters for using RolloutBuffer
-        assert isinstance(
-            use_rollout_buffer,
-            bool,
-        ), "Use rollout buffer flag must be boolean value True or False."
         assert isinstance(
             recurrent,
             bool,
@@ -229,27 +217,8 @@ class PPO(RLAlgorithm):
             BPTTSequenceType,
         ), "bptt_sequence_type must be a BPTTSequenceType enum value."
 
-        if not use_rollout_buffer:
-            warnings.warn(
-                (
-                    "DeprecationWarning: 'use_rollout_buffer=False' is deprecated and will be removed in a future release. "
-                    "The PPO implementation now expects 'use_rollout_buffer=True' for improved performance, "
-                    "cleaner support for recurrent policies, and easier integration with custom environments. "
-                    "Please update your code to use 'use_rollout_buffer=True' and, if you require recurrent policies, set 'recurrent=True'.\n"
-                    "Refer to the documentation for migration instructions and further details."
-                ),
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         self.recurrent = recurrent
-        self.use_rollout_buffer = use_rollout_buffer
         self.net_config = net_config
-
-        if self.recurrent and not self.use_rollout_buffer:
-            msg = "use_rollout_buffer must be True if recurrent=True."
-            raise ValueError(msg)
-
         self.max_seq_len = max_seq_len
         self.batch_size = batch_size
         self.lr = lr
@@ -333,10 +302,10 @@ class PPO(RLAlgorithm):
         )
 
         # Initialize rollout buffer if enabled
-        if self.use_rollout_buffer:
-            self.create_rollout_buffer()
-            # Need to register a mutation hook that does this after every mutation (e.g. the batch size, sequence length, etc. have changed)
-            self.register_mutation_hook(self.create_rollout_buffer)
+        # NOTE: Need to register a mutation hook that does this after every mutation
+        # (e.g. the batch size, sequence length, etc. have changed)
+        self.create_rollout_buffer()
+        self.register_mutation_hook(self.create_rollout_buffer)
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
@@ -638,198 +607,16 @@ class PPO(RLAlgorithm):
             values_np,
         )
 
-    def learn(self, experiences: ExperiencesType | None = None) -> float:
+    def learn(self) -> float:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: Tuple of batched states, actions, log_probs, rewards, dones, values, next_state, next_done.
-                            If use_rollout_buffer=True and experiences=None, uses data from rollout buffer.
-        :type experiences: ExperiencesType | None
         :return: Mean loss value from training.
         :rtype: float
         """
-        if self.use_rollout_buffer and experiences is None:
-            # NOTE: we are still allowing experiences to be passed in for backwards compatibility
-            # but we will remove this in a future releases.
-            # i.e. it's possible to do one learn with rollouts, then another with experiences on the same agent
-            # Learn from the internal rollout buffer
-            if self.recurrent:
-                return self._learn_from_rollout_buffer_bptt()
-            return self._learn_from_rollout_buffer_flat()
+        if self.recurrent:
+            return self._learn_from_rollout_buffer_bptt()
 
-        return self._deprecated_learn_from_experiences(experiences)
-
-    def _deprecated_learn_from_experiences(self, experiences: ExperiencesType) -> float:
-        """Learn from experiences without a rollout buffer.
-
-        This method is deprecated and will be removed in a future release. The PPO implementation
-        now uses a rollout buffer for improved performance, cleaner support for recurrent policies,
-        and easier integration with custom environments.
-
-        To migrate:
-        1. Set use_rollout_buffer=True when creating PPO agent
-        2. If using recurrent policies, set recurrent=True
-        3. Use collect_rollouts() to gather experiences instead of passing experiences tuple
-        4. Call learn() without arguments to train on collected rollouts
-        """
-        if not experiences:
-            msg = "Experiences must be provided when use_rollout_buffer is False"
-            raise ValueError(
-                msg,
-            )
-
-        # Not self.use_rollout_buffer
-        (
-            observations,
-            actions,
-            log_probs,
-            rewards,
-            dones,
-            values,
-            next_obs,
-            next_done,
-        ) = stack_experiences(*experiences)
-
-        # Bootstrapping returns using GAE advantage estimation
-        dones = dones.long()
-        with torch.no_grad():
-            num_steps = rewards.size(0)
-            next_obs = self.preprocess_observation(next_obs)
-            next_value = self.critic(next_obs).reshape(1, -1).cpu()
-            advantages = torch.zeros_like(rewards).float()
-            last_gae_lambda = 0
-            for t in reversed(range(num_steps)):
-                if t == num_steps - 1:
-                    next_non_terminal = 1.0 - next_done
-                    nextvalue = next_value.squeeze()
-                else:
-                    next_non_terminal = 1.0 - dones[t + 1]
-                    nextvalue = values[t + 1]
-
-                # Calculate delta (TD error)
-                delta = (
-                    rewards[t] + self.gamma * nextvalue * next_non_terminal - values[t]
-                )
-
-                # Use recurrence relation to compute advantage
-                advantages[t] = last_gae_lambda = (
-                    delta
-                    + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lambda
-                )
-
-            returns = advantages + values
-
-        # Flatten experiences from (batch_size, num_envs, ...) to (batch_size*num_envs, ...)
-        # after checking if experiences are vectorized
-        experiences = (observations, actions, log_probs, advantages, returns, values)
-        if is_vectorized_experiences(*experiences):
-            experiences = flatten_experiences(*experiences)
-
-        # Move experiences to algo device
-        experiences = self.to_device(*experiences)
-
-        # Get number of samples from the returns tensor
-        num_samples = experiences[4].size(0)
-        batch_idxs = np.arange(num_samples)
-        mean_loss = 0.0
-        mean_pg_loss = 0.0
-        mean_v_loss = 0.0
-        mean_entropy_loss = 0.0
-        for _ in range(self.update_epochs):
-            np.random.shuffle(batch_idxs)
-            for start in range(0, num_samples, self.batch_size):
-                minibatch_idxs = batch_idxs[start : start + self.batch_size]
-                (
-                    batch_observations,
-                    batch_actions,
-                    batch_log_probs,
-                    batch_advantages,
-                    batch_returns,
-                    batch_values,
-                ) = get_experiences_samples(minibatch_idxs, *experiences)
-
-                batch_actions = batch_actions.squeeze()
-                batch_returns = batch_returns.squeeze()
-                batch_log_probs = batch_log_probs.squeeze()
-                batch_advantages = batch_advantages.squeeze()
-                batch_values = batch_values.squeeze()
-
-                if len(minibatch_idxs) > 1:
-                    log_prob, entropy, value = self.evaluate_actions(
-                        obs=batch_observations,
-                        actions=batch_actions,
-                        hidden_state=None,
-                    )
-
-                    logratio = log_prob - batch_log_probs
-                    ratio = logratio.exp()
-
-                    with torch.no_grad():
-                        approx_kl = ((ratio - 1) - logratio).mean()
-
-                    minibatch_advs = batch_advantages
-                    minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
-                        minibatch_advs.std() + 1e-8
-                    )
-
-                    # Policy loss
-                    pg_loss1 = -minibatch_advs * ratio
-                    pg_loss2 = -minibatch_advs * torch.clamp(
-                        ratio,
-                        1 - self.clip_coef,
-                        1 + self.clip_coef,
-                    )
-
-                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
-                    # Value loss
-                    value = value.view(-1)
-                    v_loss_unclipped = (value - batch_returns) ** 2
-                    v_clipped = batch_values + torch.clamp(
-                        value - batch_values,
-                        -self.clip_coef,
-                        self.clip_coef,
-                    )
-
-                    v_loss_clipped = (v_clipped - batch_returns) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-
-                    entropy_loss = entropy.mean()
-                    loss = (
-                        pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
-                    )
-
-                    # actor + critic loss backprop
-                    self.optimizer.zero_grad()
-                    if self.accelerator is not None:
-                        self.accelerator.backward(loss)
-                    else:
-                        loss.backward()
-
-                    # Clip gradients
-                    clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                    clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-
-                    self.optimizer.step()
-
-                    mean_loss += loss.item()
-                    mean_pg_loss += pg_loss.item()
-                    mean_v_loss += v_loss.item()
-                    mean_entropy_loss += entropy_loss.item()
-
-            if self.target_kl is not None and approx_kl > self.target_kl:
-                break
-
-        divisor = num_samples * self.update_epochs
-        mean_loss /= divisor
-        mean_pg_loss /= divisor
-        mean_v_loss /= divisor
-        mean_entropy_loss /= divisor
-        self.metrics.log("total_loss", mean_loss)
-        self.metrics.log("policy_loss", mean_pg_loss)
-        self.metrics.log("value_loss", mean_v_loss)
-        self.metrics.log("entropy_loss", mean_entropy_loss)
-        return mean_loss
+        return self._learn_from_rollout_buffer_flat()
 
     def _learn_from_rollout_buffer_flat(
         self,

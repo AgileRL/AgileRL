@@ -10,6 +10,7 @@ import importlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -62,12 +63,37 @@ def get_algo_meta(name: str) -> AlgorithmMeta:
     return meta
 
 
+def hp_config_from_mutation_spec(spec: MutationSpec) -> HyperparameterConfig | None:
+    """Convert :class:`MutationSpec.rl_hp_selection` to a :class:`HyperparameterConfig`.
+
+    :param spec: Mutation specification containing RL HP ranges.
+    :type spec: MutationSpec
+    :returns: A :class:`HyperparameterConfig`, or ``None`` if no HP ranges are defined.
+    :rtype: HyperparameterConfig | None
+    """
+    if not spec.rl_hp_selection:
+        return None
+
+    return HyperparameterConfig(
+        **{
+            name: RLParameter(
+                min=hp.min,
+                max=hp.max,
+                grow_factor=hp.grow_factor,
+                shrink_factor=hp.shrink_factor,
+            )
+            for name, hp in spec.rl_hp_selection.items()
+        }
+    )
+
+
 def create_population_from_spec(
     spec: RLAlgorithmSpec,
     algo_meta: AlgorithmMeta,
     env: gym.Env,
     pop_size: int,
     device: str,
+    mutation_spec: MutationSpec | None = None,
 ) -> PopulationType:
     """Instantiate a population of agents from an :class:`RLAlgorithmSpec`.
 
@@ -84,6 +110,9 @@ def create_population_from_spec(
     :type pop_size: int
     :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
     :type device: str
+    :param mutation_spec: Optional mutation spec.  When *spec.hp_config* is
+        ``None``, HP ranges are derived from *mutation_spec.rl_hp_selection*.
+    :type mutation_spec: MutationSpec | None
     :returns: A list of algorithm instances.
     :rtype: PopulationType
     """
@@ -100,17 +129,28 @@ def create_population_from_spec(
     kwargs["action_space"] = env.single_action_space
     kwargs["device"] = device
 
-    if spec.hp_config is not None:
-        kwargs["hp_config"] = spec.hp_config
+    # Algorithm spec hp_config takes priority; fall back to mutation spec
+    hp_config = spec.hp_config
+    if hp_config is None and mutation_spec is not None:
+        hp_config = hp_config_from_mutation_spec(mutation_spec)
+
+    if hp_config is not None:
+        kwargs["hp_config"] = hp_config
 
     return [algo_cls(**kwargs, index=i) for i in range(pop_size)]
 
 
-def build_mutations(spec: MutationSpec | None, device: str) -> Mutations | None:
+def build_mutations(
+    spec: MutationSpec | Mutations | None,
+    device: str,
+) -> Mutations | None:
     """Convert a :class:`MutationSpec` into a :class:`Mutations` instance.
 
-    :param spec: Mutation configuration, or ``None`` to skip mutations.
-    :type spec: MutationSpec | None
+    If *spec* is already a :class:`Mutations` instance it is returned as-is.
+
+    :param spec: Mutation configuration, a pre-built :class:`Mutations`, or
+        ``None`` to skip mutations.
+    :type spec: MutationSpec | Mutations | None
     :param device: Torch device string.
     :type device: str
     :returns: A configured :class:`Mutations` object, or ``None``.
@@ -118,6 +158,8 @@ def build_mutations(spec: MutationSpec | None, device: str) -> Mutations | None:
     """
     if spec is None:
         return None
+    if isinstance(spec, Mutations):
+        return spec
     p = spec.probabilities
     return Mutations(
         no_mutation=p.no_mut,
@@ -133,13 +175,16 @@ def build_mutations(spec: MutationSpec | None, device: str) -> Mutations | None:
 
 
 def build_tournament(
-    spec: TournamentSelectionSpec | None,
+    spec: TournamentSelectionSpec | TournamentSelection | None,
     training: TrainingSpec,
 ) -> TournamentSelection | None:
     """Convert a :class:`TournamentSelectionSpec` into a :class:`TournamentSelection`.
 
-    :param spec: Tournament configuration, or ``None`` to skip.
-    :type spec: TournamentSelectionSpec | None
+    If *spec* is already a :class:`TournamentSelection` instance it is returned as-is.
+
+    :param spec: Tournament configuration, a pre-built :class:`TournamentSelection`,
+        or ``None`` to skip.
+    :type spec: TournamentSelectionSpec | TournamentSelection | None
     :param training: Training spec (provides ``pop_size`` and ``eval_loop``).
     :type training: TrainingSpec
     :returns: A configured :class:`TournamentSelection`, or ``None``.
@@ -147,6 +192,8 @@ def build_tournament(
     """
     if spec is None:
         return None
+    if isinstance(spec, TournamentSelection):
+        return spec
     return TournamentSelection(
         tournament_size=spec.tournament_size,
         elitism=spec.elitism,
@@ -156,17 +203,19 @@ def build_tournament(
 
 
 def build_replay_buffer(
-    spec: ReplayBufferSpec | None,
+    spec: ReplayBufferSpec | ReplayBuffer | None,
     algo_meta: AlgorithmMeta,
     device: str,
 ) -> ReplayBuffer | None:
     """Convert a :class:`ReplayBufferSpec` into a :class:`ReplayBuffer`.
 
+    If *spec* is already a :class:`ReplayBuffer` instance it is returned as-is.
     If *spec* is ``None`` but the algorithm requires a buffer, a default
     ``ReplayBuffer(max_size=100_000)`` is created automatically.
 
-    :param spec: Buffer configuration, or ``None``.
-    :type spec: ReplayBufferSpec | None
+    :param spec: Buffer configuration, a pre-built :class:`ReplayBuffer`, or
+        ``None``.
+    :type spec: ReplayBufferSpec | ReplayBuffer | None
     :param algo_meta: Registry metadata (used for ``requires_buffer``).
     :type algo_meta: AlgorithmMeta
     :param device: Torch device string.
@@ -179,6 +228,9 @@ def build_replay_buffer(
         if algo_meta.requires_buffer:
             return ReplayBuffer(max_size=100_000, device=device)
         return None
+
+    if isinstance(spec, ReplayBuffer):
+        return spec
 
     if spec.n_step_buffer:
         return MultiStepReplayBuffer(

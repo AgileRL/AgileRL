@@ -74,18 +74,19 @@ def main() -> None:
     )
 
     trainer = LocalTrainer(
-        algorithm=algorithm,  # "PPO"
+        algorithm=algorithm,
         environment=env,
         training=training,
         mutation=mutation,
         tournament=tournament,
-        env_name=env_name,
-        tensorboard=True,
-        tensorboard_log_dir="tensorboard_logs",
         device=str(device),
     )
 
-    trained_pop, _pop_fitnesses = trainer.train()
+    trained_pop, _pop_fitnesses = trainer.train(
+        env_name=env_name,
+        tensorboard=True,
+        tensorboard_log_dir="tensorboard_logs",
+    )
 
     if str(device) == "cuda":
         torch.cuda.empty_cache()

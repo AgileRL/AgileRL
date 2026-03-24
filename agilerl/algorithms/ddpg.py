@@ -316,11 +316,6 @@ class DDPG(RLAlgorithm):
 
         self.criterion = nn.MSELoss()
 
-        # Register metrics to keep track of during training
-        self.metrics.register("total_loss")
-        self.metrics.register("actor_loss")
-        self.metrics.register("critic_loss")
-
         # Register network groups for actor and critic
         self.register_network_group(
             NetworkGroup(
@@ -336,6 +331,10 @@ class DDPG(RLAlgorithm):
                 policy=False,
             ),
         )
+
+        # Register metrics to keep track of during training
+        self.metrics.register("actor_loss")
+        self.metrics.register("critic_loss")
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic. Registered as a mutation hook

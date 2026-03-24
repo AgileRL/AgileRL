@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 import numpy as np
@@ -24,6 +26,23 @@ if TYPE_CHECKING:
 
 
 AgentT = TypeVar("AgentT", bound="AlgoType")
+
+
+class _Ansi(str, Enum):
+    """ANSI escape codes for terminal coloring."""
+
+    GREEN = "\033[92m"
+    RED = "\033[91m"
+    RESET = "\033[0m"
+
+    def __str__(self) -> str:
+        return self.value
+
+    def __format__(self, format_spec: str) -> str:
+        return self.value
+
+
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 
 def get_nested_mean(metrics: list[dict[str, float]]) -> dict[str, float]:
@@ -68,6 +87,9 @@ class PopulationMetrics:
     indices: list[int]
     additional_metrics: list[dict[str, float]]
     hyperparameters: list[dict[str, float]]
+    nonscalar_additional_metrics: list[dict[str, np.ndarray | None]] = field(
+        default_factory=list
+    )
 
     @property
     def global_step(self) -> int:
@@ -174,6 +196,19 @@ class MetricsReport:
         """
         return self.metrics.to_dict()
 
+    def to_nonscalar_dict(self) -> dict[str, np.ndarray]:
+        """Return per-agent non-scalar metrics for TensorBoard-style backends.
+
+        :returns: Dictionary mapping ``train/agent_{idx}/{name}`` to arrays.
+        :rtype: dict[str, numpy.ndarray]
+        """
+        d: dict[str, np.ndarray] = {}
+        for idx, agent_metrics in enumerate(self.metrics.nonscalar_additional_metrics):
+            for name, val in agent_metrics.items():
+                if val is not None:
+                    d[f"train/agent_{idx}/{name}"] = val
+        return d
+
     def _eval_rows(self) -> list[MetricRow]:
         return [
             MetricRow(
@@ -243,25 +278,70 @@ class MetricsReport:
             rows.append(row)
 
     @staticmethod
-    def _fmt(v: float) -> str:
-        if np.isnan(v):
+    def _fmt(value: float) -> str:
+        if np.isnan(value):
             return "-"
-        if isinstance(v, (int, np.integer)) or (
-            isinstance(v, float) and v.is_integer()
+        if isinstance(value, (int, np.integer)) or (
+            isinstance(value, float) and value.is_integer()
         ):
-            return str(int(v))
-        if abs(v) >= 1e6:
-            return f"{v:.2e}"
-        if abs(v) < 5e-5:
-            return f"{v:.2e}"
-        return f"{v:.4f}"
+            return str(int(value))
+        if abs(value) >= 1e6:
+            return f"{value:.2e}"
+        if abs(value) < 5e-5:
+            return f"{value:.2e}"
+        return f"{value:.4f}"
+
+    @staticmethod
+    def _shorten_name(name: str) -> str:
+        """Strip ``eval/`` or ``train/`` prefix from a metric name."""
+        for prefix in ("eval/", "train/"):
+            name = name.removeprefix(prefix)
+        return name
+
+    @staticmethod
+    def _visible_width(s: str) -> int:
+        """Return the visible width of a string, ignoring ANSI escape codes."""
+        return len(_ANSI_RE.sub("", s))
+
+    @staticmethod
+    def _color_row(row: MetricRow, higher_is_better: bool = True) -> list[str]:
+        """Format a metric row with ANSI coloring on best/worst agent values.
+
+        :param row: Metric row to format.
+        :type row: MetricRow
+        :param higher_is_better: If ``True``, the highest value is colored
+            green and the lowest red. Reversed when ``False``.
+        :type higher_is_better: bool
+        :returns: Formatted row as ``[name, *agent_vals, mean]``.
+        :rtype: list[str]
+        """
+        formatted = [MetricsReport._fmt(value) for value in row.agent_values]
+        valid = [
+            (i, value)
+            for i, value in enumerate(row.agent_values)
+            if not np.isnan(value)
+        ]
+        if len(valid) >= 2:
+            vals = [value for _, value in valid]
+            if min(vals) < max(vals):
+                k = 1 if higher_is_better else -1
+                best_i = max(valid, key=lambda iv: iv[1] * k)[0]
+                worst_i = min(valid, key=lambda iv: iv[1] * k)[0]
+                formatted[best_i] = f"{_Ansi.GREEN}{formatted[best_i]}{_Ansi.RESET}"
+                formatted[worst_i] = f"{_Ansi.RED}{formatted[worst_i]}{_Ansi.RESET}"
+
+        return [
+            MetricsReport._shorten_name(row.name),
+            *formatted,
+            MetricsReport._fmt(row.pop_mean),
+        ]
 
     def render(
         self,
         eval_rows: list[MetricRow],
         train_rows: list[MetricRow],
     ) -> str:
-        """Render eval/train/meta rows into a tabulate-formatted banner.
+        """Render eval/train/hp/meta rows into a tabulate-formatted banner.
 
         :param eval_rows: List of evaluation metric rows.
         :type eval_rows: list[MetricRow]
@@ -269,47 +349,31 @@ class MetricsReport:
         :type train_rows: list[MetricRow]
         :returns: The report as a tabular string.
         :rtype: str
-
-        Example::
-
-            >>> report = MetricsReport(metrics)
-            >>> print(report)
-            ================================
-            Global Steps 1000
-            ================================
-            Metric   Agent 0  Agent 1  Mean
-            -------- ------- ------- -------
-            eval/fitness  1.0     2.0     1.5
-            train/score     1.0     2.0     1.5
-            train/additional_metric  1.0     2.0     1.5
-            -------- ------- ------- -------
-            steps         1000     1000     1000
-            mutations      "mut1"   "mut2"   "mut1"
-            steps_per_second  1000     1000     1000
-            ================================
         """
+        num_agents = len(self.metrics.indices)
+        # Pad headers to enforce a minimum column width, preventing table
+        # jitter from variable-length mutation strings.
+        min_col_width = 12
         headers = (
-            ["Metric"] + [f"Agent {idx}" for idx in self.metrics.indices] + ["Mean"]
+            ["Metric"]
+            + [f"Agent {idx}".center(min_col_width) for idx in self.metrics.indices]
+            + ["Mean".center(min_col_width)]
         )
 
         # Evaluation metrics
         table_data: list = [
-            [row.name]
-            + [self._fmt(v) for v in row.agent_values]
-            + [self._fmt(row.pop_mean)]
-            for row in eval_rows
+            self._color_row(row, higher_is_better=True) for row in eval_rows
         ]
         table_data.append(SEPARATING_LINE)
 
         # Training metrics
         table_data.extend(
-            [
-                [row.name]
-                + [self._fmt(v) for v in row.agent_values]
-                + [self._fmt(row.pop_mean)]
-                for row in train_rows
-            ]
+            [MetricsReport._shorten_name(row.name)]
+            + [MetricsReport._fmt(value) for value in row.agent_values]
+            + [MetricsReport._fmt(row.pop_mean)]
+            for row in train_rows
         )
+
         table_data.append(SEPARATING_LINE)
 
         # Hyperparameters
@@ -317,32 +381,35 @@ class MetricsReport:
             hp_names = list(self.metrics.hyperparameters[0].keys())
             for hp_name in hp_names:
                 hp_vals = [
-                    self._fmt(agent_hps.get(hp_name, float("nan")))
+                    MetricsReport._fmt(agent_hps.get(hp_name, float("nan")))
                     for agent_hps in self.metrics.hyperparameters
                 ]
                 table_data.append([hp_name, *hp_vals, ""])
+            table_data.append(SEPARATING_LINE)
 
         # Metadata
         steps_row = ["steps"] + [str(s) for s in self.metrics.steps] + [""]
         muts_row = ["mutations"] + [str(m) for m in self.metrics.mutations] + [""]
         fps_row = (
-            ["steps_per_second"]
-            + [self._fmt(s) for s in self.metrics.steps_per_second]
-            + [self._fmt(self.metrics.fps)]
+            ["steps/s"]
+            + [MetricsReport._fmt(s) for s in self.metrics.steps_per_second]
+            + [MetricsReport._fmt(self.metrics.fps)]
         )
         table_data.extend([steps_row, muts_row, fps_row])
 
-        # Render the table
+        col_align = ("left",) + ("right",) * (num_agents + 1)
+
         table_str = tabulate(
             table_data,
             headers=headers,
             tablefmt="simple",
-            stralign="right",
-            numalign="right",
+            colalign=col_align,
         )
 
         banner_text = f"Global Steps {self.metrics.global_step}"
-        width = max(len(line) for line in table_str.splitlines())
+        width = max(
+            MetricsReport._visible_width(line) for line in table_str.splitlines()
+        )
         border = "=" * width
 
         return f"{border}\n{banner_text.center(width)}\n{border}\n{table_str}"
@@ -369,7 +436,6 @@ class Population(Generic[AgentT]):
         agents: list[AgentT],
         *,
         min_evo_steps: int = 10,
-        sum_scores: bool = True,
         accelerator: Accelerator | None = None,
         loggers: list[Logger] | None = None,
     ) -> None:
@@ -380,7 +446,6 @@ class Population(Generic[AgentT]):
 
         self._agents = agents
         self.min_evo_steps = min_evo_steps
-        self.sum_scores = sum_scores
         self.accelerator = accelerator
         self.loggers = loggers or []
 
@@ -392,6 +457,9 @@ class Population(Generic[AgentT]):
         self.additional_metric_names: list[str] = self._agents[
             0
         ].metrics.additional_metrics
+        self.nonscalar_metric_names: list[str] = self._agents[
+            0
+        ].metrics.nonscalar_metrics
         self.agent_ids: list[str] | None = (
             self._agents[0].metrics.agent_ids if self.is_multi_agent else None
         )
@@ -405,6 +473,14 @@ class Population(Generic[AgentT]):
     def size(self) -> int:
         """Number of agents in the population."""
         return len(self._agents)
+
+    def is_nested_scores(self) -> bool:
+        """Check if the scores are nested per-sub-agent i.e. a nested list.
+
+        :returns: True if the scores are nested per-sub-agent, False otherwise.
+        :rtype: bool
+        """
+        return isinstance(self._agents[0].metrics.scores[0], list)
 
     def update(self, agents: list[AgentT]) -> None:
         """Replace the population (e.g. after tournament selection + mutation)."""
@@ -492,6 +568,7 @@ class Population(Generic[AgentT]):
             indices=indices,
             additional_metrics=self._collect_additional_metrics(),
             hyperparameters=self._collect_hyperparameters(),
+            nonscalar_additional_metrics=self._collect_nonscalar_metrics(),
         )
 
     def _collect_hyperparameters(self) -> list[dict[str, float]]:
@@ -515,7 +592,7 @@ class Population(Generic[AgentT]):
         :returns: List of mean scores for each agent or per-sub-agent scores for multi-agent systems.
         :rtype: list[float | dict[str, float]]
         """
-        if not self.is_multi_agent or self.sum_scores:
+        if not self.is_nested_scores():
             return [
                 float(np.mean(agent.metrics.scores))
                 if agent.metrics.scores
@@ -554,5 +631,25 @@ class Population(Generic[AgentT]):
                         d[f"{agent_id}/{name}"] = agent.metrics.get_mean(name, agent_id)
                 else:
                     d[name] = agent.metrics.get_mean(name)
+            result.append(d)
+        return result
+
+    def _collect_nonscalar_metrics(self) -> list[dict[str, np.ndarray | None]]:
+        """Collect per-agent non-scalar metric arrays (e.g. histograms).
+
+        :returns: One dict per agent mapping metric names to their accumulated arrays.
+        :rtype: list[dict[str, numpy.ndarray | None]]
+        """
+        result: list[dict[str, np.ndarray | None]] = []
+        for agent in self.agents:
+            d: dict[str, np.ndarray | None] = {}
+            for name in self.nonscalar_metric_names:
+                if self.is_multi_agent:
+                    for agent_id in self.agent_ids:
+                        d[f"{agent_id}/{name}"] = agent.metrics.get_histogram(
+                            name, agent_id
+                        )
+                else:
+                    d[name] = agent.metrics.get_histogram(name)
             result.append(d)
         return result

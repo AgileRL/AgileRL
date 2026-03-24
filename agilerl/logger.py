@@ -10,8 +10,14 @@ from __future__ import annotations
 import csv
 import io
 from abc import ABC, abstractmethod
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None
 
 import wandb
 
@@ -134,9 +140,13 @@ class TensorboardLogger(Logger):
         log_dir: str | Path = "tensorboard_logs",
         accelerator: Accelerator | None = None,
     ) -> None:
-        from torch.utils.tensorboard import SummaryWriter
+        if SummaryWriter is None:
+            msg = "TensorBoard is not installed. Please install it with `pip install tensorboard`."
+            raise ImportError(msg)
 
-        self._writer = SummaryWriter(log_dir=str(log_dir))
+        self._date = datetime.now().strftime("%m%d%Y%H%M%S")
+        self._log_path = Path(log_dir) / self._date
+        self._writer = SummaryWriter(log_dir=str(self._log_path))
         self._accelerator = accelerator
 
     def write(self, report: MetricsReport) -> None:
@@ -148,9 +158,15 @@ class TensorboardLogger(Logger):
             if not self._accelerator.is_main_process:
                 self._accelerator.wait_for_everyone()
                 return
+
         for key, value in data.items():
             if isinstance(value, (int, float)):
                 self._writer.add_scalar(key, value, global_step=global_step)
+
+        nonscalar_data = report.to_nonscalar_dict()
+        for key, value in nonscalar_data.items():
+            self._writer.add_histogram(key, value, global_step=global_step)
+
         self._writer.flush()
 
         if self._accelerator is not None:
