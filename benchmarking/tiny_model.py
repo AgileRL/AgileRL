@@ -113,15 +113,14 @@ class TinyDigitTokenizer:
         return output
 
 
-def build_tiny_actor_network() -> AutoModelForCausalLMWithValueHead:
-    """Create a tiny value-head causal LM suitable for PPO actor_network debugging."""
+def _make_tiny_config() -> GPT2Config:
     config = GPT2Config(
         vocab_size=TINY_VOCAB_SIZE,
         n_positions=TINY_MAX_CONTEXT_LENGTH,
         n_ctx=TINY_MAX_CONTEXT_LENGTH,
-        n_embd=32,
-        n_layer=1,
-        n_head=1,
+        n_embd=64,
+        n_layer=2,
+        n_head=2,
         bos_token_id=1,
         eos_token_id=TINY_TARGET_TOKEN_ID,
         pad_token_id=0,
@@ -129,23 +128,42 @@ def build_tiny_actor_network() -> AutoModelForCausalLMWithValueHead:
         embd_pdrop=0.0,
         resid_pdrop=0.0,
     )
-    # Keep all stochastic dropout paths disabled for PPO debugging stability.
     if hasattr(config, "summary_first_dropout"):
         config.summary_first_dropout = 0.0
-    base_model = GPT2LMHeadModel(config)
-    generation_config = GenerationConfig(
+    return config
+
+
+def _make_tiny_generation_config() -> GenerationConfig:
+    return GenerationConfig(
         do_sample=True,
         max_length=TINY_MAX_CONTEXT_LENGTH,
         max_new_tokens=TINY_MAX_OUTPUT_TOKENS,
         pad_token_id=0,
         eos_token_id=TINY_TARGET_TOKEN_ID,
     )
-    base_model.generation_config = generation_config
-    actor_network = AutoModelForCausalLMWithValueHead.from_pretrained(base_model, **{"summary_dropout_prob": 0.0})
 
-    # PEFT's generate path expects generation_config on the wrapped model.
-    actor_network.generation_config = generation_config
-    if hasattr(actor_network, "pretrained_model"):
-        actor_network.pretrained_model.generation_config = generation_config
-    actor_network.name_or_path = "tiny-debug-transformer"
-    return actor_network
+
+def build_tiny_actor_network(SEPARATE_CRITIC: bool = False) -> GPT2LMHeadModel:
+    """Create a tiny causal LM (no value head) suitable for PPO actor debugging."""
+    base_model = GPT2LMHeadModel(_make_tiny_config())
+    generation_config = _make_tiny_generation_config()
+    base_model.generation_config = generation_config
+    base_model.name_or_path = "tiny-debug-transformer"
+    if not SEPARATE_CRITIC:
+        actor_network = AutoModelForCausalLMWithValueHead.from_pretrained(base_model, **{"summary_dropout_prob": 0.0})
+        actor_network.generation_config = generation_config
+        return actor_network
+    return base_model
+
+
+def build_tiny_critic_network() -> AutoModelForCausalLMWithValueHead:
+    """Create a tiny value-head causal LM suitable for PPO critic debugging."""
+    base_model = GPT2LMHeadModel(_make_tiny_config())
+    generation_config = _make_tiny_generation_config()
+    base_model.generation_config = generation_config
+    critic_network = AutoModelForCausalLMWithValueHead.from_pretrained(base_model, **{"summary_dropout_prob": 0.0})
+    critic_network.generation_config = generation_config
+    if hasattr(critic_network, "pretrained_model"):
+        critic_network.pretrained_model.generation_config = generation_config
+    critic_network.name_or_path = "tiny-debug-transformer"
+    return critic_network

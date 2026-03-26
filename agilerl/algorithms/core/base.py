@@ -108,7 +108,6 @@ if HAS_LLM_DEPENDENCIES:
     from agilerl.utils.llm_utils import (
         create_model_from_name_or_path,
         gather_if_zero3,
-        masked_mean,
     )
 
 __all__ = ["EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
@@ -1875,6 +1874,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         return group_outputs
 
+
 class LLMAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all LLM algorithms in the AgileRL framework.
 
@@ -1993,9 +1993,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.pretrained_model_name_or_path = model_name
         elif hasattr(actor_network, "name_or_path"):
             self.pretrained_model_name_or_path = actor_network.name_or_path
-        elif hasattr(actor_network.base_model, "name_or_path"):
+        elif hasattr(actor_network, "pretrained_model") and hasattr(actor_network.pretrained_model, "name_or_path"):
+            self.pretrained_model_name_or_path = actor_network.pretrained_model.name_or_path
+        elif hasattr(actor_network, "base_model") and hasattr(actor_network.base_model, "name_or_path"):
             self.pretrained_model_name_or_path = actor_network.base_model.name_or_path
-        elif hasattr(actor_network.base_model, "pretrained_model"):
+        elif hasattr(actor_network, "base_model") and hasattr(actor_network.base_model, "pretrained_model"):
             self.pretrained_model_name_or_path = actor_network.base_model.pretrained_model.name_or_path
         else:
             raise ValueError("Actor network name or path not found.")
@@ -2017,8 +2019,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.batch_size = self.batch_size_per_process * (
             self.accelerator.num_processes if self.accelerator is not None else 1
         )
-        if self.accelerator is not None and (
-            self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+        if (
+            self.accelerator is not None
+            and self.accelerator.state.deepspeed_plugin is not None
+            and self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
                 "optimizer",
                 None,
             )
@@ -2058,7 +2062,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
         self.use_value_head = use_value_head
-        if max_grad_norm and (accelerator is not None):
+        if (
+            max_grad_norm
+            and accelerator is not None
+            and getattr(accelerator.state, "deepspeed_plugin", None) is not None
+        ):
             if accelerator.is_main_process:
                 warnings.warn(
                     "Argument 'max_grad_norm' will overwrite the equivalent value set for 'gradient_clipping' in the deepspeed config.",
@@ -2067,14 +2075,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.accelerator.state.deepspeed_plugin.deepspeed_config[
                 "gradient_clipping"
             ] = max_grad_norm
+            self.register_mutation_hook(self._sync_deepspeed_gradient_clipping)
 
         self.max_grad_norm = max_grad_norm
         self.reduce_memory_peak = reduce_memory_peak
 
-        if self.accelerator is not None:
-            self.register_mutation_hook(self._sync_deepspeed_gradient_clipping)
-
-        if self.accelerator is not None:
+        if (
+            self.accelerator is not None
+            and getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
+        ):
             self.zero_stage = self.accelerator.state.deepspeed_plugin.deepspeed_config[
                 "zero_optimization"
             ]["stage"]
@@ -2242,7 +2251,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 "Actor is not defined, please check that the actor is defined."
             )
             self.actor.save_checkpoint(path, tag=tag)
-            self.actor.set_adapter("actor")
+            self.use_adapter("actor")
         else:
             warnings.warn(
                 "Distributed actor save not supported for non-distributed training.",
@@ -2277,7 +2286,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     raise ValueError(
                         msg,
                     )
-                self.actor.set_adapter("actor")
+                self.use_adapter("actor")
 
             except Exception as e:
                 msg = f"Deepspeed failed to resume from checkpoint {path}"
@@ -2300,39 +2309,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             is_dummy_optimizer = isinstance(self.optimizer.optimizer, DummyOptimizer)
 
-            # FIXME hacky asf
-            for name, param in self.actor.named_parameters():
-                if "critic" in name and "lora" in name:
-                    param.requires_grad = True
+            self._restore_adapter_trainability(["actor", "critic"])
 
-            # Check this at init time, before deepspeed.initialize()
-            optimizer = self.optimizer.optimizer
-            all_group_params = set()
-            for group in optimizer.param_groups:
-                for p in group['params']:
-                    all_group_params.add(id(p))
-
-            for name, p in self.actor.named_parameters():
-                if "actor" in name and "lora" in name:
-                    print(name, id(p) in all_group_params)
-
-            for name, p in self.actor.named_parameters():
-                if "critic" in name and "lora" in name:
-                    print(name, id(p) in all_group_params)
-
-            # assert False
-                    
             self.actor, optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor,
                 self.optimizer.optimizer,
                 self.lr_scheduler,
             )
-
-            print(len(self.actor.optimizer.bit16_groups))  # should be 2
-            print(len(self.actor.optimizer.params_in_partition[0]))  # actor params on this rank
-            print(len(self.actor.optimizer.params_in_partition[1]))  # critic params on this rank
-            assert False
-
             self.optimizer.optimizer = (
                 optimizer if not is_dummy_optimizer else self.actor.optimizer
             )
@@ -2342,7 +2325,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 else type(self.actor.optimizer)
             )
             if self.gradient_checkpointing:
-                self.actor.module.gradient_checkpointing_enable(
+                self.accelerator.unwrap_model(self.actor).gradient_checkpointing_enable(
                     gradient_checkpointing_kwargs={"use_reentrant": False},
                 )
         else:
@@ -2351,7 +2334,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             self.actor = self.actor.to(self.device)
             if self.gradient_checkpointing:
-                self.actor.gradient_checkpointing_enable()
+                self.actor.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False},
+                )
 
     def clean_up(self) -> None:
         """Clean up the algorithm."""
@@ -2575,7 +2560,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             # Merge adapter into base model
             # Update the reference update tracker
             if self.use_separate_reference_adapter:
-                self._copy_adapter_weights(source_adapter="actor", target_adapter="reference")
+                self._copy_adapter_weights(
+                    source_adapter="actor", target_adapter="reference"
+                )
             else:
                 if self.accelerator is not None:
                     merged_base_model = self.accelerator.unwrap_model(
@@ -2591,7 +2578,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
                 if self.accelerator is not None:
                     self.accelerator.wait_for_everyone()
-                self.actor.set_adapter("actor")
+                self.use_adapter("actor")
 
                 # Reinit optimizer
                 optim_class = self._select_optim_class()
@@ -2645,6 +2632,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         if self.use_value_head and add_adapters:
             import dataclasses
+
             config = dataclasses.replace(self.lora_config)
             config.target_modules.add("summary")
             self.actor.add_adapter(
@@ -2652,11 +2640,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 peft_config=config,  # type: ignore[arg-type]
             )
 
-        self.actor.set_adapter("actor")
+        self.use_adapter("actor")
 
         for name, param in self.actor.named_parameters():
             if "actor" in name and "lora" in name:
-                assert param.requires_grad == True
+                assert param.requires_grad is True
 
         if self.accelerator is None:
             self.actor = DummyEvolvable(module=self.actor, device=self.device)
@@ -2706,7 +2694,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
-        with self.select_policy(use_reference):
+        with self.select_adapter("reference" if use_reference else "actor"):
             self.actor.train(mode=not eval_mode)
             num_samples = ids.shape[0]
             if attention_mask is None:
@@ -2744,83 +2732,110 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 log_probs.append(log_prob)
         return torch.cat(log_probs, dim=0)
 
-    def _backward_pass(self, loss: float) -> None:
-        """Perform a backward pass.
+    def _backward_pass(
+        self,
+        loss: torch.Tensor,
+        *,
+        actor_loss: torch.Tensor | None = None,
+        critic_loss: torch.Tensor | None = None,
+        accum_steps: int = 1,
+        accum_idx: int = 0,
+    ) -> None:
+        """Perform a backward pass with optional gradient accumulation.
 
-        :param loss: Loss
-        :type loss: float
+        When ``actor_loss`` and ``critic_loss`` are provided and gradient
+        checkpointing is enabled (without Accelerator), backward passes are run
+        separately so that checkpoint recomputation uses the correct adapter.
+
+        :param loss: Combined loss (used directly for the Accelerator path and
+            the non-checkpointing non-Accelerator path).
+        :param actor_loss: Actor (policy-gradient) loss for separate backward.
+        :param critic_loss: Critic (value-function) loss for separate backward.
+        :param accum_steps: Number of micro-batches per optimizer step.
+        :param accum_idx: Current micro-batch index within the accumulation window.
         """
         if self.accelerator is not None:
-            self.accelerator.backward(loss)
+            has_separate_losses = actor_loss is not None and critic_loss is not None
+            uses_deepspeed = self.accelerator.state.deepspeed_plugin is not None
+            # print({'gradient_checkpointing': self.gradient_checkpointing, 'has_separate_losses': has_separate_losses, 'uses_deepspeed': uses_deepspeed})
+            if self.gradient_checkpointing and has_separate_losses and not uses_deepspeed:
+                with self.select_adapter("actor"):
+                    self.accelerator.backward(actor_loss)
+                with self.select_adapter("critic"):
+                    self.accelerator.backward(critic_loss)
+            else:
+                self.accelerator.backward(loss)
             self.optimizer.step()
             self.optimizer.zero_grad()
+            if self.lr_scheduler is not None:
+                self.lr_scheduler.step()
+                self.lr = self.lr_scheduler.get_last_lr()[0]
         else:
-            loss.backward()
-            clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-        if self.lr_scheduler is not None:
-            self.lr_scheduler.step()
-            self.lr = self.lr_scheduler.get_last_lr()[0]
+            has_separate_losses = actor_loss is not None and critic_loss is not None
+            if self.gradient_checkpointing and has_separate_losses:
+                with self.select_adapter("actor"):
+                    (actor_loss / accum_steps).backward()
+                with self.select_adapter("critic"):
+                    (critic_loss / accum_steps).backward()
+            else:
+                (loss / accum_steps).backward()
 
-    @contextmanager
-    def select_policy(self, use_reference: bool = False) -> None:
-        """Select the policy."""
-        if use_reference:
-            self._use_reference_policy()
+            if (accum_idx + 1) % accum_steps == 0:
+                clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                if self.lr_scheduler is not None:
+                    self.lr_scheduler.step()
+                    self.lr = self.lr_scheduler.get_last_lr()[0]
+
+    def use_adapter(self, adapter_name: str) -> None:
+        """Switch the active PEFT adapter, handling all side-effects.
+
+        For "reference": switches adapter and freezes reference params (never trained).
+        For all others: switches adapter and restores requires_grad=True on all
+        training adapter LoRA params so that DeepSpeed ZeRO-2 gradient bucket hooks
+        keep firing correctly.
+
+        :param adapter_name: Name of the adapter to activate ("actor", "critic", "reference").
+        :type adapter_name: str
+        """
+        if adapter_name == "reference":
+            if self.use_separate_reference_adapter:
+                self.actor.set_adapter("reference")
+                for name, param in self.actor.named_parameters():
+                    if param is not None and "reference" in name:
+                        param.requires_grad = False
+            else:
+                self.actor.base_model.disable_adapter_layers()
         else:
-            self._use_policy()
-        yield
-        if use_reference:
-            self._use_reference_policy()
+            if self.use_separate_reference_adapter:
+                self.actor.set_adapter(adapter_name)
+            else:
+                self.actor.base_model.enable_adapter_layers()
+            self._restore_adapter_trainability(["actor", "critic"])
 
     @contextmanager
     def select_adapter(self, adapter_name: str) -> None:
-        """Select the adapter."""
-        if adapter_name == "actor":
-            self.actor.set_adapter("actor")
-            yield
-            self._use_policy()
-        elif adapter_name == "reference":
-            self._use_reference_policy()
-            yield
-            self._use_policy()
-        elif adapter_name == "critic":
-            self.actor.set_adapter("critic")
-            yield
-            self._use_policy()
-        else:
-            raise ValueError(f"Invalid adapter name: {adapter_name}")
+        """Temporarily switch adapter; restores the actor adapter on exit.
 
-    def _use_reference_policy(self) -> None:
-        """Use the reference policy."""
-        if self.use_separate_reference_adapter:
-            self.actor.set_adapter("reference")
-            for name, param in self.actor.named_parameters():
-                if param is not None and "reference" in name:
-                    param.requires_grad = False
-        else:
-            self.actor.base_model.disable_adapter_layers()
+        :param adapter_name: Name of the adapter to activate ("actor", "critic", "reference").
+        :type adapter_name: str
+        """
+        self.use_adapter(adapter_name)
+        try:
+            yield
+        finally:
+            self.use_adapter("actor")
 
-    def _use_policy(self) -> None:
-        """Use the policy."""
-        if self.use_separate_reference_adapter:
-            self.actor.set_adapter("actor")
-        else:
-            self.actor.base_model.enable_adapter_layers()
-
-    def _restore_lora_trainability(self, adapter_names: list[str]) -> None:
-        """Restore requires_grad=True for specified LoRA adapters.
+    def _restore_adapter_trainability(self, adapter_names: list[str]) -> None:
+        """Restore requires_grad=True for all trainable parameters of specified adapters.
 
         PEFT's set_adapter() sets requires_grad=False on all non-active adapter
         weights. Under DeepSpeed ZeRO Stage 2, gradient bucket hooks are registered
         once at accelerator.prepare() time based on the requires_grad snapshot at
         that moment. If set_adapter() later toggles requires_grad=False on params
         that ZeRO-2 registered hooks for, those hooks never fire, the bucket never
-        completes, and reduce-scatter never runs — the optimizer sees zero gradients.
-
-        Call this after any set_adapter() call to keep all training adapters live
-        in the ZeRO-2 gradient bucket tracking.
+        completes, and reduce-scatter never runs - the optimizer sees zero gradients.
 
         :param adapter_names: LoRA adapter names whose params should be trainable.
         :type adapter_names: list[str]
@@ -2996,7 +3011,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             action_mask = torch.zeros_like(completion_id, device=self.device)
             action_mask[:, num_input_tokens[i] :] = True
             action_mask[completion_id == self.pad_token_id] = False
-            action_mask = action_mask[:, 1:] # FIXME removed this in ppo testing
+            action_mask = action_mask[:, 1:]  # FIXME removed this in ppo testing
             action_masks.append(action_mask)
 
         return completion_ids, action_masks
@@ -3025,7 +3040,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             per_token_logps.append(row_per_token_logps)
         return torch.stack(per_token_logps)
 
-
     def _configure_batch_size(
         self,
         batch_size: int,
@@ -3042,6 +3056,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             raise ValueError(
                 msg,
             )
+
+        if self.accelerator.state.deepspeed_plugin is None:
+            self.batch_size_per_process = int(
+                batch_size / self.accelerator.num_processes
+            )
+            return
 
         ds_config = self.accelerator.state.deepspeed_plugin.deepspeed_config
 
@@ -3281,7 +3301,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Synchronize max_grad_norm with DeepSpeed gradient_clipping config.
         Registered as a mutation hook to ensure consistency after mutations.
         """
-        if self.accelerator is None:
+        if (
+            self.accelerator is None
+            or self.accelerator.state.deepspeed_plugin is None
+        ):
             return
 
         if (

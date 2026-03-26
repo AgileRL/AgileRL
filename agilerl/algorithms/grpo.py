@@ -603,7 +603,7 @@ class GRPO(LLMAlgorithm):
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
             model_kwargs["position_ids"] = position_ids
-        with self.select_policy(use_reference=False):
+        with self.select_adapter("actor"):
             self.actor.train()
             policy_hidden = _get_hidden(**model_kwargs)  # (B, seq_len, H)
         target_ids = batch_ids[:, 1:].contiguous()  # (B, seq_len-1)

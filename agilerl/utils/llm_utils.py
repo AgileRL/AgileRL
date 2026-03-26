@@ -20,7 +20,9 @@ if HAS_LLM_DEPENDENCIES:
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.modeling_utils import PreTrainedModel
     from transformers.tokenization_utils_base import BatchEncoding
-    from trl.experimental.ppo.modeling_value_head import AutoModelForCausalLMWithValueHead
+    from trl.experimental.ppo.modeling_value_head import (
+        AutoModelForCausalLMWithValueHead,
+    )
 
     AutoTokenizer = AutoTokenizer
 else:
@@ -707,16 +709,18 @@ def create_model_from_name_or_path(
     )
 
 
-
-def masked_mean(values: torch.Tensor, mask: torch.Tensor, axis: bool | None = None) -> torch.Tensor:
+def masked_mean(
+    values: torch.Tensor, mask: torch.Tensor, axis: bool | None = None
+) -> torch.Tensor:
     """Compute mean of tensor with a masked values."""
     if axis is not None:
         return (values * mask).sum(axis=axis) / mask.sum(axis=axis)
-    else:
-        return (values * mask).sum() / mask.sum()
+    return (values * mask).sum() / mask.sum()
 
 
-def masked_var(values: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) -> torch.Tensor:
+def masked_var(
+    values: torch.Tensor, mask: torch.Tensor, unbiased: bool = True
+) -> torch.Tensor:
     """Compute variance of tensor with masked values."""
     mean = masked_mean(values, mask)
     centered_values = values - mean
@@ -724,10 +728,11 @@ def masked_var(values: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) 
     if unbiased:
         mask_sum = mask.sum()
         if mask_sum == 0:
-            raise ValueError(
+            msg = (
                 "The sum of the mask is zero, which can happen when `mini_batch_size=1`;"
                 "try increase the `mini_batch_size` or `gradient_accumulation_steps`"
             )
+            raise ValueError(msg)
         # note that if mask_sum == 1, then there is a division by zero issue
         # to avoid it you just need to use a larger minibatch_size
         bessel_correction = mask_sum / (mask_sum - 1)
@@ -735,10 +740,12 @@ def masked_var(values: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) 
     return variance
 
 
-def masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True) -> torch.Tensor:
+def masked_whiten(
+    values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True
+) -> torch.Tensor:
     """Whiten values with masked values."""
     mean, var = masked_mean(values, mask), masked_var(values, mask)
     whitened = (values - mean) * torch.rsqrt(var + 1e-8)
     if not shift_mean:
         whitened += mean
-    return whitened 
+    return whitened

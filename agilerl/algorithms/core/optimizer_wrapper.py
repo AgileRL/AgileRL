@@ -58,7 +58,7 @@ def init_from_single(
     optimizer_kwargs: dict[str, Any],
 ) -> Optimizer:
     """Initialize an optimizer from a single network."""
-    # FIXME test for 
+    # FIXME test for
     # params = [
     #     {"params": [param for name, param in network.named_parameters() if "actor" in name and "lora" in name], "lr": lr},
     #     {"params":  [
@@ -71,15 +71,20 @@ def init_from_single(
     # return optimizer_cls(params, **optimizer_kwargs)
 
     for name, param in network.named_parameters():
-        if "critic" in name:
+        if "critic" in name or "actor" in name:
             param.requires_grad = True
 
-
-    actor_params = [p for n, p in network.named_parameters() if 'actor' in n and p.requires_grad]
-    critic_params = [p for n, p in network.named_parameters() if 'critic' in n and p.requires_grad]
-    params = [{"params": actor_params, "lr": lr}, {"params": critic_params, "lr": lr}]
+    actor_params = [
+        p for n, p in network.named_parameters() if "actor" in n and p.requires_grad
+    ]
+    critic_params = [
+        p for n, p in network.named_parameters() if "critic" in n and p.requires_grad
+    ]
+    params = [
+        {"params": actor_params, "lr": lr},
+        {"params": critic_params, "lr": lr},
+    ]
     return optimizer_cls(params, **optimizer_kwargs)
-    
 
 
 class OptimizerWrapper:

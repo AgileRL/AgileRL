@@ -17,6 +17,7 @@ from accelerate import Accelerator
 from agilerl.algorithms import LLMPPO
 from agilerl.training import train_llm
 from agilerl.training.train_llm import finetune_llm_reasoning
+from agilerl.utils.algo_utils import stack_and_pad_experiences
 from agilerl.utils.llm_utils import ReasoningGym
 from benchmarking.tiny_model import (
     build_tiny_actor_network,
@@ -52,29 +53,54 @@ def token_target_reward(completion: str, _answer: str, _question: str) -> float:
     return 1.0 if completion == TARGET_TOKEN else -1.0
 
 
-def evaluate_target_token_rate(agent: LLMPPO, env: ReasoningGym, batches: int = 4) -> float:
+def evaluate_target_token_rate(
+    agent: LLMPPO, env: ReasoningGym, batches: int = 4
+) -> tuple[float, float]:
     total = 0
     hits = 0
-    with env.eval_mode():
+    all_sq_errors = []
+    with env.eval_mode(), torch.no_grad():
         prompts = env.reset(reset_dataloaders=True)
         for _ in range(batches):
-            completion_ids, _ = agent.get_action(prompts, training=False)
+            completion_ids, action_masks = agent.get_action(prompts, training=False)
+            seq_rewards = []
             for prompt, group_completion in zip(prompts, completion_ids, strict=False):
                 prompt_len = prompt["input_ids"].shape[1]
                 first_generated = group_completion[:, prompt_len]
                 total += first_generated.shape[0]
-                hits += int((first_generated == TARGET_TOKEN_ID).sum().item())
+                hit = int((first_generated == TARGET_TOKEN_ID).sum().item())
+                hits += hit
+                reward = 1.0 if first_generated.item() == TARGET_TOKEN_ID else -1.0
+                seq_rewards.append(reward)
+
+            padded_ids, padded_masks = stack_and_pad_experiences(
+                completion_ids,
+                action_masks,
+                padding_values=[agent.pad_token_id, False],
+            )
+            padded_ids = padded_ids.to(agent.device)
+            padded_masks = padded_masks.to(agent.device)
+            values = agent._get_values(
+                padded_ids,
+                batch_size=padded_ids.shape[0],
+                eval_mode=True,
+            )
+            last_action_idx = padded_masks.long().cumsum(dim=-1).argmax(dim=-1)
+            last_values = values.gather(1, last_action_idx.unsqueeze(1)).squeeze(1)
+            rewards_t = torch.tensor(seq_rewards, device=last_values.device)
+            all_sq_errors.append((last_values - rewards_t).pow(2).mean().item())
+
             prompts, _ = env.step(completion_ids)
 
-    return hits / max(total, 1)
+    critic_mse = sum(all_sq_errors) / max(len(all_sq_errors), 1)
+    return hits / max(total, 1), critic_mse
 
 
 def evaluate_target_token_rate_greedy_like(
     agent: LLMPPO,
     env: ReasoningGym,
     batches: int = 4,
-) -> float:
-    # PPO path uses sampling; temporarily make it near-greedy for evaluation.
+) -> tuple[float, float]:
     original_temperature = agent.generation_config.temperature
     original_top_k = agent.generation_config.top_k
     original_top_p = agent.generation_config.top_p
@@ -90,7 +116,7 @@ def evaluate_target_token_rate_greedy_like(
 
 
 def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
-    accelerator = Accelerator()
+    accelerator = None  # Accelerator()
     torch.manual_seed(seed)
     actor_network = build_tiny_actor_network()
     tokenizer = TinyDigitTokenizer()
@@ -150,13 +176,19 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
         gamma=init_hp["GAMMA"],
         gae_lambda=init_hp["GAE_LAMBDA"],
         seed=seed,
+        gradient_checkpointing=True,
     )
 
-    pre_rate = evaluate_target_token_rate(llm_ppo, env, batches=4)
-    pre_rate_greedy = evaluate_target_token_rate_greedy_like(llm_ppo, env, batches=4)
+    pre_rate, pre_mse = evaluate_target_token_rate(llm_ppo, env, batches=4)
+    pre_rate_greedy, pre_mse_g = evaluate_target_token_rate_greedy_like(
+        llm_ppo, env, batches=4
+    )
     print(
         f"[seed={seed}] pre-train token-{TARGET_TOKEN} hit rate "
         f"(sampled/greedy-like): {pre_rate:.3f}/{pre_rate_greedy:.3f}"
+    )
+    print(
+        f"[seed={seed}] pre critic MSE (sampled/greedy-like): {pre_mse:.4f}/{pre_mse_g:.4f}"
     )
 
     original_save_checkpoint = train_llm.save_llm_checkpoint
@@ -182,15 +214,24 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
     finally:
         train_llm.save_llm_checkpoint = original_save_checkpoint
 
-    post_rate = evaluate_target_token_rate(llm_ppo, env, batches=4)
-    post_rate_greedy = evaluate_target_token_rate_greedy_like(llm_ppo, env, batches=4)
+    post_rate, post_mse = evaluate_target_token_rate(llm_ppo, env, batches=4)
+    post_rate_greedy, post_mse_g = evaluate_target_token_rate_greedy_like(
+        llm_ppo, env, batches=4
+    )
     print(
         f"[seed={seed}] post-train token-{TARGET_TOKEN} hit rate "
         f"(sampled/greedy-like): {post_rate:.3f}/{post_rate_greedy:.3f}"
     )
     print(
+        f"[seed={seed}] post critic MSE (sampled/greedy-like): {post_mse:.4f}/{post_mse_g:.4f}"
+    )
+    print(
         f"[seed={seed}] improvement (sampled/greedy-like): "
         f"{post_rate - pre_rate:+.3f}/{post_rate_greedy - pre_rate_greedy:+.3f}"
+    )
+    print(
+        f"[seed={seed}] critic MSE change (sampled/greedy-like): "
+        f"{post_mse - pre_mse:+.4f}/{post_mse_g - pre_mse_g:+.4f}"
     )
     return pre_rate, post_rate
 
@@ -218,8 +259,8 @@ if __name__ == "__main__":
     init_hp["UPDATE_EPOCHS"] = 2
     init_hp["LR"] = 1e-3
     init_hp["BETA"] = 0.0
-    init_hp["TEMPERATURE"] = 0.8
-    init_hp["VF_COEF"] = 0.0
+    init_hp["TEMPERATURE"] = 0.5
+    init_hp["VF_COEF"] = 0.5
     init_hp["GAMMA"] = 1.0
     init_hp["GAE_LAMBDA"] = 1.0
-    main(init_hp)
+    main(init_hp, (0,))

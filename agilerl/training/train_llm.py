@@ -1,14 +1,14 @@
 import warnings
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
-import torch.distributed as dist
-import wandb
 import torch
-from contextlib import contextmanager
+import torch.distributed as dist
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DPO, GRPO, LLMPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -65,7 +65,11 @@ def memory_efficient_params(agent) -> None:
     # moving params to CPU between updates causes generate() device mismatches.
     sleep_mode = use_vllm and vllm_cfg is not None and vllm_cfg.sleep_mode
     if sleep_mode:
-        unwrapped_model = agent.accelerator.unwrap_model(agent.actor) if agent.accelerator is not None else agent.actor
+        unwrapped_model = (
+            agent.accelerator.unwrap_model(agent.actor)
+            if agent.accelerator is not None
+            else agent.actor
+        )
         move_params_to_gpu(unwrapped_model, agent.device)
     yield
     if sleep_mode:
@@ -228,7 +232,9 @@ def finetune_llm_reasoning(
                 rewards,
             )
             with memory_efficient_params(agent):
-                loss, kl, pg_loss, critic_loss, entropy = agent.learn(experiences, env.tokenizer)
+                loss, kl, pg_loss, critic_loss, entropy = agent.learn(
+                    experiences, env.tokenizer
+                )
             metrics = [loss, kl, rewards, completion_lengths]
             if max_reward is not None:
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())

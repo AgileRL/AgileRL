@@ -260,7 +260,6 @@ def ppo_factory():
     return generate_ppo
 
 
-
 @spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
@@ -316,20 +315,20 @@ def test_ppo_learns(
         for _ in range(batch_size)
     ]
     rewards = torch.tensor(
-        [1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0],
-        dtype=torch.float32
+        [1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0], dtype=torch.float32
     ).unsqueeze(1)
 
-
     # DeepSpeed uses first step in cycle to allocate the fp32 master weights and synchronize them with your bf16 params.
-    ppo.learn((completions, action_masks, rewards)) 
+    ppo.learn((completions, action_masks, rewards))
 
-    pre_learn_actor_state_dict = {name: param.clone().detach() for name, param in ppo.actor.named_parameters()}
-    
+    pre_learn_actor_state_dict = {
+        name: param.clone().detach() for name, param in ppo.actor.named_parameters()
+    }
+
     for name, param in ppo.actor.named_parameters():
         if param.requires_grad:
             print(name)
-    
+
     mean_loss, mean_kl, *_ = ppo.learn((completions, action_masks, rewards))
     assert isinstance(mean_loss, float)
     assert isinstance(mean_kl, float)
@@ -340,14 +339,14 @@ def test_ppo_learns(
             assert torch.equal(param, pre_learn_actor_state_dict[param_name]), (
                 f"{param_name} should not change but did"
             )
-    
+
     vhead_changed = any(
         not torch.allclose(param, pre_learn_actor_state_dict[pname])
         for pname, param in ppo.actor.named_parameters()
         if "v_head" in pname and "reference" not in pname
     )
     assert vhead_changed, "No v_head parameters were updated after learn()"
-    
+
     actor_lora_changed = any(
         not torch.allclose(param, pre_learn_actor_state_dict[pname])
         for pname, param in ppo.actor.named_parameters()
@@ -359,6 +358,7 @@ def test_ppo_learns(
 
 
 # Lightweight stub — only the attributes that _compute_* methods need.
+
 
 class _PPOStub:
     def __init__(self, gamma: float = 1.0, gae_lambda: float = 1.0):
@@ -386,10 +386,12 @@ class TestComputeTokenRewards:
     def test_multiple_rows_each_assigned_correctly(self):
         """Each row's reward lands on its own last valid position."""
         stub = _PPOStub()
-        action_mask = torch.tensor([
-            [True, True, False, False],   # last valid = 1
-            [False, True, True, True],    # last valid = 3
-        ])
+        action_mask = torch.tensor(
+            [
+                [True, True, False, False],  # last valid = 1
+                [False, True, True, True],  # last valid = 3
+            ]
+        )
         sequence_rewards = torch.tensor([1.0, 3.0])
 
         result = stub._compute_token_rewards(action_mask, sequence_rewards)
@@ -402,16 +404,18 @@ class TestComputeTokenRewards:
     def test_all_invalid_row_stays_zero(self):
         """A row with no valid positions receives no reward."""
         stub = _PPOStub()
-        action_mask = torch.tensor([
-            [True, True, False],
-            [False, False, False],
-        ])
+        action_mask = torch.tensor(
+            [
+                [True, True, False],
+                [False, False, False],
+            ]
+        )
         sequence_rewards = torch.tensor([1.0, 2.0])
 
         result = stub._compute_token_rewards(action_mask, sequence_rewards)
 
         expected = torch.zeros(2, 3)
-        expected[0, 1] = 1.0   # only valid row gets assigned
+        expected[0, 1] = 1.0  # only valid row gets assigned
         assert torch.allclose(result, expected)
 
     def test_single_valid_position(self):
@@ -445,8 +449,8 @@ class TestComputeGAEReturns:
         to every valid token position with equal magnitude."""
         stub = _PPOStub(gamma=1.0, gae_lambda=1.0)
         rewards = torch.tensor([[0.0, 0.0, 1.0]])
-        values  = torch.tensor([[0.0, 0.0, 0.0]])
-        mask    = torch.ones(1, 3, dtype=torch.bool)
+        values = torch.tensor([[0.0, 0.0, 0.0]])
+        mask = torch.ones(1, 3, dtype=torch.bool)
 
         # t=2: delta=1, gae=1
         # t=1: delta=0+0−0=0, gae=0+1·1·1=1
@@ -454,15 +458,15 @@ class TestComputeGAEReturns:
         returns, advantages = stub._compute_gae_returns(rewards, values, mask)
 
         assert torch.allclose(advantages, torch.tensor([[1.0, 1.0, 1.0]]))
-        assert torch.allclose(returns,    torch.tensor([[1.0, 1.0, 1.0]]))
+        assert torch.allclose(returns, torch.tensor([[1.0, 1.0, 1.0]]))
 
     def test_value_bootstrap_reduces_advantage(self):
         """Non-zero values are subtracted via the TD-delta, so advantages are
         smaller but returns (adv + V) recover the full expected discounted sum."""
         stub = _PPOStub(gamma=1.0, gae_lambda=1.0)
         rewards = torch.tensor([[0.0, 0.0, 1.0]])
-        values  = torch.tensor([[0.5, 0.5, 0.5]])
-        mask    = torch.ones(1, 3, dtype=torch.bool)
+        values = torch.tensor([[0.5, 0.5, 0.5]])
+        mask = torch.ones(1, 3, dtype=torch.bool)
 
         # t=2: delta=1+0−0.5=0.5,       gae=0.5
         # t=1: delta=0+0.5−0.5=0,        gae=0+0.5=0.5
@@ -470,15 +474,17 @@ class TestComputeGAEReturns:
         returns, advantages = stub._compute_gae_returns(rewards, values, mask)
 
         assert torch.allclose(advantages, torch.tensor([[0.5, 0.5, 0.5]]))
-        assert torch.allclose(returns,    torch.tensor([[1.0, 1.0, 1.0]]))
+        assert torch.allclose(returns, torch.tensor([[1.0, 1.0, 1.0]]))
 
     def test_padding_zeroed_does_not_affect_valid_positions(self):
         """Values and rewards at padding positions are zeroed before the loop,
         so GAE for valid tokens is unaffected by whatever was in padding slots."""
         stub = _PPOStub(gamma=1.0, gae_lambda=1.0)
         rewards = torch.tensor([[0.0, 1.0, 0.0]])
-        values  = torch.tensor([[0.0, 0.0, 9.9]])   # large padding value, should be masked
-        mask    = torch.tensor([[True, True, False]])
+        values = torch.tensor(
+            [[0.0, 0.0, 9.9]]
+        )  # large padding value, should be masked
+        mask = torch.tensor([[True, True, False]])
 
         # After masking: rewards=[0,1,0], values=[0,0,0]
         # t=2: delta=0, gae=0
@@ -487,15 +493,15 @@ class TestComputeGAEReturns:
         returns, advantages = stub._compute_gae_returns(rewards, values, mask)
 
         assert torch.allclose(advantages, torch.tensor([[1.0, 1.0, 0.0]]))
-        assert torch.allclose(returns,    torch.tensor([[1.0, 1.0, 0.0]]))
+        assert torch.allclose(returns, torch.tensor([[1.0, 1.0, 0.0]]))
 
     def test_gamma_discounting(self):
         """gamma < 1 exponentially discounts future rewards."""
         gamma = 0.9
         stub = _PPOStub(gamma=gamma, gae_lambda=1.0)
         rewards = torch.tensor([[0.0, 0.0, 1.0]])
-        values  = torch.tensor([[0.0, 0.0, 0.0]])
-        mask    = torch.ones(1, 3, dtype=torch.bool)
+        values = torch.tensor([[0.0, 0.0, 0.0]])
+        mask = torch.ones(1, 3, dtype=torch.bool)
 
         # t=2: delta=1, gae=1
         # t=1: delta=0, gae=0+0.9·1·1=0.9
@@ -504,15 +510,15 @@ class TestComputeGAEReturns:
 
         expected_adv = torch.tensor([[0.81, 0.9, 1.0]])
         assert torch.allclose(advantages, expected_adv, atol=1e-5)
-        assert torch.allclose(returns,    expected_adv, atol=1e-5)
+        assert torch.allclose(returns, expected_adv, atol=1e-5)
 
     def test_gae_lambda_smoothing(self):
         """lambda < 1 blends multi-step returns, biasing towards the 1-step TD
         estimate (high bias / low variance)."""
         stub = _PPOStub(gamma=1.0, gae_lambda=0.0)
         rewards = torch.tensor([[0.0, 0.0, 1.0]])
-        values  = torch.tensor([[0.5, 0.5, 0.5]])
-        mask    = torch.ones(1, 3, dtype=torch.bool)
+        values = torch.tensor([[0.5, 0.5, 0.5]])
+        mask = torch.ones(1, 3, dtype=torch.bool)
 
         # lambda=0 → gae_t = delta_t (pure 1-step TD error, no carry)
         # t=2: delta=1+0−0.5=0.5,  gae=0.5
@@ -521,4 +527,4 @@ class TestComputeGAEReturns:
         returns, advantages = stub._compute_gae_returns(rewards, values, mask)
 
         assert torch.allclose(advantages, torch.tensor([[0.0, 0.0, 0.5]]))
-        assert torch.allclose(returns,    torch.tensor([[0.5, 0.5, 1.0]]))
+        assert torch.allclose(returns, torch.tensor([[0.5, 0.5, 1.0]]))

@@ -10,12 +10,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -1014,7 +1014,11 @@ def aggregate_metrics_across_gpus(
     :rtype: float
     """
     if accelerator is None:
-        return metric_tensor.mean().item() if isinstance(metric_tensor, torch.Tensor) else metric_tensor
+        return (
+            metric_tensor.mean().item()
+            if isinstance(metric_tensor, torch.Tensor)
+            else metric_tensor
+        )
     all_metrics = gather_tensor(metric_tensor, accelerator)
     return all_metrics.mean().item()
 

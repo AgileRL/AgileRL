@@ -27,6 +27,7 @@ MAX_CONTEXT_LENGTH = 512
 USE_TINY_DEBUG_MODEL = False
 USE_VLLM = not USE_TINY_DEBUG_MODEL
 
+
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
     raw_dataset = (
         load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
@@ -94,7 +95,6 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
 def combined_rewards(completion, solution, prompt):
 
-
     return (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
@@ -105,15 +105,24 @@ def main(init_hp, mut_p):
 
     if USE_TINY_DEBUG_MODEL:
         from benchmarking.tiny_model import build_tiny_actor_network, TinyDigitTokenizer
+
         actor_network = build_tiny_actor_network()
         tokenizer = TinyDigitTokenizer()
         model_name = None
-        target_modules=["c_attn", "c_proj", "c_fc"]
+        target_modules = ["c_attn", "c_proj", "c_fc"]
     else:
         actor_network = None
         model_name = MODEL_PATH
         tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-        target_modules = ["q_proj","k_proj","v_proj","o_proj","up_proj","down_proj","gate_proj"]
+        target_modules = [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "up_proj",
+            "down_proj",
+            "gate_proj",
+        ]
 
     # tokenizer.pad_token = tokenizer.eos_token
     print("Tokenizer", tokenizer.pad_token, tokenizer.eos_token)
@@ -140,7 +149,7 @@ def main(init_hp, mut_p):
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         conversation_template=conversation_template,
-        data_batch_size_per_gpu=init_hp["BATCH_SIZE"], # FIXME this needs fixing
+        data_batch_size_per_gpu=init_hp["BATCH_SIZE"],  # FIXME this needs fixing
         accelerator=accelerator,
         max_context_length=MAX_CONTEXT_LENGTH,
         return_raw_completions=USE_VLLM,
@@ -153,8 +162,9 @@ def main(init_hp, mut_p):
     # ]["stage"]
     init_hp["MAX_MODEL_LEN"] = MAX_CONTEXT_LENGTH
     print("pad token id", tokenizer.pad_token_id)
-    assert tokenizer.pad_token_id != tokenizer.eos_token_id, "Pad token and eos token are the same"
-
+    assert tokenizer.pad_token_id != tokenizer.eos_token_id, (
+        "Pad token and eos token are the same"
+    )
 
     llm_ppo = LLMPPO(
         model_name=model_name,
@@ -167,7 +177,9 @@ def main(init_hp, mut_p):
             # modules_to_save=["summary"],
             task_type="CAUSAL_LM",
         ),
-        micro_batch_size_per_gpu=8 if init_hp["BATCH_SIZE"] > 8 else init_hp["BATCH_SIZE"],
+        micro_batch_size_per_gpu=8
+        if init_hp["BATCH_SIZE"] > 8
+        else init_hp["BATCH_SIZE"],
         use_vllm=USE_VLLM,
         pad_token_id=tokenizer.pad_token_id,
         pad_token=tokenizer.pad_token,
@@ -189,7 +201,7 @@ def main(init_hp, mut_p):
             gpu_memory_utilization=0.5,
             max_num_seqs=2,
             sleep_mode=True,
-        )
+        ),
     )
 
     print("llm_ppo.lr", llm_ppo.lr)
@@ -218,7 +230,6 @@ def main(init_hp, mut_p):
     #     algo_kwargs=algo_kwargs,
     # )
 
-
     finetune_llm_reasoning(
         pop=[llm_ppo],
         env=env,
@@ -226,7 +237,7 @@ def main(init_hp, mut_p):
         evaluation_interval=10,
         wb=True,
         save_elite=True,
-        elite_path="saved_llms",    
+        elite_path="saved_llms",
         max_reward=2.0,
         evo_steps=None,
         mutation=None,

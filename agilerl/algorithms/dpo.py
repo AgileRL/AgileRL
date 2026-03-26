@@ -446,7 +446,7 @@ class DPO(LLMAlgorithm):
 
         # Reference hidden states — no gradient, two separate forward passes (B each)
         with torch.no_grad():
-            with self.select_policy(use_reference=True):
+            with self.select_adapter("reference"):
                 self.actor.eval()
                 ref_chosen_hidden = _get_hidden(
                     chosen_ids, chosen_attn
@@ -460,7 +460,7 @@ class DPO(LLMAlgorithm):
         ref_chosen_hidden = ref_rejected_hidden = None  # free immediately
 
         # Policy hidden states — with gradient, two separate forward passes (B each)
-        with self.select_policy(use_reference=False):
+        with self.select_adapter("actor"):
             self.actor.train()
             policy_chosen_hidden = _get_hidden(
                 chosen_ids, chosen_attn
