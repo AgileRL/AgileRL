@@ -23,7 +23,7 @@ from agilerl.utils.utils import create_population
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
-MAX_CONTEXT_LENGTH = 756
+MAX_CONTEXT_LENGTH = 512
 USE_TINY_DEBUG_MODEL = False
 USE_VLLM = not USE_TINY_DEBUG_MODEL
 
@@ -116,6 +116,7 @@ def main(init_hp, mut_p):
         target_modules = ["q_proj","k_proj","v_proj","o_proj","up_proj","down_proj","gate_proj"]
 
     # tokenizer.pad_token = tokenizer.eos_token
+    print("Tokenizer", tokenizer.pad_token, tokenizer.eos_token)
     train_dataset, test_dataset = make_dataset(DATASET)
 
     # Define a conversation template for the reasoning task, refer to questions and answers as q and a respectively
@@ -151,6 +152,8 @@ def main(init_hp, mut_p):
     #     "zero_optimization"
     # ]["stage"]
     init_hp["MAX_MODEL_LEN"] = MAX_CONTEXT_LENGTH
+    print("pad token id", tokenizer.pad_token_id)
+    assert tokenizer.pad_token_id != tokenizer.eos_token_id, "Pad token and eos token are the same"
 
 
     llm_ppo = LLMPPO(
@@ -161,14 +164,14 @@ def main(init_hp, mut_p):
             lora_alpha=64,
             target_modules=target_modules,
             bias="none",
-            modules_to_save=["summary"],
+            # modules_to_save=["summary"],
             task_type="CAUSAL_LM",
         ),
-        micro_batch_size_per_gpu=8,
+        micro_batch_size_per_gpu=8 if init_hp["BATCH_SIZE"] > 8 else init_hp["BATCH_SIZE"],
         use_vllm=USE_VLLM,
         pad_token_id=tokenizer.pad_token_id,
         pad_token=tokenizer.pad_token,
-        use_separate_reference_adapter=False,
+        use_separate_reference_adapter=True,
         batch_size=init_hp["BATCH_SIZE"],
         beta=init_hp["BETA"],
         lr=init_hp["LR"],

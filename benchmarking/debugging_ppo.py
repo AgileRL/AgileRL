@@ -13,7 +13,7 @@ import yaml
 from datasets import Dataset
 from peft import LoraConfig
 import torch
-
+from accelerate import Accelerator
 from agilerl.algorithms import LLMPPO
 from agilerl.training import train_llm
 from agilerl.training.train_llm import finetune_llm_reasoning
@@ -90,6 +90,7 @@ def evaluate_target_token_rate_greedy_like(
 
 
 def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
+    accelerator = Accelerator()
     torch.manual_seed(seed)
     actor_network = build_tiny_actor_network()
     tokenizer = TinyDigitTokenizer()
@@ -114,7 +115,7 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
         reward_fn=token_target_reward,
         conversation_template=conversation_template,
         data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
-        accelerator=None,
+        accelerator=accelerator,
         max_context_length=MAX_CONTEXT_LENGTH,
         return_raw_completions=False,
         seed=seed,
@@ -128,7 +129,6 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
             lora_alpha=16,
             target_modules=["c_attn", "c_proj", "c_fc"],
             bias="none",
-            modules_to_save=["summary"],
             task_type="CAUSAL_LM",
         ),
         micro_batch_size_per_gpu=min(8, init_hp["BATCH_SIZE"]),
@@ -145,7 +145,7 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
         temperature=init_hp["TEMPERATURE"],
         max_output_tokens=MAX_OUTPUT_TOKENS,
         max_model_len=MAX_CONTEXT_LENGTH,
-        accelerator=None,
+        accelerator=accelerator,
         vf_coef=init_hp["VF_COEF"],
         gamma=init_hp["GAMMA"],
         gae_lambda=init_hp["GAE_LAMBDA"],
@@ -174,7 +174,7 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
             evo_steps=None,
             mutation=None,
             tournament=None,
-            accelerator=None,
+            accelerator=accelerator,
             checkpoint_steps=999999,
             verbose=True,
             max_steps=4096,

@@ -1875,7 +1875,6 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         return group_outputs
 
-
 class LLMAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all LLM algorithms in the AgileRL framework.
 
@@ -2300,11 +2299,40 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 "Optimizer is set to None, please check that the optimizer is correctly defined."
             )
             is_dummy_optimizer = isinstance(self.optimizer.optimizer, DummyOptimizer)
+
+            # FIXME hacky asf
+            for name, param in self.actor.named_parameters():
+                if "critic" in name and "lora" in name:
+                    param.requires_grad = True
+
+            # Check this at init time, before deepspeed.initialize()
+            optimizer = self.optimizer.optimizer
+            all_group_params = set()
+            for group in optimizer.param_groups:
+                for p in group['params']:
+                    all_group_params.add(id(p))
+
+            for name, p in self.actor.named_parameters():
+                if "actor" in name and "lora" in name:
+                    print(name, id(p) in all_group_params)
+
+            for name, p in self.actor.named_parameters():
+                if "critic" in name and "lora" in name:
+                    print(name, id(p) in all_group_params)
+
+            # assert False
+                    
             self.actor, optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor,
                 self.optimizer.optimizer,
                 self.lr_scheduler,
             )
+
+            print(len(self.actor.optimizer.bit16_groups))  # should be 2
+            print(len(self.actor.optimizer.params_in_partition[0]))  # actor params on this rank
+            print(len(self.actor.optimizer.params_in_partition[1]))  # critic params on this rank
+            assert False
+
             self.optimizer.optimizer = (
                 optimizer if not is_dummy_optimizer else self.actor.optimizer
             )
@@ -2615,7 +2643,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 peft_config=self.lora_config,  # type: ignore[arg-type]
             )
 
+        if self.use_value_head and add_adapters:
+            import dataclasses
+            config = dataclasses.replace(self.lora_config)
+            config.target_modules.add("summary")
+            self.actor.add_adapter(
+                adapter_name="critic",
+                peft_config=config,  # type: ignore[arg-type]
+            )
+
         self.actor.set_adapter("actor")
+
+        for name, param in self.actor.named_parameters():
+            if "actor" in name and "lora" in name:
+                assert param.requires_grad == True
 
         if self.accelerator is None:
             self.actor = DummyEvolvable(module=self.actor, device=self.device)
@@ -2692,10 +2733,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 output = self.actor.forward(**batch_model_kwargs)
                 logits = output[0] if isinstance(output, tuple) else output.logits
                 logits = logits / self.temperature
+
                 log_prob = LLMAlgorithm._memory_efficient_logits(
                     logits[:, :-1],
                     batch_ids[:, 1:],
                 )
+
                 batch_model_kwargs = None
                 logits = None
                 log_probs.append(log_prob)
@@ -2709,6 +2752,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         if self.accelerator is not None:
             self.accelerator.backward(loss)
+            self.optimizer.step()
+            self.optimizer.zero_grad()
         else:
             loss.backward()
             clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
@@ -2726,7 +2771,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         else:
             self._use_policy()
         yield
-        self._use_policy()
+        if use_reference:
+            self._use_reference_policy()
 
     @contextmanager
     def select_adapter(self, adapter_name: str) -> None:
@@ -2739,10 +2785,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self._use_reference_policy()
             yield
             self._use_policy()
-        # elif adapter_name == "critic":
-        #     self.actor.set_adapter("critic")
-        #     yield
-        #     self._use_policy()
+        elif adapter_name == "critic":
+            self.actor.set_adapter("critic")
+            yield
+            self._use_policy()
         else:
             raise ValueError(f"Invalid adapter name: {adapter_name}")
 
@@ -2762,6 +2808,29 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.actor.set_adapter("actor")
         else:
             self.actor.base_model.enable_adapter_layers()
+
+    def _restore_lora_trainability(self, adapter_names: list[str]) -> None:
+        """Restore requires_grad=True for specified LoRA adapters.
+
+        PEFT's set_adapter() sets requires_grad=False on all non-active adapter
+        weights. Under DeepSpeed ZeRO Stage 2, gradient bucket hooks are registered
+        once at accelerator.prepare() time based on the requires_grad snapshot at
+        that moment. If set_adapter() later toggles requires_grad=False on params
+        that ZeRO-2 registered hooks for, those hooks never fire, the bucket never
+        completes, and reduce-scatter never runs — the optimizer sees zero gradients.
+
+        Call this after any set_adapter() call to keep all training adapters live
+        in the ZeRO-2 gradient bucket tracking.
+
+        :param adapter_names: LoRA adapter names whose params should be trainable.
+        :type adapter_names: list[str]
+        """
+        model = self.actor.module if hasattr(self.actor, "module") else self.actor
+        for name, param in model.named_parameters():
+            for adapter in adapter_names:
+                if adapter in name and "lora" in name:
+                    param.requires_grad_(True)
+                    break
 
     def _move_model_to_vllm(self) -> None:
         """Move the deepspeed model to vllm."""
@@ -2927,7 +2996,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             action_mask = torch.zeros_like(completion_id, device=self.device)
             action_mask[:, num_input_tokens[i] :] = True
             action_mask[completion_id == self.pad_token_id] = False
-            action_mask = action_mask[:, 1:]
+            action_mask = action_mask[:, 1:] # FIXME removed this in ppo testing
             action_masks.append(action_mask)
 
         return completion_ids, action_masks

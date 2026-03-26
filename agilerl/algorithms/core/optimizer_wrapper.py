@@ -69,7 +69,16 @@ def init_from_single(
     # print("PARAMS", params)
     # print("NETWORK", network)
     # return optimizer_cls(params, **optimizer_kwargs)
-    return optimizer_cls(network.parameters(), lr=lr, **optimizer_kwargs)
+
+    for name, param in network.named_parameters():
+        if "critic" in name:
+            param.requires_grad = True
+
+
+    actor_params = [p for n, p in network.named_parameters() if 'actor' in n and p.requires_grad]
+    critic_params = [p for n, p in network.named_parameters() if 'critic' in n and p.requires_grad]
+    params = [{"params": actor_params, "lr": lr}, {"params": critic_params, "lr": lr}]
+    return optimizer_cls(params, **optimizer_kwargs)
     
 
 

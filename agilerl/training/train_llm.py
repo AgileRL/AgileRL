@@ -228,7 +228,7 @@ def finetune_llm_reasoning(
                 rewards,
             )
             with memory_efficient_params(agent):
-                loss, kl, pg_loss, critic_loss, entropy = agent.learn(experiences)
+                loss, kl, pg_loss, critic_loss, entropy = agent.learn(experiences, env.tokenizer)
             metrics = [loss, kl, rewards, completion_lengths]
             if max_reward is not None:
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
