@@ -48,12 +48,6 @@ def _collect_rollouts(
     :return: The observation, done flag, scores, and info for the current step.
     :rtype: tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]
     """
-    if not agent.use_rollout_buffer:
-        msg = "collect_rollouts can only be used when use_rollout_buffer=True"
-        raise RuntimeError(
-            msg,
-        )
-
     if (
         last_obs is None
         and last_done is None

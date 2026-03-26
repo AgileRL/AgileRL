@@ -6,70 +6,41 @@ object, keeping the Trainer classes lean and testable.
 
 from __future__ import annotations
 
-import importlib
-from collections.abc import Callable
+import warnings
 from typing import TYPE_CHECKING, Any
 
+from agilerl.algorithms.core.base import (
+    LLMAlgorithm,
+    MultiAgentRLAlgorithm,
+    RLAlgorithm,
+)
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.models.algo import ALGO_REGISTRY, AlgorithmMeta, RLAlgorithmSpec
+from agilerl.models.algo import (
+    LLMAlgorithmSpec,
+    MultiAgentRLAlgorithmSpec,
+    RLAlgorithmSpec,
+)
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
+from agilerl.typing import GymEnvType, PzEnvType
 
 if TYPE_CHECKING:
-    import gymnasium as gym
+    import torch
 
-    from agilerl.algorithms.core import EvolvableAlgorithm
-    from agilerl.typing import PopulationType
-
-
-def resolve_algo_name(algorithm: EvolvableAlgorithm | RLAlgorithmSpec | str) -> str:
-    """Extract the canonical algorithm name from *algorithm*.
-
-    :param algorithm: An :class:`EvolvableAlgorithm` instance, an
-        :class:`RLAlgorithmSpec` (or subclass), or a plain string name.
-    :type algorithm: EvolvableAlgorithm | RLAlgorithmSpec | str
-    :returns: The algorithm name as registered in :data:`ALGO_REGISTRY`.
-    :rtype: str
-    :raises ValueError: If a spec subclass has no matching registry entry.
-    """
-    if isinstance(algorithm, str):
-        return algorithm
-    if isinstance(algorithm, RLAlgorithmSpec):
-        for name, meta in ALGO_REGISTRY.items():
-            if isinstance(algorithm, meta.spec_cls):
-                return name
-        msg = f"No registry entry for spec type {type(algorithm).__name__}"
-        raise ValueError(msg)
-    return algorithm.algo
-
-
-def get_algo_meta(name: str) -> AlgorithmMeta:
-    """Look up :class:`AlgorithmMeta` from the registry.
-
-    :param name: Canonical algorithm name (e.g. ``"PPO"``).
-    :type name: str
-    :returns: The corresponding registry entry.
-    :rtype: AlgorithmMeta
-    :raises ValueError: If *name* is not in :data:`ALGO_REGISTRY`.
-    """
-    meta = ALGO_REGISTRY.get(name)
-    if meta is None:
-        supported = ", ".join(sorted(ALGO_REGISTRY))
-        msg = f"No registry entry for algorithm {name!r}. Supported: {supported}"
-        raise ValueError(msg)
-    return meta
+EnvironmentT = GymEnvType | PzEnvType
+AlgoSpecT = RLAlgorithmSpec | LLMAlgorithmSpec | MultiAgentRLAlgorithmSpec
+PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
 
 def hp_config_from_mutation_spec(spec: MutationSpec) -> HyperparameterConfig | None:
     """Convert :class:`MutationSpec.rl_hp_selection` to a :class:`HyperparameterConfig`.
 
     :param spec: Mutation specification containing RL HP ranges.
-    :type spec: MutationSpec
-    :returns: A :class:`HyperparameterConfig`, or ``None`` if no HP ranges are defined.
-    :rtype: HyperparameterConfig | None
+    :returns: A :class:`HyperparameterConfig`, or ``None`` if no HP ranges.
     """
     if not spec.rl_hp_selection:
         return None
@@ -88,79 +59,67 @@ def hp_config_from_mutation_spec(spec: MutationSpec) -> HyperparameterConfig | N
 
 
 def create_population_from_spec(
-    spec: RLAlgorithmSpec,
-    algo_meta: AlgorithmMeta,
-    env: gym.Env,
     pop_size: int,
-    device: str,
-    mutation_spec: MutationSpec | None = None,
-) -> PopulationType:
-    """Instantiate a population of agents from an :class:`RLAlgorithmSpec`.
+    algo_spec: AlgoSpecT,
+    mutation_spec: MutationSpec | None,
+    env: GymEnvType | PzEnvType,
+    device: str | torch.device = "cpu",
+) -> PopulationT:
+    """Instantiate a population of agents from an algorithm spec.
 
-    Uses ``spec.model_dump()`` to extract constructor kwargs and lazily
-    imports the algorithm class via *algo_meta.algo_path*.
-
-    :param spec: Algorithm hyperparameters.
-    :type spec: RLAlgorithmSpec
-    :param algo_meta: Registry metadata for the algorithm.
-    :type algo_meta: AlgorithmMeta
-    :param env: Gymnasium environment (used for observation/action spaces).
-    :type env: gym.Env
     :param pop_size: Number of agents to create.
     :type pop_size: int
-    :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
-    :type device: str
-    :param mutation_spec: Optional mutation spec.  When *spec.hp_config* is
-        ``None``, HP ranges are derived from *mutation_spec.rl_hp_selection*.
+    :param algo_spec: Algorithm spec.
+    :type algo_spec: AlgoSpecT
+    :param mutation_spec: Optional mutation spec for HP range fallback.
     :type mutation_spec: MutationSpec | None
+    :param env: RL environment following Gymnasium or PettingZoo API.
+    :type env: GymEnvType | PzEnvType
+    :param device: Torch device string.
+    :type device: str | torch.device
     :returns: A list of algorithm instances.
-    :rtype: PopulationType
+    :rtype: PopulationT
     """
-    module_path, class_name = algo_meta.algo_path.rsplit(".", 1)
-    mod = importlib.import_module(module_path)
-    algo_cls = getattr(mod, class_name)
-
-    kwargs = spec.model_dump(exclude={"hp_config"})
-    net_config = kwargs.pop("net_config", None)
-    if net_config is not None:
-        kwargs["net_config"] = net_config
-
-    kwargs["observation_space"] = env.single_observation_space
-    kwargs["action_space"] = env.single_action_space
-    kwargs["device"] = device
-
-    # Algorithm spec hp_config takes priority; fall back to mutation spec
-    hp_config = spec.hp_config
+    # Override the hp_config with the one defined in MutationSpec if not already set
+    hp_config = algo_spec.hp_config
     if hp_config is None and mutation_spec is not None:
         hp_config = hp_config_from_mutation_spec(mutation_spec)
+        algo_spec.hp_config = hp_config
 
-    if hp_config is not None:
-        kwargs["hp_config"] = hp_config
+    # Some algorithms require num_envs as argument -> add to algo_spec
+    for num_envs_arg in ["num_envs", "vect_noise_dim"]:
+        if hasattr(algo_spec, num_envs_arg):
+            setattr(algo_spec, num_envs_arg, env.num_envs)
 
-    return [algo_cls(**kwargs, index=i) for i in range(pop_size)]
+    if isinstance(algo_spec, (RLAlgorithmSpec, MultiAgentRLAlgorithmSpec)):
+        return [
+            algo_spec.build_algorithm(
+                env.single_observation_space, env.single_action_space, index, device
+            )
+            for index in range(pop_size)
+        ]
+
+    # TODO: Add support for LLMAlgorithmSpec
+    msg = f"Algorithm spec type {type(algo_spec)} not supported."
+    raise NotImplementedError(msg)
 
 
-def build_mutations(
-    spec: MutationSpec | Mutations | None,
-    device: str,
+def build_mutations_from_spec(
+    mutation_spec: MutationSpec | None, device: str | torch.device = "cpu"
 ) -> Mutations | None:
     """Convert a :class:`MutationSpec` into a :class:`Mutations` instance.
 
-    If *spec* is already a :class:`Mutations` instance it is returned as-is.
-
-    :param spec: Mutation configuration, a pre-built :class:`Mutations`, or
-        ``None`` to skip mutations.
-    :type spec: MutationSpec | Mutations | None
+    :param mutation_spec: Mutation specification.
+    :type mutation_spec: MutationSpec | None
     :param device: Torch device string.
-    :type device: str
-    :returns: A configured :class:`Mutations` object, or ``None``.
+    :type device: str | torch.device
+    :returns: A :class:`Mutations` instance, or ``None`` if *mutation_spec* is ``None``.
     :rtype: Mutations | None
     """
-    if spec is None:
+    if mutation_spec is None:
         return None
-    if isinstance(spec, Mutations):
-        return spec
-    p = spec.probabilities
+
+    p = mutation_spec.probabilities
     return Mutations(
         no_mutation=p.no_mut,
         architecture=p.arch_mut,
@@ -168,111 +127,79 @@ def build_mutations(
         parameters=p.params_mut,
         activation=p.act_mut,
         rl_hp=p.rl_hp_mut,
-        mutation_sd=spec.mutation_sd,
-        rand_seed=spec.rand_seed,
+        mutation_sd=mutation_spec.mutation_sd,
+        rand_seed=mutation_spec.rand_seed,
         device=device,
     )
 
 
-def build_tournament(
-    spec: TournamentSelectionSpec | TournamentSelection | None,
-    training: TrainingSpec,
+def build_tournament_from_spec(
+    tournament_spec: TournamentSelectionSpec | None,
+    training_spec: TrainingSpec,
 ) -> TournamentSelection | None:
     """Convert a :class:`TournamentSelectionSpec` into a :class:`TournamentSelection`.
 
-    If *spec* is already a :class:`TournamentSelection` instance it is returned as-is.
-
-    :param spec: Tournament configuration, a pre-built :class:`TournamentSelection`,
-        or ``None`` to skip.
-    :type spec: TournamentSelectionSpec | TournamentSelection | None
-    :param training: Training spec (provides ``pop_size`` and ``eval_loop``).
-    :type training: TrainingSpec
-    :returns: A configured :class:`TournamentSelection`, or ``None``.
+    :param tournament_spec: Tournament selection specification.
+    :type tournament_spec: TournamentSelectionSpec | None
+    :param training_spec: Training specification.
+    :type training_spec: TrainingSpec
+    :returns: A :class:`TournamentSelection` instance, or ``None`` if *tournament_spec* is ``None``.
     :rtype: TournamentSelection | None
     """
-    if spec is None:
+    if tournament_spec is None:
         return None
-    if isinstance(spec, TournamentSelection):
-        return spec
+
     return TournamentSelection(
-        tournament_size=spec.tournament_size,
-        elitism=spec.elitism,
-        population_size=training.pop_size,
-        eval_loop=training.eval_loop,
+        tournament_size=tournament_spec.tournament_size,
+        elitism=tournament_spec.elitism,
+        population_size=training_spec.pop_size,
     )
 
 
-def build_replay_buffer(
-    spec: ReplayBufferSpec | ReplayBuffer | None,
-    algo_meta: AlgorithmMeta,
-    device: str,
-) -> ReplayBuffer | None:
+def build_replay_buffer_from_spec(
+    algo_spec: RLAlgorithmSpec | MultiAgentRLAlgorithmSpec,
+    buffer_spec: ReplayBufferSpec | None,
+    device: str | torch.device = "cpu",
+) -> ReplayBuffer | MultiStepReplayBuffer | MultiAgentReplayBuffer | None:
     """Convert a :class:`ReplayBufferSpec` into a :class:`ReplayBuffer`.
 
-    If *spec* is already a :class:`ReplayBuffer` instance it is returned as-is.
-    If *spec* is ``None`` but the algorithm requires a buffer, a default
-    ``ReplayBuffer(max_size=100_000)`` is created automatically.
-
-    :param spec: Buffer configuration, a pre-built :class:`ReplayBuffer`, or
-        ``None``.
-    :type spec: ReplayBufferSpec | ReplayBuffer | None
-    :param algo_meta: Registry metadata (used for ``requires_buffer``).
-    :type algo_meta: AlgorithmMeta
+    :param algo_spec: Algorithm spec.
+    :type algo_spec: RLAlgorithmSpec | MultiAgentRLAlgorithmSpec
+    :param buffer_spec: Replay buffer specification.
+    :type buffer_spec: ReplayBufferSpec | None
     :param device: Torch device string.
-    :type device: str
-    :returns: A :class:`ReplayBuffer` (or :class:`MultiStepReplayBuffer`),
-        or ``None`` for on-policy algorithms.
-    :rtype: ReplayBuffer | None
+    :type device: str | torch.device
+    :returns: A :class:`ReplayBuffer` or :class:`MultiStepReplayBuffer` instance, or ``None`` if *buffer_spec* is ``None``.
+    :rtype: ReplayBuffer | MultiStepReplayBuffer | None
     """
-    if spec is None:
-        if algo_meta.requires_buffer:
+    if buffer_spec is None:
+        if algo_spec.off_policy:
+            warnings.warn(
+                "No replay buffer specified for off-policy algorithm. Using default replay buffer with size 100,000.",
+                stacklevel=2,
+            )
             return ReplayBuffer(max_size=100_000, device=device)
+
         return None
 
-    if isinstance(spec, ReplayBuffer):
-        return spec
+    # TODO: Add support for Prioritized / MultiAgentReplayBuffer
 
-    if spec.n_step_buffer:
+    if buffer_spec.n_step_buffer:
         return MultiStepReplayBuffer(
-            max_size=spec.memory_size,
-            n_step=spec.n_step_buffer_args.n_step,
+            max_size=buffer_spec.memory_size,
+            n_step=buffer_spec.n_step_buffer_args.n_step,
             gamma=0.99,
             device=device,
         )
-    return ReplayBuffer(max_size=spec.memory_size, device=device)
-
-
-_TRAINING_FN_CACHE: dict[str, Callable[..., Any]] = {}
-
-
-def get_training_fn(algo_meta: AlgorithmMeta) -> Callable[..., Any]:
-    """Lazily import and return the training function for *algo_meta*.
-
-    Results are cached so repeated calls avoid re-importing.
-
-    :param algo_meta: Registry metadata for the algorithm.
-    :type algo_meta: AlgorithmMeta
-    :returns: The training loop function (e.g. ``train_on_policy``).
-    :rtype: Callable[..., Any]
-    """
-    fn_name = algo_meta.train_fn_name
-    if fn_name in _TRAINING_FN_CACHE:
-        return _TRAINING_FN_CACHE[fn_name]
-
-    module_path = f"agilerl.training.{fn_name}"
-    mod = importlib.import_module(module_path)
-    fn = getattr(mod, fn_name)
-    _TRAINING_FN_CACHE[fn_name] = fn
-    return fn
+    return ReplayBuffer(max_size=buffer_spec.memory_size, device=device)
 
 
 def build_train_kwargs(
     *,
-    algo_meta: AlgorithmMeta,
-    algo_name: str,
-    env: gym.Env,
-    env_name: str,
-    pop: PopulationType,
+    algo_spec: AlgoSpecT,
+    env: GymEnvType | PzEnvType,
+    env_name: str | None = None,
+    pop: PopulationT,
     training: TrainingSpec,
     tournament: TournamentSelection | None,
     mutations: Mutations | None,
@@ -294,56 +221,11 @@ def build_train_kwargs(
 
     Conditionally includes ``memory``, ``learning_delay``, and
     ``wandb_kwargs`` based on the algorithm's training loop requirements.
-
-    :param algo_meta: Registry metadata for the algorithm.
-    :type algo_meta: AlgorithmMeta
-    :param algo_name: Canonical algorithm name.
-    :type algo_name: str
-    :param env: Gymnasium environment instance.
-    :type env: gym.Env
-    :param env_name: Human-readable environment name for logging.
-    :type env_name: str
-    :param pop: Population of algorithm instances.
-    :type pop: PopulationType
-    :param training: Training loop parameters.
-    :type training: TrainingSpec
-    :param tournament: Tournament selection instance, or ``None``.
-    :type tournament: TournamentSelection | None
-    :param mutations: Mutations instance, or ``None``.
-    :type mutations: Mutations | None
-    :param memory: Replay buffer instance, or ``None``.
-    :type memory: ReplayBuffer | None
-    :param swap_channels: Whether to swap observation channels.
-    :type swap_channels: bool
-    :param checkpoint: Save a checkpoint every *n* steps (``None`` to disable).
-    :type checkpoint: int | None
-    :param checkpoint_path: Directory for checkpoint files.
-    :type checkpoint_path: str | None
-    :param save_elite: Whether to save the elite agent after training.
-    :type save_elite: bool
-    :param elite_path: Directory for elite agent files.
-    :type elite_path: str | None
-    :param wb: Enable Weights & Biases logging.
-    :type wb: bool
-    :param tensorboard: Enable TensorBoard logging.
-    :type tensorboard: bool
-    :param tensorboard_log_dir: Directory for TensorBoard logs.
-    :type tensorboard_log_dir: str | None
-    :param verbose: Print progress during training.
-    :type verbose: bool
-    :param accelerator: Optional HuggingFace ``Accelerator``.
-    :type accelerator: Any | None
-    :param wandb_api_key: Weights & Biases API key.
-    :type wandb_api_key: str | None
-    :param wandb_kwargs: Extra kwargs forwarded to ``wandb.init``.
-    :type wandb_kwargs: dict[str, Any] | None
-    :returns: Keyword arguments ready to be unpacked into the training function.
-    :rtype: dict[str, Any]
     """
     kwargs: dict[str, Any] = {
         "env": env,
         "env_name": env_name,
-        "algo": algo_name,
+        "algo": algo_spec.name,
         "pop": pop,
         "swap_channels": swap_channels,
         "max_steps": training.max_steps,
@@ -364,15 +246,8 @@ def build_train_kwargs(
         "wandb_api_key": wandb_api_key,
     }
 
-    if algo_meta.requires_buffer:
+    if algo_spec.off_policy:
         kwargs["memory"] = memory
-        if algo_meta.train_fn_name in (
-            "train_off_policy",
-            "train_multi_agent_off_policy",
-        ):
-            kwargs["learning_delay"] = training.learning_delay
-
-    if algo_meta.train_fn_name in ("train_on_policy", "train_off_policy"):
-        kwargs["wandb_kwargs"] = wandb_kwargs
+        kwargs["learning_delay"] = training.learning_delay
 
     return kwargs

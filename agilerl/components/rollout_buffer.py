@@ -576,10 +576,6 @@ class RolloutBuffer:
         # Return all flattened data, moved to the target device
         return flattened_td.to(target_device)
 
-    # ------------------------------------------------------------------
-    # New helper functions for truncated Backpropagation Through Time (BPTT)
-    # ------------------------------------------------------------------
-
     def _convert_td_to_np_dict(
         self,
         td: TensorDict,

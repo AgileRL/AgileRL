@@ -64,7 +64,7 @@ class QNetwork(EvolvableNetwork):
         head_config: NetConfigType | None = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        latent_dim: int = 32,
+        latent_dim: int = 64,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
@@ -89,7 +89,7 @@ class QNetwork(EvolvableNetwork):
             raise ValueError(msg)
 
         if head_config is None:
-            head_config = asdict(MlpNetConfig(hidden_size=[32], output_activation=None))
+            head_config = asdict(MlpNetConfig(hidden_size=[64], output_activation=None))
         else:
             head_config["output_activation"] = None
 
@@ -181,7 +181,7 @@ class RainbowQNetwork(EvolvableNetwork):
         head_config: NetConfigType | None = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        latent_dim: int = 32,
+        latent_dim: int = 64,
         device: str = "cpu",
         random_seed: int | None = None,
     ) -> None:
@@ -223,7 +223,7 @@ class RainbowQNetwork(EvolvableNetwork):
         if head_config is None:
             head_config = asdict(
                 MlpNetConfig(
-                    hidden_size=[16],
+                    hidden_size=[64],
                     output_activation=None,
                     noise_std=noise_std,
                 ),
@@ -346,7 +346,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         head_config: NetConfigType | None = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        latent_dim: int = 32,
+        latent_dim: int = 64,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
@@ -387,7 +387,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         )
 
         if head_config is None:
-            head_config = asdict(MlpNetConfig(hidden_size=[32], output_activation=None))
+            head_config = asdict(MlpNetConfig(hidden_size=[64], output_activation=None))
         else:
             head_config["output_activation"] = None
 

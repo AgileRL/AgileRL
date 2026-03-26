@@ -10,6 +10,8 @@ from __future__ import annotations
 import csv
 import io
 from abc import ABC, abstractmethod
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,6 +35,26 @@ class Logger(ABC):
 
     Subclasses must implement :meth:`write` and :meth:`close`.
     """
+
+    @staticmethod
+    @contextmanager
+    def on_main_process(
+        accelerator: Accelerator | None,
+    ) -> Generator[bool, None, None]:
+        """Synchronize distributed processes, yielding whether this is the main one.
+
+        :param accelerator: HuggingFace Accelerator, or ``None``.
+        :type accelerator: Accelerator | None
+        :yields: ``True`` if the current process is the main process (or if
+            *accelerator* is ``None``), ``False`` otherwise.
+        """
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        try:
+            yield accelerator is None or accelerator.is_main_process
+        finally:
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
 
     @abstractmethod
     def write(self, report: MetricsReport) -> None:
@@ -75,23 +97,14 @@ class WandbLogger(Logger):
         self._accelerator = accelerator
 
     def write(self, report: MetricsReport) -> None:
-        data = report.to_dict()
-        if self._accelerator is not None:
-            self._accelerator.wait_for_everyone()
-            if self._accelerator.is_main_process:
-                wandb.log(data)
-            self._accelerator.wait_for_everyone()
-        else:
-            wandb.log(data)
+        with Logger.on_main_process(self._accelerator) as is_main:
+            if is_main:
+                wandb.log(report.to_dict())
 
     def close(self) -> None:
-        if self._accelerator is not None:
-            self._accelerator.wait_for_everyone()
-            if self._accelerator.is_main_process:
+        with Logger.on_main_process(self._accelerator) as is_main:
+            if is_main:
                 wandb.finish()
-            self._accelerator.wait_for_everyone()
-        else:
-            wandb.finish()
 
 
 class CSVLogger(Logger):
@@ -101,6 +114,7 @@ class CSVLogger(Logger):
     column names adapt to whatever metrics are registered.
 
     :param path: Filesystem path for the CSV file.
+    :type path: str | Path
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -109,15 +123,25 @@ class CSVLogger(Logger):
         self._writer: csv.DictWriter | None = None
 
     def write(self, report: MetricsReport) -> None:
+        """Write the metrics report to the CSV file.
+
+        :param report: The metrics report to write.
+        :type report: MetricsReport
+        """
         data = report.to_dict()
+
+        # Write header if file is not opened
         if self._writer is None:
             self._file = self._path.open("w", newline="")
             self._writer = csv.DictWriter(self._file, fieldnames=list(data.keys()))
             self._writer.writeheader()
+
+        # Write data to file
         self._writer.writerow(data)
         self._file.flush()
 
     def close(self) -> None:
+        """Close the CSV file."""
         if self._file is not None:
             self._file.close()
             self._file = None
@@ -138,14 +162,19 @@ class TensorboardLogger(Logger):
     def __init__(
         self,
         log_dir: str | Path = "tensorboard_logs",
+        experiment_name: str | None = None,
         accelerator: Accelerator | None = None,
     ) -> None:
         if SummaryWriter is None:
             msg = "TensorBoard is not installed. Please install it with `pip install tensorboard`."
             raise ImportError(msg)
 
-        self._date = datetime.now().strftime("%m%d%Y%H%M%S")
-        self._log_path = Path(log_dir) / self._date
+        date = datetime.now().strftime("%m%d%Y%H%M%S")
+        experiment_name = (
+            date if experiment_name is None else f"{experiment_name}-{date}"
+        )
+
+        self._log_path = Path(log_dir) / experiment_name
         self._writer = SummaryWriter(log_dir=str(self._log_path))
         self._accelerator = accelerator
 
@@ -153,30 +182,18 @@ class TensorboardLogger(Logger):
         data = report.to_dict()
         global_step = int(data.get("train/global_step", 0))
 
-        if self._accelerator is not None:
-            self._accelerator.wait_for_everyone()
-            if not self._accelerator.is_main_process:
-                self._accelerator.wait_for_everyone()
-                return
+        with Logger.on_main_process(self._accelerator) as is_main:
+            if is_main:
+                for key, value in data.items():
+                    if isinstance(value, (int, float)):
+                        self._writer.add_scalar(key, value, global_step=global_step)
 
-        for key, value in data.items():
-            if isinstance(value, (int, float)):
-                self._writer.add_scalar(key, value, global_step=global_step)
+                for key, value in report.to_nonscalar_dict().items():
+                    self._writer.add_histogram(key, value, global_step=global_step)
 
-        nonscalar_data = report.to_nonscalar_dict()
-        for key, value in nonscalar_data.items():
-            self._writer.add_histogram(key, value, global_step=global_step)
-
-        self._writer.flush()
-
-        if self._accelerator is not None:
-            self._accelerator.wait_for_everyone()
+                self._writer.flush()
 
     def close(self) -> None:
-        if self._accelerator is not None:
-            self._accelerator.wait_for_everyone()
-            if self._accelerator.is_main_process:
+        with Logger.on_main_process(self._accelerator) as is_main:
+            if is_main:
                 self._writer.close()
-            self._accelerator.wait_for_everyone()
-        else:
-            self._writer.close()

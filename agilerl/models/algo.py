@@ -1,52 +1,278 @@
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.algorithms.core import LLMAlgorithm, MultiAgentRLAlgorithm, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
-from agilerl.typing import BPTTSequenceType
-
-from .networks import MlpSpec, NetworkSpec
+from agilerl.models.networks import NetworkSpec
+from agilerl.protocols import AgentType
+from agilerl.typing import SupportedActionSpace, SupportedObservationSpace
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import LoraConfig  # noqa: TC002
 
+if TYPE_CHECKING:
+    import torch
+
+logger = logging.getLogger(__name__)
+
+AlgoT = TypeVar("AlgoT", bound=RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm)
+AlgoSpecT = TypeVar("AlgoSpecT", bound="AlgorithmSpec")
+
+
+@dataclass(frozen=True, slots=True)
+class RegistryEntry:
+    """A single entry in the algorithm registry.
+
+    :param spec_cls: The algorithm spec class.
+    :param arena: Whether the algorithm is available for training on Arena.
+    """
+
+    spec_cls: type[AlgorithmSpec]
+    arena: bool
+
+
+class AlgorithmRegistry:
+    """Central registry mapping algorithm names to their spec classes.
+
+    Populated at import time by the :func:`register` decorator applied to
+    each concrete :class:`AlgorithmSpec` subclass.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, RegistryEntry] = {}
+
+    def add(self, name: str, spec_cls: type[AlgorithmSpec], *, arena: bool) -> None:
+        """Register a spec class under *name*.
+
+        :param name: Algorithm name (e.g. ``"DQN"``).
+        :type name: str
+        :param spec_cls: The spec class to register.
+        :type spec_cls: type[AlgorithmSpec]
+        :param arena: Whether the algorithm is available on Arena.
+        :type arena: bool
+        """
+        if name in self._entries:
+            logger.warning("Overriding existing registration for algorithm %r", name)
+        self._entries[name] = RegistryEntry(spec_cls=spec_cls, arena=arena)
+
+    def get(self, name: str) -> RegistryEntry:
+        """Look up an entry by algorithm name.
+
+        :param name: Algorithm name.
+        :type name: str
+        :returns: The registry entry.
+        :rtype: RegistryEntry
+        :raises KeyError: If *name* is not registered.
+        """
+        try:
+            return self._entries[name]
+        except KeyError as err:
+            supported = ", ".join(sorted(self._entries))
+            msg = f"No registry entry for algorithm {name!r}. Registered: {supported}"
+            raise KeyError(msg) from err
+
+    def arena_algorithms(self) -> dict[str, RegistryEntry]:
+        """Return the Pydantic models for algorithms available on Arena.
+
+        :returns: The registry entries for Arena-eligible algorithms.
+        :rtype: dict[str, RegistryEntry]
+        """
+        return {k: v for k, v in self._entries.items() if v.arena}
+
+    def local_algorithms(self) -> dict[str, RegistryEntry]:
+        """Return the Pydantic models for algorithms available locally.
+
+        :returns: The registry entries for local-only algorithms.
+        :rtype: dict[str, RegistryEntry]
+        """
+        return {k: v for k, v in self._entries.items() if not v.arena}
+
+
+ALGO_REGISTRY = AlgorithmRegistry()
+
+
+def register(
+    arena: bool = False,
+) -> Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]:
+    """Class decorator that registers an algorithm spec.
+
+    The registry key is derived from ``spec_cls.algo_class.__name__``.
+
+    :param arena: Whether the algorithm is available for training on Arena.
+    :type arena: bool
+
+    :returns: The decorator function.
+    :rtype: Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]
+
+    Usage::
+
+        @register(arena=True)
+        class DQNSpec(RLAlgorithmSpec):
+            algo_class: ClassVar[type[DQN]] = DQN
+            ...
+    """
+
+    def decorator(spec_cls: type[AlgorithmSpec]) -> type[AlgorithmSpec]:
+        name = spec_cls.algo_class.__name__
+        ALGO_REGISTRY.add(name, spec_cls, arena=arena)
+        return spec_cls
+
+    return decorator
+
+
+def off_policy() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
+    """Decorate an algorithm to mark it as off-policy.
+
+    By doing this we automatically signal the use
+    of a replay buffer and, optionally, epsilon decay during training.
+
+    :return: Decorated algorithm spec class
+    :rtype: Callable[[type[AlgoSpecT]], type[AlgoSpecT]]
+    """
+
+    def decorator(algo_spec_class: type[AlgoSpecT]) -> type[AlgoSpecT]:
+        algo_spec_class.off_policy = True
+        return algo_spec_class
+
+    return decorator
+
 
 class AlgorithmSpec(BaseModel):
-    """Pydantic model for `EvolvableAlgorithm` objects."""
+    """Base specification for all algorithms.
 
-    model_config = {"arbitrary_types_allowed": True}
+    Defines common fields and behavior for algorithm specifications, including
+    batch size and hyperparameter configuration.  Concrete subclasses must set
+    the ``algo_class`` and ``agent_type`` class variables, and override
+    :meth:`get_training_loop`.
+    """
 
-    batch_size: int = Field(default=64, ge=1)
+    batch_size: int = Field(default=128, ge=1)
     hp_config: HyperparameterConfig | None = None
+    off_policy: ClassVar[bool] = False
 
+    algo_class: ClassVar[type[AlgoT]]
 
-def _default_net_config() -> NetworkSpec:
-    """Sensible MLP [64, 64] default for zero-config usage."""
-    return NetworkSpec(
-        encoder_config=MlpSpec(hidden_size=[64, 64]),
-        head_config=MlpSpec(hidden_size=[64, 64]),
-    )
+    agent_type: ClassVar[AgentType]
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @property
+    def name(self) -> str:
+        """Return the name of the algorithm."""
+        return self.__class__.__name__.rstrip("Spec")
+
+    def build_algorithm(self) -> AlgoT:
+        """Build the algorithm instance using spec fields + runtime args."""
+        msg = "Algorithm specs must implement a build_algorithm method."
+        raise NotImplementedError(msg)
+
+    @staticmethod
+    def get_training_fn() -> Callable[..., Any]:
+        """Return the training function for this algorithm.
+
+        Concrete specs **must** override this to return their training
+        function (e.g. ``train_off_policy``).
+
+        :return: Training function
+        :rtype: Callable[..., Any]
+        :raises NotImplementedError: If the training function is not implemented.
+        """
+        msg = "Algorithm specs must implement get_training_fn."
+        raise NotImplementedError(msg) from None
 
 
 class RLAlgorithmSpec(AlgorithmSpec):
-    """Pydantic model for `RLAlgorithm` and `MultiAgentRLAlgorithm` objects."""
+    """Specification for single-agent reinforcement learning algorithms.
 
-    net_config: NetworkSpec = Field(default_factory=_default_net_config)
+    Extends :class:`AlgorithmSpec` with single-agent specific fields like
+    network configuration, learning step frequency, and discount factor.
+    """
+
+    net_config: NetworkSpec | None = Field(default=None)
     learn_step: int = Field(default=5, ge=1)
     gamma: float = Field(default=0.99, ge=0.0, le=1.0)
 
+    agent_type: ClassVar[AgentType] = AgentType.SingleAgent
+
+    def build_algorithm(
+        self,
+        observation_space: SupportedObservationSpace,
+        action_space: SupportedActionSpace,
+        index: int,
+        device: torch.device,
+    ) -> RLAlgorithm:
+        """Build a single-agent algorithm instance from spec fields.
+
+        :param observation_space: Observation space.
+        :type observation_space: SupportedObservationSpace
+        :param action_space: Action space.
+        :type action_space: SupportedActionSpace
+        :param index: Index of the algorithm in the population.
+        :type index: int
+        :param device: Torch device.
+        :type device: torch.device
+        :returns: Single-agent algorithm instance.
+        :rtype: RLAlgorithm
+        """
+        return self.algo_class(
+            observation_space=observation_space,
+            action_space=action_space,
+            index=index,
+            device=device,
+            **self.model_dump(),
+        )
+
+
+class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
+    """Specification for multi-agent reinforcement learning algorithms.
+
+    Extends :class:`AlgorithmSpec` with multi-agent specific fields and
+    support for multiple observation/action spaces and agent IDs.
+    """
+
+    net_config: NetworkSpec | None = Field(default=None)
+    learn_step: int = Field(default=2048, ge=1)
+    gamma: float = Field(default=0.99, ge=0.0, le=1.0)
+
+    agent_type: ClassVar[AgentType] = AgentType.MultiAgent
+
+    def build_algorithm(
+        self,
+        observation_spaces: dict[str, SupportedObservationSpace],
+        action_spaces: dict[str, SupportedActionSpace],
+        index: int,
+        device: torch.device,
+    ) -> MultiAgentRLAlgorithm:
+        """Build a multi-agent algorithm from spec fields.
+
+        :param observation_spaces: Per-agent observation spaces.
+        :type observation_spaces: dict[str, SupportedObservationSpace]
+        :param action_spaces: Per-agent action spaces.
+        :type action_spaces: dict[str, SupportedActionSpace]
+        :param index: Index of the algorithm in the population.
+        :type index: int
+        :param device: Torch device.
+        :type device: torch.device
+        :returns: Multi-agent algorithm instance.
+        :rtype: MultiAgentRLAlgorithm
+        """
+        return self.algo_class(
+            observation_spaces=observation_spaces,
+            action_spaces=action_spaces,
+            index=index,
+            device=device,
+            **self.model_dump(),
+        )
+
 
 class LoraConfigDict(TypedDict):
-    """Configuration for LoRA (Low-Rank Adaptation) fine-tuning.
-
-    This dictionary defines the parameters for LoRA fine-tuning, which is a technique
-    for adapting pre-trained language models to specific tasks by adding trainable
-    low-rank matrices to the model.
-    """
+    """Configuration for LoRA (Low-Rank Adaptation) fine-tuning."""
 
     lora_r: int
     lora_alpha: int
@@ -55,10 +281,10 @@ class LoraConfigDict(TypedDict):
 
 
 class LLMAlgorithmSpec(AlgorithmSpec):
-    """Pydantic model for `LLMAlgorithm` objects.
+    """Specification for LLM fine-tuning algorithms.
 
-    Extends AlgorithmSpec with LLM-specific fields including LoRA configuration,
-    model parameters, and training hyperparameters.
+    Extends :class:`AlgorithmSpec` with LLM-specific fields including LoRA
+    configuration, model parameters, and training hyperparameters.
     """
 
     beta: float = Field(default=0.001, ge=0.0, le=1.0)
@@ -70,225 +296,3 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     use_separate_reference_adapter: bool
     pretrained_model_name_or_path: str
     calc_position_embeddings: bool
-
-
-class DDPGSpec(RLAlgorithmSpec):
-    """Pydantic model for DDPG algorithm specification."""
-
-    lr_actor: float = Field(default=0.0001)
-    lr_critic: float = Field(default=0.001)
-    tau: float = Field(default=0.001)
-    policy_freq: int = Field(default=2)
-    O_U_noise: bool = Field(default=True)
-    expl_noise: float = Field(default=0.1)
-    mean_noise: float = Field(default=0.0)
-    theta: float = Field(default=0.15)
-    dt: float = Field(default=0.01)
-    share_encoders: bool = Field(default=False)
-
-
-class TD3Spec(RLAlgorithmSpec):
-    """Pydantic model for TD3 algorithm specification."""
-
-    lr_actor: float = Field(default=0.0001)
-    lr_critic: float = Field(default=0.001)
-    tau: float = Field(default=0.005)
-    policy_freq: int = Field(default=2)
-    O_U_noise: bool = Field(default=True)
-    expl_noise: float = Field(default=0.1)
-    mean_noise: float = Field(default=0.0)
-    theta: float = Field(default=0.15)
-    dt: float = Field(default=0.01)
-    share_encoders: bool = Field(default=False)
-
-
-class DQNSpec(RLAlgorithmSpec):
-    """Pydantic model for DQN algorithm specification."""
-
-    tau: float = Field(default=0.001)
-    double: bool = Field(default=False)
-    lr: float = Field(default=0.0001, ge=0.0)
-
-
-class RainbowDQNSpec(RLAlgorithmSpec):
-    """Pydantic model for Rainbow DQN algorithm specification."""
-
-    tau: float = Field(default=0.001)
-    beta: float = Field(default=0.4)
-    prior_eps: float = Field(default=1e-6)
-    num_atoms: int = Field(default=51, ge=1)
-    v_min: float = Field(default=-200)
-    v_max: float = Field(default=200)
-    noise_std: float = Field(default=0.5)
-    n_step: int = Field(default=3, ge=1)
-    combined_reward: bool = Field(default=False)
-    lr: float = Field(default=0.0001, ge=0.0)
-
-
-class PPOSpec(RLAlgorithmSpec):
-    """Pydantic model for PPO algorithm specification."""
-
-    learn_step: int = Field(default=2048, ge=1)
-    num_envs: int = Field(default=1, ge=1)
-    gae_lambda: float = Field(default=0.95, ge=0.0, le=1.0)
-    action_std_init: float = Field(default=0.6, ge=0.0)
-    clip_coef: float = Field(default=0.2, ge=0.0, le=1.0)
-    ent_coef: float = Field(default=0.01, ge=0.0, le=1.0)
-    vf_coef: float = Field(default=0.5, ge=0.0, le=1.0)
-    max_grad_norm: float = Field(default=0.5, ge=0.0)
-    target_kl: float | None = Field(default=None, ge=0.0)
-    update_epochs: int = Field(default=4, ge=1)
-    use_rollout_buffer: bool = Field(default=True)
-    rollout_buffer_config: dict[str, Any] | None = Field(default_factory=dict)
-    recurrent: bool = Field(default=False)
-    max_seq_len: int | None = Field(default=32, ge=1)
-    share_encoders: bool = Field(default=True)
-    bptt_sequence_type: BPTTSequenceType = Field(default=BPTTSequenceType.CHUNKED)
-    lr: float = Field(default=0.0001, ge=0.0)
-
-
-class MADDPGSpec(RLAlgorithmSpec):
-    """Pydantic model for MADDPG algorithm specification."""
-
-    vect_noise_dim: int
-    lr_actor: float = Field(default=0.001, ge=0.0)
-    lr_critic: float = Field(default=0.01, ge=0.0)
-    tau: float = Field(default=0.01)
-    O_U_noise: bool = Field(default=True)
-    expl_noise: float = Field(default=0.1)
-    mean_noise: float = Field(default=0.0)
-    theta: float = Field(default=0.15)
-    dt: float = Field(default=0.01)
-    torch_compiler: str | None = Field(default=None)
-
-
-class MATD3Spec(RLAlgorithmSpec):
-    """Pydantic model for MATD3 algorithm specification."""
-
-    vect_noise_dim: int
-    lr_actor: float = Field(default=0.001, ge=0.0)
-    lr_critic: float = Field(default=0.01, ge=0.0)
-    tau: float = Field(default=0.015, ge=0.0, le=1.0)
-    O_U_noise: bool = Field(default=True)
-    expl_noise: float = Field(default=0.1)
-    policy_freq: int = Field(default=2, ge=1)
-    mean_noise: float = Field(default=0.0)
-    theta: float = Field(default=0.15)
-    dt: float = Field(default=0.01)
-    torch_compiler: str | None = Field(default=None)
-
-
-class IPPOSpec(RLAlgorithmSpec):
-    """Pydantic model for IPPO algorithm specification."""
-
-    learn_step: int = Field(default=2048, ge=1)
-    gae_lambda: float = Field(default=0.95, ge=0.0, le=1.0)
-    action_std_init: float = Field(default=0.0)
-    clip_coef: float = Field(default=0.2, ge=0.0, le=1.0)
-    ent_coef: float = Field(default=0.01, ge=0.0, le=1.0)
-    vf_coef: float = Field(default=0.5, ge=0.0, le=1.0)
-    max_grad_norm: float = Field(default=0.5)
-    target_kl: float = Field(default=None)
-    update_epochs: int = Field(default=4, ge=1)
-    action_batch_size: int = Field(default=None)
-    lr: float = Field(default=0.0001, ge=0.0)
-    torch_compiler: str | None = Field(default=None)
-
-
-@dataclass(frozen=True, slots=True)
-class AlgorithmMeta:
-    """Metadata for a registered algorithm.
-
-    Used by the Trainer to look up the correct spec class, training
-    function, and whether a replay buffer is required.
-    """
-
-    name: str
-    spec_cls: type[RLAlgorithmSpec]
-    algo_path: str
-    train_fn_name: str
-    requires_buffer: bool
-
-
-ALGO_REGISTRY: dict[str, AlgorithmMeta] = {
-    "PPO": AlgorithmMeta(
-        "PPO", PPOSpec, "agilerl.algorithms.PPO", "train_on_policy", False
-    ),
-    "DQN": AlgorithmMeta(
-        "DQN", DQNSpec, "agilerl.algorithms.DQN", "train_off_policy", True
-    ),
-    "DDPG": AlgorithmMeta(
-        "DDPG", DDPGSpec, "agilerl.algorithms.DDPG", "train_off_policy", True
-    ),
-    "TD3": AlgorithmMeta(
-        "TD3", TD3Spec, "agilerl.algorithms.TD3", "train_off_policy", True
-    ),
-    "RainbowDQN": AlgorithmMeta(
-        "RainbowDQN",
-        RainbowDQNSpec,
-        "agilerl.algorithms.RainbowDQN",
-        "train_off_policy",
-        True,
-    ),
-    "CQN": AlgorithmMeta(
-        "CQN", RLAlgorithmSpec, "agilerl.algorithms.CQN", "train_offline", True
-    ),
-    "NeuralUCB": AlgorithmMeta(
-        "NeuralUCB",
-        RLAlgorithmSpec,
-        "agilerl.algorithms.NeuralUCB",
-        "train_bandits",
-        True,
-    ),
-    "NeuralTS": AlgorithmMeta(
-        "NeuralTS",
-        RLAlgorithmSpec,
-        "agilerl.algorithms.NeuralTS",
-        "train_bandits",
-        True,
-    ),
-    "IPPO": AlgorithmMeta(
-        "IPPO",
-        IPPOSpec,
-        "agilerl.algorithms.IPPO",
-        "train_multi_agent_on_policy",
-        False,
-    ),
-    "MADDPG": AlgorithmMeta(
-        "MADDPG",
-        MADDPGSpec,
-        "agilerl.algorithms.MADDPG",
-        "train_multi_agent_off_policy",
-        True,
-    ),
-    "MATD3": AlgorithmMeta(
-        "MATD3",
-        MATD3Spec,
-        "agilerl.algorithms.MATD3",
-        "train_multi_agent_off_policy",
-        True,
-    ),
-}
-
-
-class GRPOSpec(LLMAlgorithmSpec):
-    """Pydantic model for GRPO algorithm specification."""
-
-    group_size: int = Field(..., ge=1)
-    lr: float = Field(default=0.0001, ge=0.0)
-    clip_coef: float = Field(default=0.2, ge=0.0, le=1.0)
-    temperature: float
-    vllm_config: dict[str, Any] = Field(
-        default_factory=lambda: {
-            "max_num_seqs": 16,
-            "gpu_memory_utilization": 0.4,
-            "tensor_parallel_size": 1,
-        },
-    )
-    use_vllm: bool = Field(default=True)
-
-
-class DPOSpec(LLMAlgorithmSpec):
-    """Pydantic model for DPO algorithm specification."""
-
-    lr: float = Field(default=0.000005)

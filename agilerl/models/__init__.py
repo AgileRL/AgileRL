@@ -2,28 +2,38 @@ from __future__ import annotations
 
 from enum import Enum
 
+import yaml
 from pydantic import BaseModel, Field
+
+from agilerl import HAS_LLM_DEPENDENCIES
 
 from .algo import (
     ALGO_REGISTRY,
-    AlgorithmMeta,
     AlgorithmSpec,
+    LLMAlgorithmSpec,
+    MultiAgentRLAlgorithmSpec,
+    RLAlgorithmSpec,
+)
+from .algorithms import (
+    CQNSpec,
     DDPGSpec,
-    DPOSpec,
     DQNSpec,
-    GRPOSpec,
     IPPOSpec,
     MADDPGSpec,
     MATD3Spec,
+    NeuralTSSpec,
+    NeuralUCBSpec,
     PPOSpec,
     RainbowDQNSpec,
-    RLAlgorithmSpec,
     TD3Spec,
 )
 from .env import EnvironmentSpec
 from .hpo import MutationSpec, TournamentSelectionSpec
 from .networks import NetworkSpec
 from .training import JobStatus, ReplayBufferSpec, TrainingSpec
+
+if HAS_LLM_DEPENDENCIES:
+    from .algorithms import DPOSpec, GRPOSpec
 
 
 class ArenaVM(BaseModel):
@@ -80,36 +90,45 @@ class ArenaTrainingManifest(BaseModel):
     tournament_selection: TournamentSelectionSpec | None = Field(default=None)
     training: TrainingSpec
 
-    def to_yaml(self) -> str:
-        """Serialize the manifest to a YAML string."""
-        try:
-            import yaml
-        except ImportError as exc:
-            msg = "PyYAML is required for YAML serialization: pip install pyyaml"
-            raise ImportError(msg) from exc
+    def save(self, path: str) -> None:
+        """Save the manifest to a YAML file.
 
+        :param path: Path to the YAML file.
+        :type path: str
+        """
+        with open(path, "w") as f:
+            f.write(self.to_yaml())
+
+    def to_yaml(self) -> str:
+        """Serialize the manifest to a YAML string.
+
+        :returns: YAML string representation of the manifest.
+        :rtype: str
+        """
         data = self.model_dump(mode="json", exclude_none=True)
         return yaml.dump(data, default_flow_style=False, sort_keys=False)
 
 
 __all__ = [
     "ALGO_REGISTRY",
-    "AlgorithmMeta",
     "AlgorithmSpec",
     "ArenaCluster",
     "ArenaResource",
     "ArenaTrainingManifest",
+    "CQNSpec",
     "DDPGSpec",
-    "DPOSpec",
     "DQNSpec",
     "EnvironmentSpec",
-    "GRPOSpec",
     "IPPOSpec",
     "JobStatus",
+    "LLMAlgorithmSpec",
     "MADDPGSpec",
     "MATD3Spec",
+    "MultiAgentRLAlgorithmSpec",
     "MutationSpec",
     "NetworkSpec",
+    "NeuralTSSpec",
+    "NeuralUCBSpec",
     "PPOSpec",
     "RLAlgorithmSpec",
     "RainbowDQNSpec",
@@ -118,3 +137,6 @@ __all__ = [
     "TournamentSelectionSpec",
     "TrainingSpec",
 ]
+
+if HAS_LLM_DEPENDENCIES:
+    __all__ += ["DPOSpec", "GRPOSpec"]

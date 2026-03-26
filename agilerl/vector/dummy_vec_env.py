@@ -1,8 +1,4 @@
-"""Lightweight single-env wrappers that expose vectorized-env interfaces.
-
-:class:`DummyVecEnv` wraps a single Gymnasium env.
-:class:`PzDummyVecEnv` wraps a single PettingZoo ``ParallelEnv``.
-"""
+"""Lightweight single-env wrappers that expose vectorized-env interfaces."""
 
 from __future__ import annotations
 
@@ -151,6 +147,7 @@ class PzDummyVecEnv(PettingZooVecEnv):
             possible_agents=possible_agents,
             render_mode=getattr(env, "render_mode", None),
         )
+        self._pending_actions = None
 
     def reset(
         self,

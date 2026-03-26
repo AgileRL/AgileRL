@@ -198,7 +198,6 @@ Alternatively, use a custom on-policy training loop:
             tournament_size=2,  # Tournament selection size
             elitism=True,  # Elitism in tournament selection
             population_size=INIT_HP["POP_SIZE"],  # Population size
-            eval_loop=1,  # Evaluate using last N fitness scores
         )
 
         mutations = Mutations(
@@ -343,7 +342,7 @@ Training Loop for Recurrent On-Policy Algorithms
 
 Recurrent on-policy algorithms require a different training loop to the standard on-policy algorithms. This is because the agent needs to maintain a hidden state
 between steps, which is not possible with the standard training loop. AgileRL currently supports recurrent policies to be used with ``PPO``. To use a recurrent policy,
-users must set both ``recurrent`` and ``use_rollout_buffer`` to ``True`` as arguments to the algorithm.
+users must set ``recurrent=True`` when creating the algorithm.
 
 .. collapse:: Example Population Creation
   :open:
@@ -380,7 +379,6 @@ users must set both ``recurrent`` and ``use_rollout_buffer`` to ``True`` as argu
             "VF_COEF": 0.5,  # Value function coefficient
             "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
             "RECURRENT": True,
-            "USE_ROLLOUT_BUFFER": True,
             "TARGET_KL": None,  # Target KL divergence threshold
             "UPDATE_EPOCHS": 4,  # Number of policy update epochs
         }
@@ -408,7 +406,6 @@ users must set both ``recurrent`` and ``use_rollout_buffer`` to ``True`` as argu
             tournament_size=2,  # Tournament selection size
             elitism=True,  # Elitism in tournament selection
             population_size=INIT_HP["POP_SIZE"],  # Population size
-            eval_loop=1,  # Evaluate using last N fitness scores
         )
 
         mutations = Mutations(

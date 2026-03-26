@@ -227,7 +227,6 @@ def test_rsnorm_device_when_agent_has_rollout_buffer(vector_space):
     ppo = PPO(
         observation_space,
         action_space,
-        use_rollout_buffer=True,
         num_envs=1,
     )
     wrapper = RSNorm(ppo)
@@ -487,7 +486,7 @@ def test_rsnorm_learn(observation_space, vector_space, request, accelerator_flag
 def test_rsnorm_learn_ppo(vector_space):
     observation_space = vector_space
     action_space = copy.deepcopy(vector_space)
-    ppo = PPO(observation_space, action_space, use_rollout_buffer=True, num_envs=1)
+    ppo = PPO(observation_space, action_space, num_envs=1)
     ppo = RSNorm(ppo)
 
     env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=ppo.num_envs)
@@ -1096,7 +1095,7 @@ def test_rsnorm_build_rms_dict_space():
 def test_rsnorm_learn_rollout_buffer_full(vector_space):
     obs_space = vector_space
     action_space = copy.deepcopy(vector_space)
-    ppo = PPO(obs_space, action_space, use_rollout_buffer=True, num_envs=2)
+    ppo = PPO(obs_space, action_space, num_envs=2)
     ppo.rollout_buffer.full = True
     ppo.rollout_buffer.pos = 10
     wrapper = RSNorm(ppo)

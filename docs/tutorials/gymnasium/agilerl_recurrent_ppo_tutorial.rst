@@ -244,7 +244,6 @@ returns the best agent, and the new generation of agents.
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
         INIT_HP["POP_SIZE"],
-        INIT_HP["EVAL_LOOP"],
     )
 
 Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be

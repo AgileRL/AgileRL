@@ -20,7 +20,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import LoraConfigProtocol, PreTrainedModelProtocol
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import get_experiences_samples
-from agilerl.utils.llm_utils import PreferenceGym
+from agilerl.utils.llm_utils import PreferenceGym, aggregate_metrics_across_gpus
 
 
 class DPO(LLMAlgorithm):
@@ -157,6 +157,12 @@ class DPO(LLMAlgorithm):
         if self.wrap:
             self.wrap_models()
 
+        # Register metrics to keep track of during training
+        self.metrics.register("loss")
+        self.metrics.register("chosen_reward")
+        self.metrics.register("rejected_reward")
+        self.metrics.register("reward_margin")
+
     def get_action(
         self,
         obs: LLMObsType,
@@ -263,7 +269,28 @@ class DPO(LLMAlgorithm):
         mean_loss /= num_samples
         mean_chosen_reward /= num_samples
         mean_rejected_reward /= num_samples
-        return mean_loss, mean_chosen_reward, mean_rejected_reward
+
+        # Aggregate metrics across GPUs and report to metrics
+        if training:
+            if self.accelerator is not None:
+                agg_loss = aggregate_metrics_across_gpus(self.accelerator, mean_loss)
+                agg_chosen = aggregate_metrics_across_gpus(
+                    self.accelerator, mean_chosen_reward
+                )
+                agg_rejected = aggregate_metrics_across_gpus(
+                    self.accelerator, mean_rejected_reward
+                )
+            else:
+                agg_loss = mean_loss
+                agg_chosen = mean_chosen_reward
+                agg_rejected = mean_rejected_reward
+
+            self.metrics.log("loss", agg_loss)
+            self.metrics.log("chosen_reward", agg_chosen)
+            self.metrics.log("rejected_reward", agg_rejected)
+            self.metrics.log("reward_margin", agg_chosen - agg_rejected)
+
+        return agg_loss, agg_chosen, agg_rejected
 
     def _dpo_loss(
         self,
@@ -569,5 +596,5 @@ class DPO(LLMAlgorithm):
                 rewards.append(np.asarray(reward_margin).item())
                 prompts = env.step()
             mean_fit = float(np.mean(rewards))
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return np.array(mean_fit)

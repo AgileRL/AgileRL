@@ -417,8 +417,8 @@ class RSNorm(AgentWrapper[AgentType]):
         :rtype: Any
         """
         if experiences is None:
-            if not isinstance(self.agent, PPO) or not self.agent.use_rollout_buffer:
-                msg = "Experiences must be provided if not using a rollout buffer."
+            if not isinstance(self.agent, PPO):
+                msg = "Experiences must be provided unless the wrapped agent is PPO."
                 raise ValueError(
                     msg,
                 )

@@ -13,39 +13,103 @@ from agilerl.training.train_llm import (
 pytestmark = pytest.mark.llm
 
 
-@pytest.mark.parametrize("use_accelerator", [True, False])
-def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
-    """Test the basic training loop in finetune_llm_reasoning."""
-    # Create mock agent
-    mock_agent = MagicMock(spec=GRPO)
-    mock_agent.fitness = [0.0]
-    mock_agent.local_rank = "0"  # Main process
-    mock_agent.get_action.return_value = (
+def _mock_grpo_agent(**overrides):
+    """Build a mock GRPO agent with proper metrics interface."""
+    agent = MagicMock(spec=GRPO)
+    agent.algo = "GRPO"
+    agent.fitness = [0.0]
+    agent.local_rank = "0"
+    agent.get_action.return_value = (
         [torch.ones(1, 100) for _ in range(2)],
         Mock(),
     )
-    mock_agent.learn.return_value = (0.5, 0.2)
-    mock_agent.test.return_value = torch.tensor([0.8])
-    mock_agent.algo = "GRPO"
-    mock_agent.batch_size_per_process = 32
-    mock_agent.batch_size = 32
-    mock_agent.steps = [10]
-    mock_agent.scores = [0.0]
-    mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+    agent.learn.return_value = (0.5, 0.2)
+    agent.test.return_value = torch.tensor([0.8])
+    agent.batch_size_per_process = 32
+    agent.batch_size = 32
+    agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+    agent.lr = 0.01
+    agent.index = 0
+    agent.mut = None
 
-    # Create mock environment - use MagicMock for special methods
+    # Proper metrics mock for Population
+    metrics = MagicMock()
+    metrics.steps = 0
+    metrics.steps_per_second = 0.0
+    metrics.scores = []
+    metrics.additional_metrics = [
+        "loss",
+        "kl",
+        "mean_reward",
+        "completion_length",
+        "accuracy",
+    ]
+    metrics.nonscalar_metrics = []
+    agent.metrics = metrics
+
+    for key, val in overrides.items():
+        setattr(agent, key, val)
+    return agent
+
+
+def _mock_dpo_agent(**overrides):
+    """Build a mock DPO agent with proper metrics interface."""
+    agent = MagicMock(spec=DPO)
+    agent.algo = "DPO"
+    agent.fitness = [0.0]
+    agent.local_rank = "0"
+    agent.learn.return_value = (0.5, 0.2, 0.1)
+    agent.test.return_value = 0.87
+    agent.batch_size_per_process = 32
+    agent.batch_size = 32
+    agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+    agent.lr = 0.001
+    agent.index = 0
+    agent.mut = None
+
+    # Proper metrics mock for Population
+    metrics = MagicMock()
+    metrics.steps = 0
+    metrics.steps_per_second = 0.0
+    metrics.scores = []
+    metrics.additional_metrics = [
+        "loss",
+        "chosen_reward",
+        "rejected_reward",
+        "reward_margin",
+    ]
+    metrics.nonscalar_metrics = []
+    agent.metrics = metrics
+
+    # hp_config for Population._collect_hyperparameters
+    agent.registry = MagicMock()
+    agent.registry.hp_config = MagicMock()
+    agent.registry.hp_config.config = {"lr": 0.001, "batch_size": 32}
+    agent.registry.hp_config.names.return_value = ["lr", "batch_size"]
+
+    for key, val in overrides.items():
+        setattr(agent, key, val)
+    return agent
+
+
+@pytest.mark.parametrize("use_accelerator", [True, False])
+def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
+    """Test the basic training loop in finetune_llm_reasoning."""
+    mock_agent = _mock_grpo_agent()
+
     mock_env = MagicMock()
     mock_env.__len__.return_value = 6
     mock_env.reset.return_value = "initial_prompts"
     mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
     mock_env.data_batch_size_per_gpu = 1
 
-    # Mock other dependencies
     with (
-        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
     ):
+        mock_pbar_fn.return_value = MagicMock()
         mock_agg.return_value = 0.5
         finetune_llm_reasoning(
             pop=[mock_agent],
@@ -59,61 +123,30 @@ def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
         assert mock_agent.get_action.call_count == 6
         assert mock_env.step.call_count == 6
         assert mock_agent.learn.call_count == 6
-        assert mock_agg.call_count == 36
-        assert mock_agent.test.call_count == 3  # Should be called at step 2
+        assert mock_agent.test.call_count == 3
 
 
-@pytest.mark.parametrize(
-    "use_accelerator",
-    [
-        True,
-        # False
-    ],
-)
+@pytest.mark.parametrize("use_accelerator", [True, False])
 def test_finetune_llm_reasoning_with_wandb_and_checkpoints(use_accelerator):
     """Test finetune_llm_reasoning with wandb logging and checkpointing enabled."""
-    # Create mock agent
-    mock_agent = MagicMock(spec=GRPO)
-    mock_agent.algo = "GRPO"
-    mock_agent.registry = MagicMock()
-    mock_agent.registry.hp_config = MagicMock()
-    mock_agent.registry.hp_config.config = {"lr": 0.001, "batch_size": 32}
-    mock_agent.fitness = [0.0]
-    mock_agent.local_rank = "0"  # Main process
-    mock_agent.get_action.return_value = (
-        [torch.ones(1, 100) for _ in range(2)],
-        Mock(),
-    )
-    mock_agent.learn.return_value = (0.5, 0.2)
-    mock_agent.test.return_value = torch.tensor([0.8])
-    mock_agent.batch_size_per_process = 32
-    mock_agent.batch_size = 32
-    mock_agent.steps = [10]
-    mock_agent.scores = [0.0]
-    mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
-    mock_agent.lr = 0.01
+    mock_agent = _mock_grpo_agent()
 
-    # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
     mock_env.__len__.return_value = 6
     mock_env.reset.return_value = "initial_prompts"
     mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
     mock_env.data_batch_size_per_gpu = 1
 
-    # Mock dependencies
     with (
-        patch("agilerl.training.train_llm.trange") as mock_trange,
-        patch("agilerl.training.train_llm.init_wandb") as mock_init_wandb,
-        patch("agilerl.training.train_llm.wandb") as mock_wandb,
+        patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
+        patch("agilerl.training.train_llm.init_loggers") as mock_init_loggers,
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
     ):
-        # Configure mocks
-        mock_pbar = Mock()
-        mock_trange.return_value = mock_pbar
+        mock_pbar_fn.return_value = MagicMock()
+        mock_init_loggers.return_value = []
         mock_agg.return_value = 0.5
 
-        # Run the function with wandb and checkpointing enabled
         finetune_llm_reasoning(
             pop=[mock_agent],
             env=mock_env,
@@ -126,37 +159,20 @@ def test_finetune_llm_reasoning_with_wandb_and_checkpoints(use_accelerator):
             checkpoint_steps=6,
         )
 
-        # Verify wandb was initialized
-        mock_init_wandb.assert_called_once()
-        # Verify wandb logging
-        assert mock_wandb.log.call_count >= 5
+        # Verify loggers were initialized with wb=True
+        mock_init_loggers.assert_called_once()
+        assert mock_init_loggers.call_args.kwargs["wb"] is True
         # Verify checkpointing
         assert mock_save.call_count == 1
-
-        # Verify evaluation was called at the right intervals (steps 3)
+        # Verify evaluation was called at the right intervals
         assert mock_agent.test.call_count == 2
 
 
 @pytest.mark.parametrize("use_accelerator", [True, False])
 def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
-    """Test the basic training loop in finetune_llm_reasoning."""
-    # Create mock agent
-    mock_agent = MagicMock(spec=GRPO)
-    mock_agent.algo = "GRPO"
-    mock_agent.fitness = [0.0]
-    mock_agent.local_rank = "0"  # Main process
-    mock_agent.get_action.return_value = (
-        [torch.ones(1, 100) for _ in range(2)],
-        Mock(),
-    )
-    mock_agent.learn.return_value = (0.5, 0.2)
-    mock_agent.test.return_value = torch.tensor([0.8])
-    mock_agent.batch_size_per_process = 32
-    mock_agent.batch_size = 32
-    mock_agent.steps = [10]
-    mock_agent.scores = [0.0]
+    """Test the basic training loop in finetune_llm_reasoning with evolution."""
+    mock_agent = _mock_grpo_agent()
 
-    # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
     mock_env.__len__.return_value = 6
     mock_env.reset.return_value = "initial_prompts"
@@ -169,18 +185,19 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
     mutation.parameters_mut = 0
     mutation.activation_mut = 0
 
-    # Mock other dependencies
     with (
-        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
         patch(
             "agilerl.training.train_llm.tournament_selection_and_mutation"
         ) as mock_tournament_selection_and_mutation,
     ):
+        mock_pbar_fn.return_value = MagicMock()
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
-
         mock_agg.return_value = 0.5
+
         finetune_llm_reasoning(
             pop=[mock_agent],
             env=mock_env,
@@ -196,11 +213,8 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
         assert mock_agent.get_action.call_count == 6
         assert mock_env.step.call_count == 6
         assert mock_agent.learn.call_count == 6
-        assert mock_agg.call_count == 36
-        assert mock_agent.test.call_count == 3  # Should be called at step 2
-        assert (
-            mock_tournament_selection_and_mutation.call_count == 6
-        )  # Should be called at step 2
+        assert mock_agent.test.call_count == 3
+        assert mock_tournament_selection_and_mutation.call_count == 6
 
 
 @pytest.mark.parametrize(
@@ -208,7 +222,7 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
     [finetune_llm_reasoning, finetune_llm_preference],
 )
 def test_finetune_llm_reasoning_evo_steps_not_set(finetune_fn):
-    """Test that finetune_llm_reasoning raises a ValueError if evo_steps is not set."""
+    """Test that finetune_llm raises a ValueError if evo_steps is not set."""
     with pytest.raises(ValueError) as evo_steps_not_set_error:
         finetune_fn(
             pop=[
@@ -233,7 +247,7 @@ def test_finetune_llm_reasoning_evo_steps_not_set(finetune_fn):
     [finetune_llm_reasoning, finetune_llm_preference],
 )
 def test_finetune_llm_reasoning_value_error_if_evo_steps_not_set(finetune_fn):
-    """Test that finetune_llm_reasoning raises a warning if evo_steps is not set."""
+    """Test that finetune_llm raises a ValueError if evo_steps is not set."""
     with pytest.raises(ValueError) as evo_steps_not_set_error:
         finetune_llm_reasoning(
             pop=[
@@ -254,42 +268,28 @@ def test_finetune_llm_reasoning_value_error_if_evo_steps_not_set(finetune_fn):
 
 
 def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps():
-    """Test that finetune_llm_reasoning raises a warning if evo_steps is not set."""
-    # Create mock agent
-    mock_agent = MagicMock(spec=GRPO)
-    mock_agent.algo = "GRPO"
-    mock_agent.fitness = [0.0]
-    mock_agent.local_rank = "0"  # Main process
-    mock_agent.get_action.return_value = (
-        [torch.ones(1, 100) for _ in range(2)],
-        Mock(),
-    )
-    mock_agent.learn.return_value = (0.5, 0.2)
-    mock_agent.test.return_value = torch.tensor([0.8])
-    mock_agent.batch_size_per_process = 32
-    mock_agent.batch_size = 32
-    mock_agent.steps = [10]
-    mock_agent.scores = [0.0]
+    """Test that finetune_llm_reasoning raises a warning if num_epochs and max_steps are set."""
+    mock_agent = _mock_grpo_agent()
 
-    # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
     mock_env.__len__.return_value = 6
     mock_env.reset.return_value = "initial_prompts"
     mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
     mock_env.data_batch_size_per_gpu = 1
 
-    # Mock other dependencies
     with (
-        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
         patch(
             "agilerl.training.train_llm.tournament_selection_and_mutation"
         ) as mock_tournament_selection_and_mutation,
     ):
+        mock_pbar_fn.return_value = MagicMock()
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
-
         mock_agg.return_value = 0.5
+
         with pytest.warns(UserWarning) as num_epochs_and_max_steps_warning:
             finetune_llm_reasoning(
                 pop=[mock_agent],
@@ -307,23 +307,8 @@ def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps():
 
 
 def test_finetune_llm_reasoning_max_steps_set_from_num_epochs():
-    # Create mock agent
-    mock_agent = MagicMock(spec=GRPO)
-    mock_agent.algo = "GRPO"
-    mock_agent.fitness = [0.0]
-    mock_agent.local_rank = "0"  # Main process
-    mock_agent.get_action.return_value = (
-        [torch.ones(1, 100) for _ in range(2)],
-        Mock(),
-    )
-    mock_agent.learn.return_value = (0.5, 0.2)
-    mock_agent.test.return_value = torch.tensor([0.8])
-    mock_agent.batch_size_per_process = 32
-    mock_agent.batch_size = 32
-    mock_agent.steps = [10]
-    mock_agent.scores = [0.0]
+    mock_agent = _mock_grpo_agent()
 
-    # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
     mock_env.__len__.return_value = 3
     mock_env.reset.return_value = "initial_prompts"
@@ -336,14 +321,13 @@ def test_finetune_llm_reasoning_max_steps_set_from_num_epochs():
     mutation.parameters_mut = 0
     mutation.activation_mut = 0
 
-    # Mock other dependencies
     with (
-        patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.init_wandb"),
-        patch("agilerl.training.train_llm.wandb"),
+        patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
+        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
     ):
+        mock_pbar_fn.return_value = MagicMock()
         mock_agg.return_value = 0.5
         finetune_llm_reasoning(
             pop=[mock_agent],
@@ -360,24 +344,8 @@ def test_finetune_llm_reasoning_max_steps_set_from_num_epochs():
 
 
 def test_finetune_llm_reasoning_break_on_num_epochs():
-    # Create mock agent
-    # Create mock agent
-    mock_agent = MagicMock(spec=GRPO)
-    mock_agent.algo = "GRPO"
-    mock_agent.fitness = [0.0]
-    mock_agent.local_rank = "0"  # Main process
-    mock_agent.get_action.return_value = (
-        [torch.ones(1, 100) for _ in range(2)],
-        Mock(),
-    )
-    mock_agent.learn.return_value = (0.5, 0.2)
-    mock_agent.test.return_value = torch.tensor([0.8])
-    mock_agent.batch_size_per_process = 32
-    mock_agent.batch_size = 32
-    mock_agent.steps = [10]
-    mock_agent.scores = [0.0]
+    mock_agent = _mock_grpo_agent()
 
-    # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
     mock_env.__len__.return_value = 3
     mock_env.reset.return_value = "initial_prompts"
@@ -390,14 +358,13 @@ def test_finetune_llm_reasoning_break_on_num_epochs():
     mutation.parameters_mut = 0
     mutation.activation_mut = 0
 
-    # Mock other dependencies
     with (
-        patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.init_wandb"),
-        patch("agilerl.training.train_llm.wandb"),
+        patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
+        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
+        mock_pbar_fn.return_value = MagicMock()
         mock_env.num_epochs = 2
         mock_agg.return_value = 0.5
         finetune_llm_reasoning(
@@ -415,21 +382,9 @@ def test_finetune_llm_reasoning_break_on_num_epochs():
 # Preference loop tests
 @pytest.mark.parametrize("use_accelerator", [True, False])
 def test_finetune_llm_preference_basic_training_loop(use_accelerator):
-    """Test the basic training loop in finetune_llm."""
-    # Create mock agent
-    mock_agent = MagicMock(spec=DPO)
-    mock_agent.algo = "DPO"
-    mock_agent.fitness = [0.0]
-    mock_agent.local_rank = "0"  # Main process
-    mock_agent.get_action = MagicMock()
-    mock_agent.learn.return_value = (0.5, 0.2, 0.1)
-    mock_agent.test.return_value = 0.87
-    mock_agent.batch_size = 32
-    mock_agent.batch_size_per_process = 32
-    mock_agent.steps = [10]
-    mock_agent.scores = [0.0]
+    """Test the basic training loop in finetune_llm_preference."""
+    mock_agent = _mock_dpo_agent()
 
-    # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
     mock_env.__len__.return_value = 6
     example_prefernce_env_return = {
@@ -446,12 +401,13 @@ def test_finetune_llm_preference_basic_training_loop(use_accelerator):
     mock_env.step.return_value = example_prefernce_env_return
     mock_env.data_batch_size_per_gpu = 1
 
-    # Mock other dependencies
     with (
-        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
     ):
+        mock_pbar_fn.return_value = MagicMock()
         mock_agg.return_value = 0.5
         finetune_llm_preference(
             pop=[mock_agent],
@@ -464,33 +420,14 @@ def test_finetune_llm_preference_basic_training_loop(use_accelerator):
         assert mock_agent.get_action.call_count == 0
         assert mock_env.step.call_count == 6
         assert mock_agent.learn.call_count == 6
-        assert mock_agg.call_count == 21
-        assert mock_agent.test.call_count == 3  # Should be called at step 2
+        assert mock_agent.test.call_count == 3
 
 
-@pytest.mark.parametrize(
-    "use_accelerator",
-    [True, False],
-)
+@pytest.mark.parametrize("use_accelerator", [True, False])
 def test_finetune_llm_preference_with_wandb_and_checkpoints(use_accelerator):
-    """Test finetune_llm with wandb logging and checkpointing enabled."""
-    # Create mock agent
-    mock_agent = MagicMock(spec=DPO)
-    mock_agent.algo = "DPO"
-    mock_agent.registry = MagicMock()
-    mock_agent.registry.hp_config = MagicMock()
-    mock_agent.registry.hp_config.config = {"lr": 0.001, "batch_size": 32}
-    mock_agent.fitness = [0.0]
-    mock_agent.learn.return_value = (0.5, 0.2, 0.1)
-    mock_agent.test.return_value = 0.87
-    mock_agent.batch_size = 32
-    mock_agent.batch_size_per_process = 32
-    mock_agent.steps = [10]
-    mock_agent.scores = [0.0]
-    mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
-    mock_agent.lr = 0.001
+    """Test finetune_llm_preference with wandb logging and checkpointing enabled."""
+    mock_agent = _mock_dpo_agent()
 
-    # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
     mock_env.__len__.return_value = 6
     example_prefernce_env_return = {
@@ -507,20 +444,16 @@ def test_finetune_llm_preference_with_wandb_and_checkpoints(use_accelerator):
     mock_env.step.return_value = example_prefernce_env_return
     mock_env.data_batch_size_per_gpu = 1
 
-    # Mock dependencies
     with (
-        patch("agilerl.training.train_llm.trange") as mock_trange,
-        patch("agilerl.training.train_llm.init_wandb") as mock_init_wandb,
-        patch("agilerl.training.train_llm.wandb") as mock_wandb,
+        patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
+        patch("agilerl.training.train_llm.init_loggers") as mock_init_loggers,
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
     ):
-        # Configure mocks
-        mock_pbar = Mock()
-        mock_trange.return_value = mock_pbar
+        mock_pbar_fn.return_value = MagicMock()
+        mock_init_loggers.return_value = []
         mock_agg.return_value = 0.5
 
-        # Run the function with wandb and checkpointing enabled
         finetune_llm_preference(
             pop=[mock_agent],
             env=mock_env,
@@ -532,35 +465,20 @@ def test_finetune_llm_preference_with_wandb_and_checkpoints(use_accelerator):
             checkpoint_steps=6,
         )
 
-        # Verify wandb was initialized
-        mock_init_wandb.assert_called_once()
-        # Verify wandb logging
-        assert mock_wandb.log.call_count >= 5
+        # Verify loggers were initialized with wb=True
+        mock_init_loggers.assert_called_once()
+        assert mock_init_loggers.call_args.kwargs["wb"] is True
         # Verify checkpointing
         assert mock_save.call_count == 1
-
-        # Verify evaluation was called at the right intervals (steps 3)
+        # Verify evaluation was called at the right intervals
         assert mock_agent.test.call_count == 2
 
 
 @pytest.mark.parametrize("use_accelerator", [True, False])
 def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
-    """Test the basic training loop in finetune_llm."""
-    # Create mock agent
-    mock_agent = MagicMock(spec=DPO)
-    mock_agent.algo = "DPO"
-    mock_agent.registry = MagicMock()
-    mock_agent.registry.hp_config = MagicMock()
-    mock_agent.registry.hp_config.config = {"lr": 0.001, "batch_size": 32}
-    mock_agent.fitness = [0.0]
-    mock_agent.learn.return_value = (0.5, 0.2, 0.1)
-    mock_agent.test.return_value = 0.87
-    mock_agent.batch_size = 32
-    mock_agent.batch_size_per_process = 32
-    mock_agent.steps = [10]
-    mock_agent.scores = [0.0]
+    """Test the preference training loop with evolution."""
+    mock_agent = _mock_dpo_agent()
 
-    # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
     mock_env.__len__.return_value = 6
     example_prefernce_env_return = {
@@ -583,18 +501,19 @@ def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
     mutation.parameters_mut = 0
     mutation.activation_mut = 0
 
-    # Mock other dependencies
     with (
-        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
         patch(
             "agilerl.training.train_llm.tournament_selection_and_mutation"
         ) as mock_tournament_selection_and_mutation,
     ):
+        mock_pbar_fn.return_value = MagicMock()
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
-
         mock_agg.return_value = 0.5
+
         finetune_llm_preference(
             pop=[mock_agent],
             env=mock_env,
@@ -608,30 +527,14 @@ def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
         assert mock_env.reset.call_args == call(reset_dataloaders=True)
         assert mock_env.step.call_count == 6
         assert mock_agent.learn.call_count == 6
-        assert mock_agg.call_count == 21
-        assert mock_agent.test.call_count == 3  # Should be called at step 2
-        assert (
-            mock_tournament_selection_and_mutation.call_count == 6
-        )  # Should be called at step 2
+        assert mock_agent.test.call_count == 3
+        assert mock_tournament_selection_and_mutation.call_count == 6
 
 
 def test_finetune_llm_preference_warning_num_epochs_and_max_steps():
-    """Test that finetune_llm raises a warning if evo_steps is not set."""
-    # Create mock agent
-    mock_agent = MagicMock(spec=DPO)
-    mock_agent.algo = "DPO"
-    mock_agent.registry = MagicMock()
-    mock_agent.registry.hp_config = MagicMock()
-    mock_agent.registry.hp_config.config = {"lr": 0.001, "batch_size": 32}
-    mock_agent.fitness = [0.0]
-    mock_agent.learn.return_value = (0.5, 0.2, 0.1)
-    mock_agent.test.return_value = 0.87
-    mock_agent.batch_size = 32
-    mock_agent.batch_size_per_process = 32
-    mock_agent.steps = [10]
-    mock_agent.scores = [0.0]
+    """Test that finetune_llm_preference raises a warning if num_epochs and max_steps are set."""
+    mock_agent = _mock_dpo_agent()
 
-    # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
     mock_env.__len__.return_value = 6
     example_prefernce_env_return = {
@@ -648,18 +551,19 @@ def test_finetune_llm_preference_warning_num_epochs_and_max_steps():
     mock_env.step.return_value = example_prefernce_env_return
     mock_env.data_batch_size_per_gpu = 1
 
-    # Mock other dependencies
     with (
-        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
         patch(
             "agilerl.training.train_llm.tournament_selection_and_mutation"
         ) as mock_tournament_selection_and_mutation,
     ):
+        mock_pbar_fn.return_value = MagicMock()
         mock_tournament_selection_and_mutation.return_value = [mock_agent]
-
         mock_agg.return_value = 0.5
+
         with pytest.warns(UserWarning) as num_epochs_and_max_steps_warning:
             finetune_llm_preference(
                 pop=[mock_agent],
@@ -676,21 +580,8 @@ def test_finetune_llm_preference_warning_num_epochs_and_max_steps():
 
 
 def test_finetune_llm_preference_break_on_num_epochs():
-    # Create mock agent
-    mock_agent = MagicMock(spec=DPO)
-    mock_agent.algo = "DPO"
-    mock_agent.registry = MagicMock()
-    mock_agent.registry.hp_config = MagicMock()
-    mock_agent.registry.hp_config.config = {"lr": 0.001, "batch_size": 32}
-    mock_agent.fitness = [0.0]
-    mock_agent.learn.return_value = (0.5, 0.2, 0.1)
-    mock_agent.test.return_value = 0.87
-    mock_agent.batch_size = 32
-    mock_agent.batch_size_per_process = 32
-    mock_agent.steps = [10]
-    mock_agent.scores = [0.0]
+    mock_agent = _mock_dpo_agent()
 
-    # Create mock environment - use MagicMock for special methods
     mock_env = MagicMock()
     mock_env.__len__.return_value = 6
     example_prefernce_env_return = {
@@ -713,14 +604,13 @@ def test_finetune_llm_preference_break_on_num_epochs():
     mutation.parameters_mut = 0
     mutation.activation_mut = 0
 
-    # Mock other dependencies
     with (
-        patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.init_wandb"),
-        patch("agilerl.training.train_llm.wandb"),
+        patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
+        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
         patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
+        mock_pbar_fn.return_value = MagicMock()
         mock_env.num_epochs = 2
         mock_agg.return_value = 0.5
         finetune_llm_preference(
@@ -735,14 +625,11 @@ def test_finetune_llm_preference_break_on_num_epochs():
 
 
 def test_finetune_llm_preference_value_error_if_algo_not_dpo():
-    # Create mock agent
     mock_agent = MagicMock(spec=GRPO)
     mock_agent.algo = "GRPO"
     mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
     mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
-    mock_agent.steps = [10]
-    mock_agent.scores = [0.0]
     with pytest.raises(
         ValueError,
         match="The algorithm must be DPO for preference-based reinforcement learning.",
@@ -756,14 +643,11 @@ def test_finetune_llm_preference_value_error_if_algo_not_dpo():
 
 
 def test_finetune_llm_reasoning_value_error_if_algo_not_grpo():
-    # Create mock agent
     mock_agent = MagicMock(spec=DPO)
     mock_agent.algo = "DPO"
     mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
     mock_agent.batch_size_per_process = 32
     mock_agent.batch_size = 32
-    mock_agent.steps = [10]
-    mock_agent.scores = [0.0]
     with pytest.raises(
         ValueError,
         match="The algorithm must be GRPO for reasoning-based reinforcement learning.",

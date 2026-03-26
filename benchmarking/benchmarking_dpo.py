@@ -79,7 +79,6 @@ def main(init_hp, mut_p):
         init_hp["TOURN_SIZE"],
         init_hp["ELITISM"],
         init_hp["POP_SIZE"],
-        init_hp["EVAL_LOOP"],
     )
 
     mutations = Mutations(

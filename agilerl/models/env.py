@@ -15,3 +15,18 @@ class EnvironmentSpec(BaseModel):
     name: str
     version: str = Field(default="latest")
     num_envs: int = Field(default=16, ge=1)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, str | int]) -> "EnvironmentSpec":
+        """Create an EnvironmentSpec from a dictionary.
+
+        :param data: Dictionary containing environment configuration.
+        :type data: dict[str, Any]
+        :returns: EnvironmentSpec instance.
+        :rtype: EnvironmentSpec
+        """
+        return cls(
+            name=data["name"],
+            version=data.get("version", "latest"),
+            num_envs=data.get("num_envs", 16),
+        )

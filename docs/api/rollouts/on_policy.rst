@@ -21,7 +21,7 @@ Using a non-recurrent PPO agent::
    from agilerl.rollouts import collect_rollouts
 
    env = gym.make("CartPole-v1")
-   agent = PPO(env.observation_space, env.action_space, use_rollout_buffer=True)
+   agent = PPO(env.observation_space, env.action_space)
 
    collect_rollouts(agent, env, n_steps=agent.learn_step)
    agent.learn()
@@ -33,7 +33,6 @@ For recurrent policies, use ``collect_rollouts_recurrent``::
    agent = PPO(
        env.single_observation_space,
        env.single_action_space,
-       use_rollout_buffer=True,
        recurrent=True,
        num_envs=num_envs,
    )

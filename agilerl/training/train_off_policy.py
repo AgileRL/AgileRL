@@ -17,14 +17,13 @@ from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.logger import StdOutLogger, TensorboardLogger, WandbLogger
 from agilerl.networks.actors import DeterministicActor
 from agilerl.population import Population
 from agilerl.typing import GymEnvType
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     default_progress_bar,
-    init_wandb,
+    init_loggers,
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
@@ -224,19 +223,7 @@ def train_off_policy(
             stacklevel=2,
         )
 
-    if wb:
-        init_wandb_kwargs = {
-            "algo": algo,
-            "env_name": env_name,
-            "init_hyperparams": INIT_HP,
-            "mutation_hyperparams": MUT_P,
-            "wandb_api_key": wandb_api_key,
-            "accelerator": accelerator,
-        }
-        if wandb_kwargs is not None:
-            init_wandb_kwargs.update(wandb_kwargs)
-        init_wandb(**init_wandb_kwargs)
-
+    # Ensure environment has vectorized interface
     if not hasattr(env, "num_envs"):
         env = DummyVecEnv(env)
 
@@ -263,16 +250,23 @@ def train_off_policy(
         if n_step_memory is not None:
             n_step_sampler = Sampler(memory=n_step_memory)
 
+    # Format progress bar
     pbar = default_progress_bar(max_steps, accelerator)
 
-    # Define logger configuration
-    loggers = [StdOutLogger(pbar)]
-    if wb:
-        loggers.append(WandbLogger(accelerator))
-    if tensorboard:
-        loggers.append(
-            TensorboardLogger(log_dir=tensorboard_log_dir, accelerator=accelerator)
-        )
+    loggers = init_loggers(
+        algo=algo,
+        env_name=env_name,
+        pbar=pbar,
+        verbose=verbose,
+        wb=wb,
+        tensorboard=tensorboard,
+        tensorboard_log_dir=tensorboard_log_dir,
+        accelerator=accelerator,
+        wandb_api_key=wandb_api_key,
+        wandb_kwargs=wandb_kwargs,
+        init_hyperparams=INIT_HP,
+        mutation_hyperparams=MUT_P,
+    )
 
     # Initialize population wrapper for metrics reporting
     population = Population(
@@ -318,6 +312,8 @@ def train_off_policy(
                     action = agent.get_action(obs, action_mask=action_mask)
                 else:
                     raw_action = agent.get_action(obs)
+
+                    # Rescale action to action space bounds
                     action = DeterministicActor.rescale_action(
                         action=torch.from_numpy(raw_action),
                         low=agent.action_low,
@@ -449,7 +445,7 @@ def train_off_policy(
 
         # Save model checkpoint
         if checkpoint is not None:
-            if population.agents[0].metrics.steps // checkpoint > checkpoint_count:
+            if population.local_step // checkpoint > checkpoint_count:
                 save_population_checkpoint(
                     population=population.agents,
                     save_path=save_path,

@@ -2111,6 +2111,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
+        self.metrics = AgentMetrics()
 
         if max_grad_norm and (accelerator is not None):
             if accelerator.is_main_process:

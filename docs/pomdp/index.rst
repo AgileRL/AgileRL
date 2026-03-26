@@ -28,7 +28,7 @@ Recurrent PPO
 AgileRL offers a :class:`PPO <agilerl.algorithms.ppo.PPO>` implementation that supports performing evolutionary hyperparameter optimisation on recurrent neural
 networks (RNNs) for partially observable environments. To support these settings, we need to maintain the hidden state of the RNN throughout the rollout collection
 process through a special :func:`collect_rollouts_recurrent() <agilerl.rollouts.collect_rollouts_recurrent>` function. This is already integrated in our
-:func:`train_on_policy() <agilerl.training.train_on_policy.train_on_policy>` function, and used automatically if we set ``recurrent=True``  and ``use_rollout_buffer=True``
+:func:`train_on_policy() <agilerl.training.train_on_policy.train_on_policy>` function, and used automatically if we set ``recurrent=True``
 in the :class:`PPO <agilerl.algorithms.ppo.PPO>` constructor.
 
 For an end-to-end example of how to train ``PPO`` on a partially observable environment, please refer to

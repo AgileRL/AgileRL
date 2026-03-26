@@ -643,6 +643,42 @@ class PreferenceGym(HuggingFaceGym):
         return collate_fn
 
 
+def gather_tensor(
+    tensor: torch.Tensor | float,
+    accelerator: Accelerator,
+) -> torch.Tensor:
+    """Gather tensors from gpus.
+
+    :param tensor: Tensor to gather
+    :type tensor: torch.Tensor
+    :param accelerator: Accelerator object
+    :type accelerator: accelerate.Accelerator
+    :return: Stacked tensors
+    :rtype: torch.Tensor
+    """
+    if not isinstance(tensor, torch.Tensor):
+        tensor = torch.tensor(tensor, device=accelerator.device)
+    tensor = tensor.to(accelerator.device)
+    return accelerator.gather(tensor)
+
+
+def aggregate_metrics_across_gpus(
+    accelerator: Accelerator,
+    metric_tensor: torch.Tensor | float,
+) -> float:
+    """Aggregate gathered tensors.
+
+    :param accelerator: Accelerator object
+    :type accelerator: accelerate.Accelerator
+    :param metric_tensor: Metrics
+    :type metric_tensor: torch.Tensor
+    :return: Mean metric
+    :rtype: float
+    """
+    all_metrics = gather_tensor(metric_tensor, accelerator)
+    return all_metrics.mean().item()
+
+
 @contextmanager
 def gather_if_zero3(
     zero_stage: int,

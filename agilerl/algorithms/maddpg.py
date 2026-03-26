@@ -22,7 +22,7 @@ from agilerl.typing import (
     ObservationType,
     PzEnvType,
     StandardTensorDict,
-    SupportedObsSpaces,
+    SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
@@ -34,7 +34,7 @@ from agilerl.utils.algo_utils import (
     obs_channels_to_first,
 )
 
-SupportedActionSpaces = spaces.Discrete | spaces.Box
+SupportedActionSpace = spaces.Discrete | spaces.Box
 
 
 class MADDPG(MultiAgentRLAlgorithm):
@@ -105,8 +105,8 @@ class MADDPG(MultiAgentRLAlgorithm):
 
     def __init__(
         self,
-        observation_spaces: list[SupportedObsSpaces] | spaces.Dict,
-        action_spaces: list[SupportedActionSpaces] | spaces.Dict,
+        observation_spaces: list[SupportedObservationSpace] | spaces.Dict,
+        action_spaces: list[SupportedActionSpace] | spaces.Dict,
         agent_ids: list[str] | None = None,
         O_U_noise: bool = True,
         expl_noise: float = 0.1,

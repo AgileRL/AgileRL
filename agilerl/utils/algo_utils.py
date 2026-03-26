@@ -37,7 +37,7 @@ from agilerl.typing import (
     NetConfigType,
     NumpyObsType,
     ObservationType,
-    SupportedObsSpaces,
+    SupportedObservationSpace,
     TorchObsType,
 )
 
@@ -660,13 +660,13 @@ def get_deepest_head_config(
     return deepest
 
 
-def concatenate_spaces(space_list: list[SupportedObsSpaces]) -> spaces.Space:
+def concatenate_spaces(space_list: list[SupportedObservationSpace]) -> spaces.Space:
     """Concatenates a list of spaces into a single space. If spaces correspond to images,
     we check that their shapes are the same and use the first space's shape as the shape of the
     concatenated space.
 
     :param space_list: List of spaces to concatenate
-    :type space_list: list[SupportedObsSpaces]
+    :type space_list: list[SupportedObservationSpace]
     :return: Concatenated space
     :rtype: spaces.Space
     """

@@ -541,7 +541,6 @@ End-to-end example
             tournament_size=INIT_HP["TOURN_SIZE"],
             elitism=INIT_HP["ELITISM"],
             population_size=INIT_HP["POP_SIZE"],
-            eval_loop=INIT_HP["EVAL_LOOP"],
         )
 
         # Define the mutation parameters

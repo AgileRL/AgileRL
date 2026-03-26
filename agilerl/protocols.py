@@ -36,6 +36,14 @@ ObservationType = NumpyObsType | TorchObsType
 DeviceType = str | torch.device
 
 
+class AgentType(Enum):
+    """Enumeration of supported agent types."""
+
+    SingleAgent = "single_agent"
+    MultiAgent = "multi_agent"
+    LLMAgent = "llm_agent"
+
+
 class MutationType(Enum):
     """Enumeration of mutation types for evolvable neural networks.
 

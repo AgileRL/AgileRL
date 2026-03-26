@@ -11,14 +11,13 @@ from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.logger import StdOutLogger, TensorboardLogger, WandbLogger
 from agilerl.population import Population
 from agilerl.typing import GymEnvType
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.minari_utils import minari_to_agile_buffer
 from agilerl.utils.utils import (
     default_progress_bar,
-    init_wandb,
+    init_loggers,
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
@@ -159,20 +158,6 @@ def train_offline(
             stacklevel=2,
         )
 
-    if wb:
-        init_wandb_kwargs = {
-            "algo": algo,
-            "env_name": env_name,
-            "init_hyperparams": INIT_HP,
-            "mutation_hyperparams": MUT_P,
-            "wandb_api_key": wandb_api_key,
-            "accelerator": accelerator,
-        }
-        if wandb_kwargs is not None:
-            init_wandb_kwargs.update(wandb_kwargs)
-
-        init_wandb(**init_wandb_kwargs)
-
     save_path = (
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
@@ -235,14 +220,20 @@ def train_offline(
     # Format progress bar
     pbar = default_progress_bar(max_steps, accelerator)
 
-    # Define logger configuration
-    loggers = [StdOutLogger(pbar)]
-    if wb:
-        loggers.append(WandbLogger(accelerator))
-    if tensorboard:
-        loggers.append(
-            TensorboardLogger(log_dir=tensorboard_log_dir, accelerator=accelerator)
-        )
+    loggers = init_loggers(
+        algo=algo,
+        env_name=env_name,
+        pbar=pbar,
+        verbose=verbose,
+        wb=wb,
+        tensorboard=tensorboard,
+        tensorboard_log_dir=tensorboard_log_dir,
+        accelerator=accelerator,
+        wandb_api_key=wandb_api_key,
+        wandb_kwargs=wandb_kwargs,
+        init_hyperparams=INIT_HP,
+        mutation_hyperparams=MUT_P,
+    )
 
     # Initialize population wrapper for metrics reporting
     population = Population(

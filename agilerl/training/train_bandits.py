@@ -12,13 +12,12 @@ from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.logger import StdOutLogger, TensorboardLogger, WandbLogger
 from agilerl.population import Population
 from agilerl.typing import GymEnvType
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     default_progress_bar,
-    init_wandb,
+    init_loggers,
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
@@ -153,21 +152,6 @@ def train_bandits(
             stacklevel=2,
         )
 
-    if wb:
-        init_wandb_kwargs = {
-            "algo": algo,
-            "env_name": env_name,
-            "init_hyperparams": INIT_HP,
-            "mutation_hyperparams": MUT_P,
-            "wandb_api_key": wandb_api_key,
-            "accelerator": accelerator,
-            "project": "AgileRL-Bandits",
-        }
-        if wandb_kwargs is not None:
-            init_wandb_kwargs.update(wandb_kwargs)
-
-        init_wandb(**init_wandb_kwargs)
-
     save_path = (
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
@@ -191,22 +175,23 @@ def train_bandits(
     if accelerator is None and mutation is not None:
         pop = mutation.mutation(pop, pre_training_mut=True)
 
-    if accelerator is not None:
-        print(f"\nDistributed training on {accelerator.device}...")
-    else:
-        print("\nTraining...")
-
     # Format progress bar
     pbar = default_progress_bar(max_steps, accelerator)
 
-    # Define logger configuration
-    loggers = [StdOutLogger(pbar)]
-    if wb:
-        loggers.append(WandbLogger(accelerator))
-    if tensorboard:
-        loggers.append(
-            TensorboardLogger(log_dir=tensorboard_log_dir, accelerator=accelerator)
-        )
+    loggers = init_loggers(
+        algo=algo,
+        env_name=env_name,
+        pbar=pbar,
+        verbose=verbose,
+        wb=wb,
+        tensorboard=tensorboard,
+        tensorboard_log_dir=tensorboard_log_dir,
+        accelerator=accelerator,
+        wandb_api_key=wandb_api_key,
+        wandb_kwargs=wandb_kwargs,
+        init_hyperparams=INIT_HP,
+        mutation_hyperparams=MUT_P,
+    )
 
     # Initialize population wrapper for metrics reporting
     population = Population(
@@ -229,7 +214,6 @@ def train_bandits(
 
             score = 0
             context = env.reset()
-
             for _idx_step in range(episode_steps):
                 if swap_channels:
                     context = obs_channels_to_first(context)
@@ -285,7 +269,7 @@ def train_bandits(
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
-            if population.agents[0].metrics.steps // evo_steps > evo_count:
+            if population.local_step // evo_steps > evo_count:
                 population.update(
                     tournament_selection_and_mutation(
                         population=population.agents,
@@ -302,7 +286,7 @@ def train_bandits(
 
         # Save model checkpoint
         if checkpoint is not None:
-            if population.agents[0].metrics.steps // checkpoint > checkpoint_count:
+            if population.local_step // checkpoint > checkpoint_count:
                 save_population_checkpoint(
                     population=population.agents,
                     save_path=save_path,

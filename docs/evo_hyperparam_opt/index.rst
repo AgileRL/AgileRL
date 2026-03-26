@@ -40,7 +40,6 @@ The class :class:`TournamentSelection <agilerl.hpo.tournament.TournamentSelectio
         tournament_size=2,  # Tournament selection size
         elitism=True,  # Elitism in tournament selection
         population_size=6,  # Population size
-        eval_loop=1,  # Evaluate using last N fitness scores
     )
 
 

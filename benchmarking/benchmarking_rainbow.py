@@ -75,7 +75,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
         INIT_HP["POP_SIZE"],
-        INIT_HP["EVAL_LOOP"],
     )
     mutations = Mutations(
         no_mutation=MUTATION_PARAMS["NO_MUT"],

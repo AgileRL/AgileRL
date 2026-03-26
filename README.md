@@ -259,7 +259,6 @@ tournament = TournamentSelection(
     tournament_size=INIT_HP['TOURN_SIZE'], # Tournament selection size
     elitism=INIT_HP['ELITISM'],            # Elitism in tournament selection
     population_size=INIT_HP['POP_SIZE'],   # Population size
-    eval_loop=INIT_HP['EVAL_LOOP'],        # Evaluate using last N fitness scores
 )
 
 mutations = Mutations(

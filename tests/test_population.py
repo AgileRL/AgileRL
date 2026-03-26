@@ -236,6 +236,20 @@ class TestMetricsReport:
         rendered = report.render(report._eval_rows(), report._train_rows())
         assert str(report) == rendered
 
+    def test_render_rich_contains_banner_and_headers(self):
+        report = self._make_report()
+        rendered = report.render_rich()
+        assert "Global Steps 300" in rendered
+        assert "Agent 0" in rendered
+        assert "Agent 1" in rendered
+
+    def test_render_rich_contains_metadata_rows(self):
+        report = self._make_report()
+        rendered = report.render_rich()
+        assert "steps" in rendered
+        assert "mutations" in rendered
+        assert "steps/s" in rendered
+
     def test_to_dict_delegates(self):
         report = self._make_report()
         assert report.to_dict() == report.metrics.to_dict()

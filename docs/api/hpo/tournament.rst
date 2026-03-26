@@ -16,8 +16,7 @@ of agents.
   tournament = TournamentSelection(
     tournament_size=2, # Tournament selection size
     elitism=True,      # Elitism in tournament selection
-    population_size=6, # Population size
-    eval_loop=1)       # Evaluate using last N fitness scores
+    population_size=6) # Population size
 
 
 Parameters

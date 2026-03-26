@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -9,7 +10,9 @@ from enum import Enum
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 import numpy as np
-from tabulate import SEPARATING_LINE, tabulate
+from rich.console import Console
+from rich.table import Table
+from rich.text import Text
 
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.logger import Logger
@@ -96,7 +99,7 @@ class PopulationMetrics:
         return sum(self.steps)
 
     @property
-    def fps(self) -> float:
+    def mean_fps(self) -> float:
         return float(np.mean(self.steps_per_second))
 
     @property
@@ -131,7 +134,7 @@ class PopulationMetrics:
             "eval/mean_fitness": self.mean_fitness,
             "eval/best_fitness": self.best_fitness,
             "train/global_step": self.global_step,
-            "train/steps_per_second": self.fps,
+            "train/steps_per_second": self.mean_fps,
         }
 
         mean_score = self.mean_score
@@ -186,7 +189,7 @@ class MetricsReport:
         self.metrics = metrics
 
     def __str__(self) -> str:
-        return self.render(self._eval_rows(), self._train_rows())
+        return self.render()
 
     def to_dict(self) -> dict[str, float | int | str]:
         """Return a JSON-friendly dict for logging backends.
@@ -292,91 +295,85 @@ class MetricsReport:
         return f"{value:.4f}"
 
     @staticmethod
-    def _shorten_name(name: str) -> str:
-        """Strip ``eval/`` or ``train/`` prefix from a metric name."""
-        for prefix in ("eval/", "train/"):
-            name = name.removeprefix(prefix)
-        return name
+    def _format_name(name: str) -> str:
+        """Format a metric name for display."""
+        return name.replace("eval/", "").replace("train/", "")
 
     @staticmethod
-    def _visible_width(s: str) -> int:
-        """Return the visible width of a string, ignoring ANSI escape codes."""
-        return len(_ANSI_RE.sub("", s))
-
-    @staticmethod
-    def _color_row(row: MetricRow, higher_is_better: bool = True) -> list[str]:
-        """Format a metric row with ANSI coloring on best/worst agent values.
-
-        :param row: Metric row to format.
-        :type row: MetricRow
-        :param higher_is_better: If ``True``, the highest value is colored
-            green and the lowest red. Reversed when ``False``.
-        :type higher_is_better: bool
-        :returns: Formatted row as ``[name, *agent_vals, mean]``.
-        :rtype: list[str]
-        """
-        formatted = [MetricsReport._fmt(value) for value in row.agent_values]
+    def _eval_cell_styles(
+        row: MetricRow, higher_is_better: bool = True
+    ) -> dict[int, str]:
+        """Return Rich styles for best/worst eval values by agent index."""
         valid = [
             (i, value)
             for i, value in enumerate(row.agent_values)
             if not np.isnan(value)
         ]
-        if len(valid) >= 2:
-            vals = [value for _, value in valid]
-            if min(vals) < max(vals):
-                k = 1 if higher_is_better else -1
-                best_i = max(valid, key=lambda iv: iv[1] * k)[0]
-                worst_i = min(valid, key=lambda iv: iv[1] * k)[0]
-                formatted[best_i] = f"{_Ansi.GREEN}{formatted[best_i]}{_Ansi.RESET}"
-                formatted[worst_i] = f"{_Ansi.RED}{formatted[worst_i]}{_Ansi.RESET}"
+        if len(valid) < 2:
+            return {}
 
-        return [
-            MetricsReport._shorten_name(row.name),
-            *formatted,
-            MetricsReport._fmt(row.pop_mean),
-        ]
+        vals = [value for _, value in valid]
+        if min(vals) >= max(vals):
+            return {}
 
-    def render(
-        self,
-        eval_rows: list[MetricRow],
-        train_rows: list[MetricRow],
-    ) -> str:
-        """Render eval/train/hp/meta rows into a tabulate-formatted banner.
+        k = 1 if higher_is_better else -1
+        best_i = max(valid, key=lambda iv: iv[1] * k)[0]
+        worst_i = min(valid, key=lambda iv: iv[1] * k)[0]
+        return {best_i: "green", worst_i: "red"}
+
+    def render(self) -> str:
+        """Render eval/train/hp/meta rows into a Rich-formatted table string.
 
         :param eval_rows: List of evaluation metric rows.
-        :type eval_rows: list[MetricRow]
+        :type eval_rows: list[MetricRow] | None
         :param train_rows: List of training metric rows.
-        :type train_rows: list[MetricRow]
-        :returns: The report as a tabular string.
+        :type train_rows: list[MetricRow] | None
+        :returns: The report rendered by Rich.
         :rtype: str
         """
-        num_agents = len(self.metrics.indices)
-        # Pad headers to enforce a minimum column width, preventing table
-        # jitter from variable-length mutation strings.
-        min_col_width = 12
-        headers = (
-            ["Metric"]
-            + [f"Agent {idx}".center(min_col_width) for idx in self.metrics.indices]
-            + ["Mean".center(min_col_width)]
+        eval_rows = self._eval_rows()
+        train_rows = self._train_rows()
+
+        # Create a table for the report
+        table = Table(
+            title=f"Global Steps {self.metrics.global_step}",
+            title_style="bold",
+            show_header=True,
+            header_style="bold",
+            expand=False,
         )
+
+        # Columns for each agents metric and population mean
+        table.add_column("Metric", justify="left", style="bold")
+        for idx in self.metrics.indices:
+            table.add_column(f"Agent {idx}", justify="right")
+
+        table.add_column("Mean", justify="right")
 
         # Evaluation metrics
-        table_data: list = [
-            self._color_row(row, higher_is_better=True) for row in eval_rows
-        ]
-        table_data.append(SEPARATING_LINE)
+        for row in eval_rows:
+            styles = self._eval_cell_styles(row, higher_is_better=True)
+            agent_cells: list[Text] = []
+            for i, value in enumerate(row.agent_values):
+                style = styles.get(i)
+                agent_cells.append(Text(MetricsReport._fmt(value), style=style))
+            table.add_row(
+                MetricsReport._format_name(row.name),
+                *agent_cells,
+                Text(MetricsReport._fmt(row.pop_mean)),
+            )
+        table.add_section()
 
         # Training metrics
-        table_data.extend(
-            [MetricsReport._shorten_name(row.name)]
-            + [MetricsReport._fmt(value) for value in row.agent_values]
-            + [MetricsReport._fmt(row.pop_mean)]
-            for row in train_rows
-        )
+        for row in train_rows:
+            table.add_row(
+                MetricsReport._format_name(row.name),
+                *[MetricsReport._fmt(value) for value in row.agent_values],
+                MetricsReport._fmt(row.pop_mean),
+            )
+        table.add_section()
 
-        table_data.append(SEPARATING_LINE)
-
-        # Hyperparameters
+        # RL hyperparameters
         if self.metrics.hyperparameters:
             hp_names = list(self.metrics.hyperparameters[0].keys())
             for hp_name in hp_names:
@@ -384,35 +381,22 @@ class MetricsReport:
                     MetricsReport._fmt(agent_hps.get(hp_name, float("nan")))
                     for agent_hps in self.metrics.hyperparameters
                 ]
-                table_data.append([hp_name, *hp_vals, ""])
-            table_data.append(SEPARATING_LINE)
+                table.add_row(hp_name, *hp_vals, "")
+            table.add_section()
 
         # Metadata
-        steps_row = ["steps"] + [str(s) for s in self.metrics.steps] + [""]
-        muts_row = ["mutations"] + [str(m) for m in self.metrics.mutations] + [""]
-        fps_row = (
-            ["steps/s"]
-            + [MetricsReport._fmt(s) for s in self.metrics.steps_per_second]
-            + [MetricsReport._fmt(self.metrics.fps)]
-        )
-        table_data.extend([steps_row, muts_row, fps_row])
-
-        col_align = ("left",) + ("right",) * (num_agents + 1)
-
-        table_str = tabulate(
-            table_data,
-            headers=headers,
-            tablefmt="simple",
-            colalign=col_align,
+        table.add_row("steps", *[str(s) for s in self.metrics.steps], "")
+        table.add_row("mutations", *[str(m) for m in self.metrics.mutations], "")
+        table.add_row(
+            "steps/s",
+            *[MetricsReport._fmt(s) for s in self.metrics.steps_per_second],
+            MetricsReport._fmt(self.metrics.mean_fps),
         )
 
-        banner_text = f"Global Steps {self.metrics.global_step}"
-        width = max(
-            MetricsReport._visible_width(line) for line in table_str.splitlines()
-        )
-        border = "=" * width
-
-        return f"{border}\n{banner_text.center(width)}\n{border}\n{table_str}"
+        buf = io.StringIO()
+        console = Console(file=buf, record=True, force_terminal=True, width=120)
+        console.print(table)
+        return console.export_text(styles=True)
 
 
 class Population(Generic[AgentT]):
@@ -474,13 +458,22 @@ class Population(Generic[AgentT]):
         """Number of agents in the population."""
         return len(self._agents)
 
+    @property
+    def local_step(self) -> int:
+        """Local step counter for the population."""
+        return max(agent.metrics.steps for agent in self.agents)
+
     def is_nested_scores(self) -> bool:
         """Check if the scores are nested per-sub-agent i.e. a nested list.
 
         :returns: True if the scores are nested per-sub-agent, False otherwise.
         :rtype: bool
         """
-        return isinstance(self._agents[0].metrics.scores[0], list)
+        for agent in self.agents:
+            scores = agent.metrics.scores
+            if scores and isinstance(scores[0], list):
+                return True
+        return False
 
     def update(self, agents: list[AgentT]) -> None:
         """Replace the population (e.g. after tournament selection + mutation)."""
@@ -604,10 +597,10 @@ class Population(Generic[AgentT]):
         scores: list[dict[str, float]] = []
         for agent in self.agents:
             if agent.metrics.scores:
-                arr = np.mean(np.array(agent.metrics.scores), axis=0)
+                mean_score_subagent = np.mean(np.array(agent.metrics.scores), axis=0)
                 scores.append(
                     {
-                        agent_id: float(arr[idx])
+                        agent_id: float(mean_score_subagent[idx])
                         for idx, agent_id in enumerate(self.agent_ids)
                     }
                 )
@@ -626,7 +619,7 @@ class Population(Generic[AgentT]):
         for agent in self.agents:
             d: dict[str, float] = {}
             for name in self.additional_metric_names:
-                if self.is_multi_agent and self.agent_ids is not None:
+                if self.is_multi_agent:
                     for agent_id in self.agent_ids:
                         d[f"{agent_id}/{name}"] = agent.metrics.get_mean(name, agent_id)
                 else:

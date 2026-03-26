@@ -33,17 +33,17 @@ class DummyEnv:
         )
 
 
-def test_collect_rollouts_use_rollout_buffer_false_raises(vector_space, discrete_space):
+def test_collect_rollouts_runs(vector_space, discrete_space):
     ppo = PPO(
         observation_space=vector_space,
         action_space=discrete_space,
-        use_rollout_buffer=False,
         learn_step=5,
         num_envs=1,
     )
     env = DummyEnv(state_size=vector_space.shape, vect=True, num_envs=1)
-    with pytest.raises(RuntimeError, match="use_rollout_buffer=True"):
-        collect_rollouts(ppo, env, n_steps=5)
+    result = collect_rollouts(ppo, env, n_steps=5)
+    assert isinstance(result, tuple)
+    assert len(result) == 5
     ppo.clean_up()
 
 
@@ -51,7 +51,6 @@ def test_collect_rollouts_returns_scores(vector_space, discrete_space):
     ppo = PPO(
         observation_space=vector_space,
         action_space=discrete_space,
-        use_rollout_buffer=True,
         learn_step=4,
         num_envs=1,
     )
@@ -67,7 +66,6 @@ def test_collect_rollouts_recurrent_returns_scores(vector_space, discrete_space)
     ppo = PPO(
         observation_space=vector_space,
         action_space=discrete_space,
-        use_rollout_buffer=True,
         learn_step=4,
         num_envs=1,
         recurrent=True,
@@ -84,7 +82,6 @@ def test_collect_rollouts_warm_start_with_last_obs(vector_space, discrete_space)
     ppo = PPO(
         observation_space=vector_space,
         action_space=discrete_space,
-        use_rollout_buffer=True,
         learn_step=4,
         num_envs=1,
     )
@@ -109,7 +106,6 @@ def test_collect_rollouts_n_steps_default(vector_space, discrete_space):
     ppo = PPO(
         observation_space=vector_space,
         action_space=discrete_space,
-        use_rollout_buffer=True,
         learn_step=8,
         num_envs=1,
     )
@@ -125,7 +121,6 @@ def test_collect_rollouts_recurrent_warm_start(vector_space, discrete_space, rec
     ppo = PPO(
         observation_space=vector_space,
         action_space=discrete_space,
-        use_rollout_buffer=True,
         learn_step=4,
         num_envs=1,
         recurrent=recurrent,

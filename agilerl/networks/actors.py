@@ -84,7 +84,7 @@ class DeterministicActor(EvolvableNetwork):
         head_config: NetConfigType | None = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        latent_dim: int = 32,
+        latent_dim: int = 64,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
@@ -135,7 +135,7 @@ class DeterministicActor(EvolvableNetwork):
 
         if head_config is None:
             head_config = MlpNetConfig(
-                hidden_size=[32],
+                hidden_size=[64],
                 output_activation=output_activation,
             )
         else:
@@ -280,7 +280,7 @@ class StochasticActor(EvolvableNetwork):
         squash_output: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        latent_dim: int = 32,
+        latent_dim: int = 64,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
@@ -304,7 +304,7 @@ class StochasticActor(EvolvableNetwork):
 
         # Require the head to output logits to parameterize a distribution
         if head_config is None:
-            head_config = MlpNetConfig(hidden_size=[32], output_activation=None)
+            head_config = MlpNetConfig(hidden_size=[64], output_activation=None)
         else:
             head_config["output_activation"] = None
 

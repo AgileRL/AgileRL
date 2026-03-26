@@ -745,7 +745,6 @@ Before we go any further in this tutorial, it would be helpful to define and set
          tournament_size=2,  # Tournament selection size
          elitism=True,  # Elitism in tournament selection
          population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-         eval_loop=1,  # Evaluate using last N fitness scores
       )
 
       # Instantiate a mutations object (used for HPO)

@@ -29,9 +29,7 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.utils.llm_utils import (
-    ReasoningGym,
-)
+from agilerl.utils.llm_utils import ReasoningGym, aggregate_metrics_across_gpus
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
@@ -256,6 +254,13 @@ class GRPO(LLMAlgorithm):
         if self.wrap:
             self.wrap_models()
 
+        # Register metrics to keep track of during training
+        self.metrics.register("loss")
+        self.metrics.register("kl")
+        self.metrics.register("mean_reward")
+        self.metrics.register("completion_length")
+        self.metrics.register("accuracy")
+
     def get_action(
         self,
         obs: LLMObsType,
@@ -323,9 +328,15 @@ class GRPO(LLMAlgorithm):
 
         :param experiences: Batched completion_ids, action_masks and rewards
         :type experiences: ExperiencesType
+        :return: (mean_loss, mean_kl) for the local GPU.
+        :rtype: tuple[float, float]
         """
         gc.collect()
         torch.cuda.empty_cache()
+
+        # Compute completion lengths from raw experiences before stacking
+        raw_completion_ids = experiences[0]
+        completion_lengths = np.mean([x.shape[1] for x in raw_completion_ids])
 
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
             *experiences,
@@ -373,9 +384,30 @@ class GRPO(LLMAlgorithm):
                 self._backward_pass(loss)
                 mean_loss += loss.item()
                 mean_kl += kl.item()
+
         mean_loss /= len(completion_ids)
         mean_kl /= len(completion_ids)
-        return mean_loss, mean_kl
+
+        # Aggregate metrics across GPUs and report to metrics
+        if self.accelerator is not None:
+            agg_loss = aggregate_metrics_across_gpus(self.accelerator, mean_loss)
+            agg_kl = aggregate_metrics_across_gpus(self.accelerator, mean_kl)
+            agg_rewards = aggregate_metrics_across_gpus(self.accelerator, rewards)
+            agg_completion_lengths = aggregate_metrics_across_gpus(
+                self.accelerator, completion_lengths
+            )
+        else:
+            agg_loss = mean_loss
+            agg_kl = mean_kl
+            agg_rewards = float(rewards.mean().item())
+            agg_completion_lengths = float(completion_lengths)
+
+        self.metrics.log("loss", agg_loss)
+        self.metrics.log("kl", agg_kl)
+        self.metrics.log("mean_reward", agg_rewards)
+        self.metrics.log("completion_length", int(agg_completion_lengths))
+
+        return agg_loss, agg_kl
 
     def test(
         self,
@@ -403,7 +435,7 @@ class GRPO(LLMAlgorithm):
                 rewards.append(reward)
             reward_tensor = torch.cat(rewards)
             mean_fit = torch.mean(reward_tensor).item()
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return np.array(mean_fit)
 
     def _calculate_advantage(

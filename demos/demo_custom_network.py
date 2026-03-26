@@ -92,7 +92,6 @@ if __name__ == "__main__":
         tournament_size=2,  # Tournament selection size
         elitism=True,  # Elitism in tournament selection
         population_size=INIT_HP["POP_SIZE"],  # Population size
-        eval_loop=1,  # Evaluate using last N fitness scores
     )
 
     mutations = Mutations(

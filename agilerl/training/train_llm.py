@@ -1,34 +1,38 @@
 import warnings
 from typing import Any
 
-import numpy as np
 import torch.distributed as dist
 from accelerate import Accelerator
-from tqdm import trange
 
-import wandb
 from agilerl.algorithms import DPO, GRPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.typing import PopulationType
-from agilerl.utils.llm_utils import ReasoningGym
-from agilerl.utils.utils import (
+from agilerl.population import Population
+from agilerl.utils.llm_utils import (
+    PreferenceGym,
+    ReasoningGym,
     aggregate_metrics_across_gpus,
-    init_wandb,
+)
+from agilerl.utils.utils import (
+    default_progress_bar,
+    init_loggers,
     save_llm_checkpoint,
     tournament_selection_and_mutation,
 )
 
 InitDictType = dict[str, Any] | None
+SupportedReasoning = GRPO
 
 
 def finetune_llm_reasoning(
-    pop: PopulationType,
+    pop: list[SupportedReasoning],
     env: ReasoningGym,
     init_hp: dict[str, Any] | None = None,
     save_elite: bool | None = None,
     elite_path: str | None = None,
     wb: bool = False,
+    tensorboard: bool = False,
+    tensorboard_log_dir: str | None = None,
     evo_steps: int | None = 20,
     checkpoint_steps: int | None = None,
     tournament: TournamentSelection | None = None,
@@ -56,8 +60,14 @@ def finetune_llm_reasoning(
     :type elite_path: str, optional
     :param wb: Whether to use Weights and Biases, defaults to False
     :type wb: bool, optional
+    :param tensorboard: TensorBoard tracking, defaults to False
+    :type tensorboard: bool, optional
+    :param tensorboard_log_dir: Directory for TensorBoard logs, defaults to None
+    :type tensorboard_log_dir: str, optional
     :param evo_steps: Number of steps between evolution, defaults to None
     :type evo_steps: int, optional
+    :param checkpoint_steps: Number of steps between checkpoints, defaults to None
+    :type checkpoint_steps: int, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: TournamentSelection, optional
     :param mutation: Mutation object, defaults to None
@@ -113,7 +123,7 @@ def finetune_llm_reasoning(
 
     if not isinstance(pop[0], GRPO):
         msg = (
-            "The algorithm must be GRPO for reasoning-based reinforcement learning."
+            "The algorithm must be GRPO for reasoning-based reinforcement learning. "
             f"Got {type(pop[0])} instead."
         )
         raise ValueError(
@@ -124,131 +134,107 @@ def finetune_llm_reasoning(
         init_hp = {}
         init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size_per_process
         init_hp["ALGO"] = pop[0].algo
+
     data_increment = (
         getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
     )
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
 
-    if wb and (accelerator is None or accelerator.is_main_process):
+    if wb:
         init_hp["effective_data_batch_size"] = effective_data_batch_size
         init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
         init_hp["distributed_training"] = accelerator is not None
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
-        init_wandb_kwargs = {
-            "algo": init_hp["ALGO"],
-            "env_name": env.name,
-            "wandb_api_key": wandb_api_key,
-            "init_hyperparams": init_hp,
-        }
-        if wandb_kwargs is not None:
-            init_wandb_kwargs.update(wandb_kwargs)
 
-        init_wandb(**init_wandb_kwargs)
-
-    if accelerator is None or accelerator.is_main_process:
-        print("\nTraining...")
-
-    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
     if max_steps is None and num_epochs is None:
         max_steps = len(env)
-
     elif max_steps is None and num_epochs is not None:
         max_steps = num_epochs * len(env)
 
     training_steps = -(max_steps // -effective_data_batch_size)
-    if accelerator is None or accelerator.is_main_process:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-        )
 
-    total_steps = 0
+    pbar = default_progress_bar(max_steps, accelerator)
+
+    loggers = init_loggers(
+        algo=init_hp.get("ALGO", "GRPO"),
+        env_name=env.name,
+        pbar=pbar,
+        verbose=verbose,
+        wb=wb,
+        tensorboard=tensorboard,
+        tensorboard_log_dir=tensorboard_log_dir,
+        accelerator=accelerator,
+        wandb_api_key=wandb_api_key,
+        wandb_kwargs=wandb_kwargs,
+        init_hyperparams=init_hp,
+    )
+
+    population = Population(
+        agents=pop,
+        accelerator=accelerator,
+        loggers=loggers,
+    )
 
     # calling env.reset() supplies the first batch of training data
     prompts = env.reset(reset_dataloaders=True)
     for i in range(training_steps):
-        agent_metrics_dict = {}
-        for agent_idx, agent in enumerate(pop):
-            agent.set_reference_policy(env.num_epochs)
-            completion_ids, action_masks = agent.get_action(prompts)
-            completion_lengths = np.mean([x.shape[1] for x in completion_ids])
-
-            # Use the reward function stored in env.step to calculate reward of the each answer from the group
-            next_prompts, rewards = env.step(completion_ids)
-
-            experiences = (
-                completion_ids,
-                action_masks,
-                rewards,
-            )
-            loss, kl = agent.learn(experiences)
-            metrics = [loss, kl, rewards, completion_lengths]
-            if max_reward is not None:
-                accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
-                metrics.append(accuracy)
-            agg_metrics = [
-                aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
-            ]
-            prompts = next_prompts
-            agent.steps[-1] += effective_data_batch_size
-            total_steps += effective_data_batch_size
-            agg_test_metrics = None
-
-            if (i + 1) % evaluation_interval == 0:
-                test_reward = agent.test(env)
-                test_metrics = [test_reward]
-                if max_reward is not None:
-                    test_accuracy = (test_reward == max_reward).sum() / len(
-                        test_reward.flatten(),
-                    )
-                    test_metrics.append(test_accuracy)
-                agg_test_metrics = [
-                    aggregate_metrics_across_gpus(accelerator, metric)
-                    for metric in test_metrics
-                ]
-
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-
-            if accelerator is None or accelerator.is_main_process:
-                metrics_dict = {
-                    "global_step": total_steps,
-                    "Train/Loss": agg_metrics[0],
-                    "Train/KL-divergence": agg_metrics[1],
-                    "Train/Mean reward": agg_metrics[2],
-                    "Train/Average completion length": int(agg_metrics[3]),
-                }
-                if max_reward is not None:
-                    metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
-                agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
-                if agg_test_metrics is not None:
-                    test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
-                    if max_reward is not None:
-                        test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
-                    agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = (
-                        test_metrics_dict
-                    )
-                pbar.update(effective_data_batch_size)
-                agent.scores.append(agg_metrics[2])
-
         if accelerator is not None:
             accelerator.wait_for_everyone()
+
+        for agent in population.agents:
+            agent.set_reference_policy(env.num_epochs)
+            agent.init_evo_step()
+
+            completion_ids, action_masks = agent.get_action(prompts)
+
+            # Use the reward function stored in env.step to calculate reward
+            next_prompts, rewards = env.step(completion_ids)
+
+            experiences = (completion_ids, action_masks, rewards)
+
+            _agg_loss, _agg_kl = agent.learn(experiences)
+
+            agg_rewards = aggregate_metrics_across_gpus(accelerator, rewards)
+
+            if max_reward is not None:
+                accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
+                agg_accuracy = aggregate_metrics_across_gpus(accelerator, accuracy)
+                agent.metrics.log("accuracy", agg_accuracy)
+
+            agent.add_scores([float(agg_rewards)])
+            agent.finalize_evo_step(env.data_batch_size_per_gpu)
+
+        prompts = next_prompts
+        pbar.update(effective_data_batch_size)
+        population.increment_evo_step()
+
+        # Evaluate periodically
+        if (i + 1) % evaluation_interval == 0:
+            for agent in population.agents:
+                agent.test(env)
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+
+        # Report metrics and clear accumulators
+        population.report_metrics()
+        population.clear_agent_metrics()
+
+        # Tournament selection and population mutation
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-                pop = tournament_selection_and_mutation(
-                    population=pop,
-                    tournament=tournament,
-                    mutation=mutation,
-                    env_name=env.name,
-                    accelerator=accelerator,
-                    language_model=True,
-                    elite_path=elite_path,
-                    save_elite=save_elite,
+                population.update(
+                    tournament_selection_and_mutation(
+                        population=population.agents,
+                        tournament=tournament,
+                        mutation=mutation,
+                        env_name=env.name,
+                        accelerator=accelerator,
+                        language_model=True,
+                        elite_path=elite_path,
+                        save_elite=save_elite,
+                    ),
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
@@ -258,176 +244,25 @@ def finetune_llm_reasoning(
         ):
             save_llm_checkpoint(agent, elite_path)
 
-        if wb and (accelerator is None or accelerator.is_main_process):
-            wandb_dict = {
-                "Train/Best reward": np.max(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Mean reward"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Mean population reward": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Mean reward"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Mean population loss": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Loss"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Mean population KL divergence": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/KL-divergence"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Mean population completion length": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Average completion length"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-            }
-            if max_reward is not None:
-                wandb_dict |= {
-                    "Train/Mean population accuracy": np.mean(
-                        [
-                            agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                                "Train/Accuracy"
-                            ]
-                            for agent_idx, _ in enumerate(pop)
-                        ],
-                    ),
-                }
-                wandb_dict |= {
-                    "Train/Best accuracy": np.max(
-                        [
-                            agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                                "Train/Accuracy"
-                            ]
-                            for agent_idx, _ in enumerate(pop)
-                        ],
-                    ),
-                }
-            if len(pop[0].registry.hp_config.config.keys()) > 0:
-                wandb_dict |= {
-                    f"HPO_agent_{agent_idx}/{key}": getattr(agent, key)
-                    for agent_idx, agent in enumerate(pop)
-                    for key in agent.registry.hp_config.config
-                }
-
-            if agg_test_metrics is not None:
-                test_dict = {
-                    "Eval/Best reward": np.max(
-                        [
-                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
-                                "Eval/Mean reward"
-                            ]
-                            for agent_idx, _ in enumerate(pop)
-                        ],
-                    ),
-                    "Eval/Mean population reward": np.mean(
-                        [
-                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
-                                "Eval/Mean reward"
-                            ]
-                            for agent_idx, _ in enumerate(pop)
-                        ],
-                    ),
-                }
-                if max_reward is not None:
-                    test_dict |= {
-                        "Eval/Mean population accuracy": np.mean(
-                            [
-                                agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
-                                    "Eval/Accuracy"
-                                ]
-                                for agent_idx, _ in enumerate(pop)
-                            ],
-                        ),
-                    }
-                    wandb_dict |= {
-                        "Eval/Best accuracy": np.max(
-                            [
-                                agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
-                                    "Eval/Accuracy"
-                                ]
-                                for agent_idx, _ in enumerate(pop)
-                            ],
-                        ),
-                    }
-                wandb_dict |= test_dict
-            wandb.log(wandb_dict)
-
         if env.num_epochs == num_epochs:
             break
 
-    if (
-        verbose
-        and total_steps > evaluation_interval
-        and (accelerator is None or accelerator.is_main_process)
-    ):
-        fitness_calculated = len(agent.fitness) > 0
-        fitness = (
-            [str(round(agent.fitness[-1], 2)) for agent in pop]
-            if fitness_calculated
-            else [None] * len(pop)
-        )
-        avg_fitness = (
-            [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
-            if fitness_calculated
-            else [None] * len(pop)
-        )
-        avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
-        agents = [agent.index for agent in pop]
-        num_steps = [agent.steps[-1] for agent in pop]
-        muts = [agent.mut for agent in pop]
+    population.finish()
+    pbar.close()
 
-        banner_text = f"Global Steps {total_steps}"
-        banner_width = max(len(banner_text) + 8, 35)
-        border = "=" * banner_width
-        centered_text = f"{banner_text}".center(banner_width)
-        pbar.write(
-            f"{border}\n"
-            f"{centered_text}\n"
-            f"{border}\n"
-            f"Fitness:\t\t{fitness}\n"
-            f"Score:\t\t{agg_metrics[2]}\n"
-            f"5 fitness avgs:\t{avg_fitness}\n"
-            f"10 score avgs:\t{avg_score}\n"
-            f"Agents:\t\t{agents}\n"
-            f"Steps:\t\t{num_steps}\n"
-            f"Mutations:\t\t{muts}",
-        )
 
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    if accelerator is None or accelerator.is_main_process:
-        pbar.close()
-        if wb:
-            wandb.finish()
+SupportedPreference = DPO
 
 
 def finetune_llm_preference(
-    pop: PopulationType,
-    env: ReasoningGym,
+    pop: list[SupportedPreference],
+    env: PreferenceGym,
     init_hp: dict[str, Any] | None = None,
     save_elite: bool | None = None,
     elite_path: str | None = None,
     wb: bool = False,
+    tensorboard: bool = False,
+    tensorboard_log_dir: str | None = None,
     evo_steps: int | None = 20,
     checkpoint_steps: int | None = None,
     tournament: TournamentSelection | None = None,
@@ -440,6 +275,47 @@ def finetune_llm_preference(
     max_steps: int | None = None,
     num_epochs: int | None = None,
 ) -> None:
+    """Finetunes a population of DPOs on a PreferenceGym environment.
+
+    :param pop: Population of DPOs to finetune
+    :type pop: list[SupportedPreference]
+    :param env: PreferenceGym environment to finetune on
+    :type env: PreferenceGym
+    :param init_hp: Initial hyperparameters for the population
+    :type init_hp: dict, optional
+    :param save_elite: Whether to save the elite model, defaults to None
+    :type save_elite: bool, optional
+    :param elite_path: Path to save the elite model, defaults to None
+    :type elite_path: str, optional
+    :param wb: Whether to use Weights and Biases, defaults to False
+    :type wb: bool, optional
+    :param tensorboard: TensorBoard tracking, defaults to False
+    :type tensorboard: bool, optional
+    :param tensorboard_log_dir: Directory for TensorBoard logs, defaults to None
+    :type tensorboard_log_dir: str, optional
+    :param evo_steps: Number of steps between evolution, defaults to None
+    :type evo_steps: int, optional
+    :param checkpoint_steps: Number of steps between checkpoints, defaults to None
+    :type checkpoint_steps: int, optional
+    :param tournament: Tournament selection object, defaults to None
+    :type tournament: TournamentSelection, optional
+    :param mutation: Mutation object, defaults to None
+    :type mutation: Mutations, optional
+    :param wandb_api_key: Wandb API key, defaults to None
+    :type wandb_api_key: str, optional
+    :param wandb_kwargs: Additional kwargs to pass to wandb.init()
+    :type wandb_kwargs: dict, optional
+    :param evaluation_interval: Number of steps between evaluation, defaults to 10
+    :type evaluation_interval: int, optional
+    :param verbose: Whether to print verbose output, defaults to True
+    :type verbose: bool, optional
+    :param accelerator: Accelerator object, defaults to None
+    :type accelerator: Accelerator, optional
+    :param max_steps: Maximum number of steps to run, defaults to None
+    :type max_steps: int, optional
+    :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps, defaults to None
+    :type num_epochs: int, optional
+    """
     if evo_steps is not None and (tournament is None or mutation is None):
         warnings.warn(
             "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place.",
@@ -472,7 +348,7 @@ def finetune_llm_preference(
 
     if not isinstance(pop[0], DPO):
         msg = (
-            "The algorithm must be DPO for preference-based reinforcement learning."
+            "The algorithm must be DPO for preference-based reinforcement learning. "
             f"Got {type(pop[0])} instead."
         )
         raise ValueError(
@@ -487,105 +363,88 @@ def finetune_llm_preference(
     data_increment = accelerator.num_processes if accelerator is not None else 1
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
 
-    if wb and (accelerator is None or accelerator.is_main_process):
+    if wb:
         init_hp["effective_data_batch_size"] = effective_data_batch_size
         init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
         init_hp["distributed_training"] = accelerator is not None
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
-        init_wandb_kwargs = {
-            "algo": init_hp["ALGO"],
-            "env_name": env.name,
-            "wandb_api_key": wandb_api_key,
-            "init_hyperparams": init_hp,
-        }
-        if wandb_kwargs is not None:
-            init_wandb_kwargs.update(wandb_kwargs)
 
-        init_wandb(**init_wandb_kwargs)
-
-    if accelerator is None or accelerator.is_main_process:
-        pass
-
-    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
     if max_steps is None and num_epochs is None:
         max_steps = len(env)
-
     elif max_steps is None and num_epochs is not None:
         max_steps = num_epochs * len(env)
 
     training_steps = -(max_steps // -effective_data_batch_size)
-    if accelerator is None or accelerator.is_main_process:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-        )
 
-    total_steps = 0
+    pbar = default_progress_bar(max_steps, accelerator)
+
+    loggers = init_loggers(
+        algo=init_hp.get("ALGO", "DPO"),
+        env_name=env.name,
+        pbar=pbar,
+        verbose=verbose,
+        wb=wb,
+        tensorboard=tensorboard,
+        tensorboard_log_dir=tensorboard_log_dir,
+        accelerator=accelerator,
+        wandb_api_key=wandb_api_key,
+        wandb_kwargs=wandb_kwargs,
+        init_hyperparams=init_hp,
+    )
+
+    population = Population(
+        agents=pop,
+        accelerator=accelerator,
+        loggers=loggers,
+    )
 
     prompts = env.reset(reset_dataloaders=True)
     for i in range(training_steps):
-        agent_metrics_dict = {}
-        for agent_idx, agent in enumerate(pop):
-            agent.set_reference_policy(env.num_epochs)
-            loss, chosen_reward, rejected_reward = agent.learn(prompts)
-            next_prompts = env.step()
-            metrics = [loss, chosen_reward, rejected_reward]
-            agg_metrics = [
-                aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
-            ]
-            prompts = next_prompts
-            agent.steps[-1] += effective_data_batch_size
-            total_steps += effective_data_batch_size
-            agg_test_metrics = None
-
-            if (i + 1) % evaluation_interval == 0:
-                test_reward = agent.test(env)
-                test_metrics = [test_reward]
-                agg_test_metrics = [
-                    aggregate_metrics_across_gpus(accelerator, metric)
-                    for metric in test_metrics
-                ]
-
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-
-            if accelerator is None or accelerator.is_main_process:
-                metrics_dict = {
-                    "global_step": total_steps,
-                    "Train/Loss": agg_metrics[0],
-                    "Train/Mean chosen reward": agg_metrics[1],
-                    "Train/Mean rejected reward": agg_metrics[2],
-                    "Train/Mean reward margin": agg_metrics[1] - agg_metrics[2],
-                }
-                agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
-                if agg_test_metrics is not None:
-                    test_metrics_dict = {
-                        "Eval/Mean reward margin": agg_test_metrics[0],
-                    }
-                    agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = (
-                        test_metrics_dict
-                    )
-                pbar.update(effective_data_batch_size)
-                agent.scores.append(agg_metrics[1] - agg_metrics[2])
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
+        for agent in population.agents:
+            agent.set_reference_policy(env.num_epochs)
+            agent.init_evo_step()
+
+            # learn() aggregates and logs loss/chosen/rejected/margin to metrics
+            _, chosen_reward, rejected_reward = agent.learn(prompts)
+            next_prompts = env.step()
+
+            agent.add_scores([float(chosen_reward - rejected_reward)])
+            agent.finalize_evo_step(env.data_batch_size_per_gpu)
+
+        prompts = next_prompts
+        pbar.update(effective_data_batch_size)
+        population.increment_evo_step()
+
+        # Evaluate periodically
+        if (i + 1) % evaluation_interval == 0:
+            for agent in population.agents:
+                agent.test(env)
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+
+        # Report metrics and clear accumulators
+        population.report_metrics()
+        population.clear_agent_metrics()
+
+        # Tournament selection and population mutation
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-                pop = tournament_selection_and_mutation(
-                    population=pop,
-                    tournament=tournament,
-                    mutation=mutation,
-                    env_name=env.name,
-                    accelerator=accelerator,
-                    language_model=True,
-                    elite_path=elite_path,
-                    save_elite=save_elite,
+                population.update(
+                    tournament_selection_and_mutation(
+                        population=population.agents,
+                        tournament=tournament,
+                        mutation=mutation,
+                        env_name=env.name,
+                        accelerator=accelerator,
+                        language_model=True,
+                        elite_path=elite_path,
+                        save_elite=save_elite,
+                    ),
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
@@ -595,113 +454,8 @@ def finetune_llm_preference(
         ):
             save_llm_checkpoint(agent, elite_path)
 
-        if wb and (accelerator is None or accelerator.is_main_process):
-            wandb_dict = {
-                "Train/Best reward margin": np.max(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Mean reward margin"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Mean population reward margin": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Mean reward margin"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Mean population loss": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Loss"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Mean population chosen reward": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Mean chosen reward"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Mean population rejected reward": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Mean rejected reward"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-            }
-            if agg_test_metrics is not None:
-                test_dict = {
-                    "Eval/Best reward margin": np.max(
-                        [
-                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
-                                "Eval/Mean reward margin"
-                            ]
-                            for agent_idx, _ in enumerate(pop)
-                        ],
-                    ),
-                    "Eval/Mean population reward margin": np.mean(
-                        [
-                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
-                                "Eval/Mean reward margin"
-                            ]
-                            for agent_idx, _ in enumerate(pop)
-                        ],
-                    ),
-                }
-                wandb_dict |= test_dict
-            wandb.log(wandb_dict)
         if env.num_epochs == num_epochs:
             break
-    if (
-        verbose
-        and total_steps > evaluation_interval
-        and (accelerator is None or accelerator.is_main_process)
-    ):
-        fitness_calculated = len(agent.fitness) > 0
-        fitness = (
-            [str(round(agent.fitness[-1], 2)) for agent in pop]
-            if fitness_calculated
-            else [None] * len(pop)
-        )
-        avg_fitness = (
-            [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
-            if fitness_calculated
-            else [None] * len(pop)
-        )
-        avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
-        agents = [agent.index for agent in pop]
-        num_steps = [agent.steps[-1] for agent in pop]
-        muts = [agent.mut for agent in pop]
 
-        banner_text = f"Global Steps {total_steps}"
-        banner_width = max(len(banner_text) + 8, 35)
-        border = "=" * banner_width
-        centered_text = f"{banner_text}".center(banner_width)
-        pbar.write(
-            f"{border}\n"
-            f"{centered_text}\n"
-            f"{border}\n"
-            f"Fitness:\t\t{fitness}\n"
-            f"Score:\t\t{agg_metrics[2]}\n"
-            f"5 fitness avgs:\t{avg_fitness}\n"
-            f"10 score avgs:\t{avg_score}\n"
-            f"Agents:\t\t{agents}\n"
-            f"Steps:\t\t{num_steps}\n"
-            f"Mutations:\t\t{muts}",
-        )
-
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    if accelerator is None or accelerator.is_main_process:
-        pbar.close()
-        if wb:
-            wandb.finish()
+    population.finish()
+    pbar.close()

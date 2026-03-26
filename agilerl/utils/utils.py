@@ -8,7 +8,6 @@ from typing import Any
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 import tqdm
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
@@ -35,6 +34,7 @@ from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.logger import StdOutLogger, TensorboardLogger, WandbLogger
 from agilerl.modules import EvolvableModule
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
@@ -193,7 +193,7 @@ def default_progress_bar(
     :rtype: tqdm.tqdm
     """
     bar_format = (
-        "🚀 Training Progress │ "
+        "Training Progress │ "
         "{percentage:3.0f}% │ "
         "{bar:20} │ "
         "{n_fmt}/{total_fmt} steps │ "
@@ -375,7 +375,6 @@ def create_population(
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 4),
                 share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
                 recurrent=INIT_HP.get("RECURRENT", False),
-                use_rollout_buffer=INIT_HP.get("USE_ROLLOUT_BUFFER", False),
                 bptt_sequence_type=INIT_HP.get(
                     "BPTT_SEQUENCE_TYPE",
                     BPTTSequenceType.CHUNKED,
@@ -858,6 +857,84 @@ def init_wandb(
         wandb.init(**kwargs)
 
 
+def init_loggers(
+    *,
+    algo: str,
+    env_name: str,
+    pbar: tqdm.tqdm,
+    verbose: bool = True,
+    wb: bool = False,
+    tensorboard: bool = False,
+    tensorboard_log_dir: str | None = None,
+    accelerator: Accelerator | None = None,
+    wandb_api_key: str | None = None,
+    wandb_kwargs: dict[str, Any] | None = None,
+    init_hyperparams: dict[str, Any] | None = None,
+    mutation_hyperparams: dict[str, Any] | None = None,
+) -> list:
+    """Build the list of loggers for a training run.
+
+    Consolidates the repeated logger-setup block shared by all training loops.
+
+    :param algo: Algorithm name (used for wandb run name and TensorBoard experiment).
+    :type algo: str
+    :param env_name: Environment name.
+    :type env_name: str
+    :param pbar: ``tqdm`` progress bar for :class:`~agilerl.logger.StdOutLogger`.
+    :type pbar: tqdm.tqdm
+    :param verbose: Enable console logging via ``StdOutLogger``, defaults to True.
+    :type verbose: bool
+    :param wb: Enable Weights & Biases logging, defaults to False.
+    :type wb: bool
+    :param tensorboard: Enable TensorBoard logging, defaults to False.
+    :type tensorboard: bool
+    :param tensorboard_log_dir: Directory for TensorBoard event files, defaults to None.
+    :type tensorboard_log_dir: str | None
+    :param accelerator: HuggingFace Accelerator for distributed training, defaults to None.
+    :type accelerator: Accelerator | None
+    :param wandb_api_key: API key for Weights & Biases, defaults to None.
+    :type wandb_api_key: str | None
+    :param wandb_kwargs: Extra kwargs merged into the ``init_wandb`` call (e.g.
+        ``{"project": "AgileRLMultiAgent"}``), defaults to None.
+    :type wandb_kwargs: dict[str, Any] | None
+    :param init_hyperparams: Initial hyperparameters logged to wandb, defaults to None.
+    :type init_hyperparams: dict[str, Any] | None
+    :param mutation_hyperparams: Mutation hyperparameters logged to wandb, defaults to None.
+    :type mutation_hyperparams: dict[str, Any] | None
+    :returns: List of configured :class:`~agilerl.logger.Logger` instances.
+    :rtype: list[Logger]
+    """
+    loggers = []
+    if verbose:
+        loggers.append(StdOutLogger(pbar))
+
+    if wb:
+        init_wandb_kwargs: dict[str, Any] = {
+            "algo": algo,
+            "env_name": env_name,
+            "init_hyperparams": init_hyperparams,
+            "mutation_hyperparams": mutation_hyperparams,
+            "wandb_api_key": wandb_api_key,
+            "accelerator": accelerator,
+        }
+        if wandb_kwargs is not None:
+            init_wandb_kwargs.update(wandb_kwargs)
+        init_wandb(**init_wandb_kwargs)
+        loggers.append(WandbLogger(accelerator))
+
+    if tensorboard:
+        experiment_name = f"{algo}-{env_name}"
+        loggers.append(
+            TensorboardLogger(
+                log_dir=tensorboard_log_dir,
+                experiment_name=experiment_name,
+                accelerator=accelerator,
+            )
+        )
+
+    return loggers
+
+
 def calculate_vectorized_scores(
     rewards: np.ndarray,
     terminations: np.ndarray,
@@ -980,42 +1057,6 @@ def get_env_defined_actions(
         return None
 
     return env_defined_actions
-
-
-def gather_tensor(
-    tensor: torch.Tensor | float,
-    accelerator: Accelerator,
-) -> torch.Tensor:
-    """Gather tensors from gpus.
-
-    :param tensor: Tensor to gather
-    :type tensor: torch.Tensor
-    :param accelerator: Accelerator object
-    :type accelerator: accelerate.Accelerator
-    :return: Stacked tensors
-    :rtype: torch.Tensor
-    """
-    if not isinstance(tensor, torch.Tensor):
-        tensor = torch.tensor(tensor, device=accelerator.device)
-    tensor = tensor.to(accelerator.device)
-    return accelerator.gather(tensor)
-
-
-def aggregate_metrics_across_gpus(
-    accelerator: Accelerator,
-    metric_tensor: torch.Tensor | float,
-) -> float:
-    """Aggregate gathered tensors.
-
-    :param accelerator: Accelerator object
-    :type accelerator: accelerate.Accelerator
-    :param metric_tensor: Metrics
-    :type metric_tensor: torch.Tensor
-    :return: Mean metric
-    :rtype: float
-    """
-    all_metrics = gather_tensor(metric_tensor, accelerator)
-    return all_metrics.mean().item()
 
 
 def save_llm_checkpoint(

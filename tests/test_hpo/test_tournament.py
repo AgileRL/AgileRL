@@ -60,14 +60,12 @@ def test_initialization_with_given_parameters():
     tournament_size = 5
     elitism = True
     population_size = 100
-    eval_loop = 10
 
-    ts = TournamentSelection(tournament_size, elitism, population_size, eval_loop)
+    ts = TournamentSelection(tournament_size, elitism, population_size)
 
     assert ts.tournament_size == tournament_size
     assert ts.elitism == elitism
     assert ts.population_size == population_size
-    assert ts.eval_loop == eval_loop
 
 
 ### Single-agent algorithms ###
@@ -81,7 +79,7 @@ def test_returns_best_agent_and_new_population():
     population_size = 5
 
     # Initialize the class
-    tournament_selection = TournamentSelection(3, True, population_size, 2)
+    tournament_selection = TournamentSelection(3, True, population_size)
 
     algo_classes = {
         "DQN": DQN,
@@ -137,7 +135,7 @@ def test_returns_best_agent_and_new_population_without_elitism():
     population_size = 5
 
     # Initialize the class
-    tournament_selection = TournamentSelection(3, False, population_size, 2)
+    tournament_selection = TournamentSelection(3, False, population_size)
 
     algo_classes = {
         "DQN": DQN,
@@ -191,7 +189,7 @@ def test_returns_best_agent_and_new_population_multi_agent():
     population_size = 5
 
     # Initialize the class
-    tournament_selection = TournamentSelection(3, True, population_size, 2)
+    tournament_selection = TournamentSelection(3, True, population_size)
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
@@ -234,7 +232,7 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
     population_size = 5
 
     # Initialize the class
-    tournament_selection = TournamentSelection(3, False, population_size, 2)
+    tournament_selection = TournamentSelection(3, False, population_size)
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
@@ -270,7 +268,7 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
 @pytest.mark.parametrize("elitism", [True, False])
 @pytest.mark.parametrize("num_processes", [1, 2])
 def test_language_model_tournament(use_accelerator, elitism, num_processes):
-    tournament_selection = TournamentSelection(3, elitism, 4, 2)
+    tournament_selection = TournamentSelection(3, elitism, 4)
     population_size = 4
 
     init_hp = {
@@ -392,7 +390,6 @@ def test_tournament_returns_valid_winner_index(fitness_values, tournament_size):
         tournament_size=tournament_size,
         elitism=True,
         population_size=len(fitness_values) + 1,
-        eval_loop=1,
     )
     winner = ts._tournament(fitness_values)
     assert 0 <= winner < len(fitness_values)
@@ -418,7 +415,7 @@ def test_tournament_elitism_returns_elite_rank_max_id():
     population[2].fitness = [5, 6]
     population[3].fitness = [7, 8]
 
-    ts = TournamentSelection(3, True, 4, 2)
+    ts = TournamentSelection(3, True, 4)
     elite, rank, max_id = ts._elitism(population)
     assert elite.fitness == [7, 8]
     assert rank.shape == (4,)
@@ -427,21 +424,17 @@ def test_tournament_elitism_returns_elite_rank_max_id():
 
 
 @pytest.mark.parametrize(
-    "tournament_size,elitism,population_size,eval_loop,match",
+    "tournament_size,elitism,population_size,match",
     [
-        (0, True, 4, 2, "greater than zero"),
-        (2, "invalid", 4, 2, "boolean"),
-        (2, True, 0, 2, "greater than zero"),
-        (2, True, 4, 0, "greater than zero"),
+        (0, True, 4, "greater than zero"),
+        (2, "invalid", 4, "boolean"),
+        (2, True, 0, "greater than zero"),
     ],
 )
-def test_tournament_init_validation(
-    tournament_size, elitism, population_size, eval_loop, match
-):
+def test_tournament_init_validation(tournament_size, elitism, population_size, match):
     with pytest.raises(AssertionError, match=match):
         TournamentSelection(
             tournament_size=tournament_size,
             elitism=elitism,
             population_size=population_size,
-            eval_loop=eval_loop,
         )

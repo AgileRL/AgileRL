@@ -132,8 +132,6 @@ class PPO(RLAlgorithm):
         bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
         max_seq_len: int | None = None,
     ) -> None:
-        if rollout_buffer_config is None:
-            rollout_buffer_config = {}
         super().__init__(
             observation_space,
             action_space,
@@ -234,7 +232,7 @@ class PPO(RLAlgorithm):
         self.target_kl = target_kl
         self.update_epochs = update_epochs
         self.num_envs = num_envs
-        self.rollout_buffer_config = rollout_buffer_config
+        self.rollout_buffer_config = rollout_buffer_config or {}
         self.bptt_sequence_type = bptt_sequence_type
 
         if actor_network is not None and critic_network is not None:
@@ -301,7 +299,7 @@ class PPO(RLAlgorithm):
             lr=self.lr,
         )
 
-        # Initialize rollout buffer if enabled
+        # Initialize rollout buffer to store experiences for learning
         # NOTE: Need to register a mutation hook that does this after every mutation
         # (e.g. the batch size, sequence length, etc. have changed)
         self.create_rollout_buffer()

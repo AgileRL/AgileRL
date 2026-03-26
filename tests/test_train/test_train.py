@@ -178,7 +178,6 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):  # pylint: disable=overwritten-in
         self.rollout_buffer.reset.side_effect = lambda: None
         self.rollout_buffer.add.side_effect = lambda *args, **kwargs: None
         self.registry.policy.side_effect = lambda: "actor"
-        self.use_rollout_buffer = False
         self.num_envs = 2
 
     def learn(self, *args, **kwargs):
@@ -2358,20 +2357,14 @@ def test_train_on_policy_tourn_mut_calls(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect, use_rollout_buffer",
-    [((6,), 2, True, True), ((6,), 2, False, False)],
+    "state_size, action_size, vect", [((6,), 2, True), ((6,), 2, False)]
 )
 def test_train_on_policy(
     env,
     population_on_policy,
     tournament,
     mutations,
-    use_rollout_buffer,
 ):
-    if use_rollout_buffer:
-        for agent in population_on_policy:
-            agent.use_rollout_buffer = True
-
     pop, _ = train_on_policy(
         env,
         "env_name",
@@ -5000,7 +4993,6 @@ def test_train_on_policy_wandb_kwargs_update(env):
 @pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])
 def test_train_on_policy_recurrent_collect_rollouts_import_branch(env, monkeypatch):
     agent = DummyAgentOnPolicy(5, env)
-    agent.use_rollout_buffer = True
     agent.recurrent = True
     agent.learn_step = 1
 

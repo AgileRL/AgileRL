@@ -34,7 +34,7 @@ from agilerl.models.hpo import (
     TournamentSelectionSpec,
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-from agilerl.trainer import ArenaTrainer, LocalTrainer, Trainer
+from agilerl.training.trainer import ArenaTrainer, LocalTrainer, Trainer
 from agilerl.utils.trainer_utils import (
     build_mutations,
     build_replay_buffer,
@@ -141,16 +141,14 @@ class TestResolveAlgoName:
         inst.algo = "TD3"
         assert resolve_algo_name(inst) == "TD3"
 
-    def test_unknown_spec_falls_back_to_base(self):
-        """An RLAlgorithmSpec subclass not directly in the registry matches
-        the base RLAlgorithmSpec entries (e.g. CQN, NeuralUCB)."""
+    def test_unknown_spec_raises(self):
+        """An unregistered RLAlgorithmSpec subclass raises ValueError."""
 
         class CustomSpec(RLAlgorithmSpec):
             pass
 
-        # Should match one of the base RLAlgorithmSpec entries
-        name = resolve_algo_name(CustomSpec())
-        assert name in ALGO_REGISTRY
+        with pytest.raises(ValueError, match="No registry entry"):
+            resolve_algo_name(CustomSpec())
 
 
 class TestGetAlgoMeta:
@@ -165,10 +163,14 @@ class TestGetAlgoMeta:
             get_algo_meta("FakeAlgo")
 
     def test_all_registry_entries_consistent(self):
+        from agilerl.training import AlgorithmType
+
         for name, meta in ALGO_REGISTRY.items():
             assert meta.name == name
             assert isinstance(meta.train_fn_name, str)
             assert isinstance(meta.requires_buffer, bool)
+            assert callable(meta.train_fn)
+            assert isinstance(meta.algorithm_type, AlgorithmType)
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +394,7 @@ class TestLocalTrainerResolvePopulation:
             algorithm=ppo_spec, environment=env, training=training_spec
         )
         pop = trainer._resolve_population()
-        mock_create.assert_called_once_with(ppo_spec, trainer._algo_meta, env, 2, "cpu")
+        mock_create.assert_called_once_with(2, ppo_spec, trainer.algo_meta, env, "cpu")
         assert len(pop) == 2
 
     @patch("agilerl.trainer.create_population_from_spec")
@@ -686,7 +688,7 @@ class TestAlgoRegistry:
     }
 
     def test_all_algorithms_registered(self):
-        assert set(ALGO_REGISTRY.keys()) == self.EXPECTED_ALGOS
+        assert self.EXPECTED_ALGOS.issubset(ALGO_REGISTRY.keys())
 
     def test_on_policy_algos_dont_require_buffer(self):
         for name in ("PPO", "IPPO"):

@@ -192,7 +192,6 @@ def run_demo(recurrent: bool = True) -> None:
         tournament_size=2,
         elitism=True,
         population_size=INIT_HP["POP_SIZE"],
-        eval_loop=eval_loop,
     )
 
     mutations = Mutations(
