@@ -2767,8 +2767,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             with self._amp_ctx():
                 output = self.actor.forward(**model_kwargs)
             logits = output[0] if isinstance(output, tuple) else output.logits
-            logits = logits / self.temperature
             value = output[-1] if isinstance(output, tuple) else output[2]
+            del output
+            if self.temperature != 1.0:
+                logits = logits.div_(self.temperature)
 
             all_logprobs.append(
                 LLMAlgorithm._memory_efficient_logits(
@@ -3226,7 +3228,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _memory_efficient_logits(
         logits: torch.Tensor,
         index: torch.Tensor,
-        _chunk_rows: int = 4,
+        _chunk_rows: int = 1,
     ) -> torch.Tensor:
         """Calculate log probabilities for previously generated token ids.
 

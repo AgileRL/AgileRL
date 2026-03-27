@@ -9,7 +9,6 @@ if not HAS_LLM_DEPENDENCIES:
 import re
 
 import yaml
-from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig
 from torch.utils.data import Dataset
@@ -17,7 +16,7 @@ from transformers import AutoTokenizer
 
 from agilerl.algorithms import LLMPPO
 from agilerl.training.train_llm import finetune_llm_reasoning
-from agilerl.utils.llm_utils import ReasoningGym
+from agilerl.utils.llm_utils import ReasoningGym, create_llm_accelerator
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.utils import create_population
 
@@ -142,7 +141,7 @@ def main(init_hp, mut_p):
     ]
 
     # Convert the HuggingFace dataset into a Gymnasium environment
-    accelerator = Accelerator() if not USE_TINY_DEBUG_MODEL else None
+    accelerator = create_llm_accelerator() if not USE_TINY_DEBUG_MODEL else None
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,

@@ -43,6 +43,7 @@ dependencies = [
 llm = [
     "datasets==4.4.1",
     "deepspeed~=0.17.1",
+    "gem-llm>=0.1.0",
     "peft~=0.18.0",
     "transformers~=4.57.1",
     "vllm==0.13.0",
@@ -50,6 +51,7 @@ llm = [
 all = [
     "datasets==4.4.1",
     "deepspeed~=0.17.1",
+    "gem-llm>=0.1.0",
     "peft~=0.18.0",
     "transformers~=4.57.1",
     "vllm==0.13.0",
