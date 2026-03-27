@@ -2677,6 +2677,23 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             else None
         )
 
+    @contextmanager
+    def _amp_ctx(self):
+        """Yield a ``torch.amp.autocast`` context when running without an accelerator.
+
+        When an ``Accelerator`` is present it already manages mixed-precision
+        via its own autocast wrapper, so this is a no-op in that case.
+        """
+        if self.accelerator is not None:
+            yield
+        else:
+            device_type = torch.device(self.device).type
+            if device_type == "cuda" and torch.cuda.is_bf16_supported():
+                with torch.amp.autocast(device_type, dtype=torch.bfloat16):
+                    yield
+            else:
+                yield
+
     def _fused_model_pass(
         self,
         fused_ids: torch.Tensor,
@@ -2719,7 +2736,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if position_ids is not None:
                 model_kwargs["position_ids"] = position_ids[start:end]
 
-            output = self.actor.forward(**model_kwargs)
+            with self._amp_ctx():
+                output = self.actor.forward(**model_kwargs)
             logits = output[0] if isinstance(output, tuple) else output.logits
             logits = logits / self.temperature
             value = output[-1] if isinstance(output, tuple) else output[2]
@@ -2890,7 +2908,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 if self.calc_position_embeddings:
                     batch_position_ids = position_ids[batch:end_idx, :]
                     batch_model_kwargs |= {"position_ids": batch_position_ids}
-                output = self.actor.forward(**batch_model_kwargs)
+                with self._amp_ctx():
+                    output = self.actor.forward(**batch_model_kwargs)
                 logits = output[0] if isinstance(output, tuple) else output.logits
                 logits = logits / self.temperature
 
@@ -2987,12 +3006,23 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param adapter_names: LoRA adapter names whose params should be trainable.
         :type adapter_names: list[str]
         """
+        key = tuple(sorted(adapter_names))
+        cache = getattr(self, "_trainable_params_cache", None)
+        if cache is not None and cache[0] == key:
+            for param in cache[1]:
+                param.requires_grad_(True)
+            return
+
         model = self.actor.module if hasattr(self.actor, "module") else self.actor
+        params: list[torch.nn.Parameter] = []
         for name, param in model.named_parameters():
             for adapter in adapter_names:
                 if adapter in name and "lora" in name:
-                    param.requires_grad_(True)
+                    params.append(param)
                     break
+        for param in params:
+            param.requires_grad_(True)
+        self._trainable_params_cache = (key, params)
 
     def _move_model_to_vllm(self) -> None:
         """Move the deepspeed model to vllm."""
@@ -3168,13 +3198,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         logits: torch.Tensor,
         index: torch.Tensor,
     ) -> torch.Tensor:
-        """Calculate the log probabilities for a set of previously generated ids, looping to reduce peak memory consumption.
+        """Calculate log probabilities for previously generated token ids.
 
-        :param logits: Logits.
+        Processes one row at a time so only a single ``(seq_len, vocab_size)``
+        log-softmax tensor is live at any moment, avoiding the OOM that a
+        batched ``F.log_softmax`` over the full ``(B, seq_len, vocab_size)``
+        tensor would cause on large-vocabulary models.
+
+        :param logits: Logits of shape ``(B, seq_len, vocab_size)``.
         :type logits: torch.Tensor
-        :param index: Index.
+        :param index: Token IDs of shape ``(B, seq_len)``.
         :type index: torch.Tensor
-        :return: Log probabilities of the completion IDs.
+        :return: Log probabilities of the completion IDs, shape ``(B, seq_len)``.
         :rtype: torch.Tensor
         """
         per_token_logps = []

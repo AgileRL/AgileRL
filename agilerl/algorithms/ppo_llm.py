@@ -1,4 +1,3 @@
-import gc
 from typing import Any
 
 import numpy as np
@@ -236,7 +235,7 @@ class PPO(LLMAlgorithm):
                     actor_device = next(actor_module.parameters()).device
                 except StopIteration:
                     actor_device = torch.device(self.device)
-                with torch.no_grad():
+                with torch.no_grad(), self._amp_ctx():
                     completion_ids = []
                     action_masks = []
                     for prompt in obs:
@@ -275,9 +274,6 @@ class PPO(LLMAlgorithm):
         self, experiences: ExperiencesType, tokenizer
     ) -> tuple[float, float, float, float, float]:
         """Update actor and critic adapters using token-level PPO objectives."""
-        gc.collect()
-        torch.cuda.empty_cache()
-
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
             *experiences,
             padding_values=[self.pad_token_id, False, None],
@@ -536,7 +532,8 @@ class PPO(LLMAlgorithm):
                 if self.calc_position_embeddings:
                     batch_position_ids = position_ids[batch:end_idx, :]
                     batch_model_kwargs |= {"position_ids": batch_position_ids}
-                *_, value = self.actor.forward(**batch_model_kwargs)
+                with self._amp_ctx():
+                    *_, value = self.actor.forward(**batch_model_kwargs)
 
                 values.append(value[:, :-1])
 
