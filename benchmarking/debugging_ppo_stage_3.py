@@ -1,13 +1,17 @@
-"""Stage-3 debugging: multi-turn PPO with a digit-accumulator GEM environment.
+"""Stage-3 debugging: multi-turn PPO with a 1D grid navigation GEM environment.
 
 Tests that turn-level GAE correctly handles multi-turn trajectories where
-each generation is treated as a single action.
+each generation is treated as a single action.  The environment provides
+meaningful state transitions and per-turn rewards, forcing the agent to
+condition on environment feedback across turns.
 
-Environment: DigitAccumulatorEnv (extends gem.Env)
-  - Observation: single digit = remaining amount needed to hit the target.
-  - Action: a single digit "1", "2", or "3".
-  - Episode terminates on exact match (reward +1), overshoot (reward -1),
-    or when max_turns is exhausted (reward -1).
+Environment: GridNavigationEnv (extends gem.Env)
+  - 1D grid with positions 0..3.
+  - Initial observation: "{position}{target}" (e.g. "03").
+  - Action: "1" = left, "2" = stay, "3" = right.
+  - Feedback observation: new position as a single digit.
+  - Rewards: -0.1 step cost per turn, +1.0 on reaching target,
+    -1.0 if max_turns exhausted.
 """
 
 from __future__ import annotations
@@ -40,55 +44,70 @@ from benchmarking.tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 MAX_CONTEXT_LENGTH = 128
 MAX_OUTPUT_TOKENS = 1
-MAX_TURNS = 3
+GRID_SIZE = 4
+MAX_TURNS = 5
+STEP_COST = -0.1
 EVAL_EPISODES = 128
-TARGET_RANGE = (2, 4)
 
 
-class DigitAccumulatorEnv(GemEnv):
-    """Multi-turn env: output digits that sum exactly to a target.
+class GridNavigationEnv(GemEnv):
+    """1D grid navigation: move left/right to reach a target position.
 
-    Observation is a single digit representing the remaining amount needed.
-    Valid actions: "1", "2", or "3".
+    The agent sees its starting position and target once (initial obs),
+    then receives only its current position as feedback after each move.
+    It must remember the target from context and navigate toward it.
+
+    Actions map to: "1" = left, "2" = stay, "3" = right.
+    Positions are clamped to [0, grid_size-1].
     """
 
-    def __init__(self, target_range: tuple[int, int] = TARGET_RANGE, max_turns: int = 3, seed: int = 42):
-        self.target_range = target_range
+    def __init__(
+        self,
+        grid_size: int = GRID_SIZE,
+        max_turns: int = MAX_TURNS,
+        step_cost: float = STEP_COST,
+        seed: int = 42,
+    ):
+        self.grid_size = grid_size
         self.max_turns = max_turns
+        self.step_cost = step_cost
         self.rng = Random(seed)
+        self.position = 0
         self.target = 0
-        self.current_sum = 0
         self.turn = 0
 
     def reset(self, seed=None):
         if seed is not None:
             self.rng = Random(seed)
-        self.target = self.rng.randint(*self.target_range)
-        self.current_sum = 0
+        self.position = self.rng.randint(0, self.grid_size - 1)
+        others = [p for p in range(self.grid_size) if p != self.position]
+        self.target = self.rng.choice(others)
         self.turn = 0
-        remaining = self.target - self.current_sum
-        return str(remaining), {"target": self.target}
+        obs = f"{self.position}{self.target}"
+        return obs, {"position": self.position, "target": self.target}
 
     def step(self, action):
         self.turn += 1
-        digit = None
+
+        move = None
         for ch in str(action):
             if ch in "123":
-                digit = int(ch)
+                move = int(ch)
                 break
 
-        if digit is None:
-            remaining = max(0, self.target - self.current_sum)
-            return str(remaining), -1.0, True, False, {"success": False}
+        if move == 1:
+            self.position = max(0, self.position - 1)
+        elif move == 3:
+            self.position = min(self.grid_size - 1, self.position + 1)
+        # move == 2 or invalid: stay in place
 
-        self.current_sum += digit
-        remaining = max(0, self.target - self.current_sum)
+        obs = str(self.position)
 
-        if self.current_sum == self.target:
-            return str(remaining), 1.0, True, False, {"success": True}
-        if self.current_sum > self.target or self.turn >= self.max_turns:
-            return str(remaining), -1.0, True, False, {"success": False}
-        return str(remaining), 0.0, False, False, {}
+        if self.position == self.target:
+            return obs, 1.0, True, False, {"success": True}
+        if self.turn >= self.max_turns:
+            return obs, -1.0, True, False, {"success": False}
+        return obs, self.step_cost, False, False, {}
 
 
 def rollout_multiturn(
@@ -96,7 +115,7 @@ def rollout_multiturn(
     batch_size: int,
     tokenizer: TinyDigitTokenizer,
     max_turns: int,
-    target_range: tuple[int, int],
+    grid_size: int,
     rng: Random,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
     """Roll out a batch of multi-turn episodes and build trajectory tensors.
@@ -113,8 +132,8 @@ def rollout_multiturn(
     all_rewards: list[torch.Tensor] = []
 
     for _ in range(batch_size):
-        env = DigitAccumulatorEnv(
-            target_range=target_range, max_turns=max_turns, seed=rng.randint(0, 2**31)
+        env = GridNavigationEnv(
+            grid_size=grid_size, max_turns=max_turns, seed=rng.randint(0, 2**31)
         )
         obs, _info = env.reset()
 
@@ -194,12 +213,12 @@ def rollout_multiturn(
 def evaluate_accuracy(
     agent: LLMPPO,
     tokenizer: TinyDigitTokenizer,
-    target_range: tuple[int, int],
+    grid_size: int,
     max_turns: int,
     num_episodes: int,
     greedy: bool = False,
 ) -> float:
-    """Evaluate multi-turn accuracy over many episodes."""
+    """Evaluate multi-turn accuracy (fraction reaching target) over many episodes."""
     original_temp = agent.generation_config.temperature
     original_top_k = agent.generation_config.top_k
     original_top_p = agent.generation_config.top_p
@@ -216,8 +235,8 @@ def evaluate_accuracy(
     try:
         with torch.no_grad():
             for _ in range(num_episodes):
-                env = DigitAccumulatorEnv(
-                    target_range=target_range,
+                env = GridNavigationEnv(
+                    grid_size=grid_size,
                     max_turns=max_turns,
                     seed=eval_rng.randint(0, 2**31),
                 )
@@ -283,7 +302,7 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
     tokenizer = TinyDigitTokenizer()
     rng = Random(seed)
 
-    target_range = TARGET_RANGE
+    grid_size = GRID_SIZE
     max_turns = MAX_TURNS
 
     llm_ppo = LLMPPO(
@@ -319,10 +338,10 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
     )
 
     pre_acc = evaluate_accuracy(
-        llm_ppo, tokenizer, target_range, max_turns, EVAL_EPISODES, greedy=False
+        llm_ppo, tokenizer, grid_size, max_turns, EVAL_EPISODES, greedy=False
     )
     pre_acc_g = evaluate_accuracy(
-        llm_ppo, tokenizer, target_range, max_turns, EVAL_EPISODES, greedy=True
+        llm_ppo, tokenizer, grid_size, max_turns, EVAL_EPISODES, greedy=True
     )
     print(
         f"[seed={seed}] pre-train acc (sampled/greedy): "
@@ -353,7 +372,7 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
 
         comp_ids_list, action_masks_list, turn_ids_list, rewards_list = (
             rollout_multiturn(
-                llm_ppo, batch_size, tokenizer, max_turns, target_range, rng
+                llm_ppo, batch_size, tokenizer, max_turns, grid_size, rng
             )
         )
 
@@ -370,17 +389,11 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
             experiences, tokenizer, turn_ids=turn_ids_padded
         )
 
-        batch_terminal_rewards = []
-        for r in rewards_list:
-            nonzero = r[r.abs() > 0]
-            if len(nonzero) > 0:
-                batch_terminal_rewards.append(nonzero[0].item())
-        mean_reward = (
-            sum(batch_terminal_rewards) / max(len(batch_terminal_rewards), 1)
-        )
+        episode_scores = [r.sum().item() for r in rewards_list]
+        mean_score = sum(episode_scores) / max(len(episode_scores), 1)
         accuracy = (
-            sum(1 for r in batch_terminal_rewards if r > 0)
-            / max(len(batch_terminal_rewards), 1)
+            sum(1 for r in rewards_list if (r > 0).any())
+            / max(len(rewards_list), 1)
         )
 
         total_samples += batch_size
@@ -389,14 +402,14 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
         pbar.set_postfix(
             loss=f"{loss:.4f}",
             kl=f"{kl:.4f}",
-            reward=f"{mean_reward:.3f}",
+            score=f"{mean_score:.3f}",
             acc=f"{accuracy:.3f}",
         )
         pbar.update(batch_size)
 
         if step_count % evaluation_interval == 0:
             eval_acc = evaluate_accuracy(
-                llm_ppo, tokenizer, target_range, max_turns, EVAL_EPISODES, greedy=True
+                llm_ppo, tokenizer, grid_size, max_turns, EVAL_EPISODES, greedy=True
             )
 
             banner_text = f"Step {step_count}  ({total_samples} samples)"
@@ -406,7 +419,7 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
                 f"\n{border}\n"
                 f"{banner_text.center(banner_width)}\n"
                 f"{border}\n"
-                f"Train reward:\t\t{mean_reward:.3f}\n"
+                f"Train score:\t\t{mean_score:.3f}\n"
                 f"Train accuracy:\t\t{accuracy:.3f}\n"
                 f"Eval accuracy (greedy):\t{eval_acc:.3f}\n"
                 f"Loss:\t\t\t{loss:.4f}\n"
@@ -420,10 +433,10 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
     pbar.close()
 
     post_acc = evaluate_accuracy(
-        llm_ppo, tokenizer, target_range, max_turns, EVAL_EPISODES, greedy=False
+        llm_ppo, tokenizer, grid_size, max_turns, EVAL_EPISODES, greedy=False
     )
     post_acc_g = evaluate_accuracy(
-        llm_ppo, tokenizer, target_range, max_turns, EVAL_EPISODES, greedy=True
+        llm_ppo, tokenizer, grid_size, max_turns, EVAL_EPISODES, greedy=True
     )
     print(
         f"\n[seed={seed}] post-train acc (sampled/greedy): "
