@@ -1,12 +1,13 @@
 import gc
-import time
 from typing import Any
 
 import numpy as np
 import torch
 from accelerate import Accelerator
+
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
+from agilerl.algorithms.core.fused_lora import clear_fused_adapter_routing
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import (
     LoraConfigProtocol,
@@ -227,45 +228,46 @@ class PPO(LLMAlgorithm):
         training: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Return generated completion ids and corresponding action masks."""
-        self.actor.eval()
-        if not self.use_vllm:
-            actor_module = self._get_unwrapped_actor()
-            try:
-                actor_device = next(actor_module.parameters()).device
-            except StopIteration:
-                actor_device = torch.device(self.device)
-            with torch.no_grad():
-                completion_ids = []
-                action_masks = []
-                for prompt in obs:
-                    prompt.pop("text", None)
-                    prompt["input_ids"] = prompt["input_ids"].to(actor_device)
-                    prompt["attention_mask"] = prompt["attention_mask"].to(actor_device)
-                    completion_id = self.actor.generate(
-                        **prompt,
-                        generation_config=self.generation_config,
-                    )
-                    completion_ids.append(completion_id)
-                    action_mask = torch.zeros_like(
-                        completion_id,
-                        dtype=torch.bool,
-                        device=completion_id.device,
-                    )
-                    action_mask[:, prompt["input_ids"].shape[1] :] = True
-                    action_mask[completion_id == self.pad_token_id] = False
-                    action_mask = action_mask[:, 1:]
-                    action_masks.append(action_mask)
-        else:
-            if self.vllm_config.sleep_mode:
-                torch.cuda.empty_cache()
-                self.llm.wake_up()
-            self._move_model_to_vllm()
-            completion_ids, action_masks = self._generate_with_vllm_colocate(
-                obs,
-                1,
-            )
-            if self.vllm_config.sleep_mode:
-                self.llm.sleep(level=2)
+        with self.select_adapter("actor"):
+            self.actor.eval()
+            if not self.use_vllm:
+                actor_module = self._get_unwrapped_actor()
+                try:
+                    actor_device = next(actor_module.parameters()).device
+                except StopIteration:
+                    actor_device = torch.device(self.device)
+                with torch.no_grad():
+                    completion_ids = []
+                    action_masks = []
+                    for prompt in obs:
+                        prompt.pop("text", None)
+                        prompt["input_ids"] = prompt["input_ids"].to(actor_device)
+                        prompt["attention_mask"] = prompt["attention_mask"].to(actor_device)
+                        completion_id = self.actor.generate(
+                            **prompt,
+                            generation_config=self.generation_config,
+                        )
+                        completion_ids.append(completion_id)
+                        action_mask = torch.zeros_like(
+                            completion_id,
+                            dtype=torch.bool,
+                            device=completion_id.device,
+                        )
+                        action_mask[:, prompt["input_ids"].shape[1] :] = True
+                        action_mask[completion_id == self.pad_token_id] = False
+                        action_mask = action_mask[:, 1:]
+                        action_masks.append(action_mask)
+            else:
+                if self.vllm_config.sleep_mode:
+                    torch.cuda.empty_cache()
+                    self.llm.wake_up()
+                self._move_model_to_vllm()
+                completion_ids, action_masks = self._generate_with_vllm_colocate(
+                    obs,
+                    1,
+                )
+                if self.vllm_config.sleep_mode:
+                    self.llm.sleep(level=2)
 
         return completion_ids, action_masks
 
@@ -309,22 +311,11 @@ class PPO(LLMAlgorithm):
         )
 
         with torch.no_grad():
-            reference_log_probs = self._get_logprobs(
-                completion_ids,
-                batch_size=batch_size,
-                use_reference=True,
-                eval_mode=True,
-            )
-            old_log_probs = self._get_logprobs(
-                completion_ids,
-                batch_size=batch_size,
-                use_reference=False,
-                eval_mode=True,
-            )
-            old_values = self._get_values(
-                completion_ids,
-                batch_size=batch_size,
-                eval_mode=True,
+            reference_log_probs, old_log_probs, old_values = (
+                self._fused_forward_no_grad(
+                    completion_ids,
+                    batch_size=batch_size,
+                )
             )
             old_values = torch.masked_fill(old_values, ~action_masks.bool(), 0.0)
 
@@ -338,27 +329,9 @@ class PPO(LLMAlgorithm):
 
             token_penalised_rewards = token_rewards - self.beta * token_kl
 
-            torch.set_printoptions(threshold=torch.inf)
-
             returns, advantages = self._compute_gae_returns(
                 token_penalised_rewards, old_values, action_masks
             )
-
-            torch.set_printoptions(threshold=torch.inf)
-
-        params = {}
-
-        for name, param in self.actor.named_parameters():
-            if "lora" in name and ("actor" in name or "critic" in name):
-                params[name] = param.clone().detach()
-
-        debug = getattr(self, "_debug_logging", False)
-        _debug_step = 0
-        _debug_last_epoch = max(0, self.update_epochs - 1)
-
-        if debug and not getattr(self, "_debug_init_done", False):
-            self._debug_init_done = True
-            self._debug_dump_param_groups()
 
         for _epoch_idx in range(self.update_epochs):
             self.rng.shuffle(batch_idxs)
@@ -385,18 +358,15 @@ class PPO(LLMAlgorithm):
                     old_values,
                 )
 
-                # Pass 1: actor forward — builds pg_loss computation graph with actor LoRA.
-                batch_log_probs = self._get_logprobs(
+                # Fused forward: actor logprobs + critic values in one pass.
+                batch_log_probs, batch_values = self._fused_forward(
                     batch_ids,
                     batch_size=batch_size,
-                    use_reference=False,
-                    eval_mode=False,
                 )
                 batch_log_probs = torch.masked_fill(
                     batch_log_probs, ~batch_action_mask.bool(), 1.0
                 )
                 kl = batch_log_probs - batch_reference_log_probs
-                # Proxy entropy (-log pi(a_t|s_t)) avoids full-vocab entropy tensors.
                 masked_entropy = masked_mean(
                     -batch_log_probs.detach(), batch_action_mask
                 )
@@ -414,12 +384,6 @@ class PPO(LLMAlgorithm):
                     torch.max(pg_loss_unclipped, pg_loss_clipped), batch_action_mask
                 )
 
-                # Pass 2: critic forward — builds vf_loss computation graph with critic LoRA.
-                batch_values = self._get_values(
-                    batch_ids,
-                    batch_size=batch_size,
-                    eval_mode=False,
-                )
                 batch_values = torch.masked_fill(
                     batch_values, ~batch_action_mask.bool(), 0.0
                 )
@@ -440,35 +404,8 @@ class PPO(LLMAlgorithm):
 
                 total_loss = pg_loss + vf_loss
 
-                should_log = debug and _epoch_idx == _debug_last_epoch
-                if should_log:
-                    with torch.no_grad():
-                        ratio_vals = policy_ratio[batch_action_mask.bool()]
-                        clip_frac = (
-                            (ratio_vals - 1.0).abs() > self.clip_coef
-                        ).float().mean().item()
-                        adv_vals = batch_advantages[batch_action_mask.bool()]
-                        print(
-                            f"[step {_debug_step} epoch {_epoch_idx}] "
-                            f"pg={pg_loss.item():.4f} "
-                            f"vf={vf_loss.item():.4f} "
-                            f"total={total_loss.item():.4f} | "
-                            f"adv: m={adv_vals.mean().item():.3f} "
-                            f"s={adv_vals.std().item():.3f} | "
-                            f"ratio: m={ratio_vals.mean().item():.4f} "
-                            f"s={ratio_vals.std().item():.4f} "
-                            f"clip={clip_frac:.3f}"
-                        )
-
-                self._backward_pass(
-                    total_loss,
-                    actor_loss=pg_loss,
-                    critic_loss=vf_loss,
-                    debug_this_step=should_log,
-                )
-
-                if should_log:
-                    _debug_step += 1
+                self._backward_pass(total_loss)
+                clear_fused_adapter_routing(self._get_unwrapped_actor())
 
                 mean_kl += masked_mean(kl, batch_action_mask).item()
                 mean_entropy += masked_entropy.mean().item()
@@ -478,11 +415,6 @@ class PPO(LLMAlgorithm):
                 mean_loss += total_loss.item()
                 updates += 1
 
-        # for name, param in self.actor.named_parameters():
-        #     if "lora" in name and ("actor" in name or "critic" in name):
-        #         if torch.equal(param.data, params[name].data):
-        #             print(f"Lora {name} has not updated {time.time()}")
-
         return (
             mean_loss / max(updates, 1),
             mean_kl / max(updates, 1),
@@ -491,34 +423,6 @@ class PPO(LLMAlgorithm):
             mean_entropy / max(updates, 1),
             # reporting_reward / max(updates, 1),
         )
-
-    def _debug_dump_param_groups(self) -> None:
-        """One-time dump of optimizer param group structure."""
-        opt = self.optimizer.optimizer
-        groups = opt.param_groups
-        group_names = ["actor", "critic"] if len(groups) >= 2 else [f"group{i}" for i in range(len(groups))]
-        print("=" * 60)
-        print("[DEBUG] Optimizer param groups")
-        all_ids: set[int] = set()
-        duplicates = 0
-        for name, group in zip(group_names, groups, strict=False):
-            n_params = len(group["params"])
-            n_trainable = sum(1 for p in group["params"] if p.requires_grad)
-            total_elems = sum(p.numel() for p in group["params"] if p.requires_grad)
-            for p in group["params"]:
-                pid = id(p)
-                if pid in all_ids:
-                    duplicates += 1
-                all_ids.add(pid)
-            print(
-                f"  {name}: {n_params} params ({n_trainable} trainable, "
-                f"{total_elems:,} elements), lr={group['lr']}"
-            )
-        if duplicates:
-            print(f"  WARNING: {duplicates} params shared across groups!")
-        else:
-            print("  No params shared across groups (good)")
-        print("=" * 60)
 
     def test(
         self,
@@ -582,18 +486,6 @@ class PPO(LLMAlgorithm):
     ) -> torch.Tensor:
         token_rewards = torch.zeros_like(action_mask, dtype=torch.float32)
         valid = action_mask.any(dim=-1)
-
-        # FIXME this is a hack to test value function!
-        # Option B: more robust — last valid action position per row
-        # last_action = action_mask.long().cumsum(dim=1).max(dim=1)[1]
-        # token_rewards.scatter_(dim=1, index=last_action.unsqueeze(1), src=torch.ones_like(last_action, dtype=torch.float32).unsqueeze(1))
-        # return token_rewards
-
-        # sequence_rewards = torch.ones_like(sequence_rewards) # FIXME for testing
-
-        # reward 1.0 if response contains token id 1234, else 0.0
-
-        # print(action_mask.sum(dim=-1))
         if valid.any():
             reward_idx = action_mask[valid].long().cumsum(dim=-1).argmax(dim=-1)
             row_ids = torch.arange(
@@ -601,7 +493,6 @@ class PPO(LLMAlgorithm):
                 device=token_rewards.device,
             )[valid]
             token_rewards[row_ids, reward_idx] = sequence_rewards[valid]
-
         return token_rewards
 
     def _get_values(

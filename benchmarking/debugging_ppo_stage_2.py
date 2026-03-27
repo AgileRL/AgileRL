@@ -17,8 +17,6 @@ import yaml
 from datasets import Dataset
 from peft import LoraConfig
 
-from peft import get_peft_model
-
 from agilerl.algorithms import LLMPPO
 from agilerl.training import train_llm
 from agilerl.training.train_llm import finetune_llm_reasoning
@@ -26,7 +24,6 @@ from agilerl.utils.algo_utils import stack_and_pad_experiences
 from agilerl.utils.llm_utils import ReasoningGym, masked_whiten
 from benchmarking.tiny_model import (
     build_tiny_actor_network,
-    build_tiny_critic_network,
     TinyDigitTokenizer,
 )
 
@@ -37,7 +34,6 @@ MAX_OUTPUT_TOKENS = 1
 EVAL_BATCHES = 8
 TARGET_TOKEN_IDS = (1, 2, 3)
 TEST_POLICY_ONLY = False
-USE_SEPARATE_NETWORKS = True
 
 
 def target_from_question(question: str) -> str:
@@ -208,76 +204,8 @@ def enable_reinforce_style_advantages(agent: LLMPPO) -> None:
     )
 
 
-def setup_separate_critic(
-    agent: LLMPPO,
-    lora_config: LoraConfig,
-    lr: float,
-) -> None:
-    """Monkey-patch *agent* to use a separate base-model copy for the critic.
-
-    After this call the agent's ``_get_values`` forwards through an independent
-    critic network (its own frozen base model + LoRA + value head).  The
-    existing optimizer's critic param group is swapped to point at the separate
-    critic's trainable parameters, so the normal single-backward-pass training
-    loop works unchanged.
-    """
-    critic_model = build_tiny_critic_network()
-    critic_model = get_peft_model(critic_model, lora_config)
-    critic_model.to(agent.device)
-
-    agent._separate_critic = critic_model
-
-    opt = agent.optimizer.optimizer
-
-    for p in opt.param_groups[1]["params"]:
-        p.requires_grad = False
-
-    critic_params = [p for p in critic_model.parameters() if p.requires_grad]
-    opt.param_groups[1]["params"] = critic_params
-
-    actor_count = sum(p.numel() for p in opt.param_groups[0]["params"] if p.requires_grad)
-    critic_count = sum(p.numel() for p in critic_params)
-    print(
-        f"[separate-networks] actor params: {actor_count:,} | "
-        f"critic params: {critic_count:,}"
-    )
-
-    def _get_values_separate(
-        self,
-        ids: torch.Tensor,
-        batch_size: int,
-        eval_mode: bool = False,
-        attention_mask: torch.Tensor | None = None,
-    ):
-        cm = self._separate_critic
-        cm.train(mode=not eval_mode)
-        num_samples = ids.shape[0]
-        if attention_mask is None:
-            attention_mask = ids != self.pad_token_id
-        if self.calc_position_embeddings:
-            position_ids = attention_mask.long().cumsum(dim=-1) - 1
-            position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
-        values = []
-        for batch in range(0, num_samples, batch_size):
-            end_idx = min((batch + batch_size), num_samples)
-            batch_ids = ids[batch:end_idx, :]
-            batch_attn = attention_mask[batch:end_idx, :]
-            kwargs = {
-                "input_ids": batch_ids,
-                "attention_mask": batch_attn,
-                "use_cache": False,
-            }
-            if self.calc_position_embeddings:
-                kwargs["position_ids"] = position_ids[batch:end_idx, :]
-            *_, value = cm.forward(**kwargs)
-            values.append(value[:, :-1])
-        return torch.cat(values, dim=0)
-
-    agent._get_values = MethodType(_get_values_separate, agent)
-
-
 def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
-    accelerator = None # Accelerator()
+    accelerator = Accelerator()
     torch.manual_seed(seed)
     actor_network = build_tiny_actor_network()
     tokenizer = TinyDigitTokenizer()
@@ -333,22 +261,6 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
         seed=seed,
         gradient_checkpointing=True,
     )
-    llm_ppo._debug_logging = True
-
-    lora_cfg = LoraConfig(
-        r=8,
-        lora_alpha=32,
-        target_modules=["c_attn", "c_proj", "c_fc"],
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-    if USE_SEPARATE_NETWORKS:
-        setup_separate_critic(
-            llm_ppo,
-            lora_config=lora_cfg,
-            lr=init_hp["LR"],
-        )
-        print(f"[seed={seed}] mode: USE_SEPARATE_NETWORKS=True")
 
     if TEST_POLICY_ONLY:
         enable_reinforce_style_advantages(llm_ppo)
@@ -451,7 +363,7 @@ if __name__ == "__main__":
     # Stage-2 smoke-test overrides.
     init_hp["BATCH_SIZE"] = 32
     init_hp["UPDATE_EPOCHS"] = 4
-    init_hp["LR"] = 1e-5
+    init_hp["LR"] = 1e-3
     init_hp["BETA"] = 0.05
     init_hp["TEMPERATURE"] = 0.4
     init_hp["VF_COEF"] = 0.1

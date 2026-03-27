@@ -105,6 +105,11 @@ if HAS_LLM_DEPENDENCIES:
     from safetensors.torch import load_file
     from vllm import LLM, SamplingParams
 
+    from agilerl.algorithms.core.fused_lora import (
+        clear_fused_adapter_routing,
+        patch_lora_for_fused_forward,
+        set_fused_adapter_routing,
+    )
     from agilerl.utils.llm_utils import (
         create_model_from_name_or_path,
         gather_if_zero3,
@@ -2641,6 +2646,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
 
         self.use_adapter("actor")
+        patch_lora_for_fused_forward(self.actor)
 
         for name, param in self.actor.named_parameters():
             if "actor" in name and "lora" in name:
@@ -2670,6 +2676,172 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if self.cosine_lr_schedule_config is not None
             else None
         )
+
+    def _fused_model_pass(
+        self,
+        fused_ids: torch.Tensor,
+        fused_mask: torch.Tensor,
+        routing: list[str],
+        batch_size: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the model on a fused batch with per-sample adapter routing.
+
+        When *batch_size* is ``None`` the full batch is processed in a single
+        ``model.forward`` call — required when gradients are active so that
+        gradient-checkpoint recomputation sees the same routing.  When set,
+        the batch is iterated in micro-batches (safe under ``no_grad``).
+
+        :return: ``(log_probs, values)`` each of shape ``(N*B, seq_len - 1)``.
+        """
+        unwrapped = self._get_unwrapped_actor()
+        total = fused_ids.shape[0]
+
+        position_ids = None
+        if self.calc_position_embeddings:
+            position_ids = fused_mask.long().cumsum(dim=-1) - 1
+            position_ids.masked_fill_(mask=(fused_mask == 0), value=1)
+
+        chunks = (
+            [(0, total)]
+            if batch_size is None
+            else [(s, min(s + batch_size, total)) for s in range(0, total, batch_size)]
+        )
+
+        all_logprobs: list[torch.Tensor] = []
+        all_values: list[torch.Tensor] = []
+        for start, end in chunks:
+            set_fused_adapter_routing(unwrapped, routing[start:end])
+            model_kwargs: dict = {
+                "input_ids": fused_ids[start:end],
+                "attention_mask": fused_mask[start:end],
+                "use_cache": False,
+            }
+            if position_ids is not None:
+                model_kwargs["position_ids"] = position_ids[start:end]
+
+            output = self.actor.forward(**model_kwargs)
+            logits = output[0] if isinstance(output, tuple) else output.logits
+            logits = logits / self.temperature
+            value = output[-1] if isinstance(output, tuple) else output[2]
+
+            all_logprobs.append(
+                LLMAlgorithm._memory_efficient_logits(
+                    logits[:, :-1],
+                    fused_ids[start:end, 1:],
+                )
+            )
+            all_values.append(value[:, :-1])
+
+        if len(chunks) == 1:
+            return all_logprobs[0], all_values[0]
+        return torch.cat(all_logprobs, dim=0), torch.cat(all_values, dim=0)
+
+    def _fused_forward(
+        self,
+        ids: torch.Tensor,
+        batch_size: int,
+        attention_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Single forward pass producing both actor log-probs and critic values.
+
+        Concatenates the input twice (actor slice then critic slice) and uses
+        PEFT's ``_mixed_batch_forward`` to route each slice through its own
+        LoRA adapter.  The base model processes the doubled batch once,
+        eliminating the second forward pass and all adapter switching.
+
+        The full doubled batch is always processed in one ``model.forward``
+        call to preserve gradient-checkpoint correctness.
+
+        .. note::
+
+           The routing is **not** cleared here — it must remain active until
+           after ``backward()`` completes (for gradient checkpoint
+           recomputation).  Callers must call
+           ``clear_fused_adapter_routing`` after the backward pass.
+
+        :param ids: Token IDs ``(B, seq_len)``.
+        :param batch_size: Unused (kept for API symmetry).
+        :param attention_mask: Optional attention mask matching *ids*.
+        :return: ``(actor_log_probs, critic_values)`` each ``(B, seq_len-1)``.
+        """
+        B = ids.shape[0]
+        if attention_mask is None:
+            attention_mask = ids != self.pad_token_id
+        fused_ids = ids.repeat(2, 1)
+        fused_mask = attention_mask.repeat(2, 1)
+        routing = ["actor"] * B + ["critic"] * B
+
+        self._restore_adapter_trainability(["actor", "critic"])
+        self.actor.train()
+
+        log_probs, values = self._fused_model_pass(
+            fused_ids, fused_mask, routing,
+        )
+        return log_probs[:B], values[B:]
+
+    def _fused_forward_no_grad(
+        self,
+        ids: torch.Tensor,
+        batch_size: int,
+        attention_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute reference log-probs, actor log-probs, and critic values in
+        one forward pass (under ``torch.no_grad``).
+
+        When ``use_separate_reference_adapter`` is ``True``, the batch is
+        tripled (reference / actor / critic).  When ``False``, reference
+        log-probs are computed separately (adapter layers disabled) and the
+        actor/critic portion is double-fused.
+
+        Unlike ``_fused_forward`` this method **can** micro-batch because no
+        gradient checkpoint recomputation is involved.
+
+        :param ids: Token IDs ``(B, seq_len)``.
+        :param batch_size: Micro-batch size for memory-bounded iteration.
+        :param attention_mask: Optional attention mask matching *ids*.
+        :return: ``(reference_log_probs, actor_log_probs, critic_values)``
+            each of shape ``(B, seq_len - 1)``.
+        """
+        B = ids.shape[0]
+        if attention_mask is None:
+            attention_mask = ids != self.pad_token_id
+
+        self.actor.eval()
+
+        with torch.no_grad():
+            if self.use_separate_reference_adapter:
+                adapters = ["reference", "actor", "critic"]
+            else:
+                adapters = ["actor", "critic"]
+
+            N = len(adapters)
+            fused_ids = ids.repeat(N, 1)
+            fused_mask = attention_mask.repeat(N, 1)
+            routing: list[str] = []
+            for adapter in adapters:
+                routing.extend([adapter] * B)
+
+            log_probs, values = self._fused_model_pass(
+                fused_ids, fused_mask, routing, batch_size=batch_size,
+            )
+            clear_fused_adapter_routing(self._get_unwrapped_actor())
+
+            if self.use_separate_reference_adapter:
+                ref_logprobs = log_probs[:B]
+                actor_logprobs = log_probs[B : 2 * B]
+                critic_values = values[2 * B :]
+            else:
+                ref_logprobs = self._get_logprobs(
+                    ids,
+                    batch_size=batch_size,
+                    use_reference=True,
+                    eval_mode=True,
+                    attention_mask=attention_mask,
+                )
+                actor_logprobs = log_probs[:B]
+                critic_values = values[B:]
+
+        return ref_logprobs, actor_logprobs, critic_values
 
     def _get_logprobs(
         self,
@@ -2732,146 +2904,36 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 log_probs.append(log_prob)
         return torch.cat(log_probs, dim=0)
 
-    def _backward_pass(
-        self,
-        loss: torch.Tensor,
-        *,
-        actor_loss: torch.Tensor | None = None,
-        critic_loss: torch.Tensor | None = None,
-        debug_this_step: bool = False,
-    ) -> None:
+    def _backward_pass(self, loss: torch.Tensor) -> None:
         """Perform a backward pass and optimizer step.
 
-        When ``actor_loss`` and ``critic_loss`` are provided and gradient
-        checkpointing is enabled (without DeepSpeed), backward passes are run
-        separately so that checkpoint recomputation uses the correct adapter.
-
-        :param loss: Combined loss (used directly for the Accelerator path and
-            the non-checkpointing non-Accelerator path).
-        :param actor_loss: Actor (policy-gradient) loss for separate backward.
-        :param critic_loss: Critic (value-function) loss for separate backward.
-        :param debug_this_step: Whether to log gradient/update diagnostics.
+        :param loss: Combined loss.
         """
         if self.accelerator is not None:
-            has_separate_losses = actor_loss is not None and critic_loss is not None
             uses_deepspeed = self.accelerator.state.deepspeed_plugin is not None
 
-            if self.gradient_checkpointing and has_separate_losses and not uses_deepspeed:
-                with self.select_adapter("actor"):
-                    self.accelerator.backward(actor_loss)
-                with self.select_adapter("critic"):
-                    self.accelerator.backward(critic_loss)
-            else:
-                self.accelerator.backward(loss)
-
-            param_snapshots = None
-            if debug_this_step:
-                param_snapshots = self._debug_grad_norms("pre_clip")
+            self.accelerator.backward(loss)
 
             if not uses_deepspeed:
                 for group in self.optimizer.optimizer.param_groups:
                     clip_grad_norm_(group["params"], self.max_grad_norm)
-                if debug_this_step:
-                    self._debug_grad_norms("post_clip")
 
             self.optimizer.step()
-
-            if debug_this_step and param_snapshots is not None:
-                self._debug_param_updates(param_snapshots)
-
             self.optimizer.zero_grad()
             if self.lr_scheduler is not None:
                 self.lr_scheduler.step()
                 self.lr = self.lr_scheduler.get_last_lr()[0]
         else:
-            has_separate_losses = actor_loss is not None and critic_loss is not None
-            if self.gradient_checkpointing and has_separate_losses:
-                with self.select_adapter("actor"):
-                    actor_loss.backward()
-                with self.select_adapter("critic"):
-                    critic_loss.backward()
-            else:
-                loss.backward()
-
-            param_snapshots = None
-            if debug_this_step:
-                param_snapshots = self._debug_grad_norms("pre_clip")
+            loss.backward()
 
             for group in self.optimizer.optimizer.param_groups:
                 clip_grad_norm_(group["params"], self.max_grad_norm)
 
-            if debug_this_step:
-                self._debug_grad_norms("post_clip")
-
             self.optimizer.step()
-
-            if debug_this_step and param_snapshots is not None:
-                self._debug_param_updates(param_snapshots)
-
             self.optimizer.zero_grad()
             if self.lr_scheduler is not None:
                 self.lr_scheduler.step()
                 self.lr = self.lr_scheduler.get_last_lr()[0]
-
-    def _debug_get_param_groups(self) -> list[dict]:
-        """Get optimizer param_groups, handling DeepSpeed wrappers."""
-        opt = self.optimizer.optimizer
-        if hasattr(opt, "param_groups"):
-            return opt.param_groups
-        if hasattr(opt, "optimizer") and hasattr(opt.optimizer, "param_groups"):
-            return opt.optimizer.param_groups
-        return []
-
-    def _debug_grad_norms(self, label: str) -> dict[str, dict[int, torch.Tensor]] | None:
-        """Log per-group gradient norms. Returns param snapshots when label=='pre_clip'."""
-        groups = self._debug_get_param_groups()
-        if not groups:
-            return None
-        group_names = ["actor", "critic"] if len(groups) >= 2 else [f"group{i}" for i in range(len(groups))]
-        parts = [f"  [{label}]"]
-        snapshots: dict[str, dict[int, torch.Tensor]] = {}
-        for gname, group in zip(group_names, groups, strict=False):
-            grads = [p.grad for p in group["params"] if p.grad is not None]
-            no_grad = sum(1 for p in group["params"] if p.grad is None)
-            req_grad_false = sum(1 for p in group["params"] if not p.requires_grad)
-            if grads:
-                grad_norm = torch.cat([g.flatten() for g in grads]).norm().item()
-            else:
-                grad_norm = 0.0
-            parts.append(
-                f"{gname}: gnorm={grad_norm:.4f} "
-                f"w_grad={len(grads)} "
-                f"no_grad={no_grad} "
-                f"rg_false={req_grad_false}"
-            )
-            if label == "pre_clip":
-                snapshots[gname] = {
-                    id(p): p.data.clone() for p in group["params"] if p.requires_grad
-                }
-        print(" | ".join(parts))
-        return snapshots if label == "pre_clip" else None
-
-    def _debug_param_updates(self, snapshots: dict[str, dict[int, torch.Tensor]]) -> None:
-        """Log parameter update magnitudes after optimizer step."""
-        groups = self._debug_get_param_groups()
-        if not groups:
-            return
-        group_names = ["actor", "critic"] if len(groups) >= 2 else [f"group{i}" for i in range(len(groups))]
-        parts = ["  [update]"]
-        for gname, group in zip(group_names, groups, strict=False):
-            if gname not in snapshots:
-                continue
-            deltas = [
-                (p.data - snapshots[gname][id(p)]).flatten()
-                for p in group["params"]
-                if id(p) in snapshots[gname]
-            ]
-            if deltas:
-                update_norm = torch.cat(deltas).norm().item()
-            else:
-                update_norm = 0.0
-            parts.append(f"{gname}: update={update_norm:.6f}")
-        print(" | ".join(parts))
 
     def use_adapter(self, adapter_name: str) -> None:
         """Switch the active PEFT adapter, handling all side-effects.
