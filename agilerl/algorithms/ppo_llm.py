@@ -352,8 +352,6 @@ class PPO(LLMAlgorithm):
             if "lora" in name and ("actor" in name or "critic" in name):
                 params[name] = param.clone().detach()
 
-        accum_steps = max(1, num_samples // batch_size)
-
         debug = getattr(self, "_debug_logging", False)
         _debug_step = 0
         _debug_last_epoch = max(0, self.update_epochs - 1)
@@ -364,7 +362,7 @@ class PPO(LLMAlgorithm):
 
         for _epoch_idx in range(self.update_epochs):
             self.rng.shuffle(batch_idxs)
-            for micro_idx, start in enumerate(range(0, num_samples, batch_size)):
+            for start in range(0, num_samples, batch_size):
                 minibatch_idxs = batch_idxs[
                     start : min((start + batch_size), num_samples)
                 ]
@@ -442,8 +440,7 @@ class PPO(LLMAlgorithm):
 
                 total_loss = pg_loss + vf_loss
 
-                is_step_boundary = (micro_idx + 1) % accum_steps == 0
-                should_log = debug and _epoch_idx == _debug_last_epoch and is_step_boundary
+                should_log = debug and _epoch_idx == _debug_last_epoch
                 if should_log:
                     with torch.no_grad():
                         ratio_vals = policy_ratio[batch_action_mask.bool()]
@@ -467,8 +464,6 @@ class PPO(LLMAlgorithm):
                     total_loss,
                     actor_loss=pg_loss,
                     critic_loss=vf_loss,
-                    accum_steps=accum_steps,
-                    accum_idx=micro_idx,
                     debug_this_step=should_log,
                 )
 

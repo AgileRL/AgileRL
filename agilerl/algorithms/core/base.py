@@ -2738,22 +2738,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         *,
         actor_loss: torch.Tensor | None = None,
         critic_loss: torch.Tensor | None = None,
-        accum_steps: int = 1,
-        accum_idx: int = 0,
         debug_this_step: bool = False,
     ) -> None:
-        """Perform a backward pass with optional gradient accumulation.
+        """Perform a backward pass and optimizer step.
 
         When ``actor_loss`` and ``critic_loss`` are provided and gradient
-        checkpointing is enabled (without Accelerator), backward passes are run
+        checkpointing is enabled (without DeepSpeed), backward passes are run
         separately so that checkpoint recomputation uses the correct adapter.
 
         :param loss: Combined loss (used directly for the Accelerator path and
             the non-checkpointing non-Accelerator path).
         :param actor_loss: Actor (policy-gradient) loss for separate backward.
         :param critic_loss: Critic (value-function) loss for separate backward.
-        :param accum_steps: Number of micro-batches per optimizer step.
-        :param accum_idx: Current micro-batch index within the accumulation window.
         :param debug_this_step: Whether to log gradient/update diagnostics.
         """
         if self.accelerator is not None:
@@ -2791,32 +2787,31 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             has_separate_losses = actor_loss is not None and critic_loss is not None
             if self.gradient_checkpointing and has_separate_losses:
                 with self.select_adapter("actor"):
-                    (actor_loss / accum_steps).backward()
+                    actor_loss.backward()
                 with self.select_adapter("critic"):
-                    (critic_loss / accum_steps).backward()
+                    critic_loss.backward()
             else:
-                (loss / accum_steps).backward()
+                loss.backward()
 
-            if (accum_idx + 1) % accum_steps == 0:
-                param_snapshots = None
-                if debug_this_step:
-                    param_snapshots = self._debug_grad_norms("pre_clip")
+            param_snapshots = None
+            if debug_this_step:
+                param_snapshots = self._debug_grad_norms("pre_clip")
 
-                for group in self.optimizer.optimizer.param_groups:
-                    clip_grad_norm_(group["params"], self.max_grad_norm)
+            for group in self.optimizer.optimizer.param_groups:
+                clip_grad_norm_(group["params"], self.max_grad_norm)
 
-                if debug_this_step:
-                    self._debug_grad_norms("post_clip")
+            if debug_this_step:
+                self._debug_grad_norms("post_clip")
 
-                self.optimizer.step()
+            self.optimizer.step()
 
-                if debug_this_step and param_snapshots is not None:
-                    self._debug_param_updates(param_snapshots)
+            if debug_this_step and param_snapshots is not None:
+                self._debug_param_updates(param_snapshots)
 
-                self.optimizer.zero_grad()
-                if self.lr_scheduler is not None:
-                    self.lr_scheduler.step()
-                    self.lr = self.lr_scheduler.get_last_lr()[0]
+            self.optimizer.zero_grad()
+            if self.lr_scheduler is not None:
+                self.lr_scheduler.step()
+                self.lr = self.lr_scheduler.get_last_lr()[0]
 
     def _debug_get_param_groups(self) -> list[dict]:
         """Get optimizer param_groups, handling DeepSpeed wrappers."""
