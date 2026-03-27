@@ -354,7 +354,15 @@ class PPO(LLMAlgorithm):
 
         accum_steps = max(1, num_samples // batch_size)
 
-        for _ in range(self.update_epochs):
+        debug = getattr(self, "_debug_logging", False)
+        _debug_step = 0
+        _debug_last_epoch = max(0, self.update_epochs - 1)
+
+        if debug and not getattr(self, "_debug_init_done", False):
+            self._debug_init_done = True
+            self._debug_dump_param_groups()
+
+        for _epoch_idx in range(self.update_epochs):
             self.rng.shuffle(batch_idxs)
             for micro_idx, start in enumerate(range(0, num_samples, batch_size)):
                 minibatch_idxs = batch_idxs[
@@ -434,13 +442,38 @@ class PPO(LLMAlgorithm):
 
                 total_loss = pg_loss + vf_loss
 
+                is_step_boundary = (micro_idx + 1) % accum_steps == 0
+                should_log = debug and _epoch_idx == _debug_last_epoch and is_step_boundary
+                if should_log:
+                    with torch.no_grad():
+                        ratio_vals = policy_ratio[batch_action_mask.bool()]
+                        clip_frac = (
+                            (ratio_vals - 1.0).abs() > self.clip_coef
+                        ).float().mean().item()
+                        adv_vals = batch_advantages[batch_action_mask.bool()]
+                        print(
+                            f"[step {_debug_step} epoch {_epoch_idx}] "
+                            f"pg={pg_loss.item():.4f} "
+                            f"vf={vf_loss.item():.4f} "
+                            f"total={total_loss.item():.4f} | "
+                            f"adv: m={adv_vals.mean().item():.3f} "
+                            f"s={adv_vals.std().item():.3f} | "
+                            f"ratio: m={ratio_vals.mean().item():.4f} "
+                            f"s={ratio_vals.std().item():.4f} "
+                            f"clip={clip_frac:.3f}"
+                        )
+
                 self._backward_pass(
                     total_loss,
                     actor_loss=pg_loss,
                     critic_loss=vf_loss,
                     accum_steps=accum_steps,
                     accum_idx=micro_idx,
+                    debug_this_step=should_log,
                 )
+
+                if should_log:
+                    _debug_step += 1
 
                 mean_kl += masked_mean(kl, batch_action_mask).item()
                 mean_entropy += masked_entropy.mean().item()
@@ -450,11 +483,10 @@ class PPO(LLMAlgorithm):
                 mean_loss += total_loss.item()
                 updates += 1
 
-        for name, param in self.actor.named_parameters():
-            # Check loras have updated
-            if "lora" in name and ("actor" in name or "critic" in name):
-                if torch.equal(param.data, params[name].data):
-                    print(f"Lora {name} has not updated {time.time()}")
+        # for name, param in self.actor.named_parameters():
+        #     if "lora" in name and ("actor" in name or "critic" in name):
+        #         if torch.equal(param.data, params[name].data):
+        #             print(f"Lora {name} has not updated {time.time()}")
 
         return (
             mean_loss / max(updates, 1),
@@ -464,6 +496,34 @@ class PPO(LLMAlgorithm):
             mean_entropy / max(updates, 1),
             # reporting_reward / max(updates, 1),
         )
+
+    def _debug_dump_param_groups(self) -> None:
+        """One-time dump of optimizer param group structure."""
+        opt = self.optimizer.optimizer
+        groups = opt.param_groups
+        group_names = ["actor", "critic"] if len(groups) >= 2 else [f"group{i}" for i in range(len(groups))]
+        print("=" * 60)
+        print("[DEBUG] Optimizer param groups")
+        all_ids: set[int] = set()
+        duplicates = 0
+        for name, group in zip(group_names, groups, strict=False):
+            n_params = len(group["params"])
+            n_trainable = sum(1 for p in group["params"] if p.requires_grad)
+            total_elems = sum(p.numel() for p in group["params"] if p.requires_grad)
+            for p in group["params"]:
+                pid = id(p)
+                if pid in all_ids:
+                    duplicates += 1
+                all_ids.add(pid)
+            print(
+                f"  {name}: {n_params} params ({n_trainable} trainable, "
+                f"{total_elems:,} elements), lr={group['lr']}"
+            )
+        if duplicates:
+            print(f"  WARNING: {duplicates} params shared across groups!")
+        else:
+            print("  No params shared across groups (good)")
+        print("=" * 60)
 
     def test(
         self,

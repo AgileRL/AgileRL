@@ -2740,6 +2740,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         critic_loss: torch.Tensor | None = None,
         accum_steps: int = 1,
         accum_idx: int = 0,
+        debug_this_step: bool = False,
     ) -> None:
         """Perform a backward pass with optional gradient accumulation.
 
@@ -2753,11 +2754,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param critic_loss: Critic (value-function) loss for separate backward.
         :param accum_steps: Number of micro-batches per optimizer step.
         :param accum_idx: Current micro-batch index within the accumulation window.
+        :param debug_this_step: Whether to log gradient/update diagnostics.
         """
         if self.accelerator is not None:
             has_separate_losses = actor_loss is not None and critic_loss is not None
             uses_deepspeed = self.accelerator.state.deepspeed_plugin is not None
-            # print({'gradient_checkpointing': self.gradient_checkpointing, 'has_separate_losses': has_separate_losses, 'uses_deepspeed': uses_deepspeed})
+
             if self.gradient_checkpointing and has_separate_losses and not uses_deepspeed:
                 with self.select_adapter("actor"):
                     self.accelerator.backward(actor_loss)
@@ -2765,7 +2767,22 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     self.accelerator.backward(critic_loss)
             else:
                 self.accelerator.backward(loss)
+
+            param_snapshots = None
+            if debug_this_step:
+                param_snapshots = self._debug_grad_norms("pre_clip")
+
+            if not uses_deepspeed:
+                for group in self.optimizer.optimizer.param_groups:
+                    clip_grad_norm_(group["params"], self.max_grad_norm)
+                if debug_this_step:
+                    self._debug_grad_norms("post_clip")
+
             self.optimizer.step()
+
+            if debug_this_step and param_snapshots is not None:
+                self._debug_param_updates(param_snapshots)
+
             self.optimizer.zero_grad()
             if self.lr_scheduler is not None:
                 self.lr_scheduler.step()
@@ -2781,12 +2798,85 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 (loss / accum_steps).backward()
 
             if (accum_idx + 1) % accum_steps == 0:
-                clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                param_snapshots = None
+                if debug_this_step:
+                    param_snapshots = self._debug_grad_norms("pre_clip")
+
+                for group in self.optimizer.optimizer.param_groups:
+                    clip_grad_norm_(group["params"], self.max_grad_norm)
+
+                if debug_this_step:
+                    self._debug_grad_norms("post_clip")
+
                 self.optimizer.step()
+
+                if debug_this_step and param_snapshots is not None:
+                    self._debug_param_updates(param_snapshots)
+
                 self.optimizer.zero_grad()
                 if self.lr_scheduler is not None:
                     self.lr_scheduler.step()
                     self.lr = self.lr_scheduler.get_last_lr()[0]
+
+    def _debug_get_param_groups(self) -> list[dict]:
+        """Get optimizer param_groups, handling DeepSpeed wrappers."""
+        opt = self.optimizer.optimizer
+        if hasattr(opt, "param_groups"):
+            return opt.param_groups
+        if hasattr(opt, "optimizer") and hasattr(opt.optimizer, "param_groups"):
+            return opt.optimizer.param_groups
+        return []
+
+    def _debug_grad_norms(self, label: str) -> dict[str, dict[int, torch.Tensor]] | None:
+        """Log per-group gradient norms. Returns param snapshots when label=='pre_clip'."""
+        groups = self._debug_get_param_groups()
+        if not groups:
+            return None
+        group_names = ["actor", "critic"] if len(groups) >= 2 else [f"group{i}" for i in range(len(groups))]
+        parts = [f"  [{label}]"]
+        snapshots: dict[str, dict[int, torch.Tensor]] = {}
+        for gname, group in zip(group_names, groups, strict=False):
+            grads = [p.grad for p in group["params"] if p.grad is not None]
+            no_grad = sum(1 for p in group["params"] if p.grad is None)
+            req_grad_false = sum(1 for p in group["params"] if not p.requires_grad)
+            if grads:
+                grad_norm = torch.cat([g.flatten() for g in grads]).norm().item()
+            else:
+                grad_norm = 0.0
+            parts.append(
+                f"{gname}: gnorm={grad_norm:.4f} "
+                f"w_grad={len(grads)} "
+                f"no_grad={no_grad} "
+                f"rg_false={req_grad_false}"
+            )
+            if label == "pre_clip":
+                snapshots[gname] = {
+                    id(p): p.data.clone() for p in group["params"] if p.requires_grad
+                }
+        print(" | ".join(parts))
+        return snapshots if label == "pre_clip" else None
+
+    def _debug_param_updates(self, snapshots: dict[str, dict[int, torch.Tensor]]) -> None:
+        """Log parameter update magnitudes after optimizer step."""
+        groups = self._debug_get_param_groups()
+        if not groups:
+            return
+        group_names = ["actor", "critic"] if len(groups) >= 2 else [f"group{i}" for i in range(len(groups))]
+        parts = ["  [update]"]
+        for gname, group in zip(group_names, groups, strict=False):
+            if gname not in snapshots:
+                continue
+            deltas = [
+                (p.data - snapshots[gname][id(p)]).flatten()
+                for p in group["params"]
+                if id(p) in snapshots[gname]
+            ]
+            if deltas:
+                update_norm = torch.cat(deltas).norm().item()
+            else:
+                update_norm = 0.0
+            parts.append(f"{gname}: update={update_norm:.6f}")
+        print(" | ".join(parts))
 
     def use_adapter(self, adapter_name: str) -> None:
         """Switch the active PEFT adapter, handling all side-effects.
