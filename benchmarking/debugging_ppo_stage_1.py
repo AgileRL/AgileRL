@@ -15,12 +15,11 @@ import torch
 import yaml
 from datasets import Dataset
 from peft import LoraConfig
-from accelerate import Accelerator
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.training import train_llm
 from agilerl.training.train_llm import finetune_llm_reasoning
 from agilerl.utils.algo_utils import stack_and_pad_experiences
-from agilerl.utils.llm_utils import ReasoningGym, masked_whiten
+from agilerl.utils.llm_utils import ReasoningGym, create_llm_accelerator, masked_whiten
 from benchmarking.tiny_model import build_tiny_actor_network, build_tiny_critic_network, TinyDigitTokenizer  # build_tiny_critic_network used only when USE_SEPARATE_CRITIC=True
 
 MAX_CONTEXT_LENGTH = 128
@@ -159,7 +158,7 @@ def enable_reinforce_style_advantages(agent: LLMPPO) -> None:
 
 
 def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
-    accelerator = Accelerator()
+    accelerator = create_llm_accelerator()
     torch.manual_seed(seed)
     actor_network = build_tiny_actor_network()
     critic_network = None

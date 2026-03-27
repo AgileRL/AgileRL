@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import copy
+import logging
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator
@@ -13,6 +16,8 @@ from torch.utils.data import DataLoader
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.typing import PreferencePrompts, ReasoningPrompts
+
+logger = logging.getLogger(__name__)
 
 if HAS_LLM_DEPENDENCIES:
     import deepspeed
@@ -749,3 +754,137 @@ def masked_whiten(
     if not shift_mean:
         whitened += mean
     return whitened
+
+
+def create_llm_accelerator(
+    *,
+    model_size_gb: float | None = None,
+    micro_batch_size: int = 8,
+    gradient_accumulation_steps: int = 1,
+    gradient_clipping: float = 1.0,
+    mixed_precision: str = "bf16",
+    offload_optimizer: bool = False,
+    zero_stage: int | None = None,
+) -> Accelerator | None:
+    """Create an :class:`Accelerator` with sensible DeepSpeed defaults.
+
+    Detects the number of available GPUs and picks an appropriate
+    configuration automatically:
+
+    * **0 GPUs** — returns ``None`` (the ``accelerator=None`` code-path
+      in :class:`~agilerl.algorithms.core.base.LLMAlgorithm` handles
+      CPU-only training).
+    * **1 GPU** — returns a plain ``Accelerator`` with no DeepSpeed
+      (avoids ZeRO partitioning overhead on a single device).
+    * **2+ GPUs** — returns an ``Accelerator`` with a ``DeepSpeedPlugin``
+      whose ZeRO stage is chosen based on ``model_size_gb`` and the
+      per-GPU memory available.
+
+    The ``zero_stage`` argument overrides automatic selection when the
+    caller knows exactly what they want.
+
+    :param model_size_gb: Approximate model size in GB (parameters in
+        fp16/bf16).  Used to pick the ZeRO stage on multi-GPU setups.
+        When ``None``, defaults to ZeRO-1.
+    :param micro_batch_size: Per-GPU micro-batch size written into the
+        DeepSpeed config.
+    :param gradient_accumulation_steps: Gradient accumulation steps
+        written into the DeepSpeed config.
+    :param gradient_clipping: Maximum gradient norm.
+    :param mixed_precision: Mixed-precision mode for Accelerator
+        (``'bf16'``, ``'fp16'``, or ``'no'``).
+    :param offload_optimizer: If ``True``, offload optimizer states to
+        CPU in the DeepSpeed config.
+    :param zero_stage: Explicit ZeRO stage override.  When set, the
+        automatic GPU-count / model-size heuristic is skipped.
+    :return: A configured ``Accelerator``, or ``None`` when no GPU is
+        available.
+
+    Example::
+
+        from agilerl.utils.llm_utils import create_llm_accelerator
+
+        # Auto-detect: 1 GPU → no DeepSpeed, 2+ → ZeRO-1
+        accelerator = create_llm_accelerator()
+
+        # Hint for a large model on multi-GPU
+        accelerator = create_llm_accelerator(model_size_gb=14.0)
+
+        # Explicit override
+        accelerator = create_llm_accelerator(zero_stage=2, offload_optimizer=True)
+    """
+    from accelerate.utils import DeepSpeedPlugin
+
+    num_gpus = torch.cuda.device_count()
+
+    if num_gpus == 0:
+        logger.info("No GPUs detected — returning None (CPU-only path).")
+        return None
+
+    if num_gpus == 1 and zero_stage is None:
+        logger.info(
+            "Single GPU detected — using plain Accelerator (no DeepSpeed)."
+        )
+        return Accelerator(mixed_precision=mixed_precision)
+
+    stage = zero_stage if zero_stage is not None else _auto_zero_stage(
+        num_gpus, model_size_gb
+    )
+    logger.info(
+        "Creating Accelerator with DeepSpeed ZeRO-%d for %d GPU(s).", stage, num_gpus
+    )
+
+    ds_config: dict[str, Any] = {
+        "train_micro_batch_size_per_gpu": micro_batch_size,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "gradient_clipping": gradient_clipping,
+        "bf16": {"enabled": mixed_precision == "bf16"},
+        "fp16": {"enabled": mixed_precision == "fp16"},
+        "zero_optimization": {
+            "stage": stage,
+            "overlap_comm": stage >= 2,
+            "contiguous_gradients": True,
+            "reduce_bucket_size": int(2e8),
+        },
+    }
+
+    if offload_optimizer:
+        ds_config["zero_optimization"]["offload_optimizer"] = {"device": "cpu"}
+
+    if stage >= 3:
+        ds_config["zero_optimization"]["stage3_gather_16bit_weights_on_model_save"] = (
+            True
+        )
+
+    plugin = DeepSpeedPlugin(hf_ds_config=ds_config)
+    return Accelerator(deepspeed_plugin=plugin, mixed_precision=mixed_precision)
+
+
+def _auto_zero_stage(num_gpus: int, model_size_gb: float | None) -> int:
+    """Pick a ZeRO stage based on GPU count and model size.
+
+    Heuristic:
+
+    * If ``model_size_gb`` is unknown, default to ZeRO-1 (lightest
+      multi-GPU overhead, partitions only optimizer states).
+    * If the model fits comfortably in per-GPU memory (< 60% of VRAM),
+      use ZeRO-1.
+    * If the model is tight but fits (60-90% of VRAM), use ZeRO-2
+      (also partitions gradients).
+    * If the model exceeds per-GPU memory, use ZeRO-3 (also partitions
+      parameters).
+    """
+    if model_size_gb is None:
+        return 1
+
+    try:
+        per_gpu_gb = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+    except Exception:
+        return 1
+
+    ratio = model_size_gb / per_gpu_gb
+    if ratio < 0.6:
+        return 1
+    if ratio < 0.9:
+        return 2
+    return 3

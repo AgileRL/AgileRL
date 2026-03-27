@@ -21,7 +21,7 @@ from agilerl.algorithms import LLMPPO
 from agilerl.training import train_llm
 from agilerl.training.train_llm import finetune_llm_reasoning
 from agilerl.utils.algo_utils import stack_and_pad_experiences
-from agilerl.utils.llm_utils import ReasoningGym, masked_whiten
+from agilerl.utils.llm_utils import ReasoningGym, masked_whiten, create_llm_accelerator
 from benchmarking.tiny_model import (
     build_tiny_actor_network,
     TinyDigitTokenizer,
@@ -205,7 +205,7 @@ def enable_reinforce_style_advantages(agent: LLMPPO) -> None:
 
 
 def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
-    accelerator = Accelerator()
+    accelerator = create_llm_accelerator()
     torch.manual_seed(seed)
     actor_network = build_tiny_actor_network()
     tokenizer = TinyDigitTokenizer()
@@ -363,7 +363,7 @@ if __name__ == "__main__":
     # Stage-2 smoke-test overrides.
     init_hp["BATCH_SIZE"] = 32
     init_hp["UPDATE_EPOCHS"] = 4
-    init_hp["LR"] = 1e-3
+    init_hp["LR"] = 1e-4
     init_hp["BETA"] = 0.05
     init_hp["TEMPERATURE"] = 0.4
     init_hp["VF_COEF"] = 0.1
