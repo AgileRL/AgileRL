@@ -216,6 +216,7 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
         calc_position_embeddings=False,
         seed=seed,
         gradient_checkpointing=True,
+        torch_compiler="default",
     )
     if TEST_POLICY_ONLY:
         enable_reinforce_style_advantages(llm_ppo)

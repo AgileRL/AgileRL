@@ -119,6 +119,7 @@ class PPO(LLMAlgorithm):
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         gradient_checkpointing: bool = True,
+        torch_compiler: str | None = None,
     ) -> None:
 
         device = (
@@ -154,6 +155,7 @@ class PPO(LLMAlgorithm):
             accelerator=accelerator,
             name="LLMPPO",
             gradient_checkpointing=gradient_checkpointing,
+            torch_compiler=torch_compiler,
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
@@ -235,7 +237,7 @@ class PPO(LLMAlgorithm):
                     actor_device = next(actor_module.parameters()).device
                 except StopIteration:
                     actor_device = torch.device(self.device)
-                with torch.no_grad(), self._amp_ctx():
+                with torch.inference_mode(), self._amp_ctx():
                     completion_ids = []
                     action_masks = []
                     for prompt in obs:
@@ -306,7 +308,7 @@ class PPO(LLMAlgorithm):
             0,
         )
 
-        with torch.no_grad():
+        with torch.inference_mode():
             reference_log_probs, old_log_probs, old_values = (
                 self._fused_forward_no_grad(
                     completion_ids,
@@ -328,6 +330,9 @@ class PPO(LLMAlgorithm):
             returns, advantages = self._compute_gae_returns(
                 token_penalised_rewards, old_values, action_masks
             )
+
+        self._restore_adapter_trainability(["actor", "critic"])
+        self.actor.train()
 
         for _epoch_idx in range(self.update_epochs):
             self.rng.shuffle(batch_idxs)
@@ -426,7 +431,7 @@ class PPO(LLMAlgorithm):
         loop: int = 1,
     ) -> torch.Tensor:
         """Return fitness (test) score tensor of llm on test sub-set."""
-        with env.eval_mode(), torch.no_grad():
+        with env.eval_mode(), torch.inference_mode():
             prompts = env.reset()
             rewards = []
             for _ in range(loop):

@@ -1933,6 +1933,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :type model_config: dict[str, Any] | PretrainedConfig | None
     :param gradient_checkpointing: Whether to use gradient checkpointing.
     :type gradient_checkpointing: bool
+    :param torch_compiler: The torch compiler mode to use ('default',
+        'reduce-overhead', or 'max-autotune'), defaults to None.
+    :type torch_compiler: str | None, optional
     """
 
     def __init__(
@@ -1962,6 +1965,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         name: str | None = None,
         model_config: dict[str, Any] | PretrainedConfigProtocol | None = None,
         gradient_checkpointing: bool = True,
+        torch_compiler: str | None = None,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
@@ -1986,7 +1990,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             cosine_lr_schedule_config = None
 
-        super().__init__(index, hp_config, device, accelerator, None, name)
+        super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
         self.gradient_checkpointing = gradient_checkpointing
         self.zero_stage = None
         self.reference_update_tracker = 0  # Updated every time the reference policy is updated which is updated each time we pass through the train dataset
@@ -2652,6 +2656,23 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if "actor" in name and "lora" in name:
                 assert param.requires_grad is True
 
+        if self.torch_compiler:
+            if self._uses_deepspeed:
+                warnings.warn(
+                    "torch_compiler is not yet compatible with DeepSpeed; "
+                    "compilation skipped for this run.",
+                    stacklevel=2,
+                )
+            else:
+                if self.gradient_checkpointing:
+                    warnings.warn(
+                        "torch_compiler is incompatible with gradient_checkpointing; "
+                        "disabling gradient checkpointing for this run.",
+                        stacklevel=2,
+                    )
+                    self.gradient_checkpointing = False
+                self.actor = compile_model(self.actor, self.torch_compiler)
+
         if self.accelerator is None:
             self.actor = DummyEvolvable(module=self.actor, device=self.device)
 
@@ -2675,6 +2696,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             if self.cosine_lr_schedule_config is not None
             else None
+        )
+
+    @property
+    def _uses_deepspeed(self) -> bool:
+        return (
+            self.accelerator is not None
+            and getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
         )
 
     @contextmanager
@@ -2777,6 +2805,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
            recomputation).  Callers must call
            ``clear_fused_adapter_routing`` after the backward pass.
 
+           Callers are responsible for ensuring the model is in training
+           mode and adapter trainability is restored before entering the
+           minibatch loop (see ``learn()`` in ``ppo_llm.py``).
+
         :param ids: Token IDs ``(B, seq_len)``.
         :param batch_size: Unused (kept for API symmetry).
         :param attention_mask: Optional attention mask matching *ids*.
@@ -2788,9 +2820,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         fused_ids = ids.repeat(2, 1)
         fused_mask = attention_mask.repeat(2, 1)
         routing = ["actor"] * B + ["critic"] * B
-
-        self._restore_adapter_trainability(["actor", "critic"])
-        self.actor.train()
 
         log_probs, values = self._fused_model_pass(
             fused_ids, fused_mask, routing,
@@ -2826,7 +2855,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         self.actor.eval()
 
-        with torch.no_grad():
+        with torch.inference_mode():
             if self.use_separate_reference_adapter:
                 adapters = ["reference", "actor", "critic"]
             else:
@@ -3197,13 +3226,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _memory_efficient_logits(
         logits: torch.Tensor,
         index: torch.Tensor,
+        _chunk_rows: int = 4,
     ) -> torch.Tensor:
         """Calculate log probabilities for previously generated token ids.
 
-        Processes one row at a time so only a single ``(seq_len, vocab_size)``
-        log-softmax tensor is live at any moment, avoiding the OOM that a
-        batched ``F.log_softmax`` over the full ``(B, seq_len, vocab_size)``
-        tensor would cause on large-vocabulary models.
+        Processes a few rows at a time so peak memory stays bounded to
+        ``(_chunk_rows, seq_len, vocab_size)`` rather than the full batch,
+        avoiding OOM on large-vocabulary models while reducing Python loop
+        overhead compared to a strict row-by-row approach.
 
         :param logits: Logits of shape ``(B, seq_len, vocab_size)``.
         :type logits: torch.Tensor
@@ -3212,15 +3242,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Log probabilities of the completion IDs, shape ``(B, seq_len)``.
         :rtype: torch.Tensor
         """
-        per_token_logps = []
-        for row_logits, row_labels in zip(logits, index, strict=False):
-            row_logps = F.log_softmax(row_logits, dim=-1)
-            row_per_token_logps = row_logps.gather(
-                dim=-1,
-                index=row_labels.unsqueeze(-1),
+        B = logits.shape[0]
+        if B <= _chunk_rows:
+            return F.log_softmax(logits, dim=-1).gather(
+                dim=-1, index=index.unsqueeze(-1)
             ).squeeze(-1)
-            per_token_logps.append(row_per_token_logps)
-        return torch.stack(per_token_logps)
+
+        per_token_logps = []
+        for start in range(0, B, _chunk_rows):
+            end = min(start + _chunk_rows, B)
+            chunk_logps = F.log_softmax(logits[start:end], dim=-1)
+            chunk_gathered = chunk_logps.gather(
+                dim=-1, index=index[start:end].unsqueeze(-1)
+            ).squeeze(-1)
+            per_token_logps.append(chunk_gathered)
+        return torch.cat(per_token_logps, dim=0)
 
     def _configure_batch_size(
         self,
@@ -3306,11 +3342,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return
 
     def recompile(self) -> None:
-        """Recompiles the algorithm."""
-        msg = "Recompile method is not available for LLM finetuning algorithms."
-        raise NotImplementedError(
-            msg,
-        )
+        """Recompile evolvable modules with ``torch.compile``.
+
+        Iterates over ``evolvable_attributes`` and compiles each one.
+        Skipped when DeepSpeed is active because ``DeepSpeedEngine`` is not
+        compatible with ``OptimizedModule`` wrapping.
+        """
+        if self.torch_compiler is None or self._uses_deepspeed:
+            return
+        for name, obj in self.evolvable_attributes(networks_only=True).items():
+            setattr(self, name, compile_model(obj, self.torch_compiler))
 
     def _update_existing_adapter(
         self,
