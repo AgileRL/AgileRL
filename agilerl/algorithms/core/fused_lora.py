@@ -14,14 +14,17 @@ The mechanism piggy-backs on PEFT's existing ``_mixed_batch_forward``
 (which handles the per-row LoRA routing) but bypasses the inference-only
 gate and uses persistent per-layer attributes instead of ephemeral hooks
 so that routing survives gradient-checkpoint recomputation.
+
+.. note::
+    All functions iterate LoRA layers via ``nn.Module.modules()`` rather
+    than ``model.modules()`` because ``EvolvableModule`` overrides
+    ``modules()`` to return only evolvable children, which excludes the
+    LoRA layers.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import torch.nn as nn
+import torch.nn as nn
 
 try:
     from peft.tuners.lora.layer import LoraLayer
@@ -41,6 +44,13 @@ def _fused_routing_pre_hook(
     return args, kwargs
 
 
+def _iter_lora_layers(model: nn.Module):
+    """Yield all LoRA layers using ``nn.Module.modules()`` to bypass EvolvableModule override."""
+    for module in nn.Module.modules(model):
+        if isinstance(module, LoraLayer):
+            yield module
+
+
 def patch_lora_for_fused_forward(model: nn.Module) -> None:
     """Register permanent forward pre-hooks on all LoRA layers.
 
@@ -58,13 +68,12 @@ def patch_lora_for_fused_forward(model: nn.Module) -> None:
     """
     if LoraLayer is None:
         return
-    for module in model.modules():
-        if isinstance(module, LoraLayer):
-            module._fused_adapter_routing = None  # type: ignore[attr-defined]
-            module.register_forward_pre_hook(
-                _fused_routing_pre_hook,
-                with_kwargs=True,
-            )
+    for module in _iter_lora_layers(model):
+        module._fused_adapter_routing = None  # type: ignore[attr-defined]
+        module.register_forward_pre_hook(
+            _fused_routing_pre_hook,
+            with_kwargs=True,
+        )
 
 
 def set_fused_adapter_routing(model: nn.Module, routing: list[str]) -> None:
@@ -77,15 +86,13 @@ def set_fused_adapter_routing(model: nn.Module, routing: list[str]) -> None:
     """
     if LoraLayer is None:
         return
-    for module in model.modules():
-        if isinstance(module, LoraLayer):
-            module._fused_adapter_routing = routing  # type: ignore[attr-defined]
+    for module in _iter_lora_layers(model):
+        module._fused_adapter_routing = routing  # type: ignore[attr-defined]
 
 
 def clear_fused_adapter_routing(model: nn.Module) -> None:
     """Deactivate fused routing, restoring standard single-adapter forward."""
     if LoraLayer is None:
         return
-    for module in model.modules():
-        if isinstance(module, LoraLayer):
-            module._fused_adapter_routing = None  # type: ignore[attr-defined]
+    for module in _iter_lora_layers(model):
+        module._fused_adapter_routing = None  # type: ignore[attr-defined]
