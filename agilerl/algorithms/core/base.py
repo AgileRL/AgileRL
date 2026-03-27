@@ -3219,7 +3219,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             action_mask = torch.zeros_like(completion_id, device=self.device)
             action_mask[:, num_input_tokens[i] :] = True
             action_mask[completion_id == self.pad_token_id] = False
-            action_mask = action_mask[:, 1:]  # FIXME removed this in ppo testing
+            action_mask = action_mask[:, 1:]
             action_masks.append(action_mask)
 
         return completion_ids, action_masks
@@ -3407,7 +3407,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _copy_adapter_weights(self, source_adapter: str, target_adapter: str) -> None:
         """Copy LoRA weights from source adapter to target adapter."""
-        # FIXME might need to think about gathering weights here for the distributed context
         source_params = {}
         target_params = {}
         for name, param in self.actor.named_parameters():

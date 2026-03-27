@@ -322,7 +322,8 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
         use_separate_reference_adapter=True,
         batch_size=init_hp["BATCH_SIZE"],
         beta=init_hp["BETA"],
-        lr=init_hp["LR"],
+        lr_actor=init_hp["LR"],
+        lr_critic=init_hp.get("LR_CRITIC"),
         clip_coef=init_hp["CLIP_COEF"],
         max_grad_norm=init_hp["MAX_GRAD_NORM"],
         update_epochs=init_hp["UPDATE_EPOCHS"],
@@ -483,6 +484,7 @@ if __name__ == "__main__":
     init_hp["BATCH_SIZE"] = 32
     init_hp["UPDATE_EPOCHS"] = 4
     init_hp["LR"] = 1e-4
+    init_hp["LR_CRITIC"] = 1e-3
     init_hp["BETA"] = 0.05
     init_hp["TEMPERATURE"] = 0.4
     init_hp["VF_COEF"] = 0.1

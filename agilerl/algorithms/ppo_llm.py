@@ -126,7 +126,8 @@ class PPO(LLMAlgorithm):
         clip_coef: float = 0.2,
         gamma: float = 1.0,
         gae_lambda: float = 1.0,
-        lr: float = 5e-7,
+        lr_actor: float = 5e-7,
+        lr_critic: float | None = None,
         max_grad_norm: float = 1.0,
         update_epochs: int = 1,
         temperature: float = 1.0,
@@ -162,7 +163,7 @@ class PPO(LLMAlgorithm):
         super().__init__(
             index=index,
             batch_size=batch_size,
-            lr=lr,
+            lr=lr_actor,
             max_grad_norm=max_grad_norm,
             clone=clone,
             reduce_memory_peak=reduce_memory_peak,
@@ -191,8 +192,8 @@ class PPO(LLMAlgorithm):
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
-        assert isinstance(lr, float), "Learning rate must be a float."
-        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(lr_actor, float), "Actor learning rate must be a float."
+        assert lr_actor > 0, "Actor learning rate must be greater than zero."
         assert isinstance(clip_coef, (float, int)), (
             "Clipping coefficient must be a float."
         )
@@ -245,15 +246,52 @@ class PPO(LLMAlgorithm):
             min_p=min_p,
         )
 
+        self.lr_critic = lr_critic if lr_critic is not None else lr_actor
+
         self.use_vllm = use_vllm
         self.vllm_config = vllm_config
         if self.use_vllm:
             self._configure_vllm()
         self._initialize_actors(actor_network, not clone)
+        self._apply_critic_lr()
+
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
+
+    @property
+    def lr_actor(self) -> float:
+        """Actor learning rate, aliased to the base-class ``self.lr``.
+
+        Kept in sync automatically: mutations and lr-scheduler updates
+        that modify ``self.lr`` are reflected here, and vice-versa.
+        """
+        return self.lr
+
+    @lr_actor.setter
+    def lr_actor(self, value: float) -> None:
+        self.lr = value
+
+    def _apply_critic_lr(self) -> None:
+        """Set the critic param-group lr to ``self.lr_critic``.
+
+        Called after optimizer creation and after any optimizer reinit
+        so the critic group always uses its own learning rate.
+        """
+        opt = self.optimizer.optimizer
+        if hasattr(opt, "param_groups") and len(opt.param_groups) > 1:
+            opt.param_groups[1]["lr"] = self.lr_critic
+
+    def _reinit_opt_from_config(self, config) -> None:
+        """Reinit optimizer, then re-apply the critic learning rate.
+
+        The base-class reinit sets all param groups to ``self.lr``
+        (the actor lr).  We override to restore the critic group's
+        separate learning rate afterwards.
+        """
+        super()._reinit_opt_from_config(config)
+        self._apply_critic_lr()
 
     def get_action(
         self,
@@ -439,8 +477,6 @@ class PPO(LLMAlgorithm):
                 # Turn-level value loss
                 # Pool per-token critic values into one scalar per turn,
                 # then compute clipped MSE against turn-level returns.
-                # This is equivalent to having the value head output a
-                # single scalar per turn (see _pool_by_turns docstring).
                 batch_values = torch.masked_fill(
                     batch_values, ~batch_action_mask.bool(), 0.0
                 )

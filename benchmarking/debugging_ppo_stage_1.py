@@ -201,7 +201,8 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
         use_separate_reference_adapter=True,
         batch_size=init_hp["BATCH_SIZE"],
         beta=init_hp["BETA"],
-        lr=init_hp["LR"],
+        lr_actor=init_hp["LR_ACTOR"],
+        lr_critic=init_hp["LR_CRITIC"],
         clip_coef=init_hp["CLIP_COEF"],
         max_grad_norm=init_hp["MAX_GRAD_NORM"],
         update_epochs=init_hp["UPDATE_EPOCHS"],
@@ -316,7 +317,8 @@ if __name__ == "__main__":
     # Stage-2 smoke-test overrides.
     init_hp["BATCH_SIZE"] = 64
     init_hp["UPDATE_EPOCHS"] = 2
-    init_hp["LR"] = 1e-4
+    init_hp["LR_ACTOR"] = 1e-4
+    init_hp["LR_CRITIC"] = 1e-4
     init_hp["BETA"] = 0.01
     init_hp["TEMPERATURE"] = 0.4
     init_hp["VF_COEF"] = 0.0 if TEST_POLICY_ONLY else 0.5

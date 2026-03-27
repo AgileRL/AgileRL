@@ -234,7 +234,7 @@ def generate_ppo(
     ppo = LLMPPO(
         actor_network=actor if not from_name else None,
         model_name=pretrained_model_name_or_path if from_name else None,
-        lr=1e-5,
+        lr_actor=1e-5,
         pad_token_id=vocab_size - 1,
         pad_token="<pad>",
         device="cuda" if torch.cuda.is_available() else "cpu",
@@ -299,7 +299,7 @@ def test_ppo_learns(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         reduce_memory_peak=reduce_memory_peak,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        lr=0.01,
+        lr_actor=0.01,
     )
     completions = [
         torch.randint(
