@@ -295,6 +295,107 @@ def evaluate_accuracy(
     return correct / max(total, 1)
 
 
+def detailed_eval(
+    agent: LLMPPO,
+    tokenizer: TinyDigitTokenizer,
+    grid_size: int,
+    max_turns: int,
+) -> float:
+    """Run every (start, target) pair with greedy decoding, print per-turn actions."""
+    orig_temp = agent.generation_config.temperature
+    orig_top_k = agent.generation_config.top_k
+    orig_top_p = agent.generation_config.top_p
+    agent.generation_config.temperature = 1e-3
+    agent.generation_config.top_k = 1
+    agent.generation_config.top_p = 1.0
+
+    action_names = {"1": "L", "2": "S", "3": "R"}
+    results: dict[tuple[int, int], bool] = {}
+
+    try:
+        with torch.no_grad():
+            for start in range(grid_size):
+                for target in range(grid_size):
+                    if start == target:
+                        continue
+                    env = GridNavigationEnv(
+                        grid_size=grid_size, max_turns=max_turns, seed=0,
+                    )
+                    env.position = start
+                    env.target = target
+                    env.turn = 0
+
+                    obs = f"{start}{target}"
+                    prompt_encoded = tokenizer(
+                        [obs], return_tensors="pt", padding=True,
+                        padding_side="left", return_attention_mask=True,
+                    )
+
+                    actions: list[str] = []
+                    success = False
+                    for _ in range(max_turns):
+                        prompt_dict = {
+                            "input_ids": prompt_encoded["input_ids"],
+                            "attention_mask": prompt_encoded["attention_mask"],
+                        }
+                        prompt_len = prompt_dict["input_ids"].shape[1]
+                        completion_ids, _ = agent.get_action(
+                            [prompt_dict], training=False,
+                        )
+                        full_ids = completion_ids[0]
+                        gen_tokens = full_ids[0, prompt_len:]
+                        gen_text = tokenizer.decode(
+                            gen_tokens.tolist(), skip_special_tokens=True,
+                        )
+                        raw_tok = gen_tokens[0].item() if len(gen_tokens) > 0 else -1
+                        actions.append(
+                            action_names.get(gen_text, f"?{raw_tok}")
+                        )
+
+                        next_obs, reward, terminated, truncated, _ = env.step(
+                            gen_text,
+                        )
+                        if terminated or truncated:
+                            success = reward > 0
+                            break
+
+                        feedback_ids = torch.tensor(
+                            [tokenizer.encode(next_obs)],
+                            dtype=torch.long,
+                            device=full_ids.device,
+                        )
+                        new_prompt_ids = torch.cat(
+                            [full_ids, feedback_ids], dim=1,
+                        )
+                        prompt_encoded = {
+                            "input_ids": new_prompt_ids,
+                            "attention_mask": torch.ones_like(new_prompt_ids),
+                        }
+
+                    tag = "OK" if success else "FAIL"
+                    results[(start, target)] = success
+                    direction = "R" if target > start else "L"
+                    dist = abs(target - start)
+                    print(
+                        f"  {start}->{target} (d={dist},{direction})  "
+                        f"actions=[{','.join(actions)}]  {tag}"
+                    )
+    finally:
+        agent.generation_config.temperature = orig_temp
+        agent.generation_config.top_k = orig_top_k
+        agent.generation_config.top_p = orig_top_p
+
+    n_ok = sum(results.values())
+    n_total = len(results)
+    print(f"  {n_ok}/{n_total} pairs solved")
+    for d in range(1, grid_size):
+        pairs = [(s, t) for (s, t) in results if abs(s - t) == d]
+        if pairs:
+            ok = sum(results[p] for p in pairs)
+            print(f"  dist={d}: {ok}/{len(pairs)}")
+    return n_ok / max(n_total, 1)
+
+
 def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
     accelerator = create_llm_accelerator()
     torch.manual_seed(seed)
@@ -338,6 +439,11 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
         gradient_checkpointing=True,
     )
 
+    # Only allow valid action tokens during generation (1=left, 2=stay, 3=right).
+    # Suppress PAD (5) and EOS (6) which are not valid actions and would waste
+    # turns. Also suppress digit tokens 0 and 4 which aren't valid actions.
+    llm_ppo.generation_config.suppress_tokens = [0, 4, 5, 6]
+
     pre_acc = evaluate_accuracy(
         llm_ppo, tokenizer, grid_size, max_turns, EVAL_EPISODES, greedy=False
     )
@@ -348,6 +454,8 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
         f"[seed={seed}] pre-train acc (sampled/greedy): "
         f"{pre_acc:.3f}/{pre_acc_g:.3f}"
     )
+    print("\nPre-training detailed eval:")
+    detailed_eval(llm_ppo, tokenizer, grid_size, max_turns)
 
     num_steps = init_hp.get("MAX_STEPS", 4096 * 3)
     batch_size = init_hp["BATCH_SIZE"]
@@ -369,7 +477,7 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
 
     print("\nTraining...")
     while total_samples < num_steps:
-        llm_ppo.set_reference_policy(0)
+        llm_ppo.set_reference_policy(step_count + 1)
 
         comp_ids_list, action_masks_list, turn_ids_list, rewards_list = (
             rollout_multiturn(
@@ -447,6 +555,8 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
         f"[seed={seed}] improvement (sampled/greedy): "
         f"{post_acc - pre_acc:+.3f}/{post_acc_g - pre_acc_g:+.3f}"
     )
+    print("\nPost-training detailed eval:")
+    detailed_eval(llm_ppo, tokenizer, grid_size, max_turns)
     return post_acc - pre_acc, post_acc_g - pre_acc_g
 
 
@@ -486,9 +596,9 @@ if __name__ == "__main__":
     init_hp["LR_ACTOR"] = 1e-4
     init_hp["LR_CRITIC"] = 1e-3
     init_hp["BETA"] = 0.05
-    init_hp["TEMPERATURE"] = 0.4
-    init_hp["VF_COEF"] = 0.1
+    init_hp["TEMPERATURE"] = 0.7
+    init_hp["VF_COEF"] = 0.5
     init_hp["GAMMA"] = 0.99
     init_hp["GAE_LAMBDA"] = 0.95
-    init_hp["MAX_STEPS"] = 4096 * 3
+    init_hp["MAX_STEPS"] = 4096 * 8
     main(init_hp, (0,))

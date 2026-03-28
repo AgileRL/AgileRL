@@ -4,8 +4,8 @@ import torch
 from transformers import GPT2Config, GPT2LMHeadModel, GenerationConfig
 from trl.experimental.ppo.modeling_value_head import AutoModelForCausalLMWithValueHead
 
-TINY_VOCAB_SIZE = 5
-TINY_TARGET_TOKEN_ID = 4
+TINY_VOCAB_SIZE = 7
+TINY_TARGET_TOKEN_ID = 6
 # Keep this aligned with (or above) the PPO max_model_len you pass from benchmarking.
 # A too-small n_positions triggers CUDA device-side asserts from embedding/index ops.
 TINY_MAX_CONTEXT_LENGTH = 1024
@@ -13,15 +13,21 @@ TINY_MAX_OUTPUT_TOKENS = 64
 
 
 class TinyDigitTokenizer:
-    """Minimal tokenizer with fixed 5-token vocabulary ('0' to '4')."""
+    """Minimal tokenizer with 7-token vocabulary: digits '0'-'4' + PAD + EOS.
+
+    PAD (5) and EOS (6) are separate from data tokens so digit embeddings
+    aren't conflated with special-token semantics.
+    """
+
+    NUM_DIGITS = 5
 
     def __init__(self) -> None:
-        self.vocab = {str(i): i for i in range(TINY_VOCAB_SIZE)}
-        self.inv_vocab = {idx: tok for tok, idx in self.vocab.items()}
-        self.pad_token_id = 0
-        self.pad_token = "0"
+        self.vocab = {str(i): i for i in range(self.NUM_DIGITS)}
+        self.inv_vocab = {i: str(i) for i in range(self.NUM_DIGITS)}
+        self.pad_token_id = 5
+        self.pad_token = "<PAD>"
         self.eos_token_id = TINY_TARGET_TOKEN_ID
-        self.eos_token = str(TINY_TARGET_TOKEN_ID)
+        self.eos_token = "<EOS>"
         self.vocab_size = TINY_VOCAB_SIZE
 
     def apply_chat_template(
@@ -48,12 +54,13 @@ class TinyDigitTokenizer:
         del clean_up_tokenization_spaces
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.tolist()
+        special = {self.pad_token_id, self.eos_token_id}
         decoded = []
         for idx in token_ids:
             idx = int(idx)
-            if skip_special_tokens and idx == self.pad_token_id:
+            if skip_special_tokens and idx in special:
                 continue
-            decoded.append(self.inv_vocab.get(idx, self.pad_token))
+            decoded.append(self.inv_vocab.get(idx, ""))
         return "".join(decoded)
 
     def batch_decode(
@@ -121,9 +128,9 @@ def _make_tiny_config() -> GPT2Config:
         n_embd=64,
         n_layer=2,
         n_head=2,
-        bos_token_id=1,
+        bos_token_id=0,
         eos_token_id=TINY_TARGET_TOKEN_ID,
-        pad_token_id=0,
+        pad_token_id=5,
         attn_pdrop=0.0,
         embd_pdrop=0.0,
         resid_pdrop=0.0,
@@ -138,7 +145,7 @@ def _make_tiny_generation_config() -> GenerationConfig:
         do_sample=True,
         max_length=TINY_MAX_CONTEXT_LENGTH,
         max_new_tokens=TINY_MAX_OUTPUT_TOKENS,
-        pad_token_id=0,
+        pad_token_id=5,
         eos_token_id=TINY_TARGET_TOKEN_ID,
     )
 
