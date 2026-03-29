@@ -5,7 +5,7 @@ each generation is treated as a single action.  The environment provides
 meaningful state transitions and per-turn rewards, forcing the agent to
 condition on environment feedback across turns.
 
-Environment: GridNavigationEnv (extends gem.Env)
+Environment: GridNavigationEnv from ``agilerl.utils.probe_envs_llm`` (extends gem.Env)
   - 1D grid with positions 0..3.
   - Initial observation: "{position}{target}" (e.g. "03").
   - Action: "1" = left, "2" = stay, "3" = right.
@@ -19,195 +19,28 @@ from __future__ import annotations
 import statistics
 from random import Random
 
-from tqdm import tqdm
-
 from agilerl import HAS_LLM_DEPENDENCIES
 
 if not HAS_LLM_DEPENDENCIES:
     msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
     raise ImportError(msg)
 
-try:
-    from gem.core import Env as GemEnv
-except ImportError:
-    msg = "gem-llm is required for this script. Install with: pip install gem-llm"
-    raise ImportError(msg) from None
-
 import torch
 import yaml
 from peft import LoraConfig
 
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
-from agilerl.utils.algo_utils import stack_and_pad_experiences
+from agilerl.training import train_llm
+from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.llm_utils import create_llm_accelerator
+from agilerl.utils.probe_envs_llm import GridNavigationEnv
 from benchmarking.tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 MAX_CONTEXT_LENGTH = 128
 MAX_OUTPUT_TOKENS = 1
 GRID_SIZE = 4
 MAX_TURNS = 5
-STEP_COST = -0.1
 EVAL_EPISODES = 128
-
-
-class GridNavigationEnv(GemEnv):
-    """1D grid navigation: move left/right to reach a target position.
-
-    The agent sees its starting position and target once (initial obs),
-    then receives only its current position as feedback after each move.
-    It must remember the target from context and navigate toward it.
-
-    Actions map to: "1" = left, "2" = stay, "3" = right.
-    Positions are clamped to [0, grid_size-1].
-    """
-
-    def __init__(
-        self,
-        grid_size: int = GRID_SIZE,
-        max_turns: int = MAX_TURNS,
-        step_cost: float = STEP_COST,
-        seed: int = 42,
-    ):
-        self.grid_size = grid_size
-        self.max_turns = max_turns
-        self.step_cost = step_cost
-        self.rng = Random(seed)
-        self.position = 0
-        self.target = 0
-        self.turn = 0
-
-    def reset(self, seed=None):
-        if seed is not None:
-            self.rng = Random(seed)
-        self.position = self.rng.randint(0, self.grid_size - 1)
-        others = [p for p in range(self.grid_size) if p != self.position]
-        self.target = self.rng.choice(others)
-        self.turn = 0
-        obs = f"{self.position}{self.target}"
-        return obs, {"position": self.position, "target": self.target}
-
-    def step(self, action):
-        self.turn += 1
-
-        move = None
-        for ch in str(action):
-            if ch in "123":
-                move = int(ch)
-                break
-
-        if move == 1:
-            self.position = max(0, self.position - 1)
-        elif move == 3:
-            self.position = min(self.grid_size - 1, self.position + 1)
-        # move == 2 or invalid: stay in place
-
-        obs = str(self.position)
-
-        if self.position == self.target:
-            return obs, 1.0, True, False, {"success": True}
-        if self.turn >= self.max_turns:
-            return obs, -1.0, True, False, {"success": False}
-        return obs, self.step_cost, False, False, {}
-
-
-def rollout_multiturn(
-    agent: LLMPPO,
-    batch_size: int,
-    tokenizer: TinyDigitTokenizer,
-    max_turns: int,
-    grid_size: int,
-    rng: Random,
-) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
-    """Roll out a batch of multi-turn episodes and build trajectory tensors.
-
-    Returns per-episode lists of:
-      completion_ids  [1, seq_len_i]
-      action_masks    [1, seq_len_i - 1]
-      turn_ids        [1, seq_len_i - 1]
-      rewards         [max_turns]
-    """
-    all_completion_ids: list[torch.Tensor] = []
-    all_action_masks: list[torch.Tensor] = []
-    all_turn_ids: list[torch.Tensor] = []
-    all_rewards: list[torch.Tensor] = []
-
-    for _ in range(batch_size):
-        env = GridNavigationEnv(
-            grid_size=grid_size, max_turns=max_turns, seed=rng.randint(0, 2**31)
-        )
-        obs, _info = env.reset()
-
-        prompt_encoded = tokenizer(
-            [obs],
-            return_tensors="pt",
-            padding=True,
-            padding_side="left",
-            return_attention_mask=True,
-        )
-
-        turn_boundaries: list[tuple[int, int, int]] = []
-        turn_rewards: list[float] = []
-        full_ids: torch.Tensor | None = None
-
-        for turn_idx in range(max_turns):
-            prompt_dict = {
-                "input_ids": prompt_encoded["input_ids"],
-                "attention_mask": prompt_encoded["attention_mask"],
-            }
-            prompt_len = prompt_dict["input_ids"].shape[1]
-
-            completion_ids, _ = agent.get_action([prompt_dict], training=True)
-            full_ids = completion_ids[0]
-
-            gen_start = prompt_len
-            gen_end = full_ids.shape[1]
-            turn_boundaries.append((gen_start, gen_end, turn_idx))
-
-            gen_tokens = full_ids[0, gen_start:]
-            gen_text = tokenizer.decode(gen_tokens.tolist(), skip_special_tokens=True)
-
-            next_obs, reward, terminated, truncated, _step_info = env.step(gen_text)
-            turn_rewards.append(float(reward))
-
-            if terminated or truncated:
-                break
-
-            feedback_ids = torch.tensor(
-                [tokenizer.encode(next_obs)], dtype=torch.long,
-                device=full_ids.device,
-            )
-            new_prompt_ids = torch.cat([full_ids, feedback_ids], dim=1)
-            prompt_encoded = {
-                "input_ids": new_prompt_ids,
-                "attention_mask": torch.ones_like(new_prompt_ids),
-            }
-
-        assert full_ids is not None
-        seq_len = full_ids.shape[1]
-        action_mask = torch.zeros(1, seq_len - 1, dtype=torch.bool)
-        turn_ids = torch.full((1, seq_len - 1), -1, dtype=torch.long)
-
-        for gen_start, gen_end, tidx in turn_boundaries:
-            mask_start = gen_start - 1
-            mask_end = gen_end - 1
-            if mask_start >= 0 and mask_end <= seq_len - 1:
-                action_mask[0, mask_start:mask_end] = True
-                turn_ids[0, mask_start:mask_end] = tidx
-
-        for pos in range(seq_len - 1):
-            if full_ids[0, pos + 1].item() == tokenizer.pad_token_id:
-                action_mask[0, pos] = False
-                turn_ids[0, pos] = -1
-
-        while len(turn_rewards) < max_turns:
-            turn_rewards.append(0.0)
-
-        all_completion_ids.append(full_ids)
-        all_action_masks.append(action_mask)
-        all_turn_ids.append(turn_ids)
-        all_rewards.append(torch.tensor(turn_rewards, dtype=torch.float))
-
-    return all_completion_ids, all_action_masks, all_turn_ids, all_rewards
 
 
 def evaluate_accuracy(
@@ -457,89 +290,41 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
     print("\nPre-training detailed eval:")
     detailed_eval(llm_ppo, tokenizer, grid_size, max_turns)
 
-    num_steps = init_hp.get("MAX_STEPS", 4096 * 3)
+    max_samples = init_hp.get("MAX_STEPS", 4096 * 3)
     batch_size = init_hp["BATCH_SIZE"]
     evaluation_interval = init_hp.get("EVALUATION_INTERVAL", 50)
-    total_samples = 0
-    step_count = 0
+    # Legacy loop counted total environment samples; finetune_llm_multiturn's
+    # max_steps is the number of PPO updates (one batch per update).
+    max_train_steps = (max_samples + batch_size - 1) // batch_size
 
-    bar_format = (
-        "{l_bar}{bar:10}| {n:4}/{total_fmt} "
-        "[{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
+    env_fn = lambda: GridNavigationEnv(
+        grid_size=grid_size,
+        max_turns=max_turns,
+        seed=rng.randint(0, 2**31),
     )
-    pbar = tqdm(
-        total=num_steps,
-        unit="sample",
-        bar_format=bar_format,
-        ascii=True,
-        dynamic_ncols=True,
+    eval_fn = lambda agent: evaluate_accuracy(
+        agent, tokenizer, grid_size, max_turns, EVAL_EPISODES, greedy=True
     )
 
-    print("\nTraining...")
-    while total_samples < num_steps:
-        llm_ppo.set_reference_policy(step_count + 1)
-
-        comp_ids_list, action_masks_list, turn_ids_list, rewards_list = (
-            rollout_multiturn(
-                llm_ppo, batch_size, tokenizer, max_turns, grid_size, rng
-            )
+    original_save_checkpoint = train_llm.save_llm_checkpoint
+    train_llm.save_llm_checkpoint = lambda *args, **kwargs: None
+    try:
+        finetune_llm_multiturn(
+            pop=[llm_ppo],
+            env_fn=env_fn,
+            tokenizer=tokenizer,
+            max_turns=max_turns,
+            init_hp={"ALGO": "LLMPPO", **init_hp},
+            max_steps=max_train_steps,
+            eval_fn=eval_fn,
+            evaluation_interval=evaluation_interval,
+            wb=False,
+            save_elite=False,
+            verbose=True,
+            accelerator=accelerator,
         )
-
-        rewards_2d = torch.stack(rewards_list)
-
-        (turn_ids_padded,) = stack_and_pad_experiences(
-            turn_ids_list,
-            padding_values=[-1],
-        )
-
-        experiences = (comp_ids_list, action_masks_list, rewards_2d)
-
-        loss, kl, pg_loss, vf_loss, entropy = llm_ppo.learn(
-            experiences, tokenizer, turn_ids=turn_ids_padded
-        )
-
-        episode_scores = [r.sum().item() for r in rewards_list]
-        mean_score = sum(episode_scores) / max(len(episode_scores), 1)
-        accuracy = (
-            sum(1 for r in rewards_list if (r > 0).any())
-            / max(len(rewards_list), 1)
-        )
-
-        total_samples += batch_size
-        step_count += 1
-
-        pbar.set_postfix(
-            loss=f"{loss:.4f}",
-            kl=f"{kl:.4f}",
-            score=f"{mean_score:.3f}",
-            acc=f"{accuracy:.3f}",
-        )
-        pbar.update(batch_size)
-
-        if step_count % evaluation_interval == 0:
-            eval_acc = evaluate_accuracy(
-                llm_ppo, tokenizer, grid_size, max_turns, EVAL_EPISODES, greedy=True
-            )
-
-            banner_text = f"Step {step_count}  ({total_samples} samples)"
-            banner_width = max(len(banner_text) + 8, 40)
-            border = "=" * banner_width
-            pbar.write(
-                f"\n{border}\n"
-                f"{banner_text.center(banner_width)}\n"
-                f"{border}\n"
-                f"Train score:\t\t{mean_score:.3f}\n"
-                f"Train accuracy:\t\t{accuracy:.3f}\n"
-                f"Eval accuracy (greedy):\t{eval_acc:.3f}\n"
-                f"Loss:\t\t\t{loss:.4f}\n"
-                f"KL-divergence:\t\t{kl:.4f}\n"
-                f"PG loss:\t\t{pg_loss:.4f}\n"
-                f"VF loss:\t\t{vf_loss:.4f}\n"
-                f"Entropy:\t\t{entropy:.4f}\n"
-                f"{border}"
-            )
-
-    pbar.close()
+    finally:
+        train_llm.save_llm_checkpoint = original_save_checkpoint
 
     post_acc = evaluate_accuracy(
         llm_ppo, tokenizer, grid_size, max_turns, EVAL_EPISODES, greedy=False

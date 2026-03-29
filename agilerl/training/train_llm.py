@@ -1,6 +1,7 @@
 import warnings
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -13,6 +14,7 @@ from agilerl.algorithms import DPO, GRPO, LLMPPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import PopulationType
+from agilerl.utils.algo_utils import stack_and_pad_experiences
 from agilerl.utils.llm_utils import ReasoningGym
 from agilerl.utils.utils import (
     aggregate_metrics_across_gpus,
@@ -20,6 +22,9 @@ from agilerl.utils.utils import (
     save_llm_checkpoint,
     tournament_selection_and_mutation,
 )
+
+if TYPE_CHECKING:
+    from gem.core import Env as GemEnv
 
 InitDictType = dict[str, Any] | None
 
@@ -777,3 +782,489 @@ def finetune_llm_preference(
         pbar.close()
         if wb:
             wandb.finish()
+
+
+def finetune_llm_multiturn(
+    pop: PopulationType,
+    env_fn: Callable[[], "GemEnv"],
+    tokenizer: Any,
+    max_turns: int,
+    init_hp: dict[str, Any] | None = None,
+    max_steps: int = 32768,
+    save_elite: bool | None = None,
+    elite_path: str | None = None,
+    wb: bool = False,
+    evo_steps: int | None = None,
+    checkpoint_steps: int | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    wandb_api_key: str | None = None,
+    eval_fn: Callable[[LLMPPO], float] | None = None,
+    evaluation_interval: int = 50,
+    verbose: bool = True,
+    accelerator: Accelerator | None = None,
+) -> PopulationType:
+    if evo_steps is not None and (tournament is None or mutation is None):
+        warnings.warn(
+            "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place.",
+            stacklevel=2,
+        )
+
+    if (tournament is not None and mutation is not None) and evo_steps is None:
+        msg = "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
+        raise ValueError(
+            msg,
+        )
+
+    if mutation is not None:
+        assert mutation.architecture_mut == 0, (
+            "Probability of architecture mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.new_layer_prob == 0, (
+            "Probability of new layer mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.parameters_mut == 0, (
+            "Probability of network parameters mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.activation_mut == 0, (
+            "Probability of activation mutation must be 0 for LLM finetuning."
+        )
+
+    if not isinstance(pop[0], LLMPPO):
+        msg = (
+            "The algorithm must be LLMPPO for multi-turn GEM finetuning. "
+            f"Got {type(pop[0])} instead."
+        )
+        raise ValueError(
+            msg,
+        )
+
+    if init_hp is None:
+        init_hp = {}
+        init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size_per_process
+        init_hp["ALGO"] = pop[0].algo
+
+    batch_size = init_hp.get("BATCH_SIZE", pop[0].batch_size)
+    env_name = init_hp.get("env_name", "gem_multiturn")
+    data_increment = (
+        getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
+    )
+    effective_data_batch_size = data_increment * batch_size
+
+    if wb and (accelerator is None or accelerator.is_main_process):
+        init_hp["effective_data_batch_size"] = effective_data_batch_size
+        init_hp["batch_size"] = batch_size
+        init_hp["distributed_training"] = accelerator is not None
+        init_hp["model_name"] = pop[0].pretrained_model_name_or_path
+        init_hp["max_turns"] = max_turns
+        init_wandb(
+            algo=init_hp["ALGO"],
+            env_name=env_name,
+            wandb_api_key=wandb_api_key,
+            init_hyperparams=init_hp,
+        )
+
+    if accelerator is None or accelerator.is_main_process:
+        print("\nTraining...")
+
+    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
+    if accelerator is None or accelerator.is_main_process:
+        pbar = trange(
+            max_steps,
+            unit="step",
+            bar_format=bar_format,
+            ascii=True,
+            dynamic_ncols=True,
+        )
+
+    total_steps = 0
+    agg_metrics: list[float] = []
+    agg_eval_score: float | None = None
+
+    pad_id = getattr(tokenizer, "pad_token_id", None)
+
+    for i in range(max_steps):
+        agent_metrics_dict = {}
+        for agent_idx, agent in enumerate(pop):
+            agent.set_reference_policy(i + 1)
+
+            # -- Rollout batch_size multi-turn episodes -------------------------
+            completion_ids_list: list[torch.Tensor] = []
+            action_masks_list: list[torch.Tensor] = []
+            all_turn_ids: list[torch.Tensor] = []
+            all_rewards: list[torch.Tensor] = []
+
+            for _ in range(batch_size):
+                env = env_fn()
+                obs, reset_info = env.reset()
+                obs_text = str(obs)
+                suffix = (reset_info or {}).get("suffix", "")
+                if suffix:
+                    obs_text = f"{obs_text}\n{suffix}"
+
+                prompt_encoded = tokenizer(
+                    [obs_text],
+                    return_tensors="pt",
+                    padding=True,
+                    padding_side="left",
+                    return_attention_mask=True,
+                )
+
+                turn_boundaries: list[tuple[int, int, int]] = []
+                turn_rewards: list[float] = []
+                full_ids: torch.Tensor | None = None
+
+                for turn_idx in range(max_turns):
+                    prompt_dict = {
+                        "input_ids": prompt_encoded["input_ids"],
+                        "attention_mask": prompt_encoded["attention_mask"],
+                    }
+                    prompt_len = prompt_dict["input_ids"].shape[1]
+
+                    completion_ids, _ = agent.get_action(
+                        [prompt_dict], training=True
+                    )
+                    full_ids = completion_ids[0]
+
+                    gen_start = prompt_len
+                    gen_end = full_ids.shape[1]
+                    turn_boundaries.append((gen_start, gen_end, turn_idx))
+
+                    gen_tokens = full_ids[0, gen_start:]
+                    gen_text = tokenizer.decode(
+                        gen_tokens.tolist(), skip_special_tokens=True,
+                    )
+
+                    next_obs, reward, terminated, truncated, step_info = (
+                        env.step(gen_text)
+                    )
+                    turn_rewards.append(float(reward))
+
+                    if terminated or truncated:
+                        break
+
+                    feedback_text = str(next_obs)
+                    fb_suffix = (step_info or {}).get("suffix", "")
+                    if fb_suffix:
+                        feedback_text = f"{feedback_text}\n{fb_suffix}"
+                    feedback_ids = torch.tensor(
+                        [tokenizer.encode(feedback_text)],
+                        dtype=torch.long,
+                        device=full_ids.device,
+                    )
+                    new_prompt_ids = torch.cat(
+                        [full_ids, feedback_ids], dim=1
+                    )
+                    prompt_encoded = {
+                        "input_ids": new_prompt_ids,
+                        "attention_mask": torch.ones_like(new_prompt_ids),
+                    }
+
+                assert full_ids is not None
+                seq_len = full_ids.shape[1]
+                action_mask = torch.zeros(
+                    1, seq_len - 1, dtype=torch.bool
+                )
+                turn_ids = torch.full(
+                    (1, seq_len - 1), -1, dtype=torch.long
+                )
+
+                for gen_start, gen_end, tidx in turn_boundaries:
+                    mask_start = gen_start - 1
+                    mask_end = gen_end - 1
+                    if mask_start >= 0 and mask_end <= seq_len - 1:
+                        action_mask[0, mask_start:mask_end] = True
+                        turn_ids[0, mask_start:mask_end] = tidx
+
+                if pad_id is not None:
+                    for pos in range(seq_len - 1):
+                        if full_ids[0, pos + 1].item() == pad_id:
+                            action_mask[0, pos] = False
+                            turn_ids[0, pos] = -1
+
+                while len(turn_rewards) < max_turns:
+                    turn_rewards.append(0.0)
+
+                completion_ids_list.append(full_ids)
+                action_masks_list.append(action_mask)
+                all_turn_ids.append(turn_ids)
+                all_rewards.append(
+                    torch.tensor(turn_rewards, dtype=torch.float)
+                )
+
+            (turn_ids_padded,) = stack_and_pad_experiences(
+                all_turn_ids, padding_values=[-1],
+            )
+            rewards_2d = torch.stack(all_rewards)
+            # -- End rollout ----------------------------------------------------
+
+            completion_lengths = np.mean([x.shape[1] for x in completion_ids_list])
+            episode_scores = rewards_2d.sum(dim=1)
+            mean_score = episode_scores.mean().to(agent.device)
+            accuracy = (rewards_2d > 0).any(dim=1).float().mean().to(agent.device)
+
+            experiences = (
+                completion_ids_list,
+                action_masks_list,
+                rewards_2d,
+            )
+            with memory_efficient_params(agent):
+                loss, kl, pg_loss, critic_loss, entropy = agent.learn(
+                    experiences,
+                    tokenizer,
+                    turn_ids=turn_ids_padded,
+                )
+
+            metrics = [
+                torch.tensor(loss, dtype=torch.float32, device=agent.device),
+                torch.tensor(kl, dtype=torch.float32, device=agent.device),
+                mean_score,
+                torch.tensor(completion_lengths, dtype=torch.float32, device=agent.device),
+                accuracy,
+            ]
+            agg_metrics = [
+                aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
+            ]
+
+            agent.steps[-1] += batch_size
+            total_steps += batch_size
+            agg_eval_score = None
+
+            if (i + 1) % evaluation_interval == 0 and eval_fn is not None:
+                eval_score = eval_fn(agent)
+                eval_tensor = torch.tensor(
+                    eval_score, dtype=torch.float32, device=agent.device
+                )
+                agg_eval_score = aggregate_metrics_across_gpus(accelerator, eval_tensor)
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+
+            if accelerator is None or accelerator.is_main_process:
+                metrics_dict = {
+                    "global_step": total_steps,
+                    "Train/Loss": agg_metrics[0],
+                    "Train/KL-divergence": agg_metrics[1],
+                    "Train/Mean reward": agg_metrics[2],
+                    "Train/Average completion length": int(agg_metrics[3]),
+                    "Train/PG loss": pg_loss,
+                    "Train/Critic loss": critic_loss,
+                    "Train/Entropy": entropy,
+                    "Train/Accuracy": agg_metrics[4],
+                }
+                agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
+                if agg_eval_score is not None:
+                    agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = {
+                        "Eval/Score": agg_eval_score,
+                    }
+                agent.scores.append(agg_metrics[2])
+
+        if (
+            verbose
+            and (i + 1) % evaluation_interval == 0
+            and (accelerator is None or accelerator.is_main_process)
+        ):
+            banner_text = f"Step {i + 1}  ({total_steps} samples)"
+            banner_width = max(len(banner_text) + 8, 40)
+            border = "=" * banner_width
+            lines = [
+                f"\n{border}",
+                banner_text.center(banner_width),
+                border,
+                f"Train score:\t\t{agg_metrics[2]:.3f}",
+                f"Train accuracy:\t\t{agg_metrics[4]:.3f}",
+                f"Loss:\t\t\t{agg_metrics[0]:.4f}",
+                f"KL-divergence:\t\t{agg_metrics[1]:.4f}",
+                f"PG loss:\t\t{pg_loss:.4f}",
+                f"VF loss:\t\t{critic_loss:.4f}",
+                f"Entropy:\t\t{entropy:.4f}",
+            ]
+            if agg_eval_score is not None:
+                lines.append(f"Eval score:\t\t{agg_eval_score:.3f}")
+            lines.append(border)
+            pbar.write("\n".join(lines))
+
+        if accelerator is None or accelerator.is_main_process:
+            pbar.set_postfix(
+                loss=f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Loss'] for j in range(len(pop))]):.4f}",
+                kl=f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/KL-divergence'] for j in range(len(pop))]):.4f}",
+                score=f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Mean reward'] for j in range(len(pop))]):.3f}",
+                acc=f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Accuracy'] for j in range(len(pop))]):.3f}",
+            )
+            pbar.update(1)
+
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+
+        if tournament is not None and mutation is not None:
+            if (i + 1) % evo_steps == 0:
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+                pop = tournament_selection_and_mutation(
+                    population=pop,
+                    tournament=tournament,
+                    mutation=mutation,
+                    env_name=env_name,
+                    accelerator=accelerator,
+                    language_model=True,
+                    elite_path=elite_path,
+                    save_elite=save_elite,
+                )
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+        elif (i + 1) == max_steps or (
+            checkpoint_steps is not None and (i + 1) % checkpoint_steps == 0
+        ):
+            save_llm_checkpoint(agent, elite_path)
+
+        if wb and (accelerator is None or accelerator.is_main_process):
+            wandb_dict = {
+                "Train/Mean population PG loss": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/PG loss"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
+                "Train/Mean population critic loss": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Critic loss"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
+                "Train/Best reward": np.max(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Mean reward"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
+                "Train/Mean population reward": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Mean reward"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
+                "Train/Mean population loss": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Loss"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
+                "Train/Mean population KL divergence": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/KL-divergence"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
+                "Train/Mean population completion length": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Average completion length"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
+                "Train/Mean population entropy": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Entropy"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
+                "Train/Mean population accuracy": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Accuracy"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
+                "Train/Best accuracy": np.max(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Accuracy"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
+            }
+            if len(pop[0].registry.hp_config.config.keys()) > 0:
+                wandb_dict |= {
+                    f"HPO_agent_{agent_idx}/{key}": getattr(agent, key)
+                    for agent_idx, agent in enumerate(pop)
+                    for key in agent.registry.hp_config.config
+                }
+
+            last_eval_scores = [
+                agent_metrics_dict.get(f"agent_{agent_idx}/test_metrics", {}).get(
+                    "Eval/Score",
+                )
+                for agent_idx, _ in enumerate(pop)
+            ]
+            if any(s is not None for s in last_eval_scores):
+                wandb_dict |= {
+                    "Eval/Best score": np.max([s for s in last_eval_scores if s is not None]),
+                    "Eval/Mean population score": np.mean(
+                        [s for s in last_eval_scores if s is not None],
+                    ),
+                }
+
+            wandb.log(wandb_dict)
+
+    if (
+        verbose
+        and total_steps > evaluation_interval
+        and (accelerator is None or accelerator.is_main_process)
+    ):
+        fitness_calculated = len(agent.fitness) > 0
+        fitness = (
+            [str(round(agent.fitness[-1], 2)) for agent in pop]
+            if fitness_calculated
+            else [None] * len(pop)
+        )
+        avg_fitness = (
+            [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
+            if fitness_calculated
+            else [None] * len(pop)
+        )
+        avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
+        agents = [agent.index for agent in pop]
+        num_steps = [agent.steps[-1] for agent in pop]
+        muts = [agent.mut for agent in pop]
+
+        banner_text = f"Global Steps {total_steps}"
+        banner_width = max(len(banner_text) + 8, 35)
+        border = "=" * banner_width
+        centered_text = f"{banner_text}".center(banner_width)
+        pbar.write(
+            f"{border}\n"
+            f"{centered_text}\n"
+            f"{border}\n"
+            f"Fitness:\t\t{fitness}\n"
+            f"Score:\t\t{agg_metrics[2]}\n"
+            f"5 fitness avgs:\t{avg_fitness}\n"
+            f"10 score avgs:\t{avg_score}\n"
+            f"Agents:\t\t{agents}\n"
+            f"Steps:\t\t{num_steps}\n"
+            f"Mutations:\t\t{muts}",
+        )
+
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    if accelerator is None or accelerator.is_main_process:
+        pbar.close()
+        if wb:
+            wandb.finish()
+
+    return pop
