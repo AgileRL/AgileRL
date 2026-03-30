@@ -801,6 +801,7 @@ def finetune_llm_multiturn(
     wandb_api_key: str | None = None,
     eval_fn: Callable[[LLMPPO], float] | None = None,
     evaluation_interval: int = 50,
+    max_reward: float | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
     apply_chat_template: bool = True,
@@ -948,7 +949,6 @@ def finetune_llm_multiturn(
             completion_lengths = np.mean([x.shape[1] for x in completion_ids_list])
             episode_scores = rewards_2d.sum(dim=1)
             mean_score = episode_scores.mean().to(agent.device)
-            accuracy = (rewards_2d > 0).any(dim=1).float().mean().to(agent.device)
 
             experiences = (
                 completion_ids_list,
@@ -968,8 +968,12 @@ def finetune_llm_multiturn(
                 torch.tensor(
                     completion_lengths, dtype=torch.float32, device=agent.device
                 ),
-                accuracy,
             ]
+            if max_reward is not None:
+                accuracy = (
+                    (episode_scores >= max_reward).float().mean().to(agent.device)
+                )
+                metrics.append(accuracy)
             agg_metrics = [
                 aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
             ]
@@ -999,8 +1003,9 @@ def finetune_llm_multiturn(
                     "Train/PG loss": pg_loss,
                     "Train/Critic loss": critic_loss,
                     "Train/Entropy": entropy,
-                    "Train/Accuracy": agg_metrics[4],
                 }
+                if max_reward is not None:
+                    metrics_dict["Train/Accuracy"] = agg_metrics[4]
                 agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
                 if agg_eval_score is not None:
                     agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = {
@@ -1021,25 +1026,30 @@ def finetune_llm_multiturn(
                 banner_text.center(banner_width),
                 border,
                 f"Train score:\t\t{agg_metrics[2]:.3f}",
-                f"Train accuracy:\t\t{agg_metrics[4]:.3f}",
                 f"Loss:\t\t\t{agg_metrics[0]:.4f}",
                 f"KL-divergence:\t\t{agg_metrics[1]:.4f}",
                 f"PG loss:\t\t{pg_loss:.4f}",
                 f"VF loss:\t\t{critic_loss:.4f}",
                 f"Entropy:\t\t{entropy:.4f}",
             ]
+            if max_reward is not None:
+                lines.insert(4, f"Train accuracy:\t\t{agg_metrics[4]:.3f}")
             if agg_eval_score is not None:
                 lines.append(f"Eval score:\t\t{agg_eval_score:.3f}")
             lines.append(border)
             pbar.write("\n".join(lines))
 
         if accelerator is None or accelerator.is_main_process:
-            pbar.set_postfix(
-                loss=f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Loss'] for j in range(len(pop))]):.4f}",
-                kl=f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/KL-divergence'] for j in range(len(pop))]):.4f}",
-                score=f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Mean reward'] for j in range(len(pop))]):.3f}",
-                acc=f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Accuracy'] for j in range(len(pop))]):.3f}",
-            )
+            postfix = {
+                "loss": f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Loss'] for j in range(len(pop))]):.4f}",
+                "kl": f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/KL-divergence'] for j in range(len(pop))]):.4f}",
+                "score": f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Mean reward'] for j in range(len(pop))]):.3f}",
+            }
+            if max_reward is not None:
+                postfix["acc"] = (
+                    f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Accuracy'] for j in range(len(pop))]):.3f}"
+                )
+            pbar.set_postfix(**postfix)
             pbar.update(iteration_steps // len(pop))
 
         if accelerator is not None:
@@ -1132,23 +1142,26 @@ def finetune_llm_multiturn(
                         for agent_idx, _ in enumerate(pop)
                     ],
                 ),
-                "Train/Mean population accuracy": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Accuracy"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Best accuracy": np.max(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Accuracy"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
             }
+            if max_reward is not None:
+                wandb_dict |= {
+                    "Train/Mean population accuracy": np.mean(
+                        [
+                            agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                                "Train/Accuracy"
+                            ]
+                            for agent_idx, _ in enumerate(pop)
+                        ],
+                    ),
+                    "Train/Best accuracy": np.max(
+                        [
+                            agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                                "Train/Accuracy"
+                            ]
+                            for agent_idx, _ in enumerate(pop)
+                        ],
+                    ),
+                }
             if len(pop[0].registry.hp_config.config.keys()) > 0:
                 wandb_dict |= {
                     f"HPO_agent_{agent_idx}/{key}": getattr(agent, key)
