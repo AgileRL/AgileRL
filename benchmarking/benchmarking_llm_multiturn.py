@@ -18,7 +18,7 @@ from agilerl.utils.llm_utils import create_llm_accelerator
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 ENV_NAME = "game:GuessTheNumber-v0-easy"
-MAX_CONTEXT_LENGTH = 512
+MAX_CONTEXT_LENGTH = 4096
 USE_TINY_DEBUG_MODEL = False
 USE_VLLM = not USE_TINY_DEBUG_MODEL
 
@@ -69,9 +69,7 @@ def main(init_hp, mut_p):
             bias="none",
             task_type="CAUSAL_LM",
         ),
-        micro_batch_size_per_gpu=8
-        if init_hp["BATCH_SIZE"] > 8
-        else init_hp["BATCH_SIZE"],
+        micro_batch_size_per_gpu=2,
         use_vllm=USE_VLLM,
         pad_token_id=tokenizer.pad_token_id,
         pad_token=tokenizer.pad_token,
@@ -97,6 +95,7 @@ def main(init_hp, mut_p):
         )
         if USE_VLLM
         else None,
+        gradient_checkpointing=True,
     )
 
     print("llm_ppo.lr", llm_ppo.lr)

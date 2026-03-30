@@ -14,7 +14,7 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: LLMPPO
-    BATCH_SIZE: 16          # Increased from 16 — larger rollout batches stabilize reward estimates
+    BATCH_SIZE: 8          # Increased from 16 — larger rollout batches stabilize reward estimates
     BETA: 0.001             # Increased from 0.001 — entropy bonus was too weak to prevent collapse
     LR_ACTOR: 0.000005        # Actor learning rate — safer for LLM finetuning
     LR_CRITIC: 0.00001        # Critic learning rate — can be higher since value head is simpler

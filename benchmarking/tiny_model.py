@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 from transformers import GPT2Config, GPT2LMHeadModel, GenerationConfig
-from trl.experimental.ppo.modeling_value_head import AutoModelForCausalLMWithValueHead
+from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
 TINY_VOCAB_SIZE = 7
 TINY_TARGET_TOKEN_ID = 6

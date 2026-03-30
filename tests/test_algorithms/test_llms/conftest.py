@@ -13,7 +13,7 @@ from peft import LoraConfig, get_peft_model
 from torch._inductor.utils import fresh_cache
 from transformers import AutoModelForCausalLM
 
-from trl.experimental.ppo.modeling_value_head import AutoModelForCausalLMWithValueHead
+from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.parallel_state import destroy_model_parallel
 

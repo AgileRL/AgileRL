@@ -3,7 +3,7 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate import Accelerator
-
+from contextlib import contextmanager
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.fused_lora import clear_fused_adapter_routing
@@ -20,7 +20,7 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.utils.llm_utils import ReasoningGym, masked_mean, masked_whiten
+from agilerl.utils.llm_utils import ReasoningGym, masked_mean, masked_whiten, move_params_to_gpu, move_params_to_cpu
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
@@ -254,11 +254,27 @@ class PPO(LLMAlgorithm):
             self._configure_vllm()
         self._initialize_actors(actor_network, not clone)
         self._apply_critic_lr()
+        
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
+        
+
+        # We call get_action before learn so we need to put the model to CPU and wake it up
+        unwrapped_model = (
+            self.accelerator.unwrap_model(self.actor)
+            if self.accelerator is not None
+            else self.actor
+        )
+        # Wake up LLM
+        if self.use_vllm:
+            move_params_to_cpu(unwrapped_model)
+            self.llm.wake_up()
+            self._move_model_to_vllm()
+
+        
 
     @property
     def lr_actor(self) -> float:
@@ -297,6 +313,7 @@ class PPO(LLMAlgorithm):
         self,
         obs: LLMObsType,
         training: bool = True,
+
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Return generated completion ids and corresponding action masks."""
         with self.select_adapter("actor"):
@@ -329,16 +346,10 @@ class PPO(LLMAlgorithm):
                         action_mask = action_mask[:, 1:]
                         action_masks.append(action_mask)
             else:
-                if self.vllm_config.sleep_mode:
-                    torch.cuda.empty_cache()
-                    self.llm.wake_up()
-                self._move_model_to_vllm()
                 completion_ids, action_masks = self._generate_with_vllm_colocate(
                     obs,
                     1,
                 )
-                if self.vllm_config.sleep_mode:
-                    self.llm.sleep(level=2)
 
         return completion_ids, action_masks
 
@@ -357,163 +368,175 @@ class PPO(LLMAlgorithm):
             to its turn index (0-indexed). -1 for non-action tokens.
             When None, defaults to all action tokens belonging to turn 0.
         """
-        completion_ids, action_masks, rewards = stack_and_pad_experiences(
-            *experiences,
-            padding_values=[self.pad_token_id, False, None],
-        )
-        completion_ids = completion_ids.to(self.device)
-        action_masks = action_masks.to(self.device)
-        num_samples = completion_ids.shape[0]
-
-        if turn_ids is None:
-            turn_ids = torch.where(
-                action_masks.bool(),
-                torch.zeros_like(action_masks, dtype=torch.long),
-                torch.full_like(action_masks, -1, dtype=torch.long),
+        with self.memory_efficient_params():
+            completion_ids, action_masks, rewards = stack_and_pad_experiences(
+                *experiences,
+                padding_values=[self.pad_token_id, False, None],
             )
-            rewards_2d = rewards.flatten().to(self.device).float().unsqueeze(-1)
-        else:
-            turn_ids = turn_ids.to(self.device)
-            rewards_2d = rewards.to(self.device).float()
-            if rewards_2d.dim() == 1:
-                rewards_2d = rewards_2d.unsqueeze(-1)
+            completion_ids = completion_ids.to(self.device)
+            action_masks = action_masks.to(self.device)
+            action_mask_bool = action_masks.bool()
+            num_samples = completion_ids.shape[0]
 
-        batch_idxs = np.arange(num_samples)
-        batch_size = (
-            min(num_samples, self.micro_batch_size_per_gpu)
-            if hasattr(self, "micro_batch_size_per_gpu")
-            else num_samples
-        )
-        mean_pg_loss, mean_vf_loss, mean_loss, mean_kl, mean_entropy, updates = (
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0,
-        )
+            print("NUM SAMPLES: ", num_samples)
+            # print("BATCH SIZE: ", batch_size)
+            print("MICRO BATCH SIZE PER GPU: ", self.micro_batch_size_per_gpu)
 
-        with torch.inference_mode():
-            reference_log_probs, old_log_probs, old_values = (
-                self._fused_forward_no_grad(
-                    completion_ids,
-                    batch_size=batch_size,
+            if turn_ids is None:
+                turn_ids = torch.where(
+                    action_mask_bool,
+                    torch.zeros_like(action_masks, dtype=torch.long),
+                    torch.full_like(action_masks, -1, dtype=torch.long),
                 )
-            )
-            old_values = torch.masked_fill(old_values, ~action_masks.bool(), 0.0)
+                rewards_2d = rewards.flatten().to(self.device).float().unsqueeze(-1)
+            else:
+                turn_ids = turn_ids.to(self.device)
+                rewards_2d = rewards.to(self.device).float()
+                if rewards_2d.dim() == 1:
+                    rewards_2d = rewards_2d.unsqueeze(-1)
 
-            token_rewards = self._compute_token_rewards(
-                action_masks, rewards_2d, turn_ids
+            del rewards
+
+            batch_idxs = np.arange(num_samples)
+            batch_size = (
+                min(num_samples, self.micro_batch_size_per_gpu)
+                if hasattr(self, "micro_batch_size_per_gpu")
+                else num_samples
+            )
+            mean_pg_loss, mean_vf_loss, mean_loss, mean_kl, mean_entropy, updates = (
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0,
             )
 
-            old_log_probs = torch.masked_fill(old_log_probs, ~action_masks.bool(), 1.0)
-            reference_log_probs = torch.masked_fill(
-                reference_log_probs, ~action_masks.bool(), 1.0
-            )
-            token_kl = old_log_probs - reference_log_probs
+            with torch.inference_mode():
+                reference_log_probs, old_log_probs, old_values = (
+                    self._fused_forward_no_grad(
+                        completion_ids,
+                        batch_size=batch_size,
+                    )
+                )
+                old_values = torch.masked_fill(old_values, ~action_mask_bool, 0.0)
 
-            token_penalised_rewards = token_rewards - self.beta * token_kl
-
-            returns, advantages = self._compute_gae_returns(
-                token_penalised_rewards, old_values, action_masks, turn_ids
-            )
-
-        self._restore_adapter_trainability(["actor", "critic"])
-        self.actor.train()
-
-        for _epoch_idx in range(self.update_epochs):
-            self.rng.shuffle(batch_idxs)
-            for start in range(0, num_samples, batch_size):
-                minibatch_idxs = batch_idxs[
-                    start : min((start + batch_size), num_samples)
-                ]
-                (
-                    batch_ids,
-                    batch_action_mask,
-                    batch_old_log_probs,
-                    batch_reference_log_probs,
-                    batch_returns,
-                    batch_advantages,
-                    batch_old_values,
-                    batch_turn_ids,
-                ) = get_experiences_samples(
-                    minibatch_idxs,
-                    completion_ids,
-                    action_masks,
-                    old_log_probs,
-                    reference_log_probs,
-                    returns,
-                    advantages,
-                    old_values,
-                    turn_ids,
+                token_rewards = self._compute_token_rewards(
+                    action_masks, rewards_2d, turn_ids
                 )
 
-                # Fused forward: actor logprobs + critic values in one pass.
-                batch_log_probs, batch_values = self._fused_forward(
-                    batch_ids,
-                    batch_size=batch_size,
+                old_log_probs = torch.masked_fill(old_log_probs, ~action_mask_bool, 1.0)
+                reference_log_probs = torch.masked_fill(
+                    reference_log_probs, ~action_mask_bool, 1.0
                 )
-                batch_log_probs = torch.masked_fill(
-                    batch_log_probs, ~batch_action_mask.bool(), 1.0
-                )
-                kl = batch_log_probs - batch_reference_log_probs
-                masked_entropy = masked_mean(
-                    -batch_log_probs.detach(), batch_action_mask
-                )
-                policy_ratio = torch.exp(
-                    batch_log_probs - batch_old_log_probs,
-                )
-                clipped_ratio = torch.clamp(
-                    policy_ratio,
-                    1 - self.clip_coef,
-                    1 + self.clip_coef,
-                )
-                pg_loss_unclipped = -batch_advantages * policy_ratio
-                pg_loss_clipped = -batch_advantages * clipped_ratio
-                pg_loss = masked_mean(
-                    torch.max(pg_loss_unclipped, pg_loss_clipped), batch_action_mask
+                token_penalised_rewards = token_rewards - self.beta * (
+                    old_log_probs - reference_log_probs
                 )
 
-                # Turn-level value loss
-                # Pool per-token critic values into one scalar per turn,
-                # then compute clipped MSE against turn-level returns.
-                batch_values = torch.masked_fill(
-                    batch_values, ~batch_action_mask.bool(), 0.0
+                returns, advantages = self._compute_gae_returns(
+                    token_penalised_rewards, old_values, action_masks, turn_ids
                 )
-                mb_num_turns = batch_turn_ids.max().item() + 1
-                turn_pred = _pool_by_turns(batch_values, batch_turn_ids, mb_num_turns)
-                turn_old = _pool_by_turns(batch_old_values, batch_turn_ids, mb_num_turns)
-                turn_ret = _pool_by_turns(batch_returns, batch_turn_ids, mb_num_turns)
+                del token_rewards, token_penalised_rewards
 
-                # Mask: which (sample, turn) pairs actually exist in this batch.
-                turn_mask = torch.zeros_like(turn_pred)
-                for t in range(mb_num_turns):
-                    turn_mask[:, t] = (batch_turn_ids == t).any(dim=1).float()
+            self._restore_adapter_trainability(["actor", "critic"])
+            self.actor.train()
 
-                vf_loss = (turn_ret - turn_pred).pow(2)
-                clipped_turn_values = turn_old + torch.clamp(
-                    turn_pred - turn_old, -self.clip_coef, self.clip_coef
-                )
-                clipped_vf_loss = (turn_ret - clipped_turn_values).pow(2)
-                vf_loss = (
-                    0.5
-                    * (torch.max(vf_loss, clipped_vf_loss) * turn_mask).sum()
-                    / turn_mask.sum().clamp(min=1)
-                    * self.vf_coef
-                )
+            for _epoch_idx in range(self.update_epochs):
+                self.rng.shuffle(batch_idxs)
+                for start in range(0, num_samples, batch_size):
+                    minibatch_idxs = batch_idxs[
+                        start : min((start + batch_size), num_samples)
+                    ]
+                    (
+                        batch_ids,
+                        batch_action_mask,
+                        batch_old_log_probs,
+                        batch_reference_log_probs,
+                        batch_returns,
+                        batch_advantages,
+                        batch_old_values,
+                        batch_turn_ids,
+                    ) = get_experiences_samples(
+                        minibatch_idxs,
+                        completion_ids,
+                        action_masks,
+                        old_log_probs,
+                        reference_log_probs,
+                        returns,
+                        advantages,
+                        old_values,
+                        turn_ids,
+                    )
 
-                total_loss = pg_loss + vf_loss
+                    batch_mask_bool = batch_action_mask.bool()
 
-                self._backward_pass(total_loss)
-                clear_fused_adapter_routing(self._get_unwrapped_actor())
+                    # Fused forward: actor logprobs + critic values in one pass.
+                    batch_log_probs, batch_values = self._fused_forward(
+                        batch_ids,
+                        batch_size=batch_size,
+                    )
+                    batch_log_probs = torch.masked_fill(
+                        batch_log_probs, ~batch_mask_bool, 1.0
+                    )
+                    kl = batch_log_probs - batch_reference_log_probs
+                    masked_entropy = masked_mean(
+                        -batch_log_probs.detach(), batch_action_mask
+                    )
+                    policy_ratio = torch.exp(
+                        batch_log_probs - batch_old_log_probs,
+                    )
+                    clipped_ratio = torch.clamp(
+                        policy_ratio,
+                        1 - self.clip_coef,
+                        1 + self.clip_coef,
+                    )
+                    pg_loss_unclipped = -batch_advantages * policy_ratio
+                    pg_loss_clipped = -batch_advantages * clipped_ratio
+                    pg_loss = masked_mean(
+                        torch.max(pg_loss_unclipped, pg_loss_clipped), batch_action_mask
+                    )
 
-                mean_kl += masked_mean(kl, batch_action_mask).item()
-                mean_entropy += masked_entropy.mean().item()
-                del masked_entropy
-                mean_pg_loss += pg_loss.mean().item()
-                mean_vf_loss += vf_loss.mean().item()
-                mean_loss += total_loss.item()
-                updates += 1
+                    # Turn-level value loss
+                    # Pool per-token critic values into one scalar per turn,
+                    # then compute clipped MSE against turn-level returns.
+                    batch_values = torch.masked_fill(
+                        batch_values, ~batch_mask_bool, 0.0
+                    )
+                    mb_num_turns = batch_turn_ids.max().item() + 1
+                    turn_pred = _pool_by_turns(batch_values, batch_turn_ids, mb_num_turns)
+                    turn_old = _pool_by_turns(batch_old_values, batch_turn_ids, mb_num_turns)
+                    turn_ret = _pool_by_turns(batch_returns, batch_turn_ids, mb_num_turns)
+
+                    # Mask: which (sample, turn) pairs actually exist in this batch.
+                    turn_mask = torch.zeros_like(turn_pred)
+                    for t in range(mb_num_turns):
+                        turn_mask[:, t] = (batch_turn_ids == t).any(dim=1).float()
+
+                    vf_loss = (turn_ret - turn_pred).pow(2)
+                    clipped_turn_values = turn_old + torch.clamp(
+                        turn_pred - turn_old, -self.clip_coef, self.clip_coef
+                    )
+                    clipped_vf_loss = (turn_ret - clipped_turn_values).pow(2)
+                    vf_loss = (
+                        0.5
+                        * (torch.max(vf_loss, clipped_vf_loss) * turn_mask).sum()
+                        / turn_mask.sum().clamp(min=1)
+                        * self.vf_coef
+                    )
+
+                    total_loss = pg_loss + vf_loss
+
+                    self._backward_pass(total_loss)
+                    clear_fused_adapter_routing(self._get_unwrapped_actor())
+
+                    mean_kl += masked_mean(kl, batch_action_mask).item()
+                    mean_entropy += masked_entropy.mean().item()
+                    mean_pg_loss += pg_loss.mean().item()
+                    mean_vf_loss += vf_loss.mean().item()
+                    mean_loss += total_loss.item()
+                    updates += 1
+
+            
 
         return (
             mean_loss / max(updates, 1),
@@ -579,12 +602,16 @@ class PPO(LLMAlgorithm):
             last_gae = (delta + self.gamma * self.gae_lambda * last_gae) * has_turn
             turn_advantages[:, t] = last_gae
 
+        del turn_rewards
+
         token_advantages = torch.zeros_like(values)
         token_returns = torch.zeros_like(values)
         for t in range(num_turns):
             mask_t = (turn_ids == t).float()
             token_advantages += mask_t * turn_advantages[:, t : t + 1]
             token_returns += mask_t * (turn_advantages[:, t : t + 1] + turn_values[:, t : t + 1])
+
+        del turn_values, turn_advantages
 
         token_advantages = masked_whiten(token_advantages, action_mask)
         return token_returns, token_advantages * action_mask
@@ -681,3 +708,36 @@ class PPO(LLMAlgorithm):
         if self.accelerator is not None:
             return self.accelerator.unwrap_model(self.actor)
         return self.actor
+
+
+
+    @contextmanager
+    def memory_efficient_params(self) -> None:
+        """Memory efficient params context manager.
+
+        :param agent: Distributed agent
+        :type agent: DistributedLLMAgent
+        :return: None
+        :rtype: None
+        """
+        # FIXME add in zero 3 compatibilitys
+        vllm_cfg = getattr(self, "vllm_config", None)
+        use_vllm = getattr(self, "use_vllm", False)
+        # Only offload params for vLLM colocate mode. If use_vllm is False,
+        # moving params to CPU between updates causes generate() device mismatches.
+        sleep_mode = use_vllm and vllm_cfg is not None and vllm_cfg.sleep_mode
+        if sleep_mode:
+            # Put LLM to sleep
+            self.llm.sleep(level=2)
+            unwrapped_model = (
+                self.accelerator.unwrap_model(self.actor)
+                if self.accelerator is not None
+                else self.actor
+            )
+            move_params_to_gpu(unwrapped_model, self.device)
+        yield
+        if sleep_mode:
+            move_params_to_cpu(unwrapped_model)
+            # Wake up LLM
+            self.llm.wake_up()
+            self._move_model_to_vllm()
