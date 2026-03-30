@@ -2002,14 +2002,25 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.pretrained_model_name_or_path = model_name
         elif hasattr(actor_network, "name_or_path"):
             self.pretrained_model_name_or_path = actor_network.name_or_path
-        elif hasattr(actor_network, "pretrained_model") and hasattr(actor_network.pretrained_model, "name_or_path"):
-            self.pretrained_model_name_or_path = actor_network.pretrained_model.name_or_path
-        elif hasattr(actor_network, "base_model") and hasattr(actor_network.base_model, "name_or_path"):
+        elif hasattr(actor_network, "pretrained_model") and hasattr(
+            actor_network.pretrained_model, "name_or_path"
+        ):
+            self.pretrained_model_name_or_path = (
+                actor_network.pretrained_model.name_or_path
+            )
+        elif hasattr(actor_network, "base_model") and hasattr(
+            actor_network.base_model, "name_or_path"
+        ):
             self.pretrained_model_name_or_path = actor_network.base_model.name_or_path
-        elif hasattr(actor_network, "base_model") and hasattr(actor_network.base_model, "pretrained_model"):
-            self.pretrained_model_name_or_path = actor_network.base_model.pretrained_model.name_or_path
+        elif hasattr(actor_network, "base_model") and hasattr(
+            actor_network.base_model, "pretrained_model"
+        ):
+            self.pretrained_model_name_or_path = (
+                actor_network.base_model.pretrained_model.name_or_path
+            )
         else:
-            raise ValueError("Actor network name or path not found.")
+            msg - "Actor network name or path not found."
+            raise ValueError(msg)
 
         self.model_config = model_config
 
@@ -2416,24 +2427,30 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             input_args["wrap"] = False
             input_args["clone"] = True
 
-            actor: PeftModelProtocol = cast(
-                "PeftModelProtocol",
-                (
-                    self.accelerator.unwrap_model(self.actor)
-                    if self.accelerator is not None
-                    else self.actor
-                ),
+            actor = (
+                self.accelerator.unwrap_model(self.actor)
+                if self.accelerator is not None
+                else self.actor
             )
 
-            actor_state_dict = None
-            if self.zero_stage is None or self.zero_stage < 2:
-                actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
-
-            cloned_model = clone_llm(
-                actor,
-                self.zero_stage,
-                state_dict=actor_state_dict,
-            )
+            if self.use_value_head:
+                inner_peft = actor.pretrained_model
+                inner_sd = None
+                if self.zero_stage is None or self.zero_stage < 2:
+                    inner_sd = clone_tensors_for_torch_save(inner_peft.state_dict())
+                cloned_inner = clone_llm(
+                    inner_peft, self.zero_stage, state_dict=inner_sd
+                )
+                cloned_model = type(actor)(cloned_inner)
+                cloned_model.v_head.load_state_dict(actor.v_head.state_dict())
+                cloned_model.is_peft_model = True
+            else:
+                actor_state_dict = None
+                if self.zero_stage is None or self.zero_stage < 2:
+                    actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
+                cloned_model = clone_llm(
+                    actor, self.zero_stage, state_dict=actor_state_dict
+                )
             input_args["actor_network"] = cloned_model
             input_args["accelerator"] = (
                 Accelerator() if self.accelerator is not None else None
@@ -2573,18 +2590,25 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     source_adapter="actor", target_adapter="reference"
                 )
             else:
-                if self.accelerator is not None:
-                    merged_base_model = self.accelerator.unwrap_model(
-                        self.actor,
-                    ).merge_and_unload()
-                else:
-                    merged_base_model = self.actor.merge_and_unload()
-                self.actor = None  # De-reference the old actor base model
-                self.actor = get_peft_model(
-                    merged_base_model,
-                    self.lora_config,
-                    adapter_name="actor",
+                unwrapped = (
+                    self.accelerator.unwrap_model(self.actor)
+                    if self.accelerator is not None
+                    else self.actor
                 )
+                if self.use_value_head:
+                    merged = unwrapped.pretrained_model.merge_and_unload()
+                    unwrapped.pretrained_model = get_peft_model(
+                        merged, self.lora_config, adapter_name="actor"
+                    )
+                    unwrapped.is_peft_model = True
+                else:
+                    merged_base_model = unwrapped.merge_and_unload()
+                    self.actor = None
+                    self.actor = get_peft_model(
+                        merged_base_model,
+                        self.lora_config,
+                        adapter_name="actor",
+                    )
                 if self.accelerator is not None:
                     self.accelerator.wait_for_everyone()
                 self.use_adapter("actor")
@@ -2627,27 +2651,58 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if "default" in list(base_model.peft_config.keys()):
                 base_model.peft_config.pop("default")
 
-        self.actor: PeftModelProtocol = (
-            get_peft_model(base_model, self.lora_config, adapter_name="actor")
-            if add_adapters
-            else base_model
-        )
-
-        if self.use_separate_reference_adapter and add_adapters:
-            self.actor.add_adapter(
-                adapter_name="reference",
-                peft_config=self.lora_config,  # type: ignore[arg-type]
+        if (
+            add_adapters
+            and self.use_value_head
+            and isinstance(
+                getattr(base_model, "pretrained_model", None), PeftModelProtocol
             )
+        ):
+            if self.lora_config is None:
+                inner = base_model.pretrained_model
+                adapter_name = list(inner.peft_config.keys())
+                self.lora_config = inner.peft_config[adapter_name[0]]
+            with gather_if_zero3(self.zero_stage, list(base_model.parameters())):
+                base_model.pretrained_model = (
+                    base_model.pretrained_model.merge_and_unload()
+                )
 
-        if self.use_value_head and add_adapters:
+        if add_adapters and self.use_value_head:
+            # Apply PEFT to the inner pretrained model so the value-head
+            # wrapper (AutoModelForCausalLMWithValueHead) stays on top
+            base_model.pretrained_model = get_peft_model(
+                base_model.pretrained_model,
+                self.lora_config,
+                adapter_name="actor",
+            )
+            base_model.is_peft_model = True
+            self.actor = base_model
+
+            peft_model = self.actor.pretrained_model
+            if self.use_separate_reference_adapter:
+                peft_model.add_adapter(
+                    adapter_name="reference",
+                    peft_config=self.lora_config,  # type: ignore[arg-type]
+                )
+
             import dataclasses
 
-            config = dataclasses.replace(self.lora_config)
-            config.target_modules.add("summary")
-            self.actor.add_adapter(
+            critic_config = dataclasses.replace(self.lora_config)
+            peft_model.add_adapter(
                 adapter_name="critic",
-                peft_config=config,  # type: ignore[arg-type]
+                peft_config=critic_config,  # type: ignore[arg-type]
             )
+        elif add_adapters:
+            self.actor: PeftModelProtocol = get_peft_model(
+                base_model, self.lora_config, adapter_name="actor"
+            )
+            if self.use_separate_reference_adapter:
+                self.actor.add_adapter(
+                    adapter_name="reference",
+                    peft_config=self.lora_config,  # type: ignore[arg-type]
+                )
+        else:
+            self.actor = base_model
 
         self.use_adapter("actor")
         patch_lora_for_fused_forward(self.actor)
@@ -2824,7 +2879,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         routing = ["actor"] * B + ["critic"] * B
 
         log_probs, values = self._fused_model_pass(
-            fused_ids, fused_mask, routing,
+            fused_ids,
+            fused_mask,
+            routing,
         )
         return log_probs[:B], values[B:]
 
@@ -2871,7 +2928,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 routing.extend([adapter] * B)
 
             log_probs, values = self._fused_model_pass(
-                fused_ids, fused_mask, routing, batch_size=batch_size,
+                fused_ids,
+                fused_mask,
+                routing,
+                batch_size=batch_size,
             )
             clear_fused_adapter_routing(self._get_unwrapped_actor())
 
@@ -2985,6 +3045,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.lr_scheduler.step()
                 self.lr = self.lr_scheduler.get_last_lr()[0]
 
+    @property
+    def _peft_model(self) -> Any:
+        """The PeftModel managing LoRA adapters.
+
+        When ``use_value_head=True`` the PeftModel lives inside the
+        value-head wrapper at ``self.actor.pretrained_model``.
+        Otherwise ``self.actor`` itself is the PeftModel.
+        """
+        if self.use_value_head:
+            return self.actor.pretrained_model
+        return self.actor
+
     def use_adapter(self, adapter_name: str) -> None:
         """Switch the active PEFT adapter, handling all side-effects.
 
@@ -2996,19 +3068,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param adapter_name: Name of the adapter to activate ("actor", "critic", "reference").
         :type adapter_name: str
         """
+        peft_model = self._peft_model
         if adapter_name == "reference":
             if self.use_separate_reference_adapter:
-                self.actor.set_adapter("reference")
+                peft_model.set_adapter("reference")
                 for name, param in self.actor.named_parameters():
                     if param is not None and "reference" in name:
                         param.requires_grad = False
             else:
-                self.actor.base_model.disable_adapter_layers()
+                peft_model.base_model.disable_adapter_layers()
         else:
             if self.use_separate_reference_adapter:
-                self.actor.set_adapter(adapter_name)
+                peft_model.set_adapter(adapter_name)
             else:
-                self.actor.base_model.enable_adapter_layers()
+                peft_model.base_model.enable_adapter_layers()
             self._restore_adapter_trainability(["actor", "critic"])
 
     @contextmanager
@@ -3060,9 +3133,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
         model_ref = self.accelerator.unwrap_model(self.actor)
-        model_ref.set_adapter("actor")
+        peft_ref = model_ref.pretrained_model if self.use_value_head else model_ref
+        peft_ref.set_adapter("actor")
         with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
-            model_ref.merge_adapter()
+            peft_ref.merge_adapter()
             for name, param in model_ref.named_parameters():
                 weight_name = name.removeprefix("base_model.model.").replace(
                     ".base_layer",
@@ -3071,7 +3145,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 # TRL value-head wrappers expose the underlying CausalLM as
                 # `pretrained_model.*`; vLLM expects raw model names.
                 weight_name = weight_name.removeprefix("pretrained_model.")
-                if model_ref.prefix in weight_name:
+                if peft_ref.prefix in weight_name:
                     continue
 
                 if "original_module" in weight_name:
@@ -3085,7 +3159,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
 
                 llm_model.load_weights([(weight_name, param.data)])
-            model_ref.unmerge_adapter()
+            peft_ref.unmerge_adapter()
 
         self.llm.reset_prefix_cache()
 
@@ -3246,9 +3320,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         B = logits.shape[0]
         if B <= _chunk_rows:
-            return F.log_softmax(logits, dim=-1).gather(
-                dim=-1, index=index.unsqueeze(-1)
-            ).squeeze(-1)
+            return (
+                F.log_softmax(logits, dim=-1)
+                .gather(dim=-1, index=index.unsqueeze(-1))
+                .squeeze(-1)
+            )
 
         per_token_logps = []
         for start in range(0, B, _chunk_rows):
@@ -3370,28 +3446,28 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: None
         :rtype: None
         """
-        base_model = self.accelerator.unwrap_model(self.actor)
-        if hasattr(base_model, "module"):
-            base_model = base_model.module
+        unwrapped = self.accelerator.unwrap_model(self.actor)
+        if hasattr(unwrapped, "module"):
+            unwrapped = unwrapped.module
+        peft_model = unwrapped.pretrained_model if self.use_value_head else unwrapped
 
         adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
         adapter_state = load_file(adapter_path, device="cpu")
 
         with gather_if_zero3(
             self.zero_stage,
-            list(base_model.parameters()),
+            list(unwrapped.parameters()),
             modifier_rank=0,
         ):
             with torch.no_grad():
                 set_peft_model_state_dict(
-                    base_model,
+                    peft_model,
                     adapter_state,
                     adapter_name=adapter_name,
                 )
-            base_model.set_adapter(adapter_name)
+            peft_model.set_adapter(adapter_name)
 
-            # Make reference weights not trainable
-            for name, param in base_model.named_parameters():
+            for name, param in unwrapped.named_parameters():
                 if "reference" in name:
                     param.requires_grad = False
                 elif "actor" in name or "critic" in name:
@@ -3525,10 +3601,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Synchronize max_grad_norm with DeepSpeed gradient_clipping config.
         Registered as a mutation hook to ensure consistency after mutations.
         """
-        if (
-            self.accelerator is None
-            or self.accelerator.state.deepspeed_plugin is None
-        ):
+        if self.accelerator is None or self.accelerator.state.deepspeed_plugin is None:
             return
 
         if (

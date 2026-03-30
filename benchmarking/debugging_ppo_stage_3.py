@@ -90,9 +90,7 @@ def evaluate_accuracy(
                     }
                     prompt_len = prompt_dict["input_ids"].shape[1]
 
-                    completion_ids, _ = agent.get_action(
-                        [prompt_dict], training=False
-                    )
+                    completion_ids, _ = agent.get_action([prompt_dict], training=False)
                     full_ids = completion_ids[0]
                     gen_tokens = full_ids[0, prompt_len:]
                     gen_text = tokenizer.decode(
@@ -110,7 +108,8 @@ def evaluate_accuracy(
                         break
 
                     feedback_ids = torch.tensor(
-                        [tokenizer.encode(next_obs)], dtype=torch.long,
+                        [tokenizer.encode(next_obs)],
+                        dtype=torch.long,
                         device=full_ids.device,
                     )
                     new_prompt_ids = torch.cat([full_ids, feedback_ids], dim=1)
@@ -152,7 +151,9 @@ def detailed_eval(
                     if start == target:
                         continue
                     env = GridNavigationEnv(
-                        grid_size=grid_size, max_turns=max_turns, seed=0,
+                        grid_size=grid_size,
+                        max_turns=max_turns,
+                        seed=0,
                     )
                     env.position = start
                     env.target = target
@@ -160,8 +161,11 @@ def detailed_eval(
 
                     obs = f"{start}{target}"
                     prompt_encoded = tokenizer(
-                        [obs], return_tensors="pt", padding=True,
-                        padding_side="left", return_attention_mask=True,
+                        [obs],
+                        return_tensors="pt",
+                        padding=True,
+                        padding_side="left",
+                        return_attention_mask=True,
                     )
 
                     actions: list[str] = []
@@ -173,17 +177,17 @@ def detailed_eval(
                         }
                         prompt_len = prompt_dict["input_ids"].shape[1]
                         completion_ids, _ = agent.get_action(
-                            [prompt_dict], training=False,
+                            [prompt_dict],
+                            training=False,
                         )
                         full_ids = completion_ids[0]
                         gen_tokens = full_ids[0, prompt_len:]
                         gen_text = tokenizer.decode(
-                            gen_tokens.tolist(), skip_special_tokens=True,
+                            gen_tokens.tolist(),
+                            skip_special_tokens=True,
                         )
                         raw_tok = gen_tokens[0].item() if len(gen_tokens) > 0 else -1
-                        actions.append(
-                            action_names.get(gen_text, f"?{raw_tok}")
-                        )
+                        actions.append(action_names.get(gen_text, f"?{raw_tok}"))
 
                         next_obs, reward, terminated, truncated, _ = env.step(
                             gen_text,
@@ -198,7 +202,8 @@ def detailed_eval(
                             device=full_ids.device,
                         )
                         new_prompt_ids = torch.cat(
-                            [full_ids, feedback_ids], dim=1,
+                            [full_ids, feedback_ids],
+                            dim=1,
                         )
                         prompt_encoded = {
                             "input_ids": new_prompt_ids,
@@ -284,8 +289,7 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
         llm_ppo, tokenizer, grid_size, max_turns, EVAL_EPISODES, greedy=True
     )
     print(
-        f"[seed={seed}] pre-train acc (sampled/greedy): "
-        f"{pre_acc:.3f}/{pre_acc_g:.3f}"
+        f"[seed={seed}] pre-train acc (sampled/greedy): {pre_acc:.3f}/{pre_acc_g:.3f}"
     )
     print("\nPre-training detailed eval:")
     detailed_eval(llm_ppo, tokenizer, grid_size, max_turns)

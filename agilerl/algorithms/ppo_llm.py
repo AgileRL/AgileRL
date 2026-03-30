@@ -313,7 +313,9 @@ class PPO(LLMAlgorithm):
                     for prompt in obs:
                         prompt.pop("text", None)
                         prompt["input_ids"] = prompt["input_ids"].to(actor_device)
-                        prompt["attention_mask"] = prompt["attention_mask"].to(actor_device)
+                        prompt["attention_mask"] = prompt["attention_mask"].to(
+                            actor_device
+                        )
                         completion_id = self.actor.generate(
                             **prompt,
                             generation_config=self.generation_config,
@@ -482,7 +484,9 @@ class PPO(LLMAlgorithm):
                 )
                 mb_num_turns = batch_turn_ids.max().item() + 1
                 turn_pred = _pool_by_turns(batch_values, batch_turn_ids, mb_num_turns)
-                turn_old = _pool_by_turns(batch_old_values, batch_turn_ids, mb_num_turns)
+                turn_old = _pool_by_turns(
+                    batch_old_values, batch_turn_ids, mb_num_turns
+                )
                 turn_ret = _pool_by_turns(batch_returns, batch_turn_ids, mb_num_turns)
 
                 # Mask: which (sample, turn) pairs actually exist in this batch.
@@ -572,9 +576,13 @@ class PPO(LLMAlgorithm):
                 next_turn_value = torch.zeros_like(turn_values[:, 0])
             else:
                 next_turn_value = turn_values[:, t + 1]
-            next_turn_value = torch.where(is_last_turn, torch.zeros_like(next_turn_value), next_turn_value)
+            next_turn_value = torch.where(
+                is_last_turn, torch.zeros_like(next_turn_value), next_turn_value
+            )
 
-            delta = turn_rewards[:, t] + self.gamma * next_turn_value - turn_values[:, t]
+            delta = (
+                turn_rewards[:, t] + self.gamma * next_turn_value - turn_values[:, t]
+            )
             has_turn = (per_sample_num_turns > t).float()
             last_gae = (delta + self.gamma * self.gae_lambda * last_gae) * has_turn
             turn_advantages[:, t] = last_gae
@@ -584,7 +592,9 @@ class PPO(LLMAlgorithm):
         for t in range(num_turns):
             mask_t = (turn_ids == t).float()
             token_advantages += mask_t * turn_advantages[:, t : t + 1]
-            token_returns += mask_t * (turn_advantages[:, t : t + 1] + turn_values[:, t : t + 1])
+            token_returns += mask_t * (
+                turn_advantages[:, t : t + 1] + turn_values[:, t : t + 1]
+            )
 
         token_advantages = masked_whiten(token_advantages, action_mask)
         return token_returns, token_advantages * action_mask
