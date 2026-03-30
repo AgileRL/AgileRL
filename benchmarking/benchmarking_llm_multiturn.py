@@ -112,6 +112,7 @@ def main(init_hp, mut_p):
         mutation=None,
         tournament=None,
         evaluation_interval=10,
+        max_reward=1.0,
         verbose=True,
         accelerator=accelerator,
         apply_chat_template=apply_chat_template,
