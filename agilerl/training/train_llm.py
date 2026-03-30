@@ -921,9 +921,7 @@ def finetune_llm_multiturn(
                     }
                     prompt_len = prompt_dict["input_ids"].shape[1]
 
-                    completion_ids, _ = agent.get_action(
-                        [prompt_dict], training=True
-                    )
+                    completion_ids, _ = agent.get_action([prompt_dict], training=True)
                     full_ids = completion_ids[0]
 
                     gen_start = prompt_len
@@ -932,11 +930,12 @@ def finetune_llm_multiturn(
 
                     gen_tokens = full_ids[0, gen_start:]
                     gen_text = tokenizer.decode(
-                        gen_tokens.tolist(), skip_special_tokens=True,
+                        gen_tokens.tolist(),
+                        skip_special_tokens=True,
                     )
 
-                    next_obs, reward, terminated, truncated, step_info = (
-                        env.step(gen_text)
+                    next_obs, reward, terminated, truncated, step_info = env.step(
+                        gen_text
                     )
                     turn_rewards.append(float(reward))
 
@@ -952,9 +951,7 @@ def finetune_llm_multiturn(
                         dtype=torch.long,
                         device=full_ids.device,
                     )
-                    new_prompt_ids = torch.cat(
-                        [full_ids, feedback_ids], dim=1
-                    )
+                    new_prompt_ids = torch.cat([full_ids, feedback_ids], dim=1)
                     prompt_encoded = {
                         "input_ids": new_prompt_ids,
                         "attention_mask": torch.ones_like(new_prompt_ids),
@@ -962,12 +959,8 @@ def finetune_llm_multiturn(
 
                 assert full_ids is not None
                 seq_len = full_ids.shape[1]
-                action_mask = torch.zeros(
-                    1, seq_len - 1, dtype=torch.bool
-                )
-                turn_ids = torch.full(
-                    (1, seq_len - 1), -1, dtype=torch.long
-                )
+                action_mask = torch.zeros(1, seq_len - 1, dtype=torch.bool)
+                turn_ids = torch.full((1, seq_len - 1), -1, dtype=torch.long)
 
                 for gen_start, gen_end, tidx in turn_boundaries:
                     mask_start = gen_start - 1
@@ -988,12 +981,11 @@ def finetune_llm_multiturn(
                 completion_ids_list.append(full_ids)
                 action_masks_list.append(action_mask)
                 all_turn_ids.append(turn_ids)
-                all_rewards.append(
-                    torch.tensor(turn_rewards, dtype=torch.float)
-                )
+                all_rewards.append(torch.tensor(turn_rewards, dtype=torch.float))
 
             (turn_ids_padded,) = stack_and_pad_experiences(
-                all_turn_ids, padding_values=[-1],
+                all_turn_ids,
+                padding_values=[-1],
             )
             rewards_2d = torch.stack(all_rewards)
 
@@ -1018,7 +1010,9 @@ def finetune_llm_multiturn(
                 torch.tensor(loss, dtype=torch.float32, device=agent.device),
                 torch.tensor(kl, dtype=torch.float32, device=agent.device),
                 mean_score,
-                torch.tensor(completion_lengths, dtype=torch.float32, device=agent.device),
+                torch.tensor(
+                    completion_lengths, dtype=torch.float32, device=agent.device
+                ),
                 accuracy,
             ]
             agg_metrics = [
@@ -1213,7 +1207,9 @@ def finetune_llm_multiturn(
             ]
             if any(s is not None for s in last_eval_scores):
                 wandb_dict |= {
-                    "Eval/Best score": np.max([s for s in last_eval_scores if s is not None]),
+                    "Eval/Best score": np.max(
+                        [s for s in last_eval_scores if s is not None]
+                    ),
                     "Eval/Mean population score": np.mean(
                         [s for s in last_eval_scores if s is not None],
                     ),

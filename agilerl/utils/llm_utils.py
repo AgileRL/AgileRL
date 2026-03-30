@@ -822,13 +822,13 @@ def create_llm_accelerator(
         return None
 
     if num_gpus == 1 and zero_stage is None:
-        logger.info(
-            "Single GPU detected — using plain Accelerator (no DeepSpeed)."
-        )
+        logger.info("Single GPU detected — using plain Accelerator (no DeepSpeed).")
         return Accelerator(mixed_precision=mixed_precision)
 
-    stage = zero_stage if zero_stage is not None else _auto_zero_stage(
-        num_gpus, model_size_gb
+    stage = (
+        zero_stage
+        if zero_stage is not None
+        else _auto_zero_stage(num_gpus, model_size_gb)
     )
     logger.info(
         "Creating Accelerator with DeepSpeed ZeRO-%d for %d GPU(s).", stage, num_gpus

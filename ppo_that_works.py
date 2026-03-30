@@ -4,14 +4,12 @@ import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
-from typing import Literal, Optional
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 import tyro
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
@@ -20,6 +18,7 @@ from datasets import Dataset, load_dataset
 from huggingface_hub import HfApi
 from rich.console import Console
 from rich.pretty import pprint
+from torch import nn, optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -60,7 +59,7 @@ class Args:
     """seed of the experiment"""
     cuda: bool = True
     """Whether to use cuda if available."""
-    run_name: Optional[str] = None
+    run_name: str | None = None
     """a unique name of this run"""
     load_from_cache_file: bool = False
     """Whether to load data from the local cache file in `dataset.map`"""
@@ -84,29 +83,29 @@ class Args:
     """Number of warm up steps for the scheduler"""
 
     # various batch sizes
-    world_size: Optional[int] = None
+    world_size: int | None = None
     """The number of processes (GPUs) to use"""
     num_train_epochs: int = 1
     """Number of epochs to train"""
-    num_updates: Optional[int] = None
+    num_updates: int | None = None
     """The number of updates to train"""
     gradient_accumulation_steps: int = 64
     """The number of gradient accumulation steps"""
-    local_micro_batch_size: Optional[int] = 1
+    local_micro_batch_size: int | None = 1
     """The micro batch size per GPU (HF's `per_device_train_batch_size`)"""
-    total_episodes: Optional[int] = 1000000
+    total_episodes: int | None = 1000000
     """The total number of episodes in the dataset"""
-    micro_batch_size: Optional[int] = None
+    micro_batch_size: int | None = None
     """The micro batch size across devices (HF's `per_device_train_batch_size` * `world_size`)"""
-    local_batch_size: Optional[int] = None
+    local_batch_size: int | None = None
     """The batch size per GPU (HF's `per_device_train_batch_size` * `gradient_accumulation_steps`)"""
-    batch_size: Optional[int] = None
+    batch_size: int | None = None
     """The batch size across devices (HF's `per_device_train_batch_size` * `world_size` * `gradient_accumulation_steps`)"""
     nminibatches: int = 1
     """Number of minibatches to split a batch into"""
-    local_mini_batch_size: Optional[int] = None
+    local_mini_batch_size: int | None = None
     """the mini batch size per GPU"""
-    mini_batch_size: Optional[int] = None
+    mini_batch_size: int | None = None
     """the mini batch size across GPUs"""
     local_eval_batch_size: int = 2
     """per rank eval batch size"""
@@ -116,13 +115,15 @@ class Args:
     # other args
     base_model: str = "EleutherAI/pythia-160m"
     """the name of the pretrained model to use"""
-    query_dataset: str = "vwxyzjn/summarize_from_feedback_tldr_3_filtered_oai_preprocessing_1706381144"
+    query_dataset: str = (
+        "vwxyzjn/summarize_from_feedback_tldr_3_filtered_oai_preprocessing_1706381144"
+    )
     """the query dataset"""
     response_length: int = 53
     """the length of the response"""
     truncate_token: Literal["eos"] = "eos"
     """the truncate token"""
-    truncate_token_id: Optional[int] = None
+    truncate_token_id: int | None = None
     """the truncation token id"""
     temperature: float = 0.7
     """the sampling temperature"""
@@ -142,17 +143,17 @@ class Args:
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "tldr_summarize"
     """the wandb's project name"""
-    wandb_entity: Optional[str] = None
+    wandb_entity: str | None = None
     """the entity (team) of wandb's project"""
     push_to_hub: bool = False
     """whether to upload the saved model to huggingface"""
-    hf_entity: Optional[str] = None
+    hf_entity: str | None = None
     """the user or org name of the model repository from the Hugging Face Hub"""
-    hf_repo_id: Optional[str] = None
+    hf_repo_id: str | None = None
     """the id of the saved model in the Hugging Face Hub (can be autoset if not given)"""
-    hf_repo_revision: Optional[str] = None
+    hf_repo_revision: str | None = None
     """the revision of the saved model in the Hugging Face Hub (can be autoset if not given)"""
-    hf_repo_url: Optional[str] = None
+    hf_repo_url: str | None = None
     """the url of the saved model in the Hugging Face Hub (will be autoset)"""
     output_dir: str = "models/ppo_model"
     """Where to save the model"""
@@ -161,33 +162,45 @@ class Args:
 
 def parse_args() -> tuple[Args, Accelerator]:
     args = tyro.cli(Args)
-    accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps)
+    accelerator = Accelerator(
+        gradient_accumulation_steps=args.gradient_accumulation_steps
+    )
     args.world_size = accelerator.num_processes
-    args.local_batch_size = args.local_micro_batch_size * args.gradient_accumulation_steps * args.nminibatches
+    args.local_batch_size = (
+        args.local_micro_batch_size
+        * args.gradient_accumulation_steps
+        * args.nminibatches
+    )
     args.micro_batch_size = int(args.local_micro_batch_size * args.world_size)
     args.batch_size = int(args.local_batch_size * args.world_size)
     args.mini_batch_size = exact_div(args.batch_size, args.nminibatches)
     args.local_mini_batch_size = exact_div(args.local_batch_size, args.nminibatches)
     if args.ppo.whiten_rewards:
-        assert (
-            args.local_mini_batch_size >= 8
-        ), f"Per-rank minibatch size {args.local_mini_batch_size} is insufficient for whitening"
+        assert args.local_mini_batch_size >= 8, (
+            f"Per-rank minibatch size {args.local_mini_batch_size} is insufficient for whitening"
+        )
     # `per_rank_rollout_batch_size` is our `args.local_batch_size`
     # `per_rank_minibatch_size` is our `args.local_mini_batch_size`
     args.num_updates = args.total_episodes // args.batch_size
     time_tensor = torch.tensor(int(time.time()), device=accelerator.device)
-    time_int = broadcast(time_tensor, 0).item()  # avoid different timestamps across processes
+    time_int = broadcast(
+        time_tensor, 0
+    ).item()  # avoid different timestamps across processes
     args.run_name = f"{args.exp_name}__{args.seed}__{time_int}"
     if args.push_to_hub:
-        if args.hf_repo_id is None: # auto-generate one
-            args.hf_repo_id = f"{args.base_model.replace('/', '_')}__{args.exp_name}__tldr"
+        if args.hf_repo_id is None:  # auto-generate one
+            args.hf_repo_id = (
+                f"{args.base_model.replace('/', '_')}__{args.exp_name}__tldr"
+            )
         if args.hf_entity is None:  # find the current user
             args.hf_entity = api.whoami()["name"]
-        if "/" not in args.hf_repo_id: # prepend the current user
+        if "/" not in args.hf_repo_id:  # prepend the current user
             args.hf_repo_id = f"{args.hf_entity}/{args.hf_repo_id}"
         if args.hf_repo_revision is None:  # auto-generate one
             args.hf_repo_revision = args.run_name
-        args.hf_repo_url = f"https://huggingface.co/{args.hf_repo_id}/tree/{args.hf_repo_revision}"
+        args.hf_repo_url = (
+            f"https://huggingface.co/{args.hf_repo_id}/tree/{args.hf_repo_revision}"
+        )
     return args, accelerator
 
 
@@ -209,8 +222,7 @@ def masked_mean(values, mask, axis=None):
     """Compute mean of tensor with a masked values."""
     if axis is not None:
         return (values * mask).sum(axis=axis) / mask.sum(axis=axis)
-    else:
-        return (values * mask).sum() / mask.sum()
+    return (values * mask).sum() / mask.sum()
 
 
 def masked_var(values, mask, unbiased=True):
@@ -245,7 +257,9 @@ class ScalarModelConfig(PretrainedConfig):
     def __init__(
         self,
         base_model: str = "EleutherAI/pythia-160m",
-        base_config: PretrainedConfig = AutoConfig.from_pretrained("EleutherAI/pythia-160m"),
+        base_config: PretrainedConfig = AutoConfig.from_pretrained(
+            "EleutherAI/pythia-160m"
+        ),
         hidden_size: int = 768,
         bias: float = 0.0,
         **kwargs,
@@ -290,11 +304,20 @@ def get_reward(model, query_responses, tokenizer, context_length):
         return_dict=True,
         output_hidden_states=True,
     )
-    sequence_lengths = first_true_indices(query_responses[:, context_length:] == tokenizer.pad_token_id) - 1 + context_length
+    sequence_lengths = (
+        first_true_indices(
+            query_responses[:, context_length:] == tokenizer.pad_token_id
+        )
+        - 1
+        + context_length
+    )
     # https://github.com/huggingface/transformers/blob/dc68a39c8111217683bf49a4912d0c9018bab33d/src/transformers/models/gpt2/modeling_gpt2.py#L1454
     return (
         reward_logits,
-        reward_logits[torch.arange(reward_logits.size(0), device=reward_logits.device), sequence_lengths].squeeze(-1),
+        reward_logits[
+            torch.arange(reward_logits.size(0), device=reward_logits.device),
+            sequence_lengths,
+        ].squeeze(-1),
         sequence_lengths,
     )
 
@@ -319,7 +342,7 @@ def exact_div(a, b):
 
 
 def generate(lm_backbone, queries, tokenizer, generation_config):
-    """generate in a way that does not affect padding tokens"""
+    """Generate in a way that does not affect padding tokens"""
     context_length = queries.shape[1]
     attention_mask = queries != tokenizer.pad_token_id
     input_ids = torch.masked_fill(queries, ~attention_mask, 0)
@@ -329,21 +352,22 @@ def generate(lm_backbone, queries, tokenizer, generation_config):
         # position_ids=attention_mask.cumsum(1) - attention_mask.long(), # generation collapsed if this was turned on. TODO: why does generation collapse with this?
         generation_config=generation_config,
         return_dict_in_generate=True,
-        output_scores=True
+        output_scores=True,
     )
     logits = torch.stack(output.scores, 1)
     return torch.cat((queries, output.sequences[:, context_length:]), dim=1), logits
 
 
 def first_true_indices(bools, dtype=torch.long):
-    """
-    Takes an N-dimensional bool tensor and returns an (N-1)-dimensional tensor of integers giving
+    """Takes an N-dimensional bool tensor and returns an (N-1)-dimensional tensor of integers giving
     the position of the first True in each "row".
 
     Returns the length of the rows (bools.size(-1)) if no element is True in a given row.
     """
     row_len = bools.size(-1)
-    zero_or_index = row_len * (~bools).type(dtype) + torch.arange(row_len, dtype=dtype, device=bools.device)
+    zero_or_index = row_len * (~bools).type(dtype) + torch.arange(
+        row_len, dtype=dtype, device=bools.device
+    )
     return torch.min(zero_or_index, dim=-1).values
 
 
@@ -351,7 +375,9 @@ def truncate_response(args, tokenizer, responses):
     trunc_idxs = first_true_indices(responses == args.truncate_token_id).unsqueeze(-1)
     new_size = [1] * (len(responses.size()) - 1) + [responses.shape[1]]
     idxs = torch.arange(responses.shape[1], device=responses.device).view(*new_size)
-    postprocessed_responses = torch.masked_fill(responses, idxs > trunc_idxs, tokenizer.pad_token_id)
+    postprocessed_responses = torch.masked_fill(
+        responses, idxs > trunc_idxs, tokenizer.pad_token_id
+    )
     return postprocessed_responses
 
 
@@ -368,15 +394,21 @@ def forward(model, query_responses, tokenizer):
     )
 
 
-def evaluate(reward_model, policy, tokenizer, dataloader, generation_config, sampling=True):
+def evaluate(
+    reward_model, policy, tokenizer, dataloader, generation_config, sampling=True
+):
     eval_storage = defaultdict(list)
     with torch.no_grad():
         for data in tqdm(dataloader):
             queries = data["query_token"]
             reference_response_token = data["reference_response_token"]
             context_length = queries.shape[1]
-            query_reference_responses = torch.cat((data["query_token"], data["reference_response_token"]), dim=1)
-            _, reference_score, _ = get_reward(reward_model, query_reference_responses, tokenizer, queries.shape[1])
+            query_reference_responses = torch.cat(
+                (data["query_token"], data["reference_response_token"]), dim=1
+            )
+            _, reference_score, _ = get_reward(
+                reward_model, query_reference_responses, tokenizer, queries.shape[1]
+            )
 
             query_responses, _ = generate(
                 policy,
@@ -386,8 +418,12 @@ def evaluate(reward_model, policy, tokenizer, dataloader, generation_config, sam
             )
             responses = query_responses[:, context_length:]
             postprocessed_responses = truncate_response(args, tokenizer, responses)
-            postprocessed_query_responses = torch.cat((queries, postprocessed_responses), 1)
-            _, score, _ = get_reward(reward_model, postprocessed_query_responses, tokenizer, queries.shape[1])
+            postprocessed_query_responses = torch.cat(
+                (queries, postprocessed_responses), 1
+            )
+            _, score, _ = get_reward(
+                reward_model, postprocessed_query_responses, tokenizer, queries.shape[1]
+            )
 
             eval_storage["query_token"].extend(queries)
             eval_storage["reference_response_token"].extend(reference_response_token)
@@ -397,17 +433,25 @@ def evaluate(reward_model, policy, tokenizer, dataloader, generation_config, sam
             if sampling:
                 break
 
-    eval_storage["query"] = tokenizer.batch_decode(eval_storage["query_token"], skip_special_tokens=True)
-    eval_storage["reference_response"] = tokenizer.batch_decode(eval_storage["reference_response_token"])
+    eval_storage["query"] = tokenizer.batch_decode(
+        eval_storage["query_token"], skip_special_tokens=True
+    )
+    eval_storage["reference_response"] = tokenizer.batch_decode(
+        eval_storage["reference_response_token"]
+    )
     eval_storage["postprocessed_response"] = tokenizer.batch_decode(
         eval_storage["postprocessed_response_token"], skip_special_tokens=True
     )
     eval_score = torch.cat(eval_storage["score"]).float().cpu().numpy().tolist()
-    eval_reference_score = torch.cat(eval_storage["reference_score"]).float().cpu().numpy().tolist()
+    eval_reference_score = (
+        torch.cat(eval_storage["reference_score"]).float().cpu().numpy().tolist()
+    )
     eval_df = pd.DataFrame(
         {
             "query": gather_object(eval_storage["query"]),
-            "postprocessed_response": gather_object(eval_storage["postprocessed_response"]),
+            "postprocessed_response": gather_object(
+                eval_storage["postprocessed_response"]
+            ),
             "reference_responses": gather_object(eval_storage["reference_response"]),
             "scores": gather_object(eval_score),
             "reference_scores": gather_object(eval_reference_score),
@@ -422,13 +466,19 @@ if __name__ == "__main__":
 
     # load dataset
     dataset = load_dataset(args.query_dataset, split="train")
-    dataset = dataset.with_format("torch", columns=["query_token", "reference_response_token"])
+    dataset = dataset.with_format(
+        "torch", columns=["query_token", "reference_response_token"]
+    )
     dataloader = DataLoader(dataset, batch_size=args.local_batch_size, shuffle=True)
     eval_dataloaders = {}
     for split in ["validation", "test"]:
         eval_dataset = load_dataset(args.query_dataset, split=split)
-        eval_dataset = eval_dataset.with_format("torch", columns=["query_token", "reference_response_token"])
-        eval_dataloaders[split] = DataLoader(eval_dataset, batch_size=args.local_eval_batch_size)
+        eval_dataset = eval_dataset.with_format(
+            "torch", columns=["query_token", "reference_response_token"]
+        )
+        eval_dataloaders[split] = DataLoader(
+            eval_dataset, batch_size=args.local_eval_batch_size
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(
         args.base_model,
@@ -457,11 +507,17 @@ if __name__ == "__main__":
                 save_code=True,
             )
             file_extensions = [".toml", ".lock", ".py", ".sh", ".yaml"]
-            wandb.run.log_code(".", include_fn=lambda path: any([path.endswith(ext) for ext in file_extensions]))
+            wandb.run.log_code(
+                ".",
+                include_fn=lambda path: any(
+                    [path.endswith(ext) for ext in file_extensions]
+                ),
+            )
         writer = SummaryWriter(f"runs/{args.run_name}")
         writer.add_text(
             "hyperparameters",
-            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+            "|param|value|\n|-|-|\n%s"
+            % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
         )
         pprint(args)
     device = accelerator.device
@@ -487,12 +543,20 @@ if __name__ == "__main__":
             args.reward_model_path,
             trust_remote_code=True,
         )
-    ref_policy = AutoModelForCausalLM.from_pretrained(args.sft_model_path, config=model_config, trust_remote_code=True)
-    policy = AutoModelForCausalLM.from_pretrained(args.sft_model_path, config=model_config, trust_remote_code=True)
+    ref_policy = AutoModelForCausalLM.from_pretrained(
+        args.sft_model_path, config=model_config, trust_remote_code=True
+    )
+    policy = AutoModelForCausalLM.from_pretrained(
+        args.sft_model_path, config=model_config, trust_remote_code=True
+    )
     for module in [policy, ref_policy, critic, reward_model]:
         disable_dropout(module)
-    policy.generation_config.eos_token_id = None  # disable `pad_token_id` and `eos_token_id` because we just want to
-    policy.generation_config.pad_token_id = None  # generate tokens without truncation / padding
+    policy.generation_config.eos_token_id = (
+        None  # disable `pad_token_id` and `eos_token_id` because we just want to
+    )
+    policy.generation_config.pad_token_id = (
+        None  # generate tokens without truncation / padding
+    )
     model = PolicyAndValueWrapper(policy, critic)
     if args.optimizer == "adam":
         optimizer = optim.Adam(model.parameters(), lr=args.lr, eps=args.eps)
@@ -503,7 +567,10 @@ if __name__ == "__main__":
     # see https://gist.github.com/vwxyzjn/2581bff1e48e185e0b85b6dfe1def79c
     torch.manual_seed(args.seed)
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
-    eval_dataloaders = {split: accelerator.prepare(eval_dataloader) for split, eval_dataloader in eval_dataloaders.items()}
+    eval_dataloaders = {
+        split: accelerator.prepare(eval_dataloader)
+        for split, eval_dataloader in eval_dataloaders.items()
+    }
     torch.manual_seed(local_seed)  # reset the local seed again
 
     def repeat_generator():
@@ -515,23 +582,31 @@ if __name__ == "__main__":
         import deepspeed
 
         deepspeed_states = AcceleratorState().deepspeed_plugin
-        deepspeed_states.deepspeed_config["train_micro_batch_size_per_gpu"] = args.local_micro_batch_size
+        deepspeed_states.deepspeed_config["train_micro_batch_size_per_gpu"] = (
+            args.local_micro_batch_size
+        )
 
         eval_ds_config = {
-            "train_micro_batch_size_per_gpu": deepspeed_states.deepspeed_config["train_micro_batch_size_per_gpu"],
+            "train_micro_batch_size_per_gpu": deepspeed_states.deepspeed_config[
+                "train_micro_batch_size_per_gpu"
+            ],
             "bf16": {"enabled": True},
             "prescale_gradients": False,
             "wall_clock_breakdown": False,
         }
         if args.offload or args.base_model == "EleutherAI/pythia-6.9b-deduped":
-            deepspeed_states.deepspeed_config["checkpoint"] = {"use_node_local_storage": True}
+            deepspeed_states.deepspeed_config["checkpoint"] = {
+                "use_node_local_storage": True
+            }
             eval_ds_config["zero_optimization"] = {
                 "stage": 3,
                 "stage3_param_persistence_threshold": 1e4,
                 "offload_param": {"device": "cpu"},
             }
         accelerator.print(f"{eval_ds_config=}")
-        reward_model, *_ = deepspeed.initialize(model=reward_model, config=eval_ds_config)
+        reward_model, *_ = deepspeed.initialize(
+            model=reward_model, config=eval_ds_config
+        )
         reward_model.eval()
         ref_policy, *_ = deepspeed.initialize(model=ref_policy, config=eval_ds_config)
         ref_policy.eval()
@@ -561,7 +636,11 @@ if __name__ == "__main__":
     global_step = 0
     start_time = time.time()
     eval_split = list(eval_dataloaders.keys())[0]
-    stats_shape = (args.ppo.noptepochs, args.nminibatches, args.gradient_accumulation_steps)
+    stats_shape = (
+        args.ppo.noptepochs,
+        args.nminibatches,
+        args.gradient_accumulation_steps,
+    )
     approxkl_stats = torch.zeros(stats_shape, device=device)
     pg_clipfrac_stats = torch.zeros(stats_shape, device=device)
     pg_loss_stats = torch.zeros(stats_shape, device=device)
@@ -585,12 +664,24 @@ if __name__ == "__main__":
                 validation_generation_config,
             )
             validation_score = eval_storage["score"][0]
-            if args.print_sample_output_freq > 0 and (update - 1) % args.print_sample_output_freq == 0:
+            if (
+                args.print_sample_output_freq > 0
+                and (update - 1) % args.print_sample_output_freq == 0
+            ):
                 if accelerator.is_main_process:
                     eval_ds = Dataset.from_pandas(eval_df)
-                    eval_ds.save_to_disk(f"runs/{args.run_name}/{eval_split}_dataset_{global_step}")
+                    eval_ds.save_to_disk(
+                        f"runs/{args.run_name}/{eval_split}_dataset_{global_step}"
+                    )
                     if args.track:
-                        wandb.log({f"samples/{eval_split}_query_responses": wandb.Table(dataframe=eval_df)}, step=update)
+                        wandb.log(
+                            {
+                                f"samples/{eval_split}_query_responses": wandb.Table(
+                                    dataframe=eval_df
+                                )
+                            },
+                            step=update,
+                        )
             del eval_storage, eval_df
             torch.cuda.empty_cache()
 
@@ -616,7 +707,9 @@ if __name__ == "__main__":
 
                 # use the logits during generation directly, instead of using the following
                 all_logprob = F.log_softmax(logits, dim=-1)
-                logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(-1)
+                logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(
+                    -1
+                )
                 del logits, all_logprob
                 torch.cuda.empty_cache()
 
@@ -624,7 +717,9 @@ if __name__ == "__main__":
                 ref_logits = ref_output.logits[:, context_length - 1 : -1]
                 ref_logits /= args.temperature + 1e-7
                 ref_all_logprob = F.log_softmax(ref_logits, dim=-1)
-                ref_logprob = torch.gather(ref_all_logprob, 2, response.unsqueeze(-1)).squeeze(-1)
+                ref_logprob = torch.gather(
+                    ref_all_logprob, 2, response.unsqueeze(-1)
+                ).squeeze(-1)
                 del ref_output, ref_logits, ref_all_logprob
                 torch.cuda.empty_cache()
 
@@ -632,13 +727,26 @@ if __name__ == "__main__":
                 postprocessed_response = truncate_response(args, tokenizer, response)
 
                 # Response Processing 2. run reward model on the truncated responses
-                postprocessed_query_response = torch.cat((query, postprocessed_response), 1)
-                sequence_length = first_true_indices(postprocessed_response == tokenizer.pad_token_id) - 1
+                postprocessed_query_response = torch.cat(
+                    (query, postprocessed_response), 1
+                )
+                sequence_length = (
+                    first_true_indices(postprocessed_response == tokenizer.pad_token_id)
+                    - 1
+                )
                 full_value, _, _ = get_reward(
-                    accelerator.unwrap_model(model).critic, query_response, tokenizer, context_length
+                    accelerator.unwrap_model(model).critic,
+                    query_response,
+                    tokenizer,
+                    context_length,
                 )
                 value = full_value[:, context_length - 1 : -1].squeeze(-1)
-                _, score, _ = get_reward(reward_model, postprocessed_query_response, tokenizer, context_length)
+                _, score, _ = get_reward(
+                    reward_model,
+                    postprocessed_query_response,
+                    tokenizer,
+                    context_length,
+                )
 
                 query_responses.append(query_response)
                 responses.append(response)
@@ -662,18 +770,30 @@ if __name__ == "__main__":
             # Response Processing 3. filter response. Ensure that the sample contains truncate_token_id
             # responses not passing that filter will receive a low (fixed) score
             # only query humans on responses that pass that filter
-            contain_eos_token = torch.any(postprocessed_responses == tokenizer.eos_token_id, dim=-1)
+            contain_eos_token = torch.any(
+                postprocessed_responses == tokenizer.eos_token_id, dim=-1
+            )
             if args.non_eos_penalty:
-                scores = torch.where(contain_eos_token, scores, torch.full_like(scores, args.penalty_reward_value))
-            accelerator.print(f"{scores=}, {(contain_eos_token.sum() / len(contain_eos_token))=}")
+                scores = torch.where(
+                    contain_eos_token,
+                    scores,
+                    torch.full_like(scores, args.penalty_reward_value),
+                )
+            accelerator.print(
+                f"{scores=}, {(contain_eos_token.sum() / len(contain_eos_token))=}"
+            )
 
             # be very careful with `padding_mask_p1`; see https://excalidraw.com/#json=LWnzG4w2k5DjF_EOL_xPt,e2w3a-hFJ_gX5vOfeyXGTw
             sequence_lengths_p1 = sequence_lengths + 1
-            response_idxs = torch.arange(responses.shape[1], device=responses.device).repeat(responses.shape[0], 1)
+            response_idxs = torch.arange(
+                responses.shape[1], device=responses.device
+            ).repeat(responses.shape[0], 1)
             padding_mask = response_idxs > sequence_lengths.unsqueeze(1)
             padding_mask_p1 = response_idxs > (sequence_lengths_p1.unsqueeze(1))
             logprobs = torch.masked_fill(logprobs, padding_mask, INVALID_LOGPROB)
-            ref_logprobs = torch.masked_fill(ref_logprobs, padding_mask, INVALID_LOGPROB)
+            ref_logprobs = torch.masked_fill(
+                ref_logprobs, padding_mask, INVALID_LOGPROB
+            )
             values = torch.masked_fill(values, padding_mask_p1, 0)
 
             # 4. compute rewards
@@ -681,12 +801,18 @@ if __name__ == "__main__":
             non_score_reward = -args.ppo.kl_coef * kl
             rewards = non_score_reward.clone()
             actual_start = torch.arange(rewards.size(0), device=rewards.device)
-            actual_end = torch.where(sequence_lengths_p1 < rewards.size(1), sequence_lengths_p1, sequence_lengths)
+            actual_end = torch.where(
+                sequence_lengths_p1 < rewards.size(1),
+                sequence_lengths_p1,
+                sequence_lengths,
+            )
             rewards[[actual_start, actual_end]] += scores
 
             # 5. whiten rewards
             if args.ppo.whiten_rewards:
-                rewards = masked_whiten(rewards, mask=~padding_mask_p1, shift_mean=False)
+                rewards = masked_whiten(
+                    rewards, mask=~padding_mask_p1, shift_mean=False
+                )
                 rewards = torch.masked_fill(rewards, padding_mask_p1, 0)
 
             # 6. compute advantages and returns
@@ -713,14 +839,22 @@ if __name__ == "__main__":
         for ppo_epoch_idx in range(args.ppo.noptepochs):
             b_inds = np.random.permutation(args.local_batch_size)
             minibatch_idx = 0
-            for mini_batch_start in range(0, args.local_batch_size, args.local_mini_batch_size):
+            for mini_batch_start in range(
+                0, args.local_batch_size, args.local_mini_batch_size
+            ):
                 mini_batch_end = mini_batch_start + args.local_mini_batch_size
                 mini_batch_inds = b_inds[mini_batch_start:mini_batch_end]
                 gradient_accumulation_idx = 0
-                for micro_batch_start in range(0, args.local_mini_batch_size, args.local_micro_batch_size):
+                for micro_batch_start in range(
+                    0, args.local_mini_batch_size, args.local_micro_batch_size
+                ):
                     with accelerator.accumulate(policy):
-                        micro_batch_end = micro_batch_start + args.local_micro_batch_size
-                        micro_batch_inds = mini_batch_inds[micro_batch_start:micro_batch_end]
+                        micro_batch_end = (
+                            micro_batch_start + args.local_micro_batch_size
+                        )
+                        micro_batch_inds = mini_batch_inds[
+                            micro_batch_start:micro_batch_end
+                        ]
                         mb_return = returns[micro_batch_inds]
                         mb_advantage = advantages[micro_batch_inds]
                         mb_values = values[micro_batch_inds]
@@ -728,14 +862,24 @@ if __name__ == "__main__":
                         mb_query_responses = query_responses[micro_batch_inds]
                         mb_logprobs = logprobs[micro_batch_inds]
 
-                        output, vpred_temp = forward(model, mb_query_responses, tokenizer)
+                        output, vpred_temp = forward(
+                            model, mb_query_responses, tokenizer
+                        )
                         logits = output.logits[:, context_length - 1 : -1]
                         logits /= args.temperature + 1e-7
                         new_all_logprobs = F.log_softmax(logits, dim=-1)
-                        new_logprobs = torch.gather(new_all_logprobs, 2, mb_responses.unsqueeze(-1)).squeeze(-1)
-                        new_logprobs = torch.masked_fill(new_logprobs, padding_mask[micro_batch_inds], INVALID_LOGPROB)
+                        new_logprobs = torch.gather(
+                            new_all_logprobs, 2, mb_responses.unsqueeze(-1)
+                        ).squeeze(-1)
+                        new_logprobs = torch.masked_fill(
+                            new_logprobs,
+                            padding_mask[micro_batch_inds],
+                            INVALID_LOGPROB,
+                        )
                         vpred = vpred_temp[:, context_length - 1 : -1].squeeze(-1)
-                        vpred = torch.masked_fill(vpred, padding_mask_p1[micro_batch_inds], 0)
+                        vpred = torch.masked_fill(
+                            vpred, padding_mask_p1[micro_batch_inds], 0
+                        )
                         vpredclipped = torch.clamp(
                             vpred,
                             mb_values - args.ppo.cliprange_value,
@@ -744,15 +888,27 @@ if __name__ == "__main__":
                         vf_losses1 = torch.square(vpred - mb_return)
                         vf_losses2 = torch.square(vpredclipped - mb_return)
                         vf_loss_max = torch.max(vf_losses1, vf_losses2)
-                        vf_loss = 0.5 * masked_mean(vf_loss_max, ~padding_mask_p1[micro_batch_inds])
-                        vf_clipfrac = masked_mean((vf_losses2 > vf_losses1).float(), ~padding_mask_p1[micro_batch_inds])
+                        vf_loss = 0.5 * masked_mean(
+                            vf_loss_max, ~padding_mask_p1[micro_batch_inds]
+                        )
+                        vf_clipfrac = masked_mean(
+                            (vf_losses2 > vf_losses1).float(),
+                            ~padding_mask_p1[micro_batch_inds],
+                        )
                         logprobs_diff = new_logprobs - mb_logprobs
                         ratio = torch.exp(logprobs_diff)
                         pg_losses = -mb_advantage * ratio
-                        pg_losses2 = -mb_advantage * torch.clamp(ratio, 1.0 - args.ppo.cliprange, 1.0 + args.ppo.cliprange)
+                        pg_losses2 = -mb_advantage * torch.clamp(
+                            ratio, 1.0 - args.ppo.cliprange, 1.0 + args.ppo.cliprange
+                        )
                         pg_loss_max = torch.max(pg_losses, pg_losses2)
-                        pg_loss = masked_mean(pg_loss_max, ~padding_mask[micro_batch_inds])
-                        pg_clipfrac = masked_mean((pg_losses2 > pg_losses).float(), ~padding_mask[micro_batch_inds])
+                        pg_loss = masked_mean(
+                            pg_loss_max, ~padding_mask[micro_batch_inds]
+                        )
+                        pg_clipfrac = masked_mean(
+                            (pg_losses2 > pg_losses).float(),
+                            ~padding_mask[micro_batch_inds],
+                        )
                         loss = pg_loss + args.ppo.vf_coef * vf_loss
                         accelerator.backward(loss)
                         optimizer.step()
@@ -760,15 +916,31 @@ if __name__ == "__main__":
                         with torch.no_grad():
                             pg_clipfrac = (pg_losses2 > pg_losses).float().mean()
                             prob_dist = torch.nn.functional.softmax(logits, dim=-1)
-                            entropy = torch.logsumexp(logits, dim=-1) - torch.sum(prob_dist * logits, dim=-1)
+                            entropy = torch.logsumexp(logits, dim=-1) - torch.sum(
+                                prob_dist * logits, dim=-1
+                            )
                             approxkl = 0.5 * (logprobs_diff**2).mean()
-                            approxkl_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = approxkl
-                            pg_clipfrac_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = pg_clipfrac
-                            pg_loss_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = pg_loss
-                            vf_loss_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = vf_loss
-                            vf_clipfrac_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = vf_clipfrac
-                            entropy_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = entropy.mean()
-                            ratio_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = ratio.mean()
+                            approxkl_stats[
+                                ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx
+                            ] = approxkl
+                            pg_clipfrac_stats[
+                                ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx
+                            ] = pg_clipfrac
+                            pg_loss_stats[
+                                ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx
+                            ] = pg_loss
+                            vf_loss_stats[
+                                ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx
+                            ] = vf_loss
+                            vf_clipfrac_stats[
+                                ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx
+                            ] = vf_clipfrac
+                            entropy_stats[
+                                ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx
+                            ] = entropy.mean()
+                            ratio_stats[
+                                ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx
+                            ] = ratio.mean()
                     gradient_accumulation_idx += 1
                 minibatch_idx += 1
                 # del everything and empty cache
@@ -798,23 +970,77 @@ if __name__ == "__main__":
             mean_kl = kl.sum(1).mean()
             mean_entropy = (-logprobs).sum(1).mean()
             mean_non_score_reward = non_score_reward.sum(1).mean()
-            writer.add_scalar("objective/kl", accelerator.gather(mean_kl).mean().item(), update)
-            writer.add_scalar("objective/entropy", accelerator.gather(mean_entropy).mean().item(), update)
-            writer.add_scalar("objective/non_score_reward", accelerator.gather(mean_non_score_reward).mean().item(), update)
             writer.add_scalar(
-                "objective/score_total", accelerator.gather(mean_non_score_reward + scores.mean()).mean().item(), update
+                "objective/kl", accelerator.gather(mean_kl).mean().item(), update
             )
-            writer.add_scalar("objective/scores", accelerator.gather(scores.mean()).mean().item(), update)
-            writer.add_scalar("objective/validation_score", accelerator.gather(validation_score.mean()).mean().item(), update)
-            writer.add_scalar("ppo/policy/approxkl_avg", accelerator.gather(approxkl_stats).mean().item(), update)
-            writer.add_scalar("ppo/policy/clipfrac_avg", accelerator.gather(pg_clipfrac_stats).mean().item(), update)
-            writer.add_scalar("ppo/loss/policy_avg", accelerator.gather(pg_loss_stats).mean().item(), update)
-            writer.add_scalar("ppo/loss/value_avg", accelerator.gather(vf_loss_stats).mean().item(), update)
-            writer.add_scalar("ppo/val/clipfrac_avg", accelerator.gather(vf_clipfrac_stats).mean().item(), update)
-            writer.add_scalar("ppo/policy/entropy_avg", accelerator.gather(entropy_stats).mean().item(), update)
-            writer.add_scalar("ppo/val/ratio", accelerator.gather(ratio_stats).mean().item(), update)
-            writer.add_scalar("ppo/val/ratio_var", accelerator.gather(ratio_stats).var().item(), update)
-            writer.add_scalar("ppo/val/num_eos_tokens", (responses == tokenizer.eos_token_id).sum().item(), update)
+            writer.add_scalar(
+                "objective/entropy",
+                accelerator.gather(mean_entropy).mean().item(),
+                update,
+            )
+            writer.add_scalar(
+                "objective/non_score_reward",
+                accelerator.gather(mean_non_score_reward).mean().item(),
+                update,
+            )
+            writer.add_scalar(
+                "objective/score_total",
+                accelerator.gather(mean_non_score_reward + scores.mean()).mean().item(),
+                update,
+            )
+            writer.add_scalar(
+                "objective/scores",
+                accelerator.gather(scores.mean()).mean().item(),
+                update,
+            )
+            writer.add_scalar(
+                "objective/validation_score",
+                accelerator.gather(validation_score.mean()).mean().item(),
+                update,
+            )
+            writer.add_scalar(
+                "ppo/policy/approxkl_avg",
+                accelerator.gather(approxkl_stats).mean().item(),
+                update,
+            )
+            writer.add_scalar(
+                "ppo/policy/clipfrac_avg",
+                accelerator.gather(pg_clipfrac_stats).mean().item(),
+                update,
+            )
+            writer.add_scalar(
+                "ppo/loss/policy_avg",
+                accelerator.gather(pg_loss_stats).mean().item(),
+                update,
+            )
+            writer.add_scalar(
+                "ppo/loss/value_avg",
+                accelerator.gather(vf_loss_stats).mean().item(),
+                update,
+            )
+            writer.add_scalar(
+                "ppo/val/clipfrac_avg",
+                accelerator.gather(vf_clipfrac_stats).mean().item(),
+                update,
+            )
+            writer.add_scalar(
+                "ppo/policy/entropy_avg",
+                accelerator.gather(entropy_stats).mean().item(),
+                update,
+            )
+            writer.add_scalar(
+                "ppo/val/ratio", accelerator.gather(ratio_stats).mean().item(), update
+            )
+            writer.add_scalar(
+                "ppo/val/ratio_var",
+                accelerator.gather(ratio_stats).var().item(),
+                update,
+            )
+            writer.add_scalar(
+                "ppo/val/num_eos_tokens",
+                (responses == tokenizer.eos_token_id).sum().item(),
+                update,
+            )
             writer.add_scalar("ppo/lr", lrnow, update)
             writer.add_scalar("ppo/episode", global_step, update)
             eps = int(global_step / (time.time() - start_time))
@@ -837,7 +1063,14 @@ if __name__ == "__main__":
                 eval_ds = Dataset.from_pandas(eval_df)
                 eval_ds.save_to_disk(f"runs/{args.run_name}/{eval_split}_dataset")
                 if args.track:
-                    wandb.log({f"eval/{eval_split}_query_responses": wandb.Table(dataframe=eval_df)}, step=update)
+                    wandb.log(
+                        {
+                            f"eval/{eval_split}_query_responses": wandb.Table(
+                                dataframe=eval_df
+                            )
+                        },
+                        step=update,
+                    )
 
     # save model
     if args.output_dir and args.num_train_epochs > 0:
@@ -845,7 +1078,9 @@ if __name__ == "__main__":
         if accelerator.is_main_process:
             tokenizer.save_pretrained(args.output_dir)
             if args.push_to_hub:
-                tokenizer.push_to_hub(repo_id=args.hf_repo_id, revision=args.hf_repo_revision)
+                tokenizer.push_to_hub(
+                    repo_id=args.hf_repo_id, revision=args.hf_repo_revision
+                )
         unwrapped: PreTrainedModel = accelerator.unwrap_model(model).policy
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
@@ -857,5 +1092,11 @@ if __name__ == "__main__":
                 safe_serialization=False,
             )
             if args.push_to_hub:
-                unwrapped.push_to_hub(repo_id=args.hf_repo_id, revision=args.hf_repo_revision, safe_serialization=False)
-                accelerator.print(f"🔥 pushed to https://huggingface.co/{args.hf_repo_id}/tree/{args.hf_repo_revision}")
+                unwrapped.push_to_hub(
+                    repo_id=args.hf_repo_id,
+                    revision=args.hf_repo_revision,
+                    safe_serialization=False,
+                )
+                accelerator.print(
+                    f"🔥 pushed to https://huggingface.co/{args.hf_repo_id}/tree/{args.hf_repo_revision}"
+                )

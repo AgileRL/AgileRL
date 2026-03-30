@@ -95,9 +95,7 @@ def evaluate_accuracy(
         agent.generation_config.top_k = original_top_k
         agent.generation_config.top_p = original_top_p
 
-    per_class = {
-        t: class_correct[t] / max(class_total[t], 1) for t in TARGET_TOKEN_IDS
-    }
+    per_class = {t: class_correct[t] / max(class_total[t], 1) for t in TARGET_TOKEN_IDS}
     return correct / max(total, 1), per_class
 
 
@@ -169,8 +167,7 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
         llm_ppo, tokenizer, num_episodes=EVAL_EPISODES, greedy=True
     )
     print(
-        f"[seed={seed}] pre-train acc (sampled/greedy): "
-        f"{pre_acc:.3f}/{pre_acc_g:.3f}"
+        f"[seed={seed}] pre-train acc (sampled/greedy): {pre_acc:.3f}/{pre_acc_g:.3f}"
     )
     print(f"[seed={seed}] pre per-class sampled: {pre_class}")
     print(f"[seed={seed}] pre per-class greedy: {pre_class_g}")

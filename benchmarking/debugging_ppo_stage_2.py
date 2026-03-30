@@ -75,9 +75,7 @@ def evaluate_accuracy(
                     "attention_mask": prompt_encoded["attention_mask"],
                 }
                 prompt_len = prompt_dict["input_ids"].shape[1]
-                completion_ids, _ = agent.get_action(
-                    [prompt_dict], training=False
-                )
+                completion_ids, _ = agent.get_action([prompt_dict], training=False)
                 full_ids = completion_ids[0]
                 gen_tokens = full_ids[0, prompt_len:]
                 gen_text = tokenizer.decode(
@@ -94,9 +92,7 @@ def evaluate_accuracy(
         agent.generation_config.top_k = original_top_k
         agent.generation_config.top_p = original_top_p
 
-    per_class = {
-        t: class_correct[t] / max(class_total[t], 1) for t in TARGET_TOKEN_IDS
-    }
+    per_class = {t: class_correct[t] / max(class_total[t], 1) for t in TARGET_TOKEN_IDS}
     return correct / max(total, 1), per_class
 
 
@@ -207,17 +203,14 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
 
     if TEST_POLICY_ONLY:
         enable_reinforce_style_advantages(llm_ppo)
-        print(
-            f"[seed={seed}] mode: test_policy_only=True (REINFORCE-style advantages)"
-        )
+        print(f"[seed={seed}] mode: test_policy_only=True (REINFORCE-style advantages)")
     else:
         print(f"[seed={seed}] mode: test_policy_only=False (PPO GAE advantages)")
 
     pre_acc, pre_class = evaluate_accuracy(llm_ppo, tokenizer, greedy=False)
     pre_acc_g, pre_class_g = evaluate_accuracy(llm_ppo, tokenizer, greedy=True)
     print(
-        f"[seed={seed}] pre-train acc (sampled/greedy): "
-        f"{pre_acc:.3f}/{pre_acc_g:.3f}"
+        f"[seed={seed}] pre-train acc (sampled/greedy): {pre_acc:.3f}/{pre_acc_g:.3f}"
     )
     print(f"[seed={seed}] pre per-class sampled: {pre_class}")
     print(f"[seed={seed}] pre per-class greedy: {pre_class_g}")
@@ -272,15 +265,11 @@ def main(init_hp: dict, seeds: tuple[int, ...] = (0, 1, 2)) -> None:
 
     sampled_mean = statistics.mean(sampled_improvements)
     sampled_std = (
-        statistics.stdev(sampled_improvements)
-        if len(sampled_improvements) > 1
-        else 0.0
+        statistics.stdev(sampled_improvements) if len(sampled_improvements) > 1 else 0.0
     )
     greedy_mean = statistics.mean(greedy_improvements)
     greedy_std = (
-        statistics.stdev(greedy_improvements)
-        if len(greedy_improvements) > 1
-        else 0.0
+        statistics.stdev(greedy_improvements) if len(greedy_improvements) > 1 else 0.0
     )
     print(
         f"[summary] sampled improvement over {len(seeds)} seeds: "

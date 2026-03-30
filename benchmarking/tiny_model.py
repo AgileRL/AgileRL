@@ -157,7 +157,9 @@ def build_tiny_actor_network(SEPARATE_CRITIC: bool = False) -> GPT2LMHeadModel:
     base_model.generation_config = generation_config
     base_model.name_or_path = "tiny-debug-transformer"
     if not SEPARATE_CRITIC:
-        actor_network = AutoModelForCausalLMWithValueHead.from_pretrained(base_model, **{"summary_dropout_prob": 0.0})
+        actor_network = AutoModelForCausalLMWithValueHead.from_pretrained(
+            base_model, **{"summary_dropout_prob": 0.0}
+        )
         actor_network.generation_config = generation_config
         return actor_network
     return base_model
@@ -168,7 +170,9 @@ def build_tiny_critic_network() -> AutoModelForCausalLMWithValueHead:
     base_model = GPT2LMHeadModel(_make_tiny_config())
     generation_config = _make_tiny_generation_config()
     base_model.generation_config = generation_config
-    critic_network = AutoModelForCausalLMWithValueHead.from_pretrained(base_model, **{"summary_dropout_prob": 0.0})
+    critic_network = AutoModelForCausalLMWithValueHead.from_pretrained(
+        base_model, **{"summary_dropout_prob": 0.0}
+    )
     critic_network.generation_config = generation_config
     if hasattr(critic_network, "pretrained_model"):
         critic_network.pretrained_model.generation_config = generation_config
