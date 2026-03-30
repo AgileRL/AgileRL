@@ -127,7 +127,7 @@ class PPO(LLMAlgorithm):
         gamma: float = 1.0,
         gae_lambda: float = 1.0,
         lr_actor: float = 5e-7,
-        lr_critic: float | None = None,
+        lr_critic: float | None = 5e-5,
         max_grad_norm: float = 1.0,
         update_epochs: int = 1,
         temperature: float = 1.0,
