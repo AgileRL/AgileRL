@@ -1,9 +1,9 @@
 ---
 MUTATION_PARAMS:
-    NO_MUT: 0.1                          # No mutation
-    RL_HP_MUT: 0.6                       # Learning HP mutation
-    MUT_SD: 0.1                          # Mutation strength
-    RAND_SEED: 42                        # Random seed
+    NO_MUT: 0.1
+    RL_HP_MUT: 0.6
+    MUT_SD: 0.1
+    RAND_SEED: 42
     MIN_LR: 0.0000001
     MAX_LR: 0.00001
     MIN_BETA: 0.0001
@@ -14,19 +14,19 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: LLMPPO
-    BATCH_SIZE: 8          # Increased from 16 — larger rollout batches stabilize reward estimates
-    BETA: 0.0             # Increased from 0.001 — entropy bonus was too weak to prevent collapse
-    LR_ACTOR: 0.000001        # Actor learning rate — safer for LLM finetuning
-    LR_CRITIC: 0.00001        # Critic learning rate — can be higher since value head is simpler
-    CLIP_COEF: 0.2          # Fine, keep as-is
-    MAX_GRAD_NORM: 1.0      # Increased from 0.1 — too aggressive, was likely blocking learning
-    UPDATE_EPOCHS: 2        # Increased from 1 — get more use out of each rollout batch
-    TEMPERATURE: 1.0        # Fine, keep as-is
-    MAX_MODEL_LEN: 1024     # Fine, keep as-is
-    TOURN_SIZE: 2           # Fine for POP_SIZE 4
-    GAMMA: 0.9
-    VF_COEF: 0.1
+    BATCH_SIZE: 8
+    BETA: 0.01                # KL penalty — keeps policy close to reference
+    LR_ACTOR: 0.000005        # 5e-6 — good for LoRA on 0.5B instruct model
+    LR_CRITIC: 0.00001        # 1e-5 — value head learns faster
+    CLIP_COEF: 0.2
+    MAX_GRAD_NORM: 1.0
+    UPDATE_EPOCHS: 2
+    TEMPERATURE: 0.7          # Lower than 1.0 for more focused generation
+    MAX_MODEL_LEN: 2048
+    TOURN_SIZE: 2
+    GAMMA: 0.99               # Higher discount for multi-turn credit assignment
+    VF_COEF: 0.5              # Stronger value loss to train critic faster
     GAE_LAMBDA: 0.95
-    ELITISM: true           # Fine
-    POP_SIZE: 4             # Fine
-    EVAL_LOOP: 1            # Fine
+    ELITISM: true
+    POP_SIZE: 4
+    EVAL_LOOP: 1

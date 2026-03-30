@@ -22,6 +22,7 @@ from agilerl.utils.utils import (
     save_llm_checkpoint,
     tournament_selection_and_mutation,
 )
+from agilerl.wrappers.token_observation import TokenObservationWrapper
 
 if TYPE_CHECKING:
     from gem.core import Env as GemEnv
@@ -802,6 +803,7 @@ def finetune_llm_multiturn(
     evaluation_interval: int = 50,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
+    apply_chat_template: bool = True,
 ) -> PopulationType:
     if evo_steps is not None and (tournament is None or mutation is None):
         warnings.warn(
@@ -881,6 +883,13 @@ def finetune_llm_multiturn(
     agg_eval_score: float | None = None
 
     pad_id = getattr(tokenizer, "pad_token_id", None)
+    env = TokenObservationWrapper(
+        env_fn,
+        tokenizer,
+        max_turns,
+        pad_id,
+        apply_chat_template=apply_chat_template,
+    )
 
     i = 0
     while total_steps < max_steps:
@@ -889,7 +898,6 @@ def finetune_llm_multiturn(
         for agent_idx, agent in enumerate(pop):
             agent.set_reference_policy(i + 1)
 
-            # Rollout batch_size multi-turn episodes
             completion_ids_list: list[torch.Tensor] = []
             action_masks_list: list[torch.Tensor] = []
             all_turn_ids: list[torch.Tensor] = []
@@ -897,110 +905,39 @@ def finetune_llm_multiturn(
             batch_steps = 0
 
             for _ in range(batch_size):
-                env = env_fn()
-                obs, reset_info = env.reset()
-                obs_text = str(obs)
-                suffix = (reset_info or {}).get("suffix", "")
-                if suffix:
-                    obs_text = f"{obs_text}\n{suffix}"
+                prompt_dict = env.reset()
 
-                prompt_encoded = tokenizer(
-                    [obs_text],
-                    return_tensors="pt",
-                    padding=True,
-                    padding_side="left",
-                    return_attention_mask=True,
-                )
-
-                turn_boundaries: list[tuple[int, int, int]] = []
-                turn_rewards: list[float] = []
-                full_ids: torch.Tensor | None = None
-
-                # vLLM sleep/wake around each generate is handled in LLMPPO.get_action
-                # (wake + weight sync); sleep during the PPO update is in
-                # memory_efficient_params.
-
-                for turn_idx in range(max_turns):
-                    prompt_dict = {
-                        "input_ids": prompt_encoded["input_ids"],
-                        "attention_mask": prompt_encoded["attention_mask"],
-                    }
+                for _turn_idx in range(max_turns):
                     prompt_len = prompt_dict["input_ids"].shape[1]
+                    if "text" not in prompt_dict:
+                        prompt_dict["text"] = tokenizer.decode(
+                            prompt_dict["input_ids"][0].tolist(),
+                            skip_special_tokens=True,
+                        )
 
-
-                    prompt_ids_1d = prompt_dict["input_ids"][0]
-                    prompt_dict["text"] = tokenizer.decode(
-                        prompt_ids_1d.tolist(), skip_special_tokens=True
-                    )
-
-                    completion_ids, _ = agent.get_action(
-                        [prompt_dict], training=True
-                    )
+                    completion_ids, _ = agent.get_action([prompt_dict], training=True)
                     full_ids = completion_ids[0]
 
-                    gen_start = prompt_len
-                    gen_end = full_ids.shape[1]
-                    turn_boundaries.append((gen_start, gen_end, turn_idx))
-
-                    gen_tokens = full_ids[0, gen_start:]
+                    gen_tokens = full_ids[0, prompt_len:]
                     gen_text = tokenizer.decode(
                         gen_tokens.tolist(),
                         skip_special_tokens=True,
                     )
 
-                    next_obs, reward, terminated, truncated, step_info = env.step(
-                        gen_text
+                    prompt_dict, _reward, terminated, truncated, _info = env.step(
+                        full_ids, gen_text
                     )
-                    turn_rewards.append(float(reward))
 
                     if terminated or truncated:
                         break
 
-                    feedback_text = str(next_obs)
-                    fb_suffix = (step_info or {}).get("suffix", "")
-                    if fb_suffix:
-                        feedback_text = f"{feedback_text}\n{fb_suffix}"
-                    feedback_ids = torch.tensor(
-                        [tokenizer.encode(feedback_text)],
-                        dtype=torch.long,
-                        device=full_ids.device,
-                    )
-                    new_prompt_ids = torch.cat([full_ids, feedback_ids], dim=1)
-                    prompt_encoded = {
-                        "input_ids": new_prompt_ids,
-                        "attention_mask": torch.ones_like(new_prompt_ids),
-                    }
+                ep_ids, action_mask, turn_ids, turn_rewards_t = env.get_episode_data()
 
-
-                assert full_ids is not None
-                seq_len = full_ids.shape[1]
-                action_mask = torch.zeros(1, seq_len - 1, dtype=torch.bool)
-                turn_ids = torch.full((1, seq_len - 1), -1, dtype=torch.long)
-
-                for gen_start, gen_end, tidx in turn_boundaries:
-                    mask_start = gen_start - 1
-                    mask_end = gen_end - 1
-                    if mask_start >= 0 and mask_end <= seq_len - 1:
-                        action_mask[0, mask_start:mask_end] = True
-                        turn_ids[0, mask_start:mask_end] = tidx
-
-                if pad_id is not None:
-                    for pos in range(seq_len - 1):
-                        if full_ids[0, pos + 1].item() == pad_id:
-                            action_mask[0, pos] = False
-                            turn_ids[0, pos] = -1
-
-                while len(turn_rewards) < max_turns:
-                    turn_rewards.append(0.0)
-
-                completion_ids_list.append(full_ids)
+                completion_ids_list.append(ep_ids)
                 action_masks_list.append(action_mask)
                 all_turn_ids.append(turn_ids)
-
-                all_rewards.append(
-                    torch.tensor(turn_rewards, dtype=torch.float)
-                )
-                batch_steps += len(turn_boundaries)
+                all_rewards.append(turn_rewards_t)
+                batch_steps += len(env.turn_boundaries)
 
             (turn_ids_padded,) = stack_and_pad_experiences(
                 all_turn_ids,

@@ -1,9 +1,10 @@
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
 import torch
 from accelerate import Accelerator
-from contextlib import contextmanager
+
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.fused_lora import clear_fused_adapter_routing
@@ -20,7 +21,13 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.utils.llm_utils import ReasoningGym, masked_mean, masked_whiten, move_params_to_gpu, move_params_to_cpu
+from agilerl.utils.llm_utils import (
+    ReasoningGym,
+    masked_mean,
+    masked_whiten,
+    move_params_to_cpu,
+    move_params_to_gpu,
+)
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
@@ -51,56 +58,6 @@ def _pool_by_turns(
         count = mask_t.sum(dim=1).clamp(min=1)
         turn_values[:, t] = (token_values * mask_t).sum(dim=1) / count
     return turn_values
-
-
-def print_zero2_bucket_layout(ds_engine):
-    optimizer = ds_engine.optimizer  # ZeRO optimizer
-    reduce_bucket_size = optimizer.reduce_bucket_size  # bytes threshold
-
-    print("Optimizer: ", optimizer)
-    base_optimizer = optimizer.optimizer
-
-    # Build name lookup
-    param_to_name = {id(p): n for n, p in ds_engine.named_parameters()}
-
-    for i, group in enumerate(base_optimizer.param_groups):
-        print(f"\nGroup {i} (lr={group['lr']}):")
-        for p in group["params"]:
-            num_params_in_opt = p.numel()
-            name = param_to_name.get(id(p), "unknown")
-            print(f"  {name} | shape={p.shape} | requires_grad={p.requires_grad}")
-
-    # get num params in loras
-    lora_params = [p for n, p in ds_engine.named_parameters() if "lora" in n]
-    num_params_in_loras = sum([p.numel() for p in lora_params])
-    print(
-        "Num params in loras: ",
-        num_params_in_loras,
-        "num params in opt: ",
-        num_params_in_opt,
-    )
-
-    param_to_name = {p: n for n, p in ds_engine.module.named_parameters()}
-
-    # Collect all params in optimizer order, then reverse (ZeRO processes back-to-front)
-    all_params = []
-    for group in optimizer.param_groups:
-        all_params.extend(p for p in group["params"])
-    all_params.reverse()
-
-    print("All params: ", all_params[0].shape)
-
-    bucket_idx, bucket_names, bucket_numel = 0, [], 0
-    for p in all_params:
-        name = param_to_name.get(p, "?")
-        bucket_names.append(name)
-        bucket_numel += p.numel() * p.element_size()
-        if bucket_numel >= reduce_bucket_size:
-            print(f"Bucket {bucket_idx} ({bucket_numel / 1e6:.1f} MB): {bucket_names}")
-            bucket_idx += 1
-            bucket_names, bucket_numel = [], 0
-    if bucket_names:
-        print(f"Bucket {bucket_idx} ({bucket_numel / 1e6:.1f} MB): {bucket_names}")
 
 
 class PPO(LLMAlgorithm):
@@ -254,13 +211,11 @@ class PPO(LLMAlgorithm):
             self._configure_vllm()
         self._initialize_actors(actor_network, not clone)
         self._apply_critic_lr()
-        
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
-        
 
         # We call get_action before learn so we need to put the model to CPU and wake it up
         unwrapped_model = (
@@ -273,8 +228,6 @@ class PPO(LLMAlgorithm):
             move_params_to_cpu(unwrapped_model)
             self.llm.wake_up()
             self._move_model_to_vllm()
-
-        
 
     @property
     def lr_actor(self) -> float:
@@ -313,7 +266,6 @@ class PPO(LLMAlgorithm):
         self,
         obs: LLMObsType,
         training: bool = True,
-
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Return generated completion ids and corresponding action masks."""
         with self.select_adapter("actor"):
@@ -379,10 +331,6 @@ class PPO(LLMAlgorithm):
             action_masks = action_masks.to(self.device)
             action_mask_bool = action_masks.bool()
             num_samples = completion_ids.shape[0]
-
-            print("NUM SAMPLES: ", num_samples)
-            # print("BATCH SIZE: ", batch_size)
-            print("MICRO BATCH SIZE PER GPU: ", self.micro_batch_size_per_gpu)
 
             if turn_ids is None:
                 turn_ids = torch.where(
@@ -503,9 +451,15 @@ class PPO(LLMAlgorithm):
                         batch_values, ~batch_mask_bool, 0.0
                     )
                     mb_num_turns = batch_turn_ids.max().item() + 1
-                    turn_pred = _pool_by_turns(batch_values, batch_turn_ids, mb_num_turns)
-                    turn_old = _pool_by_turns(batch_old_values, batch_turn_ids, mb_num_turns)
-                    turn_ret = _pool_by_turns(batch_returns, batch_turn_ids, mb_num_turns)
+                    turn_pred = _pool_by_turns(
+                        batch_values, batch_turn_ids, mb_num_turns
+                    )
+                    turn_old = _pool_by_turns(
+                        batch_old_values, batch_turn_ids, mb_num_turns
+                    )
+                    turn_ret = _pool_by_turns(
+                        batch_returns, batch_turn_ids, mb_num_turns
+                    )
 
                     # Mask: which (sample, turn) pairs actually exist in this batch.
                     turn_mask = torch.zeros_like(turn_pred)
@@ -535,8 +489,6 @@ class PPO(LLMAlgorithm):
                     mean_vf_loss += vf_loss.mean().item()
                     mean_loss += total_loss.item()
                     updates += 1
-
-            
 
         return (
             mean_loss / max(updates, 1),
@@ -713,8 +665,6 @@ class PPO(LLMAlgorithm):
         if self.accelerator is not None:
             return self.accelerator.unwrap_model(self.actor)
         return self.actor
-
-
 
     @contextmanager
     def memory_efficient_params(self) -> None:
