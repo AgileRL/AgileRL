@@ -5,7 +5,7 @@ each generation is treated as a single action.  The environment provides
 meaningful state transitions and per-turn rewards, forcing the agent to
 condition on environment feedback across turns.
 
-Environment: GridNavigationEnv from ``agilerl.utils.probe_envs_llm`` (extends gem.Env)
+Environment: GridNavigationEnv from ``agilerl.utils.probe_envs_llm``
   - 1D grid with positions 0..3.
   - Initial observation: "{position}{target}" (e.g. "03").
   - Action: "1" = left, "2" = stay, "3" = right.

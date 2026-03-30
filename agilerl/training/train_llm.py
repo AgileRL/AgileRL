@@ -888,7 +888,7 @@ def finetune_llm_multiturn(
         for agent_idx, agent in enumerate(pop):
             agent.set_reference_policy(i + 1)
 
-            # -- Rollout batch_size multi-turn episodes -------------------------
+            # Rollout batch_size multi-turn episodes
             completion_ids_list: list[torch.Tensor] = []
             action_masks_list: list[torch.Tensor] = []
             all_turn_ids: list[torch.Tensor] = []
@@ -996,7 +996,6 @@ def finetune_llm_multiturn(
                 all_turn_ids, padding_values=[-1],
             )
             rewards_2d = torch.stack(all_rewards)
-            # -- End rollout ----------------------------------------------------
 
             completion_lengths = np.mean([x.shape[1] for x in completion_ids_list])
             episode_scores = rewards_2d.sum(dim=1)
