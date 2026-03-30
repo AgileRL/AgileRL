@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Self
+from typing import Any, Callable, ClassVar, Self
 
 import httpx
 
@@ -22,40 +23,34 @@ from agilerl.utils.arena_utils import (
 
 logger = logging.getLogger(__name__)
 
-_ARCHIVE_EXCLUDE_DIRS = frozenset(
-    {
-        ".git",
-        "__pycache__",
-        "node_modules",
-        ".tox",
-        ".nox",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".venv",
-        "venv",
-        ".eggs",
-        "*.egg-info",
-    }
-)
+_ARCHIVE_EXCLUDE_DIRS = frozenset({
+    ".git",
+    "__pycache__",
+    "node_modules",
+    ".tox",
+    ".nox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "venv",
+    ".eggs",
+    "*.egg-info",
+})
 
-_ARCHIVE_EXCLUDE_SUFFIXES = frozenset(
-    {
-        ".pyc",
-        ".pyo",
-        ".so",
-        ".dylib",
-        ".egg",
-    }
-)
+_ARCHIVE_EXCLUDE_SUFFIXES = frozenset({
+    ".pyc",
+    ".pyo",
+    ".so",
+    ".dylib",
+    ".egg",
+})
 
-_ARCHIVE_EXCLUDE_FILES = frozenset(
-    {
-        ".env",
-        ".DS_Store",
-        "Thumbs.db",
-    }
-)
+_ARCHIVE_EXCLUDE_FILES = frozenset({
+    ".env",
+    ".DS_Store",
+    "Thumbs.db",
+})
 
 
 @dataclass(slots=True)
@@ -165,6 +160,7 @@ class ArenaClient:
         ``~/.arena/credentials.json``.
         """
         tokens = self._auth.device_login(timeout=timeout)
+        print(tokens)
         self._tokens.access_token = tokens["access_token"]
         self._tokens.refresh_token = tokens.get("refresh_token")
         logger.info("Authenticated with Arena.")
@@ -297,6 +293,254 @@ class ArenaClient:
             return self.stream_logs(resp["operation_id"])
 
         return resp
+
+    def get_current_user(self) -> dict[str, Any]:
+        """Get the authenticated user's profile details."""
+        return self._request("GET", "/api/users/current")
+
+    def get_user_credits(self) -> Any:
+        """Get the authenticated user's credit information."""
+        return self._request("GET", "/api/users/credits")
+
+    def list_custom_environments(self) -> list[dict[str, Any]]:
+        """List custom environments available to the authenticated user."""
+        resp = self._request("GET", "/api/custom-gym-env-impls/list")
+        return resp if isinstance(resp, list) else [resp]
+
+    def custom_environment_exists(self, name: str, version: str = "latest") -> bool:
+        """Check whether a custom environment name/version exists."""
+        resp = self._request(
+            "GET",
+            "/api/custom-gym-env-impls/exists",
+            params={"name": name, "version": version},
+        )
+        if isinstance(resp, dict):
+            for key in ("exists", "is_registered", "isRegistered"):
+                if key in resp:
+                    return bool(resp[key])
+        return bool(resp)
+
+    def list_custom_environment_entrypoints(
+        self, name: str, version: str = "latest"
+    ) -> list[str]:
+        """List available entrypoints for a custom environment version."""
+        resp = self._request(
+            "GET",
+            "/api/custom-gym-env-impls/entrypoints",
+            params={"name": name, "version": version},
+        )
+        if isinstance(resp, dict):
+            entrypoints = resp.get("entrypoints", [])
+            if isinstance(entrypoints, list):
+                return [str(entrypoint) for entrypoint in entrypoints]
+        if isinstance(resp, list):
+            return [str(entrypoint) for entrypoint in resp]
+        return []
+
+    def create_and_validate_custom_environment(
+        self,
+        *,
+        name: str,
+        version: str,
+        file_path: str | os.PathLike[str],
+        env_config_path: str | os.PathLike[str],
+        requirements_path: str | os.PathLike[str],
+        multi_agent: bool = False,
+        do_rollouts: bool = True,
+        entrypoint: str = "acrobot:AcrobotEnv",
+        stream: bool = False,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Create and validate a custom environment via multipart upload."""
+        env_archive = Path(os.fspath(file_path)).expanduser().resolve()
+        env_config = Path(os.fspath(env_config_path)).expanduser().resolve()
+        requirements = Path(os.fspath(requirements_path)).expanduser().resolve()
+
+        for upload_path in (env_archive, env_config, requirements):
+            if not upload_path.is_file():
+                msg = f"Upload file not found: {upload_path}"
+                raise FileNotFoundError(msg)
+
+        with (
+            env_archive.open("rb") as archive_handle,
+            env_config.open("rb") as config_handle,
+            requirements.open("rb") as requirements_handle,
+        ):
+            payload = {
+                "name": name,
+                "version": version,
+                "multi_agent": str(multi_agent).lower(),
+                "do_rollouts": str(do_rollouts).lower(),
+                "entrypoint": entrypoint,
+            }
+            files = {
+                "file": (env_archive.name, archive_handle, "application/gzip"),
+                "env_config": (env_config.name, config_handle, "application/x-yaml"),
+                "requirements": (
+                    requirements.name,
+                    requirements_handle,
+                    "text/plain",
+                ),
+            }
+
+            if not stream:
+                return self._request(
+                    "POST",
+                    "/api/custom-gym-env-impls/create-and-validate",
+                    data=payload,
+                    files=files,
+                    timeout=self._upload_timeout,
+                )
+
+            auth_retry = False
+            while True:
+                headers = self._auth_headers()
+                try:
+                    with self._http.stream(
+                        "POST",
+                        "/api/custom-gym-env-impls/create-and-validate",
+                        headers=headers,
+                        data=payload,
+                        files=files,
+                        timeout=self._upload_timeout,
+                    ) as resp:
+                        if (
+                            resp.status_code == 401
+                            and not auth_retry
+                            and self._api_key is None
+                            and self._tokens.refresh_token
+                        ):
+                            tokens = self._auth.refresh_access_token(
+                                self._tokens.refresh_token
+                            )
+                            self._tokens.access_token = tokens["access_token"]
+                            self._tokens.refresh_token = tokens.get(
+                                "refresh_token", self._tokens.refresh_token
+                            )
+                            auth_retry = True
+                            continue
+
+                        if resp.status_code == 401:
+                            msg = (
+                                "Session expired and could not be refreshed. "
+                                "Please run client.login() again."
+                            )
+                            raise ArenaAuthError(msg)
+
+                        if not resp.is_success:
+                            detail = (
+                                resp.read().decode("utf-8", errors="replace")[:500]
+                                or "No details"
+                            )
+                            raise ArenaAPIError(
+                                status_code=resp.status_code,
+                                detail=detail,
+                            )
+
+                        chunks: list[str] = []
+                        for chunk in resp.iter_text():
+                            if not chunk:
+                                continue
+                            chunks.append(chunk)
+                            if on_chunk is not None:
+                                on_chunk(chunk)
+                        body = "".join(chunks).strip()
+                        if not body:
+                            return {}
+                        try:
+                            return json.loads(body)
+                        except json.JSONDecodeError:
+                            return {"stream": body}
+                except httpx.HTTPError as exc:
+                    raise ArenaAPIError(
+                        status_code=0,
+                        detail=f"Network error communicating with Arena: {exc}",
+                    ) from exc
+
+    def submit_experiment_job(
+        self,
+        *,
+        custom_gym_env_impl_id: int,
+        manifest: dict[str, Any],
+        stream: bool = False,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Submit an experiment job to the script-aligned API endpoint."""
+        payload = {
+            "custom_gym_env_impl_id": custom_gym_env_impl_id,
+            "manifest": manifest,
+        }
+        if not stream:
+            return self._request(
+                "POST",
+                "/api/experiments/jobs/submit",
+                json=payload,
+                timeout=self._upload_timeout,
+            )
+
+        auth_retry = False
+        while True:
+            headers = self._auth_headers()
+            try:
+                with self._http.stream(
+                    "POST",
+                    "/api/experiments/jobs/submit",
+                    headers=headers,
+                    json=payload,
+                    timeout=self._upload_timeout,
+                ) as resp:
+                    if (
+                        resp.status_code == 401
+                        and not auth_retry
+                        and self._api_key is None
+                        and self._tokens.refresh_token
+                    ):
+                        tokens = self._auth.refresh_access_token(
+                            self._tokens.refresh_token
+                        )
+                        self._tokens.access_token = tokens["access_token"]
+                        self._tokens.refresh_token = tokens.get(
+                            "refresh_token", self._tokens.refresh_token
+                        )
+                        auth_retry = True
+                        continue
+
+                    if resp.status_code == 401:
+                        msg = (
+                            "Session expired and could not be refreshed. "
+                            "Please run client.login() again."
+                        )
+                        raise ArenaAuthError(msg)
+
+                    if not resp.is_success:
+                        detail = (
+                            resp.read().decode("utf-8", errors="replace")[:500]
+                            or "No details"
+                        )
+                        raise ArenaAPIError(
+                            status_code=resp.status_code,
+                            detail=detail,
+                        )
+
+                    chunks: list[str] = []
+                    for chunk in resp.iter_text():
+                        if not chunk:
+                            continue
+                        chunks.append(chunk)
+                        if on_chunk is not None:
+                            on_chunk(chunk)
+                    body = "".join(chunks).strip()
+                    if not body:
+                        return {}
+                    try:
+                        return json.loads(body)
+                    except json.JSONDecodeError:
+                        return {"stream": body}
+            except httpx.HTTPError as exc:
+                raise ArenaAPIError(
+                    status_code=0,
+                    detail=f"Network error communicating with Arena: {exc}",
+                ) from exc
 
     # TODO: Print the environments in a table format using rich
     def list_environments(self) -> None:
@@ -531,7 +775,8 @@ class ArenaClient:
         _retried: bool = False,
         **kwargs: dict[str, Any],
     ) -> Any:
-        headers = kwargs.pop("headers", {})
+        request_headers = dict(kwargs.pop("headers", {}))
+        headers = dict(request_headers)
         headers.update(self._auth_headers())
 
         try:
@@ -542,6 +787,7 @@ class ArenaClient:
                 timeout=timeout,
                 **kwargs,
             )
+            print(resp.json())
         except httpx.HTTPError as exc:
             raise ArenaAPIError(
                 status_code=0,
@@ -560,12 +806,20 @@ class ArenaClient:
             self._tokens.refresh_token = tokens.get(
                 "refresh_token", self._tokens.refresh_token
             )
-            return self._request(method, path, timeout=timeout, _retried=True, **kwargs)
+            return self._request(
+                method,
+                path,
+                timeout=timeout,
+                _retried=True,
+                headers=request_headers,
+                **kwargs,
+            )
 
         if resp.status_code == 401:
+            detail = resp.text[:500] if resp.text else "No details"
             msg = (
                 "Session expired and could not be refreshed. "
-                "Please run client.login() again."
+                f"Please run client.login() again. Server response: {detail}"
             )
             raise ArenaAuthError(msg)
 

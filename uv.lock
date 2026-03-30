@@ -90,6 +90,7 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "click" },
     { name = "datasets" },
     { name = "deepspeed", marker = "sys_platform != 'win32'" },
     { name = "httpx" },
@@ -103,6 +104,7 @@ all = [
     { name = "vllm", version = "0.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
 ]
 arena = [
+    { name = "click" },
     { name = "httpx" },
     { name = "python-keycloak" },
 ]
@@ -134,6 +136,8 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = "~=1.7.0" },
+    { name = "click", marker = "extra == 'all'" },
+    { name = "click", marker = "extra == 'arena'" },
     { name = "datasets", marker = "extra == 'all'", specifier = "==4.4.1" },
     { name = "datasets", marker = "extra == 'llm'", specifier = "==4.4.1" },
     { name = "deepspeed", marker = "sys_platform != 'win32' and extra == 'all'", specifier = "~=0.17.1" },

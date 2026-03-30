@@ -160,7 +160,8 @@ class ArenaOAuth2:
             time.sleep(interval)
             try:
                 tokens = self.kc.token(
-                    grant_type="urn:ietf:params:oauth:grant-type:device_code",
+                    # grant_type="urn:ietf:params:oauth:grant-type:device_code",
+                    grant_type="authorization_code",
                     device_code=device_code,
                 )
                 ArenaOAuth2._write_credentials(tokens)
