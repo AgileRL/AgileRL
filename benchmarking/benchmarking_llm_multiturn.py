@@ -106,7 +106,7 @@ def main(init_hp, mut_p):
         tokenizer=tokenizer,
         max_turns=max_turns,
         init_hp=init_hp,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         evo_steps=None,

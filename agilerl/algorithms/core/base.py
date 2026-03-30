@@ -3138,13 +3138,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
             peft_ref.merge_adapter()
             for name, param in model_ref.named_parameters():
-                weight_name = name.removeprefix("base_model.model.").replace(
-                    ".base_layer",
-                    "",
-                )
-                # TRL value-head wrappers expose the underlying CausalLM as
-                # `pretrained_model.*`; vLLM expects raw model names.
-                weight_name = weight_name.removeprefix("pretrained_model.")
+                weight_name = name.removeprefix("pretrained_model.")
+                weight_name = weight_name.removeprefix("base_model.model.")
+                weight_name = weight_name.replace(".base_layer", "")
                 if peft_ref.prefix in weight_name:
                     continue
 

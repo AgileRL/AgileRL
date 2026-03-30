@@ -15,16 +15,16 @@ MUTATION_PARAMS:
 INIT_HP:
     ALGO: LLMPPO
     BATCH_SIZE: 8          # Increased from 16 — larger rollout batches stabilize reward estimates
-    BETA: 0.001             # Increased from 0.001 — entropy bonus was too weak to prevent collapse
-    LR_ACTOR: 0.000005        # Actor learning rate — safer for LLM finetuning
+    BETA: 0.0             # Increased from 0.001 — entropy bonus was too weak to prevent collapse
+    LR_ACTOR: 0.000001        # Actor learning rate — safer for LLM finetuning
     LR_CRITIC: 0.00001        # Critic learning rate — can be higher since value head is simpler
     CLIP_COEF: 0.2          # Fine, keep as-is
     MAX_GRAD_NORM: 1.0      # Increased from 0.1 — too aggressive, was likely blocking learning
-    UPDATE_EPOCHS: 4        # Increased from 1 — get more use out of each rollout batch
-    TEMPERATURE: 0.9        # Fine, keep as-is
+    UPDATE_EPOCHS: 2        # Increased from 1 — get more use out of each rollout batch
+    TEMPERATURE: 1.0        # Fine, keep as-is
     MAX_MODEL_LEN: 1024     # Fine, keep as-is
     TOURN_SIZE: 2           # Fine for POP_SIZE 4
-    GAMMA: 1.0
+    GAMMA: 0.9
     VF_COEF: 0.1
     GAE_LAMBDA: 0.95
     ELITISM: true           # Fine
