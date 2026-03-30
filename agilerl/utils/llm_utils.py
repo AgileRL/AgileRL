@@ -25,9 +25,7 @@ if HAS_LLM_DEPENDENCIES:
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.modeling_utils import PreTrainedModel
     from transformers.tokenization_utils_base import BatchEncoding
-    from trl.experimental.ppo.modeling_value_head import (
-        AutoModelForCausalLMWithValueHead,
-    )
+    from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
     AutoTokenizer = AutoTokenizer
 else:
@@ -888,3 +886,28 @@ def _auto_zero_stage(num_gpus: int, model_size_gb: float | None) -> int:
     if ratio < 0.9:
         return 2
     return 3
+
+
+def move_params_to_gpu(unwrapped_model: torch.nn.Module, device: torch.device) -> None:
+    """Move params to GPU.
+
+    :param agent: Distributed agent
+    :type agent: DistributedLLMAgent
+    :return: None
+    :rtype: None
+    """
+    unwrapped_model.to(device, non_blocking=True)
+    torch.cuda.synchronize()
+
+
+def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> None:
+    """Move params to CPU.
+
+    :param agent: Distributed agent
+    :type agent: DistributedLLMAgent
+    :return: None
+    :rtype: None
+    """
+    unwrapped_model.to("cpu", non_blocking=True)
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()

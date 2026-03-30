@@ -236,10 +236,9 @@ def finetune_llm_reasoning(
                 action_masks,
                 rewards,
             )
-            with memory_efficient_params(agent):
-                loss, kl, pg_loss, critic_loss, entropy = agent.learn(
-                    experiences, env.tokenizer
-                )
+            loss, kl, pg_loss, critic_loss, entropy = agent.learn(
+                experiences, env.tokenizer
+            )
             metrics = [loss, kl, rewards, completion_lengths]
             if max_reward is not None:
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
@@ -883,8 +882,10 @@ def finetune_llm_multiturn(
 
     pad_id = getattr(tokenizer, "pad_token_id", None)
 
-    for i in range(max_steps):
+    i = 0
+    while total_steps < max_steps:
         agent_metrics_dict = {}
+        iteration_steps = 0
         for agent_idx, agent in enumerate(pop):
             agent.set_reference_policy(i + 1)
 
@@ -893,6 +894,7 @@ def finetune_llm_multiturn(
             action_masks_list: list[torch.Tensor] = []
             all_turn_ids: list[torch.Tensor] = []
             all_rewards: list[torch.Tensor] = []
+            batch_steps = 0
 
             for _ in range(batch_size):
                 env = env_fn()
@@ -914,6 +916,10 @@ def finetune_llm_multiturn(
                 turn_rewards: list[float] = []
                 full_ids: torch.Tensor | None = None
 
+                # vLLM sleep/wake around each generate is handled in LLMPPO.get_action
+                # (wake + weight sync); sleep during the PPO update is in
+                # memory_efficient_params.
+
                 for turn_idx in range(max_turns):
                     prompt_dict = {
                         "input_ids": prompt_encoded["input_ids"],
@@ -921,7 +927,15 @@ def finetune_llm_multiturn(
                     }
                     prompt_len = prompt_dict["input_ids"].shape[1]
 
-                    completion_ids, _ = agent.get_action([prompt_dict], training=True)
+
+                    prompt_ids_1d = prompt_dict["input_ids"][0]
+                    prompt_dict["text"] = tokenizer.decode(
+                        prompt_ids_1d.tolist(), skip_special_tokens=True
+                    )
+
+                    completion_ids, _ = agent.get_action(
+                        [prompt_dict], training=True
+                    )
                     full_ids = completion_ids[0]
 
                     gen_start = prompt_len
@@ -957,6 +971,7 @@ def finetune_llm_multiturn(
                         "attention_mask": torch.ones_like(new_prompt_ids),
                     }
 
+
                 assert full_ids is not None
                 seq_len = full_ids.shape[1]
                 action_mask = torch.zeros(1, seq_len - 1, dtype=torch.bool)
@@ -981,7 +996,11 @@ def finetune_llm_multiturn(
                 completion_ids_list.append(full_ids)
                 action_masks_list.append(action_mask)
                 all_turn_ids.append(turn_ids)
-                all_rewards.append(torch.tensor(turn_rewards, dtype=torch.float))
+
+                all_rewards.append(
+                    torch.tensor(turn_rewards, dtype=torch.float)
+                )
+                batch_steps += len(turn_boundaries)
 
             (turn_ids_padded,) = stack_and_pad_experiences(
                 all_turn_ids,
@@ -999,12 +1018,11 @@ def finetune_llm_multiturn(
                 action_masks_list,
                 rewards_2d,
             )
-            with memory_efficient_params(agent):
-                loss, kl, pg_loss, critic_loss, entropy = agent.learn(
-                    experiences,
-                    tokenizer,
-                    turn_ids=turn_ids_padded,
-                )
+            loss, kl, pg_loss, critic_loss, entropy = agent.learn(
+                experiences,
+                tokenizer,
+                turn_ids=turn_ids_padded,
+            )
 
             metrics = [
                 torch.tensor(loss, dtype=torch.float32, device=agent.device),
@@ -1019,8 +1037,10 @@ def finetune_llm_multiturn(
                 aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
             ]
 
-            agent.steps[-1] += batch_size
-            total_steps += batch_size
+            effective_batch_steps = batch_steps * data_increment
+            agent.steps[-1] += effective_batch_steps
+            total_steps += effective_batch_steps
+            iteration_steps += effective_batch_steps
             agg_eval_score = None
 
             if (i + 1) % evaluation_interval == 0 and eval_fn is not None:
@@ -1083,7 +1103,7 @@ def finetune_llm_multiturn(
                 score=f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Mean reward'] for j in range(len(pop))]):.3f}",
                 acc=f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Accuracy'] for j in range(len(pop))]):.3f}",
             )
-            pbar.update(1)
+            pbar.update(iteration_steps // len(pop))
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
@@ -1104,7 +1124,7 @@ def finetune_llm_multiturn(
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-        elif (i + 1) == max_steps or (
+        elif total_steps >= max_steps or (
             checkpoint_steps is not None and (i + 1) % checkpoint_steps == 0
         ):
             save_llm_checkpoint(agent, elite_path)
@@ -1216,6 +1236,8 @@ def finetune_llm_multiturn(
                 }
 
             wandb.log(wandb_dict)
+
+        i += 1
 
     if (
         verbose

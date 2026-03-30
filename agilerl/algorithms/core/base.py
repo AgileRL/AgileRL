@@ -2819,7 +2819,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if position_ids is not None:
                 model_kwargs["position_ids"] = position_ids[start:end]
 
-            with self._amp_ctx():
+            with self._amp_ctx(): 
                 output = self.actor.forward(**model_kwargs)
             logits = output[0] if isinstance(output, tuple) else output.logits
             value = output[-1] if isinstance(output, tuple) else output[2]
@@ -3266,6 +3266,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             completion_ids = completion_ids[tp_slice]
             prompts_ids = all_prompts_ids[tp_slice]
 
+        # Check this still works with GRPO and accelerate
+        prompts_ids = [p.to(self.device, non_blocking=True) for p in prompts_ids]
+
         completion_ids = [
             torch.cat(
                 [
@@ -3318,6 +3321,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Log probabilities of the completion IDs, shape ``(B, seq_len)``.
         :rtype: torch.Tensor
         """
+        # 1. Gather the raw logits for the specific token IDs.
+        # Shape reduces from (B, seq_len, vocab_size) immediately to (B, seq_len)
+
         B = logits.shape[0]
         if B <= _chunk_rows:
             return (
@@ -3329,11 +3335,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         per_token_logps = []
         for start in range(0, B, _chunk_rows):
             end = min(start + _chunk_rows, B)
-            chunk_logps = F.log_softmax(logits[start:end], dim=-1)
-            chunk_gathered = chunk_logps.gather(
-                dim=-1, index=index[start:end].unsqueeze(-1)
-            ).squeeze(-1)
-            per_token_logps.append(chunk_gathered)
+            target_logits_chunk = logits[start:end].gather(dim=-1, index=index[start:end].unsqueeze(-1)).squeeze(-1)
+            log_z_chunk = torch.logsumexp(logits[start:end], dim=-1)
+            per_token_logps_chunk = (target_logits_chunk - log_z_chunk).to(logits.dtype) # Do we need to upcast to float 32 here??
+            per_token_logps.append(per_token_logps_chunk)
         return torch.cat(per_token_logps, dim=0)
 
     def _configure_batch_size(
