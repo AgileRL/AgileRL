@@ -24,6 +24,13 @@ DATASET = "HumanLLMs/Human-Like-DPO-Dataset"
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
+    """Download and split the dataset into train / test subsets.
+
+    :param dataset_name: HuggingFace dataset identifier.
+    :type dataset_name: str
+    :return: ``(train_dataset, test_dataset)`` HuggingFace ``Dataset`` objects.
+    :rtype: tuple[Dataset, Dataset]
+    """
     raw_dataset = load_dataset(dataset_name, split="train").shuffle(seed=42)
     train_test_split = raw_dataset.train_test_split(test_size=0.1)
     train_dataset = train_test_split["train"]
@@ -32,12 +39,18 @@ def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
 
 
 def main(init_hp, mut_p):
+    """Run the DPO benchmarking loop.
+
+    :param init_hp: Initial hyperparameter dict loaded from the YAML config.
+    :type init_hp: dict
+    :param mut_p: Mutation parameter dict loaded from the YAML config.
+    :type mut_p: dict
+    """
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
-    # Use accelerate only when launched with `accelerate launch` and DeepSpeed
-    # is configured; otherwise fall back to standard single-GPU training.
+    # Use accelerate only when launched with `accelerate launch` else None
     try:
         accelerator = Accelerator()
         if accelerator.state.deepspeed_plugin is None:
@@ -45,6 +58,7 @@ def main(init_hp, mut_p):
     except Exception:
         accelerator = None
 
+    print("Setting up PreferenceGym environment...")
     env = PreferenceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -65,6 +79,7 @@ def main(init_hp, mut_p):
         bias="none",
     )
 
+    print("Defining DPO agent population...")
     pop = [
         DPO(
             model_name=MODEL_PATH,
@@ -76,6 +91,7 @@ def main(init_hp, mut_p):
             lora_config=lora_config,
             accelerator=accelerator,
             gradient_checkpointing=accelerator is not None,
+            use_liger_loss=init_hp.get("USE_LIGER_LOSS", False),
         )
         for _ in range(init_hp["POP_SIZE"])
     ]

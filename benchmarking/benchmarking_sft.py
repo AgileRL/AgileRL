@@ -7,17 +7,6 @@ Dataset  →  SFTGym  →  SFT.learn()  →  cross-entropy on response tokens on
 SFT datasets contain plain ``(prompt, response)`` pairs — just prompts and
 their desired target responses.  No rejected/negative responses are needed.
 
-The dataset used here (``HumanLLMs/Human-Like-DPO-Dataset``) happens to be a
-DPO-style preference dataset with ``prompt``, ``chosen``, and ``rejected``
-columns.  We use only ``prompt`` + ``chosen`` by passing
-``response_column="chosen"`` to ``SFTGym``; the ``rejected`` column is
-completely ignored.
-
-This is a natural fit for the typical two-stage alignment pipeline:
-
-    Stage 1 — SFT (this script):  train on (prompt, chosen)
-    Stage 2 — DPO              :  further align on (prompt, chosen, rejected)
-
 To run (single GPU, no accelerate):
     python benchmarking/benchmarking_sft.py
 
@@ -47,16 +36,10 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_sft
 from agilerl.utils.llm_utils import SFTGym
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-# A small model suitable for quick iteration.  Swap for a larger one as needed.
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
-
-# A DPO-style dataset reused here for its "prompt" + "chosen" columns.
-# Any dataset with a "prompt" column and a response column works with SFTGym.
 DATASET = "HumanLLMs/Human-Like-DPO-Dataset"
+# A DPO-style dataset reused here for its "prompt" + "chosen" columns.
+# Any dataset with a "prompt" column and a (desirable) response column works with SFTGym.
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
@@ -80,28 +63,18 @@ def main(init_hp: dict, mut_p: dict) -> None:
     :param mut_p: Mutation parameter dict loaded from the YAML config.
     :type mut_p: dict
     """
-    # Tokenizer -----------------------------------------------------------
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
-    # Use accelerate only when launched with `accelerate launch` (i.e. when
-    # DeepSpeed / multi-GPU is configured).  For a plain single-GPU run via
-    # `uv run python benchmarking/benchmarking_sft.py` pass accelerator=None
-    # so the base class falls back to standard single-GPU training.
+    # Use accelerate only when launched with `accelerate launch` else None
     try:
         accelerator = Accelerator()
-        # Probe for DeepSpeed — if not configured the plugin is None and we
-        # fall back to accelerator=None to avoid the deepspeed_config access
-        # inside LLMAlgorithm._configure_batch_size.
         if accelerator.state.deepspeed_plugin is None:
             accelerator = None
     except Exception:
         accelerator = None
 
-    # SFTGym expects (prompt, response) pairs.  This dataset uses "chosen" as
-    # the column name for the good response, so we specify that explicitly.
-    # A pure SFT dataset would typically use "response" (the default).
     print("Setting up SFTGym environment...")
     env = SFTGym(
         train_dataset=train_dataset,
@@ -116,7 +89,6 @@ def main(init_hp: dict, mut_p: dict) -> None:
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
     init_hp["PAD_TOKEN"] = tokenizer.eos_token
 
-    # LoRA config ---------------------------------------------------------
     lora_config = LoraConfig(
         r=16,
         lora_alpha=64,
@@ -125,7 +97,6 @@ def main(init_hp: dict, mut_p: dict) -> None:
         bias="none",
     )
 
-    # Population ----------------------------------------------------------
     print("Defining SFT agent population...")
     pop = [
         SFT(
@@ -140,6 +111,7 @@ def main(init_hp: dict, mut_p: dict) -> None:
             # requires_grad=True; disable for plain single-GPU runs where
             # memory pressure is not a concern.
             gradient_checkpointing=accelerator is not None,
+            use_liger_loss=init_hp.get("USE_LIGER_LOSS", False),
         )
         for _ in range(init_hp["POP_SIZE"])
     ]
@@ -168,8 +140,6 @@ def main(init_hp: dict, mut_p: dict) -> None:
         tournament = None
         mutations = None
 
-    # Training loop -------------------------------------------------------
-    # NUM_BATCHES=None → full epoch; NUM_BATCHES=N → exactly N batches.
     num_batches = init_hp.get("NUM_BATCHES")
     max_steps = num_batches * init_hp["BATCH_SIZE"] if num_batches is not None else None
 

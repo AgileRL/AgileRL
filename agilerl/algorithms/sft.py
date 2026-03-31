@@ -1,10 +1,19 @@
 import gc
+import warnings
 from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
+
+try:
+    from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
+
+    HAS_LIGER_KERNEL = True
+except ImportError:
+    LigerCrossEntropyLoss = None
+    HAS_LIGER_KERNEL = False
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -80,6 +89,10 @@ class SFT(LLMAlgorithm):
     :param gradient_checkpointing: Use gradient checkpointing to trade compute for
         memory, defaults to True
     :type gradient_checkpointing: bool, optional
+    :param use_liger_loss: Use Liger kernel for memory-efficient cross-entropy loss
+        computation, defaults to False. Requires ``liger_kernel`` to be installed;
+        pass ``False`` to fall back to the standard PyTorch path.
+    :type use_liger_loss: bool, optional
     """
 
     def __init__(
@@ -105,7 +118,16 @@ class SFT(LLMAlgorithm):
         clone: bool = False,
         seed: int = 42,
         gradient_checkpointing: bool = True,
+        use_liger_loss: bool = False,
     ) -> None:
+        if use_liger_loss and not HAS_LIGER_KERNEL:
+            warnings.warn(
+                "use_liger_loss=True requested, but `liger-kernel` is not available on this platform/environment. "
+                "Falling back to standard loss.",
+                stacklevel=2,
+            )
+            use_liger_loss = False
+
         resolved_device = (
             f"cuda:{accelerator.process_index}"
             if accelerator is not None
@@ -128,7 +150,7 @@ class SFT(LLMAlgorithm):
             seed=seed,
             pad_token_id=pad_token_id,
             pad_token=pad_token,
-            use_liger_loss=False,
+            use_liger_loss=use_liger_loss,
             lora_config=lora_config,
             use_separate_reference_adapter=False,
             model_name=model_name,
@@ -146,6 +168,7 @@ class SFT(LLMAlgorithm):
         self.temperature = 1
         self.use_vllm = False
         self.update_epochs = update_epochs
+        self.use_liger_loss = use_liger_loss
 
         self._initialize_actors(actor_network, not clone)
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
@@ -192,29 +215,22 @@ class SFT(LLMAlgorithm):
 
         input_ids: torch.Tensor = experiences["input_ids"]
         attention_mask: torch.Tensor = experiences["attention_mask"]
-        prompt_lengths: list[int] = experiences["prompt_lengths"]
-
+        # Check first that all tensors have the same max length before calculating the masks
+        assert (
+            input_ids.shape[1] == attention_mask.shape[1]
+        ), "All tensors must have the same max length"
         max_length = input_ids.shape[1]
-
+        prompt_lengths: list[int] = experiences["prompt_lengths"]
         # Build the response mask on CPU (same device as dataloader tensors).
-        # prompt_masks[i, j] is True when position j is AFTER the prompt (i.e. a
-        # response token).  Multiplying by attention_mask zeros out padding.
-        # The micro-batch loop below moves slices to self.device right before
-        # each forward pass, so we don't need to be on GPU here.
         prompt_masks = LLMAlgorithm.create_prompt_masks(
             prompt_lengths, max_length=max_length
         )  # CPU tensor
-        # Shift by 1: align with logits[:, :-1] vs. input_ids[:, 1:]
+        # Mask has to be shifted by 1 as output log probs dims are 1 shorter than input ids as first token is used to predict the first log prob
         response_mask = (prompt_masks * attention_mask.cpu())[:, 1:]  # [B, L-1], CPU
-
-        # Labels: shifted token IDs with prompt/padding positions set to -100
-        labels = input_ids[:, 1:].clone()  # [B, L-1]
-        labels[~response_mask.bool()] = -100
+        # Create labels for CE loss
+        labels = torch.where(response_mask.bool(), input_ids[:, 1:], -100)  # [B, L-1]
 
         num_samples = input_ids.shape[0]
-        # micro_batch_size_per_gpu is only set by _configure_batch_size when an
-        # Accelerator with DeepSpeed is used; fall back to the full per-process
-        # batch size for plain single-GPU runs.
         micro_bs = min(
             num_samples,
             getattr(self, "micro_batch_size_per_gpu", self.batch_size_per_process),
@@ -280,11 +296,12 @@ class SFT(LLMAlgorithm):
         logits = self.actor.forward(**model_kwargs).logits  # [B, L, V]
         # Shift: predict token i+1 from hidden state i
         shift_logits = logits[:, :-1, :].contiguous()  # [B, L-1, V]
-        loss = F.cross_entropy(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            labels.view(-1),
-            ignore_index=-100,
-        )
+        flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+        flat_labels = labels.view(-1)
+        if self.use_liger_loss:
+            loss = LigerCrossEntropyLoss(ignore_index=-100)(flat_logits, flat_labels)
+        else:
+            loss = F.cross_entropy(flat_logits, flat_labels, ignore_index=-100)
         return loss
 
     def test(
