@@ -144,10 +144,11 @@ class _RegistryMeta(type):
         *args: Any,
         **kwargs: Any,
     ) -> SelfEvolvableAlgorithm:
-        # Create the instance
         instance: SelfEvolvableAlgorithm = super().__call__(*args, **kwargs)
 
-        # Call the base class post_init_hook after all initialization
+        # Initialize the MutationRegistry -> ensures that all of the networks and
+        # optimizers are registered with the algorithm, and that the specified hyperparameters
+        # to mutate have been set as attributes in the algorithm.
         if isinstance(instance, cls) and hasattr(instance, "_registry_init"):
             instance._registry_init()
 
