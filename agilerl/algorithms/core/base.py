@@ -3159,35 +3159,130 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         self.llm.reset_prefix_cache()
 
+    def _stitch_sliding_window_completions(
+        self,
+        completion_ids: list[torch.Tensor],
+        stitch_prefixes: list[torch.Tensor],
+        group_prompts: list[dict[str, Any]],
+        group_size: int,
+        prompts: list[dict[str, Any]],
+    ) -> list[torch.Tensor]:
+        """Reinsert dropped middle segments into ``model_prompt | generation`` tensors.
+
+        For each logical prompt ``i``, ``block`` is
+        ``concat(model_input_ids, new_tokens)`` (batched over ``group_size``).
+        When ``stitch_prefix_ids`` is non-empty, the full chronological sequence is
+        ``concat(block[:, :I], stitch, block[:, I:], dim=1)`` with
+        ``I = model_window_initial_len`` from the corresponding prompt dict.
+
+        :param completion_ids: One tensor per logical prompt: prompt+gen per row.
+        :type completion_ids: list[torch.Tensor]
+        :param stitch_prefixes: Parallel to expanded ``group_prompts``; empty
+            tensors when no windowing for that slot.
+        :type stitch_prefixes: list[torch.Tensor]
+        :param group_prompts: ``prompts`` expanded so each original prompt repeats
+            ``group_size`` times (same order as vLLM batch).
+        :type group_prompts: list[dict[str, Any]]
+        :param group_size: Number of repeated entries per logical prompt.
+        :type group_size: int
+        :param prompts: Original batch of observation dicts (length ``N``).
+        :type prompts: list[dict[str, Any]]
+        :return: Same length as ``completion_ids``, with middle stitch applied
+            where ``stitch_prefixes`` is non-empty.
+        :rtype: list[torch.Tensor]
+        """
+        stitched: list[torch.Tensor] = []
+        for i, _ in enumerate(prompts):
+            block = completion_ids[i]
+            st = stitch_prefixes[group_size * i]
+            if st.shape[1] == 0:
+                stitched.append(block)
+                continue
+            il_t = group_prompts[group_size * i].get("model_window_initial_len")
+            if il_t is None:
+                msg = (
+                    "model_window_initial_len required when stitch_prefix_ids is non-empty"
+                )
+                raise ValueError(
+                    msg,
+                )
+            il = int(il_t)
+            g = block.shape[0]
+            st_b = st.expand(g, -1)
+            stitched.append(
+                torch.cat([block[:, :il], st_b, block[:, il:]], dim=1),
+            )
+        return stitched
+
     def _generate_with_vllm_colocate(
         self,
-        prompts: list[dict[str, int]],
+        prompts: list[dict[str, Any]],
         group_size: int,
-    ) -> list[torch.Tensor]:
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Generate completions with colocated vLLM for GRPO/LLMPPO-style batches.
 
-        # I need to make the following happen
-        # prompts = [prompt1, prompt1, ..., prompt1 (group_size times), prompt2, prompt2, ..., prompt2 (group_size times), ...]
+        Each entry in ``prompts`` is repeated ``group_size`` times so vLLM receives
+        a flat list of length ``len(prompts) * group_size`` (e.g. GRPO groups).
 
-        # The below line returns a list: [prompt1 * group_size, ..., promptN * group_size],
-        # where N is the data batch size per gpu, list length is group_size * N
+        **Prompt dict fields:** ``input_ids`` and usually ``text`` for decoding.
+        For sliding-window multi-turn prompts, optionally set ``model_input_ids``,
+        ``model_text`` (decoded string passed to vLLM), ``stitch_prefix_ids``, and
+        ``model_window_initial_len`` (required when ``stitch_prefix_ids`` is
+        non-empty). Action masks use the full logical prompt length from
+        ``input_ids``, not only ``model_input_ids``.
+
+        :param prompts: Length-``N`` list of observation dicts for this rank.
+        :type prompts: list[dict[str, Any]]
+        :param group_size: Repeat factor per prompt (1 for plain PPO).
+        :type group_size: int
+        :return: Per-prompt completion token tensors and matching action masks.
+        :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
+        """
         group_prompts = [prompt for prompt in prompts for _ in range(group_size)]
-        prompts_ids = [prompt["input_ids"] for prompt in group_prompts]
-        prompts_text = [prompt["text"] for prompt in group_prompts]
+
+        def _model_input_ids(prompt: dict[str, Any]) -> torch.Tensor:
+            return cast(
+                torch.Tensor,
+                prompt.get("model_input_ids", prompt["input_ids"]),
+            )
+
+        def _prompt_text_for_vllm(prompt: dict[str, Any]) -> str:
+            if "model_text" in prompt:
+                return str(prompt["model_text"])
+            return str(prompt.get("text", ""))
+
+        def _stitch_prefix(prompt: dict[str, Any], ref: torch.Tensor) -> torch.Tensor:
+            st = prompt.get("stitch_prefix_ids")
+            if st is None:
+                return ref.new_zeros((ref.shape[0], 0))
+            return cast(torch.Tensor, st)
+
+        prompts_ids = [_model_input_ids(p) for p in group_prompts]
+        stitch_prefixes = [_stitch_prefix(p, prompts_ids[i]) for i, p in enumerate(group_prompts)]
+        prompts_text = [_prompt_text_for_vllm(p) for p in group_prompts]
         prompts_text = [
             re.sub(rf"^({re.escape(str(self.pad_token))})+", "", text)
             for text in prompts_text
         ]
 
-        # max_output_tokens now acts as a global
         max_token_cap = (
             self.max_output_tokens
             if self.max_output_tokens is not None
             else self.max_model_len
         )
 
+        def _vllm_max_new_tokens(model_prompt_len: int) -> int:
+            room = self.max_model_len - model_prompt_len
+            if room <= 0:
+                return 0
+            max_out = min(max_token_cap, room)
+            max_out = max(max_out, 1)
+            if self.min_output_tokens is not None:
+                max_out = max(max_out, min(self.min_output_tokens, room))
+            return min(max_out, room)
+
         max_output_tokens = [
-            min(max_token_cap, self.max_model_len - len(prompt_id))
-            for prompt_id in prompts_ids
+            _vllm_max_new_tokens(int(prompt_id.shape[1])) for prompt_id in prompts_ids
         ]
 
         generation_kwargs = {
@@ -3215,6 +3310,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             gathered_prompts_text = [
                 None for _ in range(self.vllm_config.tensor_parallel_size)
             ]
+            gathered_stitch_prefixes = [
+                None for _ in range(self.vllm_config.tensor_parallel_size)
+            ]
 
             torch.distributed.all_gather_object(
                 gathered_prompts_ids,
@@ -3226,6 +3324,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 prompts_text,
                 group=self.tp_group,
             )
+            torch.distributed.all_gather_object(
+                gathered_stitch_prefixes,
+                stitch_prefixes,
+                group=self.tp_group,
+            )
 
             all_prompts_ids = [
                 prompt_id for sublist in gathered_prompts_ids for prompt_id in sublist
@@ -3235,9 +3338,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 for sublist in gathered_prompts_text
                 for prompt_text in sublist
             ]
+            all_stitch_prefixes = [
+                sp
+                for sublist in gathered_stitch_prefixes
+                for sp in sublist
+            ]
         else:
             all_prompts_text = prompts_text
             all_prompts_ids = prompts_ids
+            all_stitch_prefixes = stitch_prefixes
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
@@ -3246,7 +3355,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             all_prompts_text,
             sampling_params=sampling_params,
             use_tqdm=False,
-        )  # Change this to False
+        )
 
         completion_ids = [
             output.token_ids for outputs in all_outputs for output in outputs.outputs
@@ -3261,9 +3370,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             completion_ids = completion_ids[tp_slice]
             prompts_ids = all_prompts_ids[tp_slice]
+            stitch_prefixes = all_stitch_prefixes[tp_slice]
 
-        # Check this still works with GRPO and accelerate
         prompts_ids = [p.to(self.device, non_blocking=True) for p in prompts_ids]
+        stitch_prefixes = [
+            sp.to(self.device, non_blocking=True) for sp in stitch_prefixes
+        ]
 
         completion_ids = [
             torch.cat(
@@ -3283,8 +3395,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             for i, _ in enumerate(prompts)
         ]
 
-        num_input_tokens = [prompt_ids.shape[1] for prompt_ids in prompts_ids][
-            ::group_size
+        if any(int(sp.shape[1]) > 0 for sp in stitch_prefixes):
+            completion_ids = self._stitch_sliding_window_completions(
+                completion_ids,
+                stitch_prefixes,
+                group_prompts,
+                group_size,
+                prompts,
+            )
+
+        num_input_tokens = [
+            int(cast(torch.Tensor, prompts[i]["input_ids"]).shape[1])
+            for i in range(len(prompts))
         ]
         action_masks = []
 

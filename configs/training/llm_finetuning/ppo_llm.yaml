@@ -14,7 +14,7 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: LLMPPO
-    BATCH_SIZE: 2
+    BATCH_SIZE: 8
     BETA: 0.01                # KL penalty — keeps policy close to reference
     LR_ACTOR: 0.000005        # 5e-6 — good for LoRA on 0.5B instruct model
     LR_CRITIC: 0.00001        # 1e-5 — value head learns faster

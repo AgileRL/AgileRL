@@ -326,7 +326,6 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
             save_elite=False,
             verbose=True,
             accelerator=accelerator,
-            apply_chat_template=False,
         )
     finally:
         train_llm.save_llm_checkpoint = original_save_checkpoint

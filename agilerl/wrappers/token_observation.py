@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any
-
+import os
+import re
+from typing import Tuple
+import requests
+from gem.tools.base_tool import BaseTool
 import torch
 
 if TYPE_CHECKING:
@@ -120,6 +124,9 @@ class TokenObservationWrapper:
     def reset(self) -> dict[str, torch.Tensor]:
         """Create a fresh environment and return the tokenized initial prompt.
 
+        Sets ``_initial_prompt_len`` to the length of this prompt; it is used by
+        :meth:`build_model_prompt_fields` for sliding-window truncation.
+
         :return: Prompt dict with ``input_ids`` and ``attention_mask``.
         :rtype: dict[str, torch.Tensor]
         """
@@ -128,6 +135,7 @@ class TokenObservationWrapper:
 
         encoded = self._tokenize_initial_prompt(obs_text)
         self.full_ids = encoded["input_ids"]
+        self._initial_prompt_len = int(encoded["input_ids"].shape[1])
         self.turn_boundaries = []
         self.turn_rewards = []
         self._turn_idx = 0
@@ -184,6 +192,97 @@ class TokenObservationWrapper:
             }
 
         return prompt_dict, reward, terminated, truncated, info
+
+    def build_model_prompt_fields(
+        self,
+        max_prompt_tokens: int,
+    ) -> dict[str, Any]:
+        """Build truncated prompt tensors for the LLM and a stitch prefix for full trajectories.
+
+        Drops the oldest completed assistant+feedback turns after the initial
+        user prompt until ``max_prompt_tokens`` is respected (or only the
+        initial segment remains).
+
+        :param max_prompt_tokens: Maximum number of tokens in the prompt passed
+            to the model (after truncation).
+        :type max_prompt_tokens: int
+        :return: Dict with ``model_input_ids``, ``model_attention_mask``,
+            ``model_text``, ``stitch_prefix_ids`` (tokens removed between the
+            initial segment and the kept tail), and ``model_window_initial_len``.
+            Chronological reconstruction is
+            ``cat(model_input_ids[:, :I], stitch_prefix_ids, model_input_ids[:, I:], dim=1)``
+            where ``I`` is ``model_window_initial_len``.
+        :rtype: dict[str, Any]
+        """
+        if self.full_ids is None:
+            msg = "No prompt: reset() was never called"
+            raise RuntimeError(
+                msg,
+            )
+
+        full = self.full_ids
+        initial_len = self._initial_prompt_len
+        seq_len = full.shape[1]
+        boundaries = self.turn_boundaries
+        n = len(boundaries)
+
+        if initial_len > max_prompt_tokens:
+            msg = (
+                f"Initial prompt ({initial_len} tokens) exceeds "
+                f"max_prompt_tokens ({max_prompt_tokens})."
+            )
+            raise RuntimeError(
+                msg,
+            )
+
+        k = 0
+        while True:
+            if k < n:
+                drop_from = boundaries[k][0]
+            elif n == 0:
+                drop_from = initial_len
+            else:
+                drop_from = seq_len
+            if drop_from >= seq_len:
+                trunc = full[:, :initial_len].clone()
+            else:
+                trunc = torch.cat(
+                    [full[:, :initial_len], full[:, drop_from:]],
+                    dim=1,
+                )
+            if trunc.shape[1] <= max_prompt_tokens or k >= n:
+                break
+            k += 1
+
+        if trunc.shape[1] > max_prompt_tokens:
+            msg = (
+                "Could not fit prompt even after dropping all post-initial turns; "
+                f"trunc_len={trunc.shape[1]}, max_prompt_tokens={max_prompt_tokens}."
+            )
+            raise RuntimeError(
+                msg,
+            )
+
+        if k < n:
+            drop_from_final = boundaries[k][0]
+        elif n == 0:
+            drop_from_final = initial_len
+        else:
+            drop_from_final = seq_len
+        stitch = full[:, initial_len:drop_from_final]
+
+        prompt_ids_1d = trunc[0]
+        model_text = self.tokenizer.decode(
+            prompt_ids_1d.tolist(),
+            skip_special_tokens=True,
+        )
+        return {
+            "model_input_ids": trunc,
+            "model_attention_mask": torch.ones_like(trunc),
+            "model_text": model_text,
+            "stitch_prefix_ids": stitch,
+            "model_window_initial_len": initial_len,
+        }
 
     def get_episode_data(
         self,
@@ -272,3 +371,113 @@ class TokenObservationWrapper:
             "turn_details": turn_details,
             "feedback_texts": self._feedback_texts,
         }
+
+
+
+# Adapted from https://github.com/PeterGriffinJin/Search-R1
+
+# Timeout for search request in seconds
+TIMEOUT = 5
+
+
+class SearchTool(BaseTool):
+    tool_type = "search"
+
+    def __init__(self, num_workers=1, search_url=None, topk=3, timeout=TIMEOUT):
+        super().__init__(num_workers)
+        self.search_url = search_url
+        self.topk = topk
+        self.timeout = timeout
+        self._search_url_resolved = self.search_url is not None
+
+    def _parse_action(self, action: str) -> Tuple[str, str, bool]:
+        """
+        Parse the action string to extract the <search> content and the full matched tag.
+        Returns (content, parsed_action, is_valid)
+        """
+        # only take the first match
+        pattern = r"<search>(.*?)</search>"
+        match = re.search(pattern, action, re.DOTALL)
+        if match:
+            parsed_query = match.group(1).strip()
+            parsed_action = action[: match.end()]  # including thinking process
+            return parsed_query, parsed_action, True
+        else:
+            return "", "", False
+
+    def _search(self, query: str):
+        """
+        Perform a search using the configured search_url.
+        Returns a formatted string of search results.
+        """
+        if not self._search_url_resolved:
+            self.search_url = self.search_url or os.environ.get("SEARCH_URL")
+            self._search_url_resolved = True
+
+        if not self.search_url:
+            raise ValueError("search_url must be provided for SearchTool.")
+
+        payload = {"q": query, "format": "json"}
+        
+        try:
+            response = requests.get(
+                self.search_url,
+                params=payload,
+                timeout=self.timeout,
+            ).json()
+            result = response["results"][:self.topk]
+            response_string = ""
+            for r in result:
+                response_string += f"  {r.get('content', '')}\n"
+            return response_string
+        except Exception as e:
+            return f"[SearchTool Error: {e}]"
+
+    def _passages2string(self, result):
+        format_reference = ""
+        for idx, doc_item in enumerate(result):
+            content = doc_item["document"]["contents"]
+            title = content.split("\n")[0]
+            text = "\n".join(content.split("\n")[1:])
+            format_reference += f"Doc {idx+1}(Title: {title}) {text}\n"
+        return format_reference
+
+    def instruction_string(self) -> str:
+        return (
+            "You have access to a search engine to help answer questions.\n\n"
+            "Additional instructions:\n"
+            "- If your initial reasoning in <think> shows you lack some knowledge, explain what you need to find next inside a new <think> block.\n"
+            "- Then issue a search query using:\n"
+            "  <search> your query here </search>\n"
+            "- The search engine will provide results inside:\n"
+            "  <information> ... </information>\n"
+            "- You may repeat the <think> and <search> steps as many times as needed.\n"
+            "- When you are ready, give your final answer in:\n"
+            "  <answer> your answer here </answer>"
+        )
+
+    def execute_action(self, action: str):
+        """
+        Execute the parsed action for the SearchTool.
+
+        Args:
+            action: The raw action string, typically containing a search query
+                within <search>...</search> tags.
+
+        Returns:
+            observation: The formatted search result, or an empty string if invalid.
+            done: Always False for search tool (search does not terminate the episode).
+            valid: True if a valid search query was found and executed, False otherwise.
+        """
+        parsed_query, parsed_action, is_valid = self._parse_action(action)
+        if not is_valid:
+            # observation = "No valid search query found. Please provide your query within <search>...</search> tags."
+            observation = ""
+            valid = False
+            has_error = True
+        else:
+            search_result = self._search(parsed_query)
+            observation = f"\n\n<information>{search_result}</information>\n\n"
+            valid = True
+            has_error = "[SearchTool Error:" in search_result
+        return valid, has_error, observation, parsed_action

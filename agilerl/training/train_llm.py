@@ -15,7 +15,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import PopulationType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
-from agilerl.utils.llm_utils import ReasoningGym
+from agilerl.utils.llm_utils import ReasoningGym, max_prompt_tokens_for_sliding_window
 from agilerl.utils.utils import (
     aggregate_metrics_across_gpus,
     init_wandb,
@@ -63,7 +63,7 @@ def memory_efficient_params(agent) -> None:
     :return: None
     :rtype: None
     """
-    # FIXME add in zero 3 compatibilitys
+    # ZeRO-3: extend offload/wake logic when using vLLM colocate + sleep_mode.
     vllm_cfg = getattr(agent, "vllm_config", None)
     use_vllm = getattr(agent, "use_vllm", False)
     # Only offload params for vLLM colocate mode. If use_vllm is False,
@@ -803,8 +803,56 @@ def finetune_llm_multiturn(
     max_reward: float | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
-    apply_chat_template: bool = True,
 ) -> PopulationType:
+    """Finetune a population of LLMPPO agents on a multi-turn GEM environment.
+
+    Collects token-level episodes (reset, repeated ``get_action`` / ``step``,
+    then ``get_episode_data``), then runs turn-level PPO updates. When ``env``
+    implements ``build_model_prompt_fields`` (e.g. ``TokenObservationWrapper``),
+    sliding-window prompt fields are merged before generation so long
+    trajectories stay within model context limits.
+
+    :param pop: Population of LLMPPO agents to finetune.
+    :type pop: PopulationType
+    :param env: Multi-turn environment (often a ``TokenObservationWrapper``).
+    :type env: GemEnv
+    :param tokenizer: Tokenizer used for decode/encode in the training loop.
+    :type tokenizer: Any
+    :param max_turns: Maximum interaction turns per episode.
+    :type max_turns: int
+    :param init_hp: Initial hyperparameters (e.g. ``BATCH_SIZE``, ``ALGO``).
+    :type init_hp: dict, optional
+    :param max_steps: Progress-bar / outer-loop budget in sample steps, defaults to 32768.
+    :type max_steps: int, optional
+    :param save_elite: Whether to save the elite checkpoint, defaults to None.
+    :type save_elite: bool, optional
+    :param elite_path: Directory or path prefix for checkpoints, defaults to None.
+    :type elite_path: str, optional
+    :param wb: Whether to log to Weights and Biases, defaults to False.
+    :type wb: bool, optional
+    :param evo_steps: Steps between evolution (requires tournament and mutation).
+    :type evo_steps: int, optional
+    :param checkpoint_steps: Save checkpoint every N outer iterations when no evolution.
+    :type checkpoint_steps: int, optional
+    :param tournament: Tournament selection for evolution, defaults to None.
+    :type tournament: TournamentSelection, optional
+    :param mutation: Mutation operator for evolution, defaults to None.
+    :type mutation: Mutations, optional
+    :param wandb_api_key: W&B API key, defaults to None.
+    :type wandb_api_key: str, optional
+    :param eval_fn: Optional ``(agent) -> float`` evaluated on the main process.
+    :type eval_fn: Callable[[LLMPPO], float], optional
+    :param evaluation_interval: How often to run ``eval_fn`` and verbose banners.
+    :type evaluation_interval: int, optional
+    :param max_reward: If set, adds accuracy metric vs this threshold.
+    :type max_reward: float, optional
+    :param verbose: Progress bar and periodic train summaries, defaults to True.
+    :type verbose: bool, optional
+    :param accelerator: Hugging Face Accelerate instance, defaults to None.
+    :type accelerator: Accelerator, optional
+    :return: The finetuned population (same list object, possibly mutated in place).
+    :rtype: PopulationType
+    """
     if evo_steps is not None and (tournament is None or mutation is None):
         warnings.warn(
             "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place.",
@@ -897,6 +945,10 @@ def finetune_llm_multiturn(
 
             for _ in range(batch_size):
                 prompt_dict = env.reset()
+                max_prompt_toks = max_prompt_tokens_for_sliding_window(
+                    agent.max_model_len,
+                    agent.max_output_tokens,
+                )
 
                 for _turn_idx in range(max_turns):
                     prompt_len = prompt_dict["input_ids"].shape[1]
@@ -905,26 +957,18 @@ def finetune_llm_multiturn(
                             prompt_dict["input_ids"][0].tolist(),
                             skip_special_tokens=True,
                         )
+                    if hasattr(env, "build_model_prompt_fields"):
+                        prompt_dict.update(
+                            env.build_model_prompt_fields(max_prompt_toks),
+                        )
 
                     completion_ids, _ = agent.get_action([prompt_dict], training=True)
                     full_ids = completion_ids[0]
-
-                    print("State: ")
-                    print(
-                        tokenizer.decode(
-                            full_ids[0, :prompt_len].tolist(), skip_special_tokens=True
-                        )
-                    )
-
-                    gen_tokens = full_ids[0, prompt_len:]
+                    gen_tokens = full_ids[0, prompt_len:] 
                     gen_text = tokenizer.decode(
                         gen_tokens.tolist(),
                         skip_special_tokens=True,
                     )
-                    print("Action: ")
-                    print(gen_text)
-
-                    print("--------------------------------")
 
                     prompt_dict, _reward, terminated, truncated, _info = env.step(
                         full_ids, gen_text

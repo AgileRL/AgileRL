@@ -216,6 +216,39 @@ class PPO(LLMAlgorithm):
     def lr_actor(self, value: float) -> None:
         self.lr = value
 
+    @staticmethod
+    def _stitch_hf_completion_after_windowed_generate(
+        completion_id: torch.Tensor,
+        stitch: torch.Tensor,
+        initial_len: int,
+    ) -> torch.Tensor:
+        """Reinsert dropped middle tokens after HF ``generate`` on a windowed prompt.
+
+        ``completion_id`` is ``concat(model_input_ids, new_tokens)``. The full
+        chronological sequence is
+        ``concat(completion_id[:, :initial_len], stitch, completion_id[:, initial_len:])``.
+
+        :param completion_id: Output of ``generate`` on the truncated prompt,
+            shape ``(1, seq_len)``.
+        :type completion_id: torch.Tensor
+        :param stitch: Middle segment removed for context windowing, shape ``(1, K)``.
+        :type stitch: torch.Tensor
+        :param initial_len: ``model_window_initial_len`` (length of the initial
+            user segment within ``model_input_ids``).
+        :type initial_len: int
+        :return: Full prompt plus generation with stitch restored.
+        :rtype: torch.Tensor
+        """
+        stitch = stitch.to(completion_id.device, non_blocking=True)
+        return torch.cat(
+            [
+                completion_id[:, :initial_len],
+                stitch,
+                completion_id[:, initial_len:],
+            ],
+            dim=1,
+        )
+
     def _apply_critic_lr(self) -> None:
         """Set the critic param-group lr to ``self.lr_critic``.
 
@@ -241,7 +274,24 @@ class PPO(LLMAlgorithm):
         obs: LLMObsType,
         training: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Return generated completion ids and corresponding action masks."""
+        """Return generated completion ids and corresponding action masks.
+
+        Each observation dict normally includes ``input_ids`` and ``attention_mask``.
+        Keys ``text`` and ``model_text`` are removed before the forward pass.
+
+        For sliding-window multi-turn prompts (HuggingFace path only), optional
+        keys are consumed: ``model_input_ids``, ``model_attention_mask``,
+        ``stitch_prefix_ids``, and ``model_window_initial_len`` (required when
+        ``stitch_prefix_ids`` is non-empty). vLLM colocate uses the same optional
+        keys via the base implementation.
+
+        :param obs: Batch of prompt dicts.
+        :type obs: LLMObsType
+        :param training: Unused; kept for API compatibility with other agents.
+        :type training: bool
+        :return: Lists of completion tensors and per-token action masks.
+        :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
+        """
         with self.select_adapter("actor"):
             self.actor.eval()
             if not self.use_vllm:
@@ -255,21 +305,61 @@ class PPO(LLMAlgorithm):
                     action_masks = []
                     for prompt in obs:
                         prompt.pop("text", None)
-                        prompt["input_ids"] = prompt["input_ids"].to(actor_device)
-                        prompt["attention_mask"] = prompt["attention_mask"].to(
-                            actor_device
+                        prompt.pop("model_text", None)
+                        stitch = prompt.pop("stitch_prefix_ids", None)
+                        model_window_initial_len = prompt.pop(
+                            "model_window_initial_len",
+                            None,
                         )
+                        model_input_ids = prompt.pop("model_input_ids", None)
+                        model_attention_mask = prompt.pop(
+                            "model_attention_mask",
+                            None,
+                        )
+                        if model_input_ids is not None:
+                            prompt["input_ids"] = model_input_ids.to(actor_device)
+                            if model_attention_mask is not None:
+                                prompt["attention_mask"] = model_attention_mask.to(
+                                    actor_device,
+                                )
+                        else:
+                            prompt["input_ids"] = prompt["input_ids"].to(actor_device)
+                            prompt["attention_mask"] = prompt[
+                                "attention_mask"
+                            ].to(
+                                actor_device,
+                            )
+                        model_in_len = prompt["input_ids"].shape[1]
                         completion_id = self.actor.generate(
                             **prompt,
                             generation_config=self.generation_config,
                         )
+                        stitch_mid_len = 0
+                        if stitch is not None and stitch.shape[1] > 0:
+                            if model_window_initial_len is None:
+                                msg = (
+                                    "model_window_initial_len is required when "
+                                    "stitch_prefix_ids is non-empty"
+                                )
+                                raise ValueError(
+                                    msg,
+                                )
+                            stitch_mid_len = stitch.shape[1]
+                            completion_id = (
+                                self._stitch_hf_completion_after_windowed_generate(
+                                    completion_id,
+                                    stitch,
+                                    int(model_window_initial_len),
+                                )
+                            )
+                        full_prompt_len = model_in_len + stitch_mid_len
                         completion_ids.append(completion_id)
                         action_mask = torch.zeros_like(
                             completion_id,
                             dtype=torch.bool,
                             device=completion_id.device,
                         )
-                        action_mask[:, prompt["input_ids"].shape[1] :] = True
+                        action_mask[:, full_prompt_len:] = True
                         action_mask[completion_id == self.pad_token_id] = False
                         action_mask = action_mask[:, 1:]
                         action_masks.append(action_mask)

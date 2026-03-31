@@ -76,6 +76,29 @@ def apply_chat_template(
     )
 
 
+def max_prompt_tokens_for_sliding_window(
+    max_model_len: int,
+    max_output_tokens: int | None,
+) -> int:
+    """Upper bound on prompt tokens so at least one completion token can be generated.
+
+    Matches the headroom logic used by vLLM colocate generation: reserve
+    ``min(max_output_cap, max_model_len)`` with at least one token reserved for
+    generation when room exists.
+
+    :param max_model_len: Engine context length (prompt + completion ceiling).
+    :type max_model_len: int
+    :param max_output_tokens: Configured completion cap; if ``None``, uses
+        ``max_model_len`` as the cap when computing headroom.
+    :type max_output_tokens: int | None
+    :return: Largest allowed prompt length under that headroom (may be 0).
+    :rtype: int
+    """
+    cap = max_output_tokens if max_output_tokens is not None else max_model_len
+    gen_reserve = max(1, min(cap, max_model_len))
+    return max(0, max_model_len - gen_reserve)
+
+
 class HuggingFaceGym(gym.Env, ABC):
     """Abstract base class for HuggingFace Gymnasium environments.
 
