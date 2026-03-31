@@ -25,6 +25,7 @@ if HAS_LLM_DEPENDENCIES:
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.modeling_utils import PreTrainedModel
     from transformers.tokenization_utils_base import BatchEncoding
+
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
     AutoTokenizer = AutoTokenizer
@@ -752,6 +753,27 @@ def masked_whiten(
     if not shift_mean:
         whitened += mean
     return whitened
+
+
+def pool_by_turns(
+    token_values: torch.Tensor,
+    turn_ids: torch.Tensor,
+    num_turns: int,
+) -> torch.Tensor:
+    """Mean-pool per-token values into per-turn scalars.
+
+    :param token_values: [batch, seq_len] per-token scalars.
+    :param turn_ids: [batch, seq_len] turn index per token, -1 for non-action.
+    :param num_turns: Total number of turns (max turn_id + 1).
+    :return: [batch, num_turns] mean-pooled values per turn.
+    """
+    batch_size = token_values.shape[0]
+    turn_values = torch.zeros(batch_size, num_turns, device=token_values.device)
+    for t in range(num_turns):
+        mask_t = (turn_ids == t).float()
+        count = mask_t.sum(dim=1).clamp(min=1)
+        turn_values[:, t] = (token_values * mask_t).sum(dim=1) / count
+    return turn_values
 
 
 def create_llm_accelerator(

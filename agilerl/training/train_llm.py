@@ -10,7 +10,7 @@ from accelerate import Accelerator
 from tqdm import trange
 
 import wandb
-from agilerl.algorithms import DPO, GRPO, LLMPPO
+from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMReinforce
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import PopulationType
@@ -168,9 +168,9 @@ def finetune_llm_reasoning(
             "Probability of activation mutation must be 0 for LLM finetuning."
         )
 
-    if not isinstance(pop[0], (GRPO, LLMPPO)):
+    if not isinstance(pop[0], (GRPO, LLMPPO, LLMReinforce)):
         msg = (
-            "The algorithm must be GRPO or LLMPPO for reasoning-based reinforcement learning."
+            "The algorithm must be GRPO, LLMPPO, or LLMReinforce for reasoning-based reinforcement learning. "
             f"Got {type(pop[0])} instead."
         )
         raise ValueError(
@@ -799,7 +799,7 @@ def finetune_llm_multiturn(
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
-    eval_fn: Callable[[LLMPPO], float] | None = None,
+    eval_fn: Callable[[LLMPPO | LLMReinforce], float] | None = None,
     evaluation_interval: int = 50,
     max_reward: float | None = None,
     verbose: bool = True,
@@ -832,9 +832,9 @@ def finetune_llm_multiturn(
             "Probability of activation mutation must be 0 for LLM finetuning."
         )
 
-    if not isinstance(pop[0], LLMPPO):
+    if not isinstance(pop[0], (LLMPPO, LLMReinforce)):
         msg = (
-            "The algorithm must be LLMPPO for multi-turn GEM finetuning. "
+            "The algorithm must be LLMPPO or LLMReinforce for multi-turn GEM finetuning. "
             f"Got {type(pop[0])} instead."
         )
         raise ValueError(

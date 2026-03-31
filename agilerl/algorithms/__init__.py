@@ -13,6 +13,7 @@ from .neural_ts_bandit import NeuralTS
 from .neural_ucb_bandit import NeuralUCB
 from .ppo import PPO
 from .ppo_llm import PPO as LLMPPO
+from .reinforce_llm import REINFORCE as LLMReinforce
 from .td3 import TD3
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "TD3",
     "BC_Evaluator",
     "BC_Policy",
+    "LLMReinforce",
     "NeuralTS",
     "NeuralUCB",
     "RainbowDQN",
