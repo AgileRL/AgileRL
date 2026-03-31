@@ -2,6 +2,7 @@ from .bc_lm import BC_LM, BC_Evaluator, BC_Policy
 from .cqn import CQN
 from .ddpg import DDPG
 from .dpo import DPO
+from .sft import SFT
 from .dqn import DQN
 from .dqn_rainbow import RainbowDQN
 from .grpo import GRPO
@@ -19,6 +20,7 @@ __all__ = [
     "CQN",
     "DDPG",
     "DPO",
+    "SFT",
     "DQN",
     "GRPO",
     "ILQL",

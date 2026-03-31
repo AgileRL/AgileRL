@@ -7,11 +7,11 @@ import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
-from agilerl.algorithms import DPO, GRPO
+from agilerl.algorithms import DPO, GRPO, SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import PopulationType
-from agilerl.utils.llm_utils import ReasoningGym
+from agilerl.utils.llm_utils import ReasoningGym, SFTGym
 from agilerl.utils.utils import (
     aggregate_metrics_across_gpus,
     init_wandb,
@@ -680,6 +680,274 @@ def finetune_llm_preference(
             f"{border}\n"
             f"Fitness:\t\t{fitness}\n"
             f"Score:\t\t{agg_metrics[2]}\n"
+            f"5 fitness avgs:\t{avg_fitness}\n"
+            f"10 score avgs:\t{avg_score}\n"
+            f"Agents:\t\t{agents}\n"
+            f"Steps:\t\t{num_steps}\n"
+            f"Mutations:\t\t{muts}",
+        )
+
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    if accelerator is None or accelerator.is_main_process:
+        pbar.close()
+        if wb:
+            wandb.finish()
+
+
+def finetune_llm_sft(
+    pop: PopulationType,
+    env: SFTGym,
+    init_hp: dict[str, Any] | None = None,
+    save_elite: bool | None = None,
+    elite_path: str | None = None,
+    wb: bool = False,
+    evo_steps: int | None = None,
+    checkpoint_steps: int | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    wandb_api_key: str | None = None,
+    evaluation_interval: int = 10,
+    verbose: bool = True,
+    accelerator: Accelerator | None = None,
+    max_steps: int | None = None,
+    num_epochs: int | None = None,
+) -> None:
+    """Finetune a population of SFT agents on (prompt, response) pairs.
+
+    Each training step draws a batch from ``env`` and minimises the cross-entropy
+    loss over the *response* tokens only (prompt and padding positions are masked
+    with ``ignore_index=-100``).
+
+    :param pop: Population of SFT agents.
+    :param env: SFTGym environment wrapping the dataset.
+    :param init_hp: Hyperparameter dict forwarded to wandb, defaults to None.
+    :param save_elite: Save best agent to disk, defaults to None.
+    :param elite_path: Directory for checkpoints, defaults to None.
+    :param wb: Weights & Biases logging, defaults to False.
+    :param evo_steps: Steps between HPO evolution rounds, defaults to None.
+    :param checkpoint_steps: Steps between non-HPO saves, defaults to None.
+    :param tournament: Tournament selection object, defaults to None.
+    :param mutation: Mutation object, defaults to None.
+    :param wandb_api_key: W&B API key, defaults to None.
+    :param evaluation_interval: Steps between eval passes, defaults to 10.
+    :param verbose: Print summary at end, defaults to True.
+    :param accelerator: Distributed training handle, defaults to None.
+    :param max_steps: Total samples to process (one epoch if None), defaults to None.
+    :param num_epochs: Dataset passes; overrides max_steps when set, defaults to None.
+    """
+    import warnings
+
+    if evo_steps is not None and (tournament is None or mutation is None):
+        warnings.warn(
+            "'evo_steps' is set but 'tournament' or 'mutation' is None. "
+            "Evolution will not take place.",
+            stacklevel=2,
+        )
+
+    if (tournament is not None and mutation is not None) and evo_steps is None:
+        raise ValueError(
+            "'evo_steps' must be set when 'tournament' and 'mutation' are not None."
+        )
+
+    if num_epochs is not None and max_steps is not None:
+        warnings.warn(
+            "'num_epochs' overrides 'max_steps'.",
+            stacklevel=2,
+        )
+
+    if mutation is not None:
+        assert mutation.architecture_mut == 0, (
+            "Architecture mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.new_layer_prob == 0, (
+            "New-layer mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.parameters_mut == 0, (
+            "Parameters mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.activation_mut == 0, (
+            "Activation mutation must be 0 for LLM finetuning."
+        )
+
+    from agilerl.algorithms.sft import SFT as _SFT
+
+    if not isinstance(pop[0], _SFT):
+        raise ValueError(
+            f"Population must contain SFT agents. Got {type(pop[0])}."
+        )
+
+    if init_hp is None:
+        init_hp = {}
+        init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size_per_process
+        init_hp["ALGO"] = pop[0].algo
+
+    data_increment = accelerator.num_processes if accelerator is not None else 1
+    effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
+
+    if wb and (accelerator is None or accelerator.is_main_process):
+        init_hp["effective_data_batch_size"] = effective_data_batch_size
+        init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
+        init_hp["distributed_training"] = accelerator is not None
+        init_hp["model_name"] = pop[0].pretrained_model_name_or_path
+        init_wandb(
+            algo=init_hp["ALGO"],
+            env_name=env.name,
+            wandb_api_key=wandb_api_key,
+            init_hyperparams=init_hp,
+        )
+
+    bar_format = (
+        "{l_bar}{bar:10}| {n:4}/{total_fmt} "
+        "[{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
+    )
+    if max_steps is None and num_epochs is None:
+        max_steps = len(env)
+    elif max_steps is None and num_epochs is not None:
+        max_steps = num_epochs * len(env)
+
+    training_steps = -(max_steps // -effective_data_batch_size)
+
+    if accelerator is None or accelerator.is_main_process:
+        pbar = trange(
+            max_steps,
+            unit="step",
+            bar_format=bar_format,
+            ascii=True,
+            dynamic_ncols=True,
+        )
+
+    def _agg(m):
+        if accelerator is None:
+            return float(m) if not isinstance(m, float) else m
+        return aggregate_metrics_across_gpus(accelerator, m)
+
+    total_steps = 0
+    prompts = env.reset(reset_dataloaders=True)
+
+    for i in range(training_steps):
+        agent_metrics_dict = {}
+        for agent_idx, agent in enumerate(pop):
+            loss, perplexity = agent.learn(prompts)
+            next_prompts = env.step()
+            agg_metrics = [_agg(loss), _agg(perplexity)]
+            prompts = next_prompts
+            agent.steps[-1] += effective_data_batch_size
+            total_steps += effective_data_batch_size
+            agg_test_metrics = None
+
+            if (i + 1) % evaluation_interval == 0:
+                test_score = agent.test(env)
+                agg_test_metrics = [_agg(test_score)]
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+
+            if accelerator is None or accelerator.is_main_process:
+                metrics_dict = {
+                    "global_step": total_steps,
+                    "Train/Loss": agg_metrics[0],
+                    "Train/Perplexity": agg_metrics[1],
+                }
+                agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
+                if agg_test_metrics is not None:
+                    agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = {
+                        "Eval/Negative loss (fitness)": agg_test_metrics[0],
+                    }
+                pbar.update(effective_data_batch_size)
+                agent.scores.append(-agg_metrics[0])  # higher = better
+
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+
+        if tournament is not None and mutation is not None and evo_steps is not None:
+            if (i + 1) % evo_steps == 0:
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+                pop = tournament_selection_and_mutation(
+                    population=pop,
+                    tournament=tournament,
+                    mutation=mutation,
+                    env_name=env.name,
+                    accelerator=accelerator,
+                    language_model=True,
+                    elite_path=elite_path,
+                    save_elite=save_elite,
+                )
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+        elif (i + 1) * effective_data_batch_size % max_steps == 0 or (
+            checkpoint_steps is not None
+            and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
+        ):
+            save_llm_checkpoint(agent, elite_path)
+
+        if wb and (accelerator is None or accelerator.is_main_process):
+            wandb_dict = {
+                "Train/Mean population loss": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Loss"]
+                        for j in range(len(pop))
+                    ]
+                ),
+                "Train/Mean population perplexity": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{j}/train_metrics"][
+                            "Train/Perplexity"
+                        ]
+                        for j in range(len(pop))
+                    ]
+                ),
+                "Train/Best loss": np.min(
+                    [
+                        agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Loss"]
+                        for j in range(len(pop))
+                    ]
+                ),
+            }
+            if agg_test_metrics is not None:
+                wandb_dict["Eval/Best fitness"] = np.max(
+                    [
+                        agent_metrics_dict[f"agent_{j}/test_metrics"][
+                            "Eval/Negative loss (fitness)"
+                        ]
+                        for j in range(len(pop))
+                    ]
+                )
+            wandb.log(wandb_dict)
+
+        if env.num_epochs == num_epochs:
+            break
+
+    if (
+        verbose
+        and total_steps > evaluation_interval
+        and (accelerator is None or accelerator.is_main_process)
+    ):
+        fitness_calculated = len(agent.fitness) > 0
+        fitness = (
+            [str(round(a.fitness[-1], 4)) for a in pop]
+            if fitness_calculated
+            else [None] * len(pop)
+        )
+        avg_fitness = (
+            [f"{np.mean(a.fitness[-5:]):.4f}" for a in pop]
+            if fitness_calculated
+            else [None] * len(pop)
+        )
+        avg_score = [
+            f"{np.mean(a.scores[-10:]):.4f}" if a.scores else "N/A" for a in pop
+        ]
+        agents = [a.index for a in pop]
+        num_steps = [a.steps[-1] for a in pop]
+        muts = [a.mut for a in pop]
+        banner_text = f"Global Steps {total_steps}"
+        banner_width = max(len(banner_text) + 8, 35)
+        border = "=" * banner_width
+        pbar.write(
+            f"{border}\n"
+            f"{banner_text.center(banner_width)}\n"
+            f"{border}\n"
+            f"Fitness:\t\t{fitness}\n"
             f"5 fitness avgs:\t{avg_fitness}\n"
             f"10 score avgs:\t{avg_score}\n"
             f"Agents:\t\t{agents}\n"

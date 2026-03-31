@@ -1,0 +1,24 @@
+---
+INIT_HP:
+    ALGO: SFT
+    BATCH_SIZE: 4
+    UPDATE_EPOCHS: 1
+    MAX_GRAD_NORM: 0.1
+    MAX_CONTEXT_LENGTH: 512     # cap sequence length to save memory
+    REDUCE_MEMORY_PEAK: false
+    CALC_POSITION_EMBEDDINGS: true
+    SEED: 42
+    TOURN_SIZE: 2
+    ELITISM: true
+    POP_SIZE: 1                 # single model for a quick smoke-test
+    EVAL_LOOP: 1
+    EVO_STEPS: 500
+    EVALUATION_INTERVAL: 500
+
+MUTATION_PARAMS:
+    NO_MUT: 0.4                          # No mutation
+    RL_HP_MUT: 0.6                       # Learning HP mutation
+    MUT_SD: 0.1                          # Mutation strength
+    RAND_SEED: 42                        # Random seed
+    MIN_LR: 0.000001
+    MAX_LR: 0.0001

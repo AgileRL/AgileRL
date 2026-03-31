@@ -12,7 +12,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.typing import PreferencePrompts, ReasoningPrompts
+from agilerl.typing import PreferencePrompts, ReasoningPrompts, SFTPrompts
 
 if HAS_LLM_DEPENDENCIES:
     try:
@@ -643,6 +643,176 @@ class PreferenceGym(HuggingFaceGym):
         return collate_fn
 
 
+class SFTGym(HuggingFaceGym):
+    """Gymnasium-style environment for supervised fine-tuning (SFT) datasets.
+
+    Each batch yields tokenised ``(prompt + response)`` pairs that can be
+    consumed directly by :class:`~agilerl.algorithms.sft.SFT`.  The loss is
+    computed on the response tokens only; prompt and padding positions are
+    masked out inside :meth:`~agilerl.algorithms.sft.SFT.learn`.
+
+    The dataset must have a ``"prompt"`` column and a response column (name
+    set by ``response_column``, defaults to ``"response"``).  No
+    negative/rejected response column is required — SFT only needs the target
+    good response.
+
+    .. tip::
+        If your dataset uses DPO-style column names (``"chosen"`` /
+        ``"rejected"``), pass ``response_column="chosen"`` to use it for SFT
+        warm-up before a subsequent DPO fine-tuning stage.
+
+    :param train_dataset: HuggingFace ``Dataset`` split used during training.
+    :type train_dataset: Dataset
+    :param test_dataset: HuggingFace ``Dataset`` split used for evaluation.
+    :type test_dataset: Dataset
+    :param tokenizer: Tokenizer for the target model.
+    :type tokenizer: AutoTokenizer
+    :param data_batch_size_per_gpu: DataLoader batch size per GPU, defaults to 8
+    :type data_batch_size_per_gpu: int, optional
+    :param response_column: Name of the dataset column containing the target
+        response, defaults to ``"response"``
+    :type response_column: str, optional
+    :param accelerator: Accelerate handle for distributed training, defaults to
+        None
+    :type accelerator: Accelerator, optional
+    :param max_context_length: Maximum tokenised sequence length.  Sequences
+        longer than this are truncated, defaults to None
+    :type max_context_length: int | None, optional
+    :param seed: Random seed for dataset shuffling, defaults to 42
+    :type seed: int, optional
+    """
+
+    def __init__(
+        self,
+        train_dataset: Dataset,
+        test_dataset: Dataset,
+        tokenizer: AutoTokenizer,
+        data_batch_size_per_gpu: int = 8,
+        response_column: str = "response",
+        accelerator: Accelerator | None = None,
+        max_context_length: int | None = None,
+        seed: int = 42,
+    ) -> None:
+        self.response_column = response_column
+        required = {"prompt", response_column}
+        assert required.issubset(set(train_dataset.features.keys())), (
+            f"Train dataset must contain {required} features."
+        )
+        assert required.issubset(set(test_dataset.features.keys())), (
+            f"Test dataset must contain {required} features."
+        )
+        super().__init__(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            conversation_template=None,
+            data_batch_size_per_gpu=data_batch_size_per_gpu,
+            max_context_length=max_context_length,
+            min_completion_length=None,
+            accelerator=accelerator,
+            seed=seed,
+        )
+
+    def reset(self, reset_dataloaders: bool = False) -> SFTPrompts:
+        """Reset the environment and return the first batch of tokenised data."""
+        if reset_dataloaders:
+            self._reset_dataloaders()
+            import warnings
+
+            warnings.warn(
+                "env.reset() called with reset_dataloaders=True; dataloaders are "
+                "rewound to the beginning of the dataset.",
+                stacklevel=2,
+            )
+        if self.reset_called:
+            import warnings
+
+            warnings.warn(
+                "env.reset() called more than once sequentially; it should be "
+                "followed by env.step().",
+                stacklevel=2,
+            )
+        self.reset_called = True
+        return self._get_next_batch()
+
+    def step(
+        self,
+        completions: torch.Tensor | None = None,
+    ) -> SFTPrompts:
+        """Advance the data iterator and return the next batch.
+
+        :param completions: Unused; kept for API compatibility with other Gym types.
+        """
+        self.reset_called = False
+        return self._get_next_batch()
+
+    def _get_next_batch(self) -> SFTPrompts:
+        try:
+            batch = next(self.dataloader)
+        except StopIteration:
+            if not self.evaluation_mode:
+                self.num_epochs += 1
+            self._reset_dataloaders(
+                reset_train=not self.evaluation_mode,
+                reset_test=self.evaluation_mode,
+            )
+            return self._get_next_batch()
+        return batch
+
+    def create_collate_fn(
+        self,
+        tokenizer: AutoTokenizer,
+        max_context_length: int | None = None,
+    ) -> Any:
+        """Build a collate function that tokenises ``(prompt, response)`` pairs.
+
+        :param tokenizer: Tokenizer to use.
+        :type tokenizer: AutoTokenizer
+        :param max_context_length: Truncation length, defaults to None
+        :type max_context_length: int | None, optional
+        :return: Collate function.
+        :rtype: Callable
+        """
+        response_column = self.response_column
+
+        def collate_fn(batch: list[dict[str, Any]]) -> SFTPrompts:
+            prompts = [item["prompt"] for item in batch]
+            responses = [item[response_column] for item in batch]
+
+            # Tokenise prompts alone to measure prompt lengths (for loss masking)
+            prompt_encodings = tokenizer(
+                prompts,
+                truncation=True,
+                padding=False,
+                add_special_tokens=True,
+            )
+            prompt_lengths = [len(ids) for ids in prompt_encodings["input_ids"]]
+
+            # Tokenise prompt + response together in one __call__ to avoid the
+            # "encode then pad" performance warning from fast tokenizers.
+            # Use self.max_context_length (the instance attribute) rather than
+            # the create_collate_fn parameter, which is never passed by the
+            # base class and would silently default to None.
+            pair_enc = tokenizer(
+                prompts,
+                responses,
+                max_length=self.max_context_length,
+                truncation=True,
+                padding="longest",
+                return_tensors="pt",
+            )
+
+            return {
+                "prompt": prompts,
+                "prompt_lengths": prompt_lengths,
+                "response": responses,
+                "input_ids": pair_enc["input_ids"],  # [B, max_len]
+                "attention_mask": pair_enc["attention_mask"].long(),  # [B, max_len]
+            }
+
+        return collate_fn
+
+
 @contextmanager
 def gather_if_zero3(
     zero_stage: int,
@@ -701,7 +871,7 @@ def create_model_from_name_or_path(
     """
     if model_config is None:
         model_config = {
-            "torch_dtype": torch.bfloat16,
+            "dtype": torch.bfloat16,
             "attn_implementation": "sdpa",
         }
     return AutoModelForCausalLM.from_pretrained(
