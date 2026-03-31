@@ -15,8 +15,11 @@ from agilerl.algorithms.core.base import (
     RLAlgorithm,
 )
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
+from agilerl.components.replay_buffer import (
+    MultiAgentReplayBuffer,
+    MultiStepReplayBuffer,
+    ReplayBuffer,
+)
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.models.algo import (
@@ -91,6 +94,7 @@ def create_population_from_spec(
         if hasattr(algo_spec, num_envs_arg):
             setattr(algo_spec, num_envs_arg, env.num_envs)
 
+    # Classic RL algorithms
     if isinstance(algo_spec, (RLAlgorithmSpec, MultiAgentRLAlgorithmSpec)):
         return [
             algo_spec.build_algorithm(
@@ -186,12 +190,12 @@ def build_replay_buffer_from_spec(
 
     if buffer_spec.n_step_buffer:
         return MultiStepReplayBuffer(
-            max_size=buffer_spec.memory_size,
+            max_size=buffer_spec.max_size,
             n_step=buffer_spec.n_step_buffer_args.n_step,
             gamma=0.99,
             device=device,
         )
-    return ReplayBuffer(max_size=buffer_spec.memory_size, device=device)
+    return ReplayBuffer(max_size=buffer_spec.max_size, device=device)
 
 
 def build_train_kwargs(

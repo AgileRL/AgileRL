@@ -1,36 +1,42 @@
-from pydantic import BaseModel, Field
+from __future__ import annotations
+
+from pydantic import Field
+from pydantic.dataclasses import dataclass
 
 
-class EnvironmentSpec(BaseModel):
-    """Pydantic model for Environment object.
+@dataclass
+class EnvSpec:
+    """Environment specification from an Arena manifest.
 
-    :param name: The name of the environment as seen in Arena.
+    Provides information that allows us to construct both gymnasium as well as
+    pettingzoo environments, and also custom environments from an entrypoint.
+
+    :param name: Name of the environment
     :type name: str
-    :param version: The version of the environment. Defaults to "latest".
-    :type version: str
-    :param num_envs: The number of environments to run in parallel. Defaults to 16.
+    :param num_envs: Number of environments to run in parallel
     :type num_envs: int
+    :param entrypoint: Entrypoint for the environment, if custom. Defaults to None.
+    :type entrypoint: str or None
+    :param env_path: Path to the environment, if custom. Defaults to None.
+    :type env_path: str or None
+    :param env_config: Environment configuration, if custom. Defaults to None.
+    :type env_config: dict[str, Any] or None
+    :param env_wrappers: Environment wrappers, if custom. Defaults to None.
+    :type env_wrappers: list[tuple[Any, dict[str, Any]] | str] or None
+    :param sync: Use synchronous vectorization instead of async.
+    :type sync: bool
     """
 
     name: str
+    num_envs: int
+
+
+@dataclass
+class ArenaEnvSpec(EnvSpec):
+    """Environment specification for Arena environments.
+
+    :param version: Version of the environment
+    :type version: str
+    """
+
     version: str = Field(default="latest")
-    num_envs: int = Field(default=16, ge=1)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, str | int]) -> "EnvironmentSpec":
-        """Create an EnvironmentSpec from a dictionary.
-
-        :param data: Dictionary containing environment configuration.
-        :type data: dict[str, Any]
-        :returns: EnvironmentSpec instance.
-        :rtype: EnvironmentSpec
-        """
-        return cls(
-            name=data["name"],
-            version=data.get("version", "latest"),
-            num_envs=data.get("num_envs", 16),
-        )
-
-    def to_manifest(self) -> dict[str, str | int]:
-        """Serialize this environment for Arena manifest payloads."""
-        return self.model_dump(mode="json", exclude_none=True)

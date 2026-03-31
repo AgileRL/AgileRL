@@ -270,21 +270,22 @@ class DPO(LLMAlgorithm):
         mean_chosen_reward /= num_samples
         mean_rejected_reward /= num_samples
 
-        # Aggregate metrics across GPUs and report to metrics
-        if training:
-            if self.accelerator is not None:
-                agg_loss = aggregate_metrics_across_gpus(self.accelerator, mean_loss)
-                agg_chosen = aggregate_metrics_across_gpus(
-                    self.accelerator, mean_chosen_reward
-                )
-                agg_rejected = aggregate_metrics_across_gpus(
-                    self.accelerator, mean_rejected_reward
-                )
-            else:
-                agg_loss = mean_loss
-                agg_chosen = mean_chosen_reward
-                agg_rejected = mean_rejected_reward
+        # Aggregate metrics across GPUs for both train/test paths.
+        if self.accelerator is not None:
+            agg_loss = aggregate_metrics_across_gpus(self.accelerator, mean_loss)
+            agg_chosen = aggregate_metrics_across_gpus(
+                self.accelerator, mean_chosen_reward
+            )
+            agg_rejected = aggregate_metrics_across_gpus(
+                self.accelerator, mean_rejected_reward
+            )
+        else:
+            agg_loss = mean_loss
+            agg_chosen = mean_chosen_reward
+            agg_rejected = mean_rejected_reward
 
+        # Only training should mutate tracked training metrics.
+        if training:
             self.metrics.log("loss", agg_loss)
             self.metrics.log("chosen_reward", agg_chosen)
             self.metrics.log("rejected_reward", agg_rejected)

@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field
 
 from agilerl import HAS_LLM_DEPENDENCIES
-
-from .algo import (
+from agilerl.models.algo import (
     ALGO_REGISTRY,
     AlgorithmSpec,
     LLMAlgorithmSpec,
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,
 )
-from .algorithms import (
+from agilerl.models.algorithms import (
     CQNSpec,
     DDPGSpec,
     DQNSpec,
@@ -27,13 +27,13 @@ from .algorithms import (
     RainbowDQNSpec,
     TD3Spec,
 )
-from .env import EnvironmentSpec
-from .hpo import MutationSpec, TournamentSelectionSpec
-from .networks import NetworkSpec
-from .training import JobStatus, ReplayBufferSpec, TrainingSpec
+from agilerl.models.env import EnvironmentSpec
+from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.models.networks import NetworkSpec
+from agilerl.models.training import JobStatus, ReplayBufferSpec, TrainingSpec
 
 if HAS_LLM_DEPENDENCIES:
-    from .algorithms import DPOSpec, GRPOSpec
+    from agilerl.models.algorithms import DPOSpec, GRPOSpec
 
 
 class ArenaVM(BaseModel):
@@ -90,21 +90,22 @@ class ArenaTrainingManifest(BaseModel):
     tournament_selection: TournamentSelectionSpec | None = Field(default=None)
     training: TrainingSpec
 
-    def to_payload(self) -> dict[str, object]:
-        """Serialize the manifest for Arena job submission."""
+    def to_payload(self) -> dict[str, Any]:
+        """Serialize the manifest for Arena job submission.
+
+        :returns: Payload for Arena job submission.
+        :rtype: dict[str, object]
+        """
         payload: dict[str, object] = {
-            "algorithm": self.algorithm.to_manifest(),
-            "environment": self.environment.to_manifest(),
-            "training": self.training.to_manifest(
-                name=self.algorithm.resolve_training_fn().__name__
-            ),
+            "algorithm": self.algorithm.model_dump(exclude_none=True),
+            "environment": self.environment.model_dump(exclude_none=True),
         }
         if self.network is not None:
-            payload["network"] = self.network.to_manifest()
+            payload["network"] = self.network.model_dump(exclude_none=True)
         if self.mutation is not None:
             payload["mutation"] = self.mutation.model_dump(exclude_none=True)
         if self.replay_buffer is not None:
-            payload["replay_buffer"] = self.replay_buffer.to_manifest()
+            payload["replay_buffer"] = self.replay_buffer.model_dump(exclude_none=True)
         if self.tournament_selection is not None:
             payload["tournament_selection"] = self.tournament_selection.model_dump(
                 exclude_none=True

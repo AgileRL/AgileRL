@@ -1099,61 +1099,59 @@ def mocked_multi_memory():
     mock_memory.__len__.return_value = 10000
     mock_memory.agents = ["agent_0", "other_agent_0"]
 
-    def save_to_memory(state, action, reward, next_state, done, is_vectorised=False):
-        mock_memory.state_size = list(state.values())[0].shape
-        mock_memory.action_size = list(action.values())[0].shape
-        mock_memory.next_state_size = list(next_state.values())[0].shape
-        mock_memory.counter += 1
-
-    mock_memory.save_to_memory.side_effect = save_to_memory
-
-    def save_to_memory_vect_envs(
-        state, action, reward, next_state, done, *args, **kwargs
-    ):
+    def add(data):
         if mock_memory.state_size is None:
-            mock_memory.state_size = list(state.values())[0].shape
+            mock_memory.state_size = data["obs", mock_memory.agents[0]].shape[1:]
         if mock_memory.action_size is None:
-            mock_memory.action_size = list(action.values())[0].shape
+            mock_memory.action_size = data["action", mock_memory.agents[0]].shape[1:]
         if mock_memory.next_state_size is None:
-            mock_memory.next_state_size = list(next_state.values())[0].shape
-        mock_memory.counter += 1
+            mock_memory.next_state_size = data["next_obs", mock_memory.agents[0]].shape[
+                1:
+            ]
+        mock_memory.counter += data.shape[0]
 
-    mock_memory.save_to_memory_vect_envs.side_effect = save_to_memory_vect_envs
+    mock_memory.add.side_effect = add
 
     def sample(batch_size, *args):
-        states = {
-            agent: np.array(
-                [np.random.randn(*mock_memory.state_size) for _ in range(batch_size)],
-            )
-            for agent in mock_memory.agents
-        }
-        actions = {
-            agent: np.array(
-                [np.random.randn(*mock_memory.action_size) for _ in range(batch_size)],
-            )
-            for agent in mock_memory.agents
-        }
-        rewards = {
-            agent: np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
-            for agent in mock_memory.agents
-        }
-        dones = {
-            agent: np.array(
-                [np.random.choice([True, False]) for _ in range(batch_size)],
-            )
-            for agent in mock_memory.agents
-        }
-        next_states = {
-            agent: np.array(
-                [
-                    np.random.randn(*mock_memory.next_state_size)
-                    for _ in range(batch_size)
-                ],
-            )
-            for agent in mock_memory.agents
-        }
-
-        return states, actions, rewards, dones, next_states
+        obs = TensorDict(
+            {
+                a: torch.randn(batch_size, *mock_memory.state_size)
+                for a in mock_memory.agents
+            },
+            batch_size=[batch_size],
+        )
+        actions = TensorDict(
+            {
+                a: torch.randn(batch_size, *mock_memory.action_size)
+                for a in mock_memory.agents
+            },
+            batch_size=[batch_size],
+        )
+        rewards = TensorDict(
+            {a: torch.rand(batch_size, 1) for a in mock_memory.agents},
+            batch_size=[batch_size],
+        )
+        dones = TensorDict(
+            {a: torch.zeros(batch_size, 1) for a in mock_memory.agents},
+            batch_size=[batch_size],
+        )
+        next_obs = TensorDict(
+            {
+                a: torch.randn(batch_size, *mock_memory.next_state_size)
+                for a in mock_memory.agents
+            },
+            batch_size=[batch_size],
+        )
+        return TensorDict(
+            {
+                "obs": obs,
+                "action": actions,
+                "reward": rewards,
+                "done": dones,
+                "next_obs": next_obs,
+            },
+            batch_size=[batch_size],
+        )
 
     mock_memory.sample.side_effect = sample
 
@@ -3427,7 +3425,7 @@ def test_train_multi_memory_calls(
         wb=False,
     )
     mocked_multi_memory.sample.assert_called()
-    mocked_multi_memory.save_to_memory_vect_envs.assert_called()
+    mocked_multi_memory.add.assert_called()
 
 
 @pytest.mark.parametrize("on_policy", [False])

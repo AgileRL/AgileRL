@@ -138,6 +138,72 @@ class ReplayBuffer:
         self.initialized = False
 
 
+class MultiAgentReplayBuffer(ReplayBuffer):
+    """A circular multi-agent replay buffer that extends :class:`ReplayBuffer`.
+
+    Identical to the single-agent buffer except that :meth:`add` normalises
+    scalar leaf tensors two levels deep (``field -> agent_id -> tensor``)
+    instead of one, matching the nested TensorDict layout used by
+    multi-agent algorithms like MADDPG and MATD3.
+
+    :param max_size: Maximum number of transitions to store.
+    :type max_size: int
+    :param device: Device to store transitions on.
+    :type device: str | torch.device
+    :param dtype: Default floating-point dtype.
+    :type dtype: torch.dtype
+    """
+
+    @staticmethod
+    def _normalize_dims(data: TensorDict, n: int) -> TensorDict:
+        """Ensure every leaf tensor has at least 2 dimensions (batch + feature).
+
+        Walks two levels deep to handle the ``field -> agent_id -> tensor``
+        nesting that is standard in multi-agent transitions.
+        """
+        for key, item in data.items():
+            if is_tensor_collection(item):
+                item: TensorDictBase = item
+                for agent_key, agent_item in item.items():
+                    if is_tensor_collection(agent_item):
+                        agent_item: TensorDictBase = agent_item
+                        for k, v in agent_item.items():
+                            if v.ndim == 1:
+                                agent_item[k] = v.reshape(n, 1)
+                    elif agent_item.ndim == 1:
+                        item[agent_key] = agent_item.reshape(n, 1)
+                data[key] = item
+            elif item.ndim == 1:
+                data[key] = item.reshape(n, 1)
+        return data
+
+    def add(self, data: TensorDict) -> None:
+        """Add a batch of multi-agent transitions to the circular buffer.
+
+        :param data: Batched nested TensorDict with ``shape[0] == n_transitions``.
+        :type data: TensorDict
+        """
+        data = data.to(self.device)
+        _n_transitions = data.shape[0]
+        data = self._normalize_dims(data, _n_transitions)
+
+        if self._storage is None:
+            self._init(data)
+
+        start = self._cursor
+        end = self._cursor + _n_transitions
+        if end > self.max_size:
+            n = self.max_size - start
+            self._storage[start:] = data[:n]
+            self._storage[: _n_transitions - n] = data[n:]
+        else:
+            self._storage[start:end] = data
+
+        self._cursor = end % self.max_size
+        self._size = min(self._size + _n_transitions, self.max_size)
+        self.counter += _n_transitions
+
+
 class MultiStepReplayBuffer(ReplayBuffer):
     """A circular replay buffer for n-step returns in off-policy learning.
 

@@ -1,12 +1,21 @@
 import numpy as np
 import torch
 from pettingzoo.mpe import simple_speaker_listener_v4
-from tqdm import trange
+from tensordict import TensorDictBase
 
-from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
+from agilerl.algorithms import MADDPG
+from agilerl.components.data import MultiAgentTransition
+from agilerl.components.replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import create_population, observation_space_channels_to_first
+from agilerl.population import Population
+from agilerl.utils.utils import (
+    create_population,
+    default_progress_bar,
+    init_loggers,
+    observation_space_channels_to_first,
+    tournament_selection_and_mutation,
+)
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -48,6 +57,7 @@ if __name__ == "__main__":
     }
 
     num_envs = 8
+
     # Define the simple speaker listener environment as a parallel environment
     env = AsyncPettingZooVecEnv(
         [
@@ -71,7 +81,7 @@ if __name__ == "__main__":
     INIT_HP["AGENT_IDS"] = env.agents
 
     # Create a population ready for evolutionary hyper-parameter optimisation
-    pop = create_population(
+    pop: list[MADDPG] = create_population(
         "MADDPG",
         observation_spaces,
         action_spaces,
@@ -83,11 +93,8 @@ if __name__ == "__main__":
     )
 
     # Configure the multi-agent replay buffer
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = MultiAgentReplayBuffer(
         INIT_HP["MEMORY_SIZE"],
-        field_names=field_names,
-        agent_ids=INIT_HP["AGENT_IDS"],
         device=device,
     )
 
@@ -112,62 +119,76 @@ if __name__ == "__main__":
     )
 
     # Define training loop parameters
-    max_steps = 1000000  # Max steps
+    max_steps = 1_000_000  # Max steps
     learning_delay = 0  # Steps before starting learning
 
-    evo_steps = 10000  # Evolution frequency
+    evo_steps = 10_000  # Evolution frequency
     eval_steps = None  # Evaluation steps per episode - go until done
     eval_loop = 1  # Number of evaluation episodes
 
-    total_steps = 0
+    pbar = default_progress_bar(max_steps)
+
+    # Initialize loggers and population wrapper
+    loggers = init_loggers(
+        algo="MADDPG",
+        env_name="simple_speaker_listener_v4",
+        pbar=pbar,
+        verbose=True,
+    )
+
+    population = Population(
+        agents=pop,
+        loggers=loggers,
+    )
+
+    # Pre-training mutation
+    population.update(mutations.mutation(population.agents, pre_training_mut=True))
 
     # TRAINING LOOP
     print("Training...")
-    pbar = trange(max_steps, unit="step")
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
-        pop_episode_scores = []
-        for agent in pop:  # Loop through population
-            state, info = env.reset()  # Reset environment at start of episode
+    while population.all_below(max_steps):
+        for agent in population.agents:  # Loop through population
+            agent.set_training_mode(True)
+            agent.init_evo_step()
+
+            obs, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
+
             if INIT_HP["CHANNELS_LAST"]:
-                state = {
-                    agent_id: np.moveaxis(s, [-1], [-3])
-                    for agent_id, s in state.items()
+                obs = {
+                    agent_id: np.moveaxis(s, [-1], [-3]) for agent_id, s in obs.items()
                 }
 
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
-                action, raw_action = agent.get_action(
-                    states=state,
-                    training=True,
-                    infos=info,
-                )
+                action, raw_action = agent.get_action(obs=obs, infos=info)
 
                 # Act in environment
-                next_state, reward, termination, truncation, info = env.step(action)
+                next_obs, reward, termination, truncation, info = env.step(action)
 
                 scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
-                total_steps += num_envs
                 steps += num_envs
 
                 # Image processing if necessary for the environment
                 if INIT_HP["CHANNELS_LAST"]:
-                    next_state = {
+                    next_obs = {
                         agent_id: np.moveaxis(ns, [-1], [-3])
-                        for agent_id, ns in next_state.items()
+                        for agent_id, ns in next_obs.items()
                     }
 
                 # Save experiences to replay buffer
-                memory.save_to_memory(
-                    state,
-                    raw_action,
-                    reward,
-                    next_state,
-                    termination,
-                    is_vectorised=True,
+                transition: TensorDictBase = MultiAgentTransition(
+                    obs=obs,
+                    action=raw_action,
+                    reward=reward,
+                    next_obs=next_obs,
+                    done=termination,
                 )
+                transition = transition.to_tensordict()
+                transition.batch_size = [num_envs]
+                memory.add(transition)
 
                 # Learn according to learning frequency
                 # Handle learn steps > num_envs
@@ -192,7 +213,7 @@ if __name__ == "__main__":
                         # Learn according to agent's RL algorithm
                         agent.learn(experiences)
 
-                state = next_state
+                obs = next_obs
 
                 # Calculate scores and reset noise for finished episodes
                 reset_noise_indices = []
@@ -203,50 +224,38 @@ if __name__ == "__main__":
                 ):
                     if np.any(d) or np.any(t):
                         completed_episode_scores.append(scores[idx])
-                        agent.scores.append(scores[idx])
                         scores[idx] = 0
                         reset_noise_indices.append(idx)
                 agent.reset_action_noise(reset_noise_indices)
 
-            pbar.update(evo_steps // len(pop))
+            agent.add_scores(completed_episode_scores)
+            agent.finalize_evo_step(steps)
+            pbar.update(evo_steps // population.size)
 
-            agent.steps[-1] += steps
-            pop_episode_scores.append(completed_episode_scores)
+        population.increment_evo_step()
 
         # Evaluate population
-        fitnesses = [
+        for agent in population.agents:
             agent.test(
                 env,
                 swap_channels=INIT_HP["CHANNELS_LAST"],
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
-            for agent in pop
-        ]
-        mean_scores = [
-            (
-                np.mean(episode_scores)
-                if len(episode_scores) > 0
-                else "0 completed episodes"
-            )
-            for episode_scores in pop_episode_scores
-        ]
 
-        print(f"--- Global steps {total_steps} ---")
-        print(f"Steps {[agent.steps[-1] for agent in pop]}")
-        print(f"Scores: {mean_scores}")
-        print(f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}")
-        print(
-            f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}",
-        )
+        population.report_metrics(clear=True)
 
         # Tournament selection and population mutation
-        elite, pop = tournament.select(pop)
-        pop = mutations.mutation(pop)
+        population.update(
+            tournament_selection_and_mutation(
+                population=population.agents,
+                tournament=tournament,
+                mutation=mutations,
+                env_name="simple_speaker_listener_v4",
+                algo="MADDPG",
+            ),
+        )
 
-        # Update step counter
-        for agent in pop:
-            agent.steps.append(agent.steps[-1])
-
+    population.finish()
     pbar.close()
     env.close()

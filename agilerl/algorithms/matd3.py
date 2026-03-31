@@ -17,6 +17,7 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ArrayDict,
+    ExperiencesType,
     InfosDict,
     MultiAgentModule,
     ObservationType,
@@ -628,17 +629,21 @@ class MATD3(MultiAgentRLAlgorithm):
             for idx in indices:
                 self.current_noise[agent_id][idx, :] = 0
 
-    def learn(self, experiences: tuple[StandardTensorDict, ...]) -> dict[str, float]:
+    def learn(self, experiences: ExperiencesType) -> dict[str, float]:
         """Update agent network parameters from the gathered experiences.
 
-        :param experience: Tuple of dictionaries containing batched states, actions,
-            rewards, next_states, dones in that order for each individual agent.
-        :type experience: tuple[dict[str, torch.Tensor]]
+        :param experiences: TensorDict of nested per-agent observations, actions,
+            rewards, next_observations, dones.
+        :type experiences: TensorDict
 
         :return: Losses for each agent
         :rtype: dict[str, float]
         """
-        states, actions, rewards, next_states, dones = experiences
+        states = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_states = experiences["next_obs"]
+        dones = experiences["done"]
 
         actions = {
             agent_id: agent_actions.to(self.device)

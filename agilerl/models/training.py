@@ -1,19 +1,33 @@
 from __future__ import annotations
 
-from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from agilerl.components.replay_buffer import (
+    MultiAgentReplayBuffer,
+    MultiStepReplayBuffer,
+    PrioritizedReplayBuffer,
+    ReplayBuffer,
+)
+from agilerl.models.algo import (
+    LLMAlgorithmSpec,
+    MultiAgentRLAlgorithmSpec,
+    RLAlgorithmSpec,
+)
+from agilerl.models.algorithms import RainbowDQNSpec
+from agilerl.protocols import AgentType
 
-class JobStatus(str, Enum):
-    """Status of a job."""
+BufferT = (
+    ReplayBuffer
+    | MultiStepReplayBuffer
+    | PrioritizedReplayBuffer
+    | MultiAgentReplayBuffer
+)
+AlgoSpecT = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec
 
-    PENDING = "PENDING"
-    RUNNING = "RUNNING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    STOPPED = "STOPPED"
+if TYPE_CHECKING:
+    import torch
 
 
 class NStepBufferArgs(BaseModel):
@@ -22,8 +36,14 @@ class NStepBufferArgs(BaseModel):
     n_step: int = Field(default=3, ge=1)
 
 
+class PerBufferArgs(BaseModel):
+    """Arguments for the prioritized experience replay buffer."""
+
+    alpha: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class ReplayBufferSpec(BaseModel):
-    """Pydantic model for replay buffer specification.
+    """Pydantic model for AgileRL replay buffers.
 
     :param memory_size: The memory size of the replay buffer. Defaults to 100,000.
     :type memory_size: int
@@ -35,49 +55,146 @@ class ReplayBufferSpec(BaseModel):
     :type n_step_buffer_args: NStepBufferArgs
     :param combined_buffers: Whether to use combined buffers. Defaults to False.
     :type combined_buffers: bool
+    :param per_buffer: Whether to use the prioritized experience replay buffer. Defaults to False.
+    :type per_buffer: bool
+    :param per_buffer_args: The arguments for the prioritized experience replay buffer. Defaults to PerBufferArgs.
+    :type per_buffer_args: PerBufferArgs
+    :param n_step: The number of steps to use for the n-step replay buffer. Defaults to None.
+    :type n_step: int | None
     """
 
-    memory_size: int = Field(default=100_000, ge=1)
-    standard_buffer: bool = True
-    n_step_buffer: bool = False
+    max_size: int = Field(default=10_000, ge=1)
+    standard_buffer: bool = Field(default=True)
+    combined_buffers: bool = Field(default=False)
+    n_step_buffer: bool = Field(default=False)
     n_step_buffer_args: NStepBufferArgs = Field(default_factory=NStepBufferArgs)
-    combined_buffers: bool = False
+    per_buffer: bool = Field(default=False)
+    per_buffer_args: PerBufferArgs = Field(default_factory=PerBufferArgs)
+    n_step: int | None = Field(default=None)
 
-    def to_manifest(self) -> dict[str, Any]:
-        """Serialize this replay buffer spec for Arena manifest payloads."""
-        return {
-            "name": "ReplayBuffer",
-            **self.model_dump(mode="json", exclude_none=True),
-        }
+    def init_buffer(
+        self, algo_spec: AlgoSpecT, device: str | torch.device = "cpu"
+    ) -> BufferT:
+        """Initialize the replay buffer.
+
+        :param algo_spec: Algorithm specification
+        :type algo_spec: AlgoSpecT
+        :param device: Device
+        :type device: str | torch.device
+        :return: Replay buffer
+        :rtype: BufferT
+        """
+        self.n_step = 1
+        buffer_args = {}
+        is_multi_agent = algo_spec.agent_type == AgentType.MultiAgent
+        if not is_multi_agent:
+            if self.n_step_buffer:
+                if not hasattr(algo_spec, "gamma"):
+                    msg = "Gamma must be specified for N-step buffer"
+                    raise ValueError(msg)
+
+                gamma = algo_spec.gamma
+                n_step = self.n_step_buffer_args.n_step
+                n_step_args = {"n_step": n_step, "gamma": gamma}
+                buffer_args |= n_step_args
+                buffer_class = MultiStepReplayBuffer
+
+            elif self.per_buffer:
+                if not isinstance(algo_spec, RainbowDQNSpec):
+                    msg = "PER buffer is only supported for Rainbow DQN"
+                    raise ValueError(msg)
+
+                alpha = self.per_buffer_args.alpha
+                per_args = {"alpha": alpha}
+                buffer_args |= per_args
+                buffer_class = PrioritizedReplayBuffer
+            else:
+                buffer_class = ReplayBuffer
+        else:
+            buffer_class = MultiAgentReplayBuffer
+
+        return buffer_class(
+            max_size=self.max_size,
+            device=device,
+            **buffer_args,
+        )
 
 
 class TrainingSpec(BaseModel):
-    """Training loop parameters section of an Arena training manifest.
+    """Pydantic model for AgileRL training.
 
-    :param max_steps: The maximum number of steps to train for.
-        Defaults to 1,000,000.
+    :param max_steps: Maximum number of steps to train for
     :type max_steps: int
-    :param pop_size: The population size. Defaults to 4.
-    :type pop_size: int
-    :param evo_steps: The number of evolution steps. Defaults to 10,000.
+    :param evo_steps: Number of steps to train between evolutions.
     :type evo_steps: int
-    :param eval_loop: The number of evaluation loops. Defaults to 1.
+    :param eval_loop: Number of evaluation episodes
     :type eval_loop: int
-    :param target_score: The target score to reach. Defaults to None.
+    :param eval_steps: Number of steps to train for evaluation
+    :type eval_steps: int | None
+    :param reporting_interval: Reporting interval in steps
+    :type reporting_interval: int
+    :param replay_buffer: Replay buffer configuration.
+    :type replay_buffer: ReplayBufferSpec | None
+    :param population_size: Population size
+    :type population_size: int
+    :param hpo: Whether to use evolutionary hyperparameter optimisation during training.
+    :type hpo: bool
+    :param experience_sharing: Whether to share experiences between individuals in a population.
+    :type experience_sharing: bool
+    :param learning_delay: Number of steps before starting learning.
+    :type learning_delay: int
+    :param eps_start: Probability of taking a random action at the start of training.
+    :type eps_start: float | None
+    :param eps_end: Probability of taking a random action at the end of training.
+    :type eps_end: float | None
+    :param eps_decay: Rate of decay of the exploration probability.
+    :type eps_decay: float | None
+    :param target_score: Target score for early stopping.
     :type target_score: float | None
     """
 
-    max_steps: int = Field(default=1_000_000, ge=1)
-    pop_size: int = Field(default=4, ge=1)
-    evo_steps: int = Field(default=10_000, ge=1)
-    eval_loop: int = Field(default=1, ge=1)
-    learning_delay: int = Field(default=0, ge=0)
+    max_steps: int = Field(
+        ..., ge=1, description="Maximum number of steps to train for."
+    )
+    evo_steps: int = Field(
+        ..., ge=1, description="Number of steps to train between evolutions."
+    )
+    population_size: int = Field(..., ge=1, description="Population size.")
+    eval_steps: int | None = Field(
+        default=None, description="Number of steps to take during evaluation."
+    )
+    eval_loop: int = Field(
+        default=1, ge=1, description="Number of evaluation episodes."
+    )
+    replay_buffer: ReplayBufferSpec | None = Field(default=None)
+    hpo: bool = Field(default=True)
+    target_score: float | None = Field(
+        default=None, description="Target score for early stopping."
+    )
 
-    target_score: float | None = None
+    # Experience sharing / learning delay only applicable for off policy algorithms
+    experience_sharing: bool = Field(
+        default=False,
+        description="Share experiences between individuals in a population.",
+    )
+    learning_delay: int = Field(
+        default=0, description="Number of steps before starting learning."
+    )
 
-    def to_manifest(self, *, name: str | None = None) -> dict[str, Any]:
-        """Serialize this training spec for Arena manifest payloads."""
-        payload: dict[str, Any] = self.model_dump(mode="json", exclude_none=True)
-        if name is not None:
-            payload["name"] = name
-        return payload
+    # Off-policy exploration parameters
+    eps_start: float | None = Field(
+        default=None,
+        description="Probability of taking a random action at the start of training.",
+    )
+    eps_end: float | None = Field(
+        default=None,
+        description="Probability of taking a random action at the end of training.",
+    )
+    eps_decay: float | None = Field(
+        default=None, description="Rate of decay of the exploration probability."
+    )
+
+    ### Arena-specific fields ###
+    reporting_interval: int = Field(
+        default=1024, ge=1, description="Reporting interval in steps"
+    )

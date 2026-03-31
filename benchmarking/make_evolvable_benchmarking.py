@@ -238,11 +238,8 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                 ]
                 critic = [critics_1, critics_2]
 
-        field_names = ["state", "action", "reward", "next_state", "done"]
         memory = MultiAgentReplayBuffer(
             INIT_HP["MEMORY_SIZE"],
-            field_names=field_names,
-            agent_ids=INIT_HP["AGENT_IDS"],
             device=device,
         )
 

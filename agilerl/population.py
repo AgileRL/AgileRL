@@ -470,11 +470,7 @@ class Population(Generic[AgentT]):
         :returns: True if the scores are nested per-sub-agent, False otherwise.
         :rtype: bool
         """
-        for agent in self.agents:
-            scores = agent.metrics.scores
-            if scores and isinstance(scores[0], list):
-                return True
-        return False
+        return any(isinstance(agent.metrics.scores[0], list) for agent in self.agents)
 
     def update(self, agents: list[AgentT]) -> None:
         """Replace the population (e.g. after tournament selection + mutation)."""
@@ -485,7 +481,13 @@ class Population(Generic[AgentT]):
         self.evo_steps += 1
 
     def all_below(self, max_steps: int) -> bool:
-        """Check if every agent's step count is below *max_steps*."""
+        """Check if every agent's step count is below *max_steps*.
+
+        :param max_steps: The maximum number of steps to check.
+        :type max_steps: int
+        :returns: True if every agent's step count is below *max_steps*, False otherwise.
+        :rtype: bool
+        """
         return bool(
             np.less(
                 [a.metrics.steps for a in self._agents],
@@ -494,7 +496,14 @@ class Population(Generic[AgentT]):
         )
 
     def should_stop(self, target: float | None) -> bool:
-        """Check if all agents consistently exceed the target fitness."""
+        """Check if all agents consistently exceed the target fitness and the minimum number
+        of evo-steps has been reached.
+
+        :param target: The target fitness to check.
+        :type target: float | None
+        :returns: True if all agents consistently exceed the target fitness, False otherwise.
+        :rtype: bool
+        """
         if target is None:
             return False
 
@@ -513,11 +522,11 @@ class Population(Generic[AgentT]):
         for agent in self._agents:
             agent.metrics.clear()
 
-    def report_metrics(self, clear_metrics: bool = True) -> MetricsReport:
+    def report_metrics(self, clear: bool = True) -> MetricsReport:
         """Gather, format, and log population metrics.
 
-        :param clear_metrics: Whether to clear the metrics after reporting.
-        :type clear_metrics: bool
+        :param clear: Whether to clear the metrics after reporting.
+        :type clear: bool
         :returns: The metrics report.
         :rtype: MetricsReport
         """
@@ -528,7 +537,7 @@ class Population(Generic[AgentT]):
         for logger in self.loggers:
             logger.write(report)
 
-        if clear_metrics:
+        if clear:
             self.clear_agent_metrics()
 
         return report
@@ -668,9 +677,9 @@ class Population(Generic[AgentT]):
         :returns: One dict per agent mapping metric names to their accumulated arrays.
         :rtype: list[dict[str, numpy.ndarray | None]]
         """
-        result: list[dict[str, np.ndarray | None]] = []
+        result = []
         for agent in self.agents:
-            d: dict[str, np.ndarray | None] = {}
+            d = {}
             for name in self.nonscalar_metric_names:
                 if self.is_multi_agent:
                     for agent_id in self.agent_ids:

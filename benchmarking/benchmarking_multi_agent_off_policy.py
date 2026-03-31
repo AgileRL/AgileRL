@@ -83,11 +83,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
 
     INIT_HP["AGENT_IDS"] = list(env.agents)
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = MultiAgentReplayBuffer(
-        INIT_HP["MEMORY_SIZE"],
-        field_names=field_names,
-        agent_ids=INIT_HP["AGENT_IDS"],
+        max_size=INIT_HP["MEMORY_SIZE"],
         device=device,
     )
 
@@ -122,12 +119,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Tru
         batch_size=RLParameter(
             min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
             max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-            dtype=int,
         ),
         learn_step=RLParameter(
             min=MUTATION_PARAMS["MIN_LEARN_STEP"],
             max=MUTATION_PARAMS["MAX_LEARN_STEP"],
-            dtype=int,
             grow_factor=1.5,
             shrink_factor=0.75,
         ),

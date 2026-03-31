@@ -576,14 +576,18 @@ class MADDPG(MultiAgentRLAlgorithm):
     def learn(self, experiences: ExperiencesType) -> dict[str, torch.Tensor]:
         """Update agent network parameters from the gathered experiences.
 
-        :param experience: Tuple of dictionaries containing batched states, actions,
-            rewards, next_states, dones in that order for each individual agent.
-        :type experience: tuple[dict[str, torch.Tensor]]
+        :param experiences: TensorDict of nested per-agent observations, actions,
+            rewards, next_observations, dones.
+        :type experiences: TensorDict
 
         :return: Loss dictionary
         :rtype: dict[str, torch.Tensor]
         """
-        states, actions, rewards, next_states, dones = experiences
+        states = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_states = experiences["next_obs"]
+        dones = experiences["done"]
 
         actions = {
             agent_id: agent_actions.to(self.device)

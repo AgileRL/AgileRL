@@ -1,5 +1,5 @@
-from .multi_agent_replay_buffer import MultiAgentReplayBuffer
 from .replay_buffer import (
+    MultiAgentReplayBuffer,
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,

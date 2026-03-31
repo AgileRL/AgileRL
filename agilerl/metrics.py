@@ -66,6 +66,26 @@ class BaseMetrics(ABC):
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.clear()
 
+    def __eq__(self, other: object) -> bool:
+        """Compare metrics by tracked state.
+
+        :param other: Other metrics to compare.
+        :type other: object
+        :returns: True if the metrics are equal, False otherwise.
+        :rtype: bool
+        """
+        if not isinstance(other, BaseMetrics):
+            return NotImplemented
+        return (
+            self._additional_metrics == other._additional_metrics
+            and self._nonscalar_metrics == other._nonscalar_metrics
+            and self._hyperparameters == other._hyperparameters
+            and self.steps_per_second == other.steps_per_second
+            and self.steps == other.steps
+            and self.scores == other.scores
+            and list(self.fitness) == list(other.fitness)
+        )
+
     def _check_name_available(self, name: str) -> None:
         if name in self._additional_metrics or name in self._nonscalar_metrics:
             msg = f"Metric '{name}' is already registered."

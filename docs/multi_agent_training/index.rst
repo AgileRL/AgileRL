@@ -284,17 +284,14 @@ by an individual agent because it allows faster learning from the behaviour of o
 a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself.
 
 The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``MultiAgentReplayBuffer()`` for
-multi-agent environments. During training it can be added to using the ``MultiAgentReplayBuffer.save_to_memory()`` function and sampled using the  ``MultiAgentReplayBuffer.sample()``.
+multi-agent environments. Transitions are built using the ``MultiAgentTransition`` tensorclass, added via ``memory.add()``, and sampled using ``memory.sample()``.
 
 .. code-block:: python
 
-    from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
+    from agilerl.components.replay_buffer import MultiAgentReplayBuffer
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = MultiAgentReplayBuffer(
         INIT_HP["MEMORY_SIZE"],
-        field_names=field_names,
-        agent_ids=INIT_HP["AGENT_IDS"],
         device=device,
     )
 
@@ -340,12 +337,21 @@ Alternatively, use a custom training loop. Combining all of the above:
         import numpy as np
         import torch
         from pettingzoo.mpe import simple_speaker_listener_v4
-        from tqdm import trange
 
-        from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
+        from tensordict import TensorDictBase
+
+        from agilerl.algorithms import MADDPG
+        from agilerl.components.data import MultiAgentTransition
+        from agilerl.components.replay_buffer import MultiAgentReplayBuffer
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
-        from agilerl.utils.utils import create_population, default_progress_bar
+        from agilerl.population import Population
+        from agilerl.utils.utils import (
+            create_population,
+            default_progress_bar,
+            init_loggers,
+            tournament_selection_and_mutation,
+        )
         from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -398,7 +404,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         INIT_HP["AGENT_IDS"] = env.agents
 
         # Create a population ready for evolutionary hyper-parameter optimisation
-        pop = create_population(
+        pop: list[MADDPG] = create_population(
             "MADDPG",
             observation_spaces,
             action_spaces,
@@ -410,11 +416,8 @@ Alternatively, use a custom training loop. Combining all of the above:
         )
 
         # Configure the multi-agent replay buffer
-        field_names = ["state", "action", "reward", "next_state", "done"]
         memory = MultiAgentReplayBuffer(
-            INIT_HP["MEMORY_SIZE"],
-            field_names=field_names,
-            agent_ids=INIT_HP["AGENT_IDS"],
+            max_size=INIT_HP["MEMORY_SIZE"],
             device=device,
         )
 
@@ -425,7 +428,6 @@ Alternatively, use a custom training loop. Combining all of the above:
             population_size=INIT_HP["POP_SIZE"],  # Population size
         )
 
-        # Instantiate a mutations object (used for HPO)
         mutations = Mutations(
             no_mutation=0.2,  # Probability of no mutation
             architecture=0.2,  # Probability of architecture mutation
@@ -444,56 +446,44 @@ Alternatively, use a custom training loop. Combining all of the above:
         evo_steps = 10000  # Evolution frequency
         eval_steps = None  # Evaluation steps per episode - go until done
         eval_loop = 1  # Number of evaluation episodes
-        total_steps = 0
 
         # TRAINING LOOP
         print("Training...")
         pbar = default_progress_bar(max_steps)
-        while np.less([agent.steps[-1] for agent in pop], max_steps).all():
-            pop_episode_scores = []
-            for agent in pop:  # Loop through population
+        loggers = init_loggers(
+            algo="MADDPG", env_name="simple_speaker_listener_v4", pbar=pbar, verbose=True,
+        )
+        population = Population(agents=pop, loggers=loggers)
+
+        # Pre-training mutation
+        population.update(mutations.mutation(population.agents, pre_training_mut=True))
+
+        # TRAINING LOOP
+        while population.all_below(max_steps):
+            for agent in population.agents:
                 agent.set_training_mode(True)
+                agent.init_evo_step()
 
                 obs, info = env.reset()  # Reset environment at start of episode
                 scores = np.zeros(num_envs)
                 completed_episode_scores = []
                 steps = 0
-                for idx_step in range(evo_steps // num_envs):
-                    # Get next action from agent
-                    action, raw_action = agent.get_action(
-                        obs=obs,
-                        infos=info
-                    )
 
-                    # Act in environment
+                for idx_step in range(evo_steps // num_envs):
+                    action, raw_action = agent.get_action(obs=obs, infos=info)
                     next_obs, reward, termination, truncation, info = env.step(action)
-                    total_steps += num_envs
+
+                    scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
                     steps += num_envs
 
-                    agent_rewards = np.array(list(reward.values())).transpose()
-                    agent_rewards = np.where(np.isnan(agent_rewards), 0, agent_rewards)
-                    score_increment = (
-                        (
-                            np.sum(agent_rewards, axis=-1)[:, np.newaxis]
-                            if is_vectorised
-                            else np.sum(agent_rewards, axis=-1)
-                        )
-                        if sum_scores
-                        else agent_rewards
+                    transition: TensorDictBase = MultiAgentTransition(
+                        obs=obs, action=raw_action, reward=reward,
+                        next_obs=next_obs, done=termination,
                     )
+                    transition = transition.to_tensordict()
+                    transition.batch_size = [num_envs]
+                    memory.add(transition)
 
-                    # Save experiences to replay buffer
-                    memory.save_to_memory(
-                        obs,
-                        raw_action,
-                        reward,
-                        next_obs,
-                        termination,
-                        is_vectorised=True,
-                    )
-
-                    # Learn according to learning frequency
-                    # Handle learn steps > num_envs
                     if agent.learn_step > num_envs:
                         learn_step = agent.learn_step // num_envs
                         if (
@@ -501,92 +491,50 @@ Alternatively, use a custom training loop. Combining all of the above:
                             and len(memory) >= agent.batch_size
                             and memory.counter > learning_delay
                         ):
-                            # Sample replay buffer
                             experiences = memory.sample(agent.batch_size)
-                            # Learn according to agent's RL algorithm
                             agent.learn(experiences)
-
-                    # Handle num_envs > learn step; learn multiple times per step in env
                     elif (
                         len(memory) >= agent.batch_size and memory.counter > learning_delay
                     ):
                         for _ in range(num_envs // agent.learn_step):
-                            # Sample replay buffer
                             experiences = memory.sample(agent.batch_size)
-                            # Learn according to agent's RL algorithm
                             agent.learn(experiences)
 
                     obs = next_obs
 
-                    # Find which agents are "done" - i.e. terminated or truncated
-                    dones = {}
-                    for agent_id in agent.agent_ids:
-                        terminated = termination.get(agent_id, True)
-                        truncated = truncation.get(agent_id, False)
-
-                        # Replace NaNs with True (indicate killed agent)
-                        terminated = np.where(
-                            np.isnan(terminated), True, terminated
-                        ).astype(bool)
-                        truncated = np.where(np.isnan(truncated), False, truncated).astype(
-                            bool
-                        )
-
-                        dones[agent_id] = terminated | truncated
-
-                    # Calculate scores and reset noise for finished episodes
                     reset_noise_indices = []
-                    for idx, agent_dones in enumerate(zip(*dones.values())):
-                        if all(agent_dones):
-                            completed_score = (
-                                float(scores[idx]) if sum_scores else list(scores[idx])
-                            )
-                            completed_episode_scores.append(completed_score)
-                            agent.scores.append(completed_score)
-                            scores[idx].fill(0)
+                    term_array = np.array(list(termination.values())).transpose()
+                    trunc_array = np.array(list(truncation.values())).transpose()
+                    for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
+                        if np.any(d) or np.any(t):
+                            completed_episode_scores.append(scores[idx])
+                            scores[idx] = 0
                             reset_noise_indices.append(idx)
 
                     agent.reset_action_noise(reset_noise_indices)
 
-                pbar.update(evo_steps // len(pop))
+                agent.add_scores(completed_episode_scores)
+                agent.finalize_evo_step(steps)
+                pbar.update(evo_steps // population.size)
 
-                agent.steps[-1] += steps
-                pop_episode_scores.append(completed_episode_scores)
+            population.increment_evo_step()
 
-            # Evaluate population
-            fitnesses = [
-                agent.test(
-                    env,
-                    max_steps=eval_steps,
-                    loop=eval_loop,
-                )
-                for agent in pop
-            ]
-            mean_scores = [
-                (
-                    np.mean(episode_scores)
-                    if len(episode_scores) > 0
-                    else "0 completed episodes"
-                )
-                for episode_scores in pop_episode_scores
-            ]
+            for agent in population.agents:
+                agent.test(env, max_steps=eval_steps, loop=eval_loop)
 
-            pbar.write(
-                f"--- Global steps {total_steps} ---\n"
-                f"Steps: {[agent.steps[-1] for agent in pop]}\n"
-                f"Scores: {mean_scores}\n"
-                f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
-                f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
+            population.report_metrics(clear=True)
+
+            population.update(
+                tournament_selection_and_mutation(
+                    population=population.agents,
+                    tournament=tournament,
+                    mutation=mutations,
+                    env_name="simple_speaker_listener_v4",
+                    algo="MADDPG",
+                ),
             )
 
-            # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
-            pop = mutations.mutation(pop)
-
-            # Update step counter
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
-
+        population.finish()
         pbar.close()
         env.close()
 

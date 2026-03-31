@@ -419,7 +419,7 @@ def train_off_policy(
                 loop=eval_loop,
             )
 
-        population.report_metrics(clear_metrics=True)
+        population.report_metrics(clear=True)
 
         if population.should_stop(target):
             population.finish()

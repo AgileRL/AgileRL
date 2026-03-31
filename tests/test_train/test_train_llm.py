@@ -47,6 +47,12 @@ def _mock_grpo_agent(**overrides):
     metrics.nonscalar_metrics = []
     agent.metrics = metrics
 
+    # hp_config for Population._collect_hyperparameters
+    agent.registry = MagicMock()
+    agent.registry.hp_config = MagicMock()
+    agent.registry.hp_config.config = {"lr": 0.01, "batch_size": 32}
+    agent.registry.hp_config.names.return_value = ["lr", "batch_size"]
+
     for key, val in overrides.items():
         setattr(agent, key, val)
     return agent

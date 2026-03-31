@@ -233,7 +233,7 @@ def train_on_policy(
                     )
                 )
 
-                agent.learn()
+                agent.learn()  # learn from the rollouts collected in the buffer
 
                 # Update step counter and scores
                 steps += n_steps * num_envs
@@ -255,7 +255,7 @@ def train_on_policy(
             )
 
         # Aggregate metrics from all agents and log -> clear metrics after reporting
-        population.report_metrics(clear_metrics=True)
+        population.report_metrics(clear=True)
 
         # Check if we have met the target score
         if population.should_stop(target):

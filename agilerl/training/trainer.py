@@ -12,8 +12,6 @@ from agilerl.algorithms.core.base import (
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
-from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
 from agilerl.models.algo import (
     ALGO_REGISTRY,
     LLMAlgorithmSpec,
@@ -23,7 +21,7 @@ from agilerl.models.algo import (
 from agilerl.models.env import EnvironmentSpec
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.networks import NetworkSpec
-from agilerl.models.training import TrainingSpec
+from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.typing import GymEnvType, PzEnvType
 from agilerl.utils.trainer_utils import (
     build_mutations_from_spec,
@@ -40,11 +38,12 @@ AlgoSpecT = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec
 AlgorithmT = AlgoSpecT | str
 EnvironmentT = GymEnvType | PzEnvType | AsyncPettingZooVecEnv
 ArenaEnvT = EnvironmentSpec | dict[str, str]
-ReplayBufferT = ReplayBuffer | MultiStepReplayBuffer | MultiAgentReplayBuffer | None
+ReplayBufferT = ReplayBufferSpec | None
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
 if HAS_ARENA_DEPENDENCIES:
     from agilerl.arena.client import ArenaClient
+    from agilerl.models import ArenaTrainingManifest
 else:
     ArenaClient = None
 
@@ -269,6 +268,7 @@ class ArenaTrainer(Trainer):
             if ArenaClient is None:
                 msg = "Arena dependencies are not installed. Please install them using: pip install agilerl[arena]"
                 raise ImportError(msg)
+
             self._client = ArenaClient(api_key=api_key)
 
     def train(self, *, stream: bool = False) -> dict[str, Any]:
@@ -293,8 +293,6 @@ class ArenaTrainer(Trainer):
         :returns: A fully validated manifest ready for submission.
         :rtype: ArenaTrainingManifest
         """
-        from agilerl.models import ArenaTrainingManifest
-
         env_spec = self._resolve_env_spec()
         net_config: NetworkSpec | None = getattr(self.algorithm, "net_config", None)
 

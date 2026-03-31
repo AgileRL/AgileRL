@@ -366,7 +366,7 @@ def train_multi_agent_on_policy(
                 sum_scores=sum_scores,
             )
 
-        population.report_metrics(clear_metrics=True)
+        population.report_metrics(clear=True)
 
         # Check if we have met the target score
         if population.should_stop(target):

@@ -22,8 +22,8 @@ from pettingzoo.mpe import simple_speaker_listener_v4
 from pettingzoo.sisl import pursuit_v4
 from tests.pz_vector_test_utils import GenericTestEnv, term_env
 
-from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-from agilerl.vector.pz_async_vec_env import (  # PettingZooExperienceSpec,; SharedMemory,
+from agilerl.components.replay_buffer import MultiAgentReplayBuffer
+from agilerl.vector.pz_async_vec_env import (
     AsyncPettingZooVecEnv,
     AsyncState,
     Observations,
@@ -1657,19 +1657,29 @@ def test_placeholder_tuple_space():
 
 
 # Helper function to create a replay buffer and add transitions
-def create_replay_buffer_with_transitions(env, memory_size=10):
-    buffer = MultiAgentReplayBuffer(
-        memory_size=memory_size,
-        field_names=["state", "action", "reward", "next_state", "done"],
-        agent_ids=env.possible_agents,
-    )
+def create_replay_buffer_with_transitions(env, max_size=10):
+    from tensordict import TensorDictBase
+
+    from agilerl.components.data import MultiAgentTransition
+
+    buffer = MultiAgentReplayBuffer(max_size=max_size)
     env.reset()
-    for _ in range(memory_size):
+    num_envs = env.num_envs
+    for _ in range(max_size):
         actions = {
             agent: env.action_space(agent).sample() for agent in env.possible_agents
         }
         obs, rewards, dones, truncated, infos = env.step(actions)
-        buffer.save_to_memory(obs, actions, rewards, obs, dones, is_vectorised=True)
+        transition: TensorDictBase = MultiAgentTransition(
+            obs=obs,
+            action=actions,
+            reward=rewards,
+            next_obs=obs,
+            done=dones,
+        )
+        transition = transition.to_tensordict()
+        transition.batch_size = [num_envs]
+        buffer.add(transition)
     return buffer
 
 
@@ -1680,23 +1690,13 @@ def test_replay_buffer_with_various_spaces(env_cls):
 
     buffer = create_replay_buffer_with_transitions(env)
     batch_size = 5
-    sampled_transitions = buffer.sample(batch_size)
+    sampled = buffer.sample(batch_size)
 
-    # Check that the sampled transitions have the correct structure
-    for field, agent_data in zip(buffer.field_names, sampled_transitions, strict=False):
-        for agent_id, data in agent_data.items():
-            assert agent_id in env.possible_agents
-            if field == "state":
-                obs_space = env.single_observation_space(agent_id)
-                if isinstance(obs_space, spaces.Dict):
-                    for key in obs_space.spaces:
-                        assert key in data
-                        assert data[key].shape[0] == batch_size
-                elif isinstance(obs_space, spaces.Tuple):
-                    assert len(data) == len(obs_space.spaces)
-                    for _i, sub_data in enumerate(data):
-                        assert sub_data.shape[0] == batch_size
-                else:
-                    assert data.shape[0] == batch_size
+    assert sampled.shape[0] == batch_size
+    for field in ("obs", "action", "reward", "next_obs", "done"):
+        assert field in sampled.keys()
+        sub = sampled[field]
+        for agent_id in env.possible_agents:
+            assert agent_id in sub.keys()
 
     env.close()

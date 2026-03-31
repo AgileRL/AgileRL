@@ -8,16 +8,21 @@ import os
 import numpy as np
 import torch
 from pettingzoo.mpe import simple_speaker_listener_v4
+from tensordict import TensorDictBase
 
 from agilerl.algorithms import MATD3
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
+from agilerl.components.data import MultiAgentTransition
+from agilerl.components.replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.population import Population
 from agilerl.utils.utils import (
     create_population,
     default_progress_bar,
+    init_loggers,
     make_multi_agent_vect_envs,
+    tournament_selection_and_mutation,
 )
 
 if __name__ == "__main__":
@@ -96,11 +101,8 @@ if __name__ == "__main__":
     )
 
     # Configure the multi-agent replay buffer
-    field_names = ["obs", "action", "reward", "next_obs", "done"]
     memory = MultiAgentReplayBuffer(
         INIT_HP["MEMORY_SIZE"],
-        field_names=field_names,
-        agent_ids=INIT_HP["AGENT_IDS"],
         device=device,
     )
 
@@ -130,42 +132,61 @@ if __name__ == "__main__":
     evo_steps = 10_000  # Evolution frequency
     eval_steps = None  # Evaluation steps per episode - go until done
     eval_loop = 1  # Number of evaluation episodes
-    elite = pop[0]  # Assign a placeholder "elite" agent
-    total_steps = 0
+
+    pbar = default_progress_bar(max_steps)
+
+    # Initialize loggers and population wrapper
+    loggers = init_loggers(
+        algo=INIT_HP["ALGO"],
+        env_name="simple_speaker_listener_v4",
+        pbar=pbar,
+        verbose=True,
+    )
+
+    population = Population(
+        agents=pop,
+        loggers=loggers,
+    )
+
+    # Pre-training mutation
+    population.update(mutations.mutation(population.agents, pre_training_mut=True))
 
     # TRAINING LOOP
     print("Training...")
-    pbar = default_progress_bar(max_steps)
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
-        pop_episode_scores = []
-        for agent in pop:  # Loop through population
+    while population.all_below(max_steps):
+        for agent in population.agents:  # Loop through population
             agent.set_training_mode(True)
+            agent.init_evo_step()
+
             obs, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
+
             for idx_step in range(evo_steps // num_envs):
+                # Get next action from agent
                 action, raw_action = agent.get_action(
                     obs=obs,
                     infos=info,
-                )  # Predict action
-                next_obs, reward, termination, truncation, info = env.step(
-                    action,
-                )  # Act in environment
+                )
+
+                # Act in environment
+                next_obs, reward, termination, truncation, info = env.step(action)
 
                 scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
-                total_steps += num_envs
                 steps += num_envs
 
                 # Save experiences to replay buffer
-                memory.save_to_memory(
-                    obs,
-                    raw_action,
-                    reward,
-                    next_obs,
-                    termination,
-                    is_vectorised=True,
+                transition: TensorDictBase = MultiAgentTransition(
+                    obs=obs,
+                    action=raw_action,
+                    reward=reward,
+                    next_obs=next_obs,
+                    done=termination,
                 )
+                transition = transition.to_tensordict()
+                transition.batch_size = [num_envs]
+                memory.add(transition)
 
                 # Learn according to learning frequency
                 # Handle learn steps > num_envs
@@ -176,24 +197,20 @@ if __name__ == "__main__":
                         and len(memory) >= agent.batch_size
                         and memory.counter > learning_delay
                     ):
-                        experiences = memory.sample(
-                            agent.batch_size,
-                        )  # Sample replay buffer
-                        agent.learn(
-                            experiences,
-                        )  # Learn according to agent's RL algorithm
+                        # Sample replay buffer
+                        experiences = memory.sample(agent.batch_size)
+                        # Learn according to agent's RL algorithm
+                        agent.learn(experiences)
 
                 # Handle num_envs > learn step; learn multiple times per step in env
                 elif (
                     len(memory) >= agent.batch_size and memory.counter > learning_delay
                 ):
                     for _ in range(num_envs // agent.learn_step):
-                        experiences = memory.sample(
-                            agent.batch_size,
-                        )  # Sample replay buffer
-                        agent.learn(
-                            experiences,
-                        )  # Learn according to agent's RL algorithm
+                        # Sample replay buffer
+                        experiences = memory.sample(agent.batch_size)
+                        # Learn according to agent's RL algorithm
+                        agent.learn(experiences)
 
                 obs = next_obs
 
@@ -206,58 +223,47 @@ if __name__ == "__main__":
                 ):
                     if np.any(d) or np.any(t):
                         completed_episode_scores.append(scores[idx])
-                        agent.scores.append(scores[idx])
                         scores[idx] = 0
                         reset_noise_indices.append(idx)
 
                 agent.reset_action_noise(reset_noise_indices)
 
-            pbar.update(evo_steps // len(pop))
+            agent.add_scores(completed_episode_scores)
+            agent.finalize_evo_step(steps)
+            pbar.update(evo_steps // population.size)
 
-            agent.steps[-1] += steps
-            pop_episode_scores.append(completed_episode_scores)
+        population.increment_evo_step()
 
         # Evaluate population
-        fitnesses = [
+        for agent in population.agents:
             agent.test(
                 env,
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
-            for agent in pop
-        ]
-        mean_scores = [
-            (
-                np.mean(episode_scores)
-                if len(episode_scores) > 0
-                else "0 completed episodes"
-            )
-            for episode_scores in pop_episode_scores
-        ]
 
-        pbar.write(
-            f"--- Global steps {total_steps} ---\n"
-            f"Steps {[agent.steps[-1] for agent in pop]}\n"
-            f"Scores: {mean_scores}\n"
-            f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
-            f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n"
-            f"Mutations: {[agent.mut for agent in pop]}",
-        )
+        population.report_metrics(clear=True)
 
         # Tournament selection and population mutation
-        elite, pop = tournament.select(pop)
-        pop = mutations.mutation(pop)
-
-        # Update step counter
-        for agent in pop:
-            agent.steps.append(agent.steps[-1])
+        population.update(
+            tournament_selection_and_mutation(
+                population=population.agents,
+                tournament=tournament,
+                mutation=mutations,
+                env_name="simple_speaker_listener_v4",
+                algo=INIT_HP["ALGO"],
+                save_elite=True,
+                elite_path="./models/MATD3",
+            ),
+        )
 
     # Save the trained algorithm
     path = "./models/MATD3"
     filename = "MATD3_trained_agent.pt"
     os.makedirs(path, exist_ok=True)
     save_path = os.path.join(path, filename)
-    elite.save_checkpoint(save_path)
+    population.agents[0].save_checkpoint(save_path)
 
+    population.finish()
     pbar.close()
     env.close()

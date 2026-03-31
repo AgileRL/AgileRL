@@ -1,6 +1,6 @@
 import warnings
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from accelerate import Accelerator
@@ -8,8 +8,8 @@ from pettingzoo import ParallelEnv
 from torch.utils.data import DataLoader
 
 from agilerl.algorithms import MADDPG, MATD3
-from agilerl.components.data import ReplayDataset
-from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
+from agilerl.components.data import MultiAgentTransition, ReplayDataset
+from agilerl.components.replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -23,6 +23,9 @@ from agilerl.utils.utils import (
 )
 from agilerl.vector import PzDummyVecEnv
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+
+if TYPE_CHECKING:
+    from tensordict import TensorDictBase
 
 InitDictType = dict[str, Any] | None
 PopulationType = list[MADDPG | MATD3]
@@ -264,13 +267,16 @@ def train_multi_agent_off_policy(
                         for agent_id, ns in next_obs.items()
                     }
 
-                memory.save_to_memory_vect_envs(
-                    obs,
-                    raw_action,
-                    reward,
-                    next_obs,
-                    termination,
+                transition: TensorDictBase = MultiAgentTransition(
+                    obs=obs,
+                    action=raw_action,
+                    reward=reward,
+                    next_obs=next_obs,
+                    done=termination,
                 )
+                transition = transition.to_tensordict()
+                transition.batch_size = [num_envs]
+                memory.add(transition)
 
                 # Learn according to learning frequency
                 if agent.learn_step > num_envs:
@@ -341,7 +347,7 @@ def train_multi_agent_off_policy(
                 sum_scores=sum_scores,
             )
 
-        population.report_metrics(clear_metrics=True)
+        population.report_metrics(clear=True)
 
         # Check if we have met the target score
         if population.should_stop(target):

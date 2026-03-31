@@ -15,7 +15,6 @@ from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
     observation_space_channels_to_first,
-    print_hyperparams,
 )
 
 # !Note: If you are running this demo without having installed agilerl,

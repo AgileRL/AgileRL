@@ -6,7 +6,7 @@ import torch
 
 from agilerl.algorithms.ippo import IPPO
 from agilerl.algorithms.maddpg import MADDPG
-from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
+from agilerl.components.replay_buffer import MultiAgentReplayBuffer
 from agilerl.utils.probe_envs_ma import (
     ConstantRewardContActionsEnv,
     ConstantRewardContActionsImageEnv,
@@ -625,11 +625,8 @@ def test_policy_q_learning_with_probe_env():
         "net_config": {"encoder_config": {"hidden_size": [32, 32]}},
         "batch_size": 256,
     }
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = MultiAgentReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
-        agent_ids=algo_args["agent_ids"],
+        max_size=10000,
         device=device,
     )
 
@@ -654,11 +651,8 @@ def test_policy_q_learning_with_probe_env_mlp():
         "net_config": {"encoder_config": {"hidden_size": [32, 32]}},
         "batch_size": 256,
     }
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = MultiAgentReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
-        agent_ids=algo_args["agent_ids"],
+        max_size=10000,
         device=device,
     )
 
@@ -693,18 +687,15 @@ def test_policy_q_learning_with_probe_env_cnn():
                 "init_layers": True,
             },
         },
-        "lr_actor": 1e-5,  # Reduced actor learning rate
-        "lr_critic": 1e-4,  # Reduced critic learning rate
-        "batch_size": 64,  # Smaller batch size
-        "normalize_images": True,  # Ensure image normalization
-        "gamma": 0.99,  # Stable discount factor
-        "tau": 0.005,  # Smaller soft update parameter
+        "lr_actor": 1e-5,
+        "lr_critic": 1e-4,
+        "batch_size": 64,
+        "normalize_images": True,
+        "gamma": 0.99,
+        "tau": 0.005,
     }
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = MultiAgentReplayBuffer(
-        memory_size=10000,
-        field_names=field_names,
-        agent_ids=algo_args["agent_ids"],
+        max_size=10000,
         device=device,
     )
 

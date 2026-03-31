@@ -6,22 +6,20 @@ by an individual agent because it allows faster learning from the behaviour of o
 a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself.
 
 The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``MultiAgentReplayBuffer()`` for
-multi-agent environments. During training it can be added to using the ``MultiAgentReplayBuffer.save_to_memory()`` function and sampled using the  ``MultiAgentReplayBuffer.sample()``.
+multi-agent environments. It extends ``ReplayBuffer`` with support for nested per-agent TensorDicts. Transitions are built using the ``MultiAgentTransition`` tensorclass
+and added via ``memory.add()``, and sampled using ``memory.sample()``.
 
 .. code-block:: python
 
-    from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
+    from agilerl.components.replay_buffer import MultiAgentReplayBuffer
     import torch
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = MultiAgentReplayBuffer(memory_size=1_000_000,          # Max replay buffer size
-                                    field_names=field_names,        # Field names to store in memory
-                                    agent_ids=INIT_HP['AGENT_IDS'], # ID for each agent
+    memory = MultiAgentReplayBuffer(max_size=1_000_000,           # Max replay buffer size
                                     device=torch.device("cuda"))
 
 Parameters
 ------------
 
-.. autoclass:: agilerl.components.multi_agent_replay_buffer.MultiAgentReplayBuffer
+.. autoclass:: agilerl.components.replay_buffer.MultiAgentReplayBuffer
   :members:
   :inherited-members:

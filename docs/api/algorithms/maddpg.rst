@@ -64,12 +64,14 @@ multi-agent training function by passing the info dictionary into the agents get
       import numpy as np
       import torch
       from pettingzoo.mpe import simple_speaker_listener_v4
-      from tqdm import tqdm
+      from tensordict import TensorDictBase
 
       from agilerl.algorithms import MADDPG
-      from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
+      from agilerl.components.data import MultiAgentTransition
+      from agilerl.components.replay_buffer import MultiAgentReplayBuffer
+      from agilerl.population import Population
+      from agilerl.utils.utils import default_progress_bar, init_loggers
       from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
-      from agilerl.utils.algo_utils import obs_channels_to_first
 
       device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
       num_envs = 8
@@ -81,81 +83,79 @@ multi-agent training function by passing the info dictionary into the agents get
       )
       env.reset()
 
-      # Configure the multi-agent algo input arguments
       observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
       action_spaces = [env.single_action_space(agent) for agent in env.agents]
-
-      channels_last = False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-      n_agents = env.num_agents
       agent_ids = [agent_id for agent_id in env.agents]
-      field_names = ["state", "action", "reward", "next_state", "done"]
-      memory = MultiAgentReplayBuffer(
-          memory_size=1_000_000,
-          field_names=field_names,
-          agent_ids=agent_ids,
-          device=device,
-      )
 
-      agent = MADDPG(
+      memory = MultiAgentReplayBuffer(max_size=1_000_000, device=device)
+
+      maddpg = MADDPG(
           observation_spaces=observation_spaces,
           action_spaces=action_spaces,
           agent_ids=agent_ids,
           vect_noise_dim=num_envs,
           device=device,
       )
-      agent.set_training_mode(True)
 
-      # Define training loop parameters
-      max_steps = 100000  # Max steps
-      pbar = tqdm(total=max_steps)
-      while agent.steps[-1] < max_steps:
-          obs, info  = env.reset() # Reset environment at start of episode
-          scores = np.zeros(num_envs)
-          completed_episode_scores = []
+      max_steps = 100000
+      evo_steps = 1000
+      pbar = default_progress_bar(max_steps)
+      loggers = init_loggers(algo="MADDPG", env_name="simple_speaker_listener_v4", pbar=pbar)
+      population = Population(agents=[maddpg], loggers=loggers)
 
-          for _ in range(1000):
-              # Get next action from agent
-              action, raw_action = agent.get_action(
-                  obs=obs,
-                  infos=info,
-              )
+      while population.all_below(max_steps):
+          for agent in population.agents:
+              agent.set_training_mode(True)
+              agent.init_evo_step()
+              obs, info = env.reset()
+              scores = np.zeros(num_envs)
+              completed_episode_scores = []
+              steps = 0
 
-              # Act in environment
-              next_obs, reward, termination, truncation, info = env.step(action)
+              for _ in range(evo_steps // num_envs):
+                  action, raw_action = agent.get_action(obs=obs, infos=info)
+                  next_obs, reward, termination, truncation, info = env.step(action)
 
-              scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
-              total_steps += num_envs
-              steps += num_envs
+                  scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
+                  steps += num_envs
 
-              # Save experiences to replay buffer
-              memory.save_to_memory(obs, raw_action, reward, next_obs, done, is_vectorised=True)
+                  transition: TensorDictBase = MultiAgentTransition(
+                      obs=obs, action=raw_action, reward=reward,
+                      next_obs=next_obs, done=termination,
+                  )
+                  transition = transition.to_tensordict()
+                  transition.batch_size = [num_envs]
+                  memory.add(transition)
 
-              # Learn according to learning frequency
-              if len(memory) >= agent.batch_size:
-                  for _ in range(num_envs // agent.learn_step):
-                      experiences = memory.sample(agent.batch_size) # Sample replay buffer
-                      agent.learn(experiences) # Learn according to agent's RL algorithm
+                  if len(memory) >= agent.batch_size:
+                      for _ in range(num_envs // agent.learn_step):
+                          experiences = memory.sample(agent.batch_size)
+                          agent.learn(experiences)
 
-              # Update the observation
-              obs = next_obs
+                  obs = next_obs
 
-              # Calculate scores and reset noise for finished episodes
-              reset_noise_indices = []
-              term_array = np.array(list(termination.values())).transpose()
-              trunc_array = np.array(list(truncation.values())).transpose()
-              for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
-                  if np.any(d) or np.any(t):
-                      completed_episode_scores.append(scores[idx])
-                      agent.scores.append(scores[idx])
-                      scores[idx] = 0
-                      reset_noise_indices.append(idx)
+                  reset_noise_indices = []
+                  term_array = np.array(list(termination.values())).transpose()
+                  trunc_array = np.array(list(truncation.values())).transpose()
+                  for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
+                      if np.any(d) or np.any(t):
+                          completed_episode_scores.append(scores[idx])
+                          scores[idx] = 0
+                          reset_noise_indices.append(idx)
 
-              agent.reset_action_noise(reset_noise_indices)
+                  agent.reset_action_noise(reset_noise_indices)
 
-          pbar.update(1000)
-          pbar.set_description(f"Score: {np.mean(completed_episode_scores[-10:])}")
+              agent.add_scores(completed_episode_scores)
+              agent.finalize_evo_step(steps)
+              pbar.update(evo_steps // population.size)
 
-          agent.steps[-1] += steps
+          population.increment_evo_step()
+          for agent in population.agents:
+              agent.test(env, loop=1)
+          population.report_metrics(clear=True)
+
+      population.finish()
+      pbar.close()
 
 
 Neural Network Configuration
