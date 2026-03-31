@@ -201,7 +201,9 @@ class AgentWrapper(ABC, Generic[AgentType]):
         """
         return self.wrapped_get_action(obs, *args, **kwargs)
 
-    def learn(self, experiences: ExperiencesType, *args: Any, **kwargs: Any) -> Any:
+    def learn(
+        self, experiences: ExperiencesType | None = None, *args: Any, **kwargs: Any
+    ) -> Any:
         """Learns from the experiences.
 
         :param experiences: Experiences from the environment
@@ -214,6 +216,9 @@ class AgentWrapper(ABC, Generic[AgentType]):
         :return: Learning information
         :rtype: Any
         """
+        if experiences is None:
+            return self.wrapped_learn(*args, **kwargs)
+
         return self.wrapped_learn(experiences, *args, **kwargs)
 
 
@@ -437,19 +442,21 @@ class RSNorm(AgentWrapper[AgentType]):
             )
             self.agent.rollout_buffer.buffer[:buffer_size] = valid_data
 
+            return self.wrapped_learn(*args, **kwargs)
+
         # NOTE: We want to move towards always passing experiences as TensorDict objects
-        elif is_tensor_collection(experiences):
+        if is_tensor_collection(experiences):
             experiences["obs"] = self.normalize_observation(experiences["obs"])
             experiences["next_obs"] = self.normalize_observation(
                 experiences["next_obs"],
             )
         else:
             experiences = (
-                self.normalize_observation(experiences[0]),  # State
-                experiences[1],
-                experiences[2],
-                self.normalize_observation(experiences[3]),  # Next state
-                *experiences[4:],
+                self.normalize_observation(experiences[0]),  # Observations
+                experiences[1],  # Actions
+                experiences[2],  # Rewards
+                self.normalize_observation(experiences[3]),  # Next observations
+                *experiences[4:],  # Dones, values, next_done
             )
 
         return self.wrapped_learn(experiences, *args, **kwargs)
@@ -475,18 +482,18 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
     def extract_inactive_agents(
         self,
-        obs: dict[str, ObservationType],
-    ) -> tuple[dict[str, np.ndarray], dict[str, ObservationType]]:
+        obs: MARLObservationType,
+    ) -> tuple[dict[str, np.ndarray], MARLObservationType]:
         """Extract the inactive agents from an observation. Inspects each key in the
         observation dictionary and, if all the values are `np.nan` (as set by
         ``AsyncPettingZooVecEnv``), the agent is considered inactive and removed from
         the observation dictionary.
 
         :param obs: Observation dictionary
-        :type obs: dict[str, ObservationType]
+        :type obs: MARLObservationType
 
         :return: Tuple of inactive agents and filtered observations
-        :rtype: tuple[dict[str, np.ndarray], dict[str, ObservationType]]
+        :rtype: tuple[dict[str, np.ndarray], MARLObservationType]
         """
         inactive_agents = {}
         agents_to_remove = []
@@ -558,7 +565,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
     def get_action(
         self,
-        obs: ObservationType,
+        obs: MARLObservationType,
         *args: Any,
         **kwargs: Any,
     ) -> ActionReturnType:
@@ -567,7 +574,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         values for their actions.
 
         :param obs: Observation from the environment
-        :type obs: ObservationType
+        :type obs: MARLObservationType
 
         :return: Action from the agent
         :rtype: Any

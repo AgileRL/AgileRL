@@ -22,6 +22,7 @@ from agilerl.models.algo import (
 )
 from agilerl.models.env import EnvironmentSpec
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.models.networks import NetworkSpec
 from agilerl.models.training import TrainingSpec
 from agilerl.typing import GymEnvType, PzEnvType
 from agilerl.utils.trainer_utils import (
@@ -295,7 +296,7 @@ class ArenaTrainer(Trainer):
         from agilerl.models import ArenaTrainingManifest
 
         env_spec = self._resolve_env_spec()
-        net_config = getattr(self.algorithm, "net_config", None)
+        net_config: NetworkSpec | None = getattr(self.algorithm, "net_config", None)
 
         # Validate section-level Arena serialization early.
         self.algorithm.to_manifest()
@@ -304,11 +305,11 @@ class ArenaTrainer(Trainer):
             net_config.to_manifest()
         self.training.to_manifest(name=self.algorithm.resolve_training_fn().__name__)
         if self.mutation is not None:
-            self.mutation.to_manifest()
+            self.mutation.model_dump(exclude_none=True)
         if self.replay_buffer is not None:
-            self.replay_buffer.to_manifest()
+            self.replay_buffer.model_dump(exclude_none=True)
         if self.tournament is not None:
-            self.tournament.to_manifest()
+            self.tournament.model_dump(exclude_none=True)
 
         return ArenaTrainingManifest(
             algorithm=self.algorithm,

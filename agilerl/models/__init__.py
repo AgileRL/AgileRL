@@ -102,11 +102,13 @@ class ArenaTrainingManifest(BaseModel):
         if self.network is not None:
             payload["network"] = self.network.to_manifest()
         if self.mutation is not None:
-            payload["mutation"] = self.mutation.to_manifest()
+            payload["mutation"] = self.mutation.model_dump(exclude_none=True)
         if self.replay_buffer is not None:
             payload["replay_buffer"] = self.replay_buffer.to_manifest()
         if self.tournament_selection is not None:
-            payload["tournament_selection"] = self.tournament_selection.to_manifest()
+            payload["tournament_selection"] = self.tournament_selection.model_dump(
+                exclude_none=True
+            )
         return payload
 
     def save(self, path: str) -> None:

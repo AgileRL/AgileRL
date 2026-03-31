@@ -445,7 +445,9 @@ class Population(Generic[AgentT]):
         )
         self.additional_metric_names = self._sample_agent.metrics.additional_metrics
         self.nonscalar_metric_names = self._sample_agent.metrics.nonscalar_metrics
-        self.agent_ids = self._sample_agent.agent_ids if self.is_multi_agent else None
+        self.agent_ids = (
+            self._sample_agent.metrics.agent_ids if self.is_multi_agent else None
+        )
 
     @property
     def agents(self) -> list[AgentT]:

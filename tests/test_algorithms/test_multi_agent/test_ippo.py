@@ -2037,6 +2037,7 @@ def test_learn_individual_unsqueezes_box_single_action(ma_vector_space):
         {"agent": np.array([0])},
     )
     loss = ippo._learn_individual(
+        agent_id="agent",
         experiences=experiences,
         actor=ippo.actors["agent"],
         critic=ippo.critics["agent"],

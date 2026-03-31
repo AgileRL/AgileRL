@@ -278,7 +278,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 "reduce-overhead",
                 "max-autotune",
             ], (
-                "Choose between torch compiler modes: 'default', 'reduce-overhead', 'max-autotune' or None"
+                "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
             )
 
         self.accelerator = accelerator
@@ -1441,7 +1441,6 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         self.agent_ids = list(self.possible_observation_spaces.keys())
         self.n_agents = len(self.agent_ids)
-        self.metrics = MultiAgentMetrics(self.agent_ids)
         self.placeholder_value = placeholder_value
         self.normalize_images = normalize_images
         self.observation_spaces = list(self.possible_observation_spaces.values())
@@ -1500,6 +1499,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         else:
             self.observation_space = self.possible_observation_spaces
             self.action_space = self.possible_action_spaces
+
+        # Track multi-agent metrics using the effective training IDs. In grouped
+        # setups this corresponds to shared group IDs; otherwise raw agent IDs.
+        self.metrics = MultiAgentMetrics(list(self.observation_space.keys()))
 
     def _registry_init(self) -> None:
         super()._registry_init()

@@ -629,7 +629,12 @@ class PPO(RLAlgorithm):
 
         if buffer_td.is_empty():
             warnings.warn("Buffer data is empty. Skipping learning step.", stacklevel=2)
-            for metric_name in ("loss", "policy_loss", "value_loss", "entropy_loss"):
+            for metric_name in (
+                "total_loss",
+                "policy_loss",
+                "value_loss",
+                "entropy_loss",
+            ):
                 self.metrics.log(metric_name, 0.0)
             return 0.0
 

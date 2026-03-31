@@ -5038,7 +5038,7 @@ def test_train_multi_agent_off_policy_empty_population_rejected(multi_memory):
         agents = []
         possible_agents = []
 
-    with pytest.raises(AssertionError, match="at least one agent"):
+    with pytest.raises(ValueError, match="at least one agent"):
         train_multi_agent_off_policy(
             EmptyAgentEnv(),
             "env_name",
