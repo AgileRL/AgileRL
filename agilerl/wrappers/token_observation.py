@@ -1,8 +1,6 @@
 """Token-level observation wrapper for multi-turn GEM environments."""
 
 from __future__ import annotations
-
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -27,8 +25,8 @@ class TokenObservationWrapper:
     observations are formatted as proper chat messages so the model receives
     input in the ``<|im_start|>user / assistant`` format it was trained on.
 
-    :param env_fn: Factory that returns a fresh GEM environment.
-    :type env_fn: Callable[[], GemEnv]
+    :param env: GEM environment.
+    :type env: GemEnv
     :param tokenizer: Tokenizer for encoding/decoding text.
     :type tokenizer: Any
     :param max_turns: Maximum number of interaction turns per episode.
@@ -42,24 +40,21 @@ class TokenObservationWrapper:
 
     def __init__(
         self,
-        env_fn: Callable[[], GemEnv],
+        env: GemEnv,
         tokenizer: Any,
         max_turns: int,
         pad_id: int | None = None,
         apply_chat_template: bool = True,
     ) -> None:
-        self.env_fn = env_fn
+        self._env = env
         self.tokenizer = tokenizer
         self.max_turns = max_turns
         self.pad_id = pad_id
         self.apply_chat_template = apply_chat_template
-
-        self._env: GemEnv | None = None
         self.full_ids: torch.Tensor | None = None
         self.turn_boundaries: list[tuple[int, int, int]] = []
         self.turn_rewards: list[float] = []
         self._turn_idx = 0
-
         self._prompt_text: str = ""
         self._gen_texts: list[str] = []
         self._feedback_texts: list[str] = []
@@ -128,7 +123,6 @@ class TokenObservationWrapper:
         :return: Prompt dict with ``input_ids`` and ``attention_mask``.
         :rtype: dict[str, torch.Tensor]
         """
-        self._env = self.env_fn()
         obs_text, info = self._env.reset()
         obs_text = self._format_obs(obs_text, info)
 

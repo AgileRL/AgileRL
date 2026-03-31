@@ -10,16 +10,19 @@ import gem
 import yaml
 from peft import LoraConfig
 from transformers import AutoTokenizer
+from gem.tools.search_tool import SearchTool
+from gem.tools.tool_env_wrapper import ToolEnvWrapper
 
 from agilerl.algorithms import LLMPPO
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
+from agilerl.wrappers.token_observation import TokenObservationWrapper
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
-ENV_NAME = "game:GuessTheNumber-v0-easy"
-MAX_CONTEXT_LENGTH = 2048
-MAX_OUTPUT_TOKENS = 48
+ENV_NAME = "qa:NaturalQuestions"
+MAX_CONTEXT_LENGTH = 4096
+MAX_OUTPUT_TOKENS = 512
 USE_TINY_DEBUG_MODEL = False
 USE_VLLM = not USE_TINY_DEBUG_MODEL
 
@@ -47,10 +50,20 @@ def main(init_hp, mut_p):
             "gate_proj",
         ]
         apply_chat_template = True
-
+    search_tool = SearchTool(search_url="https://www.google.com")
     sample_env = gem.make(ENV_NAME)
-    max_turns = sample_env.max_turns
-
+    max_turns = 10 # sample_env.max_turns
+    tool_env = ToolEnvWrapper(
+        env=sample_env,
+        tools=[search_tool],    
+    )
+    env = TokenObservationWrapper(
+        tool_env,
+        tokenizer,
+        max_turns,
+        tokenizer.pad_token_id,
+        apply_chat_template=apply_chat_template,
+    )
     accelerator = create_llm_accelerator() if not USE_TINY_DEBUG_MODEL else None
 
     init_hp["ALGO"] = "LLMPPO"
@@ -101,11 +114,11 @@ def main(init_hp, mut_p):
 
     finetune_llm_multiturn(
         pop=[llm_ppo],
-        env_fn=lambda: gem.make(ENV_NAME),
+        env=env,
         tokenizer=tokenizer,
         max_turns=max_turns,
         init_hp=init_hp,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         evo_steps=None,

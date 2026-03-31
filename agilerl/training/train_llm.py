@@ -22,7 +22,6 @@ from agilerl.utils.utils import (
     save_llm_checkpoint,
     tournament_selection_and_mutation,
 )
-from agilerl.wrappers.token_observation import TokenObservationWrapper
 
 if TYPE_CHECKING:
     from gem.core import Env as GemEnv
@@ -786,7 +785,7 @@ def finetune_llm_preference(
 
 def finetune_llm_multiturn(
     pop: PopulationType,
-    env_fn: Callable[[], "GemEnv"],
+    env: "GemEnv",
     tokenizer: Any,
     max_turns: int,
     init_hp: dict[str, Any] | None = None,
@@ -884,13 +883,6 @@ def finetune_llm_multiturn(
     agg_eval_score: float | None = None
 
     pad_id = getattr(tokenizer, "pad_token_id", None)
-    env = TokenObservationWrapper(
-        env_fn,
-        tokenizer,
-        max_turns,
-        pad_id,
-        apply_chat_template=apply_chat_template,
-    )
 
     i = 0
     while total_steps < max_steps:
@@ -919,11 +911,19 @@ def finetune_llm_multiturn(
                     completion_ids, _ = agent.get_action([prompt_dict], training=True)
                     full_ids = completion_ids[0]
 
-                    gen_tokens = full_ids[0, prompt_len:]
+                    print("State: ")
+                    print(tokenizer.decode(full_ids[0, :prompt_len].tolist(), skip_special_tokens=True))
+
+                    gen_tokens = full_ids[0, prompt_len:] 
                     gen_text = tokenizer.decode(
                         gen_tokens.tolist(),
                         skip_special_tokens=True,
                     )
+                    print("Action: ")
+                    print(gen_text)
+
+                    print("--------------------------------")
+
 
                     prompt_dict, _reward, terminated, truncated, _info = env.step(
                         full_ids, gen_text
@@ -939,6 +939,7 @@ def finetune_llm_multiturn(
                 all_turn_ids.append(turn_ids)
                 all_rewards.append(turn_rewards_t)
                 batch_steps += len(env.turn_boundaries)
+            assert False
 
             (turn_ids_padded,) = stack_and_pad_experiences(
                 all_turn_ids,
