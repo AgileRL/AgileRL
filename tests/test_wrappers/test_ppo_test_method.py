@@ -1,4 +1,4 @@
-"""Smoke tests for ``LLMPPO.test`` with ``TokenObservationWrapper`` and errors."""
+"""Smoke tests for ``LLMPPO.test`` with ``TokenObservationWrapper`` (no GPU conftest)."""
 
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.utils.probe_envs_llm import ConstantTargetEnv
 from agilerl.wrappers.token_observation import TokenObservationWrapper
 from benchmarking.tiny_model import TinyDigitTokenizer, build_tiny_actor_network
-
-pytestmark = pytest.mark.llm
 
 
 def _tiny_ppo() -> LLMPPO:

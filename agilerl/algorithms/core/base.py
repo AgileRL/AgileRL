@@ -2124,6 +2124,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.rng = np.random.RandomState(seed)
         if self.accelerator is not None:
             set_seed(seed, device_specific=True)
+        self._uses_deepspeed = (
+            self.accelerator is not None
+            and getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
+        )
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocess observations (dummy) for forward pass through neural network.
@@ -2712,7 +2716,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 assert param.requires_grad is True
 
         if self.torch_compiler:
-            if self._uses_deepspeed:
+            if self.uses_deepspeed:
                 warnings.warn(
                     "torch_compiler is not yet compatible with DeepSpeed; "
                     "compilation skipped for this run.",
@@ -2754,11 +2758,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
 
     @property
-    def _uses_deepspeed(self) -> bool:
-        return (
-            self.accelerator is not None
-            and getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
-        )
+    def uses_deepspeed(self) -> bool:
+        return self._uses_deepspeed
+
+    @uses_deepspeed.setter
+    def _uses_deepspeed(self, value: bool):
+        self._uses_deepspeed = value
 
     @contextmanager
     def _amp_ctx(self):
@@ -3551,7 +3556,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         Skipped when DeepSpeed is active because ``DeepSpeedEngine`` is not
         compatible with ``OptimizedModule`` wrapping.
         """
-        if self.torch_compiler is None or self._uses_deepspeed:
+        if self.torch_compiler is None or self.uses_deepspeed:
             return
         for name, obj in self.evolvable_attributes(networks_only=True).items():
             setattr(self, name, compile_model(obj, self.torch_compiler))
