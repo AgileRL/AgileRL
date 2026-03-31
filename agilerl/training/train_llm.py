@@ -22,6 +22,90 @@ from agilerl.utils.utils import (
 InitDictType = dict[str, Any] | None
 
 
+def _plot_sft_loss_curves(
+    pop: list,
+    effective_data_batch_size: int,
+    evaluation_interval: int,
+    plot_path: str,
+) -> None:
+    """Save a loss-curve plot for a completed SFT training run.
+
+    :param pop: Trained agent population.
+    :param effective_data_batch_size: Samples processed per training step.
+    :param evaluation_interval: Steps between evaluation passes.
+    :param plot_path: File path for the saved figure (e.g. ``"plots/sft_loss.png"``).
+    """
+    try:
+        import os
+
+        import matplotlib.pyplot as plt
+    except ImportError:
+        warnings.warn(
+            "matplotlib is not installed — skipping loss-curve plot.", stacklevel=2
+        )
+        return
+
+    os.makedirs(os.path.dirname(os.path.abspath(plot_path)), exist_ok=True)
+
+    has_eval = any(len(a.fitness) > 0 for a in pop)
+    n_plots = 2 if has_eval else 1
+    fig, axes = plt.subplots(1, n_plots, figsize=(7 * n_plots, 4), squeeze=False)
+    fig.suptitle("SFT Training", fontweight="bold")
+
+    for agent_idx, agent in enumerate(pop):
+        label = f"agent {agent_idx}" if len(pop) > 1 else None
+        scores = agent.scores  # stored as -loss
+        if not scores:
+            continue
+
+        # Training loss
+        train_losses = [-s for s in scores]
+        train_steps = [
+            (i + 1) * effective_data_batch_size for i in range(len(train_losses))
+        ]
+        ax = axes[0][0]
+        ax.plot(train_steps, train_losses, linewidth=1.2, alpha=0.85, label=label)
+
+        # Smoothed trend (rolling mean over 10%)
+        window = max(1, len(train_losses) // 10)
+        smoothed = np.convolve(
+            train_losses, np.ones(window) / window, mode="valid"
+        )
+        smooth_steps = train_steps[window - 1 :]
+        ax.plot(smooth_steps, smoothed, linewidth=2, linestyle="--", alpha=0.6)
+
+        # Eval loss
+        if has_eval and agent.fitness:
+            eval_losses = [-f for f in agent.fitness]
+            eval_steps = [
+                (j + 1) * evaluation_interval * effective_data_batch_size
+                for j in range(len(eval_losses))
+            ]
+            axes[0][1].plot(
+                eval_steps, eval_losses, marker="o", linewidth=1.5, label=label
+            )
+
+    axes[0][0].set_title("Training loss")
+    axes[0][0].set_xlabel("Samples")
+    axes[0][0].set_ylabel("Loss")
+    axes[0][0].grid(True, alpha=0.3)
+    if len(pop) > 1:
+        axes[0][0].legend()
+
+    if has_eval:
+        axes[0][1].set_title("Eval loss")
+        axes[0][1].set_xlabel("Samples")
+        axes[0][1].set_ylabel("Loss")
+        axes[0][1].grid(True, alpha=0.3)
+        if len(pop) > 1:
+            axes[0][1].legend()
+
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=150)
+    plt.close(fig)
+    print(f"Loss curves saved to {plot_path}")
+
+
 def finetune_llm_reasoning(
     pop: PopulationType,
     env: ReasoningGym,
@@ -426,6 +510,9 @@ def finetune_llm_preference(
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
+    wandb_project: str = "AgileRL",
+    wandb_entity: str | None = None,
+    wandb_run_name: str | None = None,
     evaluation_interval: int = 10,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
@@ -489,6 +576,11 @@ def finetune_llm_preference(
             env_name=env.name,
             wandb_api_key=wandb_api_key,
             init_hyperparams=init_hp,
+            project=wandb_project,
+            addl_args={
+                **({"name": wandb_run_name} if wandb_run_name is not None else {}),
+                **({"entity": wandb_entity} if wandb_entity is not None else {}),
+            } or None,
         )
 
     if accelerator is None or accelerator.is_main_process:
@@ -707,11 +799,15 @@ def finetune_llm_sft(
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
+    wandb_project: str = "AgileRL",
+    wandb_entity: str | None = None,
+    wandb_run_name: str | None = None,
     evaluation_interval: int = 10,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
+    plot_path: str | None = None,
 ) -> None:
     """Finetune a population of SFT agents on (prompt, response) pairs.
 
@@ -795,6 +891,11 @@ def finetune_llm_sft(
             env_name=env.name,
             wandb_api_key=wandb_api_key,
             init_hyperparams=init_hp,
+            project=wandb_project,
+            addl_args={
+                **({"name": wandb_run_name} if wandb_run_name is not None else {}),
+                **({"entity": wandb_entity} if wandb_entity is not None else {}),
+            } or None,
         )
 
     bar_format = (
@@ -854,6 +955,15 @@ def finetune_llm_sft(
                         "Eval/Negative loss (fitness)": agg_test_metrics[0],
                     }
                 pbar.update(effective_data_batch_size)
+                pbar.set_postfix(
+                    loss=f"{agg_metrics[0]:.4f}",
+                    ppl=f"{agg_metrics[1]:.2f}",
+                    **(
+                        {"eval_loss": f"{-agg_test_metrics[0]:.4f}"}
+                        if agg_test_metrics is not None
+                        else {}
+                    ),
+                )
                 agent.scores.append(-agg_metrics[0])  # higher = better
 
         if accelerator is not None:
@@ -918,41 +1028,45 @@ def finetune_llm_sft(
         if env.num_epochs == num_epochs:
             break
 
-    if (
-        verbose
-        and total_steps > evaluation_interval
-        and (accelerator is None or accelerator.is_main_process)
-    ):
-        fitness_calculated = len(agent.fitness) > 0
-        fitness = (
-            [str(round(a.fitness[-1], 4)) for a in pop]
-            if fitness_calculated
-            else [None] * len(pop)
-        )
-        avg_fitness = (
-            [f"{np.mean(a.fitness[-5:]):.4f}" for a in pop]
-            if fitness_calculated
-            else [None] * len(pop)
-        )
-        avg_score = [
-            f"{np.mean(a.scores[-10:]):.4f}" if a.scores else "N/A" for a in pop
-        ]
-        agents = [a.index for a in pop]
-        num_steps = [a.steps[-1] for a in pop]
-        muts = [a.mut for a in pop]
-        banner_text = f"Global Steps {total_steps}"
-        banner_width = max(len(banner_text) + 8, 35)
+    if verbose and (accelerator is None or accelerator.is_main_process):
+        agent = pop[0]
+        scores = agent.scores  # list of -loss per step
+        fitness = agent.fitness  # list of -eval_loss per eval step
+
+        banner_text = f"Training complete — {total_steps} steps"
+        banner_width = max(len(banner_text) + 4, 40)
         border = "=" * banner_width
-        pbar.write(
-            f"{border}\n"
-            f"{banner_text.center(banner_width)}\n"
-            f"{border}\n"
-            f"Fitness:\t\t{fitness}\n"
-            f"5 fitness avgs:\t{avg_fitness}\n"
-            f"10 score avgs:\t{avg_score}\n"
-            f"Agents:\t\t{agents}\n"
-            f"Steps:\t\t{num_steps}\n"
-            f"Mutations:\t\t{muts}",
+        lines = [border, banner_text.center(banner_width), border]
+
+        if scores:
+            losses = [-s for s in scores]
+            lines += [
+                f"  Train loss  — initial: {losses[0]:.4f}  "
+                f"final: {losses[-1]:.4f}  "
+                f"best: {min(losses):.4f}  "
+                f"mean: {np.mean(losses):.4f}",
+            ]
+        if fitness:
+            eval_losses = [-f for f in fitness]
+            lines += [
+                f"  Eval  loss  — final: {eval_losses[-1]:.4f}  "
+                f"best: {min(eval_losses):.4f}",
+            ]
+        if evo_steps is not None:
+            muts = [a.mut for a in pop]
+            agents = [a.index for a in pop]
+            lines += [
+                f"  Agents: {agents}  Mutations: {muts}",
+            ]
+
+        pbar.write("\n".join(lines))
+
+    if plot_path is not None and (accelerator is None or accelerator.is_main_process):
+        _plot_sft_loss_curves(
+            pop=pop,
+            effective_data_batch_size=effective_data_batch_size,
+            evaluation_interval=evaluation_interval,
+            plot_path=plot_path,
         )
 
     if accelerator is not None:

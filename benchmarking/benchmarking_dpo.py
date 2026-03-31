@@ -75,24 +75,32 @@ def main(init_hp, mut_p):
         for idx, _ in enumerate(range(init_hp["POP_SIZE"]))
     ]
 
-    tournament = TournamentSelection(
-        init_hp["TOURN_SIZE"],
-        init_hp["ELITISM"],
-        init_hp["POP_SIZE"],
-        init_hp["EVAL_LOOP"],
-    )
+    # HPO objects — only constructed when evolution is enabled ---------------
+    evo_steps = init_hp.get("EVO_STEPS")
+    if evo_steps is not None:
+        tournament = TournamentSelection(
+            init_hp["TOURN_SIZE"],
+            init_hp["ELITISM"],
+            init_hp["POP_SIZE"],
+            init_hp["EVAL_LOOP"],
+        )
+        mutations = Mutations(
+            no_mutation=mut_p["NO_MUT"],
+            architecture=0,
+            new_layer_prob=0,
+            parameters=0,
+            activation=0,
+            rl_hp=mut_p["RL_HP_MUT"],
+            mutation_sd=mut_p["MUT_SD"],
+            rand_seed=mut_p["RAND_SEED"],
+            accelerator=accelerator,
+        )
+    else:
+        tournament = None
+        mutations = None
 
-    mutations = Mutations(
-        no_mutation=mut_p["NO_MUT"],
-        architecture=0,
-        new_layer_prob=0,
-        parameters=0,
-        activation=0,
-        rl_hp=mut_p["RL_HP_MUT"],
-        mutation_sd=mut_p["MUT_SD"],
-        rand_seed=mut_p["RAND_SEED"],
-        accelerator=accelerator,
-    )
+    num_batches = init_hp.get("NUM_BATCHES")
+    max_steps = num_batches * init_hp["BATCH_SIZE"] if num_batches is not None else None
 
     finetune_llm_preference(
         pop=pop,
@@ -100,21 +108,21 @@ def main(init_hp, mut_p):
         init_hp=init_hp,
         save_elite=True,
         elite_path="saved_llms",
-        wb=True,
-        evo_steps=5,
+        wb=init_hp.get("WANDB", False),
+        evo_steps=evo_steps,
         tournament=tournament,
         mutation=mutations,
-        wandb_api_key=None,
-        evaluation_interval=10,
+        wandb_api_key=init_hp.get("WANDB_API_KEY"),
+        wandb_project=init_hp.get("WANDB_PROJECT", "AgileRL"),
+        wandb_entity=init_hp.get("WANDB_ENTITY"),
+        wandb_run_name=init_hp.get("WANDB_RUN_NAME"),
+        evaluation_interval=init_hp.get("EVALUATION_INTERVAL", 200),
         accelerator=accelerator,
-        num_epochs=1,
+        max_steps=max_steps,
     )
 
 
 if __name__ == "__main__":
     with open("configs/training/dpo.yaml") as file:
         config = yaml.safe_load(file)
-    init_hp = config["INIT_HP"]
-    mut_p = config["MUTATION_PARAMS"]
-    main(init_hp, mut_p)
-    main(init_hp=init_hp, mut_p=mut_p)
+    main(init_hp=config["INIT_HP"], mut_p=config["MUTATION_PARAMS"])

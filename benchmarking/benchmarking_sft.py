@@ -144,27 +144,35 @@ def main(init_hp: dict, mut_p: dict) -> None:
         for _ in range(init_hp["POP_SIZE"])
     ]
 
-    # HPO objects (optional; set evo_steps=None to disable evolution) ------
-    tournament = TournamentSelection(
-        init_hp["TOURN_SIZE"],
-        init_hp["ELITISM"],
-        init_hp["POP_SIZE"],
-        init_hp["EVAL_LOOP"],
-    )
-
-    mutations = Mutations(
-        no_mutation=mut_p["NO_MUT"],
-        architecture=0,
-        new_layer_prob=0,
-        parameters=0,
-        activation=0,
-        rl_hp=mut_p["RL_HP_MUT"],
-        mutation_sd=mut_p["MUT_SD"],
-        rand_seed=mut_p["RAND_SEED"],
-        accelerator=accelerator,
-    )
+    # HPO objects — only constructed when evolution is enabled ---------------
+    evo_steps = init_hp.get("EVO_STEPS")
+    if evo_steps is not None:
+        tournament = TournamentSelection(
+            init_hp["TOURN_SIZE"],
+            init_hp["ELITISM"],
+            init_hp["POP_SIZE"],
+            init_hp["EVAL_LOOP"],
+        )
+        mutations = Mutations(
+            no_mutation=mut_p["NO_MUT"],
+            architecture=0,
+            new_layer_prob=0,
+            parameters=0,
+            activation=0,
+            rl_hp=mut_p["RL_HP_MUT"],
+            mutation_sd=mut_p["MUT_SD"],
+            rand_seed=mut_p["RAND_SEED"],
+            accelerator=accelerator,
+        )
+    else:
+        tournament = None
+        mutations = None
 
     # Training loop -------------------------------------------------------
+    # NUM_BATCHES=None → full epoch; NUM_BATCHES=N → exactly N batches.
+    num_batches = init_hp.get("NUM_BATCHES")
+    max_steps = num_batches * init_hp["BATCH_SIZE"] if num_batches is not None else None
+
     print("Finetuning SFT agents...")
     finetune_llm_sft(
         pop=pop,
@@ -172,14 +180,18 @@ def main(init_hp: dict, mut_p: dict) -> None:
         init_hp=init_hp,
         save_elite=True,
         elite_path="saved_llms/sft",
-        wb=init_hp.get("WANDB", False),           # set to True and supply wandb_api_key to enable W&B
-        evo_steps=init_hp.get("EVO_STEPS", 5),
+        wb=init_hp.get("WANDB", False),
+        evo_steps=evo_steps,
         tournament=tournament,
         mutation=mutations,
-        wandb_api_key=None,
+        wandb_api_key=init_hp.get("WANDB_API_KEY"),
+        wandb_project=init_hp.get("WANDB_PROJECT", "AgileRL"),
+        wandb_entity=init_hp.get("WANDB_ENTITY"),
+        wandb_run_name=init_hp.get("WANDB_RUN_NAME"),
         evaluation_interval=init_hp.get("EVALUATION_INTERVAL", 200),
-        accelerator=accelerator,  # None → single-GPU, Accelerator() → multi-GPU/DeepSpeed
-        num_epochs=1,
+        accelerator=accelerator,
+        max_steps=max_steps,
+        plot_path=init_hp.get("PLOT_PATH"),
     )
 
 

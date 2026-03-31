@@ -13,6 +13,14 @@ INIT_HP:
     ELITISM: true
     POP_SIZE: 4
     EVAL_LOOP: 1
+    EVO_STEPS: null             # null disables HPO evolution
+    EVALUATION_INTERVAL: 200    # evaluate every N batches
+    NUM_BATCHES: null           # null trains a full epoch; set to an integer to cap batches
+    WANDB: false
+    WANDB_API_KEY: null         # or set via WANDB_API_KEY env var
+    WANDB_PROJECT: AgileRL
+    WANDB_ENTITY: null          # your W&B username or team; null uses your default entity
+    WANDB_RUN_NAME: null        # null auto-generates "{dataset}-EvoHPO-{algo}-{timestamp}"
 
 MUTATION_PARAMS:
     NO_MUT: 0.1                          # No mutation
