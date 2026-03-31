@@ -257,3 +257,13 @@ class NetworkSpec(BaseModel):
     def _check_latent_dim(self) -> Self:
         min_max_validator("min_latent_dim", "max_latent_dim")(self)
         return min_max_validator("min_latent_dim", "latent_dim")(self)
+
+    def to_manifest(self) -> dict[str, object]:
+        """Serialize this network spec for Arena manifest payloads."""
+        payload: dict[str, object] = self.model_dump(mode="json", exclude_none=True)
+        # Keep the discriminator tag needed to parse encoder_config unions.
+        payload["encoder_config"] = {
+            "arch": self.encoder_config.arch,
+            **payload["encoder_config"],
+        }
+        return payload

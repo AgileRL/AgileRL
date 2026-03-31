@@ -290,7 +290,7 @@ def test_initialize_matd3_with_net_config(
     assert matd3.batch_size == batch_size
     assert matd3.scores == []
     assert matd3.fitness == []
-    assert matd3.steps == [0]
+    assert matd3.steps == 0
 
     if compile_mode is not None and accelerator is None:
         assert all(
@@ -451,7 +451,7 @@ def test_initialize_matd3_with_mlp_networks(
     assert matd3.agent_ids == agent_ids
     assert matd3.scores == []
     assert matd3.fitness == []
-    assert matd3.steps == [0]
+    assert matd3.steps == 0
 
     expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
     for agent_id in matd3.agent_ids:
@@ -544,7 +544,7 @@ def test_initialize_matd3_with_cnn_networks(
     assert matd3.agent_ids == agent_ids
     assert matd3.scores == []
     assert matd3.fitness == []
-    assert matd3.steps == [0]
+    assert matd3.steps == 0
 
     expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
     for agent_id in matd3.agent_ids:
@@ -653,7 +653,7 @@ def test_initialize_matd3_with_evo_networks(
     assert matd3.agent_ids == agent_ids
     assert matd3.scores == []
     assert matd3.fitness == []
-    assert matd3.steps == [0]
+    assert matd3.steps == 0
 
     expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
     for agent_id in matd3.agent_ids:

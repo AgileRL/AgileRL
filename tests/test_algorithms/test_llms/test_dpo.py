@@ -209,7 +209,7 @@ def test_init_dpo(
     assert dpo.index == 0
     assert dpo.scores == []
     assert dpo.fitness == []
-    assert dpo.steps == [0]
+    assert dpo.steps == 0
     if config is not None:
         assert isinstance(dpo.actor, DeepSpeedEngine)
         if not use_deepspeed_optimizer:

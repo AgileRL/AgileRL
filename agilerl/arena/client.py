@@ -95,7 +95,6 @@ class ArenaClient:
     """
 
     BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
-    MAX_UPLOAD_BYTES: int = 50 * 1024 * 1024  # 50 MiB
 
     def __init__(
         self,
@@ -245,7 +244,7 @@ class ArenaClient:
         # Send the environment to Arena for registration
         return self._request(
             "POST",
-            "api/v1/custom-gym-env-impls/create",
+            "api/custom-gym-env-impls/create",
             files={"archive": ("environment.tar.gz", payload, "application/gzip")},
             data={
                 "name": name,
@@ -431,7 +430,7 @@ class ArenaClient:
             ``status``.  When *stream* is ``True``, returns the final
             result from the ``complete`` event instead.
         """
-        payload = manifest.model_dump(mode="json", exclude_none=True)
+        payload = manifest.to_payload()
         if cluster is not None:
             payload["cluster"] = cluster.model_dump(mode="json")
         resp = self._request(

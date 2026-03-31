@@ -85,10 +85,29 @@ class ArenaTrainingManifest(BaseModel):
     algorithm: AlgorithmSpec
     environment: EnvironmentSpec
     mutation: MutationSpec | None = Field(default=None)
-    network: NetworkSpec
+    network: NetworkSpec | None = Field(default=None)
     replay_buffer: ReplayBufferSpec | None = Field(default=None)
     tournament_selection: TournamentSelectionSpec | None = Field(default=None)
     training: TrainingSpec
+
+    def to_payload(self) -> dict[str, object]:
+        """Serialize the manifest for Arena job submission."""
+        payload: dict[str, object] = {
+            "algorithm": self.algorithm.to_manifest(),
+            "environment": self.environment.to_manifest(),
+            "training": self.training.to_manifest(
+                name=self.algorithm.resolve_training_fn().__name__
+            ),
+        }
+        if self.network is not None:
+            payload["network"] = self.network.to_manifest()
+        if self.mutation is not None:
+            payload["mutation"] = self.mutation.to_manifest()
+        if self.replay_buffer is not None:
+            payload["replay_buffer"] = self.replay_buffer.to_manifest()
+        if self.tournament_selection is not None:
+            payload["tournament_selection"] = self.tournament_selection.to_manifest()
+        return payload
 
     def save(self, path: str) -> None:
         """Save the manifest to a YAML file.
@@ -105,7 +124,7 @@ class ArenaTrainingManifest(BaseModel):
         :returns: YAML string representation of the manifest.
         :rtype: str
         """
-        data = self.model_dump(mode="json", exclude_none=True)
+        data = self.to_payload()
         return yaml.dump(data, default_flow_style=False, sort_keys=False)
 
 

@@ -81,20 +81,20 @@ class TestAgentMetricsNonScalar:
         m = AgentMetrics()
         m.register_histogram("action_dist")
         assert "action_dist" in m.nonscalar_metrics
-        assert m.get_last("action_dist") is None
+        assert m.get_histogram("action_dist") is None
 
         arr = np.array([10, 20, 30])
         m.log_histogram("action_dist", arr)
-        result = m.get_last("action_dist")
+        result = m.get_histogram("action_dist")
         np.testing.assert_array_equal(result, arr)
 
-    def test_log_histogram_overwrites_previous(self):
+    def test_log_histogram_accumulates_across_calls(self):
         m = AgentMetrics()
         m.register_histogram("action_dist")
         m.log_histogram("action_dist", np.array([1, 2]))
         m.log_histogram("action_dist", np.array([3, 4, 5]))
-        result = m.get_last("action_dist")
-        np.testing.assert_array_equal(result, [3, 4, 5])
+        result = m.get_histogram("action_dist")
+        np.testing.assert_array_equal(result, [1, 2, 3, 4, 5])
 
     def test_register_histogram_duplicate_raises(self):
         m = AgentMetrics()
@@ -126,7 +126,7 @@ class TestAgentMetricsNonScalar:
         m.register_histogram("h")
         m.log_histogram("h", np.array([1, 2, 3]))
         m.clear()
-        assert m.get_last("h") is None
+        assert m.get_histogram("h") is None
 
     def test_scalar_and_nonscalar_independent(self):
         m = AgentMetrics()
@@ -137,7 +137,7 @@ class TestAgentMetricsNonScalar:
         assert m.additional_metrics == ["loss"]
         assert m.nonscalar_metrics == ["action_dist"]
         assert m.get_mean("loss") == pytest.approx(0.5)
-        np.testing.assert_array_equal(m.get_last("action_dist"), [1, 2])
+        np.testing.assert_array_equal(m.get_histogram("action_dist"), [1, 2])
 
 
 class TestMultiAgentMetrics:
@@ -192,21 +192,21 @@ class TestMultiAgentMetricsNonScalar:
         m.register_histogram("action_dist")
         raw = m._nonscalar_metrics["action_dist"]
         assert set(raw.keys()) == {"agent_0", "agent_1"}
-        assert all(v is None for v in raw.values())
+        assert all(v == [] for v in raw.values())
 
-    def test_log_and_get_last(self):
+    def test_log_and_get_histogram(self):
         m = MultiAgentMetrics(self.AGENT_IDS)
         m.register_histogram("action_dist")
         arr = np.array([5, 10, 15])
         m.log_histogram("action_dist", "agent_0", arr)
 
-        np.testing.assert_array_equal(m.get_last("action_dist", "agent_0"), arr)
-        assert m.get_last("action_dist", "agent_1") is None
+        np.testing.assert_array_equal(m.get_histogram("action_dist", "agent_0"), arr)
+        assert m.get_histogram("action_dist", "agent_1") is None
 
     def test_clear_resets_nonscalar_per_agent(self):
         m = MultiAgentMetrics(self.AGENT_IDS)
         m.register_histogram("h")
         m.log_histogram("h", "agent_0", np.array([1, 2]))
         m.clear()
-        assert m.get_last("h", "agent_0") is None
-        assert m.get_last("h", "agent_1") is None
+        assert m.get_histogram("h", "agent_0") is None
+        assert m.get_histogram("h", "agent_1") is None

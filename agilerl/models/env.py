@@ -30,3 +30,7 @@ class EnvironmentSpec(BaseModel):
             version=data.get("version", "latest"),
             num_envs=data.get("num_envs", 16),
         )
+
+    def to_manifest(self) -> dict[str, str | int]:
+        """Serialize this environment for Arena manifest payloads."""
+        return self.model_dump(mode="json", exclude_none=True)

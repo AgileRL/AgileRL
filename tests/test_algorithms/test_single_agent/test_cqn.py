@@ -120,7 +120,7 @@ def test_initialize_cqn(observation_space, encoder_cls, accelerator_flag, reques
     assert cqn.index == 0
     assert cqn.scores == []
     assert cqn.fitness == []
-    assert cqn.steps == [0]
+    assert cqn.steps == 0
     assert isinstance(cqn.actor.encoder, encoder_cls)
     assert isinstance(cqn.actor_target.encoder, encoder_cls)
     expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
@@ -168,7 +168,7 @@ def test_initialize_cqn_with_make_evo(
     assert cqn.index == 0
     assert cqn.scores == []
     assert cqn.fitness == []
-    assert cqn.steps == [0]
+    assert cqn.steps == 0
     assert isinstance(cqn.optimizer.optimizer, optim.Adam)
     assert isinstance(cqn.criterion, nn.MSELoss)
     cqn.clean_up()
@@ -220,7 +220,7 @@ def test_initialize_cqn_with_actor_network_evo_net(
     assert cqn.index == 0
     assert cqn.scores == []
     assert cqn.fitness == []
-    assert cqn.steps == [0]
+    assert cqn.steps == 0
     assert isinstance(cqn.optimizer.optimizer, optim.Adam)
     assert isinstance(cqn.criterion, nn.MSELoss)
     cqn.clean_up()

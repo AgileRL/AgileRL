@@ -26,13 +26,15 @@ from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.typing import BatchDimension
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import (
+from agilerl.utils.llm_utils import (
     aggregate_metrics_across_gpus,
+    gather_tensor,
+)
+from agilerl.utils.utils import (
     calculate_vectorized_scores,
     consolidate_mutations,
     create_population,
     default_progress_bar,
-    gather_tensor,
     get_env_defined_actions,
     make_multi_agent_vect_envs,
     make_skill_vect_envs,

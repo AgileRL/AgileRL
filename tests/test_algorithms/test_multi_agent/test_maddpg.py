@@ -334,7 +334,7 @@ def test_initialize_maddpg_with_net_config(
     assert maddpg.batch_size == batch_size
     assert maddpg.scores == []
     assert maddpg.fitness == []
-    assert maddpg.steps == [0]
+    assert maddpg.steps == 0
 
     if compile_mode is not None and accelerator is None:
         assert all(
@@ -430,7 +430,7 @@ def test_initialize_maddpg_with_mlp_networks(
     assert maddpg.agent_ids == agent_ids
     assert maddpg.scores == []
     assert maddpg.fitness == []
-    assert maddpg.steps == [0]
+    assert maddpg.steps == 0
     expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
     assert all(
         isinstance(actor_optimizer, expected_optimizer_cls)
@@ -545,7 +545,7 @@ def test_initialize_maddpg_with_cnn_networks(
     assert maddpg.agent_ids == agent_ids
     assert maddpg.scores == []
     assert maddpg.fitness == []
-    assert maddpg.steps == [0]
+    assert maddpg.steps == 0
     expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
     assert all(
         isinstance(actor_optimizer, expected_optimizer_cls)
@@ -635,7 +635,7 @@ def test_initialize_maddpg_with_evo_networks(
     assert maddpg.agent_ids == agent_ids
     assert maddpg.scores == []
     assert maddpg.fitness == []
-    assert maddpg.steps == [0]
+    assert maddpg.steps == 0
 
     expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
     assert all(

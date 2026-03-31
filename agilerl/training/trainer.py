@@ -6,12 +6,12 @@ import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from agilerl import HAS_ARENA_DEPENDENCIES
 from agilerl.algorithms.core.base import (
     LLMAlgorithm,
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
-from agilerl.arena.client import ArenaClient
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
 from agilerl.models.algo import (
@@ -41,6 +41,11 @@ EnvironmentT = GymEnvType | PzEnvType | AsyncPettingZooVecEnv
 ArenaEnvT = EnvironmentSpec | dict[str, str]
 ReplayBufferT = ReplayBuffer | MultiStepReplayBuffer | MultiAgentReplayBuffer | None
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
+
+if HAS_ARENA_DEPENDENCIES:
+    from agilerl.arena.client import ArenaClient
+else:
+    ArenaClient = None
 
 if TYPE_CHECKING:
     import torch
@@ -179,7 +184,7 @@ class LocalTrainer(Trainer):
         memory = build_replay_buffer_from_spec(
             self.algorithm, self.replay_buffer, self.device
         )
-        train_fn = self.algorithm.get_training_fn()
+        train_fn = self.algorithm.resolve_training_fn()
 
         kwargs = build_train_kwargs(
             algo_spec=self.algorithm,
@@ -239,11 +244,13 @@ class ArenaTrainer(Trainer):
         self,
         algorithm: AlgorithmT,
         environment: ArenaEnvT,
+        *,
+        client: ArenaClient | None = None,
+        api_key: str | None = None,
         training: TrainingSpec | None = None,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
         replay_buffer: ReplayBufferT | None = None,
-        client: ArenaClient | None = None,
     ) -> None:
 
         super().__init__(
@@ -258,9 +265,10 @@ class ArenaTrainer(Trainer):
         if client is not None:
             self._client = client
         else:
-            from agilerl.arena.client import ArenaClient as _ArenaClient
-
-            self._client = _ArenaClient()
+            if ArenaClient is None:
+                msg = "Arena dependencies are not installed. Please install them using: pip install agilerl[arena]"
+                raise ImportError(msg)
+            self._client = ArenaClient(api_key=api_key)
 
     def train(self, *, stream: bool = False) -> dict[str, Any]:
         """Build the manifest and submit the training job to Arena.
@@ -287,12 +295,26 @@ class ArenaTrainer(Trainer):
         from agilerl.models import ArenaTrainingManifest
 
         env_spec = self._resolve_env_spec()
+        net_config = getattr(self.algorithm, "net_config", None)
+
+        # Validate section-level Arena serialization early.
+        self.algorithm.to_manifest()
+        env_spec.to_manifest()
+        if net_config is not None:
+            net_config.to_manifest()
+        self.training.to_manifest(name=self.algorithm.resolve_training_fn().__name__)
+        if self.mutation is not None:
+            self.mutation.to_manifest()
+        if self.replay_buffer is not None:
+            self.replay_buffer.to_manifest()
+        if self.tournament is not None:
+            self.tournament.to_manifest()
 
         return ArenaTrainingManifest(
             algorithm=self.algorithm,
             environment=env_spec,
             mutation=self.mutation,
-            network=self.algorithm.net_config,
+            network=net_config,
             replay_buffer=self.replay_buffer,
             tournament_selection=self.tournament,
             training=self.training,

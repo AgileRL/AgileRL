@@ -254,16 +254,14 @@ def train_on_policy(
                 loop=eval_loop,
             )
 
-        # Aggregate metrics from all agents and log
-        population.report_metrics()
+        # Aggregate metrics from all agents and log -> clear metrics after reporting
+        population.report_metrics(clear_metrics=True)
 
         # Check if we have met the target score
         if population.should_stop(target):
             population.finish()
             pbar.close()
             return population.agents, population.last_fitnesses
-
-        population.clear_agent_metrics()
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:

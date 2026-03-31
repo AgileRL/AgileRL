@@ -30,6 +30,7 @@ from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
     concatenate_experiences_into_batches,
     concatenate_tensors,
+    configure_tf32_precision,
     get_experiences_samples,
     get_vect_dim,
     key_in_nested_dict,
@@ -355,7 +356,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 )
                 self.torch_compiler = "default"
 
-            torch.set_float32_matmul_precision("high")
+            configure_tf32_precision()
             self.recompile()
 
         self.criterion = nn.MSELoss()

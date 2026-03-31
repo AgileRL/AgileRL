@@ -87,8 +87,7 @@ def test_initialize_dqn(
     assert dqn.index == 0
     assert dqn.scores == []
     assert dqn.fitness == []
-    assert dqn.steps == [0]
-    # assert dqn.actor_network is None
+    assert dqn.steps == 0
     assert isinstance(dqn.actor.encoder, encoder_cls)
     assert isinstance(dqn.actor_target.encoder, encoder_cls)
     expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
@@ -142,7 +141,7 @@ def test_initialize_dqn_with_actor_network_evo_net(
     assert dqn.index == 0
     assert dqn.scores == []
     assert dqn.fitness == []
-    assert dqn.steps == [0]
+    assert dqn.steps == 0
 
     assert isinstance(dqn.actor.encoder, encoder_cls)
     assert isinstance(dqn.actor_target.encoder, encoder_cls)
@@ -208,8 +207,7 @@ def test_initialize_dqn_with_make_evolvable(
     assert dqn.index == 0
     assert dqn.scores == []
     assert dqn.fitness == []
-    assert dqn.steps == [0]
-    # assert dqn.actor_network == actor_network
+    assert dqn.steps == 0
     assert isinstance(dqn.optimizer.optimizer, optim.Adam)
 
 
@@ -638,7 +636,7 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     dqn = DummyRainbowDQN(observation_space, discrete_space)
     dqn.fitness = [200, 200, 200]
     dqn.scores = [94, 94, 94]
-    dqn.steps = [2500]
+    dqn.steps = 2500
     dqn.tensor_attribute = torch.randn(1)
     clone_agent = dqn.clone()
 

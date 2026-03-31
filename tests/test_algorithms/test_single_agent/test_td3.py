@@ -133,7 +133,7 @@ def test_initialize_td3(
     assert td3.index == 0
     assert td3.scores == []
     assert td3.fitness == []
-    assert td3.steps == [0]
+    assert td3.steps == 0
     assert isinstance(td3.actor.encoder, encoder_cls)
     assert isinstance(td3.actor_target.encoder, encoder_cls)
     assert isinstance(td3.actor_optimizer.optimizer, expected_opt_cls)
@@ -202,7 +202,7 @@ def test_initialize_td3_with_actor_network(
     assert td3.index == 0
     assert td3.scores == []
     assert td3.fitness == []
-    assert td3.steps == [0]
+    assert td3.steps == 0
     assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
@@ -305,7 +305,7 @@ def test_initialize_td3_with_actor_network_no_critics(
     assert td3.index == 0
     assert td3.scores == []
     assert td3.fitness == []
-    assert td3.steps == [0]
+    assert td3.steps == 0
     assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
@@ -369,7 +369,7 @@ def test_initialize_td3_with_actor_network_cnn(
     assert td3.index == 0
     assert td3.scores == []
     assert td3.fitness == []
-    assert td3.steps == [0]
+    assert td3.steps == 0
     assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
@@ -663,7 +663,7 @@ def test_clone_returns_identical_agent(observation_space, vector_space, request)
     td3 = DummyTD3(observation_space, vector_space)
     td3.fitness = [200, 200, 200]
     td3.scores = [94, 94, 94]
-    td3.steps = [2500]
+    td3.steps = 2500
     td3.tensor_attribute = torch.randn(1)
     clone_agent = td3.clone()
 
@@ -938,7 +938,7 @@ def test_initialize_td3_with_actor_network_evo_net(
     assert td3.index == 0
     assert td3.scores == []
     assert td3.fitness == []
-    assert td3.steps == [0]
+    assert td3.steps == 0
     assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)

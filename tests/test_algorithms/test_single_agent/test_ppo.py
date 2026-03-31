@@ -265,7 +265,7 @@ def test_initialize_ppo(
     assert ppo.index == 0
     assert ppo.scores == []
     assert ppo.fitness == []
-    assert ppo.steps == [0]
+    assert ppo.steps == 0
     assert isinstance(ppo.actor.encoder, encoder_cls)
     assert isinstance(ppo.critic.encoder, encoder_cls)
     expected_optimizer = AcceleratedOptimizer if accelerator else optim.Adam
@@ -330,7 +330,7 @@ def test_initialize_ppo_with_make_evo(
     assert ppo.index == 0
     assert ppo.scores == []
     assert ppo.fitness == []
-    assert ppo.steps == [0]
+    assert ppo.steps == 0
     assert isinstance(ppo.optimizer.optimizer, optim.Adam)
     assert ppo.num_envs == 1
     ppo.clean_up()
@@ -659,7 +659,7 @@ def test_clone_returns_identical_agent(observation_space, discrete_space, reques
     ppo = DummyPPO(observation_space, discrete_space)
     ppo.fitness = [200, 200, 200]
     ppo.scores = [94, 94, 94]
-    ppo.steps = [2500]
+    ppo.steps = 2500
     ppo.tensor_attribute = torch.randn(1)
     clone_agent = ppo.clone()
 

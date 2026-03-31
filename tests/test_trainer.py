@@ -1,8 +1,8 @@
 """Tests for the refactored Trainer abstraction.
 
 Covers:
-- Trainer base class (algo name / meta resolution)
-- LocalTrainer (construction, population resolution, train delegation)
+- Trainer base class (algo resolution from string / spec)
+- LocalTrainer (construction, train delegation)
 - ArenaTrainer (construction, manifest building, train delegation)
 - trainer_utils pure functions
 """
@@ -21,13 +21,13 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.models import (
     ALGO_REGISTRY,
     ArenaTrainingManifest,
-    PPOSpec,
     DDPGSpec,
     DQNSpec,
     EnvironmentSpec,
+    PPOSpec,
     RLAlgorithmSpec,
-    AlgorithmMeta,
 )
+from agilerl.models.networks import MlpSpec, NetworkSpec
 from agilerl.models.hpo import (
     MutationProbabilities,
     MutationSpec,
@@ -36,13 +36,10 @@ from agilerl.models.hpo import (
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.training.trainer import ArenaTrainer, LocalTrainer, Trainer
 from agilerl.utils.trainer_utils import (
-    build_mutations,
-    build_replay_buffer,
-    build_tournament,
+    build_mutations_from_spec,
+    build_replay_buffer_from_spec,
+    build_tournament_from_spec,
     build_train_kwargs,
-    get_algo_meta,
-    get_training_fn,
-    resolve_algo_name,
 )
 
 
@@ -65,6 +62,12 @@ class DummyEnv:
     def step(self, action):
         return self.observation_space.sample(), 0.0, False, False, {}
 
+    def single_observation_space(self, agent=None):
+        return self.observation_space
+
+    def single_action_space(self, agent=None):
+        return self.action_space
+
     def __str__(self) -> str:
         return "DummyEnv"
 
@@ -76,7 +79,13 @@ def env():
 
 @pytest.fixture()
 def ppo_spec() -> PPOSpec:
-    return PPOSpec(learn_step=128)
+    return PPOSpec(
+        learn_step=128,
+        net_config=NetworkSpec(
+            encoder_config=MlpSpec(hidden_size=[64]),
+            head_config=MlpSpec(hidden_size=[64]),
+        ),
+    )
 
 
 @pytest.fixture()
@@ -122,68 +131,16 @@ def mock_client():
 
 
 # ---------------------------------------------------------------------------
-# trainer_utils — resolve_algo_name / get_algo_meta
-# ---------------------------------------------------------------------------
-
-
-class TestResolveAlgoName:
-    def test_from_string(self):
-        assert resolve_algo_name("PPO") == "PPO"
-
-    def test_from_spec(self, ppo_spec):
-        assert resolve_algo_name(ppo_spec) == "PPO"
-
-    def test_from_ddpg_spec(self, ddpg_spec):
-        assert resolve_algo_name(ddpg_spec) == "DDPG"
-
-    def test_from_instance(self):
-        inst = MagicMock()
-        inst.algo = "TD3"
-        assert resolve_algo_name(inst) == "TD3"
-
-    def test_unknown_spec_raises(self):
-        """An unregistered RLAlgorithmSpec subclass raises ValueError."""
-
-        class CustomSpec(RLAlgorithmSpec):
-            pass
-
-        with pytest.raises(ValueError, match="No registry entry"):
-            resolve_algo_name(CustomSpec())
-
-
-class TestGetAlgoMeta:
-    def test_known_algorithm(self):
-        meta = get_algo_meta("DQN")
-        assert meta.name == "DQN"
-        assert meta.spec_cls is DQNSpec
-        assert meta.requires_buffer is True
-
-    def test_unknown_algorithm_raises(self):
-        with pytest.raises(ValueError, match="No registry entry.*FakeAlgo"):
-            get_algo_meta("FakeAlgo")
-
-    def test_all_registry_entries_consistent(self):
-        from agilerl.training import AlgorithmType
-
-        for name, meta in ALGO_REGISTRY.items():
-            assert meta.name == name
-            assert isinstance(meta.train_fn_name, str)
-            assert isinstance(meta.requires_buffer, bool)
-            assert callable(meta.train_fn)
-            assert isinstance(meta.algorithm_type, AlgorithmType)
-
-
-# ---------------------------------------------------------------------------
 # trainer_utils — build_* functions
 # ---------------------------------------------------------------------------
 
 
 class TestBuildMutations:
     def test_none_returns_none(self):
-        assert build_mutations(None, "cpu") is None
+        assert build_mutations_from_spec(None, "cpu") is None
 
     def test_from_spec(self, mutation_spec):
-        result = build_mutations(mutation_spec, "cpu")
+        result = build_mutations_from_spec(mutation_spec, "cpu")
         assert isinstance(result, Mutations)
         assert result.no_mut == 0.5
         assert result.parameters_mut == 0.3
@@ -192,64 +149,45 @@ class TestBuildMutations:
 
 class TestBuildTournament:
     def test_none_returns_none(self, training_spec):
-        assert build_tournament(None, training_spec) is None
+        assert build_tournament_from_spec(None, training_spec) is None
 
     def test_from_spec(self, tournament_spec, training_spec):
-        result = build_tournament(tournament_spec, training_spec)
+        result = build_tournament_from_spec(tournament_spec, training_spec)
         assert isinstance(result, TournamentSelection)
         assert result.tournament_size == 3
         assert result.elitism is True
 
 
 class TestBuildReplayBuffer:
-    def test_none_with_on_policy_returns_none(self):
-        meta = get_algo_meta("PPO")
-        assert build_replay_buffer(None, meta, "cpu") is None
+    def test_none_with_on_policy_returns_none(self, ppo_spec):
+        assert build_replay_buffer_from_spec(ppo_spec, None, "cpu") is None
 
     def test_none_with_off_policy_creates_default(self):
-        meta = get_algo_meta("DQN")
-        result = build_replay_buffer(None, meta, "cpu")
+        dqn_spec = DQNSpec()
+        result = build_replay_buffer_from_spec(dqn_spec, None, "cpu")
         assert isinstance(result, ReplayBuffer)
         assert result.max_size == 100_000
 
     def test_from_spec_standard(self, buffer_spec):
-        meta = get_algo_meta("DQN")
-        result = build_replay_buffer(buffer_spec, meta, "cpu")
+        dqn_spec = DQNSpec()
+        result = build_replay_buffer_from_spec(dqn_spec, buffer_spec, "cpu")
         assert isinstance(result, ReplayBuffer)
         assert result.max_size == 5_000
 
     def test_from_spec_n_step(self):
         spec = ReplayBufferSpec(memory_size=10_000, n_step_buffer=True)
-        meta = get_algo_meta("RainbowDQN")
-        result = build_replay_buffer(spec, meta, "cpu")
+        from agilerl.models import RainbowDQNSpec
+
+        rainbow_spec = RainbowDQNSpec()
+        result = build_replay_buffer_from_spec(rainbow_spec, spec, "cpu")
         assert isinstance(result, MultiStepReplayBuffer)
         assert result.max_size == 10_000
 
 
-class TestGetTrainingFn:
-    def test_returns_callable(self):
-        meta = get_algo_meta("PPO")
-        fn = get_training_fn(meta)
-        assert callable(fn)
-        assert fn.__name__ == "train_on_policy"
-
-    def test_off_policy_fn(self):
-        meta = get_algo_meta("DQN")
-        fn = get_training_fn(meta)
-        assert fn.__name__ == "train_off_policy"
-
-    def test_multi_agent_fn(self):
-        meta = get_algo_meta("MADDPG")
-        fn = get_training_fn(meta)
-        assert fn.__name__ == "train_multi_agent_off_policy"
-
-
 class TestBuildTrainKwargs:
-    def test_on_policy_has_no_memory(self, env, training_spec):
-        meta = get_algo_meta("PPO")
+    def test_on_policy_has_no_memory(self, env, training_spec, ppo_spec):
         kwargs = build_train_kwargs(
-            algo_meta=meta,
-            algo_name="PPO",
+            algo_spec=ppo_spec,
             env=env,
             env_name="test",
             pop=[MagicMock()],
@@ -260,14 +198,12 @@ class TestBuildTrainKwargs:
         )
         assert "memory" not in kwargs
         assert kwargs["max_steps"] == 500
-        assert kwargs["wandb_kwargs"] is None
 
     def test_off_policy_has_memory_and_delay(self, env, training_spec):
-        meta = get_algo_meta("DQN")
+        dqn_spec = DQNSpec()
         buffer = ReplayBuffer(max_size=100, device="cpu")
         kwargs = build_train_kwargs(
-            algo_meta=meta,
-            algo_name="DQN",
+            algo_spec=dqn_spec,
             env=env,
             env_name="test",
             pop=[MagicMock()],
@@ -279,23 +215,6 @@ class TestBuildTrainKwargs:
         assert kwargs["memory"] is buffer
         assert "learning_delay" in kwargs
 
-    def test_bandit_has_memory_no_delay(self, env, training_spec):
-        meta = get_algo_meta("NeuralUCB")
-        buffer = ReplayBuffer(max_size=100, device="cpu")
-        kwargs = build_train_kwargs(
-            algo_meta=meta,
-            algo_name="NeuralUCB",
-            env=env,
-            env_name="test",
-            pop=[MagicMock()],
-            training=training_spec,
-            tournament=None,
-            mutations=None,
-            memory=buffer,
-        )
-        assert kwargs["memory"] is buffer
-        assert "learning_delay" not in kwargs
-
 
 # ---------------------------------------------------------------------------
 # LocalTrainer
@@ -305,8 +224,7 @@ class TestBuildTrainKwargs:
 class TestLocalTrainerConstruction:
     def test_string_algorithm(self, env):
         trainer = LocalTrainer(algorithm="PPO", environment=env)
-        assert trainer._algo_name == "PPO"
-        assert trainer._algo_meta.name == "PPO"
+        assert isinstance(trainer.algorithm, PPOSpec)
         assert trainer.training.max_steps == 1_000_000  # default
 
     def test_spec_algorithm(self, env, ppo_spec, training_spec):
@@ -315,19 +233,11 @@ class TestLocalTrainerConstruction:
             environment=env,
             training=training_spec,
         )
-        assert trainer._algo_name == "PPO"
+        assert trainer.algorithm is ppo_spec
         assert trainer.training.pop_size == 2
 
-    def test_pre_built_population(self, env, mock_population):
-        trainer = LocalTrainer(
-            algorithm="PPO",
-            environment=env,
-            population=mock_population,
-        )
-        assert trainer.population is mock_population
-
     def test_unknown_algorithm_raises(self, env):
-        with pytest.raises(ValueError, match="No registry entry"):
+        with pytest.raises((ValueError, KeyError)):
             LocalTrainer(algorithm="UnknownAlgo", environment=env)
 
     def test_default_training_spec(self, env):
@@ -345,122 +255,33 @@ class TestLocalTrainerConstruction:
             mutation=mutation_spec,
             tournament=tournament_spec,
             replay_buffer=buffer_spec,
-            verbose=False,
-            checkpoint=50,
-            checkpoint_path="/tmp/ckpt",
-            save_elite=True,
-            elite_path="/tmp/elite",
-            wb=True,
-            wandb_api_key="fake-key",
-            wandb_kwargs={"project": "test"},
-            swap_channels=True,
-            env_name="TestEnv",
             device="cpu",
         )
-        assert trainer.verbose is False
-        assert trainer.checkpoint == 50
-        assert trainer.swap_channels is True
-        assert trainer.env_name == "TestEnv"
-
-
-class TestLocalTrainerResolvePopulation:
-    def test_pre_built_population_returned(self, env, mock_population):
-        trainer = LocalTrainer(
-            algorithm="PPO", environment=env, population=mock_population
-        )
-        assert trainer._resolve_population() is mock_population
-
-    def test_instance_cloned(self, env):
-        from agilerl.algorithms.core import EvolvableAlgorithm
-
-        mock_algo = MagicMock(spec=EvolvableAlgorithm)
-        mock_algo.algo = "PPO"
-        clone_results = [MagicMock(), MagicMock()]
-        mock_algo.clone.side_effect = clone_results
-
-        trainer = LocalTrainer(
-            algorithm=mock_algo,
-            environment=env,
-            training=TrainingSpec(pop_size=2),
-        )
-        pop = trainer._resolve_population()
-        assert len(pop) == 2
-        assert mock_algo.clone.call_count == 2
-
-    @patch("agilerl.trainer.create_population_from_spec")
-    def test_spec_creates_population(self, mock_create, env, ppo_spec, training_spec):
-        mock_create.return_value = [MagicMock(), MagicMock()]
-        trainer = LocalTrainer(
-            algorithm=ppo_spec, environment=env, training=training_spec
-        )
-        pop = trainer._resolve_population()
-        mock_create.assert_called_once_with(2, ppo_spec, trainer.algo_meta, env, "cpu")
-        assert len(pop) == 2
-
-    @patch("agilerl.trainer.create_population_from_spec")
-    def test_string_creates_default_spec(self, mock_create, env, training_spec):
-        mock_create.return_value = [MagicMock(), MagicMock()]
-        trainer = LocalTrainer(algorithm="PPO", environment=env, training=training_spec)
-        pop = trainer._resolve_population()
-        # Should have been called with a default PPOSpec instance
-        call_args = mock_create.call_args
-        assert isinstance(call_args[0][0], PPOSpec)
-        assert len(pop) == 2
+        assert trainer.mutation is mutation_spec
+        assert trainer.tournament is tournament_spec
+        assert trainer.replay_buffer is buffer_spec
 
 
 class TestLocalTrainerTrain:
-    @patch("agilerl.trainer.get_training_fn")
-    @patch("agilerl.trainer.build_train_kwargs")
-    @patch("agilerl.trainer.build_replay_buffer")
-    @patch("agilerl.trainer.build_tournament")
-    @patch("agilerl.trainer.build_mutations")
+    @patch("agilerl.training.trainer.create_population_from_spec")
     def test_train_delegates_to_fn(
         self,
-        mock_build_mut,
-        mock_build_tourn,
-        mock_build_buf,
-        mock_build_kwargs,
-        mock_get_fn,
+        mock_create_pop,
         env,
-        mock_population,
     ):
-        mock_train_fn = MagicMock(return_value=(mock_population, [[1.0]]))
-        mock_get_fn.return_value = mock_train_fn
-        mock_build_kwargs.return_value = {"env": env, "pop": mock_population}
-        mock_build_mut.return_value = None
-        mock_build_tourn.return_value = None
-        mock_build_buf.return_value = None
+        mock_pop = [MagicMock()]
+        mock_create_pop.return_value = mock_pop
+        mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
 
         trainer = LocalTrainer(
             algorithm="PPO",
             environment=env,
-            population=mock_population,
         )
-        result = trainer.train()
+        with patch.object(PPOSpec, "get_training_fn", return_value=mock_train_fn):
+            result = trainer.train()
 
         mock_train_fn.assert_called_once()
-        assert result == (mock_population, [[1.0]])
-
-    @patch("agilerl.trainer.get_training_fn")
-    def test_train_with_mutation_and_tournament(
-        self, mock_get_fn, env, mock_population, mutation_spec, tournament_spec
-    ):
-        mock_train_fn = MagicMock(return_value=(mock_population, [[1.0]]))
-        mock_get_fn.return_value = mock_train_fn
-
-        trainer = LocalTrainer(
-            algorithm="PPO",
-            environment=env,
-            population=mock_population,
-            training=TrainingSpec(max_steps=100, pop_size=2, evo_steps=50),
-            mutation=mutation_spec,
-            tournament=tournament_spec,
-        )
-        result = trainer.train()
-        mock_train_fn.assert_called_once()
-        call_kwargs = mock_train_fn.call_args[1]
-        assert isinstance(call_kwargs.get("mutation"), Mutations)
-        assert isinstance(call_kwargs.get("tournament"), TournamentSelection)
+        assert result == (mock_pop, [[1.0]])
 
 
 # ---------------------------------------------------------------------------
@@ -470,21 +291,23 @@ class TestLocalTrainerTrain:
 
 class TestArenaTrainerConstruction:
     def test_string_algorithm_and_env(self, mock_client):
+        env_spec = EnvironmentSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm="PPO",
-            environment="CartPole-v1",
+            environment=env_spec,
             client=mock_client,
         )
-        assert trainer._algo_name == "PPO"
+        assert isinstance(trainer.algorithm, PPOSpec)
         assert trainer._client is mock_client
 
     def test_spec_algorithm(self, mock_client, ppo_spec):
+        env_spec = EnvironmentSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
-            environment="CartPole-v1",
+            environment=env_spec,
             client=mock_client,
         )
-        assert trainer._algo_name == "PPO"
+        assert trainer.algorithm is ppo_spec
 
     def test_env_spec(self, mock_client):
         env_spec = EnvironmentSpec(name="CartPole-v1", version="v1", num_envs=8)
@@ -496,15 +319,17 @@ class TestArenaTrainerConstruction:
         assert trainer.environment is env_spec
 
     def test_default_training_spec(self, mock_client):
+        env_spec = EnvironmentSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
-            algorithm="PPO", environment="CartPole-v1", client=mock_client
+            algorithm="PPO", environment=env_spec, client=mock_client
         )
         assert isinstance(trainer.training, TrainingSpec)
 
     def test_all_specs(self, mock_client, mutation_spec, tournament_spec, buffer_spec):
+        env_spec = EnvironmentSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm="DQN",
-            environment="CartPole-v1",
+            environment=env_spec,
             training=TrainingSpec(max_steps=200, pop_size=3),
             mutation=mutation_spec,
             tournament=tournament_spec,
@@ -520,15 +345,33 @@ class TestArenaTrainerConstruction:
     def test_auto_creates_client(self, mock_cls):
         """If no client is passed, ArenaTrainer creates one automatically."""
         mock_cls.return_value = MagicMock()
-        trainer = ArenaTrainer(algorithm="PPO", environment="CartPole-v1")
+        env_spec = EnvironmentSpec(name="CartPole-v1")
+        trainer = ArenaTrainer(algorithm="PPO", environment=env_spec)
         assert trainer._client is not None
 
 
 class TestArenaTrainerManifest:
-    def test_string_based_manifest(self, mock_client):
+    def test_minimal_manifest_from_string_algo_and_env(self, mock_client):
+        env_spec = EnvironmentSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm="PPO",
-            environment="CartPole-v1",
+            environment=env_spec,
+            client=mock_client,
+        )
+        manifest = trainer.to_manifest()
+        payload = manifest.to_payload()
+
+        assert isinstance(manifest, ArenaTrainingManifest)
+        assert manifest.network is None
+        assert payload["algorithm"]["name"] == "PPO"
+        assert payload["environment"]["name"] == "CartPole-v1"
+        assert "network" not in payload
+
+    def test_string_based_manifest(self, mock_client, ppo_spec):
+        env_spec = EnvironmentSpec(name="CartPole-v1")
+        trainer = ArenaTrainer(
+            algorithm=ppo_spec,
+            environment=env_spec,
             client=mock_client,
         )
         manifest = trainer.to_manifest()
@@ -540,9 +383,10 @@ class TestArenaTrainerManifest:
 
     def test_spec_based_manifest(self, mock_client, ppo_spec):
         training = TrainingSpec(max_steps=50_000, pop_size=8)
+        env_spec = EnvironmentSpec(name="MountainCar-v0")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
-            environment="MountainCar-v0",
+            environment=env_spec,
             training=training,
             client=mock_client,
         )
@@ -555,8 +399,14 @@ class TestArenaTrainerManifest:
 
     def test_env_spec_manifest(self, mock_client):
         env_spec = EnvironmentSpec(name="LunarLander-v3", version="v2", num_envs=4)
+        dqn_spec = DQNSpec(
+            net_config=NetworkSpec(
+                encoder_config=MlpSpec(hidden_size=[64]),
+                head_config=MlpSpec(hidden_size=[64]),
+            )
+        )
         trainer = ArenaTrainer(
-            algorithm="DQN",
+            algorithm=dqn_spec,
             environment=env_spec,
             client=mock_client,
         )
@@ -566,11 +416,12 @@ class TestArenaTrainerManifest:
         assert manifest.environment.num_envs == 4
 
     def test_manifest_includes_mutation_and_tournament(
-        self, mock_client, mutation_spec, tournament_spec
+        self, mock_client, mutation_spec, tournament_spec, ppo_spec
     ):
+        env_spec = EnvironmentSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
-            algorithm="PPO",
-            environment="CartPole-v1",
+            algorithm=ppo_spec,
+            environment=env_spec,
             mutation=mutation_spec,
             tournament=tournament_spec,
             client=mock_client,
@@ -580,9 +431,16 @@ class TestArenaTrainerManifest:
         assert manifest.tournament_selection is tournament_spec
 
     def test_manifest_includes_replay_buffer(self, mock_client, buffer_spec):
+        env_spec = EnvironmentSpec(name="CartPole-v1")
+        dqn_spec = DQNSpec(
+            net_config=NetworkSpec(
+                encoder_config=MlpSpec(hidden_size=[64]),
+                head_config=MlpSpec(hidden_size=[64]),
+            )
+        )
         trainer = ArenaTrainer(
-            algorithm="DQN",
-            environment="CartPole-v1",
+            algorithm=dqn_spec,
+            environment=env_spec,
             replay_buffer=buffer_spec,
             client=mock_client,
         )
@@ -590,20 +448,33 @@ class TestArenaTrainerManifest:
         assert manifest.replay_buffer is buffer_spec
 
     def test_manifest_network_from_algo_spec(self, mock_client, ppo_spec):
+        env_spec = EnvironmentSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
-            environment="CartPole-v1",
+            environment=env_spec,
             client=mock_client,
         )
         manifest = trainer.to_manifest()
         assert manifest.network is ppo_spec.net_config
 
+    def test_manifest_payload_uses_spec_serializers(self, mock_client, ppo_spec):
+        env_spec = EnvironmentSpec(name="CartPole-v1")
+        trainer = ArenaTrainer(
+            algorithm=ppo_spec,
+            environment=env_spec,
+            client=mock_client,
+        )
+        payload = trainer.to_manifest().to_payload()
+
+        assert payload["algorithm"]["name"] == "PPO"
+        assert payload["training"]["name"] == "train_on_policy"
+        assert payload["environment"]["name"] == "CartPole-v1"
+
     def test_invalid_env_type_raises(self, mock_client):
+        """Passing a non-spec environment to ArenaTrainer.to_manifest raises TypeError."""
         trainer = ArenaTrainer.__new__(ArenaTrainer)
-        trainer.algorithm = "PPO"
+        trainer.algorithm = PPOSpec()
         trainer.environment = 42  # not an EnvironmentSpec or str
-        trainer._algo_name = "PPO"
-        trainer._algo_meta = get_algo_meta("PPO")
         trainer.training = TrainingSpec()
         trainer.mutation = None
         trainer.tournament = None
@@ -615,10 +486,11 @@ class TestArenaTrainerManifest:
 
 
 class TestArenaTrainerTrain:
-    def test_train_submits_manifest(self, mock_client):
+    def test_train_submits_manifest(self, mock_client, ppo_spec):
+        env_spec = EnvironmentSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
-            algorithm="PPO",
-            environment="CartPole-v1",
+            algorithm=ppo_spec,
+            environment=env_spec,
             client=mock_client,
         )
         result = trainer.train()
@@ -628,10 +500,26 @@ class TestArenaTrainerTrain:
         assert isinstance(submitted_manifest, ArenaTrainingManifest)
         assert result["job_id"] == "test-123"
 
-    def test_train_with_stream(self, mock_client):
+    def test_train_submits_manifest_with_serializable_payload(
+        self, mock_client, ppo_spec
+    ):
+        env_spec = EnvironmentSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
-            algorithm="PPO",
-            environment="CartPole-v1",
+            algorithm=ppo_spec,
+            environment=env_spec,
+            client=mock_client,
+        )
+        trainer.train()
+        submitted_manifest = mock_client.submit_job.call_args[0][0]
+        payload = submitted_manifest.to_payload()
+        assert payload["algorithm"]["name"] == "PPO"
+        assert payload["training"]["name"] == "train_on_policy"
+
+    def test_train_with_stream(self, mock_client, ppo_spec):
+        env_spec = EnvironmentSpec(name="CartPole-v1")
+        trainer = ArenaTrainer(
+            algorithm=ppo_spec,
+            environment=env_spec,
             client=mock_client,
         )
         trainer.train(stream=True)
@@ -651,7 +539,7 @@ class TestSpecDefaults:
         assert spec.learn_step == 2048
         assert spec.num_envs == 1
         assert spec.gamma == 0.99
-        assert spec.net_config is not None
+        assert spec.net_config is None
 
     def test_dqn_defaults(self):
         spec = DQNSpec()
@@ -663,7 +551,7 @@ class TestSpecDefaults:
 
     def test_rl_algorithm_spec_default_net_config(self):
         spec = RLAlgorithmSpec()
-        assert spec.net_config is not None
+        assert spec.net_config is None
         assert spec.learn_step == 5
 
 
@@ -688,16 +576,12 @@ class TestAlgoRegistry:
     }
 
     def test_all_algorithms_registered(self):
-        assert self.EXPECTED_ALGOS.issubset(ALGO_REGISTRY.keys())
+        available = set(ALGO_REGISTRY.arena_algorithms()) | set(
+            ALGO_REGISTRY.local_algorithms()
+        )
+        assert self.EXPECTED_ALGOS.issubset(available)
 
-    def test_on_policy_algos_dont_require_buffer(self):
-        for name in ("PPO", "IPPO"):
-            assert ALGO_REGISTRY[name].requires_buffer is False
-
-    def test_off_policy_algos_require_buffer(self):
-        for name in ("DQN", "DDPG", "TD3", "RainbowDQN", "MADDPG", "MATD3"):
-            assert ALGO_REGISTRY[name].requires_buffer is True
-
-    def test_bandit_and_offline_require_buffer(self):
-        for name in ("NeuralUCB", "NeuralTS", "CQN"):
-            assert ALGO_REGISTRY[name].requires_buffer is True
+    def test_registry_entries_have_spec_cls(self):
+        for name in self.EXPECTED_ALGOS:
+            entry = ALGO_REGISTRY.get(name)
+            assert entry.spec_cls is not None

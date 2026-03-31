@@ -82,7 +82,7 @@ def test_initialize_bandit(observation_space, encoder_cls, accelerator_flag, req
     assert bandit.index == 0
     assert bandit.scores == []
     assert bandit.fitness == []
-    assert bandit.steps == [0]
+    assert bandit.steps == 0
     assert isinstance(bandit.actor.encoder, encoder_cls)
     expected_optimizer = AcceleratedOptimizer if accelerator else optim.Adam
     assert isinstance(bandit.optimizer.optimizer, expected_optimizer)
@@ -126,7 +126,7 @@ def test_initialize_bandit_with_actor_network(
     assert bandit.index == 0
     assert bandit.scores == []
     assert bandit.fitness == []
-    assert bandit.steps == [0]
+    assert bandit.steps == 0
     assert isinstance(bandit.optimizer.optimizer, optim.Adam)
     assert isinstance(bandit.criterion, nn.MSELoss)
     bandit.clean_up()
@@ -166,7 +166,7 @@ def test_initialize_bandit_with_evo_nets(vector_space, discrete_space):
     assert bandit.index == 0
     assert bandit.scores == []
     assert bandit.fitness == []
-    assert bandit.steps == [0]
+    assert bandit.steps == 0
     assert isinstance(bandit.optimizer.optimizer, optim.Adam)
     assert isinstance(bandit.criterion, nn.MSELoss)
     bandit.clean_up()

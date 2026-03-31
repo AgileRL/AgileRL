@@ -56,6 +56,16 @@ else:
     ]
 
 
+def configure_tf32_precision() -> None:
+    """Configure TF32 using a single, legacy-compatible API path.
+
+    Some runtimes import third-party code that still calls the legacy TF32 API.
+    To avoid mixed "new + legacy" TF32 state in one process (which can break
+    torch.compile/inductor), keep AgileRL on the legacy setter only.
+    """
+    torch.set_float32_matmul_precision("high")
+
+
 def check_supported_space(observation_space: GymSpaceType) -> None:
     """Check if the observation space is supported by AgileRL.
 

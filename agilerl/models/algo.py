@@ -172,6 +172,13 @@ class AlgorithmSpec(BaseModel):
         msg = "Algorithm specs must implement a build_algorithm method."
         raise NotImplementedError(msg)
 
+    def to_manifest(self) -> dict[str, Any]:
+        """Serialize this spec for Arena manifest payloads."""
+        return {
+            "name": self.name,
+            **self.model_dump(mode="json", exclude_none=True, exclude={"hp_config"}),
+        }
+
     @staticmethod
     def get_training_fn() -> Callable[..., Any]:
         """Return the training function for this algorithm.
@@ -185,6 +192,16 @@ class AlgorithmSpec(BaseModel):
         """
         msg = "Algorithm specs must implement get_training_fn."
         raise NotImplementedError(msg) from None
+
+    def resolve_training_fn(self) -> Callable[..., Any]:
+        """Return the training function, supporting legacy spec APIs."""
+        try:
+            return self.get_training_fn()
+        except NotImplementedError:
+            legacy = getattr(self, "get_training_loop", None)
+            if callable(legacy):
+                return legacy()
+            raise
 
 
 class RLAlgorithmSpec(AlgorithmSpec):
@@ -228,6 +245,17 @@ class RLAlgorithmSpec(AlgorithmSpec):
             **self.model_dump(),
         )
 
+    def to_manifest(self) -> dict[str, Any]:
+        """Serialize this RL spec for Arena manifest payloads."""
+        return {
+            "name": self.name,
+            **self.model_dump(
+                mode="json",
+                exclude_none=True,
+                exclude={"hp_config", "net_config"},
+            ),
+        }
+
 
 class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
     """Specification for multi-agent reinforcement learning algorithms.
@@ -269,6 +297,17 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
             device=device,
             **self.model_dump(),
         )
+
+    def to_manifest(self) -> dict[str, Any]:
+        """Serialize this multi-agent spec for Arena manifest payloads."""
+        return {
+            "name": self.name,
+            **self.model_dump(
+                mode="json",
+                exclude_none=True,
+                exclude={"hp_config", "net_config"},
+            ),
+        }
 
 
 class LoraConfigDict(TypedDict):

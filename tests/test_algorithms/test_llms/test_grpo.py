@@ -954,7 +954,7 @@ def test_init_grpo_with_accelerator(
     assert grpo.index == 0
     assert grpo.scores == []
     assert grpo.fitness == []
-    assert grpo.steps == [0]
+    assert grpo.steps == 0
     assert 3 > grpo.zero_stage >= 1
     assert isinstance(grpo.generation_config, GenerationConfig)
     assert isinstance(grpo.actor, DeepSpeedEngine)
@@ -1489,7 +1489,7 @@ def test_init_grpo_with_no_accelerator(
     assert grpo.index == 0
     assert grpo.scores == []
     assert grpo.fitness == []
-    assert grpo.steps == [0]
+    assert grpo.steps == 0
     assert grpo.pad_token_id == 999
     assert grpo.pad_token == "<pad>"
     assert isinstance(grpo.generation_config, GenerationConfig)

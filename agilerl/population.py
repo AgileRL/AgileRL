@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import io
-import re
-from collections import defaultdict
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 import numpy as np
@@ -16,6 +13,15 @@ from rich.text import Text
 
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.logger import Logger
+from agilerl.utils.population_utils import (
+    NestedMetricRow,
+    ScalarMetricRow,
+    build_metric_row,
+    fmt_value,
+    get_nested_mean,
+    get_values_for_key,
+    partition_nested_metric_keys,
+)
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
@@ -30,48 +36,9 @@ if TYPE_CHECKING:
 
 AgentT = TypeVar("AgentT", bound="AlgoType")
 
-
-class _Ansi(str, Enum):
-    """ANSI escape codes for terminal coloring."""
-
-    GREEN = "\033[92m"
-    RED = "\033[91m"
-    RESET = "\033[0m"
-
-    def __str__(self) -> str:
-        return self.value
-
-    def __format__(self, format_spec: str) -> str:
-        return self.value
-
-
-_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
-
-
-def get_nested_mean(metrics: list[dict[str, float]]) -> dict[str, float]:
-    """Transpose a list of dicts and compute the mean per key.
-
-    :param metrics: List of dictionaries containing metrics.
-    :type metrics: list[dict[str, float]]
-    :returns: Dictionary mapping each key to the mean across all dicts.
-    :rtype: dict[str, float]
-
-    Example::
-
-        >>> metrics = [{"a": 1.0, "b": 2.0}, {"a": 3.0, "b": 4.0}]
-        >>> get_nested_mean(metrics)
-        {"a": 2.0, "b": 3.0}
-    """
-    metrics_T: dict[str, list[float]] = defaultdict(list)
-    for indi_metrics in metrics:
-        for metric_name, metric_value in indi_metrics.items():
-            metrics_T[metric_name].append(metric_value)
-
-    # Compute the mean of each metric
-    return {
-        metric_name: float(np.nanmean(metric_values))
-        for metric_name, metric_values in metrics_T.items()
-    }
+ScalarRow = list[float | int]
+NestedRow = list[dict[str, float]]
+ScalarOrNestedRow = ScalarRow | NestedRow
 
 
 @dataclass(frozen=True)
@@ -82,17 +49,21 @@ class PopulationMetrics:
     population-level aggregates.
     """
 
-    fitnesses: list[float]
-    scores: list[float | dict[str, float]]
-    steps: list[int]
-    steps_per_second: list[float]
+    fitnesses: ScalarOrNestedRow
+    scores: ScalarOrNestedRow
+    steps: ScalarRow
+    steps_per_second: ScalarRow
     mutations: list[str]
-    indices: list[int]
+    indices: ScalarRow
     additional_metrics: list[dict[str, float]]
     hyperparameters: list[dict[str, float]]
     nonscalar_additional_metrics: list[dict[str, np.ndarray | None]] = field(
         default_factory=list
     )
+
+    @property
+    def pop_size(self) -> int:
+        return len(self.indices)
 
     @property
     def global_step(self) -> int:
@@ -103,11 +74,19 @@ class PopulationMetrics:
         return float(np.mean(self.steps_per_second))
 
     @property
-    def mean_fitness(self) -> float:
+    def mean_fitness(self) -> float | dict[str, float]:
+        if self.fitnesses and isinstance(self.fitnesses[0], dict):
+            return get_nested_mean(self.fitnesses)
         return float(np.mean(self.fitnesses))
 
     @property
-    def best_fitness(self) -> float:
+    def best_fitness(self) -> float | dict[str, float]:
+        if self.fitnesses and isinstance(self.fitnesses[0], dict):
+            fitnesses = self.fitnesses
+            return {
+                key: float(np.nanmax([fitness[key] for fitness in fitnesses]))
+                for key in fitnesses[0]
+            }
         return float(np.max(self.fitnesses))
 
     @property
@@ -131,11 +110,21 @@ class PopulationMetrics:
         :rtype: dict[str, float | int | str]
         """
         d: dict[str, float | int | str] = {
-            "eval/mean_fitness": self.mean_fitness,
-            "eval/best_fitness": self.best_fitness,
             "train/global_step": self.global_step,
             "train/steps_per_second": self.mean_fps,
         }
+
+        mean_fitness = self.mean_fitness
+        if isinstance(mean_fitness, dict):
+            best_fitness = self.best_fitness
+            for agent_id, value in mean_fitness.items():
+                d[f"eval/mean_fitness/{agent_id}"] = value
+            if isinstance(best_fitness, dict):
+                for agent_id, value in best_fitness.items():
+                    d[f"eval/best_fitness/{agent_id}"] = value
+        else:
+            d["eval/mean_fitness"] = mean_fitness
+            d["eval/best_fitness"] = self.best_fitness
 
         mean_score = self.mean_score
         if isinstance(mean_score, dict):
@@ -161,18 +150,7 @@ class PopulationMetrics:
         return d
 
 
-@dataclass(frozen=True)
-class MetricRow:
-    """Immutable row of metric data.
-
-    :param name: Metric name.
-    :param agent_values: List of metric values per agent.
-    :param pop_mean: Mean of the metric values for the population.
-    """
-
-    name: str
-    agent_values: list[float]
-    pop_mean: float
+MetricTableRow = ScalarMetricRow | NestedMetricRow
 
 
 class MetricsReport:
@@ -190,6 +168,11 @@ class MetricsReport:
 
     def __str__(self) -> str:
         return self.render()
+
+    @property
+    def show_mean_column(self) -> bool:
+        """Whether to display a population mean column."""
+        return self.metrics.pop_size > 1
 
     def to_dict(self) -> dict[str, float | int | str]:
         """Return a JSON-friendly dict for logging backends.
@@ -212,131 +195,143 @@ class MetricsReport:
                     d[f"train/agent_{idx}/{name}"] = val
         return d
 
-    def _eval_rows(self) -> list[MetricRow]:
+    def eval_rows(self) -> list[ScalarMetricRow | NestedMetricRow]:
+        """Return the evaluation metric rows.
+
+        :returns: List of evaluation metric rows.
+        :rtype: list[ScalarMetricRow | NestedMetricRow]
+        """
         return [
-            MetricRow(
+            build_metric_row(
                 name="eval/fitness",
-                agent_values=self.metrics.fitnesses,
-                pop_mean=self.metrics.mean_fitness,
+                values=self.metrics.fitnesses,
+                mean_value=self.metrics.mean_fitness,
             )
         ]
 
-    def _train_rows(self) -> list[MetricRow]:
-        rows: list[MetricRow] = []
+    def train_rows(self) -> list[ScalarMetricRow | NestedMetricRow]:
+        """Return the training metric rows.
+
+        :returns: List of training metric rows.
+        :rtype: list[ScalarMetricRow | NestedMetricRow]
+        """
+        rows = []
         self._add_score_rows(rows)
         self._add_additional_metric_rows(rows)
         return rows
 
-    def _add_score_rows(self, rows: list[MetricRow]) -> None:
+    def _add_score_rows(self, rows: list[ScalarMetricRow | NestedMetricRow]) -> None:
         """Add score rows to the report.
 
         :param rows: List of metric rows to add to.
-        :type rows: list[MetricRow]
+        :type rows: list[ScalarMetricRow | NestedMetricRow]
         """
-        agent_scores = self.metrics.scores
-        mean_score = self.metrics.mean_score
-        if agent_scores and isinstance(agent_scores[0], dict):
-            for key in agent_scores[0]:
-                agent_values = [score[key] for score in agent_scores]  # type: ignore[union-attr]
-                mean_val = (
-                    mean_score[key] if isinstance(mean_score, dict) else float("nan")
-                )
-                row = MetricRow(
-                    name=f"train/score/{key}",
-                    agent_values=agent_values,
-                    pop_mean=mean_val,
-                )
-                rows.append(row)
-        else:
-            mean_val = (
-                float(mean_score) if not isinstance(mean_score, dict) else float("nan")
-            )
-            row = MetricRow(
+        rows.append(
+            build_metric_row(
                 name="train/score",
-                agent_values=list(agent_scores),
-                pop_mean=mean_val,
+                values=self.metrics.scores,
+                mean_value=self.metrics.mean_score,
             )
-            rows.append(row)
+        )
 
-    def _add_additional_metric_rows(self, rows: list[MetricRow]) -> None:
+    def _add_additional_metric_rows(
+        self, rows: list[ScalarMetricRow | NestedMetricRow]
+    ) -> None:
         """Add additional metric rows to the report.
 
         :param rows: List of metric rows to add to.
-        :type rows: list[MetricRow]
+        :type rows: list[ScalarMetricRow | NestedMetricRow]
         """
         if not self.metrics.additional_metrics:
             return
 
+        metric_keys = self.metrics.additional_metric_names
         mean_metrics = self.metrics.mean_additional_metrics
-        for name in self.metrics.additional_metric_names:
-            agent_values = [
-                agent_metrics.get(name, float("nan"))
-                for agent_metrics in self.metrics.additional_metrics
-            ]
-            row = MetricRow(
+        scalar_metrics, nested_metrics = partition_nested_metric_keys(metric_keys)
+
+        # Add scalar metrics
+        rows.extend(
+            build_metric_row(
                 name=f"train/{name}",
-                agent_values=agent_values,
-                pop_mean=mean_metrics.get(name, float("nan")),
+                values=get_values_for_key(self.metrics.additional_metrics, name),
+                mean_value=mean_metrics.get(name, float("nan")),
             )
-            rows.append(row)
+            for name in scalar_metrics
+        )
 
-    @staticmethod
-    def _fmt(value: float) -> str:
-        if np.isnan(value):
-            return "-"
-        if isinstance(value, (int, np.integer)) or (
-            isinstance(value, float) and value.is_integer()
-        ):
-            return str(int(value))
-        if abs(value) >= 1e6:
-            return f"{value:.2e}"
-        if abs(value) < 5e-5:
-            return f"{value:.2e}"
-        return f"{value:.4f}"
+        # Transpose and add nested metrics (e.g. per-sub-agent metrics in multi-agent settings)
+        for metric_name, agent_ids in nested_metrics.items():
+            nested_values: list[dict[str, float]] = []
+            for agent_id in agent_ids:
+                key = f"{metric_name}/{agent_id}"
+                value_series = get_values_for_key(self.metrics.additional_metrics, key)
+                for idx, value in enumerate(value_series):
+                    if idx >= len(nested_values):
+                        nested_values.append({})
+                    nested_values[idx][agent_id] = value
 
-    @staticmethod
-    def _format_name(name: str) -> str:
-        """Format a metric name for display."""
-        return name.replace("eval/", "").replace("train/", "")
+            rows.append(
+                build_metric_row(
+                    name=f"train/{metric_name}",
+                    values=nested_values,
+                    mean_value={
+                        agent_id: mean_metrics.get(
+                            f"{metric_name}/{agent_id}", float("nan")
+                        )
+                        for agent_id in agent_ids
+                    },
+                )
+            )
 
-    @staticmethod
-    def _eval_cell_styles(
-        row: MetricRow, higher_is_better: bool = True
-    ) -> dict[int, str]:
-        """Return Rich styles for best/worst eval values by agent index."""
-        valid = [
-            (i, value)
-            for i, value in enumerate(row.agent_values)
-            if not np.isnan(value)
-        ]
-        if len(valid) < 2:
-            return {}
+    def _render_metric_row(
+        self, table: Table, row: ScalarMetricRow | NestedMetricRow
+    ) -> None:
+        """Render a metric row into a Rich table.
 
-        vals = [value for _, value in valid]
-        if min(vals) >= max(vals):
-            return {}
-
-        k = 1 if higher_is_better else -1
-        best_i = max(valid, key=lambda iv: iv[1] * k)[0]
-        worst_i = min(valid, key=lambda iv: iv[1] * k)[0]
-        return {best_i: "green", worst_i: "red"}
+        :param table: The table to add the row to.
+        :type table: Table
+        :param row: The metric row to render.
+        :type row: ScalarMetricRow | NestedMetricRow
+        """
+        # Display all children of nested row with special formatting
+        if isinstance(row, NestedMetricRow):
+            parent_cells: list[str] = [
+                row.fmt_name,
+                *([""] * len(self.metrics.indices)),
+            ]
+            if self.show_mean_column:
+                parent_cells.append("")
+            table.add_row(*parent_cells)
+            for child in row.children:
+                child_cells: list[Text | str] = [
+                    Text(f"  {child.name}", style="blue"),
+                    *[fmt_value(value) for value in child.agent_values],
+                ]
+                if self.show_mean_column:
+                    child_cells.append(fmt_value(child.pop_mean))
+                table.add_row(*child_cells)
+        else:
+            scalar_cells = [
+                row.fmt_name,
+                *[fmt_value(value) for value in row.agent_values],
+            ]
+            if self.show_mean_column:
+                scalar_cells.append(fmt_value(row.pop_mean))
+            table.add_row(*scalar_cells)
 
     def render(self) -> str:
-        """Render eval/train/hp/meta rows into a Rich-formatted table string.
+        """Render a `MetricsReport` snapshot of collected training metrics into a
+        Rich-formatted table string.
 
-        :param eval_rows: List of evaluation metric rows.
-        :type eval_rows: list[MetricRow] | None
-        :param train_rows: List of training metric rows.
-        :type train_rows: list[MetricRow] | None
-        :returns: The report rendered by Rich.
+        :returns: The report rendered by Rich as ANSI-styled text.
         :rtype: str
         """
-        eval_rows = self._eval_rows()
-        train_rows = self._train_rows()
+        eval_rows = self.eval_rows()
+        train_rows = self.train_rows()
 
         # Create a table for the report
         table = Table(
-            title=f"Global Steps {self.metrics.global_step}",
+            title=f"Global Steps {self.metrics.global_step:_}",
             title_style="bold",
             show_header=True,
             header_style="bold",
@@ -348,29 +343,19 @@ class MetricsReport:
         for idx in self.metrics.indices:
             table.add_column(f"Agent {idx}", justify="right")
 
-        table.add_column("Mean", justify="right")
+        if self.show_mean_column:
+            table.add_column("Mean", justify="right")
 
         # Evaluation metrics
         for row in eval_rows:
-            styles = self._eval_cell_styles(row, higher_is_better=True)
-            agent_cells: list[Text] = []
-            for i, value in enumerate(row.agent_values):
-                style = styles.get(i)
-                agent_cells.append(Text(MetricsReport._fmt(value), style=style))
-            table.add_row(
-                MetricsReport._format_name(row.name),
-                *agent_cells,
-                Text(MetricsReport._fmt(row.pop_mean)),
-            )
+            self._render_metric_row(table, row)
+
         table.add_section()
 
         # Training metrics
         for row in train_rows:
-            table.add_row(
-                MetricsReport._format_name(row.name),
-                *[MetricsReport._fmt(value) for value in row.agent_values],
-                MetricsReport._fmt(row.pop_mean),
-            )
+            self._render_metric_row(table, row)
+
         table.add_section()
 
         # RL hyperparameters
@@ -378,20 +363,35 @@ class MetricsReport:
             hp_names = list(self.metrics.hyperparameters[0].keys())
             for hp_name in hp_names:
                 hp_vals = [
-                    MetricsReport._fmt(agent_hps.get(hp_name, float("nan")))
+                    fmt_value(agent_hps.get(hp_name, float("nan")))
                     for agent_hps in self.metrics.hyperparameters
                 ]
-                table.add_row(hp_name, *hp_vals, "")
+                hp_cells = [hp_name, *hp_vals]
+
+                if self.show_mean_column:
+                    hp_cells.append("")
+
+                table.add_row(*hp_cells)
             table.add_section()
 
         # Metadata
-        table.add_row("steps", *[str(s) for s in self.metrics.steps], "")
-        table.add_row("mutations", *[str(m) for m in self.metrics.mutations], "")
-        table.add_row(
-            "steps/s",
-            *[MetricsReport._fmt(s) for s in self.metrics.steps_per_second],
-            MetricsReport._fmt(self.metrics.mean_fps),
-        )
+        steps_cells = ["steps", *[str(s) for s in self.metrics.steps]]
+        if self.show_mean_column:
+            steps_cells.append("")
+
+        table.add_row(*steps_cells)
+
+        mutation_cells = ["mutations", *[str(m) for m in self.metrics.mutations]]
+        if self.show_mean_column:
+            mutation_cells.append("")
+
+        table.add_row(*mutation_cells)
+
+        fps_cells = ["steps/s", *[fmt_value(s) for s in self.metrics.steps_per_second]]
+        if self.show_mean_column:
+            fps_cells.append(fmt_value(self.metrics.mean_fps))
+
+        table.add_row(*fps_cells)
 
         buf = io.StringIO()
         console = Console(file=buf, record=True, force_terminal=True, width=120)
@@ -407,46 +407,45 @@ class Population(Generic[AgentT]):
     and dispatches it to all configured loggers.
 
     :param agents: Initial population of RL agents.
-    :param min_evo_steps: Minimum evo steps before early stopping.
-    :param sum_scores: Whether multi-agent scores are summed across sub-agents.
+    :type agents: list[AgentT]
+    :param min_evo_steps: Minimum evolutionary steps before allowing early stopping.
+    :type min_evo_steps: int
     :param accelerator: HuggingFace Accelerator for distributed training.
-    :param wb: Enable Weights & Biases logging.
-    :param verbose: Print training banners to console.
-    :param pbar: ``tqdm`` progress bar for console output.
+    :type accelerator: Accelerator | None
+    :param loggers: List of loggers to use.
+    :type loggers: list[Logger] | None
     """
 
     def __init__(
         self,
         agents: list[AgentT],
-        *,
         min_evo_steps: int = 10,
         accelerator: Accelerator | None = None,
         loggers: list[Logger] | None = None,
     ) -> None:
+        if not agents:
+            msg = "Population requires at least one agent."
+            raise ValueError(msg)
+
         if not all(isinstance(agent, type(agents[0])) for agent in agents):
             names = ", ".join(type(a).__name__ for a in agents)
-            msg = f"All agents must be instances of the same algorithm. Found: {names}"
+            msg = f"All individuals in a population must be instances of the same algorithm. Found: {names}"
             raise ValueError(msg)
 
         self._agents = agents
+        self._sample_agent = agents[0]
         self.min_evo_steps = min_evo_steps
         self.accelerator = accelerator
         self.loggers = loggers or []
 
-        self.last_fitnesses: list[float] = []
-        self.evo_steps: int = 0
-        self.is_multi_agent: bool = all(
-            isinstance(a, MultiAgentRLAlgorithm) for a in agents
+        self.last_fitnesses: ScalarOrNestedRow = []
+        self.evo_steps = 0
+        self.is_multi_agent = all(
+            isinstance(agent, MultiAgentRLAlgorithm) for agent in agents
         )
-        self.additional_metric_names: list[str] = self._agents[
-            0
-        ].metrics.additional_metrics
-        self.nonscalar_metric_names: list[str] = self._agents[
-            0
-        ].metrics.nonscalar_metrics
-        self.agent_ids: list[str] | None = (
-            self._agents[0].metrics.agent_ids if self.is_multi_agent else None
-        )
+        self.additional_metric_names = self._sample_agent.metrics.additional_metrics
+        self.nonscalar_metric_names = self._sample_agent.metrics.nonscalar_metrics
+        self.agent_ids = self._sample_agent.agent_ids if self.is_multi_agent else None
 
     @property
     def agents(self) -> list[AgentT]:
@@ -512,9 +511,11 @@ class Population(Generic[AgentT]):
         for agent in self._agents:
             agent.metrics.clear()
 
-    def report_metrics(self) -> MetricsReport:
+    def report_metrics(self, clear_metrics: bool = True) -> MetricsReport:
         """Gather, format, and log population metrics.
 
+        :param clear_metrics: Whether to clear the metrics after reporting.
+        :type clear_metrics: bool
         :returns: The metrics report.
         :rtype: MetricsReport
         """
@@ -524,6 +525,9 @@ class Population(Generic[AgentT]):
         # Write report to all defined loggers
         for logger in self.loggers:
             logger.write(report)
+
+        if clear_metrics:
+            self.clear_agent_metrics()
 
         return report
 
@@ -538,31 +542,59 @@ class Population(Generic[AgentT]):
         :returns: The aggregated population metrics.
         :rtype: PopulationMetrics
         """
-        # Extract last reported fitness for each individual
-        fitnesses = [
-            float(agent.fitness[-1]) if agent.fitness else float("nan")
-            for agent in self.agents
-        ]
+        fitnesses = self._collect_fitnesses()
         self.last_fitnesses = fitnesses
 
         steps = [agent.metrics.steps for agent in self.agents]
         if self.accelerator is not None and self.accelerator.is_main_process:
             steps = [step * self.accelerator.state.num_processes for step in steps]
 
-        steps_per_second = [agent.metrics.steps_per_second for agent in self.agents]
-        mutations = [agent.mut for agent in self.agents]
-        indices = [agent.index for agent in self.agents]
         return PopulationMetrics(
             fitnesses=fitnesses,
             scores=self._collect_scores(),
             steps=steps,
-            steps_per_second=steps_per_second,
-            mutations=mutations,
-            indices=indices,
+            steps_per_second=[a.metrics.steps_per_second for a in self.agents],
+            mutations=[a.mut for a in self.agents],
+            indices=[a.index for a in self.agents],
             additional_metrics=self._collect_additional_metrics(),
             hyperparameters=self._collect_hyperparameters(),
             nonscalar_additional_metrics=self._collect_nonscalar_metrics(),
         )
+
+    def _collect_fitnesses(self) -> ScalarOrNestedRow:
+        """Collect the most recent fitness value from each agent.
+
+        :returns: Fitness values for each individual in population.
+        :rtype: ScalarOrNestedRow
+        """
+        fitnesses = []
+        for agent in self.agents:
+            if not agent.fitness:
+                fitnesses.append(float("nan"))
+                continue
+
+            latest_fitness = agent.fitness[-1]
+            if isinstance(latest_fitness, dict):  # multi-agent -> sum_scores=False
+                fitnesses.append(
+                    {
+                        agent_id: float(value)
+                        for agent_id, value in latest_fitness.items()
+                    }
+                )
+            elif isinstance(latest_fitness, (list, tuple, np.ndarray)):
+                if not self.agent_ids:
+                    msg = "Received nested fitness values without configured agent_ids."
+                    raise ValueError(msg)
+                fitnesses.append(
+                    {
+                        agent_id: float(latest_fitness[idx])
+                        for idx, agent_id in enumerate(self.agent_ids)
+                    }
+                )
+            else:
+                fitnesses.append(float(latest_fitness))
+
+        return fitnesses
 
     def _collect_hyperparameters(self) -> list[dict[str, float]]:
         """Collect the defined evolvable RL hyperparameters from all agents.
@@ -579,11 +611,12 @@ class Population(Generic[AgentT]):
                 )
         return hyperparameters
 
-    def _collect_scores(self) -> list[float | dict[str, float]]:
-        """Compute per-agent mean scores.
+    def _collect_scores(self) -> ScalarOrNestedRow:
+        """Collect per-agent mean scores across an evolution step.
 
-        :returns: List of mean scores for each agent or per-sub-agent scores for multi-agent systems.
-        :rtype: list[float | dict[str, float]]
+        :returns: Mean scores for each individual in population or
+            per-sub-agent scores for multi-agent systems.
+        :rtype: ScalarOrNestedRow
         """
         if not self.is_nested_scores():
             return [
@@ -594,7 +627,7 @@ class Population(Generic[AgentT]):
             ]
 
         # Multi-agent, non-summed: per-sub-agent mean scores
-        scores: list[dict[str, float]] = []
+        scores: NestedRow = []
         for agent in self.agents:
             if agent.metrics.scores:
                 mean_score_subagent = np.mean(np.array(agent.metrics.scores), axis=0)
@@ -610,18 +643,18 @@ class Population(Generic[AgentT]):
         return scores
 
     def _collect_additional_metrics(self) -> list[dict[str, float]]:
-        """Compute per-agent mean values for all registered additional metrics.
+        """Collect per-agent mean values for all registered additional metrics.
 
-        :returns: List of dictionaries containing per-agent mean values for all registered additional metrics.
+        :returns: Per-agent mean values for all registered additional metrics.
         :rtype: list[dict[str, float]]
         """
-        result: list[dict[str, float]] = []
+        result = []
         for agent in self.agents:
-            d: dict[str, float] = {}
+            d = {}
             for name in self.additional_metric_names:
                 if self.is_multi_agent:
                     for agent_id in self.agent_ids:
-                        d[f"{agent_id}/{name}"] = agent.metrics.get_mean(name, agent_id)
+                        d[f"{name}/{agent_id}"] = agent.metrics.get_mean(name, agent_id)
                 else:
                     d[name] = agent.metrics.get_mean(name)
             result.append(d)
@@ -639,7 +672,7 @@ class Population(Generic[AgentT]):
             for name in self.nonscalar_metric_names:
                 if self.is_multi_agent:
                     for agent_id in self.agent_ids:
-                        d[f"{agent_id}/{name}"] = agent.metrics.get_histogram(
+                        d[f"{name}/{agent_id}"] = agent.metrics.get_histogram(
                             name, agent_id
                         )
                 else:

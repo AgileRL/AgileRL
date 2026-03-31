@@ -222,12 +222,8 @@ def train_bandits(
                 next_context, reward = env.step(action)
 
                 # Save experience to replay buffer
-                transition = TensorDict(
-                    {
-                        "obs": context,
-                        "reward": reward,
-                    },
-                )
+                transition_dict = {"obs": context, "reward": reward}
+                transition = TensorDict(transition_dict)
                 transition = transition.unsqueeze(0)
                 transition.batch_size = [1]
                 memory.add(transition)
@@ -258,14 +254,13 @@ def train_bandits(
                 loop=eval_loop,
             )
 
-        population.report_metrics()
+        # Aggregate metrics from all agents and log -> clear metrics after reporting
+        population.report_metrics(clear_metrics=True)
 
         if population.should_stop(target):
             population.finish()
             pbar.close()
             return population.agents, population.last_fitnesses
-
-        population.clear_agent_metrics()
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:

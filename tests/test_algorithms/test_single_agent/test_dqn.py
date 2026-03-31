@@ -88,9 +88,8 @@ def test_initialize_dqn(
     assert dqn.index == 0
     assert dqn.scores == []
     assert dqn.fitness == []
-    assert dqn.steps == [0]
+    assert dqn.steps == 0
     assert dqn.double is False
-    # assert dqn.actor_network is None
     assert isinstance(dqn.actor.encoder, encoder_cls)
     assert isinstance(dqn.actor_target.encoder, encoder_cls)
     expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
@@ -139,7 +138,7 @@ def test_initialize_dqn_with_actor_network_make_evo(
     assert dqn.index == 0
     assert dqn.scores == []
     assert dqn.fitness == []
-    assert dqn.steps == [0]
+    assert dqn.steps == 0
     assert dqn.double is False
     assert isinstance(dqn.optimizer.optimizer, optim.Adam)
     assert isinstance(dqn.criterion, nn.MSELoss)
@@ -193,7 +192,7 @@ def test_initialize_dqn_with_actor_network_evo_net(
     assert dqn.index == 0
     assert dqn.scores == []
     assert dqn.fitness == []
-    assert dqn.steps == [0]
+    assert dqn.steps == 0
     assert dqn.double is False
     assert isinstance(dqn.optimizer.optimizer, optim.Adam)
     assert isinstance(dqn.criterion, nn.MSELoss)

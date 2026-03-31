@@ -27,6 +27,7 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
     concatenate_spaces,
+    configure_tf32_precision,
     format_shared_critic_encoder,
     get_deepest_head_config,
     key_in_nested_dict,
@@ -387,7 +388,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                 )
                 self.torch_compiler = "default"
 
-            torch.set_float32_matmul_precision("high")
+            configure_tf32_precision()
             self.recompile()
 
         self.criterion = nn.MSELoss()

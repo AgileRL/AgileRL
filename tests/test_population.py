@@ -22,11 +22,13 @@ from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.population import (
-    MetricRow,
     MetricsReport,
     Population,
     PopulationMetrics,
-    _Ansi,
+)
+from agilerl.utils.population_utils import (
+    ScalarMetricRow,
+    fmt_value,
     get_nested_mean,
 )
 
@@ -116,7 +118,7 @@ class TestPopulationMetrics:
         assert pop_metrics.global_step == 300
 
     def test_fps(self, pop_metrics):
-        assert pop_metrics.fps == pytest.approx(75.0)
+        assert pop_metrics.mean_fps == pytest.approx(75.0)
 
     def test_mean_and_best_fitness(self, pop_metrics):
         assert pop_metrics.mean_fitness == pytest.approx(2.0)
@@ -134,6 +136,29 @@ class TestPopulationMetrics:
         assert mean["a0"] == pytest.approx(2.0)
         assert mean["a1"] == pytest.approx(3.0)
 
+    def test_mean_additional_metrics_multi_agent_flattened_keys(self):
+        pm = _make_pop_metrics(
+            additional_metrics=[
+                {"loss/a0": 0.5, "loss/a1": 0.7},
+                {"loss/a0": 0.3, "loss/a1": 0.1},
+            ]
+        )
+        mean = pm.mean_additional_metrics
+        assert mean["loss/a0"] == pytest.approx(0.4)
+        assert mean["loss/a1"] == pytest.approx(0.4)
+
+    def test_dict_scores_mean(self):
+        pm = _make_pop_metrics(
+            scores=[
+                {"alice": 1.0, "bob": 2.0},
+                {"alice": 3.0, "bob": 4.0},
+            ],
+        )
+        mean = pm.mean_score
+        assert isinstance(mean, dict)
+        assert mean["alice"] == pytest.approx(2.0)
+        assert mean["bob"] == pytest.approx(3.0)
+
     def test_to_dict_keys(self, pop_metrics):
         d = pop_metrics.to_dict()
         assert "eval/mean_fitness" in d
@@ -148,79 +173,45 @@ class TestPopulationMetrics:
         assert "train/agent_1/lr" in d
 
 
+class TestFmtValue:
+    def test_nan(self):
+        assert fmt_value(float("nan")) == "-"
+
+    def test_integer(self):
+        assert fmt_value(5.0) == "5"
+
+    def test_large(self):
+        assert "e" in fmt_value(1_234_567.89)
+
+    def test_small(self):
+        assert "e" in fmt_value(1e-6)
+
+    def test_normal(self):
+        assert fmt_value(0.12345) == "0.1235"
+
+
 class TestMetricRow:
     def test_frozen(self):
-        row = MetricRow(name="x", agent_values=[1.0], pop_mean=1.0)
+        row = ScalarMetricRow(name="x", agent_values=[1.0], pop_mean=1.0)
         with pytest.raises(FrozenInstanceError):
             row.name = "y"
+
+    def test_fmt_name_eval(self):
+        row = ScalarMetricRow(name="eval/fitness", agent_values=[1.0], pop_mean=1.0)
+        assert row.fmt_name == "fitness"
+
+    def test_fmt_name_train(self):
+        row = ScalarMetricRow(name="train/score", agent_values=[1.0], pop_mean=1.0)
+        assert row.fmt_name == "score"
+
+    def test_fmt_name_noop(self):
+        row = ScalarMetricRow(name="other/metric", agent_values=[1.0], pop_mean=1.0)
+        assert row.fmt_name == "other/metric"
 
 
 class TestMetricsReport:
     def _make_report(self, **overrides) -> MetricsReport:
         return MetricsReport(_make_pop_metrics(**overrides))
-
-    # -- _fmt --
-
-    def test_fmt_nan(self):
-        assert MetricsReport._fmt(float("nan")) == "-"
-
-    def test_fmt_integer(self):
-        assert MetricsReport._fmt(5.0) == "5"
-
-    def test_fmt_large(self):
-        assert "e" in MetricsReport._fmt(1_234_567.89)
-
-    def test_fmt_small(self):
-        assert "e" in MetricsReport._fmt(1e-6)
-
-    def test_fmt_normal(self):
-        assert MetricsReport._fmt(0.12345) == "0.1235"
-
-    def test_shorten_name_eval(self):
-        assert MetricsReport._shorten_name("eval/fitness") == "fitness"
-
-    def test_shorten_name_train(self):
-        assert MetricsReport._shorten_name("train/score") == "score"
-
-    def test_shorten_name_noop(self):
-        assert MetricsReport._shorten_name("other/metric") == "other/metric"
-
-    def test_color_row_higher_is_better(self):
-        report = self._make_report()
-        row = MetricRow(name="eval/fitness", agent_values=[1.0, 3.0], pop_mean=2.0)
-        result = report._color_row(row, higher_is_better=True)
-        assert _Ansi.GREEN in result[2]
-        assert _Ansi.RED in result[1]
-
-    def test_color_row_lower_is_better(self):
-        report = self._make_report()
-        row = MetricRow(name="train/loss", agent_values=[1.0, 3.0], pop_mean=2.0)
-        result = report._color_row(row, higher_is_better=False)
-        assert _Ansi.GREEN in result[1]
-        assert _Ansi.RED in result[2]
-
-    def test_color_row_all_equal(self):
-        report = self._make_report()
-        row = MetricRow(name="x", agent_values=[2.0, 2.0], pop_mean=2.0)
-        result = report._color_row(row)
-        for cell in result[1:-1]:
-            assert _Ansi.GREEN not in cell
-            assert _Ansi.RED not in cell
-
-    def test_color_row_single_value(self):
-        report = self._make_report(
-            fitnesses=[1.0],
-            scores=[10.0],
-            steps=[100],
-            steps_per_second=[50.0],
-            mutations=["None"],
-            indices=[0],
-            additional_metrics=[{"loss": 0.5}],
-            hyperparameters=[{"lr": 0.001}],
-        )
-        row = MetricRow(name="x", agent_values=[5.0], pop_mean=5.0)
-        result = report._color_row(row)
-        assert _Ansi.GREEN not in result[1]
 
     # -- render / __str__ --
 
@@ -231,21 +222,42 @@ class TestMetricsReport:
         assert "Agent 0" in text
         assert "Agent 1" in text
 
+    def test_render_banner_formats_large_global_steps(self):
+        report = self._make_report(steps=[123_000, 4_567])
+        text = str(report)
+        assert "Global Steps 127_567" in text
+
     def test_report_str_delegates_to_render(self):
         report = self._make_report()
-        rendered = report.render(report._eval_rows(), report._train_rows())
+        rendered = report.render()
         assert str(report) == rendered
 
-    def test_render_rich_contains_banner_and_headers(self):
+    def test_render_contains_banner_and_headers(self):
         report = self._make_report()
-        rendered = report.render_rich()
+        rendered = report.render()
         assert "Global Steps 300" in rendered
         assert "Agent 0" in rendered
         assert "Agent 1" in rendered
+        assert "Mean" in rendered
 
-    def test_render_rich_contains_metadata_rows(self):
+    def test_render_single_agent_omits_mean_column(self):
+        report = self._make_report(
+            fitnesses=[1.0],
+            scores=[10.0],
+            steps=[100],
+            steps_per_second=[50.0],
+            mutations=["None"],
+            indices=[0],
+            additional_metrics=[{"loss": 0.5}],
+            hyperparameters=[{"lr": 0.001}],
+        )
+        rendered = report.render()
+        assert "Agent 0" in rendered
+        assert "Mean" not in rendered
+
+    def test_render_contains_metadata_rows(self):
         report = self._make_report()
-        rendered = report.render_rich()
+        rendered = report.render()
         assert "steps" in rendered
         assert "mutations" in rendered
         assert "steps/s" in rendered
@@ -285,6 +297,58 @@ class TestMetricsReport:
         result = report.to_nonscalar_dict()
         assert "train/agent_0/action_dist" in result
         assert "train/agent_1/action_dist" not in result
+
+    def test_render_multi_agent_additional_metrics_nested_rows(self):
+        report = self._make_report(
+            additional_metrics=[
+                {
+                    "loss/a0": 0.5,
+                    "loss/a1": 0.6,
+                    "entropy/a0": 0.2,
+                    "entropy/a1": 0.3,
+                },
+                {
+                    "loss/a0": 0.7,
+                    "loss/a1": 0.9,
+                    "entropy/a0": 0.4,
+                    "entropy/a1": 0.5,
+                },
+            ]
+        )
+        rendered = report.render()
+        assert "Sub-agent Additional Metrics" not in rendered
+        assert "loss/a0" not in rendered
+        assert "entropy/a0" not in rendered
+        assert "loss" in rendered
+        assert "entropy" in rendered
+        assert "a0" in rendered
+        assert "a1" in rendered
+
+    def test_render_multi_agent_scores_nested_rows(self):
+        report = self._make_report(
+            scores=[
+                {"a0": 10.0, "a1": 20.0},
+                {"a0": 30.0, "a1": 40.0},
+            ]
+        )
+        rendered = report.render()
+        assert "score/a0" not in rendered
+        assert "score/a1" not in rendered
+        assert "score" in rendered
+        assert "a0" in rendered
+        assert "a1" in rendered
+
+    def test_render_multi_agent_scores_nested_rows_from_dicts(self):
+        report = self._make_report(
+            scores=[
+                {"p0": 10.0, "p1": 20.0},
+                {"p0": 30.0, "p1": 40.0},
+            ],
+        )
+        rendered = report.render()
+        assert "score" in rendered
+        assert "p0" in rendered
+        assert "p1" in rendered
 
 
 class TestPopulation:
@@ -403,9 +467,9 @@ class TestPopulation:
 
         pop = Population(agents=agents)
         result = pop._collect_additional_metrics()
-        assert result[0]["a0/loss"] == pytest.approx(0.5)
-        assert result[0]["a1/loss"] == pytest.approx(0.7)
-        assert result[1]["a0/loss"] == pytest.approx(0.3)
+        assert result[0]["loss/a0"] == pytest.approx(0.5)
+        assert result[0]["loss/a1"] == pytest.approx(0.7)
+        assert result[1]["loss/a0"] == pytest.approx(0.3)
 
     def test_collect_nonscalar_metrics_single_agent(self, two_agents):
         for a in two_agents:
@@ -430,8 +494,8 @@ class TestPopulation:
 
         pop = Population(agents=agents)
         result = pop._collect_nonscalar_metrics()
-        np.testing.assert_array_equal(result[0]["a0/action_dist"], [10, 20])
-        assert result[0]["a1/action_dist"] is None
+        np.testing.assert_array_equal(result[0]["action_dist/a0"], [10, 20])
+        assert result[0]["action_dist/a1"] is None
 
     def test_nonscalar_in_report_metrics(self, two_agents):
         for a in two_agents:

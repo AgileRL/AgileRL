@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -42,6 +43,13 @@ class ReplayBufferSpec(BaseModel):
     n_step_buffer_args: NStepBufferArgs = Field(default_factory=NStepBufferArgs)
     combined_buffers: bool = False
 
+    def to_manifest(self) -> dict[str, Any]:
+        """Serialize this replay buffer spec for Arena manifest payloads."""
+        return {
+            "name": "ReplayBuffer",
+            **self.model_dump(mode="json", exclude_none=True),
+        }
+
 
 class TrainingSpec(BaseModel):
     """Training loop parameters section of an Arena training manifest.
@@ -66,3 +74,10 @@ class TrainingSpec(BaseModel):
     learning_delay: int = Field(default=0, ge=0)
 
     target_score: float | None = None
+
+    def to_manifest(self, *, name: str | None = None) -> dict[str, Any]:
+        """Serialize this training spec for Arena manifest payloads."""
+        payload: dict[str, Any] = self.model_dump(mode="json", exclude_none=True)
+        if name is not None:
+            payload["name"] = name
+        return payload

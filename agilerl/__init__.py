@@ -1,7 +1,16 @@
+import warnings
 from importlib.metadata import PackageNotFoundError, metadata, version
 
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
+
+# pygame currently imports deprecated pkg_resources -> suppress warning
+warnings.filterwarnings(
+    "ignore",
+    message="pkg_resources is deprecated as an API\\..*",
+    category=UserWarning,
+    module=r"pygame\.pkgdata",
+)
 
 
 def get_extra_dependencies(package: str, extra: str) -> list[str]:

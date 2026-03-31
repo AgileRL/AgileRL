@@ -199,11 +199,12 @@ class PzDummyVecEnv(PettingZooVecEnv):
         # Strip batch dimension and filter NaN (inactive) agents
         scalar_actions: dict[str, Any] = {}
         for agent_id, action in actions.items():
-            act = action[0]
+            act = np.asarray(action[0])
             if np.isnan(act).all():
                 continue
             if isinstance(self._single_action_spaces[agent_id], spaces.Discrete):
-                act = int(act)
+                act = int(act.flat[0])
+
             scalar_actions[agent_id] = act
 
         obs, reward, terminated, truncated, info = self._env.step(scalar_actions)

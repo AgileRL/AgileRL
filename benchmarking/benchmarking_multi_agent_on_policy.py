@@ -135,7 +135,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
             INIT_HP["ENV_NAME"],
             INIT_HP["ALGO"],
             agent_pop,
-            sum_scores=True,
+            sum_scores=False,
             INIT_HP=INIT_HP,
             MUT_P=MUTATION_PARAMS,
             swap_channels=INIT_HP["CHANNELS_LAST"],

@@ -69,23 +69,35 @@ class Logger(ABC):
 
 
 class StdOutLogger(Logger):
-    """Writes the tabular :class:`MetricsReport` to the console via a tqdm pbar.
+    """Writes the tabular :class:`MetricsReport` to the console via a tqdm progress bar
+    if provided, else just writes the report to the console.
 
     :param pbar: ``tqdm`` progress bar instance used for ``pbar.write()``.
+    :type pbar: tqdm | None
     """
 
-    def __init__(self, pbar: tqdm) -> None:
+    def __init__(self, pbar: tqdm | None = None) -> None:
         self._pbar = pbar
 
     def write(self, report: MetricsReport) -> None:
-        self._pbar.write(str(report))
+        """Write the metrics report to the console.
+
+        :param report: The metrics report to write.
+        :type report: MetricsReport
+        """
+        if self._pbar is not None:
+            self._pbar.write(str(report))
+        else:
+            print(report)
 
     def close(self) -> None:
         pass
 
 
 class WandbLogger(Logger):
-    """Logs a flat metrics dict to Weights & Biases.
+    """Logs a flat metrics dict to Weights & Biases. For this logger
+    to work, users should call wandb.init() before training. AgileRL
+    provides a helper function to do this: :func:`agilerl.utils.utils.init_wandb()`.
 
     Handles distributed-training synchronisation when an
     :class:`~accelerate.Accelerator` is provided.
@@ -97,11 +109,17 @@ class WandbLogger(Logger):
         self._accelerator = accelerator
 
     def write(self, report: MetricsReport) -> None:
+        """Write the metrics report to W&B.
+
+        :param report: The metrics report to write.
+        :type report: MetricsReport
+        """
         with Logger.on_main_process(self._accelerator) as is_main:
             if is_main:
                 wandb.log(report.to_dict())
 
     def close(self) -> None:
+        """Mark a run as finished on W&B, and finish uploading all data."""
         with Logger.on_main_process(self._accelerator) as is_main:
             if is_main:
                 wandb.finish()
@@ -109,9 +127,6 @@ class WandbLogger(Logger):
 
 class CSVLogger(Logger):
     """Appends one row per :meth:`write` call to a CSV file.
-
-    The header row is written lazily on the first :meth:`write` call so that
-    column names adapt to whatever metrics are registered.
 
     :param path: Filesystem path for the CSV file.
     :type path: str | Path
@@ -157,6 +172,9 @@ class TensorboardLogger(Logger):
     :param log_dir: Directory for TensorBoard event files, defaults to "tensorboard_logs"
     :type log_dir: str | Path, optional
     :param accelerator: HuggingFace Accelerator, or ``None``.
+    :type accelerator: Accelerator | None
+    :param experiment_name: Name of the experiment, defaults to None.
+    :type experiment_name: str | None
     """
 
     def __init__(
@@ -179,6 +197,11 @@ class TensorboardLogger(Logger):
         self._accelerator = accelerator
 
     def write(self, report: MetricsReport) -> None:
+        """Write the metrics report to TensorBoard.
+
+        :param report: The metrics report to write.
+        :type report: MetricsReport
+        """
         data = report.to_dict()
         global_step = int(data.get("train/global_step", 0))
 
@@ -194,6 +217,7 @@ class TensorboardLogger(Logger):
                 self._writer.flush()
 
     def close(self) -> None:
+        """Close the TensorBoard writer."""
         with Logger.on_main_process(self._accelerator) as is_main:
             if is_main:
                 self._writer.close()

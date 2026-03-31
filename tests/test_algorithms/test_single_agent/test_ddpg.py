@@ -126,7 +126,7 @@ def test_initialize_ddpg(observation_space, encoder_cls, accelerator_flag, reque
     assert ddpg.index == 0
     assert ddpg.scores == []
     assert ddpg.fitness == []
-    assert ddpg.steps == [0]
+    assert ddpg.steps == 0
     assert isinstance(ddpg.actor.encoder, encoder_cls)
     assert isinstance(ddpg.actor_target.encoder, encoder_cls)
     assert isinstance(ddpg.actor_optimizer.optimizer, expected_opt_cls)
@@ -187,7 +187,7 @@ def test_initialize_ddpg_with_actor_network(
     assert ddpg.index == 0
     assert ddpg.scores == []
     assert ddpg.fitness == []
-    assert ddpg.steps == [0]
+    assert ddpg.steps == 0
     assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
     assert isinstance(ddpg.criterion, nn.MSELoss)
@@ -221,7 +221,7 @@ def test_initialize_ddpg_with_actor_network_evo_net(vector_space):
     assert ddpg.index == 0
     assert ddpg.scores == []
     assert ddpg.fitness == []
-    assert ddpg.steps == [0]
+    assert ddpg.steps == 0
     assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
     assert isinstance(ddpg.criterion, nn.MSELoss)
@@ -291,7 +291,7 @@ def test_initialize_ddpg_with_actor_network_no_critic(
     assert ddpg.index == 0
     assert ddpg.scores == []
     assert ddpg.fitness == []
-    assert ddpg.steps == [0]
+    assert ddpg.steps == 0
     assert ddpg.actor != actor_network
     # assert ddpg.critic_network is None
     assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
@@ -521,7 +521,7 @@ def test_clone_returns_identical_agent(observation_space, request):
     ddpg = DDPG(observation_space, action_space)
     ddpg.fitness = [200, 200, 200]
     ddpg.scores = [94, 94, 94]
-    ddpg.steps = [2500]
+    ddpg.steps = 2500
     ddpg.tensor_attribute = torch.randn(1)
     clone_agent = ddpg.clone()
 

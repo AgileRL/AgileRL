@@ -25,6 +25,7 @@ def main() -> None:
 
     algorithm = PPOSpec(
         lr=0.0003,
+        learn_step=3000,
         net_config=NetworkSpec(
             latent_dim=128,
             encoder_config=MlpSpec(hidden_size=[128]),
@@ -35,8 +36,8 @@ def main() -> None:
     training = TrainingSpec(
         max_steps=2_000_000,
         pop_size=4,
-        evo_steps=10_000,
-        eval_loop=3,
+        evo_steps=12_000,
+        eval_loop=1,
         target_score=250,
     )
 

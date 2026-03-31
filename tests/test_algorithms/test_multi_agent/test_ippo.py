@@ -1303,7 +1303,7 @@ def test_initialize_ippo_with_net_config(
     assert ippo.batch_size == batch_size
     assert ippo.scores == []
     assert ippo.fitness == []
-    assert ippo.steps == [0]
+    assert ippo.steps == 0
     assert ippo.target_kl == 0.5
 
     expected_actor_cls = (
@@ -1408,7 +1408,7 @@ def test_initialize_ippo_with_mlp_networks(
     assert ippo.agent_ids == agent_ids
     assert ippo.scores == []
     assert ippo.fitness == []
-    assert ippo.steps == [0]
+    assert ippo.steps == 0
     if accelerator is None:
         assert all(
             isinstance(actor_optimizer, optim.Adam)
@@ -1541,7 +1541,7 @@ def test_initialize_ippo_with_cnn_networks(
     assert ippo.agent_ids == agent_ids
     assert ippo.scores == []
     assert ippo.fitness == []
-    assert ippo.steps == [0]
+    assert ippo.steps == 0
     if accelerator is None:
         assert all(
             isinstance(actor_optimizer, optim.Adam)
@@ -1674,7 +1674,7 @@ def test_initialize_ippo_with_evo_networks(
     assert ippo.agent_ids == agent_ids
     assert ippo.scores == []
     assert ippo.fitness == []
-    assert ippo.steps == [0]
+    assert ippo.steps == 0
     assert isinstance(ippo.criterion, nn.MSELoss)
     ippo.clean_up()
 

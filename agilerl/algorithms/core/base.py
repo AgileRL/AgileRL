@@ -78,6 +78,7 @@ from agilerl.utils.algo_utils import (
     check_supported_space,
     chkpt_attribute_to_device,
     clone_llm,
+    configure_tf32_precision,
     create_warmup_cosine_scheduler,
     filter_init_dict,
     get_input_size_from_space,
@@ -954,7 +955,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         if self.accelerator is not None and wrap:
             clone.wrap_models()
         elif self.torch_compiler:
-            torch.set_float32_matmul_precision("high")
+            configure_tf32_precision()
             clone.recompile()
 
         # Copy non-evolvable attributes back to clone
@@ -1093,7 +1094,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         if self.accelerator is not None:
             self.wrap_models()
         elif self.torch_compiler:
-            torch.set_float32_matmul_precision("high")
+            configure_tf32_precision()
             self.recompile()
 
     @classmethod
@@ -1264,7 +1265,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         if accelerator is not None:
             self.wrap_models()
         elif self.torch_compiler:
-            torch.set_float32_matmul_precision("high")
+            configure_tf32_precision()
             self.recompile()
 
         # Check for agent wrapper

@@ -419,14 +419,12 @@ def train_off_policy(
                 loop=eval_loop,
             )
 
-        population.report_metrics()
+        population.report_metrics(clear_metrics=True)
 
         if population.should_stop(target):
             population.finish()
             pbar.close()
             return population.agents, population.last_fitnesses
-
-        population.clear_agent_metrics()
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:

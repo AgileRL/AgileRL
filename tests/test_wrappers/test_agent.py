@@ -510,7 +510,7 @@ def test_rsnorm_clone_returns_identical_agent(vector_space):
     ddpg = ddpg_norm.agent
     ddpg.fitness = [200, 200, 200]
     ddpg.scores = [94, 94, 94]
-    ddpg.steps = [2500]
+    ddpg.steps = 2500
     ddpg.tensor_attribute = torch.randn(1)
     clone = ddpg_norm.clone()
     clone_agent = clone.agent
@@ -698,7 +698,7 @@ def test_rsnorm_save_load_checkpoint(tmp_path, vector_space):
     assert ddpg.index == 0
     assert ddpg.scores == []
     assert ddpg.fitness == []
-    assert ddpg.steps == [0]
+    assert ddpg.steps == 0
 
     loaded_agent = DDPG.load(checkpoint_path)
     ddpg = loaded_agent.agent
@@ -721,7 +721,7 @@ def test_rsnorm_save_load_checkpoint(tmp_path, vector_space):
     assert ddpg.index == 0
     assert ddpg.scores == []
     assert ddpg.fitness == []
-    assert ddpg.steps == [0]
+    assert ddpg.steps == 0
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])

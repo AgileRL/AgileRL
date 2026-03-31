@@ -215,9 +215,8 @@ def finetune_llm_reasoning(
             if accelerator is not None:
                 accelerator.wait_for_everyone()
 
-        # Report metrics and clear accumulators
-        population.report_metrics()
-        population.clear_agent_metrics()
+        # Report metrics and clear accumulators -> clear metrics after reporting
+        population.report_metrics(clear_metrics=True)
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -425,9 +424,8 @@ def finetune_llm_preference(
             if accelerator is not None:
                 accelerator.wait_for_everyone()
 
-        # Report metrics and clear accumulators
-        population.report_metrics()
-        population.clear_agent_metrics()
+        # Report metrics and clear accumulators -> clear metrics after reporting
+        population.report_metrics(clear_metrics=True)
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
