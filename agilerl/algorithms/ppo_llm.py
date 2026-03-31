@@ -29,6 +29,7 @@ from agilerl.utils.llm_utils import (
     move_params_to_gpu,
     pool_by_turns,
 )
+from agilerl.wrappers.token_observation import TokenObservationWrapper
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
@@ -578,21 +579,66 @@ class PPO(LLMAlgorithm):
 
     def test(
         self,
-        env: ReasoningGym,
+        env: ReasoningGym | TokenObservationWrapper,
         loop: int = 1,
     ) -> torch.Tensor:
-        """Return fitness (test) score tensor of llm on test sub-set."""
+        """Return fitness (test) score tensor of llm on test sub-set.
+
+        ``ReasoningGym`` (and compatible dataset envs): ``reset`` returns a batch
+        of prompt dicts; each ``step`` accepts completion id tensors and returns
+        the next batch plus rewards. ``loop`` iterations advance the test
+        dataloader that many times.
+
+        :class:`~agilerl.wrappers.token_observation.TokenObservationWrapper`:
+        ``reset`` returns ``(observation_dict, info)``; each ``step`` takes the
+        full completion tensor. ``loop`` is the number of **episodes**: each
+        episode calls ``reset`` once, then steps until ``terminated`` or
+        ``truncated``. The returned tensor concatenates per-turn rewards from
+        every episode.
+
+        Any other env must follow the ``ReasoningGym`` batching contract above.
+        """
         eval_context = getattr(env, "eval_mode", nullcontext)
         with eval_context(), torch.inference_mode():
-            prompts = env.reset()
-            rewards = []
-            for _ in range(loop):
-                completion_ids, _ = self.get_action(prompts, training=False)
-                next_prompts, reward = env.step(completion_ids)
-                prompts = next_prompts
-                rewards.append(reward)
-        reward_tensor = torch.cat(rewards)
-        mean_fit = torch.mean(reward_tensor).item()
+            if isinstance(env, ReasoningGym):
+                prompts = env.reset()
+                rewards = []
+                for _ in range(loop):
+                    completion_ids, _ = self.get_action(prompts, training=False)
+                    next_prompts, reward = env.step(completion_ids)
+                    prompts = next_prompts
+                    rewards.append(reward)
+                reward_tensor = torch.cat(rewards)
+            elif isinstance(env, TokenObservationWrapper):
+                all_rewards: list[torch.Tensor] = []
+                for _ in range(loop):
+                    prompt_dict, _info = env.reset()
+                    terminated, truncated = False, False
+
+                    while not terminated and not truncated:
+                        completion_ids, _ = self.get_action(
+                            [prompt_dict],
+                            training=False,
+                        )
+                        full = completion_ids[0]
+                        prompt_dict, reward, terminated, truncated, _step_info = env.step(
+                            full,
+                        )
+                        all_rewards.append(
+                            torch.tensor(
+                                [float(reward)],
+                                dtype=torch.float32,
+                                device=full.device,
+                            ),
+                        )
+                reward_tensor = torch.cat(all_rewards)
+            else:
+                msg = (
+                    "env must be a ReasoningGym (or subclass) or "
+                    f"TokenObservationWrapper; got {type(env).__name__}"
+                )
+                raise TypeError(msg)
+        mean_fit = torch.mean(reward_tensor.float()).item()
         self.fitness.append(mean_fit)
         return reward_tensor
 
