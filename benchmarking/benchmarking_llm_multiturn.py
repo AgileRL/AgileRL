@@ -144,6 +144,8 @@ def main(init_hp, mut_p):
         max_turns,
         tokenizer.pad_token_id,
         apply_chat_template=apply_chat_template,
+        max_model_len=None if USE_TINY_DEBUG_MODEL else MAX_CONTEXT_LENGTH,
+        max_output_tokens=None if USE_TINY_DEBUG_MODEL else MAX_OUTPUT_TOKENS,
     )
     accelerator = create_llm_accelerator() if not USE_TINY_DEBUG_MODEL else None
 
@@ -168,7 +170,7 @@ def main(init_hp, mut_p):
         tokenizer=tokenizer,
         max_turns=max_turns,
         init_hp=init_hp,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         evo_steps=None,
@@ -196,4 +198,5 @@ if __name__ == "__main__":
     with open(args.config) as file:
         config = yaml.safe_load(file)
     init_hp = config["INIT_HP"]
-    main(init_hp)
+    mut_p = config["MUTATION_PARAMS"]
+    main(init_hp, mut_p)

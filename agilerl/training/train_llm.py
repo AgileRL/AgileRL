@@ -15,7 +15,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import PopulationType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
-from agilerl.utils.llm_utils import ReasoningGym, max_prompt_tokens_for_sliding_window
+from agilerl.utils.llm_utils import ReasoningGym
 from agilerl.utils.utils import (
     aggregate_metrics_across_gpus,
     init_wandb,
@@ -806,17 +806,18 @@ def finetune_llm_multiturn(
 ) -> PopulationType:
     """Finetune a population of LLMPPO agents on a multi-turn GEM environment.
 
-    Collects token-level episodes (reset, repeated ``get_action`` / ``step``,
-    then ``get_episode_data``), then runs turn-level PPO updates. When ``env``
-    implements ``build_model_prompt_fields`` (e.g. ``TokenObservationWrapper``),
-    sliding-window prompt fields are merged before generation so long
-    trajectories stay within model context limits.
+    Collects token-level episodes (``reset`` returns ``(obs, info)``,
+    repeated ``get_action`` / ``step`` (full completion tensor), then
+    ``get_episode_data``), then runs turn-level PPO updates. For
+    ``TokenObservationWrapper`` with ``max_model_len`` set, sliding-window
+    prompt fields are included in each observation before generation.
 
     :param pop: Population of LLMPPO agents to finetune.
     :type pop: PopulationType
     :param env: Multi-turn environment (often a ``TokenObservationWrapper``).
     :type env: GemEnv
-    :param tokenizer: Tokenizer used for decode/encode in the training loop.
+    :param tokenizer: Tokenizer passed to ``agent.learn``; for ``TokenObservationWrapper``
+        it must be the same object as ``env.tokenizer``.
     :type tokenizer: Any
     :param max_turns: Maximum interaction turns per episode.
     :type max_turns: int
@@ -944,34 +945,18 @@ def finetune_llm_multiturn(
             batch_steps = 0
 
             for _ in range(batch_size):
-                prompt_dict = env.reset()
-                max_prompt_toks = max_prompt_tokens_for_sliding_window(
-                    agent.max_model_len,
-                    agent.max_output_tokens,
-                )
-
-                for _turn_idx in range(max_turns):
-                    prompt_len = prompt_dict["input_ids"].shape[1]
-                    if "text" not in prompt_dict:
-                        prompt_dict["text"] = tokenizer.decode(
-                            prompt_dict["input_ids"][0].tolist(),
-                            skip_special_tokens=True,
-                        )
-                    if hasattr(env, "build_model_prompt_fields"):
-                        prompt_dict.update(
-                            env.build_model_prompt_fields(max_prompt_toks),
-                        )
-
-                    completion_ids, _ = agent.get_action([prompt_dict], training=True)
-                    full_ids = completion_ids[0]
-                    gen_tokens = full_ids[0, prompt_len:] 
-                    gen_text = tokenizer.decode(
-                        gen_tokens.tolist(),
-                        skip_special_tokens=True,
+                prompt_dict, _info = env.reset()
+                sw_ml = getattr(env, "_sw_max_model_len", None)
+                if sw_ml is not None:
+                    assert sw_ml == agent.max_model_len, (
+                        f"env max_model_len ({sw_ml}) != agent.max_model_len "
+                        f"({agent.max_model_len})"
                     )
 
+                for _turn_idx in range(max_turns):
+                    completion_ids, _ = agent.get_action([prompt_dict], training=True)
                     prompt_dict, _reward, terminated, truncated, _info = env.step(
-                        full_ids, gen_text
+                        completion_ids[0],
                     )
 
                     if terminated or truncated:

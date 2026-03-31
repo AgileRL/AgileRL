@@ -1,13 +1,16 @@
 """Token-level observation wrapper for multi-turn GEM environments."""
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any
+
 import os
 import re
-from typing import Tuple
+from typing import TYPE_CHECKING, Any
+
 import requests
-from gem.tools.base_tool import BaseTool
 import torch
+from gem.tools.base_tool import BaseTool
+
+from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
 
 if TYPE_CHECKING:
     from gem.core import Env as GemEnv
@@ -40,6 +43,12 @@ class TokenObservationWrapper:
     :param apply_chat_template: Whether to format observations using the
         tokenizer's chat template. Defaults to ``True``.
     :type apply_chat_template: bool
+    :param max_model_len: Context length for sliding-window prompts; if ``None``,
+        observations skip merging :meth:`build_model_prompt_fields`.
+    :type max_model_len: int | None
+    :param max_output_tokens: Max new tokens cap (same meaning as the policy);
+        only used when ``max_model_len`` is set.
+    :type max_output_tokens: int | None
     """
 
     def __init__(
@@ -49,12 +58,16 @@ class TokenObservationWrapper:
         max_turns: int,
         pad_id: int | None = None,
         apply_chat_template: bool = True,
+        max_model_len: int | None = None,
+        max_output_tokens: int | None = None,
     ) -> None:
         self._env = env
         self.tokenizer = tokenizer
         self.max_turns = max_turns
         self.pad_id = pad_id
         self.apply_chat_template = apply_chat_template
+        self._sw_max_model_len = max_model_len
+        self._sw_max_output_tokens = max_output_tokens
         self.full_ids: torch.Tensor | None = None
         self.turn_boundaries: list[tuple[int, int, int]] = []
         self.turn_rewards: list[float] = []
@@ -62,6 +75,7 @@ class TokenObservationWrapper:
         self._prompt_text: str = ""
         self._gen_texts: list[str] = []
         self._feedback_texts: list[str] = []
+        self._last_full_prompt_token_len: int | None = None
 
     @staticmethod
     def _format_obs(obs: str, info: dict[str, Any] | None) -> str:
@@ -121,14 +135,41 @@ class TokenObservationWrapper:
             dtype=torch.long,
         )
 
-    def reset(self) -> dict[str, torch.Tensor]:
-        """Create a fresh environment and return the tokenized initial prompt.
+    def _policy_observation_from_state(self) -> dict[str, Any]:
+        """Build observation dict for ``get_action`` from current ``full_ids``."""
+        if self.full_ids is None:
+            msg = "No prompt: reset() was never called"
+            raise RuntimeError(
+                msg,
+            )
+        self._last_full_prompt_token_len = int(self.full_ids.shape[1])
+        prompt_ids_1d = self.full_ids[0]
+        obs: dict[str, Any] = {
+            "input_ids": self.full_ids,
+            "attention_mask": torch.ones_like(self.full_ids),
+            "text": self.tokenizer.decode(
+                prompt_ids_1d.tolist(),
+                skip_special_tokens=True,
+            ),
+        }
+        if self._sw_max_model_len is not None:
+            max_pt = max_prompt_tokens_for_sliding_window(
+                self._sw_max_model_len,
+                self._sw_max_output_tokens,
+            )
+            obs.update(self.build_model_prompt_fields(max_pt))
+        return obs
 
-        Sets ``_initial_prompt_len`` to the length of this prompt; it is used by
-        :meth:`build_model_prompt_fields` for sliding-window truncation.
+    def reset(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Create a fresh episode and return the policy-ready observation plus info.
 
-        :return: Prompt dict with ``input_ids`` and ``attention_mask``.
-        :rtype: dict[str, torch.Tensor]
+        The observation includes ``input_ids``, ``attention_mask``, ``text``, and
+        when ``max_model_len`` was set at construction, sliding-window fields from
+        :meth:`build_model_prompt_fields`. Sets ``_initial_prompt_len`` and
+        ``_last_full_prompt_token_len`` for :meth:`step`.
+
+        :return: ``(observation, info)`` with ``info`` from the underlying GEM env.
+        :rtype: tuple[dict[str, Any], dict[str, Any]]
         """
         obs_text, info = self._env.reset()
         obs_text = self._format_obs(obs_text, info)
@@ -143,16 +184,13 @@ class TokenObservationWrapper:
         self._gen_texts = []
         self._feedback_texts = []
 
-        return {
-            "input_ids": encoded["input_ids"],
-            "attention_mask": encoded["attention_mask"],
-        }
+        return self._policy_observation_from_state(), info
 
-    def step(
+    def _step(
         self,
         full_completion_ids: torch.Tensor,
         gen_text: str,
-    ) -> tuple[dict[str, torch.Tensor], float, bool, bool, dict[str, Any]]:
+    ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """Record a generation and step the underlying environment.
 
         :param full_completion_ids: Full token IDs (prompt + gen) of shape
@@ -160,8 +198,10 @@ class TokenObservationWrapper:
         :type full_completion_ids: torch.Tensor
         :param gen_text: Decoded generation text sent to the environment.
         :type gen_text: str
-        :return: ``(prompt_dict, reward, terminated, truncated, info)``
-        :rtype: tuple[dict[str, torch.Tensor], float, bool, bool, dict[str, Any]]
+        :return: ``(next_observation, reward, terminated, truncated, info)``.
+            ``next_observation`` is empty when the episode ended; otherwise it is
+            the policy-ready dict from :meth:`_policy_observation_from_state`.
+        :rtype: tuple[dict[str, Any], float, bool, bool, dict[str, Any]]
         """
         prompt_len = self.full_ids.shape[1]
         self.full_ids = full_completion_ids.to(self.full_ids.device)
@@ -173,7 +213,7 @@ class TokenObservationWrapper:
         self.turn_rewards.append(float(reward))
         self._turn_idx += 1
 
-        prompt_dict: dict[str, torch.Tensor] = {}
+        prompt_dict: dict[str, Any] = {}
         if not (terminated or truncated):
             feedback_text = self._format_obs(next_obs, info)
             self._feedback_texts.append(feedback_text)
@@ -181,17 +221,39 @@ class TokenObservationWrapper:
                 self.full_ids.device
             )
             self.full_ids = torch.cat([self.full_ids, feedback_ids], dim=1)
-
-            prompt_ids_1d = self.full_ids[0]
-            prompt_dict = {
-                "input_ids": self.full_ids,
-                "attention_mask": torch.ones_like(self.full_ids),
-                "text": self.tokenizer.decode(
-                    prompt_ids_1d.tolist(), skip_special_tokens=True
-                ),
-            }
+            prompt_dict = self._policy_observation_from_state()
 
         return prompt_dict, reward, terminated, truncated, info
+
+    def step(
+        self,
+        full_completion_ids: torch.Tensor,
+    ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
+        """Decode the generation from ``full_completion_ids`` and call :meth:`step`.
+
+        Uses ``_last_full_prompt_token_len`` from the latest observation built by
+        :meth:`reset` or :meth:`step`.
+
+        :param full_completion_ids: Prompt + generated tokens, shape ``[1, seq]``.
+        :type full_completion_ids: torch.Tensor
+        :return: Same tuple as :meth:`_step`.
+        :rtype: tuple[dict[str, Any], float, bool, bool, dict[str, Any]]
+        """
+        if self._last_full_prompt_token_len is None:
+            msg = (
+                "step() requires a prior reset() or step() "
+                "that built a policy observation"
+            )
+            raise RuntimeError(
+                msg,
+            )
+        pl = self._last_full_prompt_token_len
+        gen_tokens = full_completion_ids[0, pl:]
+        gen_text = self.tokenizer.decode(
+            gen_tokens.tolist(),
+            skip_special_tokens=True,
+        )
+        return self._step(full_completion_ids, gen_text)
 
     def build_model_prompt_fields(
         self,
@@ -373,7 +435,6 @@ class TokenObservationWrapper:
         }
 
 
-
 # Adapted from https://github.com/PeterGriffinJin/Search-R1
 
 # Timeout for search request in seconds
@@ -390,9 +451,8 @@ class SearchTool(BaseTool):
         self.timeout = timeout
         self._search_url_resolved = self.search_url is not None
 
-    def _parse_action(self, action: str) -> Tuple[str, str, bool]:
-        """
-        Parse the action string to extract the <search> content and the full matched tag.
+    def _parse_action(self, action: str) -> tuple[str, str, bool]:
+        """Parse the action string to extract the <search> content and the full matched tag.
         Returns (content, parsed_action, is_valid)
         """
         # only take the first match
@@ -402,12 +462,10 @@ class SearchTool(BaseTool):
             parsed_query = match.group(1).strip()
             parsed_action = action[: match.end()]  # including thinking process
             return parsed_query, parsed_action, True
-        else:
-            return "", "", False
+        return "", "", False
 
     def _search(self, query: str):
-        """
-        Perform a search using the configured search_url.
+        """Perform a search using the configured search_url.
         Returns a formatted string of search results.
         """
         if not self._search_url_resolved:
@@ -415,17 +473,18 @@ class SearchTool(BaseTool):
             self._search_url_resolved = True
 
         if not self.search_url:
-            raise ValueError("search_url must be provided for SearchTool.")
+            msg = "search_url must be provided for SearchTool."
+            raise ValueError(msg)
 
         payload = {"q": query, "format": "json"}
-        
+
         try:
             response = requests.get(
                 self.search_url,
                 params=payload,
                 timeout=self.timeout,
             ).json()
-            result = response["results"][:self.topk]
+            result = response["results"][: self.topk]
             response_string = ""
             for r in result:
                 response_string += f"  {r.get('content', '')}\n"
@@ -439,7 +498,7 @@ class SearchTool(BaseTool):
             content = doc_item["document"]["contents"]
             title = content.split("\n")[0]
             text = "\n".join(content.split("\n")[1:])
-            format_reference += f"Doc {idx+1}(Title: {title}) {text}\n"
+            format_reference += f"Doc {idx + 1}(Title: {title}) {text}\n"
         return format_reference
 
     def instruction_string(self) -> str:
@@ -457,8 +516,7 @@ class SearchTool(BaseTool):
         )
 
     def execute_action(self, action: str):
-        """
-        Execute the parsed action for the SearchTool.
+        """Execute the parsed action for the SearchTool.
 
         Args:
             action: The raw action string, typically containing a search query

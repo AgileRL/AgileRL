@@ -35,7 +35,9 @@ def test_sliding_window_reconstructs_full_sequence() -> None:
     w.tokenizer = _StubTokenizer()
     w._initial_prompt_len = 2
     # [init0,init1 | gen0a,gen0b | fb0a,fb0b | gen1a,gen1b | tail0,tail1]
-    w.full_ids = torch.tensor([[0, 1, 10, 11, 20, 21, 40, 41, 50, 51]], dtype=torch.long)
+    w.full_ids = torch.tensor(
+        [[0, 1, 10, 11, 20, 21, 40, 41, 50, 51]], dtype=torch.long
+    )
     w.turn_boundaries = [
         (2, 4, 0),
         (6, 8, 1),
@@ -64,3 +66,80 @@ def test_middle_stitch_tensor_layout_matches_vllm_colocate() -> None:
     merged = torch.cat([block[:, :il], stitch, block[:, il:]], dim=1)
     expected = torch.tensor([[0, 1, 30, 31, 10, 11, 100, 101]], dtype=torch.long)
     assert torch.equal(merged, expected)
+
+
+class _ChrTokenizer:
+    pad_token_id = 0
+    pad_token = "<pad>"
+
+    def __call__(self, texts, **kwargs):
+        ids = [[ord(c) for c in texts[0]]]
+        t = torch.tensor(ids, dtype=torch.long)
+        return {"input_ids": t, "attention_mask": torch.ones_like(t)}
+
+    def encode(self, s: str) -> list[int]:
+        return [ord(c) for c in s]
+
+    def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
+        return "".join(chr(int(x)) for x in ids)
+
+
+class _RecordingGemEnv:
+    def __init__(self) -> None:
+        self.last_gen: str | None = None
+
+    def reset(self):
+        return "hello", {}
+
+    def step(self, gen_text: str):
+        self.last_gen = gen_text
+        return "", 1.0, True, False, {}
+
+
+def test_reset_returns_tuple_with_text_and_sets_prompt_len() -> None:
+    inner = _RecordingGemEnv()
+    w = TokenObservationWrapper(
+        inner,
+        _ChrTokenizer(),
+        max_turns=3,
+        pad_id=None,
+        apply_chat_template=False,
+    )
+    obs, info = w.reset()
+    assert isinstance(info, dict)
+    assert set(obs.keys()) >= {"input_ids", "attention_mask", "text"}
+    assert obs["text"] == "hello"
+    assert w._last_full_prompt_token_len == obs["input_ids"].shape[1]
+
+
+def test_step_from_full_completion_slices_generation() -> None:
+    inner = _RecordingGemEnv()
+    w = TokenObservationWrapper(
+        inner,
+        _ChrTokenizer(),
+        max_turns=3,
+        pad_id=None,
+        apply_chat_template=False,
+    )
+    obs, _ = w.reset()
+    pl = obs["input_ids"].shape[1]
+    gen_ids = torch.tensor([[ord("x"), ord("y")]], dtype=torch.long)
+    full = torch.cat([obs["input_ids"], gen_ids], dim=1)
+    _pd, _r, term, _trunc, _i = w.step(full)
+    assert inner.last_gen == "xy"
+    assert term is True
+    assert _pd == {}
+
+
+def test_policy_observation_merges_sliding_window_when_max_model_len_set() -> None:
+    w = _bare_wrapper()
+    w.tokenizer = _StubTokenizer()
+    w._sw_max_model_len = 100
+    w._sw_max_output_tokens = 10
+    w._initial_prompt_len = 2
+    w.full_ids = torch.tensor([[0, 1, 2, 3]], dtype=torch.long)
+    w.turn_boundaries = []
+    obs = w._policy_observation_from_state()
+    assert "model_input_ids" in obs
+    assert "model_text" in obs
+    assert obs["input_ids"].shape[1] == 4

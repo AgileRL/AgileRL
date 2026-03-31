@@ -4,10 +4,9 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate import Accelerator
-from contextlib import nullcontext
+
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
-
 from agilerl.algorithms.core.fused_lora import clear_fused_adapter_routing
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import (
@@ -293,6 +292,8 @@ class PPO(LLMAlgorithm):
         :return: Lists of completion tensors and per-token action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
+        prompt_batch = [obs] if isinstance(obs, dict) else list(obs)
+
         with self.select_adapter("actor"):
             self.actor.eval()
             if not self.use_vllm:
@@ -304,7 +305,18 @@ class PPO(LLMAlgorithm):
                 with torch.inference_mode(), self._amp_ctx():
                     completion_ids = []
                     action_masks = []
-                    for prompt in obs:
+                    for raw in prompt_batch:
+                        if not isinstance(raw, dict):
+                            msg = (
+                                "Each HuggingFace observation must be a dict with "
+                                "input_ids and attention_mask; got "
+                                f"{type(raw).__name__}. For string-observation GEM "
+                                "envs, wrap the env with TokenObservationWrapper."
+                            )
+                            raise TypeError(
+                                msg,
+                            )
+                        prompt = dict(raw)
                         prompt.pop("text", None)
                         prompt.pop("model_text", None)
                         stitch = prompt.pop("stitch_prefix_ids", None)
@@ -325,9 +337,7 @@ class PPO(LLMAlgorithm):
                                 )
                         else:
                             prompt["input_ids"] = prompt["input_ids"].to(actor_device)
-                            prompt["attention_mask"] = prompt[
-                                "attention_mask"
-                            ].to(
+                            prompt["attention_mask"] = prompt["attention_mask"].to(
                                 actor_device,
                             )
                         model_in_len = prompt["input_ids"].shape[1]
@@ -366,9 +376,11 @@ class PPO(LLMAlgorithm):
                         action_masks.append(action_mask)
             else:
                 completion_ids, action_masks = self._generate_with_vllm_colocate(
-                    obs,
-                    len(obs),
-                    temperature=self.temperature if training else 0.01 # Almost deterministic for evaluation
+                    prompt_batch,
+                    len(prompt_batch),
+                    temperature=self.temperature
+                    if training
+                    else 0.01,  # Almost deterministic for evaluation
                 )
 
         return completion_ids, action_masks

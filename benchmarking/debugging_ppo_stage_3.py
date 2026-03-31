@@ -34,6 +34,7 @@ from agilerl.training import train_llm
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.probe_envs_llm import GridNavigationEnv
+from agilerl.wrappers.token_observation import TokenObservationWrapper
 from benchmarking.tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 MAX_CONTEXT_LENGTH = 128
@@ -299,12 +300,20 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
     evaluation_interval = init_hp.get("EVALUATION_INTERVAL", 50)
     # Legacy loop counted total environment samples; finetune_llm_multiturn's
     # max_steps is the number of PPO updates (one batch per update).
-    max_train_steps = (max_samples + batch_size - 1) // batch_size
+    max_train_steps = max_samples + batch_size - 1  # // batch_size
 
-    env_fn = lambda: GridNavigationEnv(
-        grid_size=grid_size,
-        max_turns=max_turns,
-        seed=rng.randint(0, 2**31),
+    env = TokenObservationWrapper(
+        GridNavigationEnv(
+            grid_size=grid_size,
+            max_turns=max_turns,
+            seed=rng.randint(0, 2**31),
+        ),
+        tokenizer,
+        max_turns,
+        tokenizer.pad_token_id,
+        apply_chat_template=False,
+        max_model_len=MAX_CONTEXT_LENGTH,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
     )
     eval_fn = lambda agent: evaluate_accuracy(
         agent, tokenizer, grid_size, max_turns, EVAL_EPISODES, greedy=True
@@ -315,7 +324,7 @@ def run_single_seed(init_hp: dict, seed: int) -> tuple[float, float]:
     try:
         finetune_llm_multiturn(
             pop=[llm_ppo],
-            env_fn=env_fn,
+            env=env,
             tokenizer=tokenizer,
             max_turns=max_turns,
             init_hp={"ALGO": "LLMPPO", **init_hp},

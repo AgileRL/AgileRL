@@ -272,6 +272,8 @@ class REINFORCE(LLMAlgorithm):
         training: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Return generated completion ids and corresponding action masks."""
+        prompt_batch = [obs] if isinstance(obs, dict) else list(obs)
+
         with self.select_adapter("actor"):
             self.actor.eval()
             if not self.use_vllm:
@@ -283,12 +285,48 @@ class REINFORCE(LLMAlgorithm):
                 with torch.inference_mode(), self._amp_ctx():
                     completion_ids = []
                     action_masks = []
-                    for prompt in obs:
+                    for raw in prompt_batch:
+                        if not isinstance(raw, dict):
+                            msg = (
+                                "Each HuggingFace observation must be a dict with "
+                                "input_ids and attention_mask; got "
+                                f"{type(raw).__name__}. For string-observation GEM "
+                                "envs, wrap the env with TokenObservationWrapper."
+                            )
+                            raise TypeError(
+                                msg,
+                            )
+                        prompt = dict(raw)
                         prompt.pop("text", None)
-                        prompt["input_ids"] = prompt["input_ids"].to(actor_device)
-                        prompt["attention_mask"] = prompt["attention_mask"].to(
-                            actor_device
+                        prompt.pop("model_text", None)
+                        stitch = prompt.pop("stitch_prefix_ids", None)
+                        if stitch is not None and stitch.shape[1] > 0:
+                            msg = (
+                                "LLMReinforce HuggingFace generation does not support "
+                                "sliding-window stitch_prefix_ids; use LLMPPO, vLLM, "
+                                "or disable sliding-window fields on observations."
+                            )
+                            raise ValueError(
+                                msg,
+                            )
+                        model_input_ids = prompt.pop("model_input_ids", None)
+                        model_attention_mask = prompt.pop(
+                            "model_attention_mask",
+                            None,
                         )
+                        prompt.pop("model_window_initial_len", None)
+                        if model_input_ids is not None:
+                            prompt["input_ids"] = model_input_ids.to(actor_device)
+                            if model_attention_mask is not None:
+                                prompt["attention_mask"] = model_attention_mask.to(
+                                    actor_device,
+                                )
+                        else:
+                            prompt["input_ids"] = prompt["input_ids"].to(actor_device)
+                            prompt["attention_mask"] = prompt["attention_mask"].to(
+                                actor_device,
+                            )
+                        prompt_len = prompt["input_ids"].shape[1]
                         completion_id = self.actor.generate(
                             **prompt,
                             generation_config=self.generation_config,
@@ -299,13 +337,13 @@ class REINFORCE(LLMAlgorithm):
                             dtype=torch.bool,
                             device=completion_id.device,
                         )
-                        action_mask[:, prompt["input_ids"].shape[1] :] = True
+                        action_mask[:, prompt_len:] = True
                         action_mask[completion_id == self.pad_token_id] = False
                         action_mask = action_mask[:, 1:]
                         action_masks.append(action_mask)
             else:
                 completion_ids, action_masks = self._generate_with_vllm_colocate(
-                    obs,
+                    prompt_batch,
                     1,
                 )
 
