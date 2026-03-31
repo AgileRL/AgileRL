@@ -4,7 +4,7 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate import Accelerator
-form contextlib import nullcontext
+from contextlib import nullcontext
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
 
@@ -367,7 +367,7 @@ class PPO(LLMAlgorithm):
             else:
                 completion_ids, action_masks = self._generate_with_vllm_colocate(
                     obs,
-                    1,
+                    len(obs),
                     temperature=self.temperature if training else 0.01 # Almost deterministic for evaluation
                 )
 
