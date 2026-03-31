@@ -1,12 +1,13 @@
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import numpy as np
 import torch
 from accelerate import Accelerator
-
+form contextlib import nullcontext
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
+
 from agilerl.algorithms.core.fused_lora import clear_fused_adapter_routing
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import (
@@ -367,6 +368,7 @@ class PPO(LLMAlgorithm):
                 completion_ids, action_masks = self._generate_with_vllm_colocate(
                     obs,
                     1,
+                    temperature=self.temperature if training else 0.01 # Almost deterministic for evaluation
                 )
 
         return completion_ids, action_masks
@@ -568,7 +570,8 @@ class PPO(LLMAlgorithm):
         loop: int = 1,
     ) -> torch.Tensor:
         """Return fitness (test) score tensor of llm on test sub-set."""
-        with env.eval_mode(), torch.inference_mode():
+        eval_context = getattr(env, "eval_mode", nullcontext)
+        with eval_context(), torch.inference_mode():
             prompts = env.reset()
             rewards = []
             for _ in range(loop):

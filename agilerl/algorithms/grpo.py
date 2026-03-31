@@ -293,6 +293,9 @@ class GRPO(LLMAlgorithm):
             completion_ids, action_masks = self._generate_with_vllm_colocate(
                 obs,
                 group_size,
+                temperature=self.temperature
+                if training
+                else 0.01,  # Almost deterministic for evaluation
             )
             if self.vllm_config.sleep_mode:
                 self.llm.sleep(level=2)

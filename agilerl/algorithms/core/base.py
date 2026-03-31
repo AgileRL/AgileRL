@@ -2819,7 +2819,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if position_ids is not None:
                 model_kwargs["position_ids"] = position_ids[start:end]
 
-            with self._amp_ctx(): 
+            with self._amp_ctx():
                 output = self.actor.forward(**model_kwargs)
             logits = output[0] if isinstance(output, tuple) else output.logits
             value = output[-1] if isinstance(output, tuple) else output[2]
@@ -3200,9 +3200,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 continue
             il_t = group_prompts[group_size * i].get("model_window_initial_len")
             if il_t is None:
-                msg = (
-                    "model_window_initial_len required when stitch_prefix_ids is non-empty"
-                )
+                msg = "model_window_initial_len required when stitch_prefix_ids is non-empty"
                 raise ValueError(
                     msg,
                 )
@@ -3215,9 +3213,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return stitched
 
     def _generate_with_vllm_colocate(
-        self,
-        prompts: list[dict[str, Any]],
-        group_size: int,
+        self, prompts: list[dict[str, Any]], group_size: int, temperature: float | None
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Generate completions with colocated vLLM for GRPO/LLMPPO-style batches.
 
@@ -3242,7 +3238,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         def _model_input_ids(prompt: dict[str, Any]) -> torch.Tensor:
             return cast(
-                torch.Tensor,
+                "torch.Tensor",
                 prompt.get("model_input_ids", prompt["input_ids"]),
             )
 
@@ -3255,10 +3251,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             st = prompt.get("stitch_prefix_ids")
             if st is None:
                 return ref.new_zeros((ref.shape[0], 0))
-            return cast(torch.Tensor, st)
+            return cast("torch.Tensor", st)
 
         prompts_ids = [_model_input_ids(p) for p in group_prompts]
-        stitch_prefixes = [_stitch_prefix(p, prompts_ids[i]) for i, p in enumerate(group_prompts)]
+        stitch_prefixes = [
+            _stitch_prefix(p, prompts_ids[i]) for i, p in enumerate(group_prompts)
+        ]
         prompts_text = [_prompt_text_for_vllm(p) for p in group_prompts]
         prompts_text = [
             re.sub(rf"^({re.escape(str(self.pad_token))})+", "", text)
@@ -3288,7 +3286,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         generation_kwargs = {
             "n": 1,  # vLLM on each GPU generates only 1 in colocate mode
             "repetition_penalty": self.repetition_penalty,
-            "temperature": self.temperature,
+            "temperature": temperature,
             "top_p": self.top_p,
             "top_k": -1 if self.top_k is None else self.top_k,
             "min_p": 0.0 if self.min_p is None else self.min_p,
@@ -3339,9 +3337,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 for prompt_text in sublist
             ]
             all_stitch_prefixes = [
-                sp
-                for sublist in gathered_stitch_prefixes
-                for sp in sublist
+                sp for sublist in gathered_stitch_prefixes for sp in sublist
             ]
         else:
             all_prompts_text = prompts_text
@@ -3405,7 +3401,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
 
         num_input_tokens = [
-            int(cast(torch.Tensor, prompts[i]["input_ids"]).shape[1])
+            int(cast("torch.Tensor", prompts[i]["input_ids"]).shape[1])
             for i in range(len(prompts))
         ]
         action_masks = []
@@ -3453,9 +3449,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         per_token_logps = []
         for start in range(0, B, _chunk_rows):
             end = min(start + _chunk_rows, B)
-            target_logits_chunk = logits[start:end].gather(dim=-1, index=index[start:end].unsqueeze(-1)).squeeze(-1)
+            target_logits_chunk = (
+                logits[start:end]
+                .gather(dim=-1, index=index[start:end].unsqueeze(-1))
+                .squeeze(-1)
+            )
             log_z_chunk = torch.logsumexp(logits[start:end], dim=-1)
-            per_token_logps_chunk = (target_logits_chunk - log_z_chunk).to(logits.dtype) # Do we need to upcast to float 32 here??
+            per_token_logps_chunk = (target_logits_chunk - log_z_chunk).to(
+                logits.dtype
+            )  # Do we need to upcast to float 32 here??
             per_token_logps.append(per_token_logps_chunk)
         return torch.cat(per_token_logps, dim=0)
 
