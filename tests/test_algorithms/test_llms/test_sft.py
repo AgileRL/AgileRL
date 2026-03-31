@@ -15,11 +15,9 @@ from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from peft import LoraConfig
 from transformers import AutoTokenizer
 
-from agilerl.algorithms.core.base import (
-    OptimizerWrapper,
-)
-from agilerl.algorithms.dpo import DPO
-from agilerl.utils.llm_utils import PreferenceGym
+from agilerl.algorithms.core.base import OptimizerWrapper
+from agilerl.algorithms.sft import SFT
+from agilerl.utils.llm_utils import SFTGym
 from tests.test_algorithms.test_llms.test_grpo import (
     create_module,
     deepspeed_config_stage_1,
@@ -27,31 +25,31 @@ from tests.test_algorithms.test_llms.test_grpo import (
 )
 
 
-def make_preference_gym(
+def make_sft_gym(
     num_samples: int,
     accelerator: Accelerator | None,
     tokenizer: AutoTokenizer,
     data_batch_size_per_gpu: int = 8,
+    response_column: str = "response",
 ):
     train_dataset = Dataset.from_dict(
         {
             "prompt": [f"Prompt {i}" for i in range(num_samples)],
-            "chosen": [f"Chosen {i}" for i in range(num_samples)],
-            "rejected": [f"Rejected {i}" for i in range(num_samples)],
+            response_column: [f"Response {i}" for i in range(num_samples)],
         }
     )
     test_dataset = Dataset.from_dict(
         {
             "prompt": [f"Prompt {i}" for i in range(num_samples)],
-            "chosen": [f"Chosen {i}" for i in range(num_samples)],
-            "rejected": [f"Rejected {i}" for i in range(num_samples)],
+            response_column: [f"Response {i}" for i in range(num_samples)],
         }
     )
-    return PreferenceGym(
+    return SFTGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         data_batch_size_per_gpu=data_batch_size_per_gpu,
+        response_column=response_column,
         accelerator=accelerator,
     )
 
@@ -60,11 +58,11 @@ pytestmark = pytest.mark.llm
 
 
 @pytest.fixture
-def preference_dataset_factory():
-    return make_preference_gym
+def sft_dataset_factory():
+    return make_sft_gym
 
 
-def generate_dpo(
+def generate_sft(
     accelerator_factory,
     model_factory,
     config,
@@ -72,12 +70,12 @@ def generate_dpo(
     vocab_size,
     input_size,
     max_tokens,
-    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     reduce_memory_peak,
     micro_batch_size_per_gpu,
     from_name=False,
     use_liger_loss=False,
+    update_epochs=1,
 ):
     if config is not None and not torch.cuda.is_available():
         pytest.skip("DeepSpeed-configured LLM tests require CUDA support.")
@@ -115,7 +113,7 @@ def generate_dpo(
         task_type="CAUSAL_LM",
         lora_dropout=0.05,
     )
-    dpo = DPO(
+    sft = SFT(
         actor_network=actor if not from_name else None,
         model_name=pretrained_model_name_or_path if from_name else None,
         pad_token_id=vocab_size - 1,
@@ -123,17 +121,17 @@ def generate_dpo(
         lora_config=lora_config,
         accelerator=accelerator,
         device="cuda" if torch.cuda.is_available() else "cpu",
-        use_separate_reference_adapter=use_separate_reference_adapter,
         reduce_memory_peak=reduce_memory_peak,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
+        update_epochs=update_epochs,
     )
-    return dpo
+    return sft
 
 
 @pytest.fixture(scope="function")
-def dpo_factory():
-    return generate_dpo
+def sft_factory():
+    return generate_sft
 
 
 @pytest.mark.parametrize(
@@ -146,7 +144,6 @@ def dpo_factory():
         (deepspeed_config_stage_2, False),
     ],
 )
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -154,21 +151,19 @@ def dpo_factory():
     "pretrained_model_name_or_path",
     [
         "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
-        # None,
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [4])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("from_name", [True, False])
-def test_init_dpo(
+def test_init_sft(
     deepspeed_env,
-    dpo_factory,
+    sft_factory,
     accelerator_factory,
     model_factory,
     config,
     use_deepspeed_optimizer,
-    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     vocab_size,
     input_size,
@@ -178,7 +173,7 @@ def test_init_dpo(
     micro_batch_size_per_gpu,
     from_name,
 ):
-    dpo = dpo_factory(
+    sft = sft_factory(
         accelerator_factory,
         model_factory,
         config,
@@ -186,53 +181,49 @@ def test_init_dpo(
         vocab_size,
         input_size,
         max_tokens,
-        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         reduce_memory_peak,
         micro_batch_size_per_gpu,
         from_name=from_name,
     )
-    assert dpo.batch_size_per_process == 16 if not reduce_memory_peak else 1
-    assert dpo.beta == 0.001
-    assert dpo.lr == 1e-4 if use_deepspeed_optimizer else 1e-5, dpo.lr == 1e-4
-    assert dpo.max_grad_norm == 0.1
-    assert dpo.update_epochs == 1
-    assert dpo.temperature == 1
-    assert dpo.calc_position_embeddings
-    assert dpo.device == (
-        dpo.accelerator.device
-        if torch.cuda.is_available() and dpo.accelerator is not None
+    assert sft.batch_size_per_process == 16 if not reduce_memory_peak else 1
+    assert sft.lr == 1e-4 if use_deepspeed_optimizer else 5e-5
+    assert sft.max_grad_norm == 0.1
+    assert sft.update_epochs == 1
+    assert sft.temperature == 1
+    assert sft.calc_position_embeddings
+    assert sft.device == (
+        sft.accelerator.device
+        if torch.cuda.is_available() and sft.accelerator is not None
         else "cuda"
         if torch.cuda.is_available()
         else "mps"
         if torch.backends.mps.is_available()
         else "cpu"
     )
-    assert dpo.index == 0
-    assert dpo.scores == []
-    assert dpo.fitness == []
-    assert dpo.steps == [0]
+    assert sft.index == 0
+    assert sft.scores == []
+    assert sft.fitness == []
+    assert sft.steps == [0]
     if config is not None:
-        assert isinstance(dpo.actor, DeepSpeedEngine)
+        assert isinstance(sft.actor, DeepSpeedEngine)
         if not use_deepspeed_optimizer:
-            assert isinstance(dpo.optimizer, OptimizerWrapper)
-            assert isinstance(dpo.optimizer.optimizer, DeepSpeedOptimizerWrapper)
+            assert isinstance(sft.optimizer, OptimizerWrapper)
+            assert isinstance(sft.optimizer.optimizer, DeepSpeedOptimizerWrapper)
         else:
-            assert isinstance(dpo.optimizer, OptimizerWrapper)
-            assert isinstance(dpo.optimizer.optimizer, DeepSpeedZeroOptimizer)
-            assert isinstance(dpo.actor.optimizer, DeepSpeedZeroOptimizer)
+            assert isinstance(sft.optimizer, OptimizerWrapper)
+            assert isinstance(sft.optimizer.optimizer, DeepSpeedZeroOptimizer)
+            assert isinstance(sft.actor.optimizer, DeepSpeedZeroOptimizer)
     else:
-        assert isinstance(dpo.actor, torch.nn.Module)
-    dpo.clean_up()
+        assert isinstance(sft.actor, torch.nn.Module)
+    sft.clean_up()
     AcceleratorState._reset_state(True)
 
 
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_init_dpo_model_name_none_actor_network_none(
-    use_separate_reference_adapter,
+def test_init_sft_model_name_none_actor_network_none(
     vocab_size,
     reduce_memory_peak,
     micro_batch_size_per_gpu,
@@ -241,14 +232,13 @@ def test_init_dpo_model_name_none_actor_network_none(
         ValueError,
         match="At least one of model_name or actor_network must be provided.",
     ):
-        DPO(
+        SFT(
             actor_network=None,
             model_name=None,
             pad_token_id=vocab_size - 1,
             pad_token="<pad>",
             accelerator=None,
             device="cuda" if torch.cuda.is_available() else "cpu",
-            use_separate_reference_adapter=use_separate_reference_adapter,
             reduce_memory_peak=reduce_memory_peak,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         )
@@ -264,7 +254,6 @@ def test_init_dpo_model_name_none_actor_network_none(
         (deepspeed_config_stage_2, False),
     ],
 )
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -277,14 +266,13 @@ def test_init_dpo_model_name_none_actor_network_none(
 @pytest.mark.parametrize("data_batch_size", [4])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_dpo_get_action(
+def test_sft_get_action(
     deepspeed_env,
-    dpo_factory,
+    sft_factory,
     accelerator_factory,
     model_factory,
     config,
     use_deepspeed_optimizer,
-    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     vocab_size,
     input_size,
@@ -293,7 +281,7 @@ def test_dpo_get_action(
     reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
-    dpo = dpo_factory(
+    sft = sft_factory(
         accelerator_factory,
         model_factory,
         config,
@@ -301,14 +289,13 @@ def test_dpo_get_action(
         vocab_size,
         input_size,
         max_tokens,
-        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     with pytest.raises(NotImplementedError):
-        dpo.get_action(obs=None)
-    dpo.clean_up()
+        sft.get_action(obs=None)
+    sft.clean_up()
     AcceleratorState._reset_state(True)
 
 
@@ -319,7 +306,6 @@ def test_dpo_get_action(
         (deepspeed_config_stage_2, False),
     ],
 )
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -333,14 +319,13 @@ def test_dpo_get_action(
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("use_liger_loss", [False, True])
-def test_dpo_learn(
+def test_sft_learn(
     deepspeed_env,
-    dpo_factory,
+    sft_factory,
     accelerator_factory,
     model_factory,
     config,
     use_deepspeed_optimizer,
-    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     vocab_size,
     input_size,
@@ -350,7 +335,7 @@ def test_dpo_learn(
     micro_batch_size_per_gpu,
     use_liger_loss,
 ):
-    dpo = dpo_factory(
+    sft = sft_factory(
         accelerator_factory,
         model_factory,
         config,
@@ -358,7 +343,6 @@ def test_dpo_learn(
         vocab_size,
         input_size,
         max_tokens,
-        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         reduce_memory_peak,
         micro_batch_size_per_gpu,
@@ -368,58 +352,48 @@ def test_dpo_learn(
     train_dataset = Dataset.from_dict(
         {
             "prompt": [f"Prompt {i}" for i in range(100)],
-            "chosen": [
-                f"This prompt is better than the rejected prompt {i}"
-                for i in range(100)
-            ],
-            "rejected": [f"REALLY BAD RESPONSE {i}" for i in range(100)],
+            "response": [f"This is a good response for prompt {i}" for i in range(100)],
         },
     )
     test_dataset = Dataset.from_dict(
         {
             "prompt": [f"Prompt {i}" for i in range(100)],
-            "chosen": [
-                f"This prompt is better than the rejected prompt {i}"
-                for i in range(100)
-            ],
-            "rejected": [f"REALLY BAD RESPONSE {i}" for i in range(100)],
+            "response": [f"This is a good response for prompt {i}" for i in range(100)],
         },
     )
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-    env = PreferenceGym(
+    env = SFTGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         data_batch_size_per_gpu=data_batch_size,
-        accelerator=dpo.accelerator,
+        accelerator=sft.accelerator,
     )
-    for name, param in dpo.actor.named_parameters():
+    for name, param in sft.actor.named_parameters():
         if ("lora_A" in name or "lora_B" in name) and param is not None:
             param.data.normal_(mean=0, std=1.0)
 
     prompts = env.reset()
-    pre_learn_actor_state_dict = copy.deepcopy(dpo.actor.state_dict())
-    loss, chosen_reward, rejected_reward = dpo.learn(prompts)
+    pre_learn_actor_state_dict = copy.deepcopy(sft.actor.state_dict())
+    loss, perplexity = sft.learn(prompts)
 
     assert isinstance(loss, float)
-    assert isinstance(chosen_reward, float)
-    assert isinstance(rejected_reward, float)
+    assert isinstance(perplexity, float)
+    assert perplexity >= 1.0  # perplexity is exp(loss), always >= 1
 
-    # Check that the actor network is updated
+    # Check that the actor parameters are updated after learning
+    any_updated = False
     for (param_name, param), (_, pre_learn_param) in zip(
-        dpo.actor.state_dict().items(),
+        sft.actor.state_dict().items(),
         pre_learn_actor_state_dict.items(),
         strict=False,
     ):
-        if "actor" in param_name:
-            assert not torch.equal(param, pre_learn_param)
+        if "lora" in param_name and not torch.equal(param, pre_learn_param):
+            any_updated = True
+            break
+    assert any_updated, "Expected at least one LoRA parameter to be updated after learn()"
 
-        elif "reference" in param_name:
-            assert torch.equal(param, pre_learn_param)
-
-        else:
-            assert torch.equal(param, pre_learn_param)
-    dpo.clean_up()
+    sft.clean_up()
     AcceleratorState._reset_state(True)
 
 
@@ -430,7 +404,6 @@ def test_dpo_learn(
         (deepspeed_config_stage_2, False),
     ],
 )
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -443,14 +416,13 @@ def test_dpo_learn(
 @pytest.mark.parametrize("data_batch_size", [2])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_dpo_test(
+def test_sft_test(
     deepspeed_env,
-    dpo_factory,
+    sft_factory,
     accelerator_factory,
     model_factory,
     config,
     use_deepspeed_optimizer,
-    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     vocab_size,
     input_size,
@@ -459,7 +431,7 @@ def test_dpo_test(
     reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
-    dpo = dpo_factory(
+    sft = sft_factory(
         accelerator_factory,
         model_factory,
         config,
@@ -467,7 +439,6 @@ def test_dpo_test(
         vocab_size,
         input_size,
         max_tokens,
-        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         reduce_memory_peak,
         micro_batch_size_per_gpu,
@@ -475,53 +446,47 @@ def test_dpo_test(
     train_dataset = Dataset.from_dict(
         {
             "prompt": [f"Prompt {i}" for i in range(100)],
-            "chosen": [
-                f"This prompt is better than the rejected prompt {i}"
-                for i in range(100)
-            ],
-            "rejected": [f"Bad response {i}" for i in range(100)],
+            "response": [f"This is a good response for prompt {i}" for i in range(100)],
         },
     )
     test_dataset = Dataset.from_dict(
         {
             "prompt": [f"Prompt {i}" for i in range(100)],
-            "chosen": [
-                f"This prompt is better than the rejected prompt {i}"
-                for i in range(100)
-            ],
-            "rejected": [f"Bad response {i}" for i in range(100)],
+            "response": [f"This is a good response for prompt {i}" for i in range(100)],
         },
     )
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-    env = PreferenceGym(
+    env = SFTGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         data_batch_size_per_gpu=data_batch_size,
-        accelerator=dpo.accelerator,
+        accelerator=sft.accelerator,
     )
-    fitness = dpo.test(env)
+    fitness = sft.test(env)
     assert isinstance(fitness, np.ndarray)
-    dpo.clean_up()
+    assert fitness <= 0.0  # fitness is negative mean loss
+    assert len(sft.fitness) == 1
+    sft.clean_up()
     AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize("assertion_mode", ["warns_and_fallback", "private_guard"])
-def test_dpo_liger_unavailable_behaviour(
+def test_sft_liger_unavailable_behaviour(
     monkeypatch,
-    dpo_factory,
+    sft_factory,
     accelerator_factory,
     model_factory,
     assertion_mode,
 ):
-    monkeypatch.setattr("agilerl.algorithms.dpo.HAS_LIGER_KERNEL", False)
-    monkeypatch.setattr("agilerl.algorithms.dpo.LigerFusedLinearDPOFunction", None)
+    monkeypatch.setattr("agilerl.algorithms.sft.HAS_LIGER_KERNEL", False)
+    monkeypatch.setattr("agilerl.algorithms.sft.LigerCrossEntropyLoss", None)
     if assertion_mode == "warns_and_fallback":
         with pytest.warns(
             UserWarning,
             match=r"use_liger_loss=True requested.*Falling back to standard loss\.",
         ):
-            dpo = dpo_factory(
+            sft = sft_factory(
                 accelerator_factory=accelerator_factory,
                 model_factory=model_factory,
                 config=None,
@@ -529,16 +494,17 @@ def test_dpo_liger_unavailable_behaviour(
                 vocab_size=30,
                 input_size=5,
                 max_tokens=10,
-                use_separate_reference_adapter=False,
                 pretrained_model_name_or_path=None,
                 reduce_memory_peak=False,
                 micro_batch_size_per_gpu=None,
                 from_name=False,
                 use_liger_loss=True,
             )
-        assert dpo.use_liger_loss is False
+        assert sft.use_liger_loss is False
     else:
-        dpo = dpo_factory(
+        # When liger is unavailable and use_liger_loss=False, training should
+        # proceed normally using the standard PyTorch cross-entropy loss path.
+        sft = sft_factory(
             accelerator_factory=accelerator_factory,
             model_factory=model_factory,
             config=None,
@@ -546,25 +512,13 @@ def test_dpo_liger_unavailable_behaviour(
             vocab_size=30,
             input_size=5,
             max_tokens=10,
-            use_separate_reference_adapter=False,
             pretrained_model_name_or_path=None,
             reduce_memory_peak=False,
             micro_batch_size_per_gpu=None,
             from_name=False,
             use_liger_loss=False,
         )
-        with pytest.raises(
-            ImportError,
-            match=r"Liger DPO loss was requested but `liger-kernel` is not available\. Set use_liger_loss=False\.",
-        ):
-            dpo._dpo_loss_liger(
-                chosen_ids=torch.ones((1, 2), dtype=torch.long),
-                rejected_ids=torch.ones((1, 2), dtype=torch.long),
-                chosen_attn=torch.ones((1, 2), dtype=torch.long),
-                rejected_attn=torch.ones((1, 2), dtype=torch.long),
-                chosen_mask=torch.ones((1, 1), dtype=torch.long),
-                rejected_mask=torch.ones((1, 1), dtype=torch.long),
-            )
+        assert sft.use_liger_loss is False
 
-    dpo.clean_up()
+    sft.clean_up()
     AcceleratorState._reset_state(True)
