@@ -19,7 +19,7 @@ INIT_HP:
     MAX_GRAD_NORM: 1.0
     UPDATE_EPOCHS: 2          # Proximal updates for data reuse (GEM paper uses 2)
     TEMPERATURE: 0.7          # Lower than 1.0 for more focused generation
-    MAX_MODEL_LEN: 2048
+    MAX_MODEL_LEN: 4096
     TOURN_SIZE: 2
     GAMMA: 0.9                # Discount factor — key advantage over GRPO; <1 encourages efficiency
     ELITISM: true

@@ -100,10 +100,10 @@ def finetune_llm_reasoning(
     max_steps: int | None = None,
     num_epochs: int | None = None,
 ) -> None:
-    """Finetunes a population of GRPO/LLMPPO agents on a ReasoningGym environment.
+    """Finetunes a population of GRPO/LLMPPO/LLMReinforce agents on a ReasoningGym environment.
 
-    :param pop: Population of GRPO/LLMPPO agents to finetune
-    :type pop: list[GRPO | LLMPPO]
+    :param pop: Population of GRPO/LLMPPO/LLMReinforce agents to finetune
+    :type pop: list[GRPO | LLMPPO | LLMReinforce]
     :param env: ReasoningGym environment to finetune on
     :type env: ReasoningGym
     :param init_hp: Initial hyperparameters for the population
