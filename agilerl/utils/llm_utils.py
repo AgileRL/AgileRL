@@ -581,47 +581,54 @@ class PreferenceGym(HuggingFaceGym):
             )
             prompt_lengths = [len(ids) for ids in prompt_encodings["input_ids"]]
 
-            # Tokenize without padding
-            chosen_enc = tokenizer(
-                prompts,
-                chosen,
-                max_length=self.max_context_length,
-                truncation=True,
-                padding=False,
-            )
-            rejected_enc = tokenizer(
-                prompts,
-                rejected,
-                max_length=self.max_context_length,
-                truncation=True,
-                padding=False,
-            )
-
-            # Compute the joint max length across both
-            max_len = max(
-                *(len(ids) for ids in chosen_enc["input_ids"]),
-                *(len(ids) for ids in rejected_enc["input_ids"]),
-            )
-
-            max_len = (
-                min(max_len, self.max_context_length)
-                if self.max_context_length is not None
-                else max_len
-            )
-
-            # Now pad both encodings to the same target length
-            chosen_enc = tokenizer.pad(
-                chosen_enc,
-                padding="max_length",
-                max_length=max_len,
-                return_tensors="pt",
-            )
-            rejected_enc = tokenizer.pad(
-                rejected_enc,
-                padding="max_length",
-                max_length=max_len,
-                return_tensors="pt",
-            )
+            # Tokenise chosen and rejected, padding both to the same length.
+            # When max_context_length is set we pad directly to that fixed cap
+            # (one __call__ each, no separate .pad() step).  When it is None we
+            # need a first pass to find the joint max length before padding.
+            if self.max_context_length is not None:
+                chosen_enc = tokenizer(
+                    prompts,
+                    chosen,
+                    max_length=self.max_context_length,
+                    truncation=True,
+                    padding="max_length",
+                    return_tensors="pt",
+                )
+                rejected_enc = tokenizer(
+                    prompts,
+                    rejected,
+                    max_length=self.max_context_length,
+                    truncation=True,
+                    padding="max_length",
+                    return_tensors="pt",
+                )
+            else:
+                # First pass: get lengths without padding to compute joint max
+                chosen_ids = tokenizer(prompts, chosen, truncation=True, padding=False)
+                rejected_ids = tokenizer(
+                    prompts, rejected, truncation=True, padding=False
+                )
+                max_len = max(
+                    *(len(ids) for ids in chosen_ids["input_ids"]),
+                    *(len(ids) for ids in rejected_ids["input_ids"]),
+                )
+                # Second pass: pad both to the joint max in a single __call__
+                chosen_enc = tokenizer(
+                    prompts,
+                    chosen,
+                    truncation=True,
+                    padding="max_length",
+                    max_length=max_len,
+                    return_tensors="pt",
+                )
+                rejected_enc = tokenizer(
+                    prompts,
+                    rejected,
+                    truncation=True,
+                    padding="max_length",
+                    max_length=max_len,
+                    return_tensors="pt",
+                )
 
             return {
                 "prompt": prompts,

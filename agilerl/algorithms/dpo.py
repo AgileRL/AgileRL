@@ -115,7 +115,13 @@ class DPO(LLMAlgorithm):
         resolved_device = (
             f"cuda:{accelerator.process_index}"
             if accelerator is not None
-            else ("cuda" if torch.cuda.is_available() else "cpu")
+            else (
+                "cuda"
+                if torch.cuda.is_available()
+                else "mps"
+                if torch.backends.mps.is_available()
+                else "cpu"
+            )
         )
         super().__init__(
             index=index,
@@ -193,11 +199,13 @@ class DPO(LLMAlgorithm):
         """
         gc.collect()
         torch.cuda.empty_cache()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
         # The following tensors are size [batch_size, max_length]
-        chosen_input_ids: torch.Tensor = experiences["chosen_input_ids"]
-        rejected_input_ids: torch.Tensor = experiences["rejected_input_ids"]
-        chosen_attention_mask: torch.Tensor = experiences["chosen_attention_mask"]
-        rejected_attention_mask: torch.Tensor = experiences["rejected_attention_mask"]
+        chosen_input_ids: torch.Tensor = experiences["chosen_input_ids"].to(self.device)
+        rejected_input_ids: torch.Tensor = experiences["rejected_input_ids"].to(self.device)
+        chosen_attention_mask: torch.Tensor = experiences["chosen_attention_mask"].to(self.device)
+        rejected_attention_mask: torch.Tensor = experiences["rejected_attention_mask"].to(self.device)
         # Check first that all tensors have the same max length before calculating the masks
         assert (
             chosen_input_ids.shape[1]
@@ -216,7 +224,10 @@ class DPO(LLMAlgorithm):
         chosen_mask = (prompt_masks * chosen_attention_mask)[:, 1:]
         rejected_mask = (prompt_masks * rejected_attention_mask)[:, 1:]
         num_samples = chosen_input_ids.shape[0]
-        batch_size = min(num_samples, self.micro_batch_size_per_gpu)
+        batch_size = min(
+            num_samples,
+            getattr(self, "micro_batch_size_per_gpu", self.batch_size_per_process),
+        )
         batch_idxs = np.arange(num_samples)
         mean_loss, mean_chosen_reward, mean_rejected_reward = 0.0, 0.0, 0.0
         ref_rejected_log_probs, ref_chosen_log_probs = None, None

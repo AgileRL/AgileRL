@@ -32,26 +32,30 @@ def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
 
 
 def main(init_hp, mut_p):
-    # Instantiate the model and the associated tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
-    # Convert the HuggingFace dataset into a Gymnasium environment
-    accelerator = Accelerator()
+    # Use accelerate only when launched with `accelerate launch` and DeepSpeed
+    # is configured; otherwise fall back to standard single-GPU training.
+    try:
+        accelerator = Accelerator()
+        if accelerator.state.deepspeed_plugin is None:
+            accelerator = None
+    except Exception:
+        accelerator = None
+
     env = PreferenceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
         accelerator=accelerator,
+        max_context_length=init_hp.get("MAX_CONTEXT_LENGTH"),
     )
 
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
     init_hp["PAD_TOKEN"] = tokenizer.eos_token
-    init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
-        "zero_optimization"
-    ]["stage"]
 
     lora_config = LoraConfig(
         r=16,
@@ -70,9 +74,10 @@ def main(init_hp, mut_p):
             beta=init_hp["BETA"],
             update_epochs=init_hp["UPDATE_EPOCHS"],
             lora_config=lora_config,
-            accelerator=accelerator if idx == 0 else Accelerator(),
+            accelerator=accelerator,
+            gradient_checkpointing=accelerator is not None,
         )
-        for idx, _ in enumerate(range(init_hp["POP_SIZE"]))
+        for _ in range(init_hp["POP_SIZE"])
     ]
 
     # HPO objects — only constructed when evolution is enabled ---------------

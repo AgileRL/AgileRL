@@ -603,6 +603,11 @@ def finetune_llm_preference(
             dynamic_ncols=True,
         )
 
+    def _agg(m):
+        if accelerator is None:
+            return float(m) if not isinstance(m, float) else m
+        return aggregate_metrics_across_gpus(accelerator, m)
+
     total_steps = 0
 
     prompts = env.reset(reset_dataloaders=True)
@@ -612,10 +617,7 @@ def finetune_llm_preference(
             agent.set_reference_policy(env.num_epochs)
             loss, chosen_reward, rejected_reward = agent.learn(prompts)
             next_prompts = env.step()
-            metrics = [loss, chosen_reward, rejected_reward]
-            agg_metrics = [
-                aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
-            ]
+            agg_metrics = [_agg(loss), _agg(chosen_reward), _agg(rejected_reward)]
             prompts = next_prompts
             agent.steps[-1] += effective_data_batch_size
             total_steps += effective_data_batch_size
@@ -623,11 +625,7 @@ def finetune_llm_preference(
 
             if (i + 1) % evaluation_interval == 0:
                 test_reward = agent.test(env)
-                test_metrics = [test_reward]
-                agg_test_metrics = [
-                    aggregate_metrics_across_gpus(accelerator, metric)
-                    for metric in test_metrics
-                ]
+                agg_test_metrics = [_agg(test_reward)]
 
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
@@ -649,6 +647,17 @@ def finetune_llm_preference(
                         test_metrics_dict
                     )
                 pbar.update(effective_data_batch_size)
+                pbar.set_postfix(
+                    loss=f"{agg_metrics[0]:.4f}",
+                    chosen=f"{agg_metrics[1]:.4f}",
+                    rejected=f"{agg_metrics[2]:.4f}",
+                    margin=f"{agg_metrics[1] - agg_metrics[2]:.4f}",
+                    **(
+                        {"eval_margin": f"{agg_test_metrics[0]:.4f}"}
+                        if agg_test_metrics is not None
+                        else {}
+                    ),
+                )
                 agent.scores.append(agg_metrics[1] - agg_metrics[2])
         if accelerator is not None:
             accelerator.wait_for_everyone()
@@ -741,43 +750,34 @@ def finetune_llm_preference(
             wandb.log(wandb_dict)
         if env.num_epochs == num_epochs:
             break
-    if (
-        verbose
-        and total_steps > evaluation_interval
-        and (accelerator is None or accelerator.is_main_process)
-    ):
-        fitness_calculated = len(agent.fitness) > 0
-        fitness = (
-            [str(round(agent.fitness[-1], 2)) for agent in pop]
-            if fitness_calculated
-            else [None] * len(pop)
-        )
-        avg_fitness = (
-            [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
-            if fitness_calculated
-            else [None] * len(pop)
-        )
-        avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
-        agents = [agent.index for agent in pop]
-        num_steps = [agent.steps[-1] for agent in pop]
-        muts = [agent.mut for agent in pop]
+    if verbose and (accelerator is None or accelerator.is_main_process):
+        agent = pop[0]
+        scores = agent.scores   # reward margin per step
+        fitness = agent.fitness  # eval reward margin per eval step
 
-        banner_text = f"Global Steps {total_steps}"
-        banner_width = max(len(banner_text) + 8, 35)
+        banner_text = f"Training complete — {total_steps} steps"
+        banner_width = max(len(banner_text) + 4, 40)
         border = "=" * banner_width
-        centered_text = f"{banner_text}".center(banner_width)
-        pbar.write(
-            f"{border}\n"
-            f"{centered_text}\n"
-            f"{border}\n"
-            f"Fitness:\t\t{fitness}\n"
-            f"Score:\t\t{agg_metrics[2]}\n"
-            f"5 fitness avgs:\t{avg_fitness}\n"
-            f"10 score avgs:\t{avg_score}\n"
-            f"Agents:\t\t{agents}\n"
-            f"Steps:\t\t{num_steps}\n"
-            f"Mutations:\t\t{muts}",
-        )
+        lines = [border, banner_text.center(banner_width), border]
+
+        if scores:
+            lines += [
+                f"  Reward margin — initial: {scores[0]:.4f}  "
+                f"final: {scores[-1]:.4f}  "
+                f"best: {max(scores):.4f}  "
+                f"mean: {np.mean(scores):.4f}",
+            ]
+        if fitness:
+            lines += [
+                f"  Eval margin  — final: {fitness[-1]:.4f}  "
+                f"best: {max(fitness):.4f}",
+            ]
+        if evo_steps is not None:
+            muts = [a.mut for a in pop]
+            agents = [a.index for a in pop]
+            lines += [f"  Agents: {agents}  Mutations: {muts}"]
+
+        pbar.write("\n".join(lines))
 
     if accelerator is not None:
         accelerator.wait_for_everyone()
