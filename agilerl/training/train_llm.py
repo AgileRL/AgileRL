@@ -10,7 +10,7 @@ from accelerate import Accelerator
 from tqdm import trange
 
 import wandb
-from agilerl.algorithms import DPO, GRPO, LLMPPO
+from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMReinforce
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import PopulationType
@@ -167,9 +167,9 @@ def finetune_llm_reasoning(
             "Probability of activation mutation must be 0 for LLM finetuning."
         )
 
-    if not isinstance(pop[0], (GRPO, LLMPPO)):
+    if not isinstance(pop[0], (GRPO, LLMPPO, LLMReinforce)):
         msg = (
-            "The algorithm must be GRPO or LLMPPO for reasoning-based reinforcement learning."
+            "The algorithm must be GRPO, LLMPPO, or LLMReinforce for reasoning-based reinforcement learning. "
             f"Got {type(pop[0])} instead."
         )
         raise ValueError(
@@ -798,7 +798,7 @@ def finetune_llm_multiturn(
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
-    eval_fn: Callable[[LLMPPO], float] | None = None,
+    eval_fn: Callable[[LLMPPO | LLMReinforce], float] | None = None,
     evaluation_interval: int = 50,
     max_reward: float | None = None,
     verbose: bool = True,
@@ -831,9 +831,9 @@ def finetune_llm_multiturn(
             "Probability of activation mutation must be 0 for LLM finetuning."
         )
 
-    if not isinstance(pop[0], LLMPPO):
+    if not isinstance(pop[0], (LLMPPO, LLMReinforce)):
         msg = (
-            "The algorithm must be LLMPPO for multi-turn GEM finetuning. "
+            "The algorithm must be LLMPPO or LLMReinforce for multi-turn GEM finetuning. "
             f"Got {type(pop[0])} instead."
         )
         raise ValueError(
@@ -882,8 +882,6 @@ def finetune_llm_multiturn(
     agg_metrics: list[float] = []
     agg_eval_score: float | None = None
 
-    pad_id = getattr(tokenizer, "pad_token_id", None)
-
     i = 0
     while total_steps < max_steps:
         agent_metrics_dict = {}
@@ -912,9 +910,13 @@ def finetune_llm_multiturn(
                     full_ids = completion_ids[0]
 
                     print("State: ")
-                    print(tokenizer.decode(full_ids[0, :prompt_len].tolist(), skip_special_tokens=True))
+                    print(
+                        tokenizer.decode(
+                            full_ids[0, :prompt_len].tolist(), skip_special_tokens=True
+                        )
+                    )
 
-                    gen_tokens = full_ids[0, prompt_len:] 
+                    gen_tokens = full_ids[0, prompt_len:]
                     gen_text = tokenizer.decode(
                         gen_tokens.tolist(),
                         skip_special_tokens=True,
@@ -923,7 +925,6 @@ def finetune_llm_multiturn(
                     print(gen_text)
 
                     print("--------------------------------")
-
 
                     prompt_dict, _reward, terminated, truncated, _info = env.step(
                         full_ids, gen_text
@@ -939,7 +940,6 @@ def finetune_llm_multiturn(
                 all_turn_ids.append(turn_ids)
                 all_rewards.append(turn_rewards_t)
                 batch_steps += len(env.turn_boundaries)
-            assert False
 
             (turn_ids_padded,) = stack_and_pad_experiences(
                 all_turn_ids,
