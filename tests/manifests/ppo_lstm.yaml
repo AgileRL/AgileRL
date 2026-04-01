@@ -1,0 +1,25 @@
+---
+algorithm:
+    name: PPO
+    lr: 0.0003
+    learn_step: 16384
+    recurrent: true
+    share_encoders: true
+
+environment:
+    name: CartPole-v1
+    num_envs: 16
+
+network:
+    latent_dim: 64
+    arch: lstm
+    encoder_config:
+        hidden_state_size: 64
+        num_layers: 1
+    head_config:
+        hidden_size: [128]
+
+training:
+    max_steps: 1000
+    evo_steps: 100
+    pop_size: 2

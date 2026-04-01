@@ -1,0 +1,31 @@
+---
+algorithm:
+    name: RainbowDQN
+    batch_size: 64
+    lr: 0.0001
+    tau: 0.001
+    n_step: 4
+    num_atoms: 51
+    v_min: -200.0
+    v_max: 200.0
+    noise_std: 0.5
+
+environment:
+    name: LunarLander-v3
+    num_envs: 16
+
+network:
+    latent_dim: 64
+    arch: mlp
+    encoder_config:
+        hidden_size: [128]
+    head_config:
+        hidden_size: [128]
+
+replay_buffer:
+    memory_size: 100000
+
+training:
+    max_steps: 1000
+    evo_steps: 100
+    pop_size: 2

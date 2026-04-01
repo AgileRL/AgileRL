@@ -1,0 +1,24 @@
+---
+algorithm:
+    name: IPPO
+    lr: 0.0001
+    learn_step: 2048
+
+environment:
+    name: pettingzoo.butterfly.cooperative_pong_v5
+    num_envs: 16
+
+network:
+    latent_dim: 128
+    arch: cnn
+    encoder_config:
+        channel_size: [64, 64, 32]
+        kernel_size: [8, 6, 4]
+        stride_size: [4, 2, 2]
+    head_config:
+        hidden_size: [128]
+
+training:
+    max_steps: 1000
+    evo_steps: 100
+    pop_size: 2

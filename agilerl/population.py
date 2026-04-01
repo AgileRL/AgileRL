@@ -189,7 +189,8 @@ class MetricsReport:
         :rtype: dict[str, numpy.ndarray]
         """
         d: dict[str, np.ndarray] = {}
-        for idx, agent_metrics in enumerate(self.metrics.nonscalar_additional_metrics):
+        nonscalar_metrics = self.metrics.nonscalar_additional_metrics
+        for idx, agent_metrics in enumerate(nonscalar_metrics):
             for name, val in agent_metrics.items():
                 if val is not None:
                     d[f"train/agent_{idx}/{name}"] = val
@@ -374,7 +375,7 @@ class MetricsReport:
                 table.add_row(*hp_cells)
             table.add_section()
 
-        # Metadata
+        # Extra info (steps, mutations, fps)
         steps_cells = ["steps", *[str(s) for s in self.metrics.steps]]
         if self.show_mean_column:
             steps_cells.append("")
@@ -393,6 +394,7 @@ class MetricsReport:
 
         table.add_row(*fps_cells)
 
+        # Redirect table print to buffer to avoid printing to console twice
         buf = io.StringIO()
         console = Console(file=buf, record=True, force_terminal=True, width=120)
         console.print(table)
@@ -427,13 +429,14 @@ class Population(Generic[AgentT]):
             msg = "Population requires at least one agent."
             raise ValueError(msg)
 
-        if not all(isinstance(agent, type(agents[0])) for agent in agents):
+        sample_agent = agents[0]
+        if not all(isinstance(agent, type(sample_agent)) for agent in agents):
             names = ", ".join(type(a).__name__ for a in agents)
             msg = f"All individuals in a population must be instances of the same algorithm. Found: {names}"
             raise ValueError(msg)
 
         self._agents = agents
-        self._sample_agent = agents[0]
+        self.sample_agent = sample_agent
         self.min_evo_steps = min_evo_steps
         self.accelerator = accelerator
         self.loggers = loggers or []
@@ -443,10 +446,10 @@ class Population(Generic[AgentT]):
         self.is_multi_agent = all(
             isinstance(agent, MultiAgentRLAlgorithm) for agent in agents
         )
-        self.additional_metric_names = self._sample_agent.metrics.additional_metrics
-        self.nonscalar_metric_names = self._sample_agent.metrics.nonscalar_metrics
+        self.additional_metric_names = self.sample_agent.metrics.additional_metrics
+        self.nonscalar_metric_names = self.sample_agent.metrics.nonscalar_metrics
         self.agent_ids = (
-            self._sample_agent.metrics.agent_ids if self.is_multi_agent else None
+            self.sample_agent.metrics.agent_ids if self.is_multi_agent else None
         )
 
     @property
@@ -470,7 +473,13 @@ class Population(Generic[AgentT]):
         :returns: True if the scores are nested per-sub-agent, False otherwise.
         :rtype: bool
         """
-        return any(isinstance(agent.metrics.scores[0], list) for agent in self.agents)
+        pop_scores = [agent.metrics.scores for agent in self.agents]
+        for agent_scores in pop_scores:
+            if not agent_scores:
+                continue
+            if isinstance(agent_scores[0], list):
+                return True
+        return False
 
     def update(self, agents: list[AgentT]) -> None:
         """Replace the population (e.g. after tournament selection + mutation)."""

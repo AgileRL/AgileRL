@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 
@@ -14,7 +15,13 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
-from agilerl.typing import ExperiencesType, GymEnvType, NetConfigType, ObservationType
+from agilerl.typing import (
+    ExperiencesType,
+    GymEnvType,
+    NetConfigType,
+    ObservationType,
+    SupportedObservationSpace,
+)
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
     multi_dim_clamp,
@@ -90,7 +97,7 @@ class TD3(RLAlgorithm):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
+        observation_space: SupportedObservationSpace,
         action_space: spaces.Box,
         O_U_noise: bool = True,
         vect_noise_dim: int = 1,
@@ -114,7 +121,7 @@ class TD3(RLAlgorithm):
         critic_networks: list[EvolvableModule] | None = None,
         share_encoders: bool = False,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         wrap: bool = True,
     ) -> None:
         super().__init__(

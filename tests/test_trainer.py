@@ -20,12 +20,12 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.models import (
     ALGO_REGISTRY,
-    ArenaTrainingManifest,
     DDPGSpec,
     DQNSpec,
-    EnvironmentSpec,
+    ArenaEnvSpec,
     PPOSpec,
     RLAlgorithmSpec,
+    TrainingManifest,
 )
 from agilerl.models.networks import MlpSpec, NetworkSpec
 from agilerl.models.hpo import (
@@ -291,7 +291,7 @@ class TestLocalTrainerTrain:
 
 class TestArenaTrainerConstruction:
     def test_string_algorithm_and_env(self, mock_client):
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm="PPO",
             environment=env_spec,
@@ -301,7 +301,7 @@ class TestArenaTrainerConstruction:
         assert trainer._client is mock_client
 
     def test_spec_algorithm(self, mock_client, ppo_spec):
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
@@ -310,7 +310,7 @@ class TestArenaTrainerConstruction:
         assert trainer.algorithm is ppo_spec
 
     def test_env_spec(self, mock_client):
-        env_spec = EnvironmentSpec(name="CartPole-v1", version="v1", num_envs=8)
+        env_spec = ArenaEnvSpec(name="CartPole-v1", version="v1", num_envs=8)
         trainer = ArenaTrainer(
             algorithm="DQN",
             environment=env_spec,
@@ -319,14 +319,14 @@ class TestArenaTrainerConstruction:
         assert trainer.environment is env_spec
 
     def test_default_training_spec(self, mock_client):
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm="PPO", environment=env_spec, client=mock_client
         )
         assert isinstance(trainer.training, TrainingSpec)
 
     def test_all_specs(self, mock_client, mutation_spec, tournament_spec, buffer_spec):
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm="DQN",
             environment=env_spec,
@@ -345,14 +345,14 @@ class TestArenaTrainerConstruction:
     def test_auto_creates_client(self, mock_cls):
         """If no client is passed, ArenaTrainer creates one automatically."""
         mock_cls.return_value = MagicMock()
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(algorithm="PPO", environment=env_spec)
         assert trainer._client is not None
 
 
 class TestArenaTrainerManifest:
     def test_minimal_manifest_from_string_algo_and_env(self, mock_client):
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm="PPO",
             environment=env_spec,
@@ -361,14 +361,14 @@ class TestArenaTrainerManifest:
         manifest = trainer.to_manifest()
         payload = manifest.to_payload()
 
-        assert isinstance(manifest, ArenaTrainingManifest)
+        assert isinstance(manifest, TrainingManifest)
         assert manifest.network is None
         assert payload["algorithm"]["name"] == "PPO"
         assert payload["environment"]["name"] == "CartPole-v1"
         assert "network" not in payload
 
     def test_string_based_manifest(self, mock_client, ppo_spec):
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
@@ -376,14 +376,14 @@ class TestArenaTrainerManifest:
         )
         manifest = trainer.to_manifest()
 
-        assert isinstance(manifest, ArenaTrainingManifest)
+        assert isinstance(manifest, TrainingManifest)
         assert isinstance(manifest.algorithm, PPOSpec)
         assert manifest.environment.name == "CartPole-v1"
         assert manifest.training.max_steps == 1_000_000
 
     def test_spec_based_manifest(self, mock_client, ppo_spec):
         training = TrainingSpec(max_steps=50_000, pop_size=8)
-        env_spec = EnvironmentSpec(name="MountainCar-v0")
+        env_spec = ArenaEnvSpec(name="MountainCar-v0")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
@@ -398,7 +398,7 @@ class TestArenaTrainerManifest:
         assert manifest.environment.name == "MountainCar-v0"
 
     def test_env_spec_manifest(self, mock_client):
-        env_spec = EnvironmentSpec(name="LunarLander-v3", version="v2", num_envs=4)
+        env_spec = ArenaEnvSpec(name="LunarLander-v3", version="v2", num_envs=4)
         dqn_spec = DQNSpec(
             net_config=NetworkSpec(
                 encoder_config=MlpSpec(hidden_size=[64]),
@@ -418,7 +418,7 @@ class TestArenaTrainerManifest:
     def test_manifest_includes_mutation_and_tournament(
         self, mock_client, mutation_spec, tournament_spec, ppo_spec
     ):
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
@@ -431,7 +431,7 @@ class TestArenaTrainerManifest:
         assert manifest.tournament_selection is tournament_spec
 
     def test_manifest_includes_replay_buffer(self, mock_client, buffer_spec):
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         dqn_spec = DQNSpec(
             net_config=NetworkSpec(
                 encoder_config=MlpSpec(hidden_size=[64]),
@@ -448,7 +448,7 @@ class TestArenaTrainerManifest:
         assert manifest.replay_buffer is buffer_spec
 
     def test_manifest_network_from_algo_spec(self, mock_client, ppo_spec):
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
@@ -458,7 +458,7 @@ class TestArenaTrainerManifest:
         assert manifest.network is ppo_spec.net_config
 
     def test_manifest_payload_uses_spec_serializers(self, mock_client, ppo_spec):
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
@@ -487,7 +487,7 @@ class TestArenaTrainerManifest:
 
 class TestArenaTrainerTrain:
     def test_train_submits_manifest(self, mock_client, ppo_spec):
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
@@ -497,13 +497,13 @@ class TestArenaTrainerTrain:
 
         mock_client.submit_job.assert_called_once()
         submitted_manifest = mock_client.submit_job.call_args[0][0]
-        assert isinstance(submitted_manifest, ArenaTrainingManifest)
+        assert isinstance(submitted_manifest, TrainingManifest)
         assert result["job_id"] == "test-123"
 
     def test_train_submits_manifest_with_serializable_payload(
         self, mock_client, ppo_spec
     ):
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
@@ -516,7 +516,7 @@ class TestArenaTrainerTrain:
         assert payload["training"]["name"] == "train_on_policy"
 
     def test_train_with_stream(self, mock_client, ppo_spec):
-        env_spec = EnvironmentSpec(name="CartPole-v1")
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,

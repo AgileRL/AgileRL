@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
@@ -24,6 +25,7 @@ from agilerl.typing import (
     ObservationType,
     PzEnvType,
     StandardTensorDict,
+    SupportedObservationSpace,
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
@@ -49,7 +51,7 @@ class IPPO(MultiAgentRLAlgorithm):
     Paper: https://arxiv.org/pdf/2011.09533
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: list[spaces.Space] | spaces.Dict
+    :type observation_spaces: list[SupportedObservationSpace] | spaces.Dict
     :param action_spaces: Action space for each agent
     :type action_spaces: list[spaces.Space] | spaces.Dict
     :param agent_ids: Agent ID for each agent
@@ -110,7 +112,7 @@ class IPPO(MultiAgentRLAlgorithm):
 
     def __init__(
         self,
-        observation_spaces: list[spaces.Space] | spaces.Dict,
+        observation_spaces: list[SupportedObservationSpace] | spaces.Dict,
         action_spaces: list[spaces.Space] | spaces.Dict,
         agent_ids: list[str] | None = None,
         index: int = 0,
@@ -134,7 +136,7 @@ class IPPO(MultiAgentRLAlgorithm):
         critic_networks: ModuleDict | None = None,
         action_batch_size: int | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         torch_compiler: str | None = None,
         wrap: bool = True,
     ) -> None:

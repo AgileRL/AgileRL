@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from agilerl.components.replay_buffer import (
     MultiAgentReplayBuffer,
@@ -63,7 +63,9 @@ class ReplayBufferSpec(BaseModel):
     :type n_step: int | None
     """
 
-    max_size: int = Field(default=10_000, ge=1)
+    max_size: int = Field(
+        default=100_000, ge=1, validation_alias=AliasChoices("max_size", "memory_size")
+    )
     standard_buffer: bool = Field(default=True)
     combined_buffers: bool = Field(default=False)
     n_step_buffer: bool = Field(default=False)
@@ -131,7 +133,8 @@ class TrainingSpec(BaseModel):
     :type eval_loop: int
     :param eval_steps: Number of steps to train for evaluation
     :type eval_steps: int | None
-    :param reporting_interval: Reporting interval in steps
+    :param reporting_interval: Number of steps between metrics reporting. This is only applicable to
+        training on Arena. When training locally, we report metrics every `evo_steps` steps. Defaults to 1024.
     :type reporting_interval: int
     :param replay_buffer: Replay buffer configuration.
     :type replay_buffer: ReplayBufferSpec | None
@@ -153,48 +156,25 @@ class TrainingSpec(BaseModel):
     :type target_score: float | None
     """
 
-    max_steps: int = Field(
-        ..., ge=1, description="Maximum number of steps to train for."
+    max_steps: int = Field(..., ge=1)
+    evo_steps: int = Field(..., ge=1)
+    population_size: int = Field(
+        ..., ge=1, validation_alias=AliasChoices("population_size", "pop_size")
     )
-    evo_steps: int = Field(
-        ..., ge=1, description="Number of steps to train between evolutions."
-    )
-    population_size: int = Field(..., ge=1, description="Population size.")
-    eval_steps: int | None = Field(
-        default=None, description="Number of steps to take during evaluation."
-    )
-    eval_loop: int = Field(
-        default=1, ge=1, description="Number of evaluation episodes."
-    )
+    eval_steps: int | None = Field(default=None)
+    eval_loop: int = Field(default=1, ge=1)
     replay_buffer: ReplayBufferSpec | None = Field(default=None)
     hpo: bool = Field(default=True)
-    target_score: float | None = Field(
-        default=None, description="Target score for early stopping."
-    )
+    target_score: float | None = Field(default=None)
 
     # Experience sharing / learning delay only applicable for off policy algorithms
-    experience_sharing: bool = Field(
-        default=False,
-        description="Share experiences between individuals in a population.",
-    )
-    learning_delay: int = Field(
-        default=0, description="Number of steps before starting learning."
-    )
+    experience_sharing: bool = Field(default=False)
+    learning_delay: int = Field(default=0)
 
     # Off-policy exploration parameters
-    eps_start: float | None = Field(
-        default=None,
-        description="Probability of taking a random action at the start of training.",
-    )
-    eps_end: float | None = Field(
-        default=None,
-        description="Probability of taking a random action at the end of training.",
-    )
-    eps_decay: float | None = Field(
-        default=None, description="Rate of decay of the exploration probability."
-    )
+    eps_start: float | None = Field(default=None)
+    eps_end: float | None = Field(default=None)
+    eps_decay: float | None = Field(default=None)
 
     ### Arena-specific fields ###
-    reporting_interval: int = Field(
-        default=1024, ge=1, description="Reporting interval in steps"
-    )
+    reporting_interval: int = Field(default=1024, ge=1)

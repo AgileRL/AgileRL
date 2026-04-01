@@ -1,0 +1,27 @@
+---
+algorithm:
+    name: CQN
+    lr: 0.001
+    tau: 0.001
+    double: true
+
+environment:
+    name: CartPole-v1
+    num_envs: 16
+    minari_dataset_id: cartpole-v0
+
+network:
+    latent_dim: 64
+    arch: mlp
+    encoder_config:
+        hidden_size: [64]
+    head_config:
+        hidden_size: [64]
+
+replay_buffer:
+    memory_size: 100000
+
+training:
+    max_steps: 1000
+    evo_steps: 100
+    pop_size: 2

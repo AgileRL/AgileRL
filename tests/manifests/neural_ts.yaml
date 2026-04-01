@@ -1,0 +1,27 @@
+---
+algorithm:
+    name: NeuralTS
+    lr: 0.003
+    gamma: 1.0
+    lamb: 1.0
+    reg: 0.00625
+
+environment:
+    name: IRIS
+    num_envs: 1
+
+network:
+    latent_dim: 128
+    arch: mlp
+    encoder_config:
+        hidden_size: [128]
+    head_config:
+        hidden_size: [128]
+
+replay_buffer:
+    memory_size: 10000
+
+training:
+    max_steps: 1000
+    evo_steps: 100
+    pop_size: 2

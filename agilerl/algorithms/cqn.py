@@ -3,6 +3,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
@@ -71,7 +72,7 @@ class CQN(RLAlgorithm):
         mut: str | None = None,
         actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         wrap: bool = True,
     ) -> None:
 

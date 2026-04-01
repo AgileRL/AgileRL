@@ -123,17 +123,13 @@ class SimbaSpec(BaseModel):
     def _check_mlp_nodes(self) -> Self:
         min_max_validator("min_mlp_nodes", "max_mlp_nodes")(self)
 
-        if any(node < self.min_mlp_nodes for node in self.hidden_size):
+        if self.hidden_size < self.min_mlp_nodes:
             msg = f"hidden_size must be greater than or equal to min_mlp_nodes ({self.min_mlp_nodes})."
-            raise ValueError(
-                msg,
-            )
+            raise ValueError(msg)
 
-        if any(node > self.max_mlp_nodes for node in self.hidden_size):
+        if self.hidden_size > self.max_mlp_nodes:
             msg = f"hidden_size must be less than or equal to max_mlp_nodes ({self.max_mlp_nodes})."
-            raise ValueError(
-                msg,
-            )
+            raise ValueError(msg)
 
         return self
 
@@ -260,10 +256,9 @@ class NetworkSpec(BaseModel):
 
     def to_manifest(self) -> dict[str, object]:
         """Serialize this network spec for Arena manifest payloads."""
-        payload: dict[str, object] = self.model_dump(mode="json", exclude_none=True)
+        payload = self.model_dump(mode="json", exclude_none=True)
+
         # Keep the discriminator tag needed to parse encoder_config unions.
-        payload["encoder_config"] = {
-            "arch": self.encoder_config.arch,
-            **payload["encoder_config"],
-        }
+        payload["encoder_config"]["arch"] = self.encoder_config.arch
+
         return payload

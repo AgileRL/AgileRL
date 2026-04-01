@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm, MultiAgentRLAlgorithm, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
+from agilerl.models.env import LLMEnvType
 from agilerl.models.networks import NetworkSpec
 from agilerl.protocols import AgentType
 from agilerl.typing import SupportedActionSpace, SupportedObservationSpace
@@ -19,6 +20,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 
 if TYPE_CHECKING:
     import torch
+    from accelerate import Accelerator
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +146,25 @@ def off_policy() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
     return decorator
 
 
+def offline() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
+    """Decorate an algorithm to mark it as offline.
+
+    Offline algorithms learn from a fixed dataset rather than
+    interacting with the environment.  This flag signals that the
+    trainer should create a replay buffer and pre-fill it with
+    data from the dataset source declared in :class:`OfflineEnvSpec`.
+
+    :return: Decorated algorithm spec class
+    :rtype: Callable[[type[AlgoSpecT]], type[AlgoSpecT]]
+    """
+
+    def decorator(algo_spec_class: type[AlgoSpecT]) -> type[AlgoSpecT]:
+        algo_spec_class.offline = True
+        return algo_spec_class
+
+    return decorator
+
+
 class AlgorithmSpec(BaseModel):
     """Base specification for all algorithms.
 
@@ -156,6 +177,7 @@ class AlgorithmSpec(BaseModel):
     batch_size: int = Field(default=128, ge=1)
     hp_config: HyperparameterConfig | None = None
     off_policy: ClassVar[bool] = False
+    offline: ClassVar[bool] = False
 
     algo_class: ClassVar[type[AlgoT]]
 
@@ -223,6 +245,7 @@ class RLAlgorithmSpec(AlgorithmSpec):
         action_space: SupportedActionSpace,
         index: int,
         device: torch.device,
+        accelerator: Accelerator | None = None,
     ) -> RLAlgorithm:
         """Build a single-agent algorithm instance from spec fields.
 
@@ -245,17 +268,6 @@ class RLAlgorithmSpec(AlgorithmSpec):
             **self.model_dump(),
         )
 
-    def to_manifest(self) -> dict[str, Any]:
-        """Serialize this RL spec for Arena manifest payloads."""
-        return {
-            "name": self.name,
-            **self.model_dump(
-                mode="json",
-                exclude_none=True,
-                exclude={"hp_config", "net_config"},
-            ),
-        }
-
 
 class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
     """Specification for multi-agent reinforcement learning algorithms.
@@ -267,6 +279,7 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
     net_config: NetworkSpec | None = Field(default=None)
     learn_step: int = Field(default=2048, ge=1)
     gamma: float = Field(default=0.99, ge=0.0, le=1.0)
+    torch_compiler: str | None = Field(default=None)
 
     agent_type: ClassVar[AgentType] = AgentType.MultiAgent
 
@@ -276,6 +289,7 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         action_spaces: dict[str, SupportedActionSpace],
         index: int,
         device: torch.device,
+        accelerator: Accelerator | None = None,
     ) -> MultiAgentRLAlgorithm:
         """Build a multi-agent algorithm from spec fields.
 
@@ -295,19 +309,9 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
             action_spaces=action_spaces,
             index=index,
             device=device,
+            accelerator=accelerator,
             **self.model_dump(),
         )
-
-    def to_manifest(self) -> dict[str, Any]:
-        """Serialize this multi-agent spec for Arena manifest payloads."""
-        return {
-            "name": self.name,
-            **self.model_dump(
-                mode="json",
-                exclude_none=True,
-                exclude={"hp_config", "net_config"},
-            ),
-        }
 
 
 class LoraConfigDict(TypedDict):
@@ -324,6 +328,11 @@ class LLMAlgorithmSpec(AlgorithmSpec):
 
     Extends :class:`AlgorithmSpec` with LLM-specific fields including LoRA
     configuration, model parameters, and training hyperparameters.
+
+    Subclasses must set the :attr:`env_type` class variable to indicate
+    which LLM gym type the algorithm requires (``"reasoning"`` for
+    :class:`~agilerl.utils.llm_utils.ReasoningGym` or ``"preference"``
+    for :class:`~agilerl.utils.llm_utils.PreferenceGym`).
     """
 
     beta: float = Field(default=0.001, ge=0.0, le=1.0)
@@ -335,3 +344,6 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     use_separate_reference_adapter: bool
     pretrained_model_name_or_path: str
     calc_position_embeddings: bool
+
+    agent_type: ClassVar[AgentType] = AgentType.LLMAgent
+    env_type: ClassVar[LLMEnvType]

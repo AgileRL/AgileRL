@@ -2,6 +2,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 
@@ -9,7 +10,12 @@ from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.modules import EvolvableModule
 from agilerl.networks.value_networks import ValueNetwork
-from agilerl.typing import ExperiencesType, GymEnvType, ObservationType
+from agilerl.typing import (
+    ExperiencesType,
+    GymEnvType,
+    ObservationType,
+    SupportedObservationSpace,
+)
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
@@ -57,7 +63,7 @@ class NeuralUCB(RLAlgorithm):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
+        observation_space: SupportedObservationSpace,
         action_space: spaces.Space,
         index: int = 0,
         hp_config: HyperparameterConfig | None = None,
@@ -72,7 +78,7 @@ class NeuralUCB(RLAlgorithm):
         mut: str | None = None,
         actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         wrap: bool = True,
     ) -> None:
         super().__init__(

@@ -1,0 +1,28 @@
+---
+algorithm:
+    name: PPO
+    lr: 0.001
+    learn_step: 6480
+    share_encoders: true
+
+environment:
+    name: Blackjack-v1
+    num_envs: 6
+
+network:
+    latent_dim: 64
+    arch: multiinput
+    encoder_config:
+        latent_dim: 64
+        mlp_config:
+            hidden_size: [64]
+            activation: Tanh
+    head_config:
+        hidden_size: [8]
+        activation: Tanh
+        min_mlp_nodes: 8
+
+training:
+    max_steps: 1000
+    evo_steps: 100
+    pop_size: 2

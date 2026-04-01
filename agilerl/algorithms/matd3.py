@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 
@@ -23,6 +24,7 @@ from agilerl.typing import (
     ObservationType,
     PzEnvType,
     StandardTensorDict,
+    SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
@@ -35,6 +37,8 @@ from agilerl.utils.algo_utils import (
     obs_channels_to_first,
 )
 
+SupportedActionSpace = spaces.Discrete | spaces.Box
+
 
 class MATD3(MultiAgentRLAlgorithm):
     """Multi-Agent Twin Delayed Deep Deterministic Policy Gradient (MATD3) algorithm.
@@ -42,9 +46,9 @@ class MATD3(MultiAgentRLAlgorithm):
     Paper: https://arxiv.org/abs/1910.01465
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: list[spaces.Space] | spaces.Dict
+    :type observation_spaces: list[SupportedObservationSpace] | spaces.Dict
     :param action_spaces: Action space for each agent
-    :type action_spaces: list[spaces.Space] | spaces.Dict
+    :type action_spaces: list[SupportedActionSpace] | spaces.Dict
     :param agent_ids: Agent ID for each agent
     :type agent_ids: list[str] | None, optional
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
@@ -97,7 +101,7 @@ class MATD3(MultiAgentRLAlgorithm):
     :type wrap: bool, optional
     """
 
-    possible_action_spaces: dict[str, spaces.Box | spaces.Discrete]
+    possible_action_spaces: dict[str, SupportedActionSpace]
 
     actors: MultiAgentModule[DeterministicActor]
     actor_targets: MultiAgentModule[DeterministicActor]
@@ -108,8 +112,8 @@ class MATD3(MultiAgentRLAlgorithm):
 
     def __init__(
         self,
-        observation_spaces: list[spaces.Space] | spaces.Dict,
-        action_spaces: list[spaces.Space] | spaces.Dict,
+        observation_spaces: list[SupportedObservationSpace] | spaces.Dict,
+        action_spaces: list[SupportedActionSpace] | spaces.Dict,
         agent_ids: list[str] | None = None,
         O_U_noise: bool = True,
         expl_noise: float = 0.1,
@@ -132,7 +136,7 @@ class MATD3(MultiAgentRLAlgorithm):
         actor_networks: ModuleDict | None = None,
         critic_networks: list[ModuleDict] | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         torch_compiler: str | None = None,
         wrap: bool = True,
     ) -> None:

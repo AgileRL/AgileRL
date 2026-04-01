@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
 
-import yaml
 from pydantic import BaseModel, Field
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -27,13 +25,40 @@ from agilerl.models.algorithms import (
     RainbowDQNSpec,
     TD3Spec,
 )
-from agilerl.models.env import EnvironmentSpec
+from agilerl.models.env import (
+    ArenaEnvSpec,
+    GymEnvSpec,
+    LLMEnvSpec,
+    OfflineEnvSpec,
+    PzEnvSpec,
+)
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.models.manifest import TrainingManifest
 from agilerl.models.networks import NetworkSpec
-from agilerl.models.training import JobStatus, ReplayBufferSpec, TrainingSpec
+from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 
 if HAS_LLM_DEPENDENCIES:
     from agilerl.models.algorithms import DPOSpec, GRPOSpec
+
+AlgoSpecT = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec
+EnvironmentSpecT = GymEnvSpec | PzEnvSpec | LLMEnvSpec | OfflineEnvSpec
+ArenaEnvSpecT = ArenaEnvSpec | dict[str, str]
+ReplayBufferSpecT = ReplayBufferSpec | None
+TrainingSpecT = TrainingSpec | None
+MutationSpecT = MutationSpec | None
+
+
+class JobStatus(str, Enum):
+    """Status of an Arena training job."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+    def __str__(self) -> str:
+        return str(self.value)
 
 
 class ArenaVM(BaseModel):
@@ -74,76 +99,18 @@ class ArenaCluster(BaseModel):
     num_nodes: int = Field(ge=1)
 
 
-class ArenaTrainingManifest(BaseModel):
-    """Complete Arena training job manifest.
-
-    Combines algorithm, environment, mutation, network, replay buffer,
-    tournament selection, and training into a single validated document
-    that can be submitted to the Arena API.
-    """
-
-    algorithm: AlgorithmSpec
-    environment: EnvironmentSpec
-    mutation: MutationSpec | None = Field(default=None)
-    network: NetworkSpec | None = Field(default=None)
-    replay_buffer: ReplayBufferSpec | None = Field(default=None)
-    tournament_selection: TournamentSelectionSpec | None = Field(default=None)
-    training: TrainingSpec
-
-    def to_payload(self) -> dict[str, Any]:
-        """Serialize the manifest for Arena job submission.
-
-        :returns: Payload for Arena job submission.
-        :rtype: dict[str, object]
-        """
-        payload: dict[str, object] = {
-            "algorithm": self.algorithm.model_dump(exclude_none=True),
-            "environment": self.environment.model_dump(exclude_none=True),
-        }
-        if self.network is not None:
-            payload["network"] = self.network.model_dump(exclude_none=True)
-        if self.mutation is not None:
-            payload["mutation"] = self.mutation.model_dump(exclude_none=True)
-        if self.replay_buffer is not None:
-            payload["replay_buffer"] = self.replay_buffer.model_dump(exclude_none=True)
-        if self.tournament_selection is not None:
-            payload["tournament_selection"] = self.tournament_selection.model_dump(
-                exclude_none=True
-            )
-        return payload
-
-    def save(self, path: str) -> None:
-        """Save the manifest to a YAML file.
-
-        :param path: Path to the YAML file.
-        :type path: str
-        """
-        with open(path, "w") as f:
-            f.write(self.to_yaml())
-
-    def to_yaml(self) -> str:
-        """Serialize the manifest to a YAML string.
-
-        :returns: YAML string representation of the manifest.
-        :rtype: str
-        """
-        data = self.to_payload()
-        return yaml.dump(data, default_flow_style=False, sort_keys=False)
-
-
 __all__ = [
     "ALGO_REGISTRY",
     "AlgorithmSpec",
     "ArenaCluster",
     "ArenaResource",
-    "ArenaTrainingManifest",
     "CQNSpec",
     "DDPGSpec",
     "DQNSpec",
-    "EnvironmentSpec",
+    "GymEnvSpec",
     "IPPOSpec",
-    "JobStatus",
     "LLMAlgorithmSpec",
+    "LLMEnvSpec",
     "MADDPGSpec",
     "MATD3Spec",
     "MultiAgentRLAlgorithmSpec",
@@ -151,12 +118,15 @@ __all__ = [
     "NetworkSpec",
     "NeuralTSSpec",
     "NeuralUCBSpec",
+    "OfflineEnvSpec",
     "PPOSpec",
+    "PzEnvSpec",
     "RLAlgorithmSpec",
     "RainbowDQNSpec",
     "ReplayBufferSpec",
     "TD3Spec",
     "TournamentSelectionSpec",
+    "TrainingManifest",
     "TrainingSpec",
 ]
 

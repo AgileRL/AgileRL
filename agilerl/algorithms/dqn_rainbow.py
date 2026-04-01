@@ -2,6 +2,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
@@ -15,6 +16,7 @@ from agilerl.typing import (
     ExperiencesType,
     GymEnvType,
     ObservationType,
+    SupportedObservationSpace,
     TorchObsType,
 )
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
@@ -27,9 +29,9 @@ class RainbowDQN(RLAlgorithm):
     Paper: https://arxiv.org/abs/1710.02298
 
     :param observation_space: Observation space of the environment
-    :type observation_space: gym.spaces.Space
+    :type observation_space: SupportedObservationSpace
     :param action_space: Action space of the environment
-    :type action_space: gym.spaces.Space
+    :type action_space: gym.spaces.Discrete
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
@@ -76,8 +78,8 @@ class RainbowDQN(RLAlgorithm):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
-        action_space: spaces.Space,
+        observation_space: SupportedObservationSpace,
+        action_space: spaces.Discrete,
         index: int = 0,
         hp_config: HyperparameterConfig | None = None,
         net_config: dict[str, Any] | None = None,
@@ -98,7 +100,7 @@ class RainbowDQN(RLAlgorithm):
         combined_reward: bool = False,
         actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         wrap: bool = True,
     ) -> None:
         super().__init__(

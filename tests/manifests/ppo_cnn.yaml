@@ -1,0 +1,25 @@
+---
+algorithm:
+    name: PPO
+    lr: 0.001
+    learn_step: 250
+    share_encoders: true
+
+environment:
+    name: ALE/Breakout-v5
+    num_envs: 6
+
+network:
+    latent_dim: 256
+    arch: cnn
+    encoder_config:
+        channel_size: [32, 64, 128]
+        kernel_size: [8, 4, 3]
+        stride_size: [4, 2, 1]
+    head_config:
+        hidden_size: [256]
+
+training:
+    max_steps: 1000
+    evo_steps: 100
+    pop_size: 2

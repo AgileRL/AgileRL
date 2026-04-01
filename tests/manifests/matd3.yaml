@@ -1,0 +1,28 @@
+---
+algorithm:
+    name: MATD3
+    batch_size: 128
+    lr_actor: 0.0001
+    lr_critic: 0.001
+    tau: 0.001
+    policy_freq: 2
+
+environment:
+    name: pettingzoo.mpe.simple_speaker_listener_v4
+    num_envs: 16
+
+network:
+    latent_dim: 64
+    arch: mlp
+    encoder_config:
+        hidden_size: [64]
+    head_config:
+        hidden_size: [64]
+
+replay_buffer:
+    memory_size: 100000
+
+training:
+    max_steps: 1000
+    evo_steps: 100
+    pop_size: 2

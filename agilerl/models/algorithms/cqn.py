@@ -6,11 +6,12 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from agilerl.algorithms import CQN
-from agilerl.models.algo import RLAlgorithmSpec, register
+from agilerl.models.algo import RLAlgorithmSpec, offline, register
 from agilerl.training.train_offline import train_offline
 
 
 @register(arena=False)
+@offline()
 class CQNSpec(RLAlgorithmSpec):
     """Specification for CQN algorithm."""
 

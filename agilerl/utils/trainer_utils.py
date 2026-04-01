@@ -1,12 +1,9 @@
-"""Helper functions for :mod:`agilerl.trainer`.
-
-Each function converts a Pydantic spec into the corresponding runtime
-object, keeping the Trainer classes lean and testable.
-"""
+"""Helper functions for :mod:`agilerl.training.trainer`."""
 
 from __future__ import annotations
 
 import warnings
+from functools import singledispatch
 from typing import TYPE_CHECKING, Any
 
 from agilerl.algorithms.core.base import (
@@ -18,6 +15,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import (
     MultiAgentReplayBuffer,
     MultiStepReplayBuffer,
+    PrioritizedReplayBuffer,
     ReplayBuffer,
 )
 from agilerl.hpo.mutation import Mutations
@@ -33,10 +31,18 @@ from agilerl.typing import GymEnvType, PzEnvType
 
 if TYPE_CHECKING:
     import torch
+    from accelerate import Accelerator
+    from gymnasium import spaces
 
 EnvironmentT = GymEnvType | PzEnvType
 AlgoSpecT = RLAlgorithmSpec | LLMAlgorithmSpec | MultiAgentRLAlgorithmSpec
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
+BufferT = (
+    ReplayBuffer
+    | MultiStepReplayBuffer
+    | MultiAgentReplayBuffer
+    | PrioritizedReplayBuffer
+)
 
 
 def hp_config_from_mutation_spec(spec: MutationSpec) -> HyperparameterConfig | None:
@@ -61,17 +67,69 @@ def hp_config_from_mutation_spec(spec: MutationSpec) -> HyperparameterConfig | N
     )
 
 
+@singledispatch
+def get_spaces_from_env(
+    algo_spec: AlgoSpecT, env: GymEnvType | PzEnvType
+) -> tuple[dict[str, spaces.Space], dict[str, spaces.Space]]:
+    """Get the observation and action spaces from the environment.
+
+    :param algo_spec: Algorithm spec.
+    :type algo_spec: AlgoSpecT
+    :param env: Environment.
+    :type env: GymEnvType | PzEnvType
+    """
+    msg = f"Algorithm spec type {type(algo_spec)} not supported."
+    raise NotImplementedError(msg)
+
+
+@get_spaces_from_env.register(MultiAgentRLAlgorithmSpec)
+def get_spaces_from_env_multi_agent(
+    algo_spec: MultiAgentRLAlgorithmSpec,
+    env: GymEnvType | PzEnvType,
+) -> tuple[dict[str, spaces.Space], dict[str, spaces.Space]]:
+    """Get the observation and action spaces from the environment for a multi-agent algorithm.
+
+    :param algo_spec: Algorithm spec.
+    :type algo_spec: MultiAgentRLAlgorithmSpec
+    :param env: Environment.
+    :type env: GymEnvType | PzEnvType
+    :returns: A tuple of observation and action spaces.
+    :rtype: tuple[dict[str, spaces.Space], dict[str, spaces.Space]]
+    """
+    return {agent: env.single_observation_space(agent) for agent in env.agents}, {
+        agent: env.single_action_space(agent) for agent in env.agents
+    }
+
+
+@get_spaces_from_env.register(RLAlgorithmSpec)
+def get_spaces_from_env_single_agent(
+    algo_spec: RLAlgorithmSpec,
+    env: GymEnvType | PzEnvType,
+) -> tuple[spaces.Space, spaces.Space]:
+    """Get the observation and action spaces from the environment for a single-agent algorithm.
+
+    :param algo_spec: Algorithm spec.
+    :type algo_spec: RLAlgorithmSpec
+    :param env: Environment.
+    :type env: GymEnvType | PzEnvType
+    :returns: A tuple of observation and action spaces.
+    :rtype: tuple[spaces.Space, spaces.Space]
+    """
+    return env.single_observation_space, env.single_action_space
+
+
 def create_population_from_spec(
-    pop_size: int,
+    population_size: int,
     algo_spec: AlgoSpecT,
     mutation_spec: MutationSpec | None,
     env: GymEnvType | PzEnvType,
     device: str | torch.device = "cpu",
+    accelerator: Accelerator | None = None,
 ) -> PopulationT:
     """Instantiate a population of agents from an algorithm spec.
 
-    :param pop_size: Number of agents to create.
-    :type pop_size: int
+    :param population_size: Number of agents to create.
+    :type population_size: int
     :param algo_spec: Algorithm spec.
     :type algo_spec: AlgoSpecT
     :param mutation_spec: Optional mutation spec for HP range fallback.
@@ -80,6 +138,8 @@ def create_population_from_spec(
     :type env: GymEnvType | PzEnvType
     :param device: Torch device string.
     :type device: str | torch.device
+    :param accelerator: Accelerator instance.
+    :type accelerator: Accelerator | None
     :returns: A list of algorithm instances.
     :rtype: PopulationT
     """
@@ -96,11 +156,12 @@ def create_population_from_spec(
 
     # Classic RL algorithms
     if isinstance(algo_spec, (RLAlgorithmSpec, MultiAgentRLAlgorithmSpec)):
+        observation_space, action_space = get_spaces_from_env(algo_spec, env)
         return [
             algo_spec.build_algorithm(
-                env.single_observation_space, env.single_action_space, index, device
+                observation_space, action_space, index, device, accelerator
             )
-            for index in range(pop_size)
+            for index in range(population_size)
         ]
 
     # TODO: Add support for LLMAlgorithmSpec
@@ -156,7 +217,7 @@ def build_tournament_from_spec(
     return TournamentSelection(
         tournament_size=tournament_spec.tournament_size,
         elitism=tournament_spec.elitism,
-        population_size=training_spec.pop_size,
+        population_size=training_spec.population_size,
     )
 
 
@@ -164,8 +225,13 @@ def build_replay_buffer_from_spec(
     algo_spec: RLAlgorithmSpec | MultiAgentRLAlgorithmSpec,
     buffer_spec: ReplayBufferSpec | None,
     device: str | torch.device = "cpu",
-) -> ReplayBuffer | MultiStepReplayBuffer | MultiAgentReplayBuffer | None:
-    """Convert a :class:`ReplayBufferSpec` into a :class:`ReplayBuffer`.
+) -> BufferT | None:
+    """Convert a :class:`ReplayBufferSpec` into a :class:`ReplayBuffer`,
+    :class:`MultiStepReplayBuffer`, :class:`MultiAgentReplayBuffer`, or
+    :class:`PrioritizedReplayBuffer` instance, given an algorithm spec.
+
+    A buffer is created for off-policy **and** offline algorithms.
+    On-policy algorithms return ``None``.
 
     :param algo_spec: Algorithm spec.
     :type algo_spec: RLAlgorithmSpec | MultiAgentRLAlgorithmSpec
@@ -173,29 +239,22 @@ def build_replay_buffer_from_spec(
     :type buffer_spec: ReplayBufferSpec | None
     :param device: Torch device string.
     :type device: str | torch.device
-    :returns: A :class:`ReplayBuffer` or :class:`MultiStepReplayBuffer` instance, or ``None`` if *buffer_spec* is ``None``.
-    :rtype: ReplayBuffer | MultiStepReplayBuffer | None
+    :returns: A replay buffer instance, or ``None`` for on-policy algorithms.
+    :rtype: BufferT | None
     """
-    if buffer_spec is None:
-        if algo_spec.off_policy:
-            warnings.warn(
-                "No replay buffer specified for off-policy algorithm. Using default replay buffer with size 100,000.",
-                stacklevel=2,
-            )
-            return ReplayBuffer(max_size=100_000, device=device)
-
+    needs_buffer = algo_spec.off_policy or algo_spec.offline
+    if not needs_buffer:
         return None
 
-    # TODO: Add support for Prioritized / MultiAgentReplayBuffer
-
-    if buffer_spec.n_step_buffer:
-        return MultiStepReplayBuffer(
-            max_size=buffer_spec.max_size,
-            n_step=buffer_spec.n_step_buffer_args.n_step,
-            gamma=0.99,
-            device=device,
+    if buffer_spec is None:
+        warnings.warn(
+            "No replay buffer specified for off-policy/offline algorithm. "
+            "Using default replay buffer with size 100,000.",
+            stacklevel=2,
         )
-    return ReplayBuffer(max_size=buffer_spec.max_size, device=device)
+        buffer_spec = ReplayBufferSpec(max_size=100_000)
+
+    return buffer_spec.init_buffer(algo_spec, device)
 
 
 def build_train_kwargs(
@@ -203,11 +262,12 @@ def build_train_kwargs(
     algo_spec: AlgoSpecT,
     env: GymEnvType | PzEnvType,
     env_name: str | None = None,
-    pop: PopulationT,
+    env_spec: Any | None = None,
+    population: PopulationT,
     training: TrainingSpec,
     tournament: TournamentSelection | None,
     mutations: Mutations | None,
-    memory: ReplayBuffer | None,
+    memory: BufferT,
     swap_channels: bool = False,
     checkpoint: int | None = None,
     checkpoint_path: str | None = None,
@@ -223,18 +283,22 @@ def build_train_kwargs(
 ) -> dict[str, Any]:
     """Assemble the keyword-argument dict for a training function call.
 
-    Conditionally includes ``memory``, ``learning_delay``, and
-    ``wandb_kwargs`` based on the algorithm's training loop requirements.
+    Conditionally includes ``memory``, ``learning_delay``, dataset
+    source, and ``wandb_kwargs`` based on the algorithm's training loop
+    requirements.
     """
+    from agilerl.models.env import OfflineEnvSpec
+
     kwargs: dict[str, Any] = {
         "env": env,
         "env_name": env_name,
         "algo": algo_spec.name,
-        "pop": pop,
+        "pop": population,
         "swap_channels": swap_channels,
         "max_steps": training.max_steps,
         "evo_steps": training.evo_steps,
         "eval_loop": training.eval_loop,
+        "eval_steps": training.eval_steps,
         "target": training.target_score,
         "tournament": tournament,
         "mutation": mutations,
@@ -253,5 +317,16 @@ def build_train_kwargs(
     if algo_spec.off_policy:
         kwargs["memory"] = memory
         kwargs["learning_delay"] = training.learning_delay
+
+    if algo_spec.offline:
+        kwargs["memory"] = memory
+        if isinstance(env_spec, OfflineEnvSpec):
+            if env_spec.minari_dataset_id is not None:
+                kwargs["minari_dataset_id"] = env_spec.minari_dataset_id
+                kwargs["remote"] = env_spec.remote
+            elif env_spec.dataset_path is not None:
+                import h5py
+
+                kwargs["dataset"] = h5py.File(env_spec.dataset_path, "r")
 
     return kwargs

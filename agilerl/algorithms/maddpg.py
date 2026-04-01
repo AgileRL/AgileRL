@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 
@@ -44,7 +45,7 @@ class MADDPG(MultiAgentRLAlgorithm):
     Paper: https://arxiv.org/abs/1706.02275
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: list[spaces.Space] | spaces.Dict
+    :type observation_spaces: list[SupportedObservationSpace] | spaces.Dict
     :param action_spaces: Action space for each agent
     :type action_spaces: list[spaces.Space] | spaces.Dict
     :param agent_ids: Agent ID for each agent
@@ -129,7 +130,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         actor_networks: MultiAgentModule | None = None,
         critic_networks: MultiAgentModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         torch_compiler: str | None = None,
         wrap: bool = True,
     ) -> None:

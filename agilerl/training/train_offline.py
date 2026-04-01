@@ -5,7 +5,7 @@ from typing import Any
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
-from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.algorithms import CQN
 from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
@@ -23,7 +23,7 @@ from agilerl.utils.utils import (
 )
 
 InitDictType = dict[str, Any] | None
-PopulationType = list[RLAlgorithm]
+PopulationType = list[CQN]
 
 
 def train_offline(
@@ -69,7 +69,7 @@ def train_offline(
     :param algo: RL algorithm name
     :type algo: str
     :param pop: Population of agents
-    :type pop: list[RLAlgorithm]
+    :type pop: list[CQN]
     :param memory: Experience Replay Buffer
     :type memory: ReplayBuffer
     :param INIT_HP: Dictionary containing initial hyperparameters, defaults to None
@@ -125,7 +125,7 @@ def train_offline(
     :type wandb_kwargs: dict, optional
 
     :return: Trained population of agents and their fitnesses
-    :rtype: tuple[list[RLAlgorithm], list[float]]
+    :rtype: tuple[list[CQN], list[float]]
     """
     assert isinstance(
         algo,
@@ -275,8 +275,10 @@ def train_offline(
                 loop=eval_loop,
             )
 
+        # Aggregate, report, and clear metrics
         population.report_metrics(clear=True)
 
+        # Check if we have met the target score
         if population.should_stop(target):
             population.finish()
             pbar.close()

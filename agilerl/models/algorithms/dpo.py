@@ -7,6 +7,7 @@ from pydantic import Field
 
 from agilerl.algorithms import DPO
 from agilerl.models.algo import LLMAlgorithmSpec, register
+from agilerl.models.env import LLMEnvType
 from agilerl.training.train_llm import finetune_llm_preference
 
 
@@ -17,6 +18,7 @@ class DPOSpec(LLMAlgorithmSpec):
     lr: float = Field(default=0.000005)
 
     algo_class: ClassVar[type[DPO]] = DPO
+    env_type: ClassVar[LLMEnvType] = "preference"
 
     @staticmethod
     def get_training_fn() -> Callable[..., Any]:

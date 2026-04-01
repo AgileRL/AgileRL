@@ -17,7 +17,12 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks import EvolvableNetwork, StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
-from agilerl.typing import ArrayOrTensor, BPTTSequenceType, GymEnvType
+from agilerl.typing import (
+    ArrayOrTensor,
+    BPTTSequenceType,
+    GymEnvType,
+    SupportedObservationSpace,
+)
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
     obs_channels_to_first,
@@ -101,7 +106,7 @@ class PPO(RLAlgorithm):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
+        observation_space: SupportedObservationSpace,
         action_space: spaces.Space,
         index: int = 0,
         hp_config: HyperparameterConfig | None = None,

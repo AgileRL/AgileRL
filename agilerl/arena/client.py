@@ -15,7 +15,7 @@ from agilerl.arena.exceptions import (
     ArenaValidationError,
 )
 from agilerl.arena.logs import EventStream, LogDisplay
-from agilerl.models import ArenaCluster, ArenaTrainingManifest, JobStatus
+from agilerl.models import ArenaCluster, JobStatus, TrainingManifest
 from agilerl.utils.arena_utils import (
     prepare_env_upload,
 )
@@ -411,38 +411,27 @@ class ArenaClient:
     # -------------------------------------------------------------------------
 
     def submit_job(
-        self,
-        manifest: ArenaTrainingManifest,
-        cluster: ArenaCluster | None = None,
-        *,
-        stream: bool = False,
+        self, manifest: TrainingManifest, cluster: ArenaCluster | None = None
     ) -> dict[str, Any]:
         """Submit a training job to Arena.
 
         :param manifest: Fully validated job manifest.
-        :type manifest: ArenaTrainingManifest
+        :type manifest: TrainingManifest
         :param cluster: Optional compute cluster specification.
         :type cluster: ArenaCluster | None
-        :param stream: If ``True``, stream training logs to the
-            terminal in real time and block until the job finishes.
-        :type stream: bool
         :returns: Server response including ``job_id`` and initial
-            ``status``.  When *stream* is ``True``, returns the final
-            result from the ``complete`` event instead.
+            ``status``.
         """
-        payload = manifest.to_payload()
+        payload = manifest.model_dump(mode="json")
         if cluster is not None:
             payload["cluster"] = cluster.model_dump(mode="json")
-        resp = self._request(
+
+        # Submit job to Arena
+        return self._request(
             "POST",
             "api/v1/jobs/submit",
             json=payload,
         )
-
-        if stream and "operation_id" in resp:
-            return self.stream_logs(resp["operation_id"])
-
-        return resp
 
     def get_job_status(self, job_id: str) -> JobStatus:
         """Retrieve the current status of a training job.

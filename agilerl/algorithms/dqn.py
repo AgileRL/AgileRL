@@ -3,6 +3,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from tensordict.nn import CudaGraphModule
 from torch import nn, optim
@@ -11,7 +12,13 @@ from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
-from agilerl.typing import ExperiencesType, GymEnvType, ObservationType, TorchObsType
+from agilerl.typing import (
+    ExperiencesType,
+    GymEnvType,
+    ObservationType,
+    SupportedObservationSpace,
+    TorchObsType,
+)
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
@@ -21,9 +28,9 @@ class DQN(RLAlgorithm):
     Paper: https://arxiv.org/abs/1312.5602
 
     :param observation_space: Observation space of the environment
-    :type observation_space: gymnasium.spaces.Space
+    :type observation_space: SupportedObservationSpace
     :param action_space: Action space of the environment
-    :type action_space: gymnasium.spaces.Space
+    :type action_space: gymnasium.spaces.Discrete
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
@@ -58,8 +65,8 @@ class DQN(RLAlgorithm):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
-        action_space: spaces.Space,
+        observation_space: SupportedObservationSpace,
+        action_space: spaces.Discrete,
         index: int = 0,
         hp_config: HyperparameterConfig | None = None,
         net_config: dict[str, Any] | None = None,
@@ -73,7 +80,7 @@ class DQN(RLAlgorithm):
         normalize_images: bool = True,
         actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         cudagraphs: bool = False,
         wrap: bool = True,
     ) -> None:
@@ -229,7 +236,9 @@ class DQN(RLAlgorithm):
 
             action_mask = torch.ones((batch_size, self.action_dim), device=device)
 
+        #
         action = self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
+
         if self.training:
             self.metrics.log_histogram("action_dist", action)
 
@@ -257,6 +266,7 @@ class DQN(RLAlgorithm):
         self.actor.eval()
         with torch.no_grad():
             q_values = self.actor(obs)
+
         self.actor.train()
 
         # Masked random actions

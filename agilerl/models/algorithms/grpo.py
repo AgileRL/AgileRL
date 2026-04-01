@@ -7,6 +7,7 @@ from pydantic import Field
 
 from agilerl.algorithms import GRPO
 from agilerl.models.algo import LLMAlgorithmSpec, register
+from agilerl.models.env import LLMEnvType
 from agilerl.training.train_llm import finetune_llm_reasoning
 
 
@@ -20,6 +21,7 @@ class GRPOSpec(LLMAlgorithmSpec):
     temperature: float = Field(default=0.9)
 
     algo_class: ClassVar[type[GRPO]] = GRPO
+    env_type: ClassVar[LLMEnvType] = "reasoning"
 
     @staticmethod
     def get_training_fn() -> Callable[..., Any]:

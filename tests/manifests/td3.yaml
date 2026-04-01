@@ -1,0 +1,27 @@
+---
+algorithm:
+    name: TD3
+    lr_actor: 0.0001
+    lr_critic: 0.001
+    tau: 0.005
+    policy_freq: 2
+
+environment:
+    name: LunarLanderContinuous-v3
+    num_envs: 16
+
+network:
+    latent_dim: 64
+    arch: mlp
+    encoder_config:
+        hidden_size: [64]
+    head_config:
+        hidden_size: [64]
+
+replay_buffer:
+    memory_size: 100000
+
+training:
+    max_steps: 1000
+    evo_steps: 100
+    pop_size: 2

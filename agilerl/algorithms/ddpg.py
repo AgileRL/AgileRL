@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 
@@ -19,6 +20,7 @@ from agilerl.typing import (
     GymEnvType,
     NetConfigType,
     ObservationType,
+    SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
@@ -38,7 +40,7 @@ class DDPG(RLAlgorithm):
     Paper: https://arxiv.org/abs/1509.02971
 
     :param observation_space: Environment observation space
-    :type observation_space: gym.spaces.Space
+    :type observation_space: SupportedObservationSpace
     :param action_space: Environment action space
     :type action_space: gym.spaces.Box
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
@@ -95,7 +97,7 @@ class DDPG(RLAlgorithm):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
+        observation_space: SupportedObservationSpace,
         action_space: spaces.Box,
         O_U_noise: bool = True,
         expl_noise: float | np.ndarray = 0.1,
@@ -119,7 +121,7 @@ class DDPG(RLAlgorithm):
         critic_network: EvolvableModule | None = None,
         share_encoders: bool = False,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         wrap: bool = True,
     ) -> None:
 

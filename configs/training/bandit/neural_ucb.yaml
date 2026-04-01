@@ -1,53 +1,60 @@
 ---
-# Define initial hyperparameters
-INIT_HP:
-    ENV_NAME: IRIS            # Environment name
-    UCI_REPO_ID: 53           # Uci repo id  https://archive.ics.uci.edu/
-    ALGO: NeuralUCB           # Algorithm
-    # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-    CHANNELS_LAST: false
-    BATCH_SIZE: 64            # Batch size
-    LR: 0.001                 # Learning rate
-    MAX_STEPS: 10_000         # Max no. steps
-    EPISODE_STEPS: 500        # Steps in episode
-    TARGET_SCORE: 96.         # Early training stop at avg score of last 100 episodes
-    GAMMA: 1.0                # Scaling factor
-    LAMBDA: 1.0               # Regularization parameter
-    REG: 0.000625             # Loss regularization parameter
-    MEMORY_SIZE: 10000        # Max memory buffer size
-    LEARN_STEP: 2             # Learning frequency
-    TOURN_SIZE: 2             # Tournament size
-    ELITISM: true             # Elitism in tournament selection
-    POP_SIZE: 4               # Population size
-    EVO_STEPS: 500            # Evolution frequency
-    EVAL_STEPS: 500           # Evaluation steps
-    EVAL_LOOP: 1              # Evaluation episodes
-    WANDB: true               # Log with Weights and Biases
+algorithm:
+    name: NeuralUCB
+    batch_size: 64
+    lr: 0.001
+    learn_step: 2
+    gamma: 1.0
+    lamb: 1.0
+    reg: 0.000625
 
-MUTATION_PARAMS:
-    NO_MUT: 0.4                            # No mutation
-    ARCH_MUT: 0.2                          # Architecture mutation
-    NEW_LAYER: 0.2                         # New layer mutation
-    PARAMS_MUT: 0.2                        # Network parameters mutation
-    ACT_MUT: 0.2                           # Activation layer mutation
-    RL_HP_MUT: 0.2                         # Learning HP mutation
-    # Learning HPs to choose from
-    RL_HP_SELECTION: [lr, batch_size, learn_step]
-    MUT_SD: 0.1                            # Mutation strength
-    RAND_SEED: 42                          # Random seed
-    # Define max and min limits for mutating RL hyperparams
-    MIN_LR: 0.0000625
-    MAX_LR: 0.01
-    MIN_BATCH_SIZE: 8
-    MAX_BATCH_SIZE: 512
-    MIN_LEARN_STEP: 1
-    MAX_LEARN_STEP: 10
+environment:
+    name: IRIS
+    num_envs: 1
+mutation:
+    probabilities:
+        no_mut: 0.4
+        arch_mut: 0.2
+        new_layer: 0.2
+        params_mut: 0.2
+        act_mut: 0.2
+        rl_hp_mut: 0.2
+    rl_hp_selection:
+        lr:
+            min: 0.0000625
+            max: 0.01
+        batch_size:
+            min: 8
+            max: 512
+        learn_step:
+            min: 1
+            max: 10
+    mutation_sd: 0.1
+    rand_seed: 42
 
-NET_CONFIG:
+network:
     latent_dim: 128
+    arch: mlp
 
     encoder_config:
-        hidden_size: [128]
+        hidden_size:
+            - 128
 
     head_config:
-        hidden_size: [128]
+        hidden_size:
+            - 128
+
+replay_buffer:
+    max_size: 10_000
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true
+
+training:
+    max_steps: 10_000
+    target_score: 96.0
+    pop_size: 4
+    evo_steps: 500
+    eval_steps: 500
+    eval_loop: 1

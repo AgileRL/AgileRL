@@ -1,0 +1,27 @@
+---
+algorithm:
+    name: IPPO
+    lr: 0.0001
+    learn_step: 2048
+    gae_lambda: 0.95
+    clip_coef: 0.2
+    ent_coef: 0.05
+
+environment:
+    name: pettingzoo.mpe.simple_speaker_listener_v4
+    num_envs: 16
+
+network:
+    latent_dim: 64
+    arch: mlp
+    encoder_config:
+        hidden_size: [64]
+        layer_norm: true
+    head_config:
+        hidden_size: [64]
+        layer_norm: true
+
+training:
+    max_steps: 1000
+    evo_steps: 100
+    pop_size: 2

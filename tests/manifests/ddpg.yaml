@@ -1,0 +1,28 @@
+---
+algorithm:
+    name: DDPG
+    lr_actor: 0.0003
+    lr_critic: 0.0003
+    tau: 0.005
+    O_U_noise: true
+    share_encoders: true
+
+environment:
+    name: LunarLanderContinuous-v3
+    num_envs: 8
+
+network:
+    latent_dim: 128
+    arch: mlp
+    encoder_config:
+        hidden_size: [128]
+    head_config:
+        hidden_size: [128]
+
+replay_buffer:
+    memory_size: 100000
+
+training:
+    max_steps: 1000
+    evo_steps: 100
+    pop_size: 2
