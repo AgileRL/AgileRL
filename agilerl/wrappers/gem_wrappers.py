@@ -539,3 +539,32 @@ class SearchTool(BaseTool):
             valid = True
             has_error = "[SearchTool Error:" in search_result
         return valid, has_error, observation, parsed_action
+
+
+class FormatRewardWrapper:
+    """Wraps a GEM environment to give a small bonus for producing <answer> tags.
+
+    Without this, the model gets zero reward when it answers without using
+    the correct format, making it impossible to learn the format through RL
+    alone (classic sparse-reward problem).
+    """
+
+    def __init__(self, env, format_bonus: float = 0.1):
+        self._env = env
+        self._format_bonus = format_bonus
+
+    @property
+    def format_bonus(self):
+        return self._format_bonus
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._env, name)
+
+    def step(self, action: str, **kwargs):
+        obs, reward, terminated, truncated, info = self._env.step(action, **kwargs)
+        if terminated and "<answer>" in action and not info.get("correct", False):
+            reward += self._format_bonus
+        return obs, reward, terminated, truncated, info
+
+    def reset(self, **kwargs):
+        return self._env.reset(**kwargs)

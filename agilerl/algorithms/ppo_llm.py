@@ -29,7 +29,7 @@ from agilerl.utils.llm_utils import (
     move_params_to_gpu,
     pool_by_turns,
 )
-from agilerl.wrappers.token_observation import TokenObservationWrapper
+from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
@@ -83,6 +83,7 @@ class PPO(LLMAlgorithm):
         use_vllm: bool = False,
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
+        turn_level_clip: bool = True,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
     ) -> None:
@@ -152,6 +153,7 @@ class PPO(LLMAlgorithm):
         self.beta = beta
         self.vf_coef = vf_coef
         self.clip_coef = clip_coef
+        self.turn_level_clip = turn_level_clip
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.update_epochs = update_epochs
@@ -509,23 +511,9 @@ class PPO(LLMAlgorithm):
                     masked_entropy = masked_mean(
                         -batch_log_probs.detach(), batch_action_mask
                     )
-                    policy_ratio = torch.exp(
-                        batch_log_probs - batch_old_log_probs,
-                    )
-                    clipped_ratio = torch.clamp(
-                        policy_ratio,
-                        1 - self.clip_coef,
-                        1 + self.clip_coef,
-                    )
-                    pg_loss_unclipped = -batch_advantages * policy_ratio
-                    pg_loss_clipped = -batch_advantages * clipped_ratio
-                    pg_loss = masked_mean(
-                        torch.max(pg_loss_unclipped, pg_loss_clipped), batch_action_mask
-                    )
 
-                    # Turn-level value loss
-                    # Pool per-token critic values into one scalar per turn,
-                    # then compute clipped MSE against turn-level returns.
+                    # Compute turn-level quantities shared by both policy and
+                    # value loss: num_turns, pooled values, and turn mask.
                     batch_values = torch.masked_fill(
                         batch_values, ~batch_mask_bool, 0.0
                     )
@@ -544,6 +532,34 @@ class PPO(LLMAlgorithm):
                     turn_mask = torch.zeros_like(turn_pred)
                     for t in range(mb_num_turns):
                         turn_mask[:, t] = (batch_turn_ids == t).any(dim=1).float()
+
+                    token_log_ratio = batch_log_probs - batch_old_log_probs
+                    if self.turn_level_clip:
+                        # Turn-PPO: sum token log-ratios per turn so the
+                        # ratio is the product of token-level ratios.
+                        log_ratio = pool_by_turns(
+                            token_log_ratio,
+                            batch_turn_ids,
+                            mb_num_turns,
+                            reduction="sum",
+                        )
+                        adv = pool_by_turns(
+                            batch_advantages, batch_turn_ids, mb_num_turns
+                        )
+                        pg_mask = turn_mask
+                    else:
+                        # Standard PPO: use token-level log-ratios.
+                        log_ratio = token_log_ratio
+                        adv = batch_advantages
+                        pg_mask = batch_action_mask
+
+                    ratio = torch.exp(log_ratio)
+                    clipped_ratio = torch.clamp(
+                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                    )
+                    pg_loss = masked_mean(
+                        torch.max(-adv * ratio, -adv * clipped_ratio), pg_mask
+                    )
 
                     vf_loss = (turn_ret - turn_pred).pow(2)
                     clipped_turn_values = turn_old + torch.clamp(
@@ -589,7 +605,7 @@ class PPO(LLMAlgorithm):
         the next batch plus rewards. ``loop`` iterations advance the test
         dataloader that many times.
 
-        :class:`~agilerl.wrappers.token_observation.TokenObservationWrapper`:
+        :class:`~agilerl.wrappers.gem_wrappers.TokenObservationWrapper`:
         ``reset`` returns ``(observation_dict, info)``; each ``step`` takes the
         full completion tensor. ``loop`` is the number of **episodes**: each
         episode calls ``reset`` once, then steps until ``terminated`` or
@@ -621,8 +637,10 @@ class PPO(LLMAlgorithm):
                             training=False,
                         )
                         full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _step_info = env.step(
-                            full,
+                        prompt_dict, reward, terminated, truncated, _step_info = (
+                            env.step(
+                                full,
+                            )
                         )
                         all_rewards.append(
                             torch.tensor(

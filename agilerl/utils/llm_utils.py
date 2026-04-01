@@ -782,20 +782,27 @@ def pool_by_turns(
     token_values: torch.Tensor,
     turn_ids: torch.Tensor,
     num_turns: int,
+    reduction: str = "mean",
 ) -> torch.Tensor:
-    """Mean-pool per-token values into per-turn scalars.
+    """Aggregate per-token values into per-turn scalars.
 
     :param token_values: [batch, seq_len] per-token scalars.
     :param turn_ids: [batch, seq_len] turn index per token, -1 for non-action.
     :param num_turns: Total number of turns (max turn_id + 1).
-    :return: [batch, num_turns] mean-pooled values per turn.
+    :param reduction: ``"mean"`` (default) for mean-pooling,
+        ``"sum"`` for sum-pooling (e.g. to aggregate log-ratios).
+    :return: [batch, num_turns] aggregated values per turn.
     """
     batch_size = token_values.shape[0]
     turn_values = torch.zeros(batch_size, num_turns, device=token_values.device)
     for t in range(num_turns):
         mask_t = (turn_ids == t).float()
-        count = mask_t.sum(dim=1).clamp(min=1)
-        turn_values[:, t] = (token_values * mask_t).sum(dim=1) / count
+        summed = (token_values * mask_t).sum(dim=1)
+        if reduction == "mean":
+            count = mask_t.sum(dim=1).clamp(min=1)
+            turn_values[:, t] = summed / count
+        else:
+            turn_values[:, t] = summed
     return turn_values
 
 

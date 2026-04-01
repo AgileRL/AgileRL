@@ -9,6 +9,7 @@ if not HAS_LLM_DEPENDENCIES:
 import argparse
 
 import gem
+from gem.tools.tool_env_wrapper import ToolEnvWrapper
 import yaml
 from peft import LoraConfig
 from transformers import AutoTokenizer
@@ -16,12 +17,16 @@ from agilerl.algorithms import LLMPPO, LLMReinforce
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
-from agilerl.wrappers.token_observation import TokenObservationWrapper
+from agilerl.wrappers.gem_wrappers import (
+    FormatRewardWrapper,
+    SearchTool,
+    TokenObservationWrapper,
+)
 
-MODEL_PATH = "Qwen/Qwen2.5-1.5B-Instruct"
-ENV_NAME = "game:GuessTheNumber-v0-hard"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
+ENV_NAME = "qa:NaturalQuestions"
 MAX_CONTEXT_LENGTH = 4096
-MAX_OUTPUT_TOKENS = 128
+MAX_OUTPUT_TOKENS = 256
 USE_TINY_DEBUG_MODEL = False
 USE_VLLM = not USE_TINY_DEBUG_MODEL
 
@@ -53,7 +58,7 @@ def _build_agent(
     vllm_config = (
         VLLMConfig(
             tensor_parallel_size=1,
-            gpu_memory_utilization=0.4,
+            gpu_memory_utilization=0.3,
             max_num_seqs=4,
             sleep_mode=True,
         )
@@ -65,7 +70,7 @@ def _build_agent(
         model_name=model_name,
         actor_network=actor_network,
         lora_config=lora_config,
-        micro_batch_size_per_gpu=2,
+        micro_batch_size_per_gpu=1,
         use_vllm=USE_VLLM,
         pad_token_id=tokenizer.pad_token_id,
         pad_token=tokenizer.pad_token,
@@ -129,15 +134,18 @@ def main(init_hp, mut_p):
             "gate_proj",
         ]
         apply_chat_template = True
-    # search_tool = SearchTool(search_url="http://localhost:8888/search")
-    env = gem.make(ENV_NAME)
-    # tool_env = ToolEnvWrapper(
-    #     env=sample_env,
-    #     tools=[search_tool],
-    # )
-    max_turns = env.max_turns
+    search_tool = SearchTool(search_url="http://localhost:8888/search")
+    sample_env = gem.make(ENV_NAME)
+    tool_env = ToolEnvWrapper(
+        env=sample_env,
+        tools=[search_tool],
+        tool_success_reward=0.1,
+        max_tool_uses=2,
+    )
+    max_turns = tool_env.max_tool_uses + 1
+    fmt_env = FormatRewardWrapper(tool_env)
     env = TokenObservationWrapper(
-        env,
+        fmt_env,
         tokenizer,
         max_turns,
         tokenizer.pad_token_id,
@@ -168,7 +176,7 @@ def main(init_hp, mut_p):
         tokenizer=tokenizer,
         max_turns=max_turns,
         init_hp=init_hp,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         evo_steps=None,

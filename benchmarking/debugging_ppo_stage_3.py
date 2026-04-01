@@ -34,7 +34,7 @@ from agilerl.training import train_llm
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.probe_envs_llm import GridNavigationEnv
-from agilerl.wrappers.token_observation import TokenObservationWrapper
+from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 from benchmarking.tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 MAX_CONTEXT_LENGTH = 128

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from agilerl.wrappers.token_observation import TokenObservationWrapper
+from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 
 
 class _StubTokenizer:

@@ -8,7 +8,7 @@ from peft import LoraConfig
 
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.utils.probe_envs_llm import ConstantTargetEnv
-from agilerl.wrappers.token_observation import TokenObservationWrapper
+from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 from benchmarking.tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 
