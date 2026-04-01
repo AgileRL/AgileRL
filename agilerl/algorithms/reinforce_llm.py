@@ -352,7 +352,6 @@ class REINFORCE(LLMAlgorithm):
     def learn(
         self,
         experiences: ExperiencesType,
-        tokenizer,
         turn_ids: torch.Tensor | None = None,
     ) -> tuple[float, float, float, float, float]:
         """Update actor using REINFORCE with Return Batch Normalization.
@@ -360,7 +359,6 @@ class REINFORCE(LLMAlgorithm):
         :param experiences: Tuple of (completion_ids, action_masks, rewards).
             For single-turn, rewards is a flat list/tensor of scalars.
             For multi-turn, rewards should be [batch, max_turns] per-turn rewards.
-        :param tokenizer: Tokenizer (unused, kept for API compatibility with LLMPPO).
         :param turn_ids: Optional [batch, seq_len] tensor mapping each token
             to its turn index (0-indexed). -1 for non-action tokens.
             When None, defaults to all action tokens belonging to turn 0.

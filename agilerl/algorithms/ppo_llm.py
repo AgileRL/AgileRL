@@ -189,18 +189,15 @@ class PPO(LLMAlgorithm):
         self._initialize_actors(actor_network, not clone)
         self._apply_critic_lr()
 
-        # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
 
-        # We call get_action before learn so we need to put the model to CPU and wake it up
         unwrapped_model = (
             self.accelerator.unwrap_model(self.actor)
             if self.accelerator is not None
             else self.actor
         )
-        # Wake up LLM
         if self.use_vllm:
             move_params_to_cpu(unwrapped_model)
             self.llm.wake_up()
@@ -391,7 +388,6 @@ class PPO(LLMAlgorithm):
     def learn(
         self,
         experiences: ExperiencesType,
-        tokenizer,
         turn_ids: torch.Tensor | None = None,
     ) -> tuple[float, float, float, float, float]:
         """Update actor and critic adapters using turn-level PPO objectives.
@@ -413,25 +409,19 @@ class PPO(LLMAlgorithm):
             action_mask_bool = action_masks.bool()
             num_samples = completion_ids.shape[0]
 
-            if turn_ids is None:
-                turn_ids = torch.where(
-                    action_mask_bool,
-                    torch.zeros_like(action_masks, dtype=torch.long),
-                    torch.full_like(action_masks, -1, dtype=torch.long),
-                )
-                rewards_2d = rewards.flatten().to(self.device).float().unsqueeze(-1)
-            else:
-                turn_ids = turn_ids.to(self.device)
-                rewards_2d = rewards.to(self.device).float()
-                if rewards_2d.dim() == 1:
-                    rewards_2d = rewards_2d.unsqueeze(-1)
+            turn_ids, rewards_2d = self._prepare_turn_ids_and_rewards(
+                rewards,
+                action_mask_bool,
+                turn_ids,
+            )
 
             del rewards
 
             batch_idxs = np.arange(num_samples)
+            micro_batch_size = self.micro_batch_size_per_gpu
             batch_size = (
-                min(num_samples, self.micro_batch_size_per_gpu)
-                if hasattr(self, "micro_batch_size_per_gpu")
+                min(num_samples, micro_batch_size)
+                if micro_batch_size is not None
                 else num_samples
             )
             mean_pg_loss, mean_vf_loss, mean_loss, mean_kl, mean_entropy, updates = (
@@ -499,7 +489,6 @@ class PPO(LLMAlgorithm):
 
                     batch_mask_bool = batch_action_mask.bool()
 
-                    # Fused forward: actor logprobs + critic values in one pass.
                     batch_log_probs, batch_values = self._fused_forward(
                         batch_ids,
                         batch_size=batch_size,
@@ -507,13 +496,11 @@ class PPO(LLMAlgorithm):
                     batch_log_probs = torch.masked_fill(
                         batch_log_probs, ~batch_mask_bool, 1.0
                     )
-                    kl = batch_log_probs - batch_reference_log_probs
+                    log_prob_delta = batch_log_probs - batch_reference_log_probs
                     masked_entropy = masked_mean(
                         -batch_log_probs.detach(), batch_action_mask
                     )
 
-                    # Compute turn-level quantities shared by both policy and
-                    # value loss: num_turns, pooled values, and turn mask.
                     batch_values = torch.masked_fill(
                         batch_values, ~batch_mask_bool, 0.0
                     )
@@ -528,15 +515,10 @@ class PPO(LLMAlgorithm):
                         batch_returns, batch_turn_ids, mb_num_turns
                     )
 
-                    # Mask: which (sample, turn) pairs actually exist in this batch.
-                    turn_mask = torch.zeros_like(turn_pred)
-                    for t in range(mb_num_turns):
-                        turn_mask[:, t] = (batch_turn_ids == t).any(dim=1).float()
+                    turn_mask = self._compute_turn_mask(batch_turn_ids, mb_num_turns)
 
                     token_log_ratio = batch_log_probs - batch_old_log_probs
                     if self.turn_level_clip:
-                        # Turn-PPO: sum token log-ratios per turn so the
-                        # ratio is the product of token-level ratios.
                         log_ratio = pool_by_turns(
                             token_log_ratio,
                             batch_turn_ids,
@@ -548,7 +530,6 @@ class PPO(LLMAlgorithm):
                         )
                         pg_mask = turn_mask
                     else:
-                        # Standard PPO: use token-level log-ratios.
                         log_ratio = token_log_ratio
                         adv = batch_advantages
                         pg_mask = batch_action_mask
@@ -578,7 +559,7 @@ class PPO(LLMAlgorithm):
                     self._backward_pass(total_loss)
                     clear_fused_adapter_routing(self._get_unwrapped_actor())
 
-                    mean_kl += masked_mean(kl, batch_action_mask).item()
+                    mean_kl += masked_mean(log_prob_delta, batch_action_mask).item()
                     mean_entropy += masked_entropy.mean().item()
                     mean_pg_loss += pg_loss.mean().item()
                     mean_vf_loss += vf_loss.mean().item()
@@ -592,6 +573,34 @@ class PPO(LLMAlgorithm):
             mean_vf_loss / max(updates, 1),
             mean_entropy / max(updates, 1),
         )
+
+    def _prepare_turn_ids_and_rewards(
+        self,
+        rewards: torch.Tensor,
+        action_mask_bool: torch.Tensor,
+        turn_ids: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if turn_ids is None:
+            default_turn_ids = torch.where(
+                action_mask_bool,
+                torch.zeros_like(action_mask_bool, dtype=torch.long),
+                torch.full_like(action_mask_bool, -1, dtype=torch.long),
+            )
+            rewards_2d = rewards.flatten().to(self.device).float().unsqueeze(-1)
+            return default_turn_ids, rewards_2d
+
+        prepared_turn_ids = turn_ids.to(self.device)
+        rewards_2d = rewards.to(self.device).float()
+        if rewards_2d.dim() == 1:
+            rewards_2d = rewards_2d.unsqueeze(-1)
+        return prepared_turn_ids, rewards_2d
+
+    @staticmethod
+    def _compute_turn_mask(batch_turn_ids: torch.Tensor, num_turns: int) -> torch.Tensor:
+        turn_indices = torch.arange(num_turns, device=batch_turn_ids.device)
+        return (
+            batch_turn_ids.unsqueeze(-1) == turn_indices.view(1, 1, -1)
+        ).any(dim=1).float()
 
     def test(
         self,
@@ -788,22 +797,6 @@ class PPO(LLMAlgorithm):
 
             return torch.cat(values, dim=0)
 
-    def _calculate_kl_divergence(
-        self,
-        log_probs: torch.Tensor,
-        reference_log_probs: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute the per-token reverse-KL-style penalty term.
-
-        This corresponds to the common Schulman-style approximation used with a
-        fixed reference policy, matching the same sign convention as GRPO.
-        """
-        return (
-            torch.exp(reference_log_probs - log_probs)
-            - (reference_log_probs - log_probs)
-            - 1
-        )
-
     def _get_unwrapped_actor(self) -> Any:
         if self.accelerator is not None:
             return self.accelerator.unwrap_model(self.actor)
@@ -811,21 +804,11 @@ class PPO(LLMAlgorithm):
 
     @contextmanager
     def memory_efficient_params(self) -> None:
-        """Memory efficient params context manager.
-
-        :param agent: Distributed agent
-        :type agent: DistributedLLMAgent
-        :return: None
-        :rtype: None
-        """
-        # FIXME add in zero 3 compatibilitys
+        """Temporarily offload actor params for vLLM colocate sleep mode."""
         vllm_cfg = getattr(self, "vllm_config", None)
         use_vllm = getattr(self, "use_vllm", False)
-        # Only offload params for vLLM colocate mode. If use_vllm is False,
-        # moving params to CPU between updates causes generate() device mismatches.
         sleep_mode = use_vllm and vllm_cfg is not None and vllm_cfg.sleep_mode
         if sleep_mode:
-            # Put LLM to sleep
             self.llm.sleep(level=2)
             unwrapped_model = (
                 self.accelerator.unwrap_model(self.actor)
@@ -836,6 +819,5 @@ class PPO(LLMAlgorithm):
         yield
         if sleep_mode:
             move_params_to_cpu(unwrapped_model)
-            # Wake up LLM
             self.llm.wake_up()
             self._move_model_to_vllm()

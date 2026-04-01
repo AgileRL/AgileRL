@@ -1,6 +1,5 @@
 import warnings
 from collections.abc import Callable
-from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -27,58 +26,6 @@ if TYPE_CHECKING:
     from gem.core import Env as GemEnv
 
 InitDictType = dict[str, Any] | None
-
-
-def move_params_to_gpu(unwrapped_model: torch.nn.Module, device: torch.device) -> None:
-    """Move params to GPU.
-
-    :param agent: Distributed agent
-    :type agent: DistributedLLMAgent
-    :return: None
-    :rtype: None
-    """
-    unwrapped_model.to(device, non_blocking=True)
-    torch.cuda.synchronize()
-
-
-def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> None:
-    """Move params to CPU.
-
-    :param agent: Distributed agent
-    :type agent: DistributedLLMAgent
-    :return: None
-    :rtype: None
-    """
-    unwrapped_model.to("cpu", non_blocking=True)
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
-
-
-@contextmanager
-def memory_efficient_params(agent) -> None:
-    """Memory efficient params context manager.
-
-    :param agent: Distributed agent
-    :type agent: DistributedLLMAgent
-    :return: None
-    :rtype: None
-    """
-    # ZeRO-3: extend offload/wake logic when using vLLM colocate + sleep_mode.
-    vllm_cfg = getattr(agent, "vllm_config", None)
-    use_vllm = getattr(agent, "use_vllm", False)
-    # Only offload params for vLLM colocate mode. If use_vllm is False,
-    # moving params to CPU between updates causes generate() device mismatches.
-    sleep_mode = use_vllm and vllm_cfg is not None and vllm_cfg.sleep_mode
-    if sleep_mode:
-        unwrapped_model = (
-            agent.accelerator.unwrap_model(agent.actor)
-            if agent.accelerator is not None
-            else agent.actor
-        )
-        move_params_to_gpu(unwrapped_model, agent.device)
-    yield
-    if sleep_mode:
-        move_params_to_cpu(unwrapped_model)
 
 
 def finetune_llm_reasoning(
@@ -197,9 +144,6 @@ def finetune_llm_reasoning(
             init_hyperparams=init_hp,
         )
 
-    if accelerator is None or accelerator.is_main_process:
-        print("\nTraining...")
-
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
     if max_steps is None and num_epochs is None:
         max_steps = len(env)
@@ -219,7 +163,6 @@ def finetune_llm_reasoning(
 
     total_steps = 0
 
-    # calling env.reset() supplies the first batch of training data
     prompts = env.reset(reset_dataloaders=True)
     for i in range(training_steps):
         agent_metrics_dict = {}
@@ -228,7 +171,6 @@ def finetune_llm_reasoning(
             completion_ids, action_masks = agent.get_action(prompts)
             completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
-            # Use the reward function stored in env.step to calculate reward of the each answer from the group
             next_prompts, rewards = env.step(completion_ids)
 
             experiences = (
@@ -236,9 +178,7 @@ def finetune_llm_reasoning(
                 action_masks,
                 rewards,
             )
-            loss, kl, pg_loss, critic_loss, entropy = agent.learn(
-                experiences, env.tokenizer
-            )
+            loss, kl, pg_loss, critic_loss, entropy = agent.learn(experiences)
             metrics = [loss, kl, rewards, completion_lengths]
             if max_reward is not None:
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
@@ -579,9 +519,6 @@ def finetune_llm_preference(
             init_hyperparams=init_hp,
         )
 
-    if accelerator is None or accelerator.is_main_process:
-        pass
-
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
     if max_steps is None and num_epochs is None:
         max_steps = len(env)
@@ -914,9 +851,6 @@ def finetune_llm_multiturn(
             init_hyperparams=init_hp,
         )
 
-    if accelerator is None or accelerator.is_main_process:
-        print("\nTraining...")
-
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
     if accelerator is None or accelerator.is_main_process:
         pbar = trange(
@@ -987,7 +921,6 @@ def finetune_llm_multiturn(
             )
             loss, kl, pg_loss, critic_loss, entropy = agent.learn(
                 experiences,
-                tokenizer,
                 turn_ids=turn_ids_padded,
             )
 

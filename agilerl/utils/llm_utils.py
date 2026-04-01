@@ -42,7 +42,7 @@ def apply_chat_template(
     answer: str,
     tokenizer: AutoTokenizer,
 ) -> BatchEncoding:
-    """Create and tokenize a chat template for a reaosning task.
+    """Create and tokenize a chat template for a reasoning task.
 
     :param conversation_template: The conversation template to be tokenized.
     :type conversation_template: list[dict[str, str]]
@@ -402,7 +402,6 @@ class ReasoningGym(HuggingFaceGym):
         :return: Rewards for the completions.
         :rtype: torch.Tensor
         """
-        # This is for a batch of completions (prompt_batch x group_size), List of tensors of length batch size, each tensor is a group of answers
         total_rewards = []
         for idx, (group_completion, answer, question) in enumerate(
             zip(completions, self.answers, self.questions, strict=False),
@@ -412,7 +411,6 @@ class ReasoningGym(HuggingFaceGym):
                 self.last_tokenized_prompts[idx]["input_ids"].shape[1] :,
             ]
 
-            # Vectorize this in the future
             decoded_group_completion = self.tokenizer.batch_decode(
                 completion_to_decode,
                 skip_special_tokens=True,
@@ -474,7 +472,6 @@ class ReasoningGym(HuggingFaceGym):
             questions = [item["question"] for item in batch]
             answers = [item["answer"] for item in batch]
 
-            # Apply chat template to all samples
             tokenized_prompts = [
                 apply_chat_template(self.conversation_template, q, a, tokenizer)
                 for q, a in zip(questions, answers, strict=False)
@@ -483,7 +480,7 @@ class ReasoningGym(HuggingFaceGym):
             return {
                 "question": questions,
                 "answer": answers,
-                "tokenized_prompts": tokenized_prompts,  # Keep individual tokenized prompts
+                "tokenized_prompts": tokenized_prompts,
             }
 
         return collate_fn
@@ -595,7 +592,6 @@ class PreferenceGym(HuggingFaceGym):
             chosen = [item["chosen"] for item in batch]
             rejected = [item["rejected"] for item in batch]
 
-            # Tokenize prompts separately to get their lengths
             prompt_encodings = tokenizer(
                 prompts,
                 truncation=True,
@@ -604,7 +600,6 @@ class PreferenceGym(HuggingFaceGym):
             )
             prompt_lengths = [len(ids) for ids in prompt_encodings["input_ids"]]
 
-            # Tokenize without padding
             chosen_enc = tokenizer(
                 prompts,
                 chosen,
@@ -620,7 +615,6 @@ class PreferenceGym(HuggingFaceGym):
                 padding=False,
             )
 
-            # Compute the joint max length across both
             max_len = max(
                 *(len(ids) for ids in chosen_enc["input_ids"]),
                 *(len(ids) for ids in rejected_enc["input_ids"]),
@@ -632,7 +626,6 @@ class PreferenceGym(HuggingFaceGym):
                 else max_len
             )
 
-            # Now pad both encodings to the same target length
             chosen_enc = tokenizer.pad(
                 chosen_enc,
                 padding="max_length",
@@ -651,16 +644,10 @@ class PreferenceGym(HuggingFaceGym):
                 "prompt_lengths": prompt_lengths,
                 "chosen": chosen,
                 "rejected": rejected,
-                "chosen_input_ids": chosen_enc["input_ids"],  # [batch_size, max_len]
-                "chosen_attention_mask": chosen_enc[
-                    "attention_mask"
-                ].long(),  # [batch_size, max_len]
-                "rejected_input_ids": rejected_enc[
-                    "input_ids"
-                ],  # [batch_size, max_len]
-                "rejected_attention_mask": rejected_enc[
-                    "attention_mask"
-                ].long(),  # [batch_size, max_len]
+                "chosen_input_ids": chosen_enc["input_ids"],
+                "chosen_attention_mask": chosen_enc["attention_mask"].long(),
+                "rejected_input_ids": rejected_enc["input_ids"],
+                "rejected_attention_mask": rejected_enc["attention_mask"].long(),
             }
 
         return collate_fn
@@ -724,7 +711,6 @@ def create_model_from_name_or_path(
             "torch_dtype": torch.bfloat16,
             "attn_implementation": "sdpa",
         }
-    print("model_config", model_config)
     if add_value_head:
         return AutoModelForCausalLMWithValueHead.from_pretrained(
             pretrained_model_name_or_path=model_name_or_path,
