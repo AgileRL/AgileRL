@@ -414,6 +414,13 @@ def finetune_llm_reasoning(
             f"Mutations:\t\t{muts}",
         )
 
+    if save_elite and elite_path is not None:
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        if accelerator is None or accelerator.is_main_process:
+            elite = max(pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf"))
+            save_llm_checkpoint(elite, elite_path)
+
     if accelerator is not None:
         accelerator.wait_for_everyone()
     if accelerator is None or accelerator.is_main_process:
@@ -753,6 +760,13 @@ def finetune_llm_preference(
 
         pbar.write("\n".join(lines))
 
+    if save_elite and elite_path is not None:
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        if accelerator is None or accelerator.is_main_process:
+            elite = max(pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf"))
+            save_llm_checkpoint(elite, elite_path)
+
     if _dpo_csv_file is not None:
         _dpo_csv_file.close()
         print(f"Training metrics saved to {os.path.join(elite_path, 'metrics.csv')}")
@@ -1072,13 +1086,12 @@ def finetune_llm_sft(
 
         pbar.write("\n".join(lines))
 
-    if plot_path is not None and (accelerator is None or accelerator.is_main_process):
-        _plot_sft_loss_curves(
-            pop=pop,
-            effective_data_batch_size=effective_data_batch_size,
-            evaluation_interval=evaluation_interval,
-            plot_path=plot_path,
-        )
+    if save_elite and elite_path is not None:
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        if accelerator is None or accelerator.is_main_process:
+            elite = max(pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf"))
+            save_llm_checkpoint(elite, elite_path)
 
     if _sft_csv_file is not None:
         _sft_csv_file.close()
