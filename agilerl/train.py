@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--manifest",
         type=Path,
-        default="configs/training/dqn/dqn.yaml",
+        required=True,
         help="Path to a YAML/JSON training manifest.",
     )
     parser.add_argument(
@@ -79,11 +79,6 @@ def parse_args() -> argparse.Namespace:
         help="Path for the saved elite agent.",
     )
     parser.add_argument(
-        "--swap-channels",
-        action="store_true",
-        help="Swap image channels from HWC to CHW.",
-    )
-    parser.add_argument(
         "--tensorboard",
         action="store_true",
         help="Enable TensorBoard logging.",
@@ -124,7 +119,6 @@ def main() -> None:
         checkpoint_path=args.checkpoint_path,
         save_elite=args.save_elite,
         elite_path=args.elite_path,
-        swap_channels=args.swap_channels,
     )
 
     best_fitness = max(f for gen in fitness_history for f in gen)

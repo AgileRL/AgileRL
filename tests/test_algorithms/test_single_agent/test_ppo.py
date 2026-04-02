@@ -1772,7 +1772,6 @@ def test_ppo_test_loop_masks_callbacks_and_non_vectorized_paths(
     ):
         _ = ppo.test(
             VecEnv(),
-            swap_channels=True,
             vectorized=True,
             loop=1,
             callback=lambda score, info: callback_calls.append((score, info)),

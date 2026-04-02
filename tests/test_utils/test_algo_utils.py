@@ -54,7 +54,6 @@ from agilerl.utils.algo_utils import (
     maybe_add_batch_dim,
     module_checkpoint_single,
     multi_dim_clamp,
-    obs_channels_to_first,
     obs_to_tensor,
     preprocess_observation,
     recursive_check_module_attrs,
@@ -302,29 +301,6 @@ def test_concatenate_spaces():
     concat_multidiscrete = concatenate_spaces([multidiscrete1, multidiscrete2])
     assert isinstance(concat_multidiscrete, spaces.MultiDiscrete)
     np.testing.assert_array_equal(concat_multidiscrete.nvec, np.array([3, 4, 5, 6]))
-
-
-def test_obs_channels_to_first():
-    # Test with 3D observation (HWC to CHW)
-    obs_hwc = np.ones((84, 84, 3))
-    obs_chw = obs_channels_to_first(obs_hwc)
-    assert obs_chw.shape == (3, 84, 84)
-
-    # Test with 4D observation (NHWC to NCHW)
-    obs_nhwc = np.ones((2, 84, 84, 3))
-    obs_nchw = obs_channels_to_first(obs_nhwc)
-    assert obs_nchw.shape == (2, 3, 84, 84)
-
-    # Test with 1D observation (no change)
-    obs_1d = np.ones(10)
-    obs_1d_result = obs_channels_to_first(obs_1d)
-    assert obs_1d_result.shape == (10,)
-
-    # Test with dict of observations
-    obs_dict = {"image": np.ones((84, 84, 3)), "vector": np.ones(10)}
-    result_dict = obs_channels_to_first(obs_dict)
-    assert result_dict["image"].shape == (3, 84, 84)
-    assert result_dict["vector"].shape == (10,)
 
 
 def test_obs_to_tensor():
@@ -1468,19 +1444,6 @@ def test_clone_llm_invalid_type_raises():
     """clone_llm raises ValueError for invalid type."""
     with pytest.raises(ValueError, match="Invalid 'original_model' type"):
         clone_llm("invalid_model", 0)
-
-
-def test_obs_channels_to_first_expand_dims():
-    """obs_channels_to_first with expand_dims=True."""
-    obs = np.ones((84, 84, 3))
-    result = obs_channels_to_first(obs, expand_dims=True)
-    assert result.shape == (1, 3, 84, 84)
-
-
-def test_obs_channels_to_first_unsupported_type():
-    """obs_channels_to_first raises for non-ndarray/dict."""
-    with pytest.raises(TypeError, match="Expected np.ndarray or dict"):
-        obs_channels_to_first("invalid")
 
 
 def test_obs_to_tensor_tensordict():

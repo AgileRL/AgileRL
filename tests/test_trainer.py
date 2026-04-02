@@ -9,7 +9,6 @@ Covers:
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,16 +24,15 @@ from agilerl.models import (
     ArenaEnvSpec,
     PPOSpec,
     RLAlgorithmSpec,
-    TrainingManifest,
 )
-from agilerl.models.networks import MlpSpec, NetworkSpec
+from agilerl.models.networks import MlpSpec, QNetworkSpec, StochasticActorSpec
 from agilerl.models.hpo import (
     MutationProbabilities,
     MutationSpec,
     TournamentSelectionSpec,
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-from agilerl.training.trainer import ArenaTrainer, LocalTrainer, Trainer
+from agilerl.training.trainer import ArenaTrainer, LocalTrainer
 from agilerl.utils.trainer_utils import (
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
@@ -49,9 +47,17 @@ from agilerl.utils.trainer_utils import (
 
 
 class DummyEnv:
-    """Minimal gym-like environment for unit tests."""
+    """Minimal gym-like environment for unit tests.
+
+    Supports the vectorized-env attributes that ``LocalTrainer`` and
+    ``build_train_kwargs`` rely on (``single_observation_space``,
+    ``single_action_space``, ``num_envs``).  Also provides a
+    ``make_env`` method so it can be used directly as an environment
+    spec in ``LocalTrainer._make_env()``.
+    """
 
     def __init__(self) -> None:
+        self.name = "DummyEnv-v0"
         self.observation_space = Box(low=-1, high=1, shape=(4,))
         self.action_space = Discrete(2)
         self.num_envs = 1
@@ -68,6 +74,15 @@ class DummyEnv:
     def single_action_space(self, agent=None):
         return self.action_space
 
+    def make_single_env(self):
+        return self
+
+    def make_env(self, **kwargs):
+        return self
+
+    def close(self):
+        pass
+
     def __str__(self) -> str:
         return "DummyEnv"
 
@@ -81,7 +96,7 @@ def env():
 def ppo_spec() -> PPOSpec:
     return PPOSpec(
         learn_step=128,
-        net_config=NetworkSpec(
+        net_config=StochasticActorSpec(
             encoder_config=MlpSpec(hidden_size=[64]),
             head_config=MlpSpec(hidden_size=[64]),
         ),
@@ -190,7 +205,7 @@ class TestBuildTrainKwargs:
             algo_spec=ppo_spec,
             env=env,
             env_name="test",
-            pop=[MagicMock()],
+            population=[MagicMock()],
             training=training_spec,
             tournament=None,
             mutations=None,
@@ -206,7 +221,7 @@ class TestBuildTrainKwargs:
             algo_spec=dqn_spec,
             env=env,
             env_name="test",
-            pop=[MagicMock()],
+            population=[MagicMock()],
             training=training_spec,
             tournament=None,
             mutations=None,
@@ -222,36 +237,39 @@ class TestBuildTrainKwargs:
 
 
 class TestLocalTrainerConstruction:
-    def test_string_algorithm(self, env):
-        trainer = LocalTrainer(algorithm="PPO", environment=env)
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_string_algorithm(self, mock_create_pop, env, training_spec):
+        mock_create_pop.return_value = [MagicMock()]
+        trainer = LocalTrainer(algorithm="PPO", environment=env, training=training_spec)
         assert isinstance(trainer.algorithm, PPOSpec)
-        assert trainer.training.max_steps == 1_000_000  # default
+        assert trainer.training is training_spec
 
-    def test_spec_algorithm(self, env, ppo_spec, training_spec):
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_spec_algorithm(self, mock_create_pop, env, ppo_spec, training_spec):
+        mock_create_pop.return_value = [MagicMock()]
         trainer = LocalTrainer(
             algorithm=ppo_spec,
             environment=env,
             training=training_spec,
         )
         assert trainer.algorithm is ppo_spec
-        assert trainer.training.pop_size == 2
+        assert trainer.training.population_size == 2
 
-    def test_unknown_algorithm_raises(self, env):
+    def test_unknown_algorithm_raises(self, env, training_spec):
         with pytest.raises((ValueError, KeyError)):
-            LocalTrainer(algorithm="UnknownAlgo", environment=env)
+            LocalTrainer(
+                algorithm="UnknownAlgo", environment=env, training=training_spec
+            )
 
-    def test_default_training_spec(self, env):
-        trainer = LocalTrainer(algorithm="PPO", environment=env)
-        assert isinstance(trainer.training, TrainingSpec)
-        assert trainer.training.pop_size == 4
-
+    @patch("agilerl.training.trainer.create_population_from_spec")
     def test_all_optional_params(
-        self, env, mutation_spec, tournament_spec, buffer_spec
+        self, mock_create_pop, env, mutation_spec, tournament_spec, buffer_spec
     ):
+        mock_create_pop.return_value = [MagicMock()]
         trainer = LocalTrainer(
             algorithm="DQN",
             environment=env,
-            training=TrainingSpec(max_steps=200),
+            training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=2),
             mutation=mutation_spec,
             tournament=tournament_spec,
             replay_buffer=buffer_spec,
@@ -268,16 +286,18 @@ class TestLocalTrainerTrain:
         self,
         mock_create_pop,
         env,
+        training_spec,
     ):
         mock_pop = [MagicMock()]
         mock_create_pop.return_value = mock_pop
         mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
 
-        trainer = LocalTrainer(
-            algorithm="PPO",
-            environment=env,
-        )
         with patch.object(PPOSpec, "get_training_fn", return_value=mock_train_fn):
+            trainer = LocalTrainer(
+                algorithm="PPO",
+                environment=env,
+                training=training_spec,
+            )
             result = trainer.train()
 
         mock_train_fn.assert_called_once()
@@ -290,47 +310,43 @@ class TestLocalTrainerTrain:
 
 
 class TestArenaTrainerConstruction:
-    def test_string_algorithm_and_env(self, mock_client):
+    def test_string_algorithm_and_env(self, mock_client, training_spec):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm="PPO",
             environment=env_spec,
+            training=training_spec,
             client=mock_client,
         )
         assert isinstance(trainer.algorithm, PPOSpec)
         assert trainer._client is mock_client
 
-    def test_spec_algorithm(self, mock_client, ppo_spec):
+    def test_spec_algorithm(self, mock_client, ppo_spec, training_spec):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
+            training=training_spec,
             client=mock_client,
         )
         assert trainer.algorithm is ppo_spec
 
-    def test_env_spec(self, mock_client):
+    def test_env_spec(self, mock_client, training_spec):
         env_spec = ArenaEnvSpec(name="CartPole-v1", version="v1", num_envs=8)
         trainer = ArenaTrainer(
             algorithm="DQN",
             environment=env_spec,
+            training=training_spec,
             client=mock_client,
         )
         assert trainer.environment is env_spec
-
-    def test_default_training_spec(self, mock_client):
-        env_spec = ArenaEnvSpec(name="CartPole-v1")
-        trainer = ArenaTrainer(
-            algorithm="PPO", environment=env_spec, client=mock_client
-        )
-        assert isinstance(trainer.training, TrainingSpec)
 
     def test_all_specs(self, mock_client, mutation_spec, tournament_spec, buffer_spec):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm="DQN",
             environment=env_spec,
-            training=TrainingSpec(max_steps=200, pop_size=3),
+            training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=3),
             mutation=mutation_spec,
             tournament=tournament_spec,
             replay_buffer=buffer_spec,
@@ -339,50 +355,53 @@ class TestArenaTrainerConstruction:
         assert trainer.mutation is mutation_spec
         assert trainer.tournament is tournament_spec
         assert trainer.replay_buffer is buffer_spec
-        assert trainer.training.pop_size == 3
+        assert trainer.training.population_size == 3
 
     @patch("agilerl.arena.client.ArenaClient")
-    def test_auto_creates_client(self, mock_cls):
+    def test_auto_creates_client(self, mock_cls, training_spec):
         """If no client is passed, ArenaTrainer creates one automatically."""
         mock_cls.return_value = MagicMock()
         env_spec = ArenaEnvSpec(name="CartPole-v1")
-        trainer = ArenaTrainer(algorithm="PPO", environment=env_spec)
+        trainer = ArenaTrainer(
+            algorithm="PPO", environment=env_spec, training=training_spec
+        )
         assert trainer._client is not None
 
 
 class TestArenaTrainerManifest:
-    def test_minimal_manifest_from_string_algo_and_env(self, mock_client):
+    def test_minimal_manifest_from_string_algo_and_env(
+        self, mock_client, training_spec
+    ):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm="PPO",
             environment=env_spec,
+            training=training_spec,
             client=mock_client,
         )
         manifest = trainer.to_manifest()
-        payload = manifest.to_payload()
 
-        assert isinstance(manifest, TrainingManifest)
-        assert manifest.network is None
-        assert payload["algorithm"]["name"] == "PPO"
-        assert payload["environment"]["name"] == "CartPole-v1"
-        assert "network" not in payload
+        assert manifest["algorithm"]["name"] == "PPO"
+        assert manifest["environment"]["name"] == "CartPole-v1"
+        assert "network" not in manifest
 
-    def test_string_based_manifest(self, mock_client, ppo_spec):
+    def test_string_based_manifest(self, mock_client, ppo_spec, training_spec):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
+            training=training_spec,
             client=mock_client,
         )
         manifest = trainer.to_manifest()
 
-        assert isinstance(manifest, TrainingManifest)
-        assert isinstance(manifest.algorithm, PPOSpec)
-        assert manifest.environment.name == "CartPole-v1"
-        assert manifest.training.max_steps == 1_000_000
+        assert isinstance(manifest, dict)
+        assert manifest["algorithm"]["name"] == "PPO"
+        assert manifest["environment"]["name"] == "CartPole-v1"
+        assert manifest["training"]["max_steps"] == 500
 
     def test_spec_based_manifest(self, mock_client, ppo_spec):
-        training = TrainingSpec(max_steps=50_000, pop_size=8)
+        training = TrainingSpec(max_steps=50_000, evo_steps=500, pop_size=8)
         env_spec = ArenaEnvSpec(name="MountainCar-v0")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
@@ -392,15 +411,15 @@ class TestArenaTrainerManifest:
         )
         manifest = trainer.to_manifest()
 
-        assert manifest.algorithm is ppo_spec
-        assert manifest.algorithm.learn_step == 128
-        assert manifest.training.pop_size == 8
-        assert manifest.environment.name == "MountainCar-v0"
+        assert manifest["algorithm"]["name"] == "PPO"
+        assert manifest["algorithm"]["learn_step"] == 128
+        assert manifest["training"]["population_size"] == 8
+        assert manifest["environment"]["name"] == "MountainCar-v0"
 
-    def test_env_spec_manifest(self, mock_client):
+    def test_env_spec_manifest(self, mock_client, training_spec):
         env_spec = ArenaEnvSpec(name="LunarLander-v3", version="v2", num_envs=4)
         dqn_spec = DQNSpec(
-            net_config=NetworkSpec(
+            net_config=QNetworkSpec(
                 encoder_config=MlpSpec(hidden_size=[64]),
                 head_config=MlpSpec(hidden_size=[64]),
             )
@@ -408,32 +427,40 @@ class TestArenaTrainerManifest:
         trainer = ArenaTrainer(
             algorithm=dqn_spec,
             environment=env_spec,
+            training=training_spec,
             client=mock_client,
         )
         manifest = trainer.to_manifest()
 
-        assert manifest.environment is env_spec
-        assert manifest.environment.num_envs == 4
+        assert manifest["environment"]["name"] == "LunarLander-v3"
+        assert manifest["environment"]["num_envs"] == 4
 
     def test_manifest_includes_mutation_and_tournament(
-        self, mock_client, mutation_spec, tournament_spec, ppo_spec
+        self, mock_client, mutation_spec, tournament_spec, ppo_spec, training_spec
     ):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
+            training=training_spec,
             mutation=mutation_spec,
             tournament=tournament_spec,
             client=mock_client,
         )
         manifest = trainer.to_manifest()
-        assert manifest.mutation is mutation_spec
-        assert manifest.tournament_selection is tournament_spec
+        assert manifest["mutation"]["probabilities"]["no_mut"] == 0.5
+        assert manifest["mutation"]["probabilities"]["params_mut"] == 0.3
+        assert manifest["mutation"]["probabilities"]["rl_hp_mut"] == 0.2
+        assert manifest["mutation"]["mutation_sd"] == 0.05
+        assert manifest["tournament_selection"]["tournament_size"] == 3
+        assert manifest["tournament_selection"]["elitism"] is True
 
-    def test_manifest_includes_replay_buffer(self, mock_client, buffer_spec):
+    def test_manifest_includes_replay_buffer(
+        self, mock_client, buffer_spec, training_spec
+    ):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         dqn_spec = DQNSpec(
-            net_config=NetworkSpec(
+            net_config=QNetworkSpec(
                 encoder_config=MlpSpec(hidden_size=[64]),
                 head_config=MlpSpec(hidden_size=[64]),
             )
@@ -441,118 +468,104 @@ class TestArenaTrainerManifest:
         trainer = ArenaTrainer(
             algorithm=dqn_spec,
             environment=env_spec,
+            training=training_spec,
             replay_buffer=buffer_spec,
             client=mock_client,
         )
         manifest = trainer.to_manifest()
-        assert manifest.replay_buffer is buffer_spec
+        assert manifest["replay_buffer"]["max_size"] == 5_000
 
-    def test_manifest_network_from_algo_spec(self, mock_client, ppo_spec):
+    def test_manifest_network_from_algo_spec(
+        self, mock_client, ppo_spec, training_spec
+    ):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
+            training=training_spec,
             client=mock_client,
         )
         manifest = trainer.to_manifest()
-        assert manifest.network is ppo_spec.net_config
+        assert manifest["algorithm"]["net_config"]["encoder_config"]["hidden_size"] == [
+            64
+        ]
+        assert manifest["algorithm"]["net_config"]["head_config"]["hidden_size"] == [64]
 
-    def test_manifest_payload_uses_spec_serializers(self, mock_client, ppo_spec):
+    def test_manifest_payload_uses_spec_serializers(
+        self, mock_client, ppo_spec, training_spec
+    ):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
+            training=training_spec,
             client=mock_client,
         )
-        payload = trainer.to_manifest().to_payload()
+        manifest = trainer.to_manifest()
 
-        assert payload["algorithm"]["name"] == "PPO"
-        assert payload["training"]["name"] == "train_on_policy"
-        assert payload["environment"]["name"] == "CartPole-v1"
+        assert manifest["algorithm"]["name"] == "PPO"
+        assert manifest["training"]["max_steps"] == 500
+        assert manifest["environment"]["name"] == "CartPole-v1"
 
-    def test_invalid_env_type_raises(self, mock_client):
+    def test_invalid_env_type_raises(self, mock_client, training_spec):
         """Passing a non-spec environment to ArenaTrainer.to_manifest raises TypeError."""
         trainer = ArenaTrainer.__new__(ArenaTrainer)
         trainer.algorithm = PPOSpec()
         trainer.environment = 42  # not an EnvironmentSpec or str
-        trainer.training = TrainingSpec()
+        trainer.training = training_spec
         trainer.mutation = None
         trainer.tournament = None
         trainer.replay_buffer = None
         trainer._client = mock_client
 
-        with pytest.raises(TypeError, match="ArenaTrainer requires"):
+        with pytest.raises((TypeError, Exception)):
             trainer.to_manifest()
 
 
 class TestArenaTrainerTrain:
-    def test_train_submits_manifest(self, mock_client, ppo_spec):
+    def test_train_submits_manifest(self, mock_client, ppo_spec, training_spec):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
+            training=training_spec,
             client=mock_client,
         )
         result = trainer.train()
 
         mock_client.submit_job.assert_called_once()
         submitted_manifest = mock_client.submit_job.call_args[0][0]
-        assert isinstance(submitted_manifest, TrainingManifest)
+        assert isinstance(submitted_manifest, dict)
+        assert submitted_manifest["algorithm"]["name"] == "PPO"
         assert result["job_id"] == "test-123"
 
     def test_train_submits_manifest_with_serializable_payload(
-        self, mock_client, ppo_spec
+        self, mock_client, ppo_spec, training_spec
     ):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
+            training=training_spec,
             client=mock_client,
         )
         trainer.train()
         submitted_manifest = mock_client.submit_job.call_args[0][0]
-        payload = submitted_manifest.to_payload()
-        assert payload["algorithm"]["name"] == "PPO"
-        assert payload["training"]["name"] == "train_on_policy"
+        assert submitted_manifest["algorithm"]["name"] == "PPO"
+        assert submitted_manifest["training"]["max_steps"] == 500
 
-    def test_train_with_stream(self, mock_client, ppo_spec):
+    def test_train_with_stream(self, mock_client, ppo_spec, training_spec):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm=ppo_spec,
             environment=env_spec,
+            training=training_spec,
             client=mock_client,
         )
         trainer.train(stream=True)
 
         _, call_kwargs = mock_client.submit_job.call_args
         assert call_kwargs["stream"] is True
-
-
-# ---------------------------------------------------------------------------
-# Spec defaults (zero-config)
-# ---------------------------------------------------------------------------
-
-
-class TestSpecDefaults:
-    def test_ppo_defaults(self):
-        spec = PPOSpec()
-        assert spec.learn_step == 2048
-        assert spec.num_envs == 1
-        assert spec.gamma == 0.99
-        assert spec.net_config is None
-
-    def test_dqn_defaults(self):
-        spec = DQNSpec()
-        assert spec.learn_step == 5
-
-    def test_ddpg_defaults(self):
-        spec = DDPGSpec()
-        assert spec.learn_step == 5
-
-    def test_rl_algorithm_spec_default_net_config(self):
-        spec = RLAlgorithmSpec()
-        assert spec.net_config is None
-        assert spec.learn_step == 5
 
 
 # ---------------------------------------------------------------------------

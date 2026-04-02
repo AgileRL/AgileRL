@@ -176,5 +176,5 @@ class TrainingSpec(BaseModel):
     eps_end: float | None = Field(default=None)
     eps_decay: float | None = Field(default=None)
 
-    ### Arena-specific fields ###
+    # NOTE: The following are only applicable to Arena training
     reporting_interval: int = Field(default=1024, ge=1)

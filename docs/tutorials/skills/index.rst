@@ -69,12 +69,10 @@ Importing the following packages, functions and classes will enable us to run th
       from agilerl.algorithms.ppo import PPO
       from agilerl.training.train_on_policy import train_on_policy
       from agilerl.wrappers.learning import Skill
-      from agilerl.utils.algo_utils import obs_channels_to_first
       from agilerl.utils.utils import (
          create_population,
          make_skill_vect_envs,
          make_vect_envs,
-         observation_space_channels_to_first
       )
 
 
@@ -245,8 +243,6 @@ Once the skills have been defined, training agents to solve them is very straigh
          "MAX_STEPS": 1_000_000,
          "EVO_STEPS": 10_000,
          "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-         "CHANNELS_LAST": False,
          "WANDB": True,
       }
 
@@ -273,8 +269,6 @@ Once the skills have been defined, training agents to solve them is very straigh
 
          observation_space = env.single_observation_space
          action_space = env.single_action_space
-         if INIT_HP["CHANNELS_LAST"]:
-               observation_space = observation_space_channels_to_first(observation_space)
 
          pop = create_population(
                algo="PPO",  # Algorithm
@@ -291,9 +285,6 @@ Once the skills have been defined, training agents to solve them is very straigh
                env_name=f"{INIT_HP['ENV_NAME']}-{skill}",  # Environment name
                algo=INIT_HP["ALGO"],  # Algorithm
                pop=pop,  # Population of agents
-               swap_channels=INIT_HP[
-                  "CHANNELS_LAST"
-               ],  # Swap image channel from last to first
                max_steps=INIT_HP["MAX_STEPS"],  # Max number of training episodes
                evo_steps=INIT_HP["EVO_STEPS"],  # Evolution frequency
                evo_loop=3,  # Number of evaluation episodes per agent
@@ -349,9 +340,6 @@ Next we can define the variables we will need in our training loop.
       )  # Selector will be trained to choose which trained skill to use
 
       action_space = spaces.Discrete(action_dim)
-
-      if INIT_HP["CHANNELS_LAST"]:
-         observation_space = observation_space_channels_to_first(observation_space)
 
       pop = create_population(
          algo="PPO",  # Algorithm

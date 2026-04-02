@@ -30,7 +30,7 @@ Below is an example of a distributed training loop.
         from agilerl.components.sampler import Sampler
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
-        from agilerl.utils.utils import create_population, make_vect_envs, observation_space_channels_to_first
+        from agilerl.utils.utils import create_population, make_vect_envs
         from accelerate import Accelerator
         import numpy as np
         import os
@@ -56,8 +56,6 @@ Below is an example of a distributed training loop.
             "GAMMA": 0.99,  # Discount factor
             "LEARN_STEP": 1,  # Learning frequency
             "TAU": 1e-3,  # For soft update of target network parameters
-            # Swap image channels dimension last to first [H, W, C] -> [C, H, W]
-            "CHANNELS_LAST": False,
             "POP_SIZE": 4,  # Population size
         }
 
@@ -67,8 +65,6 @@ Below is an example of a distributed training loop.
 
         observation_space = env.single_observation_space
         action_space = env.single_action_space
-        if INIT_HP['CHANNELS_LAST']:
-            observation_space = observation_space_channels_to_first(observation_space)
 
         # RL hyperparameter configuration for mutations
         hp_config = HyperparameterConfig(
@@ -200,7 +196,6 @@ Below is an example of a distributed training loop.
             fitnesses = [
                 agent.test(
                     env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
                     max_steps=eval_steps,
                     loop=eval_loop,
                 )

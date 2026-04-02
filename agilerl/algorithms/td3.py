@@ -25,7 +25,6 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
     multi_dim_clamp,
-    obs_channels_to_first,
     share_encoder_parameters,
 )
 from agilerl.utils.evolvable_networks import (
@@ -35,7 +34,7 @@ from agilerl.utils.evolvable_networks import (
 
 
 class TD3(RLAlgorithm):
-    """Twin Delayed Deep Deterministic Policy Gradient (TD3) algorithm.
+    """Twin Delayed Deep Deterministic Policy Gradient (TD3).
 
     Paper: https://arxiv.org/abs/1802.09477
 
@@ -585,7 +584,6 @@ class TD3(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
@@ -593,8 +591,6 @@ class TD3(RLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -614,9 +610,6 @@ class TD3(RLAlgorithm):
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
-                    if swap_channels:
-                        obs = obs_channels_to_first(obs)
-
                     action = self.get_action(obs, training=False)
                     obs, reward, done, trunc, _ = env.step(action)
                     step += 1

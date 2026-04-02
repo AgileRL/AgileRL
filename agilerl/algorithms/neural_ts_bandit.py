@@ -16,12 +16,12 @@ from agilerl.typing import (
     ObservationType,
     SupportedObservationSpace,
 )
-from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
+from agilerl.utils.algo_utils import make_safe_deepcopies
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
 class NeuralTS(RLAlgorithm):
-    """Neural Thompson Sampling (NeuralTS) algorithm.
+    """Neural Thompson Sampling (NeuralTS).
 
     Paper: https://arxiv.org/abs/2010.00827
 
@@ -306,7 +306,6 @@ class NeuralTS(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels: bool = False,
         max_steps: int = 100,
         loop: int = 1,
     ) -> float:
@@ -314,8 +313,6 @@ class NeuralTS(RLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to 500
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 3
@@ -328,8 +325,6 @@ class NeuralTS(RLAlgorithm):
                 obs = env.reset()
                 score = 0
                 for _ in range(max_steps):
-                    if swap_channels:
-                        obs = obs_channels_to_first(obs)
                     obs = torch.from_numpy(obs).float()
                     obs = obs.to(self.device)
                     action = np.argmax(self.actor(obs).cpu().numpy())

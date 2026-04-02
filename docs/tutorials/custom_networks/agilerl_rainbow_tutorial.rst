@@ -484,9 +484,7 @@ End-to-end example
             "V_MIN": -200.0,  # Minimum value of support
             "V_MAX": 200.0,  # Maximum value of support
             "NOISY": True,  # Add noise directly to the weights of the network
-            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
             "LEARNING_DELAY": 1000,  # Steps before starting learning
-            "CHANNELS_LAST": False,  # Use with RGB states
             "TARGET_SCORE": 200.0,  # Target score that will beat the environment
             "MAX_STEPS": 200000,  # Maximum number of steps an agent takes in an environment
             "EVO_STEPS": 10000,  # Evolution frequency

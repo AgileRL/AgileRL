@@ -278,7 +278,6 @@ parameters, and ``MUTATION_PARAMS``, which define the evolutionary probabilities
           'ENV_NAME': 'LunarLander-v3',   # Gym environment name
           'ALGO': 'DQN',                  # Algorithm
           'DOUBLE': True,                 # Use double Q-learning
-          'CHANNELS_LAST': False,         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
           'BATCH_SIZE': 256,              # Batch size
           'LR': 1e-3,                     # Learning rate
           'MAX_STEPS': 1_000_000,         # Max no. steps
@@ -344,7 +343,6 @@ First, use ``utils.utils.create_population`` to create a list of agents - our po
       from agilerl.utils.utils import (
           make_vect_envs,
           create_population,
-          observation_space_channels_to_first
       )
 
       device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -354,8 +352,6 @@ First, use ``utils.utils.create_population`` to create a list of agents - our po
 
       observation_space = env.single_observation_space
       action_space = env.single_action_space
-      if INIT_HP['CHANNELS_LAST']:
-          observation_space = observation_space_channels_to_first(observation_space)
 
       agent_pop = create_population(
           algo=INIT_HP['ALGO'],                 # Algorithm
@@ -426,7 +422,6 @@ It requires the ``agent`` have methods ``get_action()`` and ``learn()``.
           algo=INIT_HP['ALGO'],                      # Algorithm
           pop=agent_pop,                             # Population of agents
           memory=memory,                             # Replay buffer
-          swap_channels=INIT_HP['CHANNELS_LAST'],    # Swap image channel from last to first
           max_steps=INIT_HP["MAX_STEPS"],            # Max number of training steps
           evo_steps=INIT_HP['EVO_STEPS'],            # Evolution frequency
           eval_steps=INIT_HP["EVAL_STEPS"],          # Number of steps in evaluation episode

@@ -399,13 +399,10 @@ def test_clone_new_index(vector_space, discrete_space):
     clone_agent.clean_up()
 
 
-def test_algorithm_test_loop_swap_channels(image_space, discrete_space, monkeypatch):
-    monkeypatch.setattr(
-        "agilerl.algorithms.neural_ts_bandit.obs_channels_to_first", lambda x: x
-    )
+def test_algorithm_test_loop(image_space, discrete_space):
     env = DummyBanditEnv(state_size=image_space.shape, arms=discrete_space.n)
     agent = NeuralTS(observation_space=image_space, action_space=discrete_space)
-    mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+    mean_score = agent.test(env, max_steps=1, loop=1)
     assert isinstance(mean_score, float)
     agent.clean_up()
 

@@ -1,6 +1,5 @@
 import importlib
 
-import supersuit as ss
 import torch
 import yaml
 from accelerate import Accelerator
@@ -13,7 +12,6 @@ from agilerl.training.train_multi_agent_on_policy import train_multi_agent_on_po
 from agilerl.utils.utils import (
     create_population,
     make_multi_agent_vect_envs,
-    observation_space_channels_to_first,
     suppress_verbose_logging,
 )
 
@@ -43,17 +41,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
     print(f"DEVICE: {device}")
 
     def create_env(**kwargs):
-        env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env(**kwargs)
-
-        if INIT_HP["CHANNELS_LAST"]:
-            # Environment processing for image based observations
-            env = ss.frame_skip_v0(env, 4)
-            env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
-            env = ss.color_reduction_v0(env, mode="B")
-            env = ss.resize_v1(env, x_size=84, y_size=84)
-            env = ss.frame_stack_v1(env, 4)
-
-        return env
+        return importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env(**kwargs)
 
     env_kwargs = {"max_cycles": 25, "continuous_actions": True}
     env = make_multi_agent_vect_envs(
@@ -67,10 +55,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
     # Configure the multi-agent algo input arguments
     observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
     action_spaces = [env.single_action_space(agent) for agent in env.agents]
-    if INIT_HP["CHANNELS_LAST"]:
-        observation_spaces = [
-            observation_space_channels_to_first(obs) for obs in observation_spaces
-        ]
 
     INIT_HP["AGENT_IDS"] = list(env.agents)
 
@@ -138,7 +122,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
             sum_scores=False,
             INIT_HP=INIT_HP,
             MUT_P=MUTATION_PARAMS,
-            swap_channels=INIT_HP["CHANNELS_LAST"],
             max_steps=INIT_HP["MAX_STEPS"],
             evo_steps=INIT_HP["EVO_STEPS"],
             eval_steps=INIT_HP["EVAL_STEPS"],

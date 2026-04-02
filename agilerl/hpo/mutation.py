@@ -291,13 +291,13 @@ class Mutations:
         # Relative probabilities of mutation
         self.no_mut = no_mutation  # No mutation
         self.architecture_mut = architecture  # Architecture mutation
-
-        # New layer mutation (type of architecture mutation)
-        self.new_layer_prob = new_layer_prob
+        self.new_layer_prob = (
+            new_layer_prob  # New layer mutation (type of architecture mutation)
+        )
         self.parameters_mut = parameters  # Network parameters mutation
         self.activation_mut = activation  # Activation layer mutation
         self.rl_hp_mut = rl_hp  # Learning HP mutation
-        self.activation_selection = activation_selection  # Learning HPs to choose from
+        self.activation_selection = activation_selection  # Activation functions
         self.mutation_sd = mutation_sd  # Mutation strength
         self.mutate_elite = mutate_elite
         self.device = device

@@ -119,17 +119,16 @@ class DeterministicActor(EvolvableNetwork):
         elif isinstance(action_space, spaces.Discrete):
             output_activation = "GumbelSoftmax"
 
-        if head_config is not None:
-            if "output_activation" in head_config:
-                user_output_activation = head_config["output_activation"]
-                if user_output_activation not in self._allowed_output_activations:
-                    warnings.warn(
-                        f"Output activation must be one of the following: {', '.join(self._allowed_output_activations)}. "
-                        f"Got {user_output_activation} instead. Using default output activation.",
-                        stacklevel=2,
-                    )
-                else:
-                    output_activation = user_output_activation
+        if head_config is not None and "output_activation" in head_config:
+            user_output_activation = head_config["output_activation"]
+            if user_output_activation not in self._allowed_output_activations:
+                warnings.warn(
+                    f"Output activation must be one of the following: {', '.join(self._allowed_output_activations)}. "
+                    f"Got {user_output_activation} instead. Using default output activation.",
+                    stacklevel=2,
+                )
+            else:
+                output_activation = user_output_activation
 
         self.output_activation = output_activation
 

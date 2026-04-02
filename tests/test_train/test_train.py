@@ -35,6 +35,7 @@ from agilerl.components.replay_buffer import (
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
+from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.training.train_bandits import train_bandits
 from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
@@ -169,7 +170,7 @@ class DummyAgentOffPolicy:
             return loss, None, None
         return loss
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3, **kwargs):
+    def test(self, env, max_steps=None, loop=3, **kwargs):
         rand_int = np.random.uniform(0, 400)
         self.fitness.append(rand_int)
         return rand_int
@@ -233,8 +234,8 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):  # pylint: disable=overwritten-in
     def _get_action_and_values(self, *args, **kwargs):
         return tuple(torch.randn(self.action_size) for _ in range(5))
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3, **kwargs):
-        return super().test(env, swap_channels, max_steps, loop, **kwargs)
+    def test(self, env, max_steps=None, loop=3, **kwargs):
+        return super().test(env, max_steps, loop, **kwargs)
 
     def preprocess_observation(self, obs):
         return obs
@@ -299,11 +300,14 @@ class DummyCompiledPolicy:
 
 
 class DummyMultiEnv(ParallelEnv):  # pylint: disable=overwritten-inherited-attribute
+    """Mimics a vectorized multi-agent parallel environment with num_envs=1."""
+
     def __init__(self, state_dims, action_dims):
         self.state_dims = state_dims
         self.state_size = self.state_dims
         self.action_dims = action_dims
         self.action_size = self.action_dims
+        self.num_envs = 1
         self.agents = ["agent_0", "other_agent_0"]
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.render_mode = None
@@ -319,15 +323,25 @@ class DummyMultiEnv(ParallelEnv):  # pylint: disable=overwritten-inherited-attri
 
     def reset(self, seed=None, options=None):
         return {
-            agent: np.random.rand(*self.state_dims) for agent in self.agents
+            agent: np.random.rand(self.num_envs, *self.state_dims)
+            for agent in self.agents
         }, self.info
 
     def step(self, action):
         return (
-            {agent: np.random.rand(*self.state_dims) for agent in self.agents},
-            {agent: np.random.randint(0, 5) for agent in self.agents},
-            {agent: np.random.randint(0, 2) for agent in self.agents},
-            {agent: np.random.randint(0, 2) for agent in self.agents},
+            {
+                agent: np.random.rand(self.num_envs, *self.state_dims)
+                for agent in self.agents
+            },
+            {agent: np.random.rand(self.num_envs) for agent in self.agents},
+            {
+                agent: np.random.randint(0, 2, size=(self.num_envs,)).astype(bool)
+                for agent in self.agents
+            },
+            {
+                agent: np.random.randint(0, 2, size=(self.num_envs,)).astype(bool)
+                for agent in self.agents
+            },
             self.info,
         )
 
@@ -420,7 +434,6 @@ class DummyMultiAgent(DummyAgentOffPolicy):
     def test(
         self,
         env,
-        swap_channels=False,
         max_steps=None,
         loop=3,
         sum_scores=True,
@@ -463,6 +476,10 @@ class DummyMultiAgent(DummyAgentOffPolicy):
 
     def extract_inactive_agents(self, obs):
         return {}, obs
+
+
+# Register the dummy multi-agent algorithm with the MultiAgentRLAlgorithm base class.
+MultiAgentRLAlgorithm.register(DummyMultiAgent)
 
 
 class DummyTournament:
@@ -634,75 +651,72 @@ class DummyBanditMemory(ReplayBuffer):
         )
 
 
-class DummyMultiMemory:
+class DummyMultiMemory(ReplayBuffer):
+    """TensorDict-based multi-agent replay buffer stub.
+
+    Mirrors the API of :class:`MultiAgentReplayBuffer` that the
+    multi-agent off-policy training loop expects (``add``, ``sample``,
+    ``counter``, ``__len__``).
+    """
+
     def __init__(self):
-        self.counter = 0
+        super().__init__(max_size=0)
         self.state_size = None
         self.action_size = None
         self.next_state_size = None
-        self.agents = ["agent_0", "other_agent_1"]
+        self.agents = ["agent_0", "other_agent_0"]
 
     def __len__(self):
         return 1000
 
-    def save_to_memory(
-        self,
-        state,
-        action,
-        reward,
-        next_state,
-        done,
-        is_vectorised=False,
-    ):
-        self.state_size = list(state.values())[0].shape
-        self.action_size = list(action.values())[0].shape
-        self.next_state_size = list(next_state.values())[0].shape
-        self.counter += 1
-
-    def save_to_memory_vect_envs(self, *args, **kwargs):
+    def add(self, data: TensorDict) -> None:
+        obs_td = data["obs"]
+        first_agent = next(iter(obs_td.keys()))
         if self.state_size is None:
-            state = args[0] if args else kwargs.get("state")
-            action = args[1] if len(args) > 1 else kwargs.get("action")
-            next_state = args[3] if len(args) > 3 else kwargs.get("next_state")
-            if state is not None:
-                self.state_size = list(state.values())[0].shape
-            if action is not None:
-                self.action_size = list(action.values())[0].shape
-            if next_state is not None:
-                self.next_state_size = list(next_state.values())[0].shape
+            self.state_size = obs_td[first_agent].shape
+            self.action_size = data["action"][first_agent].shape
+            self.next_state_size = data["next_obs"][first_agent].shape
+        self.size += 1
         self.counter += 1
 
     def sample(self, batch_size, *args):
-        states = {
-            agent: np.array(
-                [np.random.randn(*self.state_size) for _ in range(batch_size)],
-            )
-            for agent in self.agents
-        }
-        actions = {
-            agent: np.array(
-                [np.random.randn(*self.action_size) for _ in range(batch_size)],
-            )
-            for agent in self.agents
-        }
-        rewards = {
-            agent: np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
-            for agent in self.agents
-        }
-        dones = {
-            agent: np.array(
-                [np.random.choice([True, False]) for _ in range(batch_size)],
-            )
-            for agent in self.agents
-        }
-        next_states = {
-            agent: np.array(
-                [np.random.randn(*self.next_state_size) for _ in range(batch_size)],
-            )
-            for agent in self.agents
-        }
-
-        return states, actions, rewards, dones, next_states
+        return TensorDict(
+            {
+                "obs": TensorDict(
+                    {
+                        agent: torch.randn(batch_size, *self.state_size[1:])
+                        for agent in self.agents
+                    },
+                    batch_size=[batch_size],
+                ),
+                "action": TensorDict(
+                    {
+                        agent: torch.randn(batch_size, *self.action_size[1:])
+                        for agent in self.agents
+                    },
+                    batch_size=[batch_size],
+                ),
+                "reward": TensorDict(
+                    {agent: torch.randn(batch_size, 1) for agent in self.agents},
+                    batch_size=[batch_size],
+                ),
+                "next_obs": TensorDict(
+                    {
+                        agent: torch.randn(batch_size, *self.next_state_size[1:])
+                        for agent in self.agents
+                    },
+                    batch_size=[batch_size],
+                ),
+                "done": TensorDict(
+                    {
+                        agent: torch.randint(0, 2, (batch_size, 1)).float()
+                        for agent in self.agents
+                    },
+                    batch_size=[batch_size],
+                ),
+            },
+            batch_size=[batch_size],
+        )
 
 
 @pytest.fixture
@@ -922,11 +936,11 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.actors = {aid: MagicMock() for aid in agent_ids}
 
     def get_action_on_policy(*args, **kwargs):
-        out = {a: np.random.randn(mock_agent.action_size) for a in agent_ids}
+        out = {a: np.random.randn(1, mock_agent.action_size) for a in agent_ids}
         return out, out
 
     def get_action_off_policy(*args, **kwargs):
-        out = {a: np.random.randn(mock_agent.action_size) for a in agent_ids}
+        out = {a: np.random.randn(1, mock_agent.action_size) for a in agent_ids}
         return out, out, out, out
 
     mock_agent.get_action.side_effect = (
@@ -1295,7 +1309,6 @@ def offline_init_hp():
         "DOUBLE": False,
         "LEARN_STEP": 1,
         "TAU": 1e-3,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
         "DATASET": "../data/cartpole/cartpole_v1.1.0.h5",
@@ -1328,7 +1341,6 @@ def test_train_off_policy(env, population_off_policy, tournament, mutations, mem
         memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1381,7 +1393,6 @@ def test_train_off_policy_agent_calls_made(
             memory,
             INIT_HP=None,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -1442,7 +1453,6 @@ def test_train_off_policy_agent_calls_made_rainbow(
         memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1482,7 +1492,6 @@ def test_train_off_policy_save_elite_warning(
             memory,
             INIT_HP=None,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -1518,7 +1527,6 @@ def test_train_off_policy_checkpoint_warning(
             memory,
             INIT_HP=None,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -1543,7 +1551,6 @@ def test_actions_histogram(env, population_off_policy, tournament, mutations, me
         memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1574,7 +1581,6 @@ def test_train_off_policy_replay_buffer_calls(
         mocked_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1612,7 +1618,6 @@ def test_train_off_policy_alternate_buffer_calls(
         memory=mocked_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1653,7 +1658,6 @@ def test_train_off_policy_env_calls(
         memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1689,7 +1693,6 @@ def test_train_off_policy_tourn_mut_calls(
         memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1720,7 +1723,6 @@ def test_train_off_policy_rgb_input(
         memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=True,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1756,7 +1758,6 @@ def test_train_off_policy_using_alternate_buffers(
         memory=memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1788,7 +1789,6 @@ def test_train_off_policy_using_alternate_buffers_rgb(
         memory=memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=True,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1823,7 +1823,6 @@ def test_train_off_policy_distributed(
         memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1847,7 +1846,6 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
         "GAMMA": 0.99,
         "LEARN_STEP": 1,
         "TAU": 1e-3,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
@@ -1873,7 +1871,6 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
             memory,
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -1928,7 +1925,6 @@ def test_wandb_init_log_distributed(
         "GAMMA": 0.99,
         "LEARN_STEP": 1,
         "TAU": 1e-3,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
@@ -1954,7 +1950,6 @@ def test_wandb_init_log_distributed(
             memory,
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -1996,7 +1991,6 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
         "GAMMA": 0.99,
         "LEARN_STEP": 1,
         "TAU": 1e-3,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
@@ -2023,7 +2017,6 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
             target=-10000,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2057,7 +2050,6 @@ def test_train_off_policy_save_elite(
         memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2096,7 +2088,6 @@ def test_train_save_checkpoint(
         memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2132,7 +2123,6 @@ def test_train_on_policy_agent_calls_made(
             mock_population,
             INIT_HP=None,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2169,7 +2159,6 @@ def test_train_on_policy_save_elite_warning(
             population_on_policy,
             INIT_HP=None,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2200,7 +2189,6 @@ def test_train_on_policy_checkpoint_warning(
             population_on_policy,
             INIT_HP=None,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2231,7 +2219,6 @@ def test_train_on_policy_env_calls(
         population_on_policy,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2262,7 +2249,6 @@ def test_train_on_policy_tourn_mut_calls(
         population_on_policy,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2290,7 +2276,6 @@ def test_train_on_policy(
         population_on_policy,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=256,
         evo_steps=256,
         eval_loop=1,
@@ -2311,7 +2296,6 @@ def test_train_on_policy_rgb_input(env, population_on_policy, tournament, mutati
         population_on_policy,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=True,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2336,7 +2320,6 @@ def test_train_on_policy_distributed(env, population_on_policy, tournament, muta
         population_on_policy,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2367,7 +2350,6 @@ def test_wandb_init_log_on_policy(
         "GAMMA": 0.99,
         "LEARN_STEP": 1,
         "TAU": 1e-3,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
     }
     MUT_P = {
@@ -2391,7 +2373,6 @@ def test_wandb_init_log_on_policy(
             population_on_policy,
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
-            swap_channels=False,
             max_steps=50,
             evo_steps=10,
             eval_loop=1,
@@ -2422,7 +2403,6 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
         "GAMMA": 0.99,
         "LEARN_STEP": 1,
         "TAU": 1e-3,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
@@ -2448,7 +2428,6 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
             target=-10000,
-            swap_channels=False,
             max_steps=500,
             evo_steps=10,
             eval_loop=1,
@@ -2482,7 +2461,6 @@ def test_train_on_policy_save_elite(
         population_on_policy,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2517,7 +2495,6 @@ def test_train_on_policy_save_checkpoint(
         population_on_policy,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=500,
         evo_steps=500,
         eval_loop=1,
@@ -2554,7 +2531,6 @@ def test_train_multi_agent_off_policy(
         memory=multi_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2568,8 +2544,8 @@ def test_train_multi_agent_off_policy(
 
 @pytest.mark.parametrize("on_policy", [True])
 @pytest.mark.parametrize(
-    "state_size, action_size, sum_scores, swap_channels",
-    [((6,), 2, True, False), ((6,), 2, False, False), ((250, 160, 3), 2, False, True)],
+    "state_size, action_size, sum_scores",
+    [((6,), 2, True), ((6,), 2, False)],
 )
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_train_multi_agent_on_policy(
@@ -2579,7 +2555,6 @@ def test_train_multi_agent_on_policy(
     tournament,
     mutations,
     sum_scores,
-    swap_channels,
     accelerator_flag,
 ):
     accelerator = Accelerator() if accelerator_flag else None
@@ -2590,7 +2565,6 @@ def test_train_multi_agent_on_policy(
         pop=population_multi_agent,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=swap_channels,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2622,7 +2596,6 @@ def test_train_multi_agent_off_policy_distributed(
         memory=multi_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2656,7 +2629,6 @@ def test_train_multi_agent_off_policy_rgb(
         memory=multi_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=True,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2697,7 +2669,6 @@ def test_train_multi_agent_off_policy_rgb_vectorized(
         memory=multi_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=10,
         evo_steps=5,
         eval_loop=1,
@@ -2737,7 +2708,6 @@ def test_train_multi_agent_on_policy_rgb_vectorized(
         pop=population_multi_agent,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=10,
         evo_steps=5,
         eval_loop=1,
@@ -2771,7 +2741,6 @@ def test_train_multi_save_elite_warning(
             memory=multi_memory,
             INIT_HP=None,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2804,7 +2773,6 @@ def test_train_multi_save_elite_warning_on_policy(
             pop=population_multi_agent,
             INIT_HP=None,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2838,7 +2806,6 @@ def test_train_multi_checkpoint_warning(
             memory=multi_memory,
             INIT_HP=None,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2871,7 +2838,6 @@ def test_train_multi_checkpoint_warning_on_policy(
             pop=population_multi_agent,
             INIT_HP=None,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2903,7 +2869,6 @@ def test_train_multi_wandb_init_log(
         "GAMMA": 0.99,
         "LEARN_STEP": 1,
         "TAU": 1e-3,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
@@ -2936,7 +2901,6 @@ def test_train_multi_wandb_init_log(
             multi_memory,
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
-            swap_channels=False,
             max_steps=50,
             evo_steps=10,
             eval_loop=1,
@@ -2980,7 +2944,6 @@ def test_train_multi_wandb_init_log_on_policy(
         "GAMMA": 0.99,
         "LEARN_STEP": 1,
         "TAU": 1e-3,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
@@ -3012,7 +2975,6 @@ def test_train_multi_wandb_init_log_on_policy(
             population_multi_agent,
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
-            swap_channels=False,
             max_steps=50,
             evo_steps=10,
             eval_loop=1,
@@ -3057,7 +3019,6 @@ def test_multi_agent_early_stop(
         "GAMMA": 0.99,
         "LEARN_STEP": 1,
         "TAU": 1e-3,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
@@ -3085,7 +3046,6 @@ def test_multi_agent_early_stop(
             multi_memory,
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
-            swap_channels=False,
             target=-10000,
             max_steps=500,
             evo_steps=10,
@@ -3121,7 +3081,6 @@ def test_multi_agent_early_stop_on_policy(
         "GAMMA": 0.99,
         "LEARN_STEP": 1,
         "TAU": 1e-3,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
@@ -3146,7 +3105,6 @@ def test_multi_agent_early_stop_on_policy(
             population_multi_agent,
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
-            swap_channels=False,
             target=-10000,
             max_steps=500,
             evo_steps=10,
@@ -3189,7 +3147,6 @@ def test_train_multi_agent_off_policy_calls(
         multi_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3236,7 +3193,6 @@ def test_train_multi_agent_onpolicy_calls(
         mock_population,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3278,7 +3234,6 @@ def test_train_multi_env_calls(
         multi_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3312,7 +3267,6 @@ def test_train_multi_env_calls_on_policy(
         population_multi_agent,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3347,7 +3301,6 @@ def test_train_multi_tourn_mut_calls(
         multi_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3381,7 +3334,6 @@ def test_train_multi_tourn_mut_calls_on_policy(
         population_multi_agent,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3416,7 +3368,6 @@ def test_train_multi_memory_calls(
         mocked_multi_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3453,7 +3404,6 @@ def test_train_multi_save_elite(
         multi_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3491,7 +3441,6 @@ def test_train_multi_save_elite_on_policy(
         population_multi_agent,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3529,7 +3478,6 @@ def test_train_multi_save_checkpoint(
         multi_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3567,7 +3515,6 @@ def test_train_multi_save_checkpoint_on_policy(
         population_multi_agent,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3583,17 +3530,15 @@ def test_train_multi_save_checkpoint_on_policy(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect, swap_channels",
+    "state_size, action_size, vect",
     [
-        ((6,), 2, True, False),
-        ((250, 160, 3), 2, False, True),
+        ((6,), 2, True),
     ],
 )
 def test_train_offline(
     env,
     population_off_policy,
     memory,
-    swap_channels,
     tournament,
     mutations,
     offline_init_hp,
@@ -3611,7 +3556,6 @@ def test_train_offline(
             memory,
             INIT_HP=offline_init_hp,
             MUT_P=None,
-            swap_channels=swap_channels,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3745,7 +3689,6 @@ def test_train_offline_wandb_calls(
             memory,
             INIT_HP=offline_init_hp,
             MUT_P=MUT_P,
-            swap_channels=False,
             max_steps=50,
             evo_steps=10,
             eval_loop=1,
@@ -3808,7 +3751,6 @@ def test_train_offline_early_stop(
                 memory,
                 INIT_HP=offline_init_hp,
                 MUT_P=MUT_P,
-                swap_channels=False,
                 target=-10000,
                 max_steps=50,
                 evo_steps=10,
@@ -3852,7 +3794,6 @@ def test_offline_agent_calls(
             memory,
             INIT_HP=offline_init_hp,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3895,7 +3836,6 @@ def test_offline_memory_calls(
             mocked_memory,
             INIT_HP=offline_init_hp,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3935,7 +3875,6 @@ def test_offline_mut_tourn_calls(
             memory,
             INIT_HP=offline_init_hp,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3974,7 +3913,6 @@ def test_train_offline_save_elite(
         memory,
         INIT_HP=offline_init_hp,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -4014,7 +3952,6 @@ def test_train_offline_save_checkpoint(
         memory,
         INIT_HP=offline_init_hp,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -4050,7 +3987,6 @@ def test_train_bandit(
         bandit_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4090,7 +4026,6 @@ def test_train_bandit_agent_calls_made(
             bandit_memory,
             INIT_HP=None,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -4132,7 +4067,6 @@ def test_train_bandit_save_elite_warning(
             bandit_memory,
             INIT_HP=None,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -4167,7 +4101,6 @@ def test_train_bandit_checkpoint_warning(
             bandit_memory,
             INIT_HP=None,
             MUT_P=None,
-            swap_channels=False,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -4197,7 +4130,6 @@ def test_bandit_actions_histogram(
         bandit_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4227,7 +4159,6 @@ def test_train_bandit_replay_buffer_calls(
         mocked_bandit_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4262,7 +4193,6 @@ def test_train_bandit_bandit_env_calls(
         bandit_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4297,7 +4227,6 @@ def test_train_bandit_tourn_mut_calls(
         bandit_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4327,7 +4256,6 @@ def test_train_bandit_rgb_input(
         bandit_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=True,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4360,7 +4288,6 @@ def test_train_bandit_using_alternate_buffers(
         memory=bandit_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4390,7 +4317,6 @@ def test_train_bandit_using_alternate_buffers_rgb(
         memory=bandit_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=True,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4421,7 +4347,6 @@ def test_train_bandit_distributed(
         bandit_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4451,7 +4376,6 @@ def test_bandit_wandb_init_log(
         "LAMBDA": 1,
         "REG": 0.000625,
         "LEARN_STEP": 1,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
@@ -4477,7 +4401,6 @@ def test_bandit_wandb_init_log(
             bandit_memory,
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
-            swap_channels=False,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -4532,7 +4455,6 @@ def test_bandit_wandb_init_log_distributed(
         "LAMBDA": 1,
         "REG": 0.000625,
         "LEARN_STEP": 1,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
@@ -4558,7 +4480,6 @@ def test_bandit_wandb_init_log_distributed(
             bandit_memory,
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
-            swap_channels=False,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -4606,7 +4527,6 @@ def test_bandit_early_stop_wandb(
         "LAMBDA": 1,
         "REG": 0.000625,
         "LEARN_STEP": 1,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
@@ -4633,7 +4553,6 @@ def test_bandit_early_stop_wandb(
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
             target=-10000,
-            swap_channels=False,
             max_steps=550,
             episode_steps=5,
             evo_steps=25,
@@ -4666,7 +4585,6 @@ def test_train_bandit_save_elite(
         bandit_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4704,7 +4622,6 @@ def test_bandit_train_save_checkpoint(
         bandit_memory,
         INIT_HP=None,
         MUT_P=None,
-        swap_channels=False,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,

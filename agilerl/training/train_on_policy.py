@@ -30,7 +30,6 @@ def train_on_policy(
     pop: PopulationType,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
-    swap_channels: bool = False,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
     eval_steps: int | None = None,
@@ -69,9 +68,6 @@ def train_on_policy(
     :type INIT_HP: dict, optional
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
     :type MUT_P: dict, optional
-    :param swap_channels: Swap image channels dimension from last to first
-        [H, W, C] -> [C, H, W], defaults to False
-    :type swap_channels: bool, optional
     :param max_steps: Maximum number of steps in environment, defaults to 1000000
     :type max_steps: int, optional
     :param evo_steps: Evolution frequency (steps), defaults to 10000
@@ -249,7 +245,6 @@ def train_on_policy(
         for agent in population.agents:
             agent.test(
                 env,
-                swap_channels=swap_channels,
                 max_steps=eval_steps,
                 loop=eval_loop,
             )

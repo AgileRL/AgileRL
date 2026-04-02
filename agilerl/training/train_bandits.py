@@ -14,7 +14,6 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.typing import GymEnvType
-from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -34,7 +33,6 @@ def train_bandits(
     memory: ReplayBuffer,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
-    swap_channels: bool = False,
     max_steps: int = 20000,
     episode_steps: int = 500,
     evo_steps: int = 2500,
@@ -73,9 +71,6 @@ def train_bandits(
     :type INIT_HP: dict, optional
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
     :type MUT_P: dict, optional
-    :param swap_channels: Swap image channels dimension from last to first
-        [H, W, C] -> [C, H, W], defaults to False
-    :type swap_channels: bool, optional
     :param max_steps: Maximum number of steps in environment, defaults to 20000
     :type max_steps: int, optional
     :param episode_steps: Number of steps in environment per episode, defaults to 500
@@ -215,8 +210,6 @@ def train_bandits(
             score = 0
             context = env.reset()
             for _idx_step in range(episode_steps):
-                if swap_channels:
-                    context = obs_channels_to_first(context)
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)
@@ -249,7 +242,6 @@ def train_bandits(
         for agent in population.agents:
             agent.test(
                 env,
-                swap_channels=swap_channels,
                 max_steps=eval_steps,
                 loop=eval_loop,
             )

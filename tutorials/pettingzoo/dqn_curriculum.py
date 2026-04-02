@@ -9,6 +9,7 @@ import random
 from collections import deque
 from datetime import datetime, timezone
 
+import gymnasium as gym
 import numpy as np
 import torch
 import wandb
@@ -24,8 +25,7 @@ from agilerl.components.data import Transition
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.algo_utils import obs_channels_to_first
-from agilerl.utils.utils import create_population, observation_space_channels_to_first
+from agilerl.utils.utils import create_population
 
 
 class CurriculumEnv:
@@ -545,7 +545,7 @@ def transform_and_flip(observation, player):
     """
     state = observation["observation"]
     # Pre-process dimensions for PyTorch (N, C, H, W)
-    state = obs_channels_to_first(state)
+    state = np.moveaxis(state, -1, -3)
     if player == 1:
         # Swap pieces so that the agent always sees the board from the same perspective
         state[[0, 1], :, :] = state[[1, 0], :, :]
@@ -581,7 +581,6 @@ if __name__ == "__main__":
             # "ALGO": "Rainbow DQN",  # Algorithm
             "ALGO": "DQN",  # Algorithm
             "DOUBLE": True,
-            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
             "BATCH_SIZE": 256,  # Batch size
             "LR": 1e-4,  # Learning rate
             "GAMMA": 0.99,  # Discount factor
@@ -612,9 +611,12 @@ if __name__ == "__main__":
 
         # Pre-process dimensions for PyTorch layers
         # We only need to worry about the state dim of a single agent
-        # We flatten the 6x7x2 observation as input to the agent"s neural network
-        observation_space = observation_space_channels_to_first(
-            observation_spaces[0]["observation"],
+        # Transpose observation space from (6, 7, 2) HWC to (2, 6, 7) CHW
+        raw_space = observation_spaces[0]["observation"]
+        observation_space = gym.spaces.Box(
+            low=raw_space.low.transpose(2, 0, 1),
+            high=raw_space.high.transpose(2, 0, 1),
+            dtype=raw_space.dtype,
         )
 
         # Mutation config for RL hyperparameters
@@ -707,10 +709,9 @@ if __name__ == "__main__":
         # Perform buffer and agent warmups if desired
         if LESSON["buffer_warm_up"]:
             warm_up_opponent = Opponent(env, difficulty=LESSON["warm_up_opponent"])
-            memory = env.fill_replay_buffer(
-                memory,
-                warm_up_opponent,
-            )  # Fill replay buffer with transitions
+
+            # Fill replay buffer with transitions
+            memory = env.fill_replay_buffer(memory, warm_up_opponent)
             if LESSON["agent_warm_up"] > 0:
                 print("Warming up agents ...")
                 agent = pop[0]

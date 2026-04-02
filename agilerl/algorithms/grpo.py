@@ -36,7 +36,9 @@ if HAS_LLM_DEPENDENCIES:
 
 
 class GRPO(LLMAlgorithm):
-    """The GRPO algorithm class. GRPO paper: https://arxiv.org/pdf/2402.03300.
+    """Group Relative Policy Optimization (GRPO).
+
+    Paper: https://arxiv.org/pdf/2402.03300
 
     :param pad_token_id: Pad token id
     :type pad_token_id: int
@@ -248,7 +250,9 @@ class GRPO(LLMAlgorithm):
         self.vllm_config = vllm_config
         if self.use_vllm:
             self._configure_vllm()
+
         self._initialize_actors(actor_network, not clone)
+
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:

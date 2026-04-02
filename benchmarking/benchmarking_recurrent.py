@@ -15,6 +15,7 @@ from agilerl.utils.utils import (
     print_hyperparams,
 )
 from agilerl.wrappers.agent import RSNorm
+from agilerl.wrappers.image_transpose import ImageTranspose, needs_image_transpose
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -74,7 +75,17 @@ def main_recurrent(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     def make_env():
         return MaskVelocityWrapper(gym.make(INIT_HP["ENV_NAME"]))
 
-    env = make_vect_envs(make_env=make_env, num_envs=INIT_HP["NUM_ENVS"])
+    probe = make_env()
+    extra_wrappers = (
+        [ImageTranspose] if needs_image_transpose(probe.observation_space) else None
+    )
+    probe.close()
+
+    env = make_vect_envs(
+        make_env=make_env,
+        num_envs=INIT_HP["NUM_ENVS"],
+        extra_wrappers=extra_wrappers,
+    )
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
@@ -143,7 +154,6 @@ def main_recurrent(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         agent_pop,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
-        swap_channels=INIT_HP["CHANNELS_LAST"],
         max_steps=INIT_HP["MAX_STEPS"],
         evo_steps=INIT_HP["EVO_STEPS"],
         eval_steps=INIT_HP["EVAL_STEPS"],

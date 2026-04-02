@@ -9,6 +9,7 @@ from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from gymnasium.spaces import Box, Discrete
 from pettingzoo import ParallelEnv
+from tensordict import TensorDict
 from torch import nn, optim
 from torch._dynamo import OptimizedModule
 
@@ -280,7 +281,16 @@ def experiences(
             for agent in agent_ids
         }
 
-    return states, actions, rewards, next_states, dones
+    return TensorDict(
+        {
+            "obs": TensorDict(states, batch_size=[batch_size]),
+            "action": TensorDict(actions, batch_size=[batch_size]),
+            "reward": TensorDict(rewards, batch_size=[batch_size]),
+            "next_obs": TensorDict(next_states, batch_size=[batch_size]),
+            "done": TensorDict(dones, batch_size=[batch_size]),
+        },
+        batch_size=[batch_size],
+    )
 
 
 @pytest.mark.parametrize(
@@ -1494,7 +1504,16 @@ def test_clone_after_learning(compile_mode, ma_vector_space):
     }
     dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
 
-    experiences = states, actions, rewards, next_states, dones
+    experiences = TensorDict(
+        {
+            "obs": TensorDict(states, batch_size=[batch_size]),
+            "action": TensorDict(actions, batch_size=[batch_size]),
+            "reward": TensorDict(rewards, batch_size=[batch_size]),
+            "next_obs": TensorDict(next_states, batch_size=[batch_size]),
+            "done": TensorDict(dones, batch_size=[batch_size]),
+        },
+        batch_size=[batch_size],
+    )
     maddpg.learn(experiences)
     clone_agent = maddpg.clone()
     assert isinstance(clone_agent, MADDPG)

@@ -34,8 +34,6 @@ Network and Model Utilities
 Observation Processing
 ~~~~~~~~~~~~~~~~~~~~~~
 
-.. autofunction:: agilerl.utils.algo_utils.obs_channels_to_first
-
 .. autofunction:: agilerl.utils.algo_utils.obs_to_tensor
 
 .. autofunction:: agilerl.utils.algo_utils.get_vect_dim

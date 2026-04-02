@@ -50,6 +50,7 @@ def make_vect_envs(
     *,
     make_env: Callable[..., Any] | None = None,
     should_async_vector: bool = True,
+    extra_wrappers: list[type] | None = None,
     **env_kwargs: Any,
 ) -> Any:
     """Return async-vectorized gym environments.
@@ -62,6 +63,9 @@ def make_vect_envs(
     :type make_env: Callable, optional
     :param should_async_vector: Whether to asynchronous vectorized environments, defaults to True
     :type should_async_vector: bool, optional
+    :param extra_wrappers: Optional list of wrapper classes to apply to each individual
+        environment before vectorization.
+    :type extra_wrappers: list[type] or None, optional
     """
     if env_name is None and make_env is None:
         msg = "Either env_name or make_env must be provided"
@@ -76,12 +80,23 @@ def make_vect_envs(
 
     make_env = make_env or default_make_env
 
+    if extra_wrappers is not None:
+        _inner_make_env = make_env
+
+        def make_env() -> gym.Env:
+            env = _inner_make_env()
+            for wrapper_cls in extra_wrappers:
+                env = wrapper_cls(env)
+            return env
+
     return vectorize([make_env for _ in range(num_envs)])
 
 
 def make_multi_agent_vect_envs(
     env: Callable[[], ParallelEnv],
     num_envs: int = 1,
+    *,
+    extra_wrappers: list[type] | None = None,
     **env_kwargs: Any,
 ) -> AsyncPettingZooVecEnv:
     """Return async-vectorized PettingZoo parallel environments.
@@ -90,10 +105,22 @@ def make_multi_agent_vect_envs(
     :type env: pettingzoo.utils.env.ParallelEnv
     :param num_envs: Number of vectorized environments, defaults to 1
     :type num_envs: int, optional
+    :param extra_wrappers: Optional list of wrapper classes to apply to each individual
+        environment before vectorization.
+    :type extra_wrappers: list[type] or None, optional
 
     :return: Async-vectorized PettingZoo parallel environments
     :rtype: agilerl.vector.pz_async_vec_env.AsyncPettingZooVecEnv
     """
+    if extra_wrappers is not None:
+        _original_env = env
+
+        def env(**kwargs: Any) -> ParallelEnv:
+            e = _original_env(**kwargs)
+            for wrapper_cls in extra_wrappers:
+                e = wrapper_cls(e)
+            return e
+
     env_fns = [lambda: env(**env_kwargs) for _ in range(num_envs)]
     return AsyncPettingZooVecEnv(env_fns=env_fns)
 
@@ -115,48 +142,6 @@ def make_skill_vect_envs(
     return gym.vector.AsyncVectorEnv(
         [lambda: skill(gym.make(env_name)) for i in range(num_envs)],
     )
-
-
-def observation_space_channels_to_first(
-    observation_space: SupportedObservationSpace,
-) -> SupportedObservationSpace:
-    """Swap the channel order of an observation space from [H, W, C] -> [C, H, W].
-
-    :param observation_space: Observation space
-    :type observation_space: spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete
-    :return: Observation space with swapped channels
-    :rtype: spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete
-    """
-    if isinstance(observation_space, spaces.Dict):
-        for key in observation_space.spaces:
-            if (
-                isinstance(observation_space[key], spaces.Box)
-                and len(observation_space[key].shape) == 3
-            ):
-                observation_space[key] = observation_space_channels_to_first(
-                    observation_space[key],
-                )
-    elif isinstance(observation_space, spaces.Tuple):
-        observation_space = spaces.Tuple(
-            [
-                (
-                    observation_space_channels_to_first(space)
-                    if isinstance(space, spaces.Box) and len(space.shape) == 3
-                    else space
-                )
-                for space in observation_space.spaces
-            ],
-        )
-    elif isinstance(observation_space, spaces.Box):
-        low = observation_space.low.transpose(2, 0, 1)
-        high = observation_space.high.transpose(2, 0, 1)
-        observation_space = spaces.Box(
-            low=low,
-            high=high,
-            dtype=observation_space.dtype,
-        )
-
-    return observation_space
 
 
 def suppress_verbose_logging() -> None:

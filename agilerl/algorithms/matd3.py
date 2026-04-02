@@ -34,14 +34,13 @@ from agilerl.utils.algo_utils import (
     get_deepest_head_config,
     key_in_nested_dict,
     make_safe_deepcopies,
-    obs_channels_to_first,
 )
 
 SupportedActionSpace = spaces.Discrete | spaces.Box
 
 
 class MATD3(MultiAgentRLAlgorithm):
-    """Multi-Agent Twin Delayed Deep Deterministic Policy Gradient (MATD3) algorithm.
+    """Multi-Agent Twin Delayed Deep Deterministic Policy Gradient (MATD3).
 
     Paper: https://arxiv.org/abs/1910.01465
 
@@ -858,7 +857,6 @@ class MATD3(MultiAgentRLAlgorithm):
     def test(
         self,
         env: PzEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
@@ -867,8 +865,6 @@ class MATD3(MultiAgentRLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -902,13 +898,6 @@ class MATD3(MultiAgentRLAlgorithm):
                 step = 0
                 while not np.all(finished):
                     step += 1
-                    if swap_channels:
-                        expand_dims = not is_vectorised
-                        obs = {
-                            agent_id: obs_channels_to_first(s, expand_dims)
-                            for agent_id, s in obs.items()
-                        }
-
                     action, _ = self.get_action(
                         obs,
                         infos=info,

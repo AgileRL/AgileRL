@@ -8,10 +8,12 @@ from importlib import util as importlib_util
 from pathlib import Path
 from typing import Any
 
+import gymnasium as gym
+import h5py
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
 from pettingzoo import ParallelEnv
-from pydantic import Field
-from pydantic.dataclasses import dataclass
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing_extensions import Self
 
 from agilerl.vector import AsyncPettingZooVecEnv
 
@@ -189,8 +191,7 @@ def _apply_wrappers(
     return wrapped_env
 
 
-@dataclass
-class EnvSpec:
+class EnvSpec(BaseModel):
     """Environment specification from an Arena manifest.
 
     Provides information that allows us to construct both gymnasium as well as
@@ -202,11 +203,12 @@ class EnvSpec:
     :type num_envs: int
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     name: str
     num_envs: int = Field(default=1, ge=1)
 
 
-@dataclass
 class GymEnvSpec(EnvSpec):
     """Gym environment specification.
 
@@ -259,9 +261,30 @@ class GymEnvSpec(EnvSpec):
 
         return default_make_env
 
-    def make_env(self) -> GymEnvType:
+    def make_single_env(self) -> gym.Env:
+        """Create a single (non-vectorized) environment instance.
+
+        Useful for probing the observation/action space without the overhead
+        of spinning up a full vectorized environment.
+
+        :returns: A single gymnasium environment.
+        :rtype: gymnasium.Env
+        """
+        if self.entrypoint is not None:
+            return self.constuct_custom_env_fn(
+                self.entrypoint,
+                self.path,
+                self.config,
+                self.wrappers,
+            )()
+        return gym.make(self.name)
+
+    def make_env(self, extra_wrappers: list[type] | None = None) -> GymEnvType:
         """Instantiate the vectorized environment given the configuration.
 
+        :param extra_wrappers: Optional list of wrapper classes to apply to each
+            individual environment before vectorization.
+        :type extra_wrappers: list[type] or None, optional
         :returns: Vectorized environment
         :rtype: GymEnvType
         """
@@ -282,10 +305,10 @@ class GymEnvSpec(EnvSpec):
             num_envs=self.num_envs,
             make_env=make_env,
             should_async_vector=(not self.sync),
+            extra_wrappers=extra_wrappers,
         )
 
 
-@dataclass
 class PzEnvSpec(EnvSpec):
     """PettingZoo environment specification.
 
@@ -337,12 +360,43 @@ class PzEnvSpec(EnvSpec):
 
         return default_make_env
 
-    def make_env(self) -> AsyncPettingZooVecEnv:
+    def make_single_env(self) -> ParallelEnv:
+        """Create a single (non-vectorized) PettingZoo environment instance.
+
+        Useful for probing the observation/action spaces without the overhead
+        of spinning up a full vectorized environment.
+
+        :returns: A single PettingZoo parallel environment.
+        :rtype: ParallelEnv
+        """
+        if self.entrypoint is not None:
+            return self.constuct_custom_env_fn(
+                self.entrypoint,
+                self.path,
+                self.config,
+                self.wrappers,
+            )()
+        module = import_module(self.name)
+        if not hasattr(module, "parallel_env"):
+            msg = f"PettingZoo module '{self.name}' has no 'parallel_env' constructor."
+            raise AttributeError(msg)
+
+        env = module.parallel_env(**(self.config or {}))
+        return _apply_wrappers(env, self.wrappers, path=self.path)
+
+    def make_env(
+        self, extra_wrappers: list[type] | None = None
+    ) -> AsyncPettingZooVecEnv:
         """Instantiate vectorized PettingZoo environments from a constructor.
 
+        :param extra_wrappers: Optional list of wrapper classes to apply to each
+            individual environment before vectorization.
+        :type extra_wrappers: list[type] or None, optional
         :returns: Vectorized PettingZoo environments.
         :rtype: AsyncPettingZooVecEnv
         """
+        from agilerl.utils.utils import make_multi_agent_vect_envs
+
         if self.entrypoint is not None:
             make_env = self.constuct_custom_env_fn(
                 self.entrypoint,
@@ -361,118 +415,93 @@ class PzEnvSpec(EnvSpec):
                 env = constructor(**(self.config or {}))
                 return _apply_wrappers(env, self.wrappers, path=self.path)
 
-        from agilerl.utils.utils import make_multi_agent_vect_envs
-
         return make_multi_agent_vect_envs(
             env=make_env,
             num_envs=self.num_envs,
+            extra_wrappers=extra_wrappers,
         )
 
 
-@dataclass
-class LLMEnvSpec:
+class LLMEnvSpec(BaseModel):
     """Environment specification for LLM reasoning and preference training.
 
-    Declaratively captures the HuggingFace dataset, tokenizer, reward
-    function, and conversation template needed to construct a
-    :class:`~agilerl.utils.llm_utils.ReasoningGym` or
-    :class:`~agilerl.utils.llm_utils.PreferenceGym`.
+    Declaratively captures the dataset, reward function, and prompt template
+    needed to construct a :class:`~agilerl.utils.llm_utils.ReasoningGym` or
+    :class:`~agilerl.utils.llm_utils.PreferenceGym`.  Fields are aligned
+    with what Arena expects for LLM training jobs.
 
-    :param dataset_name: HuggingFace dataset identifier (e.g. ``"gsm8k"``).
-    :type dataset_name: str
-    :param tokenizer_name: HuggingFace tokenizer / model identifier used to
-        load an ``AutoTokenizer``.
-    :type tokenizer_name: str
-    :param env_type: One of ``"reasoning"`` or ``"preference"``.
-    :type env_type: str
-    :param reward_fn: An entrypoint string (``"module:callable"``) or an
-        already-resolved callable that scores completions.  Required for
-        reasoning environments; ignored for preference environments.
-    :type reward_fn: str | Callable[..., float] | None
-    :param conversation_template: Chat-template messages with ``{question}``
-        / ``{answer}`` placeholders.  Required for reasoning environments.
-    :type conversation_template: list[dict[str, str]] | None
-    :param dataset_config: Optional config name passed to
-        ``datasets.load_dataset`` (e.g. ``"main"``).
-    :type dataset_config: str | None
-    :param train_split: Dataset split used for training.
-    :type train_split: str
-    :param test_split: Dataset split used for evaluation.
-    :type test_split: str
-    :param data_batch_size_per_gpu: Per-GPU DataLoader batch size.
-    :type data_batch_size_per_gpu: int
-    :param max_context_length: Maximum tokenized context length.  Samples
-        exceeding this are filtered out.
-    :type max_context_length: int | None
-    :param min_completion_length: Minimum completion length (preference only).
-    :type min_completion_length: int | None
-    :param seed: RNG seed for the DataLoader.
-    :type seed: int
+    :param env_type: The type of LLM environment (``"reasoning"`` or
+        ``"preference"``).
+    :type env_type: LLMEnvType
+    :param columns: Optional mapping from source dataset column names to the
+        names expected by the gym (e.g. ``{"question": "input", "answer":
+        "output"}`` for reasoning).
+    :type columns: dict[str, str] | None
+    :param prompt_template: Chat-template configuration passed as
+        ``conversation_template`` to :class:`ReasoningGym`.
+    :type prompt_template: dict[str, Any] | None
+    :param max_reward: Maximum achievable reward, forwarded to the LLM
+        training loop for accuracy logging.
+    :type max_reward: float | None
+    :param train_test_split: Fraction of the dataset used for training.
+    :type train_test_split: float
+    :param reward_file_path: Path to a Python file containing the reward
+        function.  Required for reasoning environments.
+    :type reward_file_path: str | None
+    :param dataset_path: Path to a Parquet dataset file.
+    :type dataset_path: str
     """
 
-    dataset_name: str
-    tokenizer_name: str
-    name: str = Field(default="")
-    num_envs: int = Field(default=1, ge=1)
-    env_type: LLMEnvType = Field(default=LLMEnvType.REASONING)
-    reward_fn: str | Callable[..., float] | None = Field(default=None)
-    conversation_template: list[dict[str, str]] | None = Field(default=None)
-    dataset_config: str | None = Field(default=None)
-    train_split: str = Field(default="train")
-    test_split: str = Field(default="test")
-    data_batch_size_per_gpu: int = Field(default=8, ge=1)
-    max_context_length: int | None = Field(default=None)
-    min_completion_length: int | None = Field(default=None)
-    seed: int = Field(default=42)
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    def __post_init__(self) -> None:
-        if self.env_type not in (LLMEnvType.REASONING, LLMEnvType.PREFERENCE):
-            msg = f"env_type must be {LLMEnvType.REASONING} or {LLMEnvType.PREFERENCE}, got {self.env_type!r}"
-            raise ValueError(msg)
-        if self.env_type == LLMEnvType.REASONING and self.reward_fn is None:
-            msg = "reward_fn is required for reasoning environments"
-            raise ValueError(msg)
-        if self.env_type == LLMEnvType.REASONING and self.conversation_template is None:
-            msg = "conversation_template is required for reasoning environments"
-            raise ValueError(msg)
+    env_type: LLMEnvType
+    columns: dict[str, str] | None = Field(default=None)
+    prompt_template: dict[str, Any] | None = Field(default=None)
+    max_reward: float | None = Field(default=None)
+    train_test_split: float = Field(default=0.9, ge=0.0, le=1.0)
+    reward_file_path: str | None = Field(default="reward.py")
+    dataset_path: str = Field(default="dataset.parquet")
 
-    def _load_datasets(self) -> tuple[Any, Any]:
-        """Load train and test splits from HuggingFace.
+    @model_validator(mode="after")
+    def _validate_reasoning_fields(self) -> Self:
+        if self.env_type == LLMEnvType.REASONING and self.reward_file_path is None:
+            msg = "reward_file_path is required for reasoning environments"
+            raise ValueError(msg)
+        return self
+
+    def _load_dataset(self) -> tuple[Any, Any]:
+        """Load and split the Parquet dataset into train/test.
 
         :returns: A ``(train_dataset, test_dataset)`` tuple.
         :rtype: tuple[Dataset, Dataset]
         """
-        from datasets import load_dataset
+        import pandas as pd
+        from datasets import Dataset
 
-        ds = load_dataset(self.dataset_name, self.dataset_config)
-        return ds[self.train_split], ds[self.test_split]
+        df = pd.read_parquet(self.dataset_path)
+        if self.columns:
+            df = df.rename(columns=self.columns)
+
+        ds = Dataset.from_pandas(df)
+        split = ds.train_test_split(test_size=1.0 - self.train_test_split)
+        return split["train"], split["test"]
 
     def _resolve_reward_fn(self) -> Callable[..., float]:
-        """Resolve ``reward_fn`` to a callable.
+        """Resolve the reward function from ``reward_file_path``.
 
-        If the value is already callable it is returned as-is; otherwise
-        the string is treated as an entrypoint (``"module:target"``).
+        The file is expected to contain a ``reward`` callable at module
+        level.
 
         :returns: The resolved reward callable.
         :rtype: Callable[..., float]
         """
-        if callable(self.reward_fn):
-            return self.reward_fn
-        return _resolve_entrypoint_target(self.reward_fn)
+        return _resolve_entrypoint_target(f"{self.reward_file_path}:reward")
 
-    def _load_tokenizer(self) -> Any:
-        """Load the tokenizer from HuggingFace.
-
-        :returns: An ``AutoTokenizer`` instance.
-        :rtype: AutoTokenizer
-        """
-        from transformers import AutoTokenizer
-
-        return AutoTokenizer.from_pretrained(self.tokenizer_name)
-
-    def make_env(self, accelerator: Any | None = None) -> Any:
+    def make_env(self, tokenizer: Any, accelerator: Any | None = None) -> Any:
         """Construct the LLM gym environment.
 
+        :param tokenizer: A HuggingFace tokenizer instance.
+        :type tokenizer: Any
         :param accelerator: Optional HuggingFace ``Accelerator``.
         :type accelerator: Accelerator | None
         :returns: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
@@ -480,8 +509,7 @@ class LLMEnvSpec:
         """
         from agilerl.utils.llm_utils import PreferenceGym, ReasoningGym
 
-        train_ds, test_ds = self._load_datasets()
-        tokenizer = self._load_tokenizer()
+        train_ds, test_ds = self._load_dataset()
 
         if self.env_type == LLMEnvType.REASONING:
             return ReasoningGym(
@@ -489,26 +517,18 @@ class LLMEnvSpec:
                 test_dataset=test_ds,
                 tokenizer=tokenizer,
                 reward_fn=self._resolve_reward_fn(),
-                conversation_template=self.conversation_template,
-                data_batch_size_per_gpu=self.data_batch_size_per_gpu,
+                conversation_template=self.prompt_template,
                 accelerator=accelerator,
-                max_context_length=self.max_context_length,
-                seed=self.seed,
             )
 
         return PreferenceGym(
             train_dataset=train_ds,
             test_dataset=test_ds,
             tokenizer=tokenizer,
-            data_batch_size_per_gpu=self.data_batch_size_per_gpu,
             accelerator=accelerator,
-            max_context_length=self.max_context_length,
-            min_completion_length=self.min_completion_length,
-            seed=self.seed,
         )
 
 
-@dataclass
 class OfflineEnvSpec(GymEnvSpec):
     """Environment specification for offline RL training.
 
@@ -533,21 +553,21 @@ class OfflineEnvSpec(GymEnvSpec):
     minari_dataset_id: str | None = Field(default=None)
     dataset_path: str | None = Field(default=None)
     remote: bool = Field(default=False)
+    dataset: Any = Field(default=None, exclude=True)
 
-    def __post_init__(self) -> None:
-
+    @model_validator(mode="after")
+    def _validate_and_load_dataset(self) -> Self:
         if self.dataset_path is not None:
-            import h5py
-
+            # NOTE: Not too sure this is a robust way to load any kind of dataset
             self.dataset = h5py.File(self.dataset_path, "r")
         elif self.minari_dataset_id is not None:
             self.dataset = None
         else:
             msg = "OfflineEnvSpec requires either 'minari_dataset_id' or 'dataset_path' to be set."
             raise ValueError(msg)
+        return self
 
 
-@dataclass
 class ArenaEnvSpec(EnvSpec):
     """Environment specification for Arena environments.
 

@@ -12,7 +12,6 @@ from agilerl.utils.utils import (
     create_population,
     make_skill_vect_envs,
     make_vect_envs,
-    observation_space_channels_to_first,
 )
 from agilerl.wrappers.learning import Skill
 
@@ -152,8 +151,6 @@ if __name__ == "__main__":
         "MAX_STEPS": 10_000_000,
         "EVO_STEPS": 10_000,
         "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        "CHANNELS_LAST": False,
         "WANDB": True,
     }
 
@@ -194,9 +191,6 @@ if __name__ == "__main__":
             env_name=f"{INIT_HP['ENV_NAME']}-{skill}",  # Environment name
             algo=INIT_HP["ALGO"],  # Algorithm
             pop=pop,  # Population of agents
-            swap_channels=INIT_HP[
-                "CHANNELS_LAST"
-            ],  # Swap image channel from last to first
             max_steps=INIT_HP["MAX_STEPS"],  # Max number of training episodes
             evo_steps=INIT_HP["EVO_STEPS"],  # Evolution frequency
             target=INIT_HP["TARGET_SCORE"],  # Target score for early stopping
@@ -231,9 +225,6 @@ if __name__ == "__main__":
     action_dim = len(
         trained_skills,
     )  # Selector will be trained to choose which trained skill to use
-
-    if INIT_HP["CHANNELS_LAST"]:
-        observation_space = observation_space_channels_to_first(observation_space)
 
     pop = create_population(
         algo="PPO",  # Algorithm

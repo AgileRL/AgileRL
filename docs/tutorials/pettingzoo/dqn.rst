@@ -654,6 +654,8 @@ Before we go any further in this tutorial, it would be helpful to define and set
 
    .. code-block:: python
 
+      from gymnasium import spaces
+
       device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
       print("===== AgileRL Curriculum Learning Demo =====")
 
@@ -679,7 +681,6 @@ Before we go any further in this tutorial, it would be helpful to define and set
          # "ALGO": "Rainbow DQN",  # Algorithm
          "ALGO": "DQN",  # Algorithm
          "DOUBLE": True,
-         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
          "BATCH_SIZE": 256,  # Batch size
          "LR": 1e-4,  # Learning rate
          "GAMMA": 0.99,  # Discount factor
@@ -709,10 +710,14 @@ Before we go any further in this tutorial, it would be helpful to define and set
       # Warp the environment in the curriculum learning wrapper
       env = CurriculumEnv(env, LESSON)
 
-      # Pre-process dimensions for PyTorch layers
+      # Pre-process dimensions for PyTorch layers (channels-first: C, H, W)
       # We only need to worry about the state dim of a single agent
-      # We flatten the 6x7x2 observation as input to the agent"s neural network
-      observation_space = observation_space_channels_to_first(observation_spaces[0])
+      _ob = observation_spaces[0]
+      observation_space = spaces.Box(
+         low=np.moveaxis(_ob.low, -1, -3),
+         high=np.moveaxis(_ob.high, -1, -3),
+         dtype=_ob.dtype,
+      )
       action_space = action_spaces[0]
 
       # Mutation config for RL hyperparameters
@@ -816,7 +821,7 @@ account for the fact that the agent will play as both player 0 and player 1. We 
          """
          state = observation["observation"]
          # Pre-process dimensions for PyTorch (N, C, H, W)
-         state = obs_channels_to_first(state)
+         state = np.moveaxis(state, -1, -3)
          if player == 1:
             # Swap pieces so that the agent always sees the board from the same perspective
             state[[0, 1], :, :] = state[[1, 0], :, :]

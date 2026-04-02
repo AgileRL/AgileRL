@@ -7,6 +7,7 @@ from pydantic import Field
 
 from agilerl.algorithms import NeuralTS
 from agilerl.models.algo import RLAlgorithmSpec, register
+from agilerl.models.networks import QNetworkSpec
 from agilerl.training.train_bandits import train_bandits
 
 
@@ -19,6 +20,7 @@ class NeuralTSSpec(RLAlgorithmSpec):
     reg: float = Field(default=0.000625)
     lr: float = Field(default=0.003, ge=0.0)
     learn_step: int = Field(default=2, ge=1)
+    net_config: QNetworkSpec | None = Field(default=None)
 
     algo_class: ClassVar[type[NeuralTS]] = NeuralTS
 

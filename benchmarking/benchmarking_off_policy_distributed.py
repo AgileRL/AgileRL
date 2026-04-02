@@ -1,3 +1,4 @@
+import gymnasium as gym
 import yaml
 from accelerate import Accelerator
 
@@ -8,9 +9,9 @@ from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
-    observation_space_channels_to_first,
     print_hyperparams,
 )
+from agilerl.wrappers.image_transpose import ImageTranspose, needs_image_transpose
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -27,12 +28,20 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         print("============ AgileRL Distributed ============")
     accelerator.wait_for_everyone()
 
-    env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
+    probe = gym.make(INIT_HP["ENV_NAME"])
+    extra_wrappers = (
+        [ImageTranspose] if needs_image_transpose(probe.observation_space) else None
+    )
+    probe.close()
+
+    env = make_vect_envs(
+        INIT_HP["ENV_NAME"],
+        num_envs=INIT_HP["NUM_ENVS"],
+        extra_wrappers=extra_wrappers,
+    )
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-    if INIT_HP["CHANNELS_LAST"]:
-        observation_space = observation_space_channels_to_first(observation_space)
 
     memory = ReplayBuffer(INIT_HP["MEMORY_SIZE"], device=accelerator.device)
     tournament = TournamentSelection(
@@ -71,7 +80,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         memory=memory,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
-        swap_channels=INIT_HP["CHANNELS_LAST"],
         max_steps=INIT_HP["MAX_STEPS"],
         evo_steps=INIT_HP["EVO_STEPS"],
         eval_steps=INIT_HP["EVAL_STEPS"],

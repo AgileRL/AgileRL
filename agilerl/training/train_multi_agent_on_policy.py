@@ -12,7 +12,6 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
 from agilerl.population import Population
-from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -38,7 +37,6 @@ def train_multi_agent_on_policy(
     sum_scores: bool = True,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
-    swap_channels: bool = False,
     max_steps: int = 50000,
     evo_steps: int = 25,
     eval_steps: int | None = None,
@@ -76,9 +74,6 @@ def train_multi_agent_on_policy(
     :type INIT_HP: dict
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
     :type MUT_P: dict, optional
-    :param swap_channels: Swap image channels dimension from last to first
-        [H, W, C] -> [C, H, W], defaults to False
-    :type swap_channels: bool, optional
     :param max_steps: Maximum number of steps in environment across the entire population, defaults to 50000
     :type max_steps: int, optional
     :param evo_steps: Evolution frequency (steps), defaults to 25
@@ -215,11 +210,6 @@ def train_multi_agent_on_policy(
             )
             completed_episode_scores = []
             steps = 0
-            if swap_channels:
-                obs = {
-                    agent_id: obs_channels_to_first(s) for agent_id, s in obs.items()
-                }
-
             for _ in range(-(evo_steps // -agent.learn_step)):
                 states = {agent_id: [] for agent_id in agent.agent_ids}
                 actions = {agent_id: [] for agent_id in agent.agent_ids}
@@ -311,12 +301,6 @@ def train_multi_agent_on_policy(
                         )
                         next_done[agent_id] = result
 
-                    if swap_channels:
-                        next_obs = {
-                            agent_id: obs_channels_to_first(s)
-                            for agent_id, s in next_obs.items()
-                        }
-
                     obs = next_obs
                     done = next_done
                     for idx, agent_dones in enumerate(
@@ -360,7 +344,6 @@ def train_multi_agent_on_policy(
         for agent in population.agents:
             agent.test(
                 env,
-                swap_channels=swap_channels,
                 max_steps=eval_steps,
                 loop=eval_loop,
                 sum_scores=sum_scores,

@@ -13,11 +13,12 @@ algorithm:
     mean_noise: 0.0
     theta: 0.15
     dt: 0.01
-    share_encoders: true
+    share_encoders: false
 
 environment:
     name: HalfCheetah-v4
     num_envs: 16
+
 mutation:
     probabilities:
         no_mut: 0.4

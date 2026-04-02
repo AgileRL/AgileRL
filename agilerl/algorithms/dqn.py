@@ -19,11 +19,11 @@ from agilerl.typing import (
     SupportedObservationSpace,
     TorchObsType,
 )
-from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
+from agilerl.utils.algo_utils import make_safe_deepcopies
 
 
 class DQN(RLAlgorithm):
-    """Deep Q-Network (DQN) algorithm.
+    """Deep Q-Network (DQN).
 
     Paper: https://arxiv.org/abs/1312.5602
 
@@ -379,7 +379,6 @@ class DQN(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 1,
     ) -> float:
@@ -387,8 +386,6 @@ class DQN(RLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 1
@@ -407,9 +404,6 @@ class DQN(RLAlgorithm):
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
-                    if swap_channels:
-                        obs = obs_channels_to_first(obs)
-
                     action_mask = info.get("action_mask", None)
                     action = self.get_action(obs, epsilon=0.0, action_mask=action_mask)
                     obs, reward, done, trunc, info = env.step(action)

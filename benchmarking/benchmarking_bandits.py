@@ -44,9 +44,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     env = BanditEnv(features, targets)  # Create environment
     context_dim = env.context_dim
 
-    if INIT_HP["CHANNELS_LAST"]:
-        context_dim = (context_dim[2], context_dim[0], context_dim[1])
-
     memory = ReplayBuffer(INIT_HP["MEMORY_SIZE"], device=device)
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
@@ -118,7 +115,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         memory=memory,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
-        swap_channels=INIT_HP["CHANNELS_LAST"],
         max_steps=INIT_HP["MAX_STEPS"],
         episode_steps=INIT_HP["EPISODE_STEPS"],
         evo_steps=INIT_HP["EVO_STEPS"],

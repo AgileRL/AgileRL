@@ -12,6 +12,7 @@ algorithm:
 environment:
     name: LunarLander-v3
     num_envs: 16
+
 mutation:
     probabilities:
         no_mut: 0.4

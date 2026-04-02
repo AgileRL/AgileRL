@@ -20,7 +20,6 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.actors import DeterministicActor
 from agilerl.population import Population
 from agilerl.typing import GymEnvType
-from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -80,7 +79,6 @@ def train_off_policy(
     memory: BufferType,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
-    swap_channels: bool = False,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
     eval_steps: int | None = None,
@@ -125,9 +123,6 @@ def train_off_policy(
     :type INIT_HP: dict, optional
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
     :type MUT_P: dict, optional
-    :param swap_channels: Swap image channels dimension from last to first
-        [H, W, C] -> [C, H, W], defaults to False
-    :type swap_channels: bool, optional
     :param max_steps: Maximum number of steps in environment, defaults to 1000000
     :type max_steps: int, optional
     :param evo_steps: Evolution frequency (steps), defaults to 10000
@@ -268,7 +263,7 @@ def train_off_policy(
         mutation_hyperparams=MUT_P,
     )
 
-    # Initialize population wrapper for metrics reporting
+    # Initialize population for metrics reporting
     population = Population(
         agents=pop,
         accelerator=accelerator,
@@ -299,9 +294,6 @@ def train_off_policy(
                 epsilon = eps_start
 
             for idx_step in range(evo_steps // num_envs):
-                if swap_channels:
-                    obs = obs_channels_to_first(obs)
-
                 # Get next action from agent
                 if isinstance(agent, DQN):
                     action_mask = info.get("action_mask", None)
@@ -338,11 +330,6 @@ def train_off_policy(
 
                 steps += num_envs
 
-                # Save experience to replay buffer
-                next_obs = (
-                    obs_channels_to_first(next_obs) if swap_channels else next_obs
-                )
-
                 # Save network output in buffer
                 if isinstance(agent, (DDPG, TD3)):
                     action = raw_action
@@ -363,6 +350,7 @@ def train_off_policy(
                         memory.add(one_step_transition)
                 else:
                     memory.add(transition)
+
                 if per:
                     fraction = min(
                         ((agent.metrics.steps + idx_step + 1) * num_envs / max_steps),
@@ -414,7 +402,6 @@ def train_off_policy(
         for agent in population.agents:
             agent.test(
                 env,
-                swap_channels=swap_channels,
                 max_steps=eval_steps,
                 loop=eval_loop,
             )

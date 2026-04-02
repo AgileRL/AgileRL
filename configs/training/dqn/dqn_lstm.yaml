@@ -12,6 +12,7 @@ algorithm:
 environment:
     name: stocks-v0
     num_envs: 16
+
 mutation:
     probabilities:
         no_mut: 0.4

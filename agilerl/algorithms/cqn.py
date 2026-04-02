@@ -13,11 +13,13 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import GymEnvType, ObservationType
-from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
+from agilerl.utils.algo_utils import make_safe_deepcopies
 
 
 class CQN(RLAlgorithm):
-    """The CQN algorithm class. CQN paper: https://arxiv.org/abs/2006.04779.
+    """Conservative Q-Learning for Offline Reinforcement Learning.
+
+    Paper: https://arxiv.org/abs/2006.04779
 
     :param observation_space: The observation space of the environment.
     :type observation_space: spaces.Space
@@ -284,7 +286,6 @@ class CQN(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
@@ -292,8 +293,6 @@ class CQN(RLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None.
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -311,9 +310,6 @@ class CQN(RLAlgorithm):
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
-                    if swap_channels:
-                        obs = obs_channels_to_first(obs)
-
                     action_mask = info.get("action_mask", None)
                     action = self.get_action(obs, epsilon=0, action_mask=action_mask)
                     obs, reward, done, trunc, info = env.step(action)

@@ -13,7 +13,6 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.typing import GymEnvType
-from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.minari_utils import minari_to_agile_buffer
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -35,7 +34,6 @@ def train_offline(
     memory: ReplayBuffer,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
-    swap_channels: bool = False,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
     eval_steps: int | None = None,
@@ -76,9 +74,6 @@ def train_offline(
     :type INIT_HP: dict, optional
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
     :type MUT_P: dict, optional
-    :param swap_channels: Swap image channels dimension from last to first
-        [H, W, C] -> [C, H, W], defaults to False
-    :type swap_channels: bool, optional
     :param max_steps: Maximum number of steps in environment, defaults to 1000000
     :type max_steps: int, optional
     :param evo_steps: Evolution frequency (steps), defaults to 10000
@@ -183,9 +178,6 @@ def train_offline(
         for i in range(dataset_length - 1):
             obs = dataset["observations"][i]
             next_obs = dataset["observations"][i + 1]
-            if swap_channels:
-                obs = obs_channels_to_first(obs)
-                next_obs = obs_channels_to_first(next_obs)
             action = dataset["actions"][i]
             reward = dataset["rewards"][i]
             done = bool(dataset["terminals"][i])
@@ -270,7 +262,6 @@ def train_offline(
         for agent in population.agents:
             agent.test(
                 env,
-                swap_channels=swap_channels,
                 max_steps=eval_steps,
                 loop=eval_loop,
             )

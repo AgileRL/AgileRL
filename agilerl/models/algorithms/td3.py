@@ -7,6 +7,7 @@ from pydantic import Field
 
 from agilerl.algorithms import TD3
 from agilerl.models.algo import RLAlgorithmSpec, off_policy, register
+from agilerl.models.networks import DeterministicActorSpec
 from agilerl.training.train_off_policy import train_off_policy
 
 
@@ -26,6 +27,7 @@ class TD3Spec(RLAlgorithmSpec):
     theta: float = Field(default=0.15)
     dt: float = Field(default=0.01)
     share_encoders: bool = Field(default=False)
+    net_config: DeterministicActorSpec | None = Field(default=None)
 
     algo_class: ClassVar[type[TD3]] = TD3
 

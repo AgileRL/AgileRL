@@ -723,33 +723,6 @@ def concatenate_spaces(space_list: list[SupportedObservationSpace]) -> spaces.Sp
     )
 
 
-def obs_channels_to_first(
-    observation: NumpyObsType,
-    expand_dims: bool = False,
-) -> NumpyObsType:
-    """Convert observation space from channels last to channels first format.
-
-    :param observation_space: Observation space
-    :type observation_space: spaces.Box | spaces.Dict
-    :param expand_dims: If True, expand the dimensions of the observation, defaults to False
-    :type expand_dims: bool, optional
-    :return: Observation space with channels first format
-    :rtype: spaces.Box | spaces.Dict
-    """
-    if isinstance(observation, np.ndarray):
-        if expand_dims:
-            observation = np.expand_dims(observation, axis=0)
-
-        if observation.ndim in {3, 4}:
-            return np.moveaxis(observation, -1, -3)
-        return observation
-
-    if isinstance(observation, dict):
-        return {key: obs_channels_to_first(obs) for key, obs in observation.items()}
-    msg = f"Expected np.ndarray or dict, got {type(observation)}"
-    raise TypeError(msg)
-
-
 def obs_to_tensor(obs: ObservationType, device: str | torch.device) -> TorchObsType:
     """Move the observation to the given device as a PyTorch tensor.
 

@@ -7,8 +7,6 @@ General Utils
 
 .. autofunction:: agilerl.utils.utils.make_skill_vect_envs
 
-.. autofunction:: agilerl.utils.utils.observation_space_channels_to_first
-
 .. autofunction:: agilerl.utils.utils.create_population
 
 .. autofunction:: agilerl.utils.utils.save_population_checkpoint

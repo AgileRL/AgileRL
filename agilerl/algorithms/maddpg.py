@@ -33,14 +33,13 @@ from agilerl.utils.algo_utils import (
     get_deepest_head_config,
     key_in_nested_dict,
     make_safe_deepcopies,
-    obs_channels_to_first,
 )
 
 SupportedActionSpace = spaces.Discrete | spaces.Box
 
 
 class MADDPG(MultiAgentRLAlgorithm):
-    """Multi-Agent Deep Deterministic Policy Gradient (MADDPG) algorithm.
+    """Multi-Agent Deep Deterministic Policy Gradient (MADDPG).
 
     Paper: https://arxiv.org/abs/1706.02275
 
@@ -770,7 +769,6 @@ class MADDPG(MultiAgentRLAlgorithm):
     def test(
         self,
         env: PzEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
@@ -779,8 +777,6 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -816,13 +812,6 @@ class MADDPG(MultiAgentRLAlgorithm):
                 step = 0
                 while not np.all(finished):
                     step += 1
-                    if swap_channels:
-                        expand_dims = not is_vectorised
-                        obs = {
-                            agent_id: obs_channels_to_first(s, expand_dims)
-                            for agent_id, s in obs.items()
-                        }
-
                     action, _ = self.get_action(
                         obs,
                         infos=info,

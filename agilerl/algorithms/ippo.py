@@ -37,7 +37,6 @@ from agilerl.utils.algo_utils import (
     get_vect_dim,
     key_in_nested_dict,
     make_safe_deepcopies,
-    obs_channels_to_first,
     vectorize_experiences_by_agent,
 )
 from agilerl.utils.algo_utils import (
@@ -46,7 +45,7 @@ from agilerl.utils.algo_utils import (
 
 
 class IPPO(MultiAgentRLAlgorithm):
-    """Independent Proximal Policy Optimization (IPPO) algorithm.
+    """Independent Proximal Policy Optimization (IPPO).
 
     Paper: https://arxiv.org/pdf/2011.09533
 
@@ -907,7 +906,6 @@ class IPPO(MultiAgentRLAlgorithm):
     def test(
         self,
         env: PzEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
@@ -916,8 +914,6 @@ class IPPO(MultiAgentRLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: PettingZoo environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -953,12 +949,6 @@ class IPPO(MultiAgentRLAlgorithm):
                 step = 0
                 while not np.all(finished):
                     step += 1
-                    if swap_channels:
-                        obs = {
-                            agent_id: obs_channels_to_first(s)
-                            for agent_id, s in obs.items()
-                        }
-
                     # Get next action from agent
                     action, _, _, _ = self.get_action(obs=obs, infos=info)
 

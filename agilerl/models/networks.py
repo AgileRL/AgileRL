@@ -45,7 +45,7 @@ def min_max_validator(min_field: str, max_field: str) -> Callable[[T], T]:
 
 
 class MlpSpec(BaseModel):
-    """Model specification for multi-layer perceptron networks."""
+    """Model specification for evolvable MLP networks."""
 
     hidden_size: list[int] = Field(min_length=1)
     activation: MlpActivation = Field(default="ReLU")
@@ -98,7 +98,7 @@ class MlpSpec(BaseModel):
 
 
 class SimbaSpec(BaseModel):
-    """Model specification for SimBA networks.
+    """Model specification for evolvable SimBA networks.
 
     Reference: https://arxiv.org/abs/2410.09754
     """
@@ -135,7 +135,7 @@ class SimbaSpec(BaseModel):
 
 
 class CnnSpec(BaseModel):
-    """Model specification for convolutional networks."""
+    """Model specification for evolvable convolutional networks."""
 
     channel_size: list[int] = Field(min_length=1)
     kernel_size: list[int] = Field(min_length=1)
@@ -196,7 +196,7 @@ class CnnSpec(BaseModel):
 
 
 class MultiInputSpec(BaseModel):
-    """Model specification for multi-input networks."""
+    """Model specification for evolvable multi-input networks."""
 
     latent_dim: int = Field(default=32, gt=0)
     vector_space_mlp: bool = Field(default=False)
@@ -214,7 +214,7 @@ class MultiInputSpec(BaseModel):
 
 
 class LstmSpec(BaseModel):
-    """Model specification for Long Short-Term Memory networks."""
+    """Model specification for evolvable LSTM networks."""
 
     hidden_state_size: int = Field(gt=0)
     num_layers: int = Field(default=1, gt=0)
@@ -248,17 +248,44 @@ class NetworkSpec(BaseModel):
     max_latent_dim: int = Field(default=128, gt=1)
     encoder_config: EncoderType = Field(discriminator="arch")
     head_config: MlpSpec
+    random_seed: int | None = Field(default=None)
 
     @model_validator(mode="after")
     def _check_latent_dim(self) -> Self:
         min_max_validator("min_latent_dim", "max_latent_dim")(self)
         return min_max_validator("min_latent_dim", "latent_dim")(self)
 
-    def to_manifest(self) -> dict[str, object]:
-        """Serialize this network spec for Arena manifest payloads."""
-        payload = self.model_dump(mode="json", exclude_none=True)
 
-        # Keep the discriminator tag needed to parse encoder_config unions.
-        payload["encoder_config"]["arch"] = self.encoder_config.arch
+class QNetworkSpec(NetworkSpec):
+    """Model specification for evolvable Q networks."""
 
-        return payload
+    simba: bool = Field(default=False)
+
+
+class RainbowQNetworkSpec(NetworkSpec):
+    """Model specification for evolvable Rainbow Q networks."""
+
+
+class ContinuousQNetworkSpec(NetworkSpec):
+    """Model specification for evolvable continuous Q networks."""
+
+    simba: bool = Field(default=False)
+
+
+class DeterministicActorSpec(NetworkSpec):
+    """Model specification for evolvable deterministic actor networks."""
+
+    simba: bool = Field(default=False)
+
+
+class StochasticActorSpec(NetworkSpec):
+    """Model specification for evolvable stochastic actor networks."""
+
+    squash_output: bool = Field(default=False)
+    simba: bool = Field(default=False)
+
+
+class ValueNetworkSpec(NetworkSpec):
+    """Model specification for evolvable value networks."""
+
+    simba: bool = Field(default=False)

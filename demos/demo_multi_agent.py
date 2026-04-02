@@ -13,7 +13,6 @@ from agilerl.utils.utils import (
     create_population,
     default_progress_bar,
     init_loggers,
-    observation_space_channels_to_first,
     tournament_selection_and_mutation,
 )
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
@@ -38,8 +37,6 @@ if __name__ == "__main__":
 
     # Define the initial hyperparameters
     INIT_HP = {
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        "CHANNELS_LAST": False,
         "BATCH_SIZE": 32,  # Batch size
         "O_U_NOISE": True,  # Ornstein Uhlenbeck action noise
         "EXPL_NOISE": 0.1,  # Action noise scale
@@ -70,11 +67,6 @@ if __name__ == "__main__":
     # Configure the multi-agent algo input arguments
     observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
     action_spaces = [env.single_action_space(agent) for agent in env.agents]
-
-    if INIT_HP["CHANNELS_LAST"]:
-        observation_spaces = [
-            observation_space_channels_to_first(space) for space in observation_spaces
-        ]
 
     # Append number of agents and agent IDs to the initial hyperparameter dictionary
     INIT_HP["N_AGENTS"] = env.num_agents
@@ -156,11 +148,6 @@ if __name__ == "__main__":
             completed_episode_scores = []
             steps = 0
 
-            if INIT_HP["CHANNELS_LAST"]:
-                obs = {
-                    agent_id: np.moveaxis(s, [-1], [-3]) for agent_id, s in obs.items()
-                }
-
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
                 action, raw_action = agent.get_action(obs=obs, infos=info)
@@ -170,13 +157,6 @@ if __name__ == "__main__":
 
                 scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
                 steps += num_envs
-
-                # Image processing if necessary for the environment
-                if INIT_HP["CHANNELS_LAST"]:
-                    next_obs = {
-                        agent_id: np.moveaxis(ns, [-1], [-3])
-                        for agent_id, ns in next_obs.items()
-                    }
 
                 # Save experiences to replay buffer
                 transition: TensorDictBase = MultiAgentTransition(
@@ -201,8 +181,10 @@ if __name__ == "__main__":
                     ):
                         # Sample replay buffer
                         experiences = memory.sample(agent.batch_size)
-                        # Learn according to agent's RL algorithm
-                        agent.learn(experiences)
+                        agent.learn(
+                            experiences
+                        )  # Learn according to agent's RL algorithm
+
                 # Handle num_envs > learn step; learn multiple times per step in env
                 elif (
                     len(memory) >= agent.batch_size and memory.counter > learning_delay
@@ -238,7 +220,6 @@ if __name__ == "__main__":
         for agent in population.agents:
             agent.test(
                 env,
-                swap_channels=INIT_HP["CHANNELS_LAST"],
                 max_steps=eval_steps,
                 loop=eval_loop,
             )

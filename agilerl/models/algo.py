@@ -11,7 +11,6 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm, MultiAgentRLAlgorithm, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.models.env import LLMEnvType
-from agilerl.models.networks import NetworkSpec
 from agilerl.protocols import AgentType
 from agilerl.typing import SupportedActionSpace, SupportedObservationSpace
 
@@ -215,16 +214,6 @@ class AlgorithmSpec(BaseModel):
         msg = "Algorithm specs must implement get_training_fn."
         raise NotImplementedError(msg) from None
 
-    def resolve_training_fn(self) -> Callable[..., Any]:
-        """Return the training function, supporting legacy spec APIs."""
-        try:
-            return self.get_training_fn()
-        except NotImplementedError:
-            legacy = getattr(self, "get_training_loop", None)
-            if callable(legacy):
-                return legacy()
-            raise
-
 
 class RLAlgorithmSpec(AlgorithmSpec):
     """Specification for single-agent reinforcement learning algorithms.
@@ -233,7 +222,6 @@ class RLAlgorithmSpec(AlgorithmSpec):
     network configuration, learning step frequency, and discount factor.
     """
 
-    net_config: NetworkSpec | None = Field(default=None)
     learn_step: int = Field(default=5, ge=1)
     gamma: float = Field(default=0.99, ge=0.0, le=1.0)
 
@@ -246,6 +234,7 @@ class RLAlgorithmSpec(AlgorithmSpec):
         index: int,
         device: torch.device,
         accelerator: Accelerator | None = None,
+        resume_from_checkpoint: str | None = None,
     ) -> RLAlgorithm:
         """Build a single-agent algorithm instance from spec fields.
 
@@ -257,16 +246,24 @@ class RLAlgorithmSpec(AlgorithmSpec):
         :type index: int
         :param device: Torch device.
         :type device: torch.device
+        :param resume_from_checkpoint: Path to resume from checkpoint.
+        :type resume_from_checkpoint: str | None
         :returns: Single-agent algorithm instance.
         :rtype: RLAlgorithm
         """
-        return self.algo_class(
+        algo = self.algo_class(
             observation_space=observation_space,
             action_space=action_space,
             index=index,
             device=device,
             **self.model_dump(),
         )
+
+        # Load checkpoint if provided
+        if resume_from_checkpoint is not None:
+            algo.load_checkpoint(resume_from_checkpoint)
+
+        return algo
 
 
 class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
@@ -276,7 +273,6 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
     support for multiple observation/action spaces and agent IDs.
     """
 
-    net_config: NetworkSpec | None = Field(default=None)
     learn_step: int = Field(default=2048, ge=1)
     gamma: float = Field(default=0.99, ge=0.0, le=1.0)
     torch_compiler: str | None = Field(default=None)
@@ -290,6 +286,7 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         index: int,
         device: torch.device,
         accelerator: Accelerator | None = None,
+        resume_from_checkpoint: str | None = None,
     ) -> MultiAgentRLAlgorithm:
         """Build a multi-agent algorithm from spec fields.
 
@@ -301,10 +298,12 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         :type index: int
         :param device: Torch device.
         :type device: torch.device
+        :param resume_from_checkpoint: Path to resume from checkpoint.
+        :type resume_from_checkpoint: str | None
         :returns: Multi-agent algorithm instance.
         :rtype: MultiAgentRLAlgorithm
         """
-        return self.algo_class(
+        algo = self.algo_class(
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
             index=index,
@@ -312,6 +311,12 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
             accelerator=accelerator,
             **self.model_dump(),
         )
+
+        # Load checkpoint if provided
+        if resume_from_checkpoint is not None:
+            algo.load_checkpoint(resume_from_checkpoint)
+
+        return algo
 
 
 class LoraConfigDict(TypedDict):
@@ -347,3 +352,58 @@ class LLMAlgorithmSpec(AlgorithmSpec):
 
     agent_type: ClassVar[AgentType] = AgentType.LLMAgent
     env_type: ClassVar[LLMEnvType]
+
+    def build_algorithm(
+        self,
+        tokenizer: Any,
+        index: int = 0,
+        accelerator: Accelerator | None = None,
+        device: str | torch.device = "cpu",
+        resume_from_checkpoint: str | None = None,
+    ) -> LLMAlgorithm:
+        """Build an LLM algorithm instance from spec fields.
+
+        :param tokenizer: A HuggingFace ``AutoTokenizer`` instance.
+        :type tokenizer: Any
+        :param index: Index of the algorithm in the population.
+        :type index: int
+        :param accelerator: HuggingFace ``Accelerator`` instance.
+        :type accelerator: Accelerator | None
+        :param device: Torch device.
+        :type device: str | torch.device
+        :param resume_from_checkpoint: Path to resume from checkpoint.
+        :type resume_from_checkpoint: str | None
+        :returns: LLM algorithm instance.
+        :rtype: LLMAlgorithm
+        """
+        micro_batch_size_per_gpu = None
+        if accelerator is not None:
+            micro_batch_size_per_gpu = min(
+                self.batch_size / accelerator.num_processes, 1
+            )
+
+        use_vllm = getattr(self, "use_vllm", False)
+        if not use_vllm and hasattr(self, "vllm_config"):
+            self.vllm_config = None
+
+        kwargs = vars(self).copy()
+        kwargs.pop("pretrained_model_name_or_path")
+        if not use_vllm:
+            kwargs.pop("max_model_len", None)
+
+        algo = self.algo_class(
+            model_name=self.pretrained_model_name_or_path,
+            pad_token_id=tokenizer.eos_token_id,
+            pad_token=tokenizer.eos_token,
+            accelerator=accelerator,
+            index=index,
+            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+            device=device,
+            **kwargs,
+        )
+
+        # Load checkpoint if provided
+        if resume_from_checkpoint is not None:
+            algo.load_checkpoint(resume_from_checkpoint)
+
+        return algo

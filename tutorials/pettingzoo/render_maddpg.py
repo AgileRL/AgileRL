@@ -8,7 +8,6 @@ from pettingzoo.atari import space_invaders_v2
 from PIL import Image, ImageDraw
 
 from agilerl.algorithms import MADDPG
-from agilerl.utils.algo_utils import obs_channels_to_first
 
 
 # Define function to return image
@@ -32,14 +31,11 @@ if __name__ == "__main__":
 
     # Configure the environment
     env = space_invaders_v2.parallel_env(render_mode="rgb_array")
-    channels_last = True  # Needed for environments that use images as observations
-    if channels_last:
-        # Environment processing for image based observations
-        env = ss.frame_skip_v0(env, 4)
-        env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
-        env = ss.color_reduction_v0(env, mode="B")
-        env = ss.resize_v1(env, x_size=84, y_size=84)
-        env = ss.frame_stack_v1(env, 4)
+    env = ss.frame_skip_v0(env, 4)
+    env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
+    env = ss.color_reduction_v0(env, mode="B")
+    env = ss.resize_v1(env, x_size=84, y_size=84)
+    env = ss.frame_stack_v1(env, 4)
 
     env.reset()
 
@@ -66,11 +62,6 @@ if __name__ == "__main__":
         agent_reward = dict.fromkeys(agent_ids, 0)
         score = 0
         for _ in range(max_steps):
-            if channels_last:
-                obs = {
-                    agent_id: obs_channels_to_first(s) for agent_id, s in obs.items()
-                }
-
             # Get next action from agent
             action, _ = maddpg.get_action(obs, infos=info)
 

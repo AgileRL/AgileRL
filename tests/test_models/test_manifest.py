@@ -10,7 +10,7 @@ Test manifests live under ``tests/manifests/`` as YAML files.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -588,13 +588,11 @@ class TestLocalTrainerLLM:
         return _make_manifest(
             algo=algo,
             env={
-                "name": "gsm8k",
-                "dataset_name": "gsm8k",
-                "tokenizer_name": "Qwen/Qwen2.5-1.5B",
-                "reward_fn": lambda *a, **kw: 1.0,
-                "conversation_template": [
-                    {"role": "user", "content": "{question}"},
-                ],
+                "dataset_path": "train.parquet",
+                "reward_file_path": "reward.py",
+                "prompt_template": {"role": "user", "content": "{question}"},
+                "max_reward": 10.0,
+                "train_test_split": 0.8,
             },
             mutation={
                 "probabilities": {"no_mut": 0.1, "rl_hp_mut": 0.6},
@@ -614,16 +612,34 @@ class TestLocalTrainerLLM:
         return _make_manifest(
             algo=algo,
             env={
-                "name": "argilla/dpo-mix-7k",
-                "dataset_name": "argilla/dpo-mix-7k",
-                "tokenizer_name": "Qwen/Qwen2.5-1.5B",
                 "env_type": "preference",
+                "dataset_path": "dpo_data.parquet",
+                "columns": {"prompt": "question", "chosen": "accepted"},
             },
             mutation={
                 "probabilities": {"no_mut": 0.1, "rl_hp_mut": 0.6},
                 "mutation_sd": 0.1,
             },
         )
+
+    @pytest.fixture(autouse=True)
+    def _patch_llm_trainer_init(self):
+        """Patch heavy LocalTrainer init steps (env creation, population, tokenizer)."""
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 0
+        mock_tokenizer.eos_token = "<eos>"
+        with (
+            patch(
+                "transformers.AutoTokenizer.from_pretrained",
+                return_value=mock_tokenizer,
+            ),
+            patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=[MagicMock()],
+            ),
+        ):
+            yield
 
     def test_grpo_produces_llm_env_spec(self):
         trainer = LocalTrainer.from_manifest(self._grpo_manifest())
@@ -645,6 +661,17 @@ class TestLocalTrainerLLM:
         assert trainer.algorithm.temperature == 0.9
         assert trainer.algorithm.clip_coef == 0.2
 
+    def test_grpo_env_fields(self):
+        trainer = LocalTrainer.from_manifest(self._grpo_manifest())
+        assert trainer.environment.dataset_path == "train.parquet"
+        assert trainer.environment.reward_file_path == "reward.py"
+        assert trainer.environment.max_reward == 10.0
+        assert trainer.environment.train_test_split == 0.8
+        assert trainer.environment.prompt_template == {
+            "role": "user",
+            "content": "{question}",
+        }
+
     def test_dpo_produces_llm_env_spec(self):
         trainer = LocalTrainer.from_manifest(self._dpo_manifest())
         assert isinstance(trainer, LocalTrainer)
@@ -654,6 +681,14 @@ class TestLocalTrainerLLM:
     def test_dpo_env_type_preference(self):
         trainer = LocalTrainer.from_manifest(self._dpo_manifest())
         assert str(trainer.environment.env_type) == "preference"
+
+    def test_dpo_env_fields(self):
+        trainer = LocalTrainer.from_manifest(self._dpo_manifest())
+        assert trainer.environment.dataset_path == "dpo_data.parquet"
+        assert trainer.environment.columns == {
+            "prompt": "question",
+            "chosen": "accepted",
+        }
 
     def test_dpo_algorithm_fields(self):
         trainer = LocalTrainer.from_manifest(self._dpo_manifest())
@@ -667,11 +702,6 @@ class TestLocalTrainerLLM:
             if hasattr(trainer.algorithm, "net_config")
             else True
         )
-
-
-# ============================================================================
-# TestArenaTrainerFromManifest – Arena scenarios
-# ============================================================================
 
 
 class TestArenaTrainerFromManifest:
@@ -867,10 +897,10 @@ class TestFromConfigFiles:
                 "calc_position_embeddings": True,
             }
         )
+        data.setdefault("environment", {})
 
         manifest = TrainingManifest.model_validate(data)
         assert isinstance(manifest.algorithm, expected_algo_cls)
-        assert manifest.environment == {}
 
     @pytest.mark.parametrize(
         "rel_path",

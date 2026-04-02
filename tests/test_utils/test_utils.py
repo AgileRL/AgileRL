@@ -39,7 +39,6 @@ from agilerl.utils.utils import (
     make_multi_agent_vect_envs,
     make_skill_vect_envs,
     make_vect_envs,
-    observation_space_channels_to_first,
     plot_population_score,
     print_hyperparams,
     save_llm_checkpoint,
@@ -80,7 +79,6 @@ SHARED_INIT_HP = {
     "AGENT_IDS": ["agent1", "agent2"],
     "LAMBDA": 1.0,
     "REG": 0.000625,
-    "CHANNELS_LAST": False,
     "O_U_NOISE": True,
     "EXPL_NOISE": 0.1,
     "MEAN_NOISE": 0.0,
@@ -109,42 +107,6 @@ def test_make_vect_envs_sync_vector():
     env = make_vect_envs("CartPole-v1", num_envs=2, should_async_vector=False)
     assert isinstance(env, gym.vector.SyncVectorEnv)
     assert env.num_envs == 2
-
-
-def test_observation_space_channels_to_first_box():
-    space = spaces.Box(0, 255, shape=(32, 32, 3), dtype="uint8")
-    result = observation_space_channels_to_first(space)
-    assert result.shape == (3, 32, 32)
-
-
-def test_observation_space_channels_to_first_dict():
-    space = spaces.Dict(
-        {
-            "img": spaces.Box(0, 255, shape=(16, 16, 4), dtype="uint8"),
-            "vec": spaces.Box(0, 1, shape=(4,), dtype="float32"),
-        }
-    )
-    result = observation_space_channels_to_first(space)
-    assert result["img"].shape == (4, 16, 16)
-    assert result["vec"].shape == (4,)
-
-
-def test_observation_space_channels_to_first_tuple():
-    space = spaces.Tuple(
-        (
-            spaces.Box(0, 255, shape=(8, 8, 2), dtype="uint8"),
-            spaces.Discrete(5),
-        )
-    )
-    result = observation_space_channels_to_first(space)
-    assert result.spaces[0].shape == (2, 8, 8)
-    assert isinstance(result.spaces[1], spaces.Discrete)
-
-
-def test_observation_space_channels_to_first_discrete_passthrough():
-    space = spaces.Discrete(5)
-    result = observation_space_channels_to_first(space)
-    assert result == space
 
 
 def test_suppress_verbose_logging():

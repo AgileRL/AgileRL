@@ -25,7 +25,6 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
     multi_dim_clamp,
-    obs_channels_to_first,
     share_encoder_parameters,
 )
 from agilerl.utils.evolvable_networks import (
@@ -35,7 +34,7 @@ from agilerl.utils.evolvable_networks import (
 
 
 class DDPG(RLAlgorithm):
-    """Deep Deterministic Policy Gradient (DDPG) algorithm.
+    """Deep Deterministic Policy Gradient (DDPG).
 
     Paper: https://arxiv.org/abs/1509.02971
 
@@ -80,15 +79,15 @@ class DDPG(RLAlgorithm):
     :param policy_freq: Frequency of critic network updates compared to policy network, defaults to 2
     :type policy_freq: int, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module | None, optional
+    :type actor_network: EvolvableModule | None, optional
     :param critic_network: Custom critic network, defaults to None
-    :type critic_network: nn.Module | None, optional
+    :type critic_network: EvolvableModule | None, optional
     :param share_encoders: Share encoders between actor and critic, defaults to False
     :type share_encoders: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :type accelerator: accelerate.Accelerator | None, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
@@ -522,7 +521,6 @@ class DDPG(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
@@ -530,8 +528,6 @@ class DDPG(RLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -551,8 +547,6 @@ class DDPG(RLAlgorithm):
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
-                    if swap_channels:
-                        obs = obs_channels_to_first(obs)
                     action = self.get_action(obs, training=False)
                     obs, reward, done, trunc, _ = env.step(action)
                     step += 1

@@ -41,7 +41,6 @@ are more likely to remain present in the population. The sequence of evolution (
         from agilerl.utils.utils import (
             create_population,
             make_vect_envs,
-            observation_space_channels_to_first
         )
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -64,8 +63,6 @@ are more likely to remain present in the population. The sequence of evolution (
             "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
             "TARGET_KL": None,  # Target KL divergence threshold
             "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-            "CHANNELS_LAST": False,
         }
 
         num_envs = 16

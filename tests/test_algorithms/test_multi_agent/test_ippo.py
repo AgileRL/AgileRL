@@ -2049,11 +2049,8 @@ def test_learn_individual_unsqueezes_box_single_action(ma_vector_space):
     assert isinstance(loss, float)
 
 
-def test_ippo_test_with_swap_channels_path(
-    ma_image_space, ma_discrete_space, monkeypatch
-):
+def test_ippo_test(ma_image_space, ma_discrete_space):
     env = DummyMultiEnv(ma_image_space, ma_discrete_space)
-    monkeypatch.setattr("agilerl.algorithms.ippo.obs_channels_to_first", lambda x: x)
     ippo = IPPO(
         observation_spaces=ma_image_space,
         action_spaces=ma_discrete_space,
@@ -2061,7 +2058,5 @@ def test_ippo_test_with_swap_channels_path(
         device="cpu",
         torch_compiler=None,
     )
-    mean_score = ippo.test(
-        env, swap_channels=True, max_steps=1, loop=1, sum_scores=True
-    )
+    mean_score = ippo.test(env, max_steps=1, loop=1, sum_scores=True)
     assert isinstance(mean_score, float)

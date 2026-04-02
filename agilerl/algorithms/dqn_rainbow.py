@@ -19,12 +19,12 @@ from agilerl.typing import (
     SupportedObservationSpace,
     TorchObsType,
 )
-from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
+from agilerl.utils.algo_utils import make_safe_deepcopies
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class RainbowDQN(RLAlgorithm):
-    """Rainbow Deep Q-Network (DQN) algorithm.
+    """Rainbow Deep Q-Network (DQN).
 
     Paper: https://arxiv.org/abs/1710.02298
 
@@ -67,7 +67,7 @@ class RainbowDQN(RLAlgorithm):
     :param combined_reward: Boolean flag indicating whether to use combined 1-step and n-step reward, defaults to False
     :type combined_reward: bool, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module, optional
+    :type actor_network: EvolvableModule | None, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -512,7 +512,6 @@ class RainbowDQN(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
@@ -520,8 +519,6 @@ class RainbowDQN(RLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 3
@@ -538,9 +535,6 @@ class RainbowDQN(RLAlgorithm):
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
-                    if swap_channels:
-                        obs = obs_channels_to_first(obs)
-
                     action_mask = info.get("action_mask", None)
                     action = self.get_action(
                         obs,

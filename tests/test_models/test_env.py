@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
 import pytest
 
-from agilerl.models.env import GymEnvSpec, PzEnvSpec
+from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.models.env import GymEnvSpec, LLMEnvSpec, LLMEnvType, PzEnvSpec
 
 
 def _write_module(tmp_path, name: str, contents: str) -> None:
@@ -275,3 +277,117 @@ def mark_wrapped(env):
             assert all(agent in observations for agent in env.agents)
         finally:
             env.close()
+
+
+class TestLLMEnvSpec:
+    def test_reasoning_requires_reward_file_path(self):
+        with pytest.raises(ValueError, match="reward_file_path is required"):
+            LLMEnvSpec(env_type=LLMEnvType.REASONING, reward_file_path=None)
+
+    def test_preference_does_not_require_reward_file_path(self):
+        spec = LLMEnvSpec(env_type=LLMEnvType.PREFERENCE, reward_file_path=None)
+        assert spec.reward_file_path is None
+
+    def test_default_fields(self):
+        spec = LLMEnvSpec(env_type=LLMEnvType.REASONING)
+        assert spec.train_test_split == 0.9
+        assert spec.reward_file_path == "reward.py"
+        assert spec.dataset_path == "dataset.parquet"
+        assert spec.columns is None
+        assert spec.prompt_template is None
+        assert spec.max_reward is None
+
+    def test_is_standalone_model(self):
+        spec = LLMEnvSpec(env_type=LLMEnvType.REASONING)
+        assert not hasattr(spec, "name")
+        assert not hasattr(spec, "num_envs")
+
+    def test_custom_fields(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.REASONING,
+            columns={"question": "input", "answer": "output"},
+            prompt_template={"role": "user", "content": "{question}"},
+            max_reward=5.0,
+            train_test_split=0.8,
+            reward_file_path="my_reward.py",
+            dataset_path="data/train.parquet",
+        )
+        assert spec.columns == {"question": "input", "answer": "output"}
+        assert spec.prompt_template == {"role": "user", "content": "{question}"}
+        assert spec.max_reward == 5.0
+        assert spec.train_test_split == 0.8
+        assert spec.reward_file_path == "my_reward.py"
+        assert spec.dataset_path == "data/train.parquet"
+
+    def test_train_test_split_bounds(self):
+        with pytest.raises(Exception):
+            LLMEnvSpec(env_type=LLMEnvType.REASONING, train_test_split=1.5)
+        with pytest.raises(Exception):
+            LLMEnvSpec(env_type=LLMEnvType.REASONING, train_test_split=-0.1)
+
+    @patch("agilerl.models.env._resolve_entrypoint_target")
+    @patch("agilerl.models.env.LLMEnvSpec._load_dataset")
+    def test_make_env_reasoning(self, mock_load, mock_resolve):
+        mock_train_ds = MagicMock()
+        mock_test_ds = MagicMock()
+        mock_load.return_value = (mock_train_ds, mock_test_ds)
+        mock_resolve.return_value = lambda *a, **kw: 1.0
+        mock_tokenizer = MagicMock()
+
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.REASONING,
+            reward_file_path="reward.py",
+            prompt_template={"role": "user", "content": "{q}"},
+        )
+
+        with patch("agilerl.utils.llm_utils.ReasoningGym") as MockGym:
+            MockGym.return_value = "reasoning_gym"
+            result = spec.make_env(tokenizer=mock_tokenizer)
+
+        assert result == "reasoning_gym"
+        MockGym.assert_called_once_with(
+            train_dataset=mock_train_ds,
+            test_dataset=mock_test_ds,
+            tokenizer=mock_tokenizer,
+            reward_fn=mock_resolve.return_value,
+            conversation_template={"role": "user", "content": "{q}"},
+            accelerator=None,
+        )
+
+    @patch("agilerl.models.env.LLMEnvSpec._load_dataset")
+    def test_make_env_preference(self, mock_load):
+        mock_train_ds = MagicMock()
+        mock_test_ds = MagicMock()
+        mock_load.return_value = (mock_train_ds, mock_test_ds)
+        mock_tokenizer = MagicMock()
+
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.PREFERENCE,
+            reward_file_path=None,
+        )
+
+        with patch("agilerl.utils.llm_utils.PreferenceGym") as MockGym:
+            MockGym.return_value = "preference_gym"
+            result = spec.make_env(tokenizer=mock_tokenizer)
+
+        assert result == "preference_gym"
+        MockGym.assert_called_once_with(
+            train_dataset=mock_train_ds,
+            test_dataset=mock_test_ds,
+            tokenizer=mock_tokenizer,
+            accelerator=None,
+        )
+
+    def test_serialization_roundtrip(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.REASONING,
+            columns={"q": "question"},
+            max_reward=10.0,
+            dataset_path="data.parquet",
+        )
+        data = spec.model_dump()
+        restored = LLMEnvSpec.model_validate(data)
+        assert restored.env_type == LLMEnvType.REASONING
+        assert restored.columns == {"q": "question"}
+        assert restored.max_reward == 10.0
+        assert restored.dataset_path == "data.parquet"

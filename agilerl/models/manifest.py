@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer
 
 from agilerl.models.algo import (
     ALGO_REGISTRY,
@@ -25,6 +25,13 @@ def _resolve_algorithm(v: Any) -> AlgoSpecT:
     Reads the ``name`` key from the raw dict (e.g. ``"DQN"``), looks up
     the corresponding spec class in the registry, and instantiates it
     with the remaining fields.
+
+    :param v: The raw dict or AlgorithmSpec to resolve.
+    :type v: Any
+    :returns: The resolved AlgorithmSpec.
+    :rtype: AlgoSpecT
+    :raises TypeError: If the input is not a dict or AlgorithmSpec.
+    :raises ValueError: If the 'name' field is not present.
     """
     if isinstance(v, AlgoSpecT):
         return v
@@ -35,11 +42,31 @@ def _resolve_algorithm(v: Any) -> AlgoSpecT:
     data = dict(v)
     name = data.pop("name", None)
     if name is None:
-        msg = "Algorithm section must include a 'name' field"
+        msg = "Algorithm section must include a 'name' field, corresponding to the name of the algorithm class."
         raise ValueError(msg)
 
     entry = ALGO_REGISTRY.get(name)
     return entry.spec_cls(**data)
+
+
+def _coerce_environment(v: Any) -> dict[str, Any]:
+    """Accept environment spec objects or raw dicts.
+
+    If *v* is a Pydantic ``BaseModel`` (e.g. :class:`ArenaEnvSpec`,
+    :class:`GymEnvSpec`), it is serialized via ``model_dump()``.
+    Plain dicts are passed through unchanged.
+
+    :param v: An environment spec or raw dict.
+    :type v: Any
+    :returns: A plain dictionary suitable for manifest serialization.
+    :rtype: dict[str, Any]
+    """
+    if isinstance(v, dict):
+        return v
+    if isinstance(v, BaseModel):
+        return v.model_dump()
+    msg = f"Expected a dict or environment spec (BaseModel), got {type(v).__name__}"
+    raise TypeError(msg)
 
 
 def _resolve_network(v: Any) -> Any:
@@ -60,7 +87,14 @@ def _resolve_network(v: Any) -> Any:
     return v
 
 
-AlgorithmFromManifest = Annotated[AlgoSpecT, BeforeValidator(_resolve_algorithm)]
+AlgorithmFromManifest = Annotated[
+    AlgoSpecT,
+    BeforeValidator(_resolve_algorithm),
+    PlainSerializer(lambda v: v.to_manifest(), return_type=dict[str, Any]),
+]
+EnvironmentFromManifest = Annotated[
+    dict[str, Any], BeforeValidator(_coerce_environment)
+]
 NetworkFromManifest = Annotated[NetworkSpec, BeforeValidator(_resolve_network)]
 
 
@@ -71,14 +105,14 @@ class TrainingManifest(BaseModel):
     :data:`ALGO_REGISTRY` and pre-processes the network section so
     the encoder discriminator works correctly.
 
-    The ``environment`` section is left as a raw dict because the
-    concrete environment spec depends on which :class:`Trainer` subclass
-    is being constructed (determined by ``cls`` in
-    :meth:`Trainer.from_manifest`).
+    The ``environment`` section is stored as a raw dict.  Callers may
+    pass either a plain dict **or** an environment spec (any
+    :class:`~pydantic.BaseModel` subclass such as :class:`ArenaEnvSpec`);
+    spec objects are automatically serialized to dicts on validation.
     """
 
     algorithm: AlgorithmFromManifest
-    environment: dict[str, Any] = Field(default_factory=dict)
+    environment: EnvironmentFromManifest
     training: TrainingSpec
     network: NetworkFromManifest | None = Field(default=None)
     mutation: MutationSpec | None = Field(default=None)

@@ -46,7 +46,6 @@ INIT_HP = {
     "AGENT_IDS": ["agent1", "agent2"],
     "LAMBDA": 1.0,
     "REG": 0.000625,
-    "CHANNELS_LAST": False,
     "O_U_NOISE": True,
     "EXPL_NOISE": 0.1,
     "MEAN_NOISE": 0.0,

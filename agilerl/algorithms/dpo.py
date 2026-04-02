@@ -24,7 +24,9 @@ from agilerl.utils.llm_utils import PreferenceGym, aggregate_metrics_across_gpus
 
 
 class DPO(LLMAlgorithm):
-    """The DPO algorithm class. DPO paper: https://arxiv.org/pdf/2305.18290.
+    """Direct Preference Optimization (DPO).
+
+    Paper: https://arxiv.org/pdf/2305.18290
 
     :param pad_token_id: Pad token id
     :type pad_token_id: int

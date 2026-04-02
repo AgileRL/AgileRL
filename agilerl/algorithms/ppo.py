@@ -25,7 +25,6 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
-    obs_channels_to_first,
     share_encoder_parameters,
 )
 
@@ -40,7 +39,7 @@ RecurrentActionReturnType = tuple[
 
 
 class PPO(RLAlgorithm):
-    """Proximal Policy Optimization (PPO) algorithm.
+    """Proximal Policy Optimization (PPO).
 
     Paper: https://arxiv.org/abs/1707.06347v2
 
@@ -956,7 +955,6 @@ class PPO(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
         vectorized: bool = True,
@@ -966,8 +964,6 @@ class PPO(RLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: GymEnvType
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -1002,9 +998,6 @@ class PPO(RLAlgorithm):
                 # Initialize last_info holder
                 last_infos = [{}] * num_envs if vectorized else {}
                 while not np.all(finished):
-                    if swap_channels:
-                        obs = obs_channels_to_first(obs)
-
                     # Process action mask
                     action_mask = None
                     if vectorized:

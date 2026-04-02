@@ -124,7 +124,9 @@ def create_population_from_spec(
     mutation_spec: MutationSpec | None,
     env: GymEnvType | PzEnvType,
     device: str | torch.device = "cpu",
+    resume_from_checkpoint: str | None = None,
     accelerator: Accelerator | None = None,
+    tokenizer: Any | None = None,
 ) -> PopulationT:
     """Instantiate a population of agents from an algorithm spec.
 
@@ -138,8 +140,12 @@ def create_population_from_spec(
     :type env: GymEnvType | PzEnvType
     :param device: Torch device string.
     :type device: str | torch.device
+    :param resume_from_checkpoint: Path to resume from checkpoint.
+    :type resume_from_checkpoint: str | None
     :param accelerator: Accelerator instance.
     :type accelerator: Accelerator | None
+    :param tokenizer: Pre-loaded HuggingFace tokenizer for LLM algorithms.
+    :type tokenizer: Any | None
     :returns: A list of algorithm instances.
     :rtype: PopulationT
     """
@@ -159,14 +165,27 @@ def create_population_from_spec(
         observation_space, action_space = get_spaces_from_env(algo_spec, env)
         return [
             algo_spec.build_algorithm(
-                observation_space, action_space, index, device, accelerator
+                observation_space,
+                action_space,
+                index=i,
+                device=device,
+                accelerator=accelerator,
+                resume_from_checkpoint=resume_from_checkpoint,
             )
-            for index in range(population_size)
+            for i in range(population_size)
         ]
 
-    # TODO: Add support for LLMAlgorithmSpec
-    msg = f"Algorithm spec type {type(algo_spec)} not supported."
-    raise NotImplementedError(msg)
+    # LLM algorithms
+    return [
+        algo_spec.build_algorithm(
+            tokenizer=tokenizer,
+            index=i,
+            accelerator=accelerator,
+            device=device,
+            resume_from_checkpoint=resume_from_checkpoint,
+        )
+        for i in range(population_size)
+    ]
 
 
 def build_mutations_from_spec(
@@ -268,7 +287,6 @@ def build_train_kwargs(
     tournament: TournamentSelection | None,
     mutations: Mutations | None,
     memory: BufferT,
-    swap_channels: bool = False,
     checkpoint: int | None = None,
     checkpoint_path: str | None = None,
     save_elite: bool = False,
@@ -294,7 +312,6 @@ def build_train_kwargs(
         "env_name": env_name,
         "algo": algo_spec.name,
         "pop": population,
-        "swap_channels": swap_channels,
         "max_steps": training.max_steps,
         "evo_steps": training.evo_steps,
         "eval_loop": training.eval_loop,
@@ -328,5 +345,72 @@ def build_train_kwargs(
                 import h5py
 
                 kwargs["dataset"] = h5py.File(env_spec.dataset_path, "r")
+
+    return kwargs
+
+
+def build_llm_train_kwargs(
+    *,
+    env: Any,
+    population: PopulationT,
+    training: TrainingSpec,
+    tournament: TournamentSelection | None,
+    mutations: Mutations | None,
+    env_spec: Any | None = None,
+    save_elite: bool = False,
+    elite_path: str | None = None,
+    wb: bool = False,
+    tensorboard: bool = False,
+    tensorboard_log_dir: str | None = None,
+    verbose: bool = True,
+    accelerator: Any | None = None,
+    wandb_api_key: str | None = None,
+    wandb_kwargs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Assemble keyword arguments for LLM finetune functions.
+
+    Produces the dict expected by :func:`finetune_llm_reasoning` or
+    :func:`finetune_llm_preference`.
+
+    :param env: The LLM gym environment (``ReasoningGym`` or ``PreferenceGym``).
+    :param population: Population of LLM agents.
+    :param training: Training specification.
+    :param tournament: Tournament selection instance.
+    :param mutations: Mutations instance.
+    :param env_spec: The :class:`LLMEnvSpec` for extracting ``max_reward``.
+    :param save_elite: Whether to save the elite agent.
+    :param elite_path: Path to save the elite agent.
+    :param wb: Enable Weights & Biases logging.
+    :param tensorboard: Enable TensorBoard logging.
+    :param tensorboard_log_dir: TensorBoard log directory.
+    :param verbose: Verbose output.
+    :param accelerator: HuggingFace ``Accelerator``.
+    :param wandb_api_key: W&B API key.
+    :param wandb_kwargs: Additional W&B keyword arguments.
+    :returns: Keyword arguments dict for the finetune function.
+    :rtype: dict[str, Any]
+    """
+    from agilerl.models.env import LLMEnvSpec
+
+    kwargs: dict[str, Any] = {
+        "pop": population,
+        "env": env,
+        "max_steps": training.max_steps,
+        "evo_steps": training.evo_steps,
+        "tournament": tournament,
+        "mutation": mutations,
+        "save_elite": save_elite,
+        "elite_path": elite_path,
+        "wb": wb,
+        "tensorboard": tensorboard,
+        "tensorboard_log_dir": tensorboard_log_dir,
+        "verbose": verbose,
+        "accelerator": accelerator,
+        "wandb_api_key": wandb_api_key,
+        "wandb_kwargs": wandb_kwargs,
+    }
+
+    if isinstance(env_spec, LLMEnvSpec) and env_spec.max_reward is not None:
+        kwargs["max_reward"] = env_spec.max_reward
 
     return kwargs

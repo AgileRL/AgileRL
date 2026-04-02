@@ -62,8 +62,6 @@ be imported and used for training with the Python package ``ucimlrepo``, and to 
             "LAMBDA": 1.0,  # Regularization factor
             "REG": 0.000625,  # Loss regularization factor
             "LEARN_STEP": 2,  # Learning frequency
-            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-            "CHANNELS_LAST": False,
             "POP_SIZE": 4,  # Population size
         }
 
@@ -135,7 +133,6 @@ The easiest way to train a population of bandits is to use our training function
         memory=memory,  # Experience replay buffer
         INIT_HP=INIT_HP,  # Initial hyperparameters
         MUT_P=MUTATION_PARAMS,  # Mutation parameters
-        swap_channels=INIT_HP["CHANNELS_LAST"],  # Swap image channel from last to first
         max_steps=10000,  # Max number of training steps
         episode_steps=500,  # Steps in episode
         evo_steps=500,  # Evolution frequency
@@ -185,8 +182,6 @@ Alternatively, use a custom bandit training loop:
             "LAMBDA": 1.0,  # Regularization factor
             "REG": 0.000625,  # Loss regularization factor
             "LEARN_STEP": 2,  # Learning frequency
-            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-            "CHANNELS_LAST": False,
             "POP_SIZE": 4,  # Population size
         }
 
@@ -259,8 +254,6 @@ Alternatively, use a custom bandit training loop:
                 losses = []
                 context = env.reset()  # Reset environment at start of episode
                 for idx_step in range(episode_steps):
-                    if INIT_HP["CHANNELS_LAST"]:
-                        context = obs_channels_to_first(context)
                     # Get next action from agent
                     action = agent.get_action(context)
                     next_context, reward = env.step(action)  # Act in environment
@@ -306,7 +299,6 @@ Alternatively, use a custom bandit training loop:
             fitnesses = [
                 agent.test(
                     env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
                     max_steps=eval_steps,
                     loop=eval_loop,
                 )

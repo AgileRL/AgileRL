@@ -14,7 +14,6 @@ from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -40,7 +39,6 @@ def train_multi_agent_off_policy(
     sum_scores: bool = True,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
-    swap_channels: bool = False,
     max_steps: int = 50000,
     evo_steps: int = 25,
     eval_steps: int | None = None,
@@ -82,9 +80,6 @@ def train_multi_agent_off_policy(
     :type INIT_HP: dict
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
     :type MUT_P: dict, optional
-    :param swap_channels: Swap image channels dimension from last to first
-        [H, W, C] -> [C, H, W], defaults to False
-    :type swap_channels: bool, optional
     :param max_steps: Maximum number of steps in environment, defaults to 50000
     :type max_steps: int, optional
     :param evo_steps: Evolution frequency (steps), defaults to 25
@@ -236,11 +231,6 @@ def train_multi_agent_off_policy(
             completed_episode_scores: list[float] | list[list[float]] = []
             steps = 0
 
-            if swap_channels:
-                obs = {
-                    agent_id: obs_channels_to_first(s) for agent_id, s in obs.items()
-                }
-
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
                 action, raw_action = agent.get_action(obs=obs, infos=info)
@@ -260,13 +250,7 @@ def train_multi_agent_off_policy(
                 scores += score_increment
                 steps += num_envs
 
-                # Save experience to replay buffer
-                if swap_channels:
-                    next_obs = {
-                        agent_id: obs_channels_to_first(ns)
-                        for agent_id, ns in next_obs.items()
-                    }
-
+                # Make a tensorclass out of the transition for easy adding to the replay buffer
                 transition: TensorDictBase = MultiAgentTransition(
                     obs=obs,
                     action=raw_action,
@@ -341,7 +325,6 @@ def train_multi_agent_off_policy(
         for agent in population.agents:
             agent.test(
                 env,
-                swap_channels=swap_channels,
                 max_steps=eval_steps,
                 loop=eval_loop,
                 sum_scores=sum_scores,

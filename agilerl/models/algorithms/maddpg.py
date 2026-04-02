@@ -7,6 +7,7 @@ from pydantic import Field
 
 from agilerl.algorithms import MADDPG
 from agilerl.models.algo import MultiAgentRLAlgorithmSpec, off_policy, register
+from agilerl.models.networks import DeterministicActorSpec
 from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
 
 
@@ -25,6 +26,7 @@ class MADDPGSpec(MultiAgentRLAlgorithmSpec):
     theta: float = Field(default=0.15)
     dt: float = Field(default=0.01)
     torch_compiler: str | None = Field(default=None)
+    net_config: DeterministicActorSpec | None = Field(default=None)
 
     algo_class: ClassVar[type[MADDPG]] = MADDPG
 
