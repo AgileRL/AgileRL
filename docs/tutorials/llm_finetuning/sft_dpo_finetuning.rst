@@ -14,6 +14,8 @@ SFT, also known as instruction tuning, uses a supervised learning approach to fi
 DPO, on the other hand, constructs an implicit reward function by comparing the model's output logits for each token with the "chosen" and "rejected" tokens. 
 The objective is to maximize the output logits similarity to the chosen tokens and minimize similarity to the rejected tokens.
 To prevent "reward hacking" leading to nonsensical outputs, an additional KL-divergence term (controlled by a \beta parameter) is added to the loss function to limit divergence from the base model.
+Additionally, we implement a negative log-likelihood (NLL) term to weight the model towards maximizing the likelihood of the chosen response, rather than simply maximizing the marginal reward, as proposed here (https://arxiv.org/pdf/2404.19733).
+The NLL term is controlled by a \alpha parameter, and is set to 1.0 by default. The NLL term has been shown to be crucial to DPO performance by preventing a common failure mode of the likelihoods of both rejected and chosen responses decreasing.
 
 Both methods make use of Low Rank Adaptation (LoRA) to fine-tune the LLM, a technique that allows for fine-tuning the LLM with a small number of parameters. 
 Recent work has shown this to be just as effective as full fine-tuning (in which every parameter of the base model is updated), but much more compute efficient (https://thinkingmachines.ai/blog/lora/).
@@ -77,6 +79,34 @@ The next block of code configures the LoRA adapter and instantiates the SFT agen
         accelerator=accelerator,
     )
 
-% Include an illustration of LoRA
+If you want more detail on LoRA and how it works, see this blog post that gives a theoretical and empirical overview of how LoRA can achieve the same results as full finetuning, but with a much smaller number of parameters: https://thinkingmachines.ai/blog/lora/
+
+
+DPO Training Curves
+-------------------
+
+Below are representative training curves from a DPO run on the Human-Like-DPO-Dataset using Qwen2.5-0.5B.
+The training loss drops rapidly in the first few hundred steps and converges close to zero, indicating that the model
+quickly learns to distinguish between chosen and rejected responses.
+
+.. figure:: images/dpo_training_loss.png
+   :align: center
+   :width: 600
+
+   DPO training loss over 4000 steps. The smoothed curve (EMA) is overlaid on the raw per-step loss.
+
+The reward margin plot shows the implicit reward signals that DPO extracts. The chosen reward stays near zero while
+the rejected reward becomes increasingly negative, producing a growing positive margin -- exactly the behaviour we want.
+
+.. figure:: images/dpo_reward_margins.png
+   :align: center
+   :width: 600
+
+   Chosen and rejected rewards diverge over training, with the reward margin steadily increasing.
+
+These plots can be reproduced from any training run's ``metrics.csv`` using the plotting script::
+
+    python benchmarking/plot_llm_metrics.py <path-to-metrics.csv> -o <output-dir>
+
 
 
