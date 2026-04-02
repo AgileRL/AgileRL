@@ -1,13 +1,10 @@
-"""Single-agent benchmarking script.
-
-Loads a training manifest and runs evolutionary RL training via
-``LocalTrainer.from_manifest()``.
+"""Train locally using AgileRL evolutionary HPO from a manifest specifying the training configuration.
 
 Example usage::
 
-    python benchmarks/single_agent.py configs/training/ppo/ppo.yaml
-    python benchmarks/single_agent.py configs/training/dqn/dqn.yaml --device cuda
-    python benchmarks/single_agent.py configs/training/ddpg/ddpg.yaml --wb --checkpoint 50
+    python train.py configs/training/ppo/ppo.yaml
+    python train.py configs/training/dqn/dqn.yaml --device cuda
+    python train.py configs/training/ddpg/ddpg.yaml --wb --checkpoint 50
 """
 
 from __future__ import annotations
@@ -17,6 +14,7 @@ import logging
 from pathlib import Path
 
 import torch
+from accelerate import Accelerator
 
 from agilerl.training.trainer import LocalTrainer
 
@@ -28,9 +26,9 @@ logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for single-agent training."""
+    """Parse command-line arguments for local training."""
     parser = argparse.ArgumentParser(
-        description="Run single-agent evolutionary RL training from a manifest.",
+        description="Run local evolutionary RL training from a manifest.",
     )
     parser.add_argument(
         "--manifest",
@@ -43,6 +41,11 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Torch device (default: cuda if available, else cpu).",
+    )
+    parser.add_argument(
+        "--use-accelerator",
+        action="store_true",
+        help="Use Accelerator for training.",
     )
     parser.add_argument(
         "--wb",
@@ -68,6 +71,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory for checkpoint files.",
     )
     parser.add_argument(
+        "--resume-from-checkpoint",
+        type=str,
+        default=None,
+        help="Resume training from checkpoint.",
+    )
+    parser.add_argument(
         "--save-elite",
         action="store_true",
         help="Persist the elite agent after training.",
@@ -89,28 +98,40 @@ def parse_args() -> argparse.Namespace:
         default="tensorboard_logs",
         help="Directory for TensorBoard logs.",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print verbose output.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
-    """Run single-agent evolutionary RL training from a manifest."""
+    """Run local evolutionary RL training from a manifest."""
     args = parse_args()
 
     logger.info("Loading manifest: %s", args.manifest)
 
+    accelerator = Accelerator() if args.use_accelerator else None
+
     # Load the Trainer from the manifest
-    trainer = LocalTrainer.from_manifest(args.manifest, device=args.device)
+    trainer = LocalTrainer.from_manifest(
+        manifest=args.manifest,
+        device=args.device,
+        accelerator=accelerator,
+        resume_from_checkpoint=args.resume_from_checkpoint,
+    )
 
     logger.info(
         "Algorithm: %s | Env: %s | Pop: %d | Steps: %d",
         trainer.algorithm.name,
-        getattr(trainer.environment, "name", trainer.environment),
+        trainer.environment.name,
         trainer.training.population_size,
         trainer.training.max_steps,
     )
 
     # Train the population of agents
-    _population, fitness_history = trainer.train(
+    _population, last_fitnesses = trainer.train(
         wb=args.wb,
         wandb_api_key=args.wandb_api_key,
         tensorboard=args.tensorboard,
@@ -119,10 +140,10 @@ def main() -> None:
         checkpoint_path=args.checkpoint_path,
         save_elite=args.save_elite,
         elite_path=args.elite_path,
+        verbose=args.verbose,
     )
 
-    best_fitness = max(f for gen in fitness_history for f in gen)
-    logger.info("Training complete. Best fitness: %.4f", best_fitness)
+    logger.info("Training complete. Best fitness: %.4f", max(last_fitnesses))
 
 
 if __name__ == "__main__":

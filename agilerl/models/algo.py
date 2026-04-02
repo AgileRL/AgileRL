@@ -5,12 +5,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, TypeVar
 
+import h5py
 from pydantic import BaseModel, ConfigDict, Field
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm, MultiAgentRLAlgorithm, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
-from agilerl.models.env import LLMEnvType
 from agilerl.protocols import AgentType
 from agilerl.typing import SupportedActionSpace, SupportedObservationSpace
 
@@ -20,6 +20,21 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 if TYPE_CHECKING:
     import torch
     from accelerate import Accelerator
+
+    from agilerl.components.replay_buffer import MultiAgentReplayBuffer, ReplayBuffer
+    from agilerl.models.env import (
+        GymEnvSpec,
+        LLMEnvSpec,
+        LLMEnvType,
+        OfflineEnvSpec,
+        PzEnvSpec,
+    )
+    from agilerl.models.training import TrainingSpec
+
+    EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec
+    ReplayBufferT = ReplayBuffer | MultiAgentReplayBuffer
+    PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
+
 
 logger = logging.getLogger(__name__)
 
@@ -201,18 +216,65 @@ class AlgorithmSpec(BaseModel):
         }
 
     @staticmethod
-    def get_training_fn() -> Callable[..., Any]:
+    def get_training_fn() -> Callable[..., tuple[PopulationT, list[list[float]]]]:
         """Return the training function for this algorithm.
 
         Concrete specs **must** override this to return their training
         function (e.g. ``train_off_policy``).
 
         :return: Training function
-        :rtype: Callable[..., Any]
+        :rtype: Callable[..., tuple[PopulationT, list[list[float]]]]
         :raises NotImplementedError: If the training function is not implemented.
         """
         msg = "Algorithm specs must implement get_training_fn."
         raise NotImplementedError(msg) from None
+
+    def get_training_kwargs(
+        self,
+        *,
+        training: TrainingSpec,
+        env_spec: EnvSpecT = None,
+        memory: ReplayBufferT = None,
+    ) -> dict[str, Any]:
+        """Return additional kwargs for multi-agent RL training loops.
+
+        :param training: Training specification.
+        :param env_spec: Environment specification.
+        :param memory: Replay buffer instance.
+        :returns: Extra keyword arguments for the training function.
+        :rtype: dict[str, Any]
+        """
+        kwargs = {}
+        if isinstance(self, LLMAlgorithmSpec):
+            if env_spec.max_reward is not None:
+                kwargs["max_reward"] = env_spec.max_reward
+
+            return kwargs
+
+        # Core RL algorithm kwargs
+        kwargs.update(
+            {
+                "env_name": env_spec.name,
+                "algo": self.name,
+                "eval_steps": training.eval_steps,
+                "eval_loop": training.eval_loop,
+                "target": training.target_score,
+            }
+        )
+
+        if self.off_policy or self.offline:
+            kwargs["memory"] = memory
+
+        if self.off_policy:
+            kwargs["learning_delay"] = training.learning_delay
+        elif self.offline:
+            if env_spec.minari_dataset_id is not None:
+                kwargs["minari_dataset_id"] = env_spec.minari_dataset_id
+                kwargs["remote"] = env_spec.remote
+            elif env_spec.dataset_path is not None:
+                kwargs["dataset"] = h5py.File(env_spec.dataset_path, "r")
+
+        return kwargs
 
 
 class RLAlgorithmSpec(AlgorithmSpec):

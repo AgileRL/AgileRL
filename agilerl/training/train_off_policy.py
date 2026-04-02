@@ -37,7 +37,7 @@ PopulationType = list[SupportedOffPolicy]
 BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer
 
 
-def _learn_step(
+def _learn_from_buffer(
     agent: SupportedOffPolicy,
     sampler: Sampler,
     memory: BufferType,
@@ -242,12 +242,14 @@ def train_off_policy(
         sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
     else:
         sampler = Sampler(memory=memory)
-        if n_step_memory is not None:
-            n_step_sampler = Sampler(memory=n_step_memory)
+        n_step_sampler = (
+            Sampler(memory=n_step_memory) if n_step_memory is not None else None
+        )
 
     # Format progress bar
     pbar = default_progress_bar(max_steps, accelerator)
 
+    # Initialize loggers for metrics reporting
     loggers = init_loggers(
         algo=algo,
         env_name=env_name,
@@ -367,23 +369,23 @@ def train_off_policy(
                         and len(memory) >= agent.batch_size
                         and memory.size > learning_delay
                     ):
-                        _learn_step(
+                        _learn_from_buffer(
                             agent,
                             sampler,
                             memory,
                             n_step_memory,
-                            n_step_sampler if n_step_memory is not None else None,
+                            n_step_sampler,
                             per,
                         )
 
                 elif len(memory) >= agent.batch_size and memory.size > learning_delay:
                     for _ in range(num_envs // agent.learn_step):
-                        _learn_step(
+                        _learn_from_buffer(
                             agent,
                             sampler,
                             memory,
                             n_step_memory,
-                            n_step_sampler if n_step_memory is not None else None,
+                            n_step_sampler,
                             per,
                         )
 

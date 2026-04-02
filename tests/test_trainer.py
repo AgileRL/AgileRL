@@ -37,7 +37,6 @@ from agilerl.utils.trainer_utils import (
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
-    build_train_kwargs,
 )
 
 
@@ -199,36 +198,30 @@ class TestBuildReplayBuffer:
         assert result.max_size == 10_000
 
 
-class TestBuildTrainKwargs:
-    def test_on_policy_has_no_memory(self, env, training_spec, ppo_spec):
-        kwargs = build_train_kwargs(
-            algo_spec=ppo_spec,
-            env=env,
-            env_name="test",
-            population=[MagicMock()],
-            training=training_spec,
-            tournament=None,
-            mutations=None,
-            memory=None,
+class TestGetTrainingKwargs:
+    def test_on_policy_has_no_memory(self, training_spec, ppo_spec):
+        kwargs = ppo_spec.get_training_kwargs(
+            training=training_spec, env_spec=None, memory=None
         )
         assert "memory" not in kwargs
-        assert kwargs["max_steps"] == 500
+        assert kwargs["algo"] == "PPO"
+        assert kwargs["eval_loop"] == training_spec.eval_loop
 
-    def test_off_policy_has_memory_and_delay(self, env, training_spec):
+    def test_off_policy_has_memory_and_delay(self, training_spec):
         dqn_spec = DQNSpec()
         buffer = ReplayBuffer(max_size=100, device="cpu")
-        kwargs = build_train_kwargs(
-            algo_spec=dqn_spec,
-            env=env,
-            env_name="test",
-            population=[MagicMock()],
-            training=training_spec,
-            tournament=None,
-            mutations=None,
-            memory=buffer,
+        kwargs = dqn_spec.get_training_kwargs(
+            training=training_spec, env_spec=None, memory=buffer
         )
         assert kwargs["memory"] is buffer
         assert "learning_delay" in kwargs
+
+    def test_base_spec_returns_empty(self, training_spec):
+        from agilerl.models.algo import AlgorithmSpec
+
+        spec = AlgorithmSpec.__new__(AlgorithmSpec)
+        kwargs = spec.get_training_kwargs(training=training_spec)
+        assert kwargs == {}
 
 
 # ---------------------------------------------------------------------------

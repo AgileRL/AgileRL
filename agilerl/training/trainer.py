@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import yaml
 from typing_extensions import Self
 
-from agilerl import HAS_ARENA_DEPENDENCIES
+from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.base import (
     LLMAlgorithm,
     MultiAgentRLAlgorithm,
@@ -35,11 +35,9 @@ from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.protocols import AgentType
 from agilerl.typing import GymEnvType, PzEnvType
 from agilerl.utils.trainer_utils import (
-    build_llm_train_kwargs,
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
-    build_train_kwargs,
     create_population_from_spec,
 )
 from agilerl.vector import AsyncPettingZooVecEnv
@@ -61,9 +59,13 @@ PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
 if HAS_ARENA_DEPENDENCIES:
     from agilerl.arena.client import ArenaClient
-    from agilerl.models import TrainingManifest
 else:
     ArenaClient = None
+
+if HAS_LLM_DEPENDENCIES:
+    from transformers import AutoTokenizer
+else:
+    AutoTokenizer = None
 
 if TYPE_CHECKING:
     import torch
@@ -130,8 +132,9 @@ class Trainer(ABC):
     def from_manifest(
         cls,
         manifest: str | Path | dict[str, Any],
+        device: str | torch.device = "cpu",
+        accelerator: Accelerator | None = None,
         resume_from_checkpoint: str | None = None,
-        **kwargs: Any,
     ) -> Self:
         """Instantiate a :class:`Trainer` from a YAML, JSON, or dict manifest.
 
@@ -143,10 +146,12 @@ class Trainer(ABC):
 
         :param manifest: Path to a YAML/JSON file, or a raw dict.
         :type manifest: str | Path | dict[str, Any]
+        :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
+        :type device: str | torch.device
+        :param accelerator: Accelerator instance.
+        :type accelerator: Accelerator | None
         :param resume_from_checkpoint: Path to resume from checkpoint.
         :type resume_from_checkpoint: str | None
-        :param kwargs: Extra keyword arguments forwarded to the trainer constructor.
-        :type kwargs: Any
         :returns: A fully configured :class:`Trainer` instance.
         :rtype: SelfTrainerT
         """
@@ -175,7 +180,8 @@ class Trainer(ABC):
             tournament=validated_manifest.tournament_selection,
             replay_buffer=validated_manifest.replay_buffer,
             resume_from_checkpoint=resume_from_checkpoint,
-            **kwargs,
+            device=device,
+            accelerator=accelerator,
         )
 
     def to_manifest(self) -> dict[str, Any]:
@@ -278,7 +284,9 @@ class LocalTrainer(Trainer):
         # For LLM algorithms, load the tokenizer once and share it.
         self.tokenizer = None
         if isinstance(self.algorithm, LLMAlgorithmSpec):
-            from transformers import AutoTokenizer
+            if AutoTokenizer is None:
+                msg = "LLM dependencies are not installed. Please install them using: pip install agilerl[llm]"
+                raise ImportError(msg)
 
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.algorithm.pretrained_model_name_or_path
@@ -364,8 +372,6 @@ class LocalTrainer(Trainer):
         *,
         verbose: bool = True,
         accelerator: Any | None = None,
-        checkpoint: int | None = None,
-        checkpoint_path: str | None = None,
         save_elite: bool = False,
         elite_path: str | None = None,
         wb: bool = False,
@@ -374,16 +380,12 @@ class LocalTrainer(Trainer):
         wandb_api_key: str | None = None,
         wandb_kwargs: dict[str, Any] | None = None,
     ) -> tuple[PopulationT, list[list[float]]]:
-        """Run local training.
+        """Run a local training job given the passed configuration.
 
         :param verbose: If ``True``, print verbose output.
         :type verbose: bool
         :param accelerator: An :class:`accelerate.Accelerator` instance.
         :type accelerator: Any | None
-        :param checkpoint: The number of episodes to save a checkpoint.
-        :type checkpoint: int | None
-        :param checkpoint_path: The path to save the checkpoint.
-        :type checkpoint_path: str | None
         :param save_elite: If ``True``, save the elite agent.
         :type save_elite: bool
         :param elite_path: The path to save the elite agent.
@@ -404,50 +406,32 @@ class LocalTrainer(Trainer):
             *fitness_history* is a list of per-generation fitness scores.
         :rtype: tuple[PopulationT, list[list[float]]]
         """
-        if isinstance(self.algorithm, LLMAlgorithmSpec):
-            kwargs = build_llm_train_kwargs(
-                env=self.env,
-                population=self.population,
+        kwargs: dict[str, Any] = {
+            "pop": self.population,
+            "env": self.env,
+            "max_steps": self.training.max_steps,
+            "evo_steps": self.training.evo_steps,
+            "tournament": self.tournament_selection,
+            "mutation": self.mutations,
+            "save_elite": save_elite,
+            "elite_path": elite_path,
+            "wb": wb,
+            "tensorboard": tensorboard,
+            "tensorboard_log_dir": tensorboard_log_dir,
+            "verbose": verbose,
+            "accelerator": accelerator or self.accelerator,
+            "wandb_api_key": wandb_api_key,
+            "wandb_kwargs": wandb_kwargs,
+        }
+
+        # Extract algo-specific kwargs from the algorithm spec.
+        kwargs.update(
+            self.algorithm.get_training_kwargs(
                 training=self.training,
-                tournament=self.tournament_selection,
-                mutations=self.mutations,
                 env_spec=self.environment,
-                save_elite=save_elite,
-                elite_path=elite_path,
-                wb=wb,
-                tensorboard=tensorboard,
-                tensorboard_log_dir=tensorboard_log_dir,
-                verbose=verbose,
-                accelerator=accelerator or self.accelerator,
-                wandb_api_key=wandb_api_key,
-                wandb_kwargs=wandb_kwargs,
+                memory=self.memory,
             )
-            self.train_fn(**kwargs)
-            return self.population, []
-
-        kwargs = build_train_kwargs(
-            algo_spec=self.algorithm,
-            env=self.env,
-            env_name=self.environment.name,
-            env_spec=self.environment,
-            population=self.population,
-            training=self.training,
-            tournament=self.tournament_selection,
-            mutations=self.mutations,
-            memory=self.memory,
-            checkpoint=checkpoint,
-            checkpoint_path=checkpoint_path,
-            save_elite=save_elite,
-            elite_path=elite_path,
-            wb=wb,
-            tensorboard=tensorboard,
-            tensorboard_log_dir=tensorboard_log_dir,
-            verbose=verbose,
-            accelerator=accelerator,
-            wandb_api_key=wandb_api_key,
-            wandb_kwargs=wandb_kwargs,
         )
-
         return self.train_fn(**kwargs)
 
 
