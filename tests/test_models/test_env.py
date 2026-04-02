@@ -39,9 +39,9 @@ class CustomGymEnv:
 
         make_env = GymEnvSpec.constuct_custom_env_fn(
             entrypoint="custom_gym_env:CustomGymEnv",
-            env_path=str(tmp_path),
-            env_config={"value": 12},
-            env_wrappers=[wrapper_one, (wrapper_two, {"tag": "wrapper_two"})],
+            path=str(tmp_path),
+            config={"value": 12},
+            wrappers=[wrapper_one, (wrapper_two, {"tag": "wrapper_two"})],
         )
         env = make_env()
 
@@ -63,8 +63,8 @@ class CwdEnv:
 
         make_env = GymEnvSpec.constuct_custom_env_fn(
             entrypoint="cwd_env:CwdEnv",
-            env_path=None,
-            env_config={"value": 99},
+            path=None,
+            config={"value": 99},
         )
         env = make_env()
         assert env.value == 99
@@ -90,7 +90,7 @@ class OtherEnv:
         )
         make_env = GymEnvSpec.constuct_custom_env_fn(
             entrypoint="missing_target:WantedEnv",
-            env_path=str(tmp_path),
+            path=str(tmp_path),
         )
         with pytest.raises(AttributeError, match="does not define 'WantedEnv'"):
             make_env()
@@ -122,8 +122,8 @@ class MyGymEnv:
             name="unused",
             num_envs=2,
             entrypoint="gym_for_make_env:MyGymEnv",
-            env_path=str(tmp_path),
-            env_config={"value": 7},
+            path=str(tmp_path),
+            config={"value": 7},
             sync=True,
         )
 
@@ -173,9 +173,9 @@ def build_env(size=0):
             name="unused",
             num_envs=3,
             entrypoint="custom_pz_env:build_env",
-            env_path=str(tmp_path),
-            env_config={"size": 5},
-            env_wrappers=[(wrapper, {"tag": "wrapped"})],
+            path=str(tmp_path),
+            config={"size": 5},
+            wrappers=[(wrapper, {"tag": "wrapped"})],
         )
 
         with patch("agilerl.utils.utils.make_multi_agent_vect_envs") as make_multi_mock:
@@ -210,7 +210,7 @@ def parallel_env(value=0):
         spec = PzEnvSpec(
             name="pz_pkg",
             num_envs=2,
-            env_config={"value": 42},
+            config={"value": 42},
         )
 
         with patch("agilerl.utils.utils.make_multi_agent_vect_envs") as make_multi_mock:
@@ -245,9 +245,9 @@ def mark_wrapped(env):
             name="unused",
             num_envs=1,
             entrypoint="custom_pz_env_with_wrapper:build_env",
-            env_path=str(tmp_path),
-            env_config={"value": 3},
-            env_wrappers=["custom_pz_env_with_wrapper:mark_wrapped"],
+            path=str(tmp_path),
+            config={"value": 3},
+            wrappers=["custom_pz_env_with_wrapper:mark_wrapped"],
         )
 
         with patch("agilerl.utils.utils.make_multi_agent_vect_envs") as make_multi_mock:

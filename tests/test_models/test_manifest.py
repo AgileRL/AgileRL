@@ -274,7 +274,7 @@ class TestTrainingManifest:
         assert isinstance(manifest.network, NetworkSpec)
         assert isinstance(manifest.network.encoder_config, MlpSpec)
         assert isinstance(manifest.replay_buffer, ReplayBufferSpec)
-        assert manifest.replay_buffer.max_size == 50_000
+        assert manifest.replay_buffer.max_size == 100_000
         assert isinstance(manifest.tournament_selection, TournamentSelectionSpec)
         assert isinstance(manifest.training, TrainingSpec)
         assert manifest.training.population_size == 4
@@ -356,7 +356,7 @@ class TestLocalTrainerSingleAgent:
         assert trainer.algorithm.double is False
         assert trainer.algorithm.lr == pytest.approx(6.3e-4)
         assert trainer.replay_buffer is not None
-        assert trainer.replay_buffer.max_size == 50_000
+        assert trainer.replay_buffer.max_size == 100_000
         assert trainer.training.eps_start == 1.0
         assert trainer.training.eps_end == 0.1
 
@@ -433,7 +433,7 @@ class TestLocalTrainerSingleAgent:
     def test_replay_buffer_forwarded(self):
         trainer = LocalTrainer.from_manifest(DQN_MANIFEST)
         assert isinstance(trainer.replay_buffer, ReplayBufferSpec)
-        assert trainer.replay_buffer.max_size == 50_000
+        assert trainer.replay_buffer.max_size == 100_000
 
     def test_optional_sections_none_when_omitted(self):
         data = _make_manifest(

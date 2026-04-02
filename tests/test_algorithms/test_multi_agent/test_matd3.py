@@ -188,7 +188,16 @@ def accelerated_experiences(
             agent: torch.randn(batch_size, *state_size) for agent in agent_ids
         }
 
-    return states, actions, rewards, next_states, dones
+    return TensorDict(
+        {
+            "obs": TensorDict(states, batch_size=[batch_size]),
+            "action": TensorDict(actions, batch_size=[batch_size]),
+            "reward": TensorDict(rewards, batch_size=[batch_size]),
+            "next_obs": TensorDict(next_states, batch_size=[batch_size]),
+            "done": TensorDict(dones, batch_size=[batch_size]),
+        },
+        batch_size=[batch_size],
+    )
 
 
 @pytest.fixture(scope="function")
