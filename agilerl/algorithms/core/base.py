@@ -21,6 +21,7 @@ from typing import (
 )
 
 import dill
+import pickle
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -2115,29 +2116,39 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Override the save_checkpoint method to provide guidance on the correct method to use.
         :param path: Location to save checkpoint at
         :type path: string
-        :param weights_only: If True, only save the weights of the model, defaults to False
+        :param weights_only: If True, only save the LoRA adapter weights via HuggingFace
+            ``save_pretrained`` (produces a directory loadable with ``PeftModel.from_pretrained``).
+            If False, save a full AgileRL checkpoint including the complete model state dict.
+            Defaults to True.
         :type weights_only: bool, optional.
         """
-        if self.accelerator is not None:
-            if not weights_only:
-                self._save_distributed_actor(path, tag="save_checkpoint")
-            else:
-                selected_adapters = (
-                    ["actor", "reference"]
-                    if self.use_separate_reference_adapter
-                    else ["actor"]
+        selected_adapters = (
+            ["actor", "reference"]
+            if self.use_separate_reference_adapter
+            else ["actor"]
+        )
+        if weights_only and self.accelerator is not None:
+            model_ref = self.accelerator.unwrap_model(self.actor)
+            with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
+                model_ref.save_pretrained(
+                    save_directory=path,
+                    selected_adapters=selected_adapters,
+                    is_main_process=self.accelerator.is_main_process,
                 )
-                model_ref = self.accelerator.unwrap_model(self.actor)
-                with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
-                    model_ref.save_pretrained(
-                        save_directory=path,
-                        selected_adapters=selected_adapters,
-                        is_main_process=self.accelerator.is_main_process,
-                    )
+        elif weights_only:
+            # No accelerator: save_pretrained is forwarded to the underlying PeftModel
+            # via DummyEvolvable.__getattr__.
+            self.actor.save_pretrained(
+                save_directory=path,
+                selected_adapters=selected_adapters,
+            )
+        elif self.accelerator is not None:
+            self._save_distributed_actor(path, tag="save_checkpoint")
 
+        # Exclude model weights from attributes.pt when weights_only=True so that we only save LoRA adapter weights.
         checkpoint_dict = get_checkpoint_dict(
             self,
-            using_deepspeed=self.accelerator is not None,
+            using_deepspeed=self.accelerator is not None or weights_only,
         )
         checkpoint_dict["_weights_only"] = weights_only
         checkpoint_dict.pop("llm", None)
@@ -2158,30 +2169,24 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param path: Location to load checkpoint from
         :type path: string
         """
+        pickle_module = dill if self.accelerator is None else pickle
+        checkpoint = torch.load(path + "/attributes.pt", weights_only=False, pickle_module=pickle_module)
+        weights_only = checkpoint.get("_weights_only", False)
+        for attr, value in checkpoint.items():
+            setattr(self, attr, value)
         if self.accelerator is not None:
-            checkpoint = torch.load(path + "/attributes.pt", weights_only=False)
-            weights_only = checkpoint.get("_weights_only", False)
 
             if weights_only:
                 if self.use_separate_reference_adapter:
-                    self._update_existing_adapter(
-                        path,
-                        "reference",
-                    )
-
-                self._update_existing_adapter(
-                    path,
-                    "actor",
-                )
+                    self._update_existing_adapter(path, "reference")
+                self._update_existing_adapter(path, "actor")
             else:
                 self._load_distributed_actor(path, tag="save_checkpoint")
-
-            for attr, value in checkpoint.items():
-                setattr(self, attr, value)
 
             self.device = self.accelerator.device
 
             self.optimizer = None
+            # N.B. that optimizer state is reset here
             self.optimizer = OptimizerWrapper(
                 optimizer_cls=self._select_optim_class(),
                 networks=[self.actor],
@@ -2190,7 +2195,34 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 lr_name="lr",
             )
         else:
-            super().load_checkpoint(path + "/attributes.pt")
+            if weights_only:
+                # Adapters were saved via save_pretrained; reload them in-place.
+                # self.actor.module is the underlying PeftModel inside DummyEvolvable.
+                adapters_to_load = (
+                    ["actor", "reference"]
+                    if self.use_separate_reference_adapter
+                    else ["actor"]
+                )
+                for adapter_name in adapters_to_load:
+                    adapter_path = f"{path}/{adapter_name}/adapter_model.safetensors"
+                    adapter_state = load_file(adapter_path, device=str(self.device))
+                    with torch.no_grad():
+                        set_peft_model_state_dict(
+                            self.actor.module,
+                            adapter_state,
+                            adapter_name=adapter_name,
+                        )
+                self.actor.set_adapter("actor")
+                for attr, value in checkpoint.items():
+                    setattr(self, attr, value)
+                self.optimizer = None
+                # N.B. that optimizer state is reset here
+                self.optimizer = OptimizerWrapper(
+                    optimizer_cls=self._select_optim_class(),
+                    networks=[self.actor], network_names=["actor"], lr=self.lr, lr_name="lr",
+                )
+            else:
+                super().load_checkpoint(path + "/attributes.pt")
 
     @classmethod
     def load(
@@ -2201,7 +2233,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     ) -> None:
         msg = (
             "The load class method is not supported for this algorithm class. "
-            "To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO "
+            "To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO/DPO/SFT "
             "class, using the pre-trained model.\n\n"
             "base_model = AutoModelForCausalLM.from_pretrained(\n"
             '    "Qwen/Qwen2.5-3B",\n'
@@ -2209,7 +2241,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             '    device_map="auto"\n'
             ")\n"
             'tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")\n'
-            "model = PeftModelProtocol.from_pretrained(base_model, path)"
+            "model = PeftModelProtocol.from_pretrained(base_model, path)\n"
+            "where 'path' is the directory containing the saved LoRA adapter weights."
         )
         raise NotImplementedError(
             msg,
@@ -2408,6 +2441,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 (
                     self.accelerator.unwrap_model(self.actor)
                     if self.accelerator is not None
+                    else self.actor.module  # unwrap DummyEvolvable → raw PeftModel
+                    if isinstance(self.actor, DummyEvolvable)
                     else self.actor
                 ),
             )
@@ -2620,28 +2655,46 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
 
         if isinstance(base_model, PeftModelProtocol) and add_adapters:
-            # Handles backwards compatibility with user providing a peft model as the actor network
-            if self.lora_config is None:
-                adapter_name = list(base_model.peft_config.keys())
-                self.lora_config = base_model.peft_config[adapter_name[0]]
-            with gather_if_zero3(self.zero_stage, list(base_model.parameters())):
-                base_model = base_model.merge_and_unload()
-            if "default" in list(base_model.peft_config.keys()):
-                base_model.peft_config.pop("default")
-
-        self.actor: PeftModelProtocol = (
-            get_peft_model(base_model, self.lora_config, adapter_name="actor")
-            if add_adapters
-            else base_model
-        )
-
-        if self.use_separate_reference_adapter and add_adapters:
-            self.actor.add_adapter(
-                adapter_name="reference",
-                peft_config=self.lora_config,  # type: ignore[arg-type]
+            peft_adapter_names = set(base_model.peft_config.keys())
+            if "actor" in peft_adapter_names:
+                # The model already has the correct "actor" adapter (e.g. from clone_llm).
+                # Use it directly so the trained LoRA weights are preserved and the base
+                # model is left unchanged — no merge_and_unload needed.
+                self.actor = base_model
+                if self.use_separate_reference_adapter and "reference" not in peft_adapter_names:
+                    self.actor.add_adapter(
+                        adapter_name="reference",
+                        peft_config=self.lora_config,  # type: ignore[arg-type]
+                    )
+                self.actor.set_adapter("actor")
+            else:
+                # Backwards-compatibility path: user passed a PEFT model whose adapter
+                # isn't named "actor" (e.g. named "default"). Merge it into the base so
+                # we can re-apply a properly named adapter on top.
+                if self.lora_config is None:
+                    adapter_name = list(base_model.peft_config.keys())
+                    self.lora_config = base_model.peft_config[adapter_name[0]]
+                with gather_if_zero3(self.zero_stage, list(base_model.parameters())):
+                    base_model = base_model.merge_and_unload()
+                self.actor = get_peft_model(base_model, self.lora_config, adapter_name="actor")
+                if self.use_separate_reference_adapter:
+                    self.actor.add_adapter(
+                        adapter_name="reference",
+                        peft_config=self.lora_config,  # type: ignore[arg-type]
+                    )
+                self.actor.set_adapter("actor")
+        else:
+            self.actor = (
+                get_peft_model(base_model, self.lora_config, adapter_name="actor")
+                if add_adapters
+                else base_model
             )
-
-        self.actor.set_adapter("actor")
+            if self.use_separate_reference_adapter and add_adapters:
+                self.actor.add_adapter(
+                    adapter_name="reference",
+                    peft_config=self.lora_config,  # type: ignore[arg-type]
+                )
+            self.actor.set_adapter("actor")
 
         if self.accelerator is None:
             self.actor = DummyEvolvable(module=self.actor, device=self.device)

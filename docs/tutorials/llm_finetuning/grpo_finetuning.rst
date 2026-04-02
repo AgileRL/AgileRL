@@ -213,7 +213,7 @@ To allow our model to become an agent and learn through reinforcement learning, 
 :class:`GRPO <agilerl.algorithms.GRPO>` class. This class follows the same structure as the other
 reinforcement learning algorithms in the AgileRL library.
 
-An important part of training aN LLM to display reasoning bahevaiour is distributed training. They are
+An important part of training aN LLM to display reasoning behaviour is distributed training. They are
 called *Large* Language Models for a reason, and unless you are a very lucky individual, you may not
 have enough capacity on your individual computer to train even a 'small' LLM. If you want to train a
 larger, more powerful model, then this becomes even more infeasible. Instead, we can leverage distributed

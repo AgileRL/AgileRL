@@ -1,3 +1,5 @@
+import csv
+import os
 import warnings
 from typing import Any
 
@@ -22,88 +24,10 @@ from agilerl.utils.utils import (
 InitDictType = dict[str, Any] | None
 
 
-def _plot_sft_loss_curves(
-    pop: list,
-    effective_data_batch_size: int,
-    evaluation_interval: int,
-    plot_path: str,
-) -> None:
-    """Save a loss-curve plot for a completed SFT training run.
-
-    :param pop: Trained agent population.
-    :param effective_data_batch_size: Samples processed per training step.
-    :param evaluation_interval: Steps between evaluation passes.
-    :param plot_path: File path for the saved figure (e.g. ``"plots/sft_loss.png"``).
-    """
-    try:
-        import os
-
-        import matplotlib.pyplot as plt
-    except ImportError:
-        warnings.warn(
-            "matplotlib is not installed — skipping loss-curve plot.", stacklevel=2
-        )
-        return
-
-    os.makedirs(os.path.dirname(os.path.abspath(plot_path)), exist_ok=True)
-
-    has_eval = any(len(a.fitness) > 0 for a in pop)
-    n_plots = 2 if has_eval else 1
-    fig, axes = plt.subplots(1, n_plots, figsize=(7 * n_plots, 4), squeeze=False)
-    fig.suptitle("SFT Training", fontweight="bold")
-
-    for agent_idx, agent in enumerate(pop):
-        label = f"agent {agent_idx}" if len(pop) > 1 else None
-        scores = agent.scores  # stored as -loss
-        if not scores:
-            continue
-
-        # Training loss
-        train_losses = [-s for s in scores]
-        train_steps = [
-            (i + 1) * effective_data_batch_size for i in range(len(train_losses))
-        ]
-        ax = axes[0][0]
-        ax.plot(train_steps, train_losses, linewidth=1.2, alpha=0.85, label=label)
-
-        # Smoothed trend (rolling mean over 10%)
-        window = max(1, len(train_losses) // 10)
-        smoothed = np.convolve(
-            train_losses, np.ones(window) / window, mode="valid"
-        )
-        smooth_steps = train_steps[window - 1 :]
-        ax.plot(smooth_steps, smoothed, linewidth=2, linestyle="--", alpha=0.6)
-
-        # Eval loss
-        if has_eval and agent.fitness:
-            eval_losses = [-f for f in agent.fitness]
-            eval_steps = [
-                (j + 1) * evaluation_interval * effective_data_batch_size
-                for j in range(len(eval_losses))
-            ]
-            axes[0][1].plot(
-                eval_steps, eval_losses, marker="o", linewidth=1.5, label=label
-            )
-
-    axes[0][0].set_title("Training loss")
-    axes[0][0].set_xlabel("Samples")
-    axes[0][0].set_ylabel("Loss")
-    axes[0][0].grid(True, alpha=0.3)
-    if len(pop) > 1:
-        axes[0][0].legend()
-
-    if has_eval:
-        axes[0][1].set_title("Eval loss")
-        axes[0][1].set_xlabel("Samples")
-        axes[0][1].set_ylabel("Loss")
-        axes[0][1].grid(True, alpha=0.3)
-        if len(pop) > 1:
-            axes[0][1].legend()
-
-    fig.tight_layout()
-    fig.savefig(plot_path, dpi=150)
-    plt.close(fig)
-    print(f"Loss curves saved to {plot_path}")
+def safe_aggregate_metrics(accelerator: Accelerator | None, metrics: list[float]) -> float:
+    if accelerator is None:
+        return float(metrics) if not isinstance(metrics, float) else metrics
+    return aggregate_metrics_across_gpus(accelerator, metrics)
 
 
 def finetune_llm_reasoning(
@@ -603,12 +527,27 @@ def finetune_llm_preference(
             dynamic_ncols=True,
         )
 
-    def _agg(m):
-        if accelerator is None:
-            return float(m) if not isinstance(m, float) else m
-        return aggregate_metrics_across_gpus(accelerator, m)
-
     total_steps = 0
+
+    _dpo_csv_file = None
+    _dpo_csv_writer = None
+    if elite_path is not None and (accelerator is None or accelerator.is_main_process):
+        os.makedirs(elite_path, exist_ok=True)
+        _dpo_csv_path = os.path.join(elite_path, "metrics.csv")
+        _dpo_csv_file = open(_dpo_csv_path, "w", newline="")
+        _dpo_csv_writer = csv.DictWriter(
+            _dpo_csv_file,
+            fieldnames=[
+                "step",
+                "train_loss",
+                "train_chosen_reward",
+                "train_rejected_reward",
+                "train_reward_margin",
+                "eval_reward_margin",
+            ],
+        )
+        _dpo_csv_writer.writeheader()
+        _dpo_csv_file.flush()
 
     prompts = env.reset(reset_dataloaders=True)
     for i in range(training_steps):
@@ -617,7 +556,11 @@ def finetune_llm_preference(
             agent.set_reference_policy(env.num_epochs)
             loss, chosen_reward, rejected_reward = agent.learn(prompts)
             next_prompts = env.step()
-            agg_metrics = [_agg(loss), _agg(chosen_reward), _agg(rejected_reward)]
+            agg_metrics = [
+                safe_aggregate_metrics(accelerator, loss), 
+                safe_aggregate_metrics(accelerator, chosen_reward), 
+                safe_aggregate_metrics(accelerator, rejected_reward)
+            ]
             prompts = next_prompts
             agent.steps[-1] += effective_data_batch_size
             total_steps += effective_data_batch_size
@@ -625,7 +568,7 @@ def finetune_llm_preference(
 
             if (i + 1) % evaluation_interval == 0:
                 test_reward = agent.test(env)
-                agg_test_metrics = [_agg(test_reward)]
+                agg_test_metrics = [safe_aggregate_metrics(accelerator, test_reward)]
 
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
@@ -659,6 +602,37 @@ def finetune_llm_preference(
                     ),
                 )
                 agent.scores.append(agg_metrics[1] - agg_metrics[2])
+
+        if _dpo_csv_writer is not None and agent_metrics_dict:
+            mean_loss = np.mean(
+                [agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Loss"] for j in range(len(pop))]
+            )
+            mean_chosen = np.mean(
+                [agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Mean chosen reward"] for j in range(len(pop))]
+            )
+            mean_rejected = np.mean(
+                [agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Mean rejected reward"] for j in range(len(pop))]
+            )
+            mean_margin = np.mean(
+                [agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Mean reward margin"] for j in range(len(pop))]
+            )
+            eval_margin = (
+                np.mean(
+                    [agent_metrics_dict[f"agent_{j}/test_metrics"]["Eval/Mean reward margin"] for j in range(len(pop))]
+                )
+                if agg_test_metrics is not None
+                else ""
+            )
+            _dpo_csv_writer.writerow({
+                "step": total_steps,
+                "train_loss": mean_loss,
+                "train_chosen_reward": mean_chosen,
+                "train_rejected_reward": mean_rejected,
+                "train_reward_margin": mean_margin,
+                "eval_reward_margin": eval_margin,
+            })
+            _dpo_csv_file.flush()
+
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
@@ -778,6 +752,10 @@ def finetune_llm_preference(
             lines += [f"  Agents: {agents}  Mutations: {muts}"]
 
         pbar.write("\n".join(lines))
+
+    if _dpo_csv_file is not None:
+        _dpo_csv_file.close()
+        print(f"Training metrics saved to {os.path.join(elite_path, 'metrics.csv')}")
 
     if accelerator is not None:
         accelerator.wait_for_everyone()
@@ -918,20 +896,31 @@ def finetune_llm_sft(
             dynamic_ncols=True,
         )
 
-    def _agg(m):
-        if accelerator is None:
-            return float(m) if not isinstance(m, float) else m
-        return aggregate_metrics_across_gpus(accelerator, m)
-
     total_steps = 0
     prompts = env.reset(reset_dataloaders=True)
+
+    _sft_csv_file = None
+    _sft_csv_writer = None
+    if elite_path is not None and (accelerator is None or accelerator.is_main_process):
+        os.makedirs(elite_path, exist_ok=True)
+        _sft_csv_path = os.path.join(elite_path, "metrics.csv")
+        _sft_csv_file = open(_sft_csv_path, "w", newline="")
+        _sft_csv_writer = csv.DictWriter(
+            _sft_csv_file,
+            fieldnames=["step", "train_loss", "train_perplexity", "eval_loss"],
+        )
+        _sft_csv_writer.writeheader()
+        _sft_csv_file.flush()
 
     for i in range(training_steps):
         agent_metrics_dict = {}
         for agent_idx, agent in enumerate(pop):
             loss, perplexity = agent.learn(prompts)
             next_prompts = env.step()
-            agg_metrics = [_agg(loss), _agg(perplexity)]
+            agg_metrics = [
+                safe_aggregate_metrics(accelerator, loss), 
+                safe_aggregate_metrics(accelerator, perplexity)
+            ]
             prompts = next_prompts
             agent.steps[-1] += effective_data_batch_size
             total_steps += effective_data_batch_size
@@ -939,7 +928,7 @@ def finetune_llm_sft(
 
             if (i + 1) % evaluation_interval == 0:
                 test_score = agent.test(env)
-                agg_test_metrics = [_agg(test_score)]
+                agg_test_metrics = [safe_aggregate_metrics(accelerator, test_score)]
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
 
@@ -965,6 +954,28 @@ def finetune_llm_sft(
                     ),
                 )
                 agent.scores.append(-agg_metrics[0])  # higher = better
+
+        if _sft_csv_writer is not None and agent_metrics_dict:
+            mean_loss = np.mean(
+                [agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Loss"] for j in range(len(pop))]
+            )
+            mean_ppl = np.mean(
+                [agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Perplexity"] for j in range(len(pop))]
+            )
+            eval_loss = (
+                -np.mean(
+                    [agent_metrics_dict[f"agent_{j}/test_metrics"]["Eval/Negative loss (fitness)"] for j in range(len(pop))]
+                )
+                if agg_test_metrics is not None
+                else ""
+            )
+            _sft_csv_writer.writerow({
+                "step": total_steps,
+                "train_loss": mean_loss,
+                "train_perplexity": mean_ppl,
+                "eval_loss": eval_loss,
+            })
+            _sft_csv_file.flush()
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
@@ -1068,6 +1079,10 @@ def finetune_llm_sft(
             evaluation_interval=evaluation_interval,
             plot_path=plot_path,
         )
+
+    if _sft_csv_file is not None:
+        _sft_csv_file.close()
+        print(f"Training metrics saved to {os.path.join(elite_path, 'metrics.csv')}")
 
     if accelerator is not None:
         accelerator.wait_for_everyone()

@@ -1,8 +1,9 @@
 ---
 INIT_HP:
     ALGO: DPO
-    BATCH_SIZE: 2               # DPO runs 4 forward passes per step; keep small on MPS/single-GPU
-    BETA: 0.001
+    BATCH_SIZE: 4               # DPO runs 4 forward passes per step; keep small on MPS/single-GPU
+    BETA: 0.1
+    NLL_ALPHA: 1.0              # weight for the NLL loss on chosen responses; 0 disables
     UPDATE_EPOCHS: 1
     MAX_GRAD_NORM: 0.1
     MAX_CONTEXT_LENGTH: 512     # cap sequence length to save memory
@@ -11,18 +12,19 @@ INIT_HP:
     USE_LIGER_LOSS: false           # set true on Linux with liger-kernel installed
     USE_SEPARATE_REFERENCE_ADAPTER: true
     SEED: 42
-    TOURN_SIZE: 2
+    TOURN_SIZE: 1
     ELITISM: true
     POP_SIZE: 1                 # single model for smoke-test; increase for HPO
     EVAL_LOOP: 1
     EVO_STEPS: null             # null disables HPO evolution
-    EVALUATION_INTERVAL: 200    # evaluate every N batches
-    NUM_BATCHES: null           # null trains a full epoch; set to an integer to cap batches
+    EVALUATION_INTERVAL: 1000    # evaluate every N batches
+    NUM_BATCHES: null             # null trains a full epoch; set to an integer to cap batches
     WANDB: false
     WANDB_API_KEY: null         # or set via WANDB_API_KEY env var
     WANDB_PROJECT: AgileRL
     WANDB_ENTITY: null          # your W&B username or team; null uses your default entity
     WANDB_RUN_NAME: null        # null auto-generates "{dataset}-EvoHPO-{algo}-{timestamp}"
+    EVAL_N_SAMPLES: 10               # prompts randomly drawn from test set for post-training comparison
 
 MUTATION_PARAMS:
     NO_MUT: 0.1                          # No mutation

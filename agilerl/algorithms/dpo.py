@@ -9,10 +9,74 @@ from accelerate import Accelerator
 
 try:
     from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOFunction
+    from liger_kernel.chunked_loss.fused_linear_preference import (
+        LigerFusedLinearPreferenceBase,
+    )
+
+    class _LigerDPOWithAlpha(LigerFusedLinearPreferenceBase):
+        """Thin wrapper that exposes ``alpha`` for NLL scaling.
+
+        ``LigerFusedLinearDPOFunction`` passes ``compute_nll_loss`` as a bool
+        but never forwards ``alpha`` to the base class (which defaults to 1.0).
+        This subclass re-uses the DPO preference loss and adds ``alpha`` so the
+        fused kernel correctly scales the NLL component.
+        """
+
+        preference_loss_fn = staticmethod(
+            LigerFusedLinearDPOFunction.preference_loss_fn
+        )
+
+        @classmethod
+        def forward(
+            cls,
+            ctx,
+            _input,
+            weight,
+            target,
+            bias=None,
+            ref_input=None,
+            ref_weight=None,
+            ref_bias=None,
+            ignore_index=-100,
+            beta=0.1,
+            alpha=1.0,
+            compute_nll_loss=True,
+            compiled=True,
+            use_ref_model=True,
+            average_log_prob=False,
+            chunk_size=1,
+            loss_type="sigmoid",
+        ):
+            return LigerFusedLinearPreferenceBase.forward(
+                cls=cls,
+                ctx=ctx,
+                _input=_input,
+                weight=weight,
+                target=target,
+                bias=bias,
+                ignore_index=ignore_index,
+                alpha=alpha,
+                beta=beta,
+                compute_nll_loss=compute_nll_loss,
+                compiled=compiled,
+                use_ref_model=use_ref_model,
+                ref_input=ref_input,
+                ref_weight=ref_weight,
+                ref_bias=ref_bias,
+                average_log_prob=average_log_prob,
+                chunk_size=chunk_size,
+                loss_type=loss_type,
+            )
+
+        @staticmethod
+        def backward(ctx, *grad_output):
+            grads = LigerFusedLinearPreferenceBase.backward(ctx, grad_output)[:4]
+            return (*grads, *(None,) * 12)
 
     HAS_LIGER_KERNEL = True
 except ImportError:
     LigerFusedLinearDPOFunction = None
+    _LigerDPOWithAlpha = None
     HAS_LIGER_KERNEL = False
 
 from agilerl.algorithms.core.base import LLMAlgorithm
@@ -43,8 +107,11 @@ class DPO(LLMAlgorithm):
     :type batch_size: int, optional
     :param lr: Learning rate, defaults to 0.000005
     :type lr: float, optional
-    :param beta: Beta parameter for DPO, defaults to 0.001
+    :param beta: DPO beta parameter, defaults to 0.1
     :type beta: float, optional
+    :param nll_alpha: Weight for the NLL loss on chosen responses (DPO + NLL), defaults to 1.0.
+        Set to 0 to disable the NLL term entirely.
+    :type nll_alpha: float, optional
     :param max_grad_norm: Maximum gradient norm, defaults to 0.1
     :type max_grad_norm: float, optional
     :param update_epochs: Number of update epochs, defaults to 1
@@ -88,7 +155,8 @@ class DPO(LLMAlgorithm):
         index: int = 0,
         batch_size: int = 16,
         lr: float = 0.000005,
-        beta: float = 0.001,
+        beta: float = 0.1,
+        nll_alpha: float = 1.0,
         max_grad_norm: float = 0.1,
         update_epochs: int = 1,
         calc_position_embeddings: bool = True,
@@ -150,6 +218,7 @@ class DPO(LLMAlgorithm):
             gradient_checkpointing=gradient_checkpointing,
         )
         self.beta = beta
+        self.nll_alpha = nll_alpha
         self.temperature = (
             1  # Temperature for logits calculation, DPO does not use temperature
         )
@@ -219,7 +288,7 @@ class DPO(LLMAlgorithm):
         prompt_masks = LLMAlgorithm.create_prompt_masks(
             prompt_lengths,
             max_length=max_length,
-        ) # CPU tensor
+        ).to(self.device)
 
         # Mask has to be shifted by 1 as output log probs dims are 1 shorter than input ids as first token is used to predict the first log prob
         chosen_mask = (prompt_masks * chosen_attention_mask)[:, 1:]
@@ -411,9 +480,12 @@ class DPO(LLMAlgorithm):
                 rejected_log_probs,
                 ref_rejected_log_probs,
             )
+        loss = -F.logsigmoid(self.beta * (chosen_ratio - rejected_ratio)).mean()
+        if self.nll_alpha > 0:
+            loss = loss - self.nll_alpha * chosen_log_probs.sum() / chosen_mask.sum()
 
         return (
-            -F.logsigmoid(self.beta * (chosen_ratio - rejected_ratio)).mean(),
+            loss,
             implicit_chosen_reward,
             implicit_rejected_reward,
         )
@@ -515,7 +587,7 @@ class DPO(LLMAlgorithm):
         policy_hidden = policy_hidden[:, :-1, :].contiguous()
         ref_hidden = ref_hidden[:, :-1, :].contiguous()
 
-        loss, aux = LigerFusedLinearDPOFunction.apply(
+        loss, aux = _LigerDPOWithAlpha.apply(
             policy_hidden,
             lm_head_weight,
             stacked_target,
@@ -525,7 +597,8 @@ class DPO(LLMAlgorithm):
             lm_head_bias,  # ref_bias (same weight → same bias)
             -100,  # ignore_index
             self.beta,
-            False,  # compute_nll_loss
+            self.nll_alpha,  # alpha — scales NLL in the fused kernel
+            self.nll_alpha > 0,  # compute_nll_loss
             True,  # compiled
             True,  # use_ref_model
             False,  # average_log_prob (sum, matching _dpo_loss)

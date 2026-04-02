@@ -2,7 +2,7 @@ import importlib
 import sys
 from contextlib import contextmanager
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
@@ -18,6 +18,7 @@ from agilerl.utils.algo_utils import DummyOptimizer
 from agilerl.utils.llm_utils import (
     PreferenceGym,
     ReasoningGym,
+    compare_responses,
     gather_if_zero3,
     get_state_dict,
 )
@@ -928,3 +929,182 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
     finally:
         # Restore original module to avoid affecting other tests
         sys.modules["agilerl.utils.llm_utils"] = original_module
+
+
+# ---------------------------------------------------------------------------
+# compare_responses tests
+# ---------------------------------------------------------------------------
+
+
+def _make_tokenizer(vocab_size: int = 100, prompt_len: int = 3) -> MagicMock:
+    """Return a mock tokenizer compatible with compare_responses."""
+    tokenizer = MagicMock()
+    tokenizer.pad_token_id = 0
+    tokenizer.eos_token_id = 1
+    # tokenizer(text, return_tensors="pt") → encoding with .to(device)
+    encoding = MagicMock()
+    encoding.__getitem__ = lambda self, key: (
+        torch.zeros(1, prompt_len, dtype=torch.long) if key == "input_ids" else torch.ones(1, prompt_len, dtype=torch.long)
+    )
+    encoding.to.return_value = {
+        "input_ids": torch.zeros(1, prompt_len, dtype=torch.long),
+        "attention_mask": torch.ones(1, prompt_len, dtype=torch.long),
+    }
+    tokenizer.return_value = encoding
+    tokenizer.decode.return_value = "decoded response"
+    return tokenizer
+
+
+def _make_agent(has_adapter: bool, device: str = "cpu") -> MagicMock:
+    """Return a mock agent with actor and device attributes."""
+    agent = MagicMock()
+    agent.device = device
+    model = MagicMock()
+    model.generate.return_value = torch.zeros(1, 5, dtype=torch.long)
+    if has_adapter:
+        # disable_adapter() must work as a context manager
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=None)
+        cm.__exit__ = MagicMock(return_value=False)
+        model.disable_adapter = MagicMock(return_value=cm)
+    else:
+        del model.disable_adapter  # hasattr() returns False
+    agent.actor = model
+    return agent
+
+
+def test_compare_responses_no_adapter_with_reference(capsys):
+    """Without an adapter only the model response section is printed; reference is shown."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("What is 2+2?", "It is 4.")]
+
+    compare_responses(agent, tokenizer, samples)
+
+    captured = capsys.readouterr().out
+    assert "PROMPT" in captured
+    assert "DATASET RESPONSE" in captured
+    assert "MODEL RESPONSE" in captured
+    assert "BASE MODEL" not in captured
+    assert "FINE-TUNED MODEL" not in captured
+    # generate called exactly once (no base model pass)
+    assert agent.actor.generate.call_count == 1
+
+
+def test_compare_responses_no_adapter_no_reference(capsys):
+    """When reference is None the DATASET RESPONSE section is skipped."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("What is 2+2?", None)]
+
+    compare_responses(agent, tokenizer, samples)
+
+    captured = capsys.readouterr().out
+    assert "PROMPT" in captured
+    assert "DATASET RESPONSE" not in captured
+    assert "MODEL RESPONSE" in captured
+
+
+def test_compare_responses_with_adapter_shows_base_and_finetuned(capsys):
+    """With an adapter both BASE MODEL and FINE-TUNED MODEL sections are printed."""
+    agent = _make_agent(has_adapter=True)
+    tokenizer = _make_tokenizer()
+    samples = [("Tell me a joke.", "Why did the chicken cross the road?")]
+
+    compare_responses(agent, tokenizer, samples)
+
+    captured = capsys.readouterr().out
+    assert "BASE MODEL" in captured
+    assert "FINE-TUNED MODEL" in captured
+    assert "MODEL RESPONSE" not in captured
+    # generate called twice: once inside disable_adapter, once without
+    assert agent.actor.generate.call_count == 2
+    agent.actor.disable_adapter.assert_called_once()
+
+
+def test_compare_responses_multiple_samples_enter_continues(capsys):
+    """Pressing Enter (empty string) advances to the next sample."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("Q1", "A1"), ("Q2", "A2"), ("Q3", "A3")]
+
+    with patch("builtins.input", return_value=""):
+        compare_responses(agent, tokenizer, samples)
+
+    captured = capsys.readouterr().out
+    # Navigation prompt appears between samples (not after the last one)
+    assert captured.count("[Enter] next sample") == len(samples) - 1
+    # All three samples were generated
+    assert agent.actor.generate.call_count == len(samples)
+
+
+def test_compare_responses_quit_early(capsys):
+    """Pressing 'q' stops processing remaining samples."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("Q1", "A1"), ("Q2", "A2"), ("Q3", "A3")]
+
+    with patch("builtins.input", return_value="q"):
+        compare_responses(agent, tokenizer, samples)
+
+    # Only the first sample's generation runs; loop exits before Q2 and Q3
+    assert agent.actor.generate.call_count == 1
+
+
+def test_compare_responses_eof_breaks_loop(capsys):
+    """An EOFError from input() (non-interactive environment) stops the loop gracefully."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("Q1", "A1"), ("Q2", "A2")]
+
+    with patch("builtins.input", side_effect=EOFError):
+        compare_responses(agent, tokenizer, samples)
+
+    # Only the first sample is generated; EOFError prevents further iteration
+    assert agent.actor.generate.call_count == 1
+
+
+def test_compare_responses_single_sample_no_input_prompt(capsys):
+    """With a single sample the navigation prompt and input() are never shown/called."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("Only prompt", "Only response")]
+
+    with patch("builtins.input") as mock_input:
+        compare_responses(agent, tokenizer, samples)
+
+    mock_input.assert_not_called()
+
+
+@pytest.mark.parametrize("do_sample,temperature", [(False, 1.0), (True, 0.7)])
+def test_compare_responses_generation_kwargs_forwarded(do_sample, temperature):
+    """do_sample and temperature are forwarded to model.generate."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("prompt", None)]
+
+    compare_responses(
+        agent,
+        tokenizer,
+        samples,
+        max_new_tokens=50,
+        temperature=temperature,
+        do_sample=do_sample,
+    )
+
+    _, call_kwargs = agent.actor.generate.call_args
+    assert call_kwargs["max_new_tokens"] == 50
+    assert call_kwargs["temperature"] == temperature
+    assert call_kwargs["do_sample"] == do_sample
+
+
+def test_compare_responses_skip_special_tokens_forwarded():
+    """skip_special_tokens is forwarded to tokenizer.decode."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("prompt", None)]
+
+    compare_responses(agent, tokenizer, samples, skip_special_tokens=False)
+
+    _, decode_kwargs = tokenizer.decode.call_args
+    assert decode_kwargs["skip_special_tokens"] is False

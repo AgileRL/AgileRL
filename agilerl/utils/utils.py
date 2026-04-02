@@ -26,6 +26,7 @@ from agilerl.algorithms import (
     MADDPG,
     MATD3,
     PPO,
+    SFT,
     TD3,
     NeuralTS,
     NeuralUCB,
@@ -261,10 +262,10 @@ def create_population(
     :type accelerator: accelerate.Accelerator(), optional
     :param torch_compiler: Torch compiler, defaults to None
     :type torch_compiler: Any, optional
-    :return: Population of agents
-    :rtype: list[EvolvableAlgorithm]
     :param algo_kwargs: Additional keyword arguments for the algorithm
     :type algo_kwargs: dict, optional
+    :return: Population of agents
+    :rtype: list[EvolvableAlgorithm]
     """
     if algo_kwargs is None:
         algo_kwargs = {}
@@ -650,6 +651,35 @@ def create_population(
                 **algo_kwargs,
             )
             population.append(agent)
+    elif algo == "SFT":
+        for idx in range(population_size):
+            agent = SFT(
+                actor_network=(
+                    clone_llm(
+                        actor_network,
+                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
+                        state_dict=(
+                            actor_network.state_dict()
+                            if accelerator is None
+                            else get_state_dict(actor_network)
+                        ),
+                    )
+                    if idx != 0
+                    else actor_network
+                ),
+                hp_config=hp_config,
+                index=idx,
+                batch_size=INIT_HP.get("BATCH_SIZE", 2),
+                lr=INIT_HP.get("LR", 5e-7),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
+                calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
+                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
+                accelerator=Accelerator() if accelerator else None,
+                device=device,
+                **algo_kwargs,
+            )
+            population.append(agent)
     return population
 
 
@@ -1021,20 +1051,33 @@ def aggregate_metrics_across_gpus(
 def save_llm_checkpoint(
     agent: LLMAlgorithm,
     checkpoint_path: str | None,
-    weights_only: bool = False,
+    weights_only: bool = True,
 ) -> None:
     """Checkpoint the LLM.
 
+    When ``weights_only=True`` (the default) the LoRA adapters are saved via HuggingFace
+    ``save_pretrained``, producing a directory that can be reloaded with::
+
+        from peft import PeftModel
+        from transformers import AutoModelForCausalLM
+
+        base_model = AutoModelForCausalLM.from_pretrained("<base-model-name>")
+        model = PeftModel.from_pretrained(base_model, "<checkpoint_path>/actor/")
+
+    When ``weights_only=False`` a full AgileRL checkpoint is saved (includes optimizer state
+    and all hyperparameters), which is larger but allows resuming training via
+    ``agent.load_checkpoint(path)``.
+
     :param agent: Agent
     :type agent: LLMAlgorithm
-    :param checkpoint_path: Checkpoint path
+    :param checkpoint_path: Checkpoint path — used as-is (no algo sub-directory is appended).
+        Defaults to ``"./saved_checkpoints"`` when ``None``.
     :type checkpoint_path: str
-    :param weights_only: If True, only save the weights of the model, defaults to False
+    :param weights_only: Save only LoRA adapter weights (HuggingFace format), defaults to True
     :type weights_only: bool, optional
     """
     assert agent.actor is not None, "Actor is not initialized"
-    base_path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
-    path = base_path + f"/{agent.algo}"
+    path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
     Path(path).mkdir(parents=True, exist_ok=True)
     if agent.accelerator is not None:
         agent.accelerator.wait_for_everyone()
@@ -1042,6 +1085,7 @@ def save_llm_checkpoint(
         agent.accelerator.wait_for_everyone()
     else:
         agent.save_checkpoint(path, weights_only=weights_only)
+
 
 
 def consolidate_mutations(population: list[LLMAlgorithm]) -> None:

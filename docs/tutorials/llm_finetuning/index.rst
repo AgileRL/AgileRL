@@ -111,3 +111,4 @@ for finetuning LLMs.
 
    grpo_finetuning
    grpo_hpo
+   sft_dpo_finetuning
