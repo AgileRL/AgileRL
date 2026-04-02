@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
-import h5py
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
 from pettingzoo import ParallelEnv
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -422,6 +421,7 @@ class PzEnvSpec(EnvSpec):
         )
 
 
+# TODO: Make this prettier
 class LLMEnvSpec(BaseModel):
     """Environment specification for LLM reasoning and preference training.
 
@@ -557,14 +557,10 @@ class OfflineEnvSpec(GymEnvSpec):
 
     @model_validator(mode="after")
     def _validate_and_load_dataset(self) -> Self:
-        if self.dataset_path is not None:
-            # NOTE: Not too sure this is a robust way to load any kind of dataset
-            self.dataset = h5py.File(self.dataset_path, "r")
-        elif self.minari_dataset_id is not None:
-            self.dataset = None
-        else:
+        if self.dataset_path is None and self.minari_dataset_id is None:
             msg = "OfflineEnvSpec requires either 'minari_dataset_id' or 'dataset_path' to be set."
             raise ValueError(msg)
+
         return self
 
 

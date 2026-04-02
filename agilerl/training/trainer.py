@@ -118,15 +118,15 @@ class Trainer(ABC):
         if isinstance(algorithm, str):
             algorithm: AlgoSpecT = ALGO_REGISTRY.get(algorithm).spec_cls()
 
-        self.algorithm = algorithm
-        self.environment = environment
-        self.training = training
-        self.mutation = mutation
-        self.tournament = tournament
-        self.replay_buffer = replay_buffer
+        self.algorithm_spec = algorithm
+        self.env_spec = environment
+        self.training_spec = training
+        self.mutation_spec = mutation
+        self.tournament_selection_spec = tournament
+        self.replay_buffer_spec = replay_buffer
         self.device = device
-        self.resume_from_checkpoint = resume_from_checkpoint
         self.accelerator = accelerator
+        self.resume_from_checkpoint = resume_from_checkpoint
 
     @classmethod
     def from_manifest(
@@ -190,15 +190,15 @@ class Trainer(ABC):
         :returns: A fully validated manifest ready for submission to Arena.
         :rtype: dict[str, Any]
         """
-        network = getattr(self.algorithm, "net_config", None)
+        network = getattr(self.algorithm_spec, "net_config", None)
         manifest = TrainingManifest(
-            algorithm=self.algorithm,
-            environment=self.environment,
-            training=self.training,
+            algorithm=self.algorithm_spec,
+            environment=self.env_spec,
+            training=self.training_spec,
             network=network,
-            mutation=self.mutation,
-            replay_buffer=self.replay_buffer,
-            tournament_selection=self.tournament,
+            mutation=self.mutation_spec,
+            replay_buffer=self.replay_buffer_spec,
+            tournament_selection=self.tournament_selection_spec,
         )
         return manifest.model_dump(mode="json", exclude_none=True)
 
@@ -283,21 +283,21 @@ class LocalTrainer(Trainer):
 
         # For LLM algorithms, load the tokenizer once and share it.
         self.tokenizer = None
-        if isinstance(self.algorithm, LLMAlgorithmSpec):
+        if isinstance(self.algorithm_spec, LLMAlgorithmSpec):
             if AutoTokenizer is None:
                 msg = "LLM dependencies are not installed. Please install them using: pip install agilerl[llm]"
                 raise ImportError(msg)
 
             self.tokenizer = AutoTokenizer.from_pretrained(
-                self.algorithm.pretrained_model_name_or_path
+                self.algorithm_spec.pretrained_model_name_or_path
             )
 
         # Instantiate the training components from their specs.
         self.env = self._make_env()
         self.population = create_population_from_spec(
-            population_size=self.training.population_size,
-            algo_spec=self.algorithm,
-            mutation_spec=self.mutation,
+            population_size=self.training_spec.population_size,
+            algo_spec=self.algorithm_spec,
+            mutation_spec=self.mutation_spec,
             env=self.env,
             device=self.device,
             accelerator=self.accelerator,
@@ -306,12 +306,12 @@ class LocalTrainer(Trainer):
         )
         self.mutations = build_mutations_from_spec(self.mutation, self.device)
         self.tournament_selection = build_tournament_from_spec(
-            self.tournament, self.training
+            self.tournament_selection_spec, self.training_spec
         )
         self.memory = build_replay_buffer_from_spec(
-            self.algorithm, self.replay_buffer, self.device
+            self.algorithm_spec, self.replay_buffer_spec, self.device
         )
-        self.train_fn = self.algorithm.get_training_fn()
+        self.train_fn = self.algorithm_spec.get_training_fn()
 
     def _make_env(self) -> EnvT:
         """Create the environment to train on.
@@ -319,31 +319,29 @@ class LocalTrainer(Trainer):
         :returns: The environment to train on.
         :rtype: GymEnvType | PzEnvType | LLMEnvType
         """
-        if isinstance(self.environment, LLMEnvSpec):
-            return self.environment.make_env(
+        if isinstance(self.env_spec, LLMEnvSpec):
+            return self.env_spec.make_env(
                 tokenizer=self.tokenizer, accelerator=self.accelerator
             )
 
         # Check if the environment contains an image-last observation space,
         # in which case we transpose through a wrapper -> (H,W,C) -> (C,H,W)
         extra_wrappers = None
-        probe = self.environment.make_single_env()
-        if isinstance(self.environment, PzEnvSpec):
+        probe = self.env_spec.make_single_env()
+        if isinstance(self.env_spec, PzEnvSpec):
             sample_agent = probe.possible_agents[0]
             if needs_image_transpose(probe.observation_space(sample_agent)):
                 extra_wrappers = [PettingZooImageTranspose]
 
-        elif isinstance(self.environment, GymEnvSpec):
+        elif isinstance(self.env_spec, GymEnvSpec):
             if needs_image_transpose(probe.observation_space):
                 extra_wrappers = [ImageTranspose]
 
         probe.close()
-        return self.environment.make_env(extra_wrappers=extra_wrappers)
+        return self.env_spec.make_env(extra_wrappers=extra_wrappers)
 
     @classmethod
-    def _resolve_env_spec(
-        cls, manifest: TrainingManifest
-    ) -> GymEnvSpec | PzEnvSpec | LLMEnvSpec | OfflineEnvSpec:
+    def _resolve_env_spec(cls, manifest: TrainingManifest) -> EnvSpecT:
         """Build the appropriate environment spec from the manifest.
 
         Uses the algorithm's ``agent_type`` and ``offline`` flag to
@@ -371,7 +369,6 @@ class LocalTrainer(Trainer):
         self,
         *,
         verbose: bool = True,
-        accelerator: Any | None = None,
         save_elite: bool = False,
         elite_path: str | None = None,
         wb: bool = False,
@@ -384,8 +381,6 @@ class LocalTrainer(Trainer):
 
         :param verbose: If ``True``, print verbose output.
         :type verbose: bool
-        :param accelerator: An :class:`accelerate.Accelerator` instance.
-        :type accelerator: Any | None
         :param save_elite: If ``True``, save the elite agent.
         :type save_elite: bool
         :param elite_path: The path to save the elite agent.
@@ -409,26 +404,26 @@ class LocalTrainer(Trainer):
         kwargs: dict[str, Any] = {
             "pop": self.population,
             "env": self.env,
-            "max_steps": self.training.max_steps,
-            "evo_steps": self.training.evo_steps,
-            "tournament": self.tournament_selection,
-            "mutation": self.mutations,
+            "max_steps": self.training_spec.max_steps,
+            "evo_steps": self.training_spec.evo_steps,
+            "tournament": self.tournament_selection_spec,
+            "mutation": self.mutation_spec,
             "save_elite": save_elite,
             "elite_path": elite_path,
             "wb": wb,
             "tensorboard": tensorboard,
             "tensorboard_log_dir": tensorboard_log_dir,
             "verbose": verbose,
-            "accelerator": accelerator or self.accelerator,
+            "accelerator": self.accelerator,
             "wandb_api_key": wandb_api_key,
             "wandb_kwargs": wandb_kwargs,
         }
 
         # Extract algo-specific kwargs from the algorithm spec.
         kwargs.update(
-            self.algorithm.get_training_kwargs(
-                training=self.training,
-                env_spec=self.environment,
+            self.algorithm_spec.get_training_kwargs(
+                training=self.training_spec,
+                env_spec=self.env_spec,
                 memory=self.memory,
             )
         )
@@ -536,12 +531,12 @@ class ArenaTrainer(Trainer):
         :raises TypeError: If the environment is not a string or
             :class:`ArenaEnvSpec`.
         """
-        if isinstance(self.environment, ArenaEnvSpec):
+        if isinstance(self.env_spec, ArenaEnvSpec):
             return self.environment
-        if isinstance(self.environment, dict):
-            return ArenaEnvSpec(**self.environment)
+        if isinstance(self.env_spec, dict):
+            return ArenaEnvSpec(**self.env_spec)
         msg = (
             f"ArenaTrainer requires an ArenaEnvSpec or a dictionary with 'name', 'version', and 'num_envs' keys, "
-            f"got {type(self.environment).__name__}"
+            f"got {type(self.env_spec).__name__}"
         )
         raise TypeError(msg)
