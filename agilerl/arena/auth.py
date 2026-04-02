@@ -28,7 +28,7 @@ def load_credentials(
     :returns: Token dictionary, or ``None`` if absent or malformed.
     :rtype: dict[str, Any] | None
     """
-    credentials_path = Path(os.fspath(credentials_path)).resolve()
+    credentials_path = Path(os.fspath(credentials_path)).expanduser().resolve()
     if not credentials_path.is_file():
         return None
     try:
@@ -160,8 +160,8 @@ class ArenaOAuth2:
             time.sleep(interval)
             try:
                 tokens = self.kc.token(
-                    # grant_type="urn:ietf:params:oauth:grant-type:device_code",
-                    grant_type="authorization_code",
+                    # Device Authorization Grant requires this grant type.
+                    grant_type="urn:ietf:params:oauth:grant-type:device_code",
                     device_code=device_code,
                 )
                 ArenaOAuth2._write_credentials(tokens)

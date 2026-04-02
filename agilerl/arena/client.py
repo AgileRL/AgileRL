@@ -160,7 +160,6 @@ class ArenaClient:
         ``~/.arena/credentials.json``.
         """
         tokens = self._auth.device_login(timeout=timeout)
-        print(tokens)
         self._tokens.access_token = tokens["access_token"]
         self._tokens.refresh_token = tokens.get("refresh_token")
         logger.info("Authenticated with Arena.")
@@ -787,7 +786,6 @@ class ArenaClient:
                 timeout=timeout,
                 **kwargs,
             )
-            print(resp.json())
         except httpx.HTTPError as exc:
             raise ArenaAPIError(
                 status_code=0,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 import click
@@ -88,6 +89,36 @@ def _handle_error(exc: Exception, output: OutputFormat) -> None:
         raise click.exceptions.Exit(1)
 
     raise exc
+
+
+def _stream_chunk(chunk: str) -> None:
+    click.echo(chunk, nl=False)
+
+
+def _load_json_payload(
+    payload_json: str | None,
+    payload_file: str | None,
+) -> dict[str, Any]:
+    if payload_json is None and payload_file is None:
+        msg = "Provide either --manifest-json or --manifest-file."
+        raise click.UsageError(msg)
+    if payload_json is not None and payload_file is not None:
+        msg = "Use only one of --manifest-json or --manifest-file."
+        raise click.UsageError(msg)
+
+    try:
+        if payload_json is not None:
+            parsed = json.loads(payload_json)
+        else:
+            parsed = json.loads(Path(payload_file).read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        msg = f"Invalid JSON payload: {exc}"
+        raise click.UsageError(msg) from exc
+
+    if not isinstance(parsed, dict):
+        msg = "Manifest payload must be a JSON object."
+        raise click.UsageError(msg)
+    return parsed
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -276,6 +307,122 @@ def env_entrypoints(
             client.list_custom_environment_entrypoints(name=name, version=version),
             config.output,
         )
+    except Exception as exc:  # noqa: BLE001
+        _handle_error(exc, config.output)
+    finally:
+        client.close()
+
+
+@env.command("create-and-validate")
+@click.option("--name", default=None, help="Environment name. Random UUID if omitted.")
+@click.option("--version", default="ident", show_default=True)
+@click.option(
+    "--file-path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Path to environment tar.gz archive.",
+)
+@click.option(
+    "--env-config-path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Path to env_config.yaml file.",
+)
+@click.option(
+    "--requirements-path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Path to requirements.txt file.",
+)
+@click.option("--entrypoint", default="acrobot:AcrobotEnv", show_default=True)
+@click.option("--multi-agent/--single-agent", default=False, show_default=True)
+@click.option("--do-rollouts/--no-do-rollouts", default=True, show_default=True)
+@click.option("--stream/--no-stream", default=True, show_default=True)
+@click.pass_obj
+def env_create_and_validate(
+    config: CLIConfig,
+    name: str | None,
+    version: str,
+    file_path: Path,
+    env_config_path: Path,
+    requirements_path: Path,
+    entrypoint: str,
+    multi_agent: bool,
+    do_rollouts: bool,
+    stream: bool,
+) -> None:
+    """Upload and validate an environment with multipart request."""
+    from uuid import uuid4
+
+    client = _build_client(config)
+    env_name = name or str(uuid4())
+    try:
+        result = client.create_and_validate_custom_environment(
+            name=env_name,
+            version=version,
+            file_path=file_path,
+            env_config_path=env_config_path,
+            requirements_path=requirements_path,
+            entrypoint=entrypoint,
+            multi_agent=multi_agent,
+            do_rollouts=do_rollouts,
+            stream=stream,
+            on_chunk=_stream_chunk if stream else None,
+        )
+        if stream:
+            click.echo()
+        _emit(result, config.output)
+    except Exception as exc:  # noqa: BLE001
+        _handle_error(exc, config.output)
+    finally:
+        client.close()
+
+
+@main.group()
+def experiments() -> None:
+    """Experiment-related commands."""
+
+
+@experiments.command("submit")
+@click.option(
+    "--custom-gym-env-impl-id",
+    type=int,
+    required=True,
+    help="Custom gym environment implementation ID.",
+)
+@click.option(
+    "--manifest-json",
+    default=None,
+    help="Raw JSON manifest payload string.",
+)
+@click.option(
+    "--manifest-file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Path to JSON file containing manifest payload.",
+)
+@click.option("--stream/--no-stream", default=True, show_default=True)
+@click.pass_obj
+def experiments_submit(
+    config: CLIConfig,
+    custom_gym_env_impl_id: int,
+    manifest_json: str | None,
+    manifest_file: str | None,
+    stream: bool,
+) -> None:
+    """Submit an experiment job to Arena."""
+    manifest = _load_json_payload(manifest_json, manifest_file)
+    client = _build_client(config)
+    try:
+        result = client.submit_experiment_job(
+            custom_gym_env_impl_id=custom_gym_env_impl_id,
+            manifest=manifest,
+            stream=stream,
+            on_chunk=_stream_chunk if stream else None,
+        )
+        if stream:
+            click.echo()
+        _emit(result, config.output)
     except Exception as exc:  # noqa: BLE001
         _handle_error(exc, config.output)
     finally:
