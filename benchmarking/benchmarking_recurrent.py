@@ -10,6 +10,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import (
+    _check_box2d_available,
     create_population,
     make_vect_envs,
     print_hyperparams,
@@ -70,6 +71,8 @@ def main_recurrent(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
+
+    _check_box2d_available(INIT_HP["ENV_NAME"])
 
     def make_env():
         return MaskVelocityWrapper(gym.make(INIT_HP["ENV_NAME"]))

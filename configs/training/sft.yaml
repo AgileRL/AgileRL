@@ -7,7 +7,7 @@ INIT_HP:
     MAX_CONTEXT_LENGTH: 512     # cap sequence length to save memory
     REDUCE_MEMORY_PEAK: false
     CALC_POSITION_EMBEDDINGS: true
-    USE_LIGER_LOSS: false           # set true on Linux with liger-kernel installed
+    USE_LIGER_LOSS: true           # set true on Linux with liger-kernel installed
     SEED: 42
     TOURN_SIZE: 2
     ELITISM: true
@@ -15,7 +15,7 @@ INIT_HP:
     EVAL_LOOP: 1
     EVO_STEPS: null             # null disables HPO evolution. 1 step per call to learn()
     EVALUATION_INTERVAL: 1000
-    NUM_BATCHES: 1000          # null trains a full epoch; set to an integer for a quick smoke-test
+    NUM_BATCHES: null          # null trains a full epoch; set to an integer for a quick smoke-test
     WANDB: false
     WANDB_API_KEY: null         # or set via WANDB_API_KEY env var
     WANDB_PROJECT: SFT-Benchmarking

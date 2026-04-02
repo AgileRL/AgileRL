@@ -44,6 +44,32 @@ from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
 
+_BOX2D_ENV_PREFIXES = (
+    "LunarLander",
+    "LunarLanderContinuous",
+    "BipedalWalker",
+    "BipedalWalkerHardcore",
+    "CarRacing",
+)
+
+
+def _check_box2d_available(env_name: str) -> None:
+    """Raise a helpful error if a Box2D environment is requested but box2d-py is missing."""
+    if not any(env_name.startswith(prefix) for prefix in _BOX2D_ENV_PREFIXES):
+        return
+    try:
+        import Box2D  # noqa: F401
+    except ImportError:
+        msg = (
+            f"Environment '{env_name}' requires the Box2D physics engine.\n"
+            "Install it with:  pip install agilerl[box2d]  (or  uv sync --extra box2d)\n"
+            "Note: building box2d-py requires the system package 'swig'.\n"
+            "  Ubuntu/Debian: sudo apt-get install swig\n"
+            "  macOS:         brew install swig\n"
+            "Alternatively, use a non-Box2D environment such as 'CartPole-v1'."
+        )
+        raise ImportError(msg) from None
+
 
 def make_vect_envs(
     env_name: str | None = None,
@@ -67,6 +93,9 @@ def make_vect_envs(
     if env_name is None and make_env is None:
         msg = "Either env_name or make_env must be provided"
         raise ValueError(msg)
+
+    if env_name is not None:
+        _check_box2d_available(env_name)
 
     vectorize = (
         gym.vector.AsyncVectorEnv if should_async_vector else gym.vector.SyncVectorEnv
