@@ -21,7 +21,11 @@ from agilerl.algorithms.dpo import DPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_preference
-from agilerl.utils.llm_utils import PreferenceGym, compare_responses, sample_eval_prompts
+from agilerl.utils.llm_utils import (
+    PreferenceGym,
+    compare_responses,
+    sample_eval_prompts,
+)
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "HumanLLMs/Human-Like-DPO-Dataset"
@@ -90,7 +94,7 @@ def main(
 
     lora_config = LoraConfig(
         r=16,
-        lora_alpha=64,
+        lora_alpha=32,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         lora_dropout=0.05,
         bias="none",
@@ -101,7 +105,9 @@ def main(
         with open(f"{load_path}/adapter_config.json") as f:
             base_model_name = json.load(f)["base_model_name_or_path"]
         base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
-        actor_network = PeftModel.from_pretrained(base_model, load_path)
+        actor_network = PeftModel.from_pretrained(
+            base_model, load_path, adapter_name="actor"
+        )
     else:
         actor_network = None
 

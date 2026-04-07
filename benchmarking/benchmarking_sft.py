@@ -289,4 +289,8 @@ if __name__ == "__main__":
 
         with open(args.config) as f:
             config = yaml.safe_load(f)
-        main(init_hp=config["INIT_HP"], mut_p=config["MUTATION_PARAMS"], save_path=save_path)
+        main(
+            init_hp=config["INIT_HP"],
+            mut_p=config["MUTATION_PARAMS"],
+            save_path=save_path,
+        )

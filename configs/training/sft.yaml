@@ -13,14 +13,14 @@ INIT_HP:
     ELITISM: true
     POP_SIZE: 1                 # single model for a quick smoke-test
     EVAL_LOOP: 1
-    EVO_STEPS: null             # null disables HPO evolution. 1 step per call to learn()
+    EVO_STEPS:                  # null disables HPO evolution. 1 step per call to learn()
     EVALUATION_INTERVAL: 1000
-    NUM_BATCHES: null          # null trains a full epoch; set to an integer for a quick smoke-test
+    NUM_BATCHES:               # null trains a full epoch; set to an integer for a quick smoke-test
     WANDB: false
-    WANDB_API_KEY: null         # or set via WANDB_API_KEY env var
+    WANDB_API_KEY:              # or set via WANDB_API_KEY env var
     WANDB_PROJECT: SFT-Benchmarking
-    WANDB_ENTITY: null          # your W&B username or team; null uses your default entity
-    WANDB_RUN_NAME: null        # null auto-generates "{dataset}-EvoHPO-{algo}-{timestamp}"
+    WANDB_ENTITY:               # your W&B username or team; null uses your default entity
+    WANDB_RUN_NAME:             # null auto-generates "{dataset}-EvoHPO-{algo}-{timestamp}"
     EVAL_N_SAMPLES: 10               # prompts randomly drawn from test set for post-training comparison
 
 MUTATION_PARAMS:
