@@ -19,8 +19,8 @@ develop *agency* and can be described as **agents**.
      - **Tutorials**
    * - :ref:`GRPO<grpo>`
      - :ref:`LLM reasoning with GRPO<grpo_tutorial>`
-   * - :ref:`DPO<dpo>`
-     - --
+   * - :ref:`SFT<sft>` and :ref:`DPO<dpo>`
+     - :ref:`LLM finetuning with SFT and DPO<sft_dpo_finetuning>`
 
 .. _rl_for_reasoning:
 .. _rlhf:

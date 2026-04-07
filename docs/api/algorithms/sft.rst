@@ -130,4 +130,3 @@ Parameters
 .. autoclass:: agilerl.algorithms.sft.SFT
   :members:
   :inherited-members:
-
