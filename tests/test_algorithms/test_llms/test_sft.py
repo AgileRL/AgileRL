@@ -1,5 +1,7 @@
 import copy
 import gc
+import tempfile
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -15,7 +17,7 @@ from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from peft import LoraConfig
 from transformers import AutoTokenizer
 
-from agilerl.algorithms.core.base import OptimizerWrapper
+from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
 from agilerl.algorithms.sft import SFT
 from agilerl.utils.llm_utils import SFTGym
 from tests.test_algorithms.test_llms.test_grpo import (
@@ -391,7 +393,9 @@ def test_sft_learn(
         if "lora" in param_name and not torch.equal(param, pre_learn_param):
             any_updated = True
             break
-    assert any_updated, "Expected at least one LoRA parameter to be updated after learn()"
+    assert any_updated, (
+        "Expected at least one LoRA parameter to be updated after learn()"
+    )
 
     sft.clean_up()
     AcceleratorState._reset_state(True)
@@ -522,3 +526,354 @@ def test_sft_liger_unavailable_behaviour(
 
     sft.clean_up()
     AcceleratorState._reset_state(True)
+
+
+def test_sft_load():
+    with pytest.raises(NotImplementedError):
+        SFT.load("path")
+
+
+@pytest.mark.parametrize(
+    "config, use_deepspeed_optimizer",
+    [(None, False)],
+)
+@pytest.mark.parametrize("vocab_size", [100])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize(
+    "pretrained_model_name_or_path",
+    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+)
+@pytest.mark.parametrize("reduce_memory_peak", [True])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+def test_sft_clean_up(
+    deepspeed_env,
+    sft_factory,
+    accelerator_factory,
+    model_factory,
+    config,
+    use_deepspeed_optimizer,
+    pretrained_model_name_or_path,
+    vocab_size,
+    input_size,
+    max_tokens,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+):
+    sft = sft_factory(
+        accelerator_factory,
+        model_factory,
+        config,
+        use_deepspeed_optimizer,
+        vocab_size,
+        input_size,
+        max_tokens,
+        pretrained_model_name_or_path,
+        reduce_memory_peak,
+        micro_batch_size_per_gpu,
+    )
+    sft.clean_up()
+    assert sft.actor is None
+    assert sft.optimizer is None
+    assert sft.lr_scheduler is None
+
+
+@pytest.mark.parametrize(
+    "config, use_deepspeed_optimizer",
+    [(None, False)],
+)
+@pytest.mark.parametrize("vocab_size", [100])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize(
+    "pretrained_model_name_or_path",
+    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+)
+@pytest.mark.parametrize("reduce_memory_peak", [True])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+@pytest.mark.parametrize("weights_only", [False, True])
+def test_sft_save_load_checkpoint(
+    deepspeed_env,
+    sft_factory,
+    accelerator_factory,
+    model_factory,
+    config,
+    use_deepspeed_optimizer,
+    vocab_size,
+    input_size,
+    max_tokens,
+    pretrained_model_name_or_path,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+    weights_only,
+):
+    sft = sft_factory(
+        accelerator_factory,
+        model_factory,
+        config,
+        use_deepspeed_optimizer,
+        vocab_size,
+        input_size,
+        max_tokens,
+        pretrained_model_name_or_path,
+        reduce_memory_peak,
+        micro_batch_size_per_gpu,
+    )
+    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sft.save_checkpoint(tmpdir, weights_only=weights_only)
+        new_sft = SFT(
+            actor_network=model_factory(pretrained_model_name_or_path),
+            pad_token_id=vocab_size - 1,
+            pad_token="<pad>",
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            accelerator=accelerator,
+        )
+        new_sft.load_checkpoint(tmpdir)
+
+        for attr in EvolvableAlgorithm.inspect_attributes(sft):
+            if attr.startswith("_"):
+                continue
+            if attr == "rng":
+                assert hasattr(new_sft, attr)
+            elif attr == "actor":
+                for (name, param), (new_name, new_param) in zip(
+                    sft.actor.named_parameters(),
+                    new_sft.actor.named_parameters(),
+                    strict=False,
+                ):
+                    assert torch.allclose(param, new_param), (
+                        f"Parameter {name} is not equal (new_name: {new_name})"
+                    )
+            elif attr == "optimizer":
+                for param, new_param in zip(
+                    sft.optimizer.parameters(),
+                    new_sft.optimizer.parameters(),
+                    strict=False,
+                ):
+                    assert torch.equal(param, new_param)
+            elif attr in ("accelerator", "lr_scheduler"):
+                assert (
+                    getattr(new_sft, attr).__class__.__name__
+                    == getattr(sft, attr).__class__.__name__
+                )
+            elif not isinstance(getattr(sft, attr), torch.Tensor):
+                assert getattr(new_sft, attr) == getattr(sft, attr), (
+                    f"Attribute {attr} is not equal"
+                )
+            else:
+                assert torch.equal(getattr(new_sft, attr), getattr(sft, attr))
+    sft.clean_up()
+    new_sft.clean_up()
+
+
+@pytest.mark.parametrize(
+    "config, use_deepspeed_optimizer",
+    [(None, False)],
+)
+@pytest.mark.parametrize("vocab_size", [100])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize(
+    "pretrained_model_name_or_path",
+    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+)
+@pytest.mark.parametrize("reduce_memory_peak", [True])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+def test_sft_exception_on_recompile(
+    deepspeed_env,
+    sft_factory,
+    accelerator_factory,
+    model_factory,
+    config,
+    use_deepspeed_optimizer,
+    pretrained_model_name_or_path,
+    vocab_size,
+    input_size,
+    max_tokens,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+):
+    sft = sft_factory(
+        accelerator_factory,
+        model_factory,
+        config,
+        use_deepspeed_optimizer,
+        vocab_size,
+        input_size,
+        max_tokens,
+        pretrained_model_name_or_path,
+        reduce_memory_peak,
+        micro_batch_size_per_gpu,
+    )
+    with pytest.raises(NotImplementedError):
+        sft.recompile()
+    sft.clean_up()
+
+
+def test_sft_no_llm_dependencies(sft_factory, model_factory, accelerator_factory):
+    with (
+        mock.patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False),
+        pytest.raises(
+            ImportError,
+            match=r"LLM dependencies are not installed. Please install them using \`pip install agilerl\[llm\]\`.",
+        ),
+    ):
+        sft_factory(
+            accelerator_factory=accelerator_factory,
+            model_factory=model_factory,
+            config=None,
+            use_deepspeed_optimizer=False,
+            vocab_size=30,
+            input_size=5,
+            max_tokens=10,
+            pretrained_model_name_or_path=None,
+            reduce_memory_peak=False,
+            micro_batch_size_per_gpu=None,
+            from_name=False,
+        )
+    AcceleratorState._reset_state(True)
+
+
+@pytest.mark.parametrize(
+    "config, use_deepspeed_optimizer",
+    [(None, False)],
+)
+@pytest.mark.parametrize("vocab_size", [100])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize(
+    "pretrained_model_name_or_path",
+    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+)
+@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("reduce_memory_peak", [True])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+def test_sft_get_logprobs(
+    deepspeed_env,
+    sft_factory,
+    accelerator_factory,
+    model_factory,
+    config,
+    use_deepspeed_optimizer,
+    vocab_size,
+    input_size,
+    max_tokens,
+    pretrained_model_name_or_path,
+    batch_size,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+):
+    sft = sft_factory(
+        accelerator_factory,
+        model_factory,
+        config,
+        use_deepspeed_optimizer,
+        vocab_size,
+        input_size,
+        max_tokens,
+        pretrained_model_name_or_path,
+        reduce_memory_peak,
+        micro_batch_size_per_gpu,
+    )
+    ids = torch.randint(0, vocab_size, (batch_size, input_size + max_tokens)).to(
+        sft.device,
+    )
+    log_probs = sft._get_logprobs(ids=ids, batch_size=1)
+    assert log_probs.shape == (ids.shape[0], ids.shape[1] - 1)
+    sft.clean_up()
+
+
+@pytest.mark.parametrize(
+    "config, use_deepspeed_optimizer",
+    [(None, False)],
+)
+@pytest.mark.parametrize("vocab_size", [100])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize(
+    "pretrained_model_name_or_path",
+    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+)
+@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("reduce_memory_peak", [True])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+def test_sft_backward_pass(
+    deepspeed_env,
+    sft_factory,
+    accelerator_factory,
+    model_factory,
+    config,
+    use_deepspeed_optimizer,
+    vocab_size,
+    input_size,
+    max_tokens,
+    pretrained_model_name_or_path,
+    batch_size,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+):
+    sft = sft_factory(
+        accelerator_factory,
+        model_factory,
+        config,
+        use_deepspeed_optimizer,
+        vocab_size,
+        input_size,
+        max_tokens,
+        pretrained_model_name_or_path,
+        reduce_memory_peak,
+        micro_batch_size_per_gpu,
+    )
+    ids = torch.randint(0, vocab_size, (batch_size, input_size + max_tokens)).to(
+        sft.device,
+    )
+    loss = sft.actor.forward(ids).logits.mean()
+    sft._backward_pass(loss)
+    sft.clean_up()
+
+
+@pytest.mark.parametrize(
+    "config, use_deepspeed_optimizer",
+    [(None, False)],
+)
+@pytest.mark.parametrize("vocab_size", [100])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize(
+    "pretrained_model_name_or_path",
+    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+)
+@pytest.mark.parametrize("reduce_memory_peak", [True])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+def test_sft_preprocess_observation(
+    deepspeed_env,
+    sft_factory,
+    accelerator_factory,
+    model_factory,
+    config,
+    use_deepspeed_optimizer,
+    pretrained_model_name_or_path,
+    vocab_size,
+    input_size,
+    max_tokens,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+):
+    sft = sft_factory(
+        accelerator_factory,
+        model_factory,
+        config,
+        use_deepspeed_optimizer,
+        vocab_size,
+        input_size,
+        max_tokens,
+        pretrained_model_name_or_path,
+        reduce_memory_peak,
+        micro_batch_size_per_gpu,
+    )
+    obs = sft.preprocess_observation(
+        orig_obs := torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+    )
+    assert torch.equal(obs, orig_obs)
+    sft.clean_up()
