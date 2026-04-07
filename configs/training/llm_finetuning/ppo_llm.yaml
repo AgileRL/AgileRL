@@ -22,11 +22,24 @@ INIT_HP:
     MAX_GRAD_NORM: 1.0
     UPDATE_EPOCHS: 2
     TEMPERATURE: 0.9          # Higher temp for better exploration in sparse reward setting
-    MAX_MODEL_LEN: 2048
+    MAX_MODEL_LEN: 1024
     TOURN_SIZE: 2
     GAMMA: 0.99               # Higher discount for multi-turn credit assignment
     VF_COEF: 0.5              # Stronger value loss to train critic faster
     GAE_LAMBDA: 0.95
     ELITISM: true
-    POP_SIZE: 4
+    POP_SIZE: 1
     EVAL_LOOP: 1
+    USE_VLLM: true
+    LORA_R: 16
+    LORA_ALPHA: 64
+    LORA_DROPOUT: 0.05
+    TARGET_MODULES:
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+        - up_proj
+        - down_proj
+        - gate_proj
+

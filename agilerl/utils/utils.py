@@ -1325,9 +1325,15 @@ def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
                 if not isinstance(agent.optimizer.optimizer, DummyOptimizer)
                 else agent.actor.optimizer
             )
+            lr_crit_kw: dict = {}
+            if hasattr(opt, "param_groups") and any(
+                "group" in pg for pg in opt.param_groups
+            ):
+                lr_crit_kw["lr_critic"] = getattr(agent, "lr_critic")
             agent.accelerator, agent.lr_scheduler = LLMAlgorithm.update_lr(
                 opt,
                 getattr(agent, mut),
                 agent.accelerator,
                 agent.cosine_lr_schedule_config,
+                **lr_crit_kw,
             )

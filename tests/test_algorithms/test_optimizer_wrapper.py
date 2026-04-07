@@ -7,6 +7,8 @@ from gymnasium import spaces
 from torch import nn
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
+from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.core.optimizer_wrapper import init_llm_optimizer
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules import EvolvableModule, ModuleDict
 
@@ -941,6 +943,71 @@ class TestOptimizerWrapper:
             count += 1
 
         assert count == 3
+
+    def test_llm_param_groups_optimizer_wrapper(self):
+        """Single module with actor/critic param groups (LLM PPO style)."""
+
+        class _Net(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.actor_linear = nn.Linear(2, 1, bias=False)
+                self.critic_linear = nn.Linear(2, 1, bias=False)
+                self.v_head = nn.Module()
+                self.v_head.summary = nn.Linear(2, 1, bias=False)
+
+        net = _Net()
+        wrap = OptimizerWrapper(
+            torch.optim.Adam,
+            net,
+            lr=0.01,
+            lr_critic=0.02,
+            use_llm_param_groups=True,
+            network_names=["actor"],
+            lr_name=("lr_actor", "lr_critic"),
+            optimizer_kwargs={"eps": 1e-8},
+        )
+
+        assert wrap.use_llm_param_groups is True
+        assert wrap.lr_critic == 0.02
+        assert wrap.lr_name == ("lr_actor", "lr_critic")
+        assert len(wrap.optimizer.param_groups) == 2
+        assert wrap.optimizer.param_groups[0]["group"] == "actor"
+        assert wrap.optimizer.param_groups[0]["lr"] == 0.01
+        assert wrap.optimizer.param_groups[1]["group"] == "critic"
+        assert wrap.optimizer.param_groups[1]["lr"] == 0.02
+
+        ckpt = wrap.checkpoint_dict("optimizer")
+        assert ckpt["optimizer_use_llm_param_groups"] is True
+        assert ckpt["optimizer_lr"] == ("lr_actor", "lr_critic")
+
+        state = wrap.state_dict()
+        wrap2 = OptimizerWrapper(
+            torch.optim.Adam,
+            net,
+            lr=0.05,
+            lr_critic=0.06,
+            use_llm_param_groups=True,
+            network_names=["actor"],
+            lr_name=("lr_actor", "lr_critic"),
+            optimizer_kwargs={"eps": 1e-8},
+        )
+        wrap2.load_state_dict(state)
+        assert wrap2.optimizer.state_dict() == wrap.optimizer.state_dict()
+
+    def test_update_lr_respects_actor_critic_groups(self):
+        class _Net(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.actor_linear = nn.Linear(1, 1, bias=False)
+                self.critic_linear = nn.Linear(1, 1, bias=False)
+                self.v_head = nn.Module()
+                self.v_head.summary = nn.Linear(1, 1, bias=False)
+
+        net = _Net()
+        opt = init_llm_optimizer(net, torch.optim.Adam, 0.1, {}, lr_critic=0.2)
+        LLMAlgorithm.update_lr(opt, lr=0.3, lr_critic=0.4)
+        assert opt.param_groups[0]["lr"] == 0.3
+        assert opt.param_groups[1]["lr"] == 0.4
 
 
 def test_optimizer_wrapper_fallback_peft_type_when_no_llm_dependencies():

@@ -151,7 +151,7 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=False,
+        wb=True,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
@@ -165,7 +165,7 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
-    with open("configs/training/llm_finetuning/reinforce_llm.yaml") as file:
+    with open("configs/training/llm_finetuning/ppo_llm.yaml") as file:
         config = yaml.safe_load(file)
         print(config)
     init_hp = config["INIT_HP"]

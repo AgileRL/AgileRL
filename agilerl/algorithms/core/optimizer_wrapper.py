@@ -2,6 +2,8 @@ import inspect
 from typing import Any, Union
 
 from torch import nn
+
+LrNameType = str | tuple[str, str]
 from torch.optim import Optimizer
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -58,32 +60,39 @@ def init_from_single(
     optimizer_kwargs: dict[str, Any],
 ) -> Optimizer:
     """Initialize an optimizer from a single network."""
-    # FIXME test for
-    # params = [
-    #     {"params": [param for name, param in network.named_parameters() if "actor" in name and "lora" in name], "lr": lr},
-    #     {"params":  [
-    #     param for name, param in network.named_parameters()
-    #     if "v_head" in name and "modules_to_save.actor" in name
-    # ], "lr": 0.00001},
-    # ]
-    # print("PARAMS", params)
-    # print("NETWORK", network)
-    # return optimizer_cls(params, **optimizer_kwargs)
+    return optimizer_cls(network.parameters(), lr=lr, **optimizer_kwargs)
 
+def init_llm_optimizer(
+    network: EvolvableModule,
+    optimizer_cls: OptimizerType,
+    lr_actor: float,
+    optimizer_kwargs: dict[str, Any],
+    lr_critic: float | None = None,
+) -> Optimizer:
+    """AdamW-style optimizer with separate param groups for actor LoRA vs critic/value head."""
     for name, param in network.named_parameters():
-        if "critic" in name or "actor" in name:
+        if "actor" in name or "critic" in name:
             param.requires_grad = True
-
     actor_params = [
-        p for n, p in network.named_parameters() if "actor" in n and p.requires_grad
+        p
+        for n, p in network.named_parameters()
+        if "actor" in n and p.requires_grad
     ]
-    critic_params = [
-        p for n, p in network.named_parameters() if "critic" in n and p.requires_grad
+    params: list[dict[str, Any]] = [
+        {"params": actor_params, "lr": lr_actor, "group": "actor"},
     ]
-    params = [
-        {"params": actor_params, "lr": lr},
-        {"params": critic_params, "lr": lr},
-    ]
+    if lr_critic is not None:
+        critic_params = [
+            p
+            for n, p in network.named_parameters()
+            if (
+                ("critic" in n and p.requires_grad)
+                or ("v_head.summary" in n and p.requires_grad)
+            )
+        ]
+        params.append(
+            {"params": critic_params, "lr": lr_critic, "group": "critic"},
+        )
     return optimizer_cls(params, **optimizer_kwargs)
 
 
@@ -104,8 +113,16 @@ class OptimizerWrapper:
     :type optimizer_kwargs: dict[str, Any]
     :param network_names: The attribute names of the networks in the parent container.
     :type network_names: list[str]
-    :param lr_name: The attribute name of the learning rate in the parent container.
-    :type lr_name: str
+    :param lr_name: Attribute name(s) on the parent for learning rate(s): ``str``
+        or ``("lr_actor", "lr_critic")`` when ``use_llm_param_groups`` is True.
+    :type lr_name: str | tuple[str, str] | None
+    :param use_llm_param_groups: If True, build actor/critic param groups via
+        :func:`init_llm_optimizer` (single module only). Requires ``network_names``,
+        ``lr_name`` as a 2-tuple, and ``lr_critic``.
+    :type use_llm_param_groups: bool
+    :param lr_critic: Learning rate for the critic/value-head group when
+        ``use_llm_param_groups`` is True.
+    :type lr_critic: float | None
     """
 
     optimizer: _Optimizer
@@ -117,12 +134,16 @@ class OptimizerWrapper:
         lr: float,
         optimizer_kwargs: dict[str, Any] | None = None,
         network_names: list[str] | None = None,
-        lr_name: str | None = None,
+        lr_name: LrNameType | None = None,
+        use_llm_param_groups: bool = False,
+        lr_critic: float | None = None,
     ) -> None:
 
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs if optimizer_kwargs is not None else {}
         self.lr = lr
+        self.use_llm_param_groups = use_llm_param_groups
+        self.lr_critic = lr_critic if use_llm_param_groups else None
 
         if isinstance(networks, nn.Module):
             self.networks = [networks]
@@ -134,9 +155,28 @@ class OptimizerWrapper:
             msg = "Expected a single / list of torch.nn.Module objects."
             raise TypeError(msg)
 
-        # NOTE: This should be passed when reintializing the optimizer
-        # when mutating an individual.
-        if network_names is not None:
+        if use_llm_param_groups:
+            if isinstance(self.networks[0], ModuleDict):
+                msg = "use_llm_param_groups does not support ModuleDict networks."
+                raise TypeError(msg)
+            if len(self.networks) != 1:
+                msg = "use_llm_param_groups expects exactly one network module."
+                raise ValueError(msg)
+            if network_names is None or lr_name is None:
+                msg = (
+                    "use_llm_param_groups requires explicit network_names and "
+                    "lr_name=('lr_actor', 'lr_critic')."
+                )
+                raise ValueError(msg)
+            if not isinstance(lr_name, tuple) or len(lr_name) != 2:
+                msg = "use_llm_param_groups requires lr_name to be a 2-tuple of attribute names."
+                raise ValueError(msg)
+            if lr_critic is None:
+                msg = "use_llm_param_groups requires lr_critic."
+                raise ValueError(msg)
+            self.network_names = network_names
+            self.lr_name = lr_name
+        elif network_names is not None:
             assert lr_name is not None, (
                 "Learning rate attribute name must be passed along with the network names."
             )
@@ -170,6 +210,23 @@ class OptimizerWrapper:
                     self.lr,
                     kwargs,
                 )
+
+        elif use_llm_param_groups:
+            assert isinstance(
+                optimizer_cls,
+                type,
+            ), "Expected a single optimizer class for LLM param groups."
+            assert isinstance(
+                self.optimizer_kwargs,
+                dict,
+            ), "Expected a single dictionary of optimizer keyword arguments."
+            self.optimizer = init_llm_optimizer(
+                self.networks[0],
+                optimizer_cls,
+                self.lr,
+                self.optimizer_kwargs,
+                lr_critic,
+            )
 
         # Single-agent algorithms with multiple networks for a single optimizer
         elif len(self.networks) > 1 and multiple_attrs:
@@ -354,13 +411,16 @@ class OptimizerWrapper:
         :return: A dictionary of the optimizer's state and parameters.
         :rtype: dict[str, Any]
         """
-        return {
+        out = {
             f"{name}_cls": self.optimizer_cls_names(),
             f"{name}_state_dict": self.state_dict(),
             f"{name}_networks": self.network_names,
             f"{name}_lr": self.lr_name,
             f"{name}_kwargs": self.optimizer_kwargs,
         }
+        if self.use_llm_param_groups:
+            out[f"{name}_use_llm_param_groups"] = True
+        return out
 
     def zero_grad(self) -> None:
         """Zero the gradients of the optimizer."""
@@ -383,11 +443,16 @@ class OptimizerWrapper:
         self.optimizer.step()
 
     def __repr__(self) -> str:
+        extra = ""
+        if self.use_llm_param_groups:
+            extra = f",\n    lr_critic={self.lr_critic},\n    use_llm_param_groups=True"
         return (
             f"OptimizerWrapper(\n"
             f"    optimizer={self.optimizer_cls_names()},\n"
             f"    lr={self.lr},\n"
             f"    networks={self.network_names},\n"
-            f"    optimizer_kwargs={self.optimizer_kwargs}\n"
+            f"    lr_name={self.lr_name!r},\n"
+            f"    optimizer_kwargs={self.optimizer_kwargs}"
+            f"{extra}\n"
             ")"
         )

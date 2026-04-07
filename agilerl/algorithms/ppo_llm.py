@@ -100,6 +100,7 @@ class PPO(LLMAlgorithm):
             index=index,
             batch_size=batch_size,
             lr=lr_actor,
+            lr_critic=lr_critic,
             max_grad_norm=max_grad_norm,
             clone=clone,
             reduce_memory_peak=reduce_memory_peak,
@@ -222,25 +223,15 @@ class PPO(LLMAlgorithm):
     @lr_actor.setter
     def lr_actor(self, value: float) -> None:
         self.lr = value
-    
 
     def _apply_critic_lr(self) -> None:
-        """Set the critic param-group lr to ``self.lr_critic``.
-
-        Called after optimizer creation and after any optimizer reinit
-        so the critic group always uses its own learning rate.
-        """
-        opt = self.optimizer.optimizer
-        if hasattr(opt, "param_groups") and len(opt.param_groups) > 1:
-            opt.param_groups[1]["lr"] = self.lr_critic
+        inner = self.optimizer.optimizer
+        for pg in inner.param_groups:
+            if pg.get("group") == "critic":
+                pg["lr"] = self.lr_critic
 
     def _reinit_opt_from_config(self, config) -> None:
-        """Reinit optimizer, then re-apply the critic learning rate.
-
-        The base-class reinit sets all param groups to ``self.lr``
-        (the actor lr).  We override to restore the critic group's
-        separate learning rate afterwards.
-        """
+        """Reinit optimizer; keep critic/value-head LR in sync with ``self.lr_critic``."""
         super()._reinit_opt_from_config(config)
         self._apply_critic_lr()
 
