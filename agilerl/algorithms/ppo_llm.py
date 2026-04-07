@@ -1,4 +1,4 @@
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
@@ -21,17 +21,16 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 from agilerl.utils.llm_utils import (
     ReasoningGym,
     masked_mean,
     masked_whiten,
     move_params_to_cpu,
-    move_params_to_gpu,
     pool_by_turns,
     prepare_prompt_hf_generate,
     stitch_completion_after_windowed_hf_generate,
 )
+from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
@@ -192,7 +191,6 @@ class PPO(LLMAlgorithm):
         if self.use_vllm:
             self._configure_vllm()
         self._initialize_actors(actor_network, not clone)
-        self._apply_critic_lr()
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
@@ -211,36 +209,12 @@ class PPO(LLMAlgorithm):
             self.llm.wake_up()
             self._move_model_to_vllm()
 
-    @property
-    def lr_actor(self) -> float:
-        """Actor learning rate, aliased to the base-class ``self.lr``.
-
-        Kept in sync automatically: mutations and lr-scheduler updates
-        that modify ``self.lr`` are reflected here, and vice-versa.
-        """
-        return self.lr
-
-    @lr_actor.setter
-    def lr_actor(self, value: float) -> None:
-        self.lr = value
-
-    def _apply_critic_lr(self) -> None:
-        inner = self.optimizer.optimizer
-        for pg in inner.param_groups:
-            if pg.get("group") == "critic":
-                pg["lr"] = self.lr_critic
-
-    def _reinit_opt_from_config(self, config) -> None:
-        """Reinit optimizer; keep critic/value-head LR in sync with ``self.lr_critic``."""
-        super()._reinit_opt_from_config(config)
-        self._apply_critic_lr()
-
     def get_action(
         self,
         obs: LLMObsType,
         training: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-    
+
         prompt_batch = [obs] if isinstance(obs, dict) else obs
 
         with self.select_adapter("actor"):
@@ -255,7 +229,7 @@ class PPO(LLMAlgorithm):
                     completion_ids = []
                     completion_masks = []
 
-                    for prompt_dict in prompt_batch:   
+                    for prompt_dict in prompt_batch:
                         prompt = prepare_prompt_hf_generate(prompt_dict, actor_device)
                         stitch_ids = prompt.pop("stitch_prefix_ids", None)
                         initial_prompt_len = prompt.pop("initial_prompt_len", None)
@@ -263,10 +237,12 @@ class PPO(LLMAlgorithm):
                             **prompt,
                             generation_config=self.generation_config,
                         )
-                        completion_id, full_prompt_len = stitch_completion_after_windowed_hf_generate(
-                            completion_id,
-                            stitch_ids,
-                            initial_prompt_len,
+                        completion_id, full_prompt_len = (
+                            stitch_completion_after_windowed_hf_generate(
+                                completion_id,
+                                stitch_ids,
+                                initial_prompt_len,
+                            )
                         )
                         completion_ids.append(completion_id)
                         completion_mask = torch.zeros_like(
@@ -281,7 +257,7 @@ class PPO(LLMAlgorithm):
             else:
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
                     prompt_batch,
-                    1, # This does not support batching at the moment
+                    1,  # This does not support batching at the moment
                     temperature=self.temperature
                     if training
                     else 0.01,  # Almost deterministic for evaluation
@@ -336,7 +312,7 @@ class PPO(LLMAlgorithm):
             )
             mean_pg_loss, mean_vf_loss, mean_loss, mean_kl, mean_entropy, updates = (
                 0.0,
-                0.0,    
+                0.0,
                 0.0,
                 0.0,
                 0.0,

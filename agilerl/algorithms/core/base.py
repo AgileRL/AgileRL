@@ -18,6 +18,7 @@ from typing import (
     TypeVar,
     cast,
 )
+
 import dill
 import numpy as np
 import torch
@@ -112,9 +113,9 @@ if HAS_LLM_DEPENDENCIES:
     from agilerl.utils.llm_utils import (
         create_model_from_name_or_path,
         gather_if_zero3,
-        stitch_completion_after_windowed_vllm_generate,
-        move_params_to_gpu,
         move_params_to_cpu,
+        move_params_to_gpu,
+        stitch_completion_after_windowed_vllm_generate,
     )
 
 __all__ = ["EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
@@ -684,31 +685,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             # Reinitialize optimizer with mutated nets
             # NOTE: We need to do this since there is a chance the network parameters have changed
             # due to architecture mutations
-            if getattr(opt, "use_llm_param_groups", False) and isinstance(
-                opt.lr_name,
-                tuple,
-            ):
-                lr_actor = getattr(self, opt.lr_name[0])
-                lr_critic = getattr(self, opt.lr_name[1])
-                offspring_opt = OptimizerWrapper(
-                    optimizer_cls=config.get_optimizer_cls(),
-                    networks=opt_nets,
-                    lr=lr_actor,
-                    lr_critic=lr_critic,
-                    use_llm_param_groups=True,
-                    optimizer_kwargs=opt.optimizer_kwargs,
-                    network_names=opt.network_names,
-                    lr_name=opt.lr_name,
-                )
-            else:
-                offspring_opt = OptimizerWrapper(
-                    optimizer_cls=config.get_optimizer_cls(),
-                    networks=opt_nets,
-                    lr=getattr(self, opt.lr_name),
-                    optimizer_kwargs=opt.optimizer_kwargs,
-                    network_names=opt.network_names,
-                    lr_name=opt.lr_name,
-                )
+            offspring_opt = OptimizerWrapper(
+                optimizer_cls=config.get_optimizer_cls(),
+                networks=opt_nets,
+                lr=getattr(self, opt.lr_name),
+                optimizer_kwargs=opt.optimizer_kwargs,
+                network_names=opt.network_names,
+                lr_name=opt.lr_name,
+            )
 
             setattr(self, config.name, offspring_opt)
 
@@ -1039,31 +1023,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             opt_networks = opt_dict[f"{name}_networks"]
             opt_lr = opt_dict[f"{name}_lr"]
             networks = [getattr(self, net) for net in opt_networks]
-            use_llm_split = opt_dict.get(f"{name}_use_llm_param_groups", False) or (
-                isinstance(opt_lr, (list, tuple)) and len(opt_lr) == 2
+            optimizer = OptimizerWrapper(
+                optimizer_cls=optimizer_cls,
+                networks=networks,
+                lr=getattr(self, opt_lr),
+                optimizer_kwargs=opt_kwargs,
+                network_names=opt_networks,
+                lr_name=opt_lr,
             )
-
-            if use_llm_split:
-                lr_names = tuple(opt_lr)
-                optimizer = OptimizerWrapper(
-                    optimizer_cls=optimizer_cls,
-                    networks=networks,
-                    lr=getattr(self, lr_names[0]),
-                    lr_critic=getattr(self, lr_names[1]),
-                    use_llm_param_groups=True,
-                    optimizer_kwargs=opt_kwargs,
-                    network_names=opt_networks,
-                    lr_name=lr_names,
-                )
-            else:
-                optimizer = OptimizerWrapper(
-                    optimizer_cls=optimizer_cls,
-                    networks=networks,
-                    lr=getattr(self, opt_lr),
-                    optimizer_kwargs=opt_kwargs,
-                    network_names=opt_networks,
-                    lr_name=opt_lr,
-                )
 
             # Load optimizer state
             optimizer.load_state_dict(opt_dict[f"{name}_state_dict"])
@@ -1219,35 +1186,18 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             # Add device to optimizer kwargs
             opt_kwargs = chkpt_attribute_to_device(opt_dict[f"{name}_kwargs"], device)
-            lr_spec = opt_dict[f"{name}_lr"]
+            lr = opt_dict[f"{name}_lr"]
             optimizer_cls = get_optimizer_cls(opt_dict[f"{name}_cls"])
             opt_networks = opt_dict[f"{name}_networks"]
             networks = [loaded_modules[net] for net in opt_networks]
-            use_llm_split = opt_dict.get(f"{name}_use_llm_param_groups", False) or (
-                isinstance(lr_spec, (list, tuple)) and len(lr_spec) == 2
+            optimizer = OptimizerWrapper(
+                optimizer_cls=optimizer_cls,
+                networks=networks,
+                lr=getattr(self, lr),
+                network_names=opt_networks,
+                lr_name=lr,
+                optimizer_kwargs=opt_kwargs,
             )
-
-            if use_llm_split:
-                lr_names = tuple(lr_spec)
-                optimizer = OptimizerWrapper(
-                    optimizer_cls=optimizer_cls,
-                    networks=networks,
-                    lr=getattr(self, lr_names[0]),
-                    lr_critic=getattr(self, lr_names[1]),
-                    use_llm_param_groups=True,
-                    network_names=opt_networks,
-                    lr_name=lr_names,
-                    optimizer_kwargs=opt_kwargs,
-                )
-            else:
-                optimizer = OptimizerWrapper(
-                    optimizer_cls=optimizer_cls,
-                    networks=networks,
-                    lr=getattr(self, lr_spec),
-                    network_names=opt_networks,
-                    lr_name=lr_spec,
-                    optimizer_kwargs=opt_kwargs,
-                )
 
             state_dict = chkpt_attribute_to_device(
                 opt_dict[f"{name}_state_dict"],
@@ -2159,7 +2109,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.lr = lr
         self.lr_critic = lr_critic
         self.lora_config = lora_config
-        self.memory_efficient_params_context = self._memory_efficient_params if use_memory_efficient_params else nullcontext
+        self.memory_efficient_params_context = (
+            self._memory_efficient_params
+            if use_memory_efficient_params
+            else nullcontext
+        )
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
@@ -2296,7 +2250,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 lr=self.lr,
                 lr_critic=self.lr_critic,
                 use_llm_param_groups=True,
-                lr_name="lr_actor" if self.lr_critic is None else ("lr_actor", "lr_critic"),
+                lr_name="lr" if self.lr_critic is None else ("lr_actor", "lr_critic"),
             )
         else:
             super().load_checkpoint(path + "/attributes.pt")
@@ -2635,23 +2589,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
                 # Reinit optimizer
                 optim_class = self._select_optim_class()
-                if self.name == "LLMPPO" and self.use_value_head:
-                    lc = self.lr_critic if self.lr_critic is not None else self.lr
-                    self.optimizer = OptimizerWrapper(
-                        optim_class,
-                        networks=[self.actor],
-                        lr=self.lr,
-                        lr_critic=lc,
-                        use_llm_param_groups=True,
-                        network_names=["actor"],
-                        lr_name=("lr_actor", "lr_critic"),
-                    )
-                else:
-                    self.optimizer = OptimizerWrapper(
-                        optim_class,
-                        networks=[self.actor],
-                        lr=self.lr,
-                    )
+                self.optimizer = OptimizerWrapper(
+                    optim_class,
+                    networks=[self.actor],
+                    lr=self.lr,
+                    lr_critic=self.lr_critic,
+                    use_llm_param_groups=True,
+                    network_names=["actor"],
+                    lr_name="lr"
+                    if self.lr_critic is None
+                    else ("lr_actor", "lr_critic"),
+                )
                 self.wrap_models()
             self.reference_update_tracker += 1
 
@@ -2695,7 +2643,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         finally:
             self.use_adapter("actor")
 
-    
     def _select_optim_class(self) -> type[OptimizerType] | type[DummyOptimizer]:
         """Select the optimizer class based on the accelerator and deepspeed config.
 
@@ -2824,12 +2771,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
 
         if add_adapters:
-            peft_target = base_model.pretrained_model if self.use_value_head else base_model
-            peft_target = get_peft_model(peft_target, self.lora_config, adapter_name="actor")
-            
+            peft_target = (
+                base_model.pretrained_model if self.use_value_head else base_model
+            )
+            peft_target = get_peft_model(
+                peft_target, self.lora_config, adapter_name="actor"
+            )
+
             if self.use_separate_reference_adapter:
                 peft_target.add_adapter("reference", peft_config=self.lora_config)
-            
+
             if self.use_value_head:
                 peft_target.add_adapter("critic", peft_config=self.lora_config)
                 base_model.pretrained_model = peft_target
@@ -2864,23 +2815,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.actor = DummyEvolvable(module=self.actor, device=self.device)
 
         optim_class = self._select_optim_class()
-        if self.use_value_head:
-            lc = self.lr_critic if self.lr_critic is not None else self.lr
-            self.optimizer = OptimizerWrapper(
-                optim_class,
-                networks=[self.actor],
-                lr=self.lr,
-                lr_critic=lc,
-                use_llm_param_groups=True,
-                network_names=["actor"],
-                lr_name=("lr_actor", "lr_critic"),
-            )
-        else:
-            self.optimizer = OptimizerWrapper(
-                optim_class,
-                networks=[self.actor],
-                lr=self.lr,
-            )
+
+        self.optimizer = OptimizerWrapper(
+            optim_class,
+            networks=[self.actor],
+            lr=self.lr,
+            lr_critic=self.lr_critic,
+            use_llm_param_groups=True,
+            network_names=["actor"],
+            lr_name="lr" if self.lr_critic is None else ("lr_actor", "lr_critic"),
+        )
 
         self.lr_scheduler = (
             create_warmup_cosine_scheduler(
@@ -2896,7 +2840,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if self.cosine_lr_schedule_config is not None
             else None
         )
-
 
     @contextmanager
     def _memory_efficient_params(self) -> None:
@@ -2928,7 +2871,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             # Wake up LLM
             self.llm.wake_up()
             self._move_model_to_vllm()
-
 
     @contextmanager
     def _amp_ctx(self):
@@ -3019,7 +2961,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             values = torch.cat(all_values, dim=0) if len(chunks) > 1 else all_values[0]
         else:
             values = None
-        logprobs = torch.cat(all_logprobs, dim=0) if len(chunks) > 1 else all_logprobs[0]
+        logprobs = (
+            torch.cat(all_logprobs, dim=0) if len(chunks) > 1 else all_logprobs[0]
+        )
         return logprobs, values
 
     def _fused_forward(
@@ -3252,7 +3196,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             return self.actor.pretrained_model
         return self.actor
 
-
     def _restore_adapter_trainability(self, adapter_names: list[str]) -> None:
         """Restore requires_grad=True for all trainable parameters of specified adapters.
 
@@ -3314,7 +3257,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             peft_ref.unmerge_adapter()
         self.llm.reset_prefix_cache()
 
-
     def _generate_with_vllm_colocate(
         self, prompts: list[dict[str, Any]], group_size: int, temperature: float | None
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
@@ -3337,6 +3279,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Per-prompt completion token tensors and matching action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
+
         def _trajectory_input_ids(prompt: dict[str, Any]) -> torch.Tensor:
             return cast(
                 "torch.Tensor",
@@ -3357,7 +3300,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         def _vllm_max_new_tokens(model_prompt_len: int) -> int:
             room = self.max_model_len - model_prompt_len
             if room <= 0:
-                raise ValueError(f"Model prompt length ({model_prompt_len}) is greater than the model length ({self.max_model_len})")
+                error_msg = f"Model prompt length ({model_prompt_len}) is greater than the model length ({self.max_model_len})"
+                raise ValueError(error_msg)
             max_out = min(max_token_cap, room)
             if self.min_output_tokens is not None:
                 max_out = max(max_out, min(self.min_output_tokens, room))
@@ -3865,7 +3809,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         Set use_liger_loss=False.
         """
         raise AttributeError(err_msg)
-
 
     def _get_unwrapped_actor(self) -> Any:
         if self.accelerator is not None:

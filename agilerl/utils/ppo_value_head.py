@@ -88,13 +88,21 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
         )
 
         if hasattr(pretrained_model, "gradient_checkpointing_disable"):
-            self.gradient_checkpointing_disable = pretrained_model.gradient_checkpointing_disable
+            self.gradient_checkpointing_disable = (
+                pretrained_model.gradient_checkpointing_disable
+            )
         if hasattr(pretrained_model, "gradient_checkpointing_enable"):
-            self.gradient_checkpointing_enable = pretrained_model.gradient_checkpointing_enable
+            self.gradient_checkpointing_enable = (
+                pretrained_model.gradient_checkpointing_enable
+            )
         if hasattr(pretrained_model, "enable_input_require_grads"):
-            self.enable_input_require_grads = pretrained_model.enable_input_require_grads
+            self.enable_input_require_grads = (
+                pretrained_model.enable_input_require_grads
+            )
 
-        self.prepare_inputs_for_generation = pretrained_model.prepare_inputs_for_generation
+        self.prepare_inputs_for_generation = (
+            pretrained_model.prepare_inputs_for_generation
+        )
 
         v_kw: dict[str, Any] = {}
         if summary_dropout_prob is not None:
@@ -102,7 +110,9 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
         self.v_head = PPOValueHead(self.pretrained_model.config, **v_kw)
 
         if v_head_init_strategy == "normal":
-            self.v_head.summary.weight.data.normal_(mean=0.0, std=v_head_initializer_range)
+            self.v_head.summary.weight.data.normal_(
+                mean=0.0, std=v_head_initializer_range
+            )
             self.v_head.summary.bias.data.zero_()
 
     @property
@@ -111,7 +121,7 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
 
     @name_or_path.setter
     def name_or_path(self, value: str) -> None:
-        setattr(self.pretrained_model, "name_or_path", value)
+        self.pretrained_model.name_or_path = value
 
     @property
     def generation_config(self):
@@ -136,7 +146,11 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
         if past_key_values is not None:
             kwargs["past_key_values"] = past_key_values
 
-        inner_kw = {k: v for k, v in kwargs.items() if k not in {"return_dict", "output_hidden_states"}}
+        inner_kw = {
+            k: v
+            for k, v in kwargs.items()
+            if k not in {"return_dict", "output_hidden_states"}
+        }
         base_out = self.pretrained_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -161,7 +175,9 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
 
     def state_dict(self, *args: Any, **kwargs: Any) -> dict[str, torch.Tensor]:
         if not self.is_peft_model:
-            pretrained_model_state_dict = self.pretrained_model.state_dict(*args, **kwargs)
+            pretrained_model_state_dict = self.pretrained_model.state_dict(
+                *args, **kwargs
+            )
         else:
             pretrained_model_state_dict = {}
         v_head_state_dict = self.v_head.state_dict(*args, **kwargs)

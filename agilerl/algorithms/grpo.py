@@ -1,4 +1,3 @@
-import gc
 from typing import Any
 
 import numpy as np
@@ -21,9 +20,7 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.utils.llm_utils import (
-    ReasoningGym,
-)
+from agilerl.utils.llm_utils import ReasoningGym, move_params_to_cpu
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
@@ -244,6 +241,18 @@ class GRPO(LLMAlgorithm):
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
+
+        # We call get_action before learn so we need to put the model to CPU and wake it up
+        unwrapped_model = (
+            self.accelerator.unwrap_model(self.actor)
+            if self.accelerator is not None
+            else self.actor
+        )
+        # Wake up LLM
+        if self.use_vllm:
+            move_params_to_cpu(unwrapped_model)
+            self.llm.wake_up()
+            self._move_model_to_vllm()
 
     def get_action(
         self,

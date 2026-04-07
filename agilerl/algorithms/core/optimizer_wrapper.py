@@ -2,14 +2,12 @@ import inspect
 from typing import Any, Union
 
 from torch import nn
-
-LrNameType = str | tuple[str, str]
 from torch.optim import Optimizer
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol
-from agilerl.typing import OptimizerType, StateDict
+from agilerl.typing import LrNameType, OptimizerType, StateDict
 from agilerl.utils.algo_utils import DummyOptimizer
 
 if HAS_LLM_DEPENDENCIES:
@@ -62,6 +60,7 @@ def init_from_single(
     """Initialize an optimizer from a single network."""
     return optimizer_cls(network.parameters(), lr=lr, **optimizer_kwargs)
 
+
 def init_llm_optimizer(
     network: EvolvableModule,
     optimizer_cls: OptimizerType,
@@ -71,12 +70,20 @@ def init_llm_optimizer(
 ) -> Optimizer:
     """AdamW-style optimizer with separate param groups for actor LoRA vs critic/value head."""
     for name, param in network.named_parameters():
-        if "actor" in name or "critic" in name:
+        name_lower = name.lower()
+        if ("actor" in name_lower and "lora" in name_lower) or (
+            "critic" in name_lower and "lora" in name_lower
+        ):
             param.requires_grad = True
+
+        # Check if v_head params require grad
+        if "v_head.summary" in name_lower:
+            assert param.requires_grad
+
     actor_params = [
         p
         for n, p in network.named_parameters()
-        if "actor" in n and p.requires_grad
+        if "actor" in n.lower() and "lora" in n.lower() and p.requires_grad
     ]
     params: list[dict[str, Any]] = [
         {"params": actor_params, "lr": lr_actor, "group": "actor"},
@@ -86,8 +93,8 @@ def init_llm_optimizer(
             p
             for n, p in network.named_parameters()
             if (
-                ("critic" in n and p.requires_grad)
-                or ("v_head.summary" in n and p.requires_grad)
+                ("critic" in n.lower() and "lora" in n.lower() and p.requires_grad)
+                or ("v_head.summary" in n.lower() and p.requires_grad)
             )
         ]
         params.append(

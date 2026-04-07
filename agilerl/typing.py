@@ -137,6 +137,7 @@ PopulationType = list[EvolvableAlgorithmProtocol]
 MutationMethod = Callable[[EvolvableAlgorithmProtocol], EvolvableAlgorithmProtocol]
 ConfigType = IsDataclass | dict[str, Any]
 StateDict = dict[str, Any] | list[dict[str, Any]]
+LrNameType = str | tuple[str, str]
 
 
 class BatchDimension:

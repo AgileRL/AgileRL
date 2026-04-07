@@ -24,10 +24,12 @@ from agilerl.algorithms import (
     DQN,
     GRPO,
     IPPO,
+    LLMPPO,
     MADDPG,
     MATD3,
     PPO,
     TD3,
+    LLMReinforce,
     NeuralTS,
     NeuralUCB,
     RainbowDQN,
@@ -108,15 +110,15 @@ def _prepare_llm_algo_kwargs(
         INIT_HP.get("USE_SEPARATE_REFERENCE_ADAPTER", True),
     )
     if "micro_batch_size_per_gpu" not in merged:
-        bsz = INIT_HP.get("BATCH_SIZE", 16)
+        batch_size = INIT_HP.get("BATCH_SIZE", 16)
         merged["micro_batch_size_per_gpu"] = INIT_HP.get(
             "MICRO_BATCH_SIZE_PER_GPU",
-            min(8, bsz) if bsz else 8,
-        )
+            min(8, batch_size) if batch_size else 8,
+        )  # NOTE we should take a look into deepspeed auto batch-sizing
     return merged
 
 
-def _validate_llm_merged(merged: dict[str, Any], *, actor_network: Any | None) -> None:
+def _validate_llm_kwargs(merged: dict[str, Any], *, actor_network: Any | None) -> None:
     if merged.get("pad_token_id") is None or merged.get("pad_token") is None:
         msg = (
             "LLM agents require pad_token_id and pad_token; pass tokenizer= to "
@@ -764,9 +766,8 @@ def create_population(
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLMPPO requires optional LLM dependencies (install agilerl[llm])."
             raise ImportError(msg)
-        from agilerl.algorithms import LLMPPO
 
-        merged = _prepare_llm_algo_kwargs(
+        kwargs = _prepare_llm_algo_kwargs(
             algo_kwargs,
             tokenizer=tokenizer,
             model_name=model_name,
@@ -774,7 +775,7 @@ def create_population(
             vllm_config=vllm_config,
             INIT_HP=INIT_HP,
         )
-        _validate_llm_merged(merged, actor_network=actor_network)
+        _validate_llm_kwargs(kwargs, actor_network=actor_network)
         cosine_cfg = INIT_HP.get("COSINE_lR_SCHEDULER")
         cosine_lr = (
             CosineLRScheduleConfig(**cosine_cfg) if cosine_cfg is not None else None
@@ -797,7 +798,7 @@ def create_population(
                 if actor_network is not None
                 else None
             )
-            kw = dict(merged)
+            kw = dict(kwargs)
             kw.update(
                 hp_config=hp_config,
                 index=idx,
@@ -835,9 +836,8 @@ def create_population(
                 "(install agilerl[llm])."
             )
             raise ImportError(msg)
-        from agilerl.algorithms import LLMReinforce
 
-        merged = _prepare_llm_algo_kwargs(
+        kwargs = _prepare_llm_algo_kwargs(
             algo_kwargs,
             tokenizer=tokenizer,
             model_name=model_name,
@@ -845,7 +845,7 @@ def create_population(
             vllm_config=vllm_config,
             INIT_HP=INIT_HP,
         )
-        _validate_llm_merged(merged, actor_network=actor_network)
+        _validate_llm_kwargs(kwargs, actor_network=actor_network)
         cosine_cfg = INIT_HP.get("COSINE_lR_SCHEDULER")
         cosine_lr = (
             CosineLRScheduleConfig(**cosine_cfg) if cosine_cfg is not None else None
@@ -868,7 +868,7 @@ def create_population(
                 if actor_network is not None
                 else None
             )
-            kw = dict(merged)
+            kw = dict(kwargs)
             kw.update(
                 hp_config=hp_config,
                 index=idx,
@@ -1319,21 +1319,20 @@ def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
         assert index == agent.index
         agent.mut = mut
         setattr(agent, mut, mut_value)
-        if mut == "lr":
+
+        if mut in ("lr", "critic_lr"):
             opt = (
                 agent.optimizer
                 if not isinstance(agent.optimizer.optimizer, DummyOptimizer)
                 else agent.actor.optimizer
             )
-            lr_crit_kw: dict = {}
-            if hasattr(opt, "param_groups") and any(
-                "group" in pg for pg in opt.param_groups
-            ):
-                lr_crit_kw["lr_critic"] = getattr(agent, "lr_critic")
+            update_lr_kw = {
+                "optimizer": opt,
+                "lr": agent.lr,
+                "accelerator": agent.accelerator,
+                "scheduler_config": agent.cosine_lr_schedule_config,
+                "lr_critic": agent.lr_critic,
+            }
             agent.accelerator, agent.lr_scheduler = LLMAlgorithm.update_lr(
-                opt,
-                getattr(agent, mut),
-                agent.accelerator,
-                agent.cosine_lr_schedule_config,
-                **lr_crit_kw,
+                **update_lr_kw
             )

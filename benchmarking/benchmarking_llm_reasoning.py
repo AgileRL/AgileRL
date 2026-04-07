@@ -37,8 +37,8 @@ def format_reward_func(completions, target, **kwargs):
     rewards = []
     for completion, _gt in zip(completions, target, strict=False):
         try:
-            completion = "<redacted_thinking>" + completion
-            regex = r"^<redacted_thinking>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
+            completion = "<think>" + completion
+            regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
             matches = re.search(regex, completion, re.DOTALL)
             if matches is None or len(matches.groups()) != 2:
                 rewards.append(0.0)
@@ -54,7 +54,7 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
     for completion, gt, numbers in zip(completions, target, nums, strict=False):
         try:
-            completion = "<redacted_thinking>" + completion
+            completion = "<think>" + completion
             answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
 
             if len(answer_tags) != 1:
@@ -105,9 +105,9 @@ def main(init_hp, mut_p):
         },
         {
             "role": "user",
-            "content": "Using each number in this list only once {question}, create an equation that equals {answer}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <redacted_thinking> </redacted_thinking> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
+            "content": "Using each number in this list only once {question}, create an equation that equals {answer}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.",
         },
-        {"role": "assistant", "content": "Let me solve this step by step.\n<redacted_thinking>"},
+        {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
 
     accelerator = create_llm_accelerator()

@@ -1,4 +1,3 @@
-from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
@@ -24,10 +23,9 @@ from agilerl.utils.llm_utils import (
     ReasoningGym,
     masked_mean,
     move_params_to_cpu,
-    move_params_to_gpu,
     pool_by_turns,
     prepare_prompt_hf_generate,
-    stitch_completion_after_windowed_hf_generate
+    stitch_completion_after_windowed_hf_generate,
 )
 
 if HAS_LLM_DEPENDENCIES:
@@ -272,13 +270,12 @@ class REINFORCE(LLMAlgorithm):
             self.llm.wake_up()
             self._move_model_to_vllm()
 
-    
     def get_action(
         self,
         obs: LLMObsType,
         training: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-    
+
         prompt_batch = [obs] if isinstance(obs, dict) else obs
 
         with self.select_adapter("actor"):
@@ -293,7 +290,7 @@ class REINFORCE(LLMAlgorithm):
                     completion_ids = []
                     completion_masks = []
 
-                    for prompt_dict in prompt_batch:   
+                    for prompt_dict in prompt_batch:
                         prompt = prepare_prompt_hf_generate(prompt_dict, actor_device)
                         stitch_ids = prompt.pop("stitch_prefix_ids", None)
                         initial_prompt_len = prompt.pop("initial_prompt_len", None)
@@ -301,10 +298,12 @@ class REINFORCE(LLMAlgorithm):
                             **prompt,
                             generation_config=self.generation_config,
                         )
-                        completion_id, full_prompt_len = stitch_completion_after_windowed_hf_generate(
-                            completion_id,
-                            stitch_ids,
-                            initial_prompt_len,
+                        completion_id, full_prompt_len = (
+                            stitch_completion_after_windowed_hf_generate(
+                                completion_id,
+                                stitch_ids,
+                                initial_prompt_len,
+                            )
                         )
                         completion_ids.append(completion_id)
                         completion_mask = torch.zeros_like(
@@ -319,7 +318,7 @@ class REINFORCE(LLMAlgorithm):
             else:
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
                     prompt_batch,
-                    1, # This does not support batching at the moment
+                    1,  # This does not support batching at the moment
                     temperature=self.temperature
                     if training
                     else 0.01,  # Almost deterministic for evaluation

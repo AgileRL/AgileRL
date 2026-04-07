@@ -238,15 +238,13 @@ def finetune_llm_reasoning(
             )
             metrics = [rewards, completion_lengths]
             if isinstance(agent, (LLMPPO, LLMReinforce)):
-                loss, kl, pg_loss, critic_loss, entropy = agent.learn(
-                    experiences
-                )
+                loss, kl, pg_loss, critic_loss, entropy = agent.learn(experiences)
                 metrics.extend([loss, kl, pg_loss, critic_loss, entropy])
-                
+
             else:
                 loss, kl = agent.learn(experiences)
                 metrics.extend([loss, kl])
-            
+
             if max_reward is not None:
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
                 metrics.append(accuracy)
@@ -371,30 +369,31 @@ def finetune_llm_reasoning(
                 ),
             }
             if isinstance(agent, (LLMPPO, LLMReinforce)):
-                wandb_dict |= {"Train/Mean population PG loss": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/PG loss"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Mean population critic loss": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Critic loss"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Mean population entropy": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Entropy"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
+                wandb_dict |= {
+                    "Train/Mean population PG loss": np.mean(
+                        [
+                            agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                                "Train/PG loss"
+                            ]
+                            for agent_idx, _ in enumerate(pop)
+                        ],
+                    ),
+                    "Train/Mean population critic loss": np.mean(
+                        [
+                            agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                                "Train/Critic loss"
+                            ]
+                            for agent_idx, _ in enumerate(pop)
+                        ],
+                    ),
+                    "Train/Mean population entropy": np.mean(
+                        [
+                            agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                                "Train/Entropy"
+                            ]
+                            for agent_idx, _ in enumerate(pop)
+                        ],
+                    ),
                 }
             if max_reward is not None:
                 wandb_dict |= {
