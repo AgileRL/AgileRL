@@ -1,10 +1,10 @@
 .. _LLM_Finetuning_tutorials:
 
-LLM Finetuning Tutorials
-========================
+LLM Fine-Tuning Tutorials
+=========================
 
 These tutorials provide an introductory guide to using `AgileRL <https://github.com/AgileRL/AgileRL>`_
-for finetuning LLMs.
+for fine-tuning LLMs.
 
 
 .. raw:: html
@@ -97,10 +97,13 @@ for finetuning LLMs.
 
    <div class="tiles article">
       <a href="../llm_finetuning/grpo_finetuning.html" class="tile">
-         <h2>GRPO - Finetuning</h2>
+         <h2>GRPO - Fine-Tuning</h2>
       </a>
       <a href="../llm_finetuning/grpo_hpo.html" class="tile online">
-         <h2>GRPO - Finetuning with HPO</h2>
+         <h2>GRPO - Fine-Tuning with HPO</h2>
+      </a>
+      <a href="../llm_finetuning/sft_dpo_finetuning.html" class="tile">
+         <h2>SFT &amp; DPO - Fine-Tuning</h2>
       </a>
    </div>
 

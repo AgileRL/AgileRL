@@ -3,23 +3,22 @@
 LLM Fine-Tuning with SFT and DPO
 =================================
 
-In this tutorial we cover two widely used LLM fine-tuning algorithms: Supervised Fine-Tuning (SFT) and Direct Preference Optimization (DPO).
+In this tutorial we cover two widely used LLM fine-tuning algorithms: **Supervised Fine-Tuning (SFT)** and **Direct Preference Optimization (DPO)**.
 We show how to run each in the AgileRL framework, compare training curves, and examine qualitative outputs.
 
-Supervised Fine-Tuning (SFT) and Direct Preference Optimization (DPO) are two widely used LLM fine-tuning algorithms.
-SFT is a simple algorithm that fine-tunes an LLM on a dataset of human-generated examples,
-while DPO is a more advanced algorithm that fine-tunes an LLM on a dataset of human preferences.
+**SFT** is a simple algorithm that fine-tunes an LLM on a dataset of human-generated examples,
+while **DPO** is a more advanced algorithm that fine-tunes an LLM on a dataset of human preferences.
 
 SFT, also known as instruction tuning, uses a supervised learning approach to fine-tune the LLM. It calculates a simple cross-entropy loss between the model's output logits for each token and the target token from the dataset.
 
 DPO, on the other hand, constructs an implicit reward function by comparing the model's output logits for each token with "chosen" and "rejected" tokens from the set of preference data.
 The objective is to maximize the output logits similarity to the chosen tokens and minimize similarity to the rejected tokens.
-To prevent "reward hacking" leading to nonsensical outputs, an additional KL-divergence term (controlled by a \beta parameter) is added to the loss function to limit divergence from the base model.
-Additionally, we implement a negative log-likelihood (NLL) term to weight the model towards maximizing the likelihood of the chosen response, rather than simply maximizing the marginal reward, as proposed here (https://arxiv.org/pdf/2404.19733).
-The NLL term is controlled by a \alpha parameter, and is set to 1.0 by default. The NLL term has been shown to be crucial to DPO performance by preventing a common failure mode of the likelihoods of both rejected and chosen responses decreasing.
+To prevent **reward hacking** leading to nonsensical outputs, an additional **KL-divergence** term (controlled by a :math:`\beta` parameter) is added to the loss function to limit divergence from the base model.
+Additionally, we implement a **negative log-likelihood (NLL)** term to weight the model towards maximizing the likelihood of the chosen response, rather than simply maximizing the marginal reward, as proposed `here <https://arxiv.org/pdf/2404.19733>`_.
+The **NLL** term is controlled by a :math:`\alpha` parameter, and is set to 1.0 by default. The NLL term has been shown to be crucial to DPO performance by preventing a common failure mode of the likelihoods of both rejected and chosen responses decreasing.
 
-Both methods make use of Low Rank Adaptation (LoRA) to fine-tune the LLM, a technique that allows for fine-tuning the LLM with a small number of parameters.
-Recent work has shown this to be just as effective as full fine-tuning (in which every parameter of the base model is updated), but much more compute efficient (https://thinkingmachines.ai/blog/lora/).
+Both methods make use of **Low Rank Adaptation (LoRA)** to fine-tune the LLM, a technique that allows for fine-tuning the LLM with a small number of parameters.
+Recent work has shown this to be just as effective as full fine-tuning (in which every parameter of the base model is updated), but much more compute efficient (`link <https://thinkingmachines.ai/blog/lora/>`_).
 
 In this tutorial, we show how to run each of the algorithms in the AgileRL framework using an open source model and dataset.
 
@@ -27,19 +26,39 @@ We will use the Qwen2.5-0.5B model (https://huggingface.co/Qwen/Qwen2.5-0.5B)
 and the Human-Like-DPO-Dataset dataset (https://huggingface.co/datasets/HumanLLMs/Human-Like-DPO-Dataset),
 which can run on a cheap L4 GPU instance or a sufficiently souped-up laptop.
 
-First, we look at SFT, then DPO, then combine them in a pipeline SFT->DPO and compare the outputs.
+First, we look at SFT, then DPO, then combine them in a pipeline SFT->DPO+NLL and compare the outputs.
 
 
 Getting Started
 ---------------
 
-Take a look at the `benchmarking/benchmarking_sft.py` script for a full example of how to run SFT.
+Take a look at ``benchmarking/benchmarking_sft.py`` and ``benchmarking/benchmarking_dpo.py`` for full examples.
+Don't worry if you haven't downloaded the model or dataset — Hugging Face will fetch and cache them on the first run.
 
-.. code-block:: python
+Train SFT and save the LoRA adapter:
 
-    python benchmarking/benchmarking_sft.py
+.. code-block:: bash
 
-This will run SFT on the Human-Like-DPO-Dataset dataset using the Qwen2.5-0.5B model. Don't worry if you haven't downloaded the model or dataset - Huggingface will take care of this the first time you run the script, then cache the files for future use.
+    python benchmarking/benchmarking_sft.py --save-path outputs/sft --no-timestamp
+
+Train DPO from the base model:
+
+.. code-block:: bash
+
+    python benchmarking/benchmarking_dpo.py --save-path outputs/dpo --no-timestamp
+
+Warm-start DPO from a prior SFT checkpoint:
+
+.. code-block:: bash
+
+    python benchmarking/benchmarking_dpo.py --save-path outputs/sft_dpo --load-path outputs/sft/actor --no-timestamp
+
+Evaluate a saved checkpoint interactively:
+
+.. code-block:: bash
+
+    python benchmarking/benchmarking_sft.py --eval --load-path outputs/sft/actor
+    python benchmarking/benchmarking_dpo.py --eval --load-path outputs/dpo/actor
 
 The first block of code applies the model's tokenizer to the dataset, and creates an SFTGym environment. This is a wrapper around the dataset that allows for easy training of the LLM.
 
@@ -80,7 +99,7 @@ The next block of code configures the LoRA adapter and instantiates the SFT agen
         accelerator=accelerator,
     )
 
-If you want more detail on LoRA and how it works, see this blog post that gives a theoretical and empirical overview of how LoRA can achieve the same results as full finetuning, but with a much smaller number of parameters: https://thinkingmachines.ai/blog/lora/
+If you want more detail on LoRA and how it works, see `this blog post <https://thinkingmachines.ai/blog/lora/>`_ that gives a theoretical and empirical overview of how LoRA can achieve the same results as full fine-tuning, but with a much smaller number of parameters.
 
 
 SFT Training Curves
@@ -101,14 +120,28 @@ DPO Training Curves
 -------------------
 
 Below are representative training curves from a DPO run on the Human-Like-DPO-Dataset using Qwen2.5-0.5B.
-The training loss drops rapidly in the first few hundred steps and converges close to zero, indicating that the model
-quickly learns to distinguish between chosen and rejected responses.
+
+**Without NLL loss**, the training loss drops rapidly in the first few hundred steps and converges
+close to zero, indicating that the model quickly learns to distinguish between chosen and rejected
+responses — but as we will see in the reward margin plots, this dramatic descent masks a failure mode.
 
 .. figure:: images/dpo_training_loss.png
    :align: center
    :width: 600
 
-   DPO training loss over 4000 steps. The smoothed curve (EMA) is overlaid on the raw per-step loss.
+   **DPO training loss (without NLL)** over 4000 steps. The smoothed curve (EMA) is overlaid on the
+   raw per-step loss. The loss collapses close to zero.
+
+**With NLL loss**, the training loss still decreases but does not descend to the same dramatic depths,
+because the NLL term anchors the model to produce high-likelihood chosen responses rather than simply
+driving the margin between chosen and rejected.
+
+.. figure:: images/dpo_plus_nll_training_loss.png
+   :align: center
+   :width: 600
+
+   **DPO training loss (with NLL)** over 4000 steps. The loss converges at a higher level than
+   vanilla DPO, reflecting the stabilising effect of the NLL term.
 
 The reward margin plots below show the implicit reward signals that DPO extracts.
 Without the NLL loss term, both the chosen and rejected rewards drift downward together,
