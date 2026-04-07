@@ -239,7 +239,11 @@ class AgentMetrics(BaseMetrics):
 
 
 class MultiAgentMetrics(BaseMetrics):
-    """Tracks training metrics for a multi-agent RL algorithm instance.
+    """Tracks training metrics for multi-agent RL algorithms.
+
+    Assumes that we log metrics for each sub-agent separately. For settings
+    where we have homogeneous/grouped agents (e.g. speaker_0, speaker_1, listener_0, listener_1),
+    we assume metrics are logged for the group as a whole.
 
     :param agent_ids: Sub-agent identifiers from the environment.
     :type agent_ids: list[str]
@@ -267,18 +271,18 @@ class MultiAgentMetrics(BaseMetrics):
     def log(self, name: str, agent_id: str, value: float) -> None:
         """Append a value to the accumulator for a registered metric and sub-agent.
 
+        Example:
+        >>> metrics = MultiAgentMetrics(["speaker_0", "speaker_1", "listener_0", "listener_1"])
+        >>> metrics.log("loss", "speaker_0", 0.1)
+        >>> metrics.log("loss", "speaker_0", 0.2)
+        >>> metrics.get_mean("loss", "speaker_0")
+
         :param name: Previously registered metric name.
         :type name: str
         :param agent_id: Sub-agent identifier.
         :type agent_id: str
         :param value: Scalar metric value.
         :type value: float
-
-        Example:
-        >>> metrics = MultiAgentMetrics(["agent1", "agent2"])
-        >>> metrics.log("loss", "agent1", 0.1)
-        >>> metrics.log("loss", "agent2", 0.2)
-        >>> metrics.get_mean("loss", "agent1")
         """
         self._additional_metrics[name][agent_id].append(float(value))
 
@@ -329,10 +333,6 @@ class MultiAgentMetrics(BaseMetrics):
         """Clear scores and all additional metric accumulators."""
         super().clear()
         for name in self._additional_metrics:
-            self._additional_metrics[name] = {
-                agent_id: [] for agent_id in self.agent_ids
-            }
+            self._additional_metrics[name] = {k: [] for k in self.agent_ids}
         for name in self._nonscalar_metrics:
-            self._nonscalar_metrics[name] = {
-                agent_id: [] for agent_id in self.agent_ids
-            }
+            self._nonscalar_metrics[name] = {k: [] for k in self.agent_ids}

@@ -704,10 +704,10 @@ class MADDPG(MultiAgentRLAlgorithm):
             dones[agent_id],
         ).to(torch.uint8)
 
+        # Compute target Q-value for critic loss
         y_j = (
             rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
         )
-
         critic_loss: torch.Tensor = self.criterion(q_value, y_j)
 
         # critic loss backprop

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
+import pandas as pd
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
 from pettingzoo import ParallelEnv
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -205,7 +206,7 @@ class EnvSpec(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: str
-    num_envs: int = Field(default=1, ge=1)
+    num_envs: int = Field(default=16, ge=1)
 
 
 class GymEnvSpec(EnvSpec):
@@ -562,6 +563,71 @@ class OfflineEnvSpec(GymEnvSpec):
             raise ValueError(msg)
 
         return self
+
+
+class BanditEnvSpec(BaseModel):
+    """Environment specification for contextual bandit training.
+
+    Stores the features and targets that define a bandit problem.  Each
+    field can be either a :class:`~pandas.DataFrame` or a **file path**
+    (CSV, Parquet, or any format supported by :func:`pandas.read_csv`
+    / :func:`pandas.read_parquet`).  When a string path is given, the
+    data is loaded lazily at :meth:`make_env` time.
+
+    :param name: Human-readable name for the environment / dataset.
+    :type name: str
+    :param features: Dataset features — a DataFrame or a path to a file.
+    :type features: pandas.DataFrame | str
+    :param targets: Dataset targets — a DataFrame or a path to a file.
+    :type targets: pandas.DataFrame | str
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    name: str = Field(default="BanditEnv")
+    features: pd.DataFrame | str | Path
+    targets: pd.DataFrame | str | Path
+
+    def _load_dataframe(self, value: str | Path) -> pd.DataFrame:
+        """Load a DataFrame from a path.
+
+        Supports CSV, Parquet, and HDF5 files based on file extension.
+
+        :param value: A file path.
+        :returns: A pandas DataFrame.
+        :rtype: pd.DataFrame
+        """
+        path = Path(value) if isinstance(value, str) else value
+        if path.suffix in {".parquet", ".pq"}:
+            data = pd.read_parquet(path)
+        elif path.suffix == ".csv":
+            data = pd.read_csv(path)
+        elif path.suffix in {".h5", ".hdf5"}:
+            data = pd.read_hdf(path)
+        else:
+            msg = f"Unsupported file type: {path.suffix}"
+            raise ValueError(msg)
+        return data
+
+    def make_env(self) -> Any:
+        """Construct a :class:`~agilerl.wrappers.learning.BanditEnv`.
+
+        :returns: A bandit environment ready for training.
+        :rtype: BanditEnv
+        """
+        from agilerl.wrappers.learning import BanditEnv
+
+        features = (
+            self._load_dataframe(self.features)
+            if isinstance(self.features, str | Path)
+            else self.features
+        )
+        targets = (
+            self._load_dataframe(self.targets)
+            if isinstance(self.targets, str | Path)
+            else self.targets
+        )
+        return BanditEnv(features=features, targets=targets)
 
 
 class ArenaEnvSpec(EnvSpec):

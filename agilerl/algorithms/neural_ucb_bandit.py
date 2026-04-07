@@ -216,9 +216,7 @@ class NeuralUCB(RLAlgorithm):
             if (mu_raw.numel() == 1 and self.action_dim > 1)
             else mu_raw
         )
-        g = torch.zeros((self.action_dim, self.numel)).to(
-            self.device if self.accelerator is None else self.accelerator.device,
-        )
+        g: torch.Tensor = torch.zeros((self.action_dim, self.numel)).to(self.device)
         if mu_raw.numel() == 1 and self.action_dim > 1:
             self.optimizer.zero_grad()
             mu_raw[0].backward(retain_graph=True)

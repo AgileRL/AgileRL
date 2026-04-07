@@ -13,20 +13,20 @@ from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.typing import GymEnvType
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
+from agilerl.wrappers.learning import BanditEnv
 
 InitDictType = dict[str, Any] | None
 PopulationType = list[NeuralTS | NeuralUCB]
 
 
 def train_bandits(
-    env: GymEnvType,
+    env: BanditEnv,
     env_name: str,
     algo: str,
     pop: PopulationType,
@@ -58,7 +58,7 @@ def train_bandits(
     and their fitnesses.
 
     :param env: The environment to train in.
-    :type env: Gym-style environment
+    :type env: BanditEnv
     :param env_name: Environment name
     :type env_name: str
     :param algo: RL algorithm name
@@ -166,10 +166,6 @@ def train_bandits(
     else:
         sampler = Sampler(memory=memory)
 
-    # Pre-training mutation
-    if accelerator is None and mutation is not None:
-        pop = mutation.mutation(pop, pre_training_mut=True)
-
     # Format progress bar
     pbar = default_progress_bar(max_steps, accelerator)
 
@@ -194,6 +190,10 @@ def train_bandits(
         accelerator=accelerator,
         loggers=loggers,
     )
+
+    # Pre-training mutation
+    if accelerator is None and mutation is not None:
+        population.update(mutation.mutation(population.agents, pre_training_mut=True))
 
     checkpoint_count = 0
     evo_count = 0

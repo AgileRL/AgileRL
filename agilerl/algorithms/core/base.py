@@ -285,8 +285,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self.accelerator = accelerator
         self.device = device if self.accelerator is None else self.accelerator.device
         self.torch_compiler = torch_compiler
-        self.algo = name if name is not None else self.__class__.__name__
-
+        self.algo = name or self.__class__.__name__
         self._mut = None
         self._index = index
         self.registry = MutationRegistry(hp_config)
@@ -1503,7 +1502,14 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         # Track multi-agent metrics using the effective training IDs. In grouped
         # setups this corresponds to shared group IDs; otherwise raw agent IDs.
-        self.metrics = MultiAgentMetrics(list(self.observation_space.keys()))
+        # FIXME: Temporary workaround to get correct agent IDs for MADDPG and MATD3
+        # while they dont support centralized policy execution.
+        agent_ids = (
+            self.agent_ids
+            if self.algo in ["MADDPG", "MATD3"]
+            else list(self.observation_space.keys())
+        )
+        self.metrics = MultiAgentMetrics(agent_ids)
 
     def _registry_init(self) -> None:
         super()._registry_init()
@@ -1557,16 +1563,14 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         )
 
     def preprocess_observation(
-        self,
-        observation: ObservationType,
+        self, observation: ObservationType
     ) -> dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
 
-        :param observations: Observations of environment
-        :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
-
+        :param observation: Observations of environment
+        :type observation: ObservationType
         :return: Preprocessed observations
-        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
+        :rtype: dict[str, TorchObsType]
         """
         preprocessed = {}
         for agent_id, agent_obs in observation.items():
@@ -1819,6 +1823,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     ####---------------------------------------####
     #### Grouped Multi-Agent Utility Functions ####
     ####---------------------------------------####
+
     def get_group_id(self, agent_id: str) -> str:
         """Get the group ID for an agent.
 

@@ -72,7 +72,6 @@ class ReplayBufferSpec(BaseModel):
     n_step_buffer_args: NStepBufferArgs = Field(default_factory=NStepBufferArgs)
     per_buffer: bool = Field(default=False)
     per_buffer_args: PerBufferArgs = Field(default_factory=PerBufferArgs)
-    n_step: int | None = Field(default=None)
 
     def init_buffer(
         self, algo_spec: AlgoSpecT, device: str | torch.device = "cpu"
@@ -86,7 +85,6 @@ class ReplayBufferSpec(BaseModel):
         :return: Replay buffer
         :rtype: BufferT
         """
-        self.n_step = 1
         buffer_args = {}
         is_multi_agent = algo_spec.agent_type == AgentType.MultiAgent
         if not is_multi_agent:
@@ -95,9 +93,8 @@ class ReplayBufferSpec(BaseModel):
                     msg = "Gamma must be specified for N-step buffer"
                     raise ValueError(msg)
 
-                gamma = algo_spec.gamma
                 n_step = self.n_step_buffer_args.n_step
-                n_step_args = {"n_step": n_step, "gamma": gamma}
+                n_step_args = {"n_step": n_step, "gamma": algo_spec.gamma}
                 buffer_args |= n_step_args
                 buffer_class = MultiStepReplayBuffer
 
@@ -154,6 +151,12 @@ class TrainingSpec(BaseModel):
     :type eps_decay: float | None
     :param target_score: Target score for early stopping.
     :type target_score: float | None
+    :param checkpoint: The checkpoint number to resume from.
+    :type checkpoint: int | None
+    :param checkpoint_path: The path to save the checkpoint.
+    :type checkpoint_path: str | None
+    :param overwrite_checkpoints: If ``True``, overwrite the checkpoint.
+    :type overwrite_checkpoints: bool
     """
 
     max_steps: int = Field(..., ge=1)
@@ -175,6 +178,11 @@ class TrainingSpec(BaseModel):
     eps_start: float | None = Field(default=None)
     eps_end: float | None = Field(default=None)
     eps_decay: float | None = Field(default=None)
+
+    # Model checkpoints (only relevant for local training)
+    checkpoint: int | None = Field(default=None)
+    checkpoint_path: str | None = Field(default=None)
+    overwrite_checkpoints: bool = Field(default=False)
 
     # NOTE: The following are only applicable to Arena training
     reporting_interval: int = Field(default=1024, ge=1)

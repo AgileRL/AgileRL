@@ -8,7 +8,8 @@ algorithm:
 
 environment:
     name: IRIS
-    num_envs: 1
+    features: tests/data/iris_features.csv
+    targets: tests/data/iris_targets.csv
 
 network:
     latent_dim: 128

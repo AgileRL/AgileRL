@@ -249,17 +249,25 @@ class NetworkSpec(BaseModel):
     encoder_config: EncoderType = Field(discriminator="arch")
     head_config: MlpSpec
     random_seed: int | None = Field(default=None)
+    simba: bool = Field(default=False)
 
     @model_validator(mode="after")
     def _check_latent_dim(self) -> Self:
         min_max_validator("min_latent_dim", "max_latent_dim")(self)
         return min_max_validator("min_latent_dim", "latent_dim")(self)
 
+    @model_validator(mode="after")
+    def _detect_simba(self) -> Self:
+        """Auto-detect SimBA from the encoder type so callers don't need to
+        set both ``arch: simba`` and ``simba: true`` in the manifest.
+        """
+        if isinstance(self.encoder_config, SimbaSpec):
+            self.simba = True
+        return self
+
 
 class QNetworkSpec(NetworkSpec):
     """Model specification for evolvable Q networks."""
-
-    simba: bool = Field(default=False)
 
 
 class RainbowQNetworkSpec(NetworkSpec):
@@ -269,23 +277,16 @@ class RainbowQNetworkSpec(NetworkSpec):
 class ContinuousQNetworkSpec(NetworkSpec):
     """Model specification for evolvable continuous Q networks."""
 
-    simba: bool = Field(default=False)
-
 
 class DeterministicActorSpec(NetworkSpec):
     """Model specification for evolvable deterministic actor networks."""
-
-    simba: bool = Field(default=False)
 
 
 class StochasticActorSpec(NetworkSpec):
     """Model specification for evolvable stochastic actor networks."""
 
     squash_output: bool = Field(default=False)
-    simba: bool = Field(default=False)
 
 
 class ValueNetworkSpec(NetworkSpec):
     """Model specification for evolvable value networks."""
-
-    simba: bool = Field(default=False)

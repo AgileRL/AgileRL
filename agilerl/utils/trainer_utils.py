@@ -28,13 +28,16 @@ from agilerl.models.algo import (
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.typing import GymEnvType, PzEnvType
+from agilerl.utils.llm_utils import PreferenceGym, ReasoningGym
+from agilerl.wrappers.learning import BanditEnv
 
 if TYPE_CHECKING:
     import torch
     from accelerate import Accelerator
     from gymnasium import spaces
 
-EnvironmentT = GymEnvType | PzEnvType
+LLMEnvType = ReasoningGym | PreferenceGym
+EnvironmentT = GymEnvType | PzEnvType | BanditEnv | LLMEnvType
 AlgoSpecT = RLAlgorithmSpec | LLMAlgorithmSpec | MultiAgentRLAlgorithmSpec
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 BufferT = (
@@ -121,8 +124,9 @@ def get_spaces_from_env_single_agent(
 def create_population_from_spec(
     population_size: int,
     algo_spec: AlgoSpecT,
+    env: EnvironmentT,
     mutation_spec: MutationSpec | None,
-    env: GymEnvType | PzEnvType,
+    replay_buffer_spec: ReplayBufferSpec | None,
     device: str | torch.device = "cpu",
     resume_from_checkpoint: str | None = None,
     accelerator: Accelerator | None = None,
@@ -137,7 +141,9 @@ def create_population_from_spec(
     :param mutation_spec: Optional mutation spec for HP range fallback.
     :type mutation_spec: MutationSpec | None
     :param env: RL environment following Gymnasium or PettingZoo API.
-    :type env: GymEnvType | PzEnvType
+    :type env: EnvironmentT
+    :param replay_buffer_spec: Replay buffer specification.
+    :type replay_buffer_spec: ReplayBufferSpec | None
     :param device: Torch device string.
     :type device: str | torch.device
     :param resume_from_checkpoint: Path to resume from checkpoint.
@@ -149,6 +155,8 @@ def create_population_from_spec(
     :returns: A list of algorithm instances.
     :rtype: PopulationT
     """
+    from agilerl.models.algorithms import RainbowDQNSpec
+
     # Override the hp_config with the one defined in MutationSpec if not already set
     hp_config = algo_spec.hp_config
     if hp_config is None and mutation_spec is not None:
@@ -156,6 +164,7 @@ def create_population_from_spec(
         algo_spec.hp_config = hp_config
 
     # Some algorithms require num_envs as argument -> add to algo_spec
+    # NOTE: We should identify these lazily during training...
     for num_envs_arg in ["num_envs", "vect_noise_dim"]:
         if hasattr(algo_spec, num_envs_arg):
             setattr(algo_spec, num_envs_arg, env.num_envs)
@@ -163,6 +172,14 @@ def create_population_from_spec(
     # Classic RL algorithms
     if isinstance(algo_spec, (RLAlgorithmSpec, MultiAgentRLAlgorithmSpec)):
         observation_space, action_space = get_spaces_from_env(algo_spec, env)
+
+        if (
+            isinstance(algo_spec, RainbowDQNSpec)
+            and replay_buffer_spec is not None
+            and replay_buffer_spec.n_step_buffer
+        ):
+            algo_spec.n_step = replay_buffer_spec.n_step_buffer_args.n_step
+
         return [
             algo_spec.build_algorithm(
                 observation_space,
@@ -261,7 +278,7 @@ def build_replay_buffer_from_spec(
     :returns: A replay buffer instance, or ``None`` for on-policy algorithms.
     :rtype: BufferT | None
     """
-    needs_buffer = algo_spec.off_policy or algo_spec.offline
+    needs_buffer = algo_spec.off_policy or algo_spec.offline or algo_spec.bandit
     if not needs_buffer:
         return None
 

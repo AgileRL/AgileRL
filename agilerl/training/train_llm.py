@@ -237,6 +237,7 @@ def finetune_llm_reasoning(
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
+
         elif (i + 1) * effective_data_batch_size % max_steps == 0 or (
             checkpoint_steps is not None
             and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
@@ -447,6 +448,7 @@ def finetune_llm_preference(
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
+
         elif (i + 1) * effective_data_batch_size % max_steps == 0 or (
             checkpoint_steps is not None
             and (i + 1) * effective_data_batch_size % checkpoint_steps == 0

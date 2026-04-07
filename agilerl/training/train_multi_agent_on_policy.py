@@ -267,7 +267,9 @@ def train_multi_agent_on_policy(
                     )
 
                     # Compute score increment (replace NaNs representing inactive agents with 0)
-                    agent_rewards = np.array(list(reward.values())).transpose()
+                    agent_rewards = np.column_stack(
+                        [np.asarray(v).ravel() for v in reward.values()]
+                    )
                     agent_rewards = np.where(np.isnan(agent_rewards), 0, agent_rewards)
                     score_increment = (
                         np.sum(agent_rewards, axis=-1)[:, np.newaxis]

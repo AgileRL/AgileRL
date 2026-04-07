@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
-import matplotlib.pyplot as plt
 import numpy as np
 import tqdm
 from accelerate import Accelerator
@@ -818,11 +817,10 @@ def init_wandb(
     if mutation_hyperparams is not None:
         config_dict.update(mutation_hyperparams)
 
+    # track hyperparameters and run metadata
     kwargs = {
-        # track hyperparameters and run metadata
         "config": config_dict,
-        # set the wandb project where this run will be logged
-        "project": project,
+        "project": project,  # wandb project where this run will be logged
         "name": "{}-EvoHPO-{}-{}".format(
             env_name,
             algo,
@@ -1002,23 +1000,6 @@ def print_hyperparams(pop: PopulationType) -> None:
             *[f"  {k}: {v}" for k, v in sorted(attrs.items())],
         ]
         print("\n".join(lines) + "\n")
-
-
-def plot_population_score(pop: PopulationType) -> None:
-    """Plot the fitness scores of agents in a population.
-
-    :param pop: Population of agents
-    :type pop: list[EvolvableAlgorithm]
-    """
-    plt.figure()
-    for agent in pop:
-        scores = agent.fitness
-        steps = agent.steps[:-1]
-        plt.plot(steps, scores)
-    plt.title("Score History - Mutations")
-    plt.xlabel("Steps")
-    plt.ylim(bottom=-400)
-    plt.show()
 
 
 def get_env_defined_actions(

@@ -110,6 +110,7 @@ If you use AgileRL in your work, please cite the repository:
    llm_finetuning/index
    bandits/index
    distributed_training/index
+   trainers/index
    evolvable_networks/index
    custom_algorithms/index
    debugging_rl/index

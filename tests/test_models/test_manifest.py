@@ -27,7 +27,13 @@ from agilerl.models.algorithms.neural_ucb import NeuralUCBSpec
 from agilerl.models.algorithms.ppo import PPOSpec
 from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
 from agilerl.models.algorithms.td3 import TD3Spec
-from agilerl.models.env import ArenaEnvSpec, GymEnvSpec, OfflineEnvSpec, PzEnvSpec
+from agilerl.models.env import (
+    ArenaEnvSpec,
+    BanditEnvSpec,
+    GymEnvSpec,
+    OfflineEnvSpec,
+    PzEnvSpec,
+)
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.manifest import TrainingManifest
 from agilerl.models.networks import (
@@ -65,9 +71,11 @@ def _load(name: str) -> dict:
 
 def _make_manifest(algo: dict, env: dict | None = None, **sections) -> dict:
     """Build an ad-hoc manifest dict (for one-off / error-case tests)."""
-    m = {"algorithm": algo, "training": sections.pop("training", _TRAINING)}
-    if env is not None:
-        m["environment"] = env
+    m = {
+        "algorithm": algo,
+        "environment": env if env is not None else {},
+        "training": sections.pop("training", _TRAINING),
+    }
     m.update(sections)
     return m
 
@@ -245,10 +253,10 @@ class TestTrainingManifest:
         assert manifest.replay_buffer is None
         assert manifest.tournament_selection is None
 
-    def test_environment_defaults_to_empty_dict(self):
+    def test_environment_required(self):
         data = {"algorithm": {"name": "DQN"}, "training": _TRAINING}
-        manifest = TrainingManifest.model_validate(data)
-        assert manifest.environment == {}
+        with pytest.raises(Exception):
+            TrainingManifest.model_validate(data)
 
     def test_environment_kept_as_raw_dict(self):
         data = _make_manifest(
@@ -303,8 +311,6 @@ class TestLocalTrainerSingleAgent:
             (DDPG_MANIFEST, DDPGSpec, MlpSpec),
             (DDPG_SIMBA_MANIFEST, DDPGSpec, SimbaSpec),
             (TD3_MANIFEST, TD3Spec, MlpSpec),
-            (NEURAL_TS_MANIFEST, NeuralTSSpec, MlpSpec),
-            (NEURAL_UCB_MANIFEST, NeuralUCBSpec, MlpSpec),
             (MULTI_INPUT_MANIFEST, PPOSpec, MultiInputSpec),
         ],
         ids=[
@@ -316,8 +322,6 @@ class TestLocalTrainerSingleAgent:
             "DDPG-MLP",
             "DDPG-SimBA",
             "TD3-MLP",
-            "NeuralTS-MLP",
-            "NeuralUCB-MLP",
             "PPO-MultiInput",
         ],
     )
@@ -327,93 +331,117 @@ class TestLocalTrainerSingleAgent:
         trainer = LocalTrainer.from_manifest(manifest)
 
         assert isinstance(trainer, LocalTrainer)
-        assert isinstance(trainer.algorithm, expected_algo_cls)
-        assert isinstance(trainer.environment, GymEnvSpec)
-        assert isinstance(trainer.training, TrainingSpec)
+        assert isinstance(trainer.algorithm_spec, expected_algo_cls)
+        assert isinstance(trainer.env_spec, GymEnvSpec)
+        assert isinstance(trainer.training_spec, TrainingSpec)
 
-        assert trainer.algorithm.net_config is not None
-        assert isinstance(trainer.algorithm.net_config, NetworkSpec)
+        assert trainer.algorithm_spec.net_config is not None
+        assert isinstance(trainer.algorithm_spec.net_config, NetworkSpec)
         assert isinstance(
-            trainer.algorithm.net_config.encoder_config, expected_encoder_cls
+            trainer.algorithm_spec.net_config.encoder_config, expected_encoder_cls
         )
+
+    @pytest.mark.parametrize(
+        "manifest, expected_algo_cls",
+        [
+            (NEURAL_TS_MANIFEST, NeuralTSSpec),
+            (NEURAL_UCB_MANIFEST, NeuralUCBSpec),
+        ],
+        ids=["NeuralTS-MLP", "NeuralUCB-MLP"],
+    )
+    def test_bandit_from_manifest_creates_correct_types(
+        self, manifest, expected_algo_cls
+    ):
+        trainer = LocalTrainer.from_manifest(manifest)
+
+        assert isinstance(trainer, LocalTrainer)
+        assert isinstance(trainer.algorithm_spec, expected_algo_cls)
+        assert isinstance(trainer.env_spec, BanditEnvSpec)
+        assert isinstance(trainer.training_spec, TrainingSpec)
+
+        assert trainer.algorithm_spec.net_config is not None
+        assert isinstance(trainer.algorithm_spec.net_config, NetworkSpec)
+        assert isinstance(trainer.algorithm_spec.net_config.encoder_config, MlpSpec)
 
     def test_offline_manifest_creates_offline_env_spec(self):
         trainer = LocalTrainer.from_manifest(CQN_MANIFEST)
 
         assert isinstance(trainer, LocalTrainer)
-        assert isinstance(trainer.algorithm, CQNSpec)
-        assert isinstance(trainer.environment, OfflineEnvSpec)
-        assert trainer.environment.minari_dataset_id == "cartpole-v0"
-        assert isinstance(trainer.training, TrainingSpec)
-        assert trainer.algorithm.net_config is not None
-        assert isinstance(trainer.algorithm.net_config.encoder_config, MlpSpec)
+        assert isinstance(trainer.algorithm_spec, CQNSpec)
+        assert isinstance(trainer.env_spec, OfflineEnvSpec)
+        assert trainer.env_spec.minari_dataset_id == "cartpole-v0"
+        assert isinstance(trainer.training_spec, TrainingSpec)
+        assert trainer.algorithm_spec.net_config is not None
+        assert isinstance(trainer.algorithm_spec.net_config.encoder_config, MlpSpec)
 
     # -- Algorithm-specific field checks ------------------------------------
 
     def test_dqn_off_policy_fields(self):
         trainer = LocalTrainer.from_manifest(DQN_MANIFEST)
-        assert trainer.algorithm.tau == 0.001
-        assert trainer.algorithm.double is False
-        assert trainer.algorithm.lr == pytest.approx(6.3e-4)
-        assert trainer.replay_buffer is not None
-        assert trainer.replay_buffer.max_size == 100_000
-        assert trainer.training.eps_start == 1.0
-        assert trainer.training.eps_end == 0.1
+        assert trainer.algorithm_spec.tau == 0.001
+        assert trainer.algorithm_spec.double is False
+        assert trainer.algorithm_spec.lr == pytest.approx(6.3e-4)
+        assert trainer.replay_buffer_spec is not None
+        assert trainer.replay_buffer_spec.max_size == 100_000
+        assert trainer.training_spec.eps_start == 1.0
+        assert trainer.training_spec.eps_end == 0.1
 
     def test_rainbow_dqn_fields(self):
         trainer = LocalTrainer.from_manifest(RAINBOW_MANIFEST)
-        assert trainer.algorithm.n_step == 4
-        assert trainer.algorithm.num_atoms == 51
-        assert trainer.algorithm.v_min == -200.0
-        assert trainer.algorithm.v_max == 200.0
-        assert trainer.algorithm.noise_std == 0.5
+        assert trainer.algorithm_spec.n_step == 4
+        assert trainer.algorithm_spec.num_atoms == 51
+        assert trainer.algorithm_spec.v_min == -200.0
+        assert trainer.algorithm_spec.v_max == 200.0
+        assert trainer.algorithm_spec.noise_std == 0.5
 
     def test_ppo_on_policy_fields(self):
         trainer = LocalTrainer.from_manifest(PPO_MANIFEST)
-        assert trainer.algorithm.gae_lambda == 0.95
-        assert trainer.algorithm.clip_coef == 0.2
-        assert trainer.algorithm.ent_coef == 0.01
-        assert trainer.algorithm.update_epochs == 4
-        assert trainer.algorithm.share_encoders is True
-        assert trainer.replay_buffer is None
+        assert trainer.algorithm_spec.gae_lambda == 0.95
+        assert trainer.algorithm_spec.clip_coef == 0.2
+        assert trainer.algorithm_spec.ent_coef == 0.01
+        assert trainer.algorithm_spec.update_epochs == 4
+        assert trainer.algorithm_spec.share_encoders is True
+        assert trainer.replay_buffer_spec is None
 
     def test_ppo_recurrent_flag(self):
         trainer = LocalTrainer.from_manifest(PPO_LSTM_MANIFEST)
-        assert trainer.algorithm.recurrent is True
+        assert trainer.algorithm_spec.recurrent is True
 
     def test_ddpg_actor_critic_lrs(self):
         trainer = LocalTrainer.from_manifest(DDPG_MANIFEST)
-        assert trainer.algorithm.lr_actor == 0.0003
-        assert trainer.algorithm.lr_critic == 0.0003
-        assert trainer.algorithm.O_U_noise is True
-        assert trainer.algorithm.share_encoders is True
+        assert trainer.algorithm_spec.lr_actor == 0.0003
+        assert trainer.algorithm_spec.lr_critic == 0.0003
+        assert trainer.algorithm_spec.O_U_noise is True
+        assert trainer.algorithm_spec.share_encoders is True
 
     def test_td3_policy_freq(self):
         trainer = LocalTrainer.from_manifest(TD3_MANIFEST)
-        assert trainer.algorithm.policy_freq == 2
+        assert trainer.algorithm_spec.policy_freq == 2
 
     def test_cqn_offline_fields(self):
         trainer = LocalTrainer.from_manifest(CQN_MANIFEST)
-        assert trainer.algorithm.double is True
+        assert trainer.algorithm_spec.double is True
 
     def test_bandit_fields(self):
         trainer = LocalTrainer.from_manifest(NEURAL_TS_MANIFEST)
-        assert trainer.algorithm.lamb == 1.0
-        assert trainer.algorithm.reg == pytest.approx(0.00625)
+        assert trainer.algorithm_spec.lamb == 1.0
+        assert trainer.algorithm_spec.reg == pytest.approx(0.00625)
+        assert isinstance(trainer.env_spec, BanditEnvSpec)
+        assert trainer.env_spec.name == "IRIS"
 
     # -- Environment spec construction --------------------------------------
 
     def test_env_name_and_num_envs(self):
         trainer = LocalTrainer.from_manifest(DQN_MANIFEST)
-        assert trainer.environment.name == "LunarLander-v3"
-        assert trainer.environment.num_envs == 16
+        assert trainer.env_spec.name == "LunarLander-v3"
+        assert trainer.env_spec.num_envs == 16
 
     # -- Network injection into algo spec -----------------------------------
 
     def test_network_injected_into_algo_net_config(self):
         trainer = LocalTrainer.from_manifest(DQN_MANIFEST)
-        assert trainer.algorithm.net_config is not None
-        assert trainer.algorithm.net_config.latent_dim == 128
+        assert trainer.algorithm_spec.net_config is not None
+        assert trainer.algorithm_spec.net_config.latent_dim == 128
 
     def test_no_network_section_leaves_net_config_none(self):
         data = _make_manifest(
@@ -421,19 +449,19 @@ class TestLocalTrainerSingleAgent:
             env={"name": "CartPole-v1"},
         )
         trainer = LocalTrainer.from_manifest(data)
-        assert trainer.algorithm.net_config is None
+        assert trainer.algorithm_spec.net_config is None
 
     # -- Mutation / tournament / replay buffer passthrough -------------------
 
     def test_mutation_and_tournament_forwarded(self):
         trainer = LocalTrainer.from_manifest(DQN_MANIFEST)
-        assert isinstance(trainer.mutation, MutationSpec)
-        assert isinstance(trainer.tournament, TournamentSelectionSpec)
+        assert isinstance(trainer.mutation_spec, MutationSpec)
+        assert isinstance(trainer.tournament_selection_spec, TournamentSelectionSpec)
 
     def test_replay_buffer_forwarded(self):
         trainer = LocalTrainer.from_manifest(DQN_MANIFEST)
-        assert isinstance(trainer.replay_buffer, ReplayBufferSpec)
-        assert trainer.replay_buffer.max_size == 100_000
+        assert isinstance(trainer.replay_buffer_spec, ReplayBufferSpec)
+        assert trainer.replay_buffer_spec.max_size == 100_000
 
     def test_optional_sections_none_when_omitted(self):
         data = _make_manifest(
@@ -441,22 +469,22 @@ class TestLocalTrainerSingleAgent:
             env={"name": "CartPole-v1"},
         )
         trainer = LocalTrainer.from_manifest(data)
-        assert trainer.mutation is None
-        assert trainer.tournament is None
-        assert trainer.replay_buffer is None
+        assert trainer.mutation_spec is None
+        assert trainer.tournament_selection_spec is None
+        assert trainer.replay_buffer_spec is None
 
     # -- Loading from files -------------------------------------------------
 
     def test_from_yaml_file(self):
         trainer = LocalTrainer.from_manifest(MANIFESTS_DIR / "dqn.yaml")
         assert isinstance(trainer, LocalTrainer)
-        assert isinstance(trainer.algorithm, DQNSpec)
-        assert trainer.environment.name == "LunarLander-v3"
+        assert isinstance(trainer.algorithm_spec, DQNSpec)
+        assert trainer.env_spec.name == "LunarLander-v3"
 
     def test_from_string_path(self):
         trainer = LocalTrainer.from_manifest(str(MANIFESTS_DIR / "ppo.yaml"))
         assert isinstance(trainer, LocalTrainer)
-        assert isinstance(trainer.algorithm, PPOSpec)
+        assert isinstance(trainer.algorithm_spec, PPOSpec)
 
     # -- Extra kwargs -------------------------------------------------------
 
@@ -473,11 +501,11 @@ class TestLocalTrainerSingleAgent:
         )
         trainer = LocalTrainer.from_manifest(data)
         assert isinstance(trainer, LocalTrainer)
-        assert trainer.algorithm.batch_size == 128  # DQN default
-        assert trainer.environment.name == "CartPole-v1"
-        assert trainer.mutation is None
-        assert trainer.tournament is None
-        assert trainer.replay_buffer is None
+        assert trainer.algorithm_spec.batch_size == 128  # DQN default
+        assert trainer.env_spec.name == "CartPole-v1"
+        assert trainer.mutation_spec is None
+        assert trainer.tournament_selection_spec is None
+        assert trainer.replay_buffer_spec is None
 
 
 # ============================================================================
@@ -502,46 +530,46 @@ class TestLocalTrainerMultiAgent:
         trainer = LocalTrainer.from_manifest(manifest)
 
         assert isinstance(trainer, LocalTrainer)
-        assert isinstance(trainer.algorithm, expected_algo_cls)
-        assert isinstance(trainer.environment, PzEnvSpec)
-        assert isinstance(trainer.training, TrainingSpec)
+        assert isinstance(trainer.algorithm_spec, expected_algo_cls)
+        assert isinstance(trainer.env_spec, PzEnvSpec)
+        assert isinstance(trainer.training_spec, TrainingSpec)
 
     def test_maddpg_env_name(self):
         trainer = LocalTrainer.from_manifest(MADDPG_MANIFEST)
-        assert trainer.environment.name == "pettingzoo.mpe.simple_speaker_listener_v4"
-        assert trainer.environment.num_envs == 16
+        assert trainer.env_spec.name == "pettingzoo.mpe.simple_speaker_listener_v4"
+        assert trainer.env_spec.num_envs == 16
 
     def test_maddpg_actor_critic_lrs(self):
         trainer = LocalTrainer.from_manifest(MADDPG_MANIFEST)
-        assert trainer.algorithm.lr_actor == 0.0001
-        assert trainer.algorithm.lr_critic == 0.001
-        assert trainer.algorithm.O_U_noise is True
+        assert trainer.algorithm_spec.lr_actor == 0.0001
+        assert trainer.algorithm_spec.lr_critic == 0.001
+        assert trainer.algorithm_spec.O_U_noise is True
 
     def test_matd3_policy_freq(self):
         trainer = LocalTrainer.from_manifest(MATD3_MANIFEST)
-        assert trainer.algorithm.policy_freq == 2
+        assert trainer.algorithm_spec.policy_freq == 2
 
     def test_ippo_on_policy_fields(self):
         trainer = LocalTrainer.from_manifest(IPPO_MANIFEST)
-        assert trainer.algorithm.gae_lambda == 0.95
-        assert trainer.algorithm.clip_coef == 0.2
-        assert trainer.algorithm.ent_coef == 0.05
+        assert trainer.algorithm_spec.gae_lambda == 0.95
+        assert trainer.algorithm_spec.clip_coef == 0.2
+        assert trainer.algorithm_spec.ent_coef == 0.05
 
     def test_ippo_cnn_encoder(self):
         trainer = LocalTrainer.from_manifest(IPPO_CNN_MANIFEST)
-        assert isinstance(trainer.algorithm.net_config.encoder_config, CnnSpec)
-        encoder = trainer.algorithm.net_config.encoder_config
+        assert isinstance(trainer.algorithm_spec.net_config.encoder_config, CnnSpec)
+        encoder = trainer.algorithm_spec.net_config.encoder_config
         assert encoder.channel_size == [64, 64, 32]
 
     def test_multi_agent_network_injection(self):
         trainer = LocalTrainer.from_manifest(MADDPG_MANIFEST)
-        assert trainer.algorithm.net_config is not None
-        assert trainer.algorithm.net_config.latent_dim == 64
+        assert trainer.algorithm_spec.net_config is not None
+        assert trainer.algorithm_spec.net_config.latent_dim == 64
 
     def test_multi_agent_replay_buffer(self):
         trainer = LocalTrainer.from_manifest(MADDPG_MANIFEST)
-        assert isinstance(trainer.replay_buffer, ReplayBufferSpec)
-        assert trainer.replay_buffer.max_size == 100_000
+        assert isinstance(trainer.replay_buffer_spec, ReplayBufferSpec)
+        assert trainer.replay_buffer_spec.max_size == 100_000
 
 
 # ============================================================================
@@ -644,8 +672,8 @@ class TestLocalTrainerLLM:
     def test_grpo_produces_llm_env_spec(self):
         trainer = LocalTrainer.from_manifest(self._grpo_manifest())
         assert isinstance(trainer, LocalTrainer)
-        assert isinstance(trainer.algorithm, GRPOSpec)
-        assert isinstance(trainer.environment, LLMEnvSpec)
+        assert isinstance(trainer.algorithm_spec, GRPOSpec)
+        assert isinstance(trainer.env_spec, LLMEnvSpec)
 
     def test_grpo_env_type_injected_from_algo(self):
         """When ``env_type`` is not in the environment section, it should be
@@ -653,21 +681,21 @@ class TestLocalTrainerLLM:
         manifest = self._grpo_manifest()
         manifest["environment"].pop("env_type", None)
         trainer = LocalTrainer.from_manifest(manifest)
-        assert str(trainer.environment.env_type) == "reasoning"
+        assert str(trainer.env_spec.env_type) == "reasoning"
 
     def test_grpo_algorithm_fields(self):
         trainer = LocalTrainer.from_manifest(self._grpo_manifest())
-        assert trainer.algorithm.group_size == 6
-        assert trainer.algorithm.temperature == 0.9
-        assert trainer.algorithm.clip_coef == 0.2
+        assert trainer.algorithm_spec.group_size == 6
+        assert trainer.algorithm_spec.temperature == 0.9
+        assert trainer.algorithm_spec.clip_coef == 0.2
 
     def test_grpo_env_fields(self):
         trainer = LocalTrainer.from_manifest(self._grpo_manifest())
-        assert trainer.environment.dataset_path == "train.parquet"
-        assert trainer.environment.reward_file_path == "reward.py"
-        assert trainer.environment.max_reward == 10.0
-        assert trainer.environment.train_test_split == 0.8
-        assert trainer.environment.prompt_template == {
+        assert trainer.env_spec.dataset_path == "train.parquet"
+        assert trainer.env_spec.reward_file_path == "reward.py"
+        assert trainer.env_spec.max_reward == 10.0
+        assert trainer.env_spec.train_test_split == 0.8
+        assert trainer.env_spec.prompt_template == {
             "role": "user",
             "content": "{question}",
         }
@@ -675,31 +703,31 @@ class TestLocalTrainerLLM:
     def test_dpo_produces_llm_env_spec(self):
         trainer = LocalTrainer.from_manifest(self._dpo_manifest())
         assert isinstance(trainer, LocalTrainer)
-        assert isinstance(trainer.algorithm, DPOSpec)
-        assert isinstance(trainer.environment, LLMEnvSpec)
+        assert isinstance(trainer.algorithm_spec, DPOSpec)
+        assert isinstance(trainer.env_spec, LLMEnvSpec)
 
     def test_dpo_env_type_preference(self):
         trainer = LocalTrainer.from_manifest(self._dpo_manifest())
-        assert str(trainer.environment.env_type) == "preference"
+        assert str(trainer.env_spec.env_type) == "preference"
 
     def test_dpo_env_fields(self):
         trainer = LocalTrainer.from_manifest(self._dpo_manifest())
-        assert trainer.environment.dataset_path == "dpo_data.parquet"
-        assert trainer.environment.columns == {
+        assert trainer.env_spec.dataset_path == "dpo_data.parquet"
+        assert trainer.env_spec.columns == {
             "prompt": "question",
             "chosen": "accepted",
         }
 
     def test_dpo_algorithm_fields(self):
         trainer = LocalTrainer.from_manifest(self._dpo_manifest())
-        assert trainer.algorithm.beta == 0.001
-        assert trainer.algorithm.update_epochs == 1
+        assert trainer.algorithm_spec.beta == 0.001
+        assert trainer.algorithm_spec.update_epochs == 1
 
     def test_llm_no_network_section(self):
         trainer = LocalTrainer.from_manifest(self._grpo_manifest())
         assert (
-            trainer.algorithm.net_config is None
-            if hasattr(trainer.algorithm, "net_config")
+            trainer.algorithm_spec.net_config is None
+            if hasattr(trainer.algorithm_spec, "net_config")
             else True
         )
 
@@ -712,10 +740,10 @@ class TestArenaTrainerFromManifest:
         trainer = ArenaTrainer.from_manifest(DQN_MANIFEST, client=mock_client)
 
         assert isinstance(trainer, ArenaTrainer)
-        assert isinstance(trainer.algorithm, DQNSpec)
-        assert isinstance(trainer.environment, ArenaEnvSpec)
-        assert trainer.environment.name == "LunarLander-v3"
-        assert trainer.environment.num_envs == 16
+        assert isinstance(trainer.algorithm_spec, DQNSpec)
+        assert isinstance(trainer.env_spec, ArenaEnvSpec)
+        assert trainer.env_spec.name == "LunarLander-v3"
+        assert trainer.env_spec.num_envs == 16
 
     def test_env_defaults_version_to_latest(self):
         data = _make_manifest(
@@ -724,7 +752,7 @@ class TestArenaTrainerFromManifest:
         )
         mock_client = MagicMock()
         trainer = ArenaTrainer.from_manifest(data, client=mock_client)
-        assert trainer.environment.version == "latest"
+        assert trainer.env_spec.version == "latest"
 
     def test_env_version_from_manifest(self):
         data = _make_manifest(
@@ -733,7 +761,7 @@ class TestArenaTrainerFromManifest:
         )
         mock_client = MagicMock()
         trainer = ArenaTrainer.from_manifest(data, client=mock_client)
-        assert trainer.environment.version == "2.1"
+        assert trainer.env_spec.version == "2.1"
 
     def test_arena_env_missing_name_raises(self):
         data = _make_manifest(
@@ -750,7 +778,7 @@ class TestArenaTrainerFromManifest:
             MANIFESTS_DIR / "dqn.yaml", client=mock_client
         )
         assert isinstance(trainer, ArenaTrainer)
-        assert isinstance(trainer.environment, ArenaEnvSpec)
+        assert isinstance(trainer.env_spec, ArenaEnvSpec)
 
     @pytest.mark.parametrize(
         "manifest, expected_algo_cls",
@@ -765,8 +793,8 @@ class TestArenaTrainerFromManifest:
     def test_all_algorithms_produce_arena_env(self, manifest, expected_algo_cls):
         mock_client = MagicMock()
         trainer = ArenaTrainer.from_manifest(manifest, client=mock_client)
-        assert isinstance(trainer.algorithm, expected_algo_cls)
-        assert isinstance(trainer.environment, ArenaEnvSpec)
+        assert isinstance(trainer.algorithm_spec, expected_algo_cls)
+        assert isinstance(trainer.env_spec, ArenaEnvSpec)
 
 
 # ============================================================================
@@ -784,9 +812,12 @@ _SINGLE_AGENT_CONFIGS = [
     ("ddpg/ddpg_lstm.yaml", DDPGSpec, LstmSpec),
     ("ddpg/ddpg_simba.yaml", DDPGSpec, SimbaSpec),
     ("td3.yaml", TD3Spec, MlpSpec),
+    ("multi_input.yaml", PPOSpec, MultiInputSpec),
+]
+
+_BANDIT_CONFIGS = [
     ("bandit/neural_ts.yaml", NeuralTSSpec, MlpSpec),
     ("bandit/neural_ucb.yaml", NeuralUCBSpec, MlpSpec),
-    ("multi_input.yaml", PPOSpec, MultiInputSpec),
 ]
 
 _OFFLINE_CONFIGS = [
@@ -819,12 +850,12 @@ class TestFromConfigFiles:
 
         trainer = LocalTrainer.from_manifest(config_path)
 
-        assert isinstance(trainer.algorithm, expected_algo_cls)
-        assert isinstance(trainer.environment, GymEnvSpec)
-        assert isinstance(trainer.training, TrainingSpec)
-        if trainer.algorithm.net_config is not None:
+        assert isinstance(trainer.algorithm_spec, expected_algo_cls)
+        assert isinstance(trainer.env_spec, GymEnvSpec)
+        assert isinstance(trainer.training_spec, TrainingSpec)
+        if trainer.algorithm_spec.net_config is not None:
             assert isinstance(
-                trainer.algorithm.net_config.encoder_config,
+                trainer.algorithm_spec.net_config.encoder_config,
                 expected_encoder_cls,
             )
 
@@ -840,12 +871,33 @@ class TestFromConfigFiles:
 
         trainer = LocalTrainer.from_manifest(config_path)
 
-        assert isinstance(trainer.algorithm, expected_algo_cls)
-        assert isinstance(trainer.environment, OfflineEnvSpec)
-        assert isinstance(trainer.training, TrainingSpec)
-        if trainer.algorithm.net_config is not None:
+        assert isinstance(trainer.algorithm_spec, expected_algo_cls)
+        assert isinstance(trainer.env_spec, OfflineEnvSpec)
+        assert isinstance(trainer.training_spec, TrainingSpec)
+        if trainer.algorithm_spec.net_config is not None:
             assert isinstance(
-                trainer.algorithm.net_config.encoder_config,
+                trainer.algorithm_spec.net_config.encoder_config,
+                expected_encoder_cls,
+            )
+
+    @pytest.mark.parametrize(
+        "rel_path, expected_algo_cls, expected_encoder_cls",
+        _BANDIT_CONFIGS,
+        ids=[p for p, *_ in _BANDIT_CONFIGS],
+    )
+    def test_bandit_config(self, rel_path, expected_algo_cls, expected_encoder_cls):
+        config_path = CONFIGS_DIR / rel_path
+        if not config_path.exists():
+            pytest.skip(f"Config not found: {config_path}")
+
+        trainer = LocalTrainer.from_manifest(config_path)
+
+        assert isinstance(trainer.algorithm_spec, expected_algo_cls)
+        assert isinstance(trainer.env_spec, BanditEnvSpec)
+        assert isinstance(trainer.training_spec, TrainingSpec)
+        if trainer.algorithm_spec.net_config is not None:
+            assert isinstance(
+                trainer.algorithm_spec.net_config.encoder_config,
                 expected_encoder_cls,
             )
 
@@ -861,8 +913,8 @@ class TestFromConfigFiles:
 
         trainer = LocalTrainer.from_manifest(config_path)
 
-        assert isinstance(trainer.algorithm, expected_algo_cls)
-        assert isinstance(trainer.environment, PzEnvSpec)
+        assert isinstance(trainer.algorithm_spec, expected_algo_cls)
+        assert isinstance(trainer.env_spec, PzEnvSpec)
 
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
     @pytest.mark.parametrize(
@@ -905,6 +957,7 @@ class TestFromConfigFiles:
     @pytest.mark.parametrize(
         "rel_path",
         [p for p, *_ in _SINGLE_AGENT_CONFIGS]
+        + [p for p, *_ in _BANDIT_CONFIGS]
         + [p for p, *_ in _OFFLINE_CONFIGS]
         + [p for p, _ in _MULTI_AGENT_CONFIGS],
     )
@@ -916,4 +969,4 @@ class TestFromConfigFiles:
 
         mock_client = MagicMock()
         trainer = ArenaTrainer.from_manifest(config_path, client=mock_client)
-        assert isinstance(trainer.environment, ArenaEnvSpec)
+        assert isinstance(trainer.env_spec, ArenaEnvSpec)

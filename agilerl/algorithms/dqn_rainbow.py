@@ -191,6 +191,7 @@ class RainbowDQN(RLAlgorithm):
             )
         else:
             net_config = {} if net_config is None else net_config
+            net_config.pop("simba", None)
             head_config: dict[str, Any] | None = net_config.get("head_config", {})
 
             head_config = MlpNetConfig(

@@ -24,6 +24,7 @@ from agilerl.models.algo import (
 )
 from agilerl.models.env import (
     ArenaEnvSpec,
+    BanditEnvSpec,
     GymEnvSpec,
     LLMEnvSpec,
     OfflineEnvSpec,
@@ -33,14 +34,13 @@ from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.manifest import TrainingManifest
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.protocols import AgentType
-from agilerl.typing import GymEnvType, PzEnvType
 from agilerl.utils.trainer_utils import (
+    EnvironmentT,
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
     create_population_from_spec,
 )
-from agilerl.vector import AsyncPettingZooVecEnv
 from agilerl.wrappers.image_transpose import (
     ImageTranspose,
     PettingZooImageTranspose,
@@ -51,8 +51,7 @@ logger = logging.getLogger(__name__)
 
 AlgoSpecT = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec
 AlgorithmT = AlgoSpecT | str
-EnvSpecT = str | GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec
-EnvT = GymEnvType | PzEnvType | AsyncPettingZooVecEnv
+EnvSpecT = str | GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
 ArenaEnvT = ArenaEnvSpec | dict[str, str]
 ReplayBufferT = ReplayBufferSpec | None
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
@@ -128,13 +127,42 @@ class Trainer(ABC):
         self.accelerator = accelerator
         self.resume_from_checkpoint = resume_from_checkpoint
 
+    @staticmethod
+    def get_validated_manifest(
+        manifest: str | Path | dict[str, Any],
+    ) -> TrainingManifest:
+        """Get a validated manifest from a YAML, JSON, or dict.
+
+        :param manifest: Path to a YAML/JSON file, or a raw dict.
+        :type manifest: str | Path | dict[str, Any]
+        :returns: A validated manifest.
+        :rtype: TrainingManifest
+        """
+        if isinstance(manifest, (str, Path)):
+            with open(manifest) as fh:
+                data = yaml.safe_load(fh)
+        else:
+            data = manifest
+
+        validated_manifest = TrainingManifest.model_validate(data)
+
+        # 'network' component of manifest corresponds to algorithm's net_config
+        # NOTE: LLM algorithms dont build networks in the same way as the rest
+        if validated_manifest.network is not None and not isinstance(
+            validated_manifest.algorithm, LLMAlgorithmSpec
+        ):
+            validated_manifest.algorithm.net_config = validated_manifest.network
+
+        return validated_manifest
+
     @classmethod
     def from_manifest(
         cls,
         manifest: str | Path | dict[str, Any],
+        *,
+        resume_from_checkpoint: str | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
-        resume_from_checkpoint: str | None = None,
     ) -> Self:
         """Instantiate a :class:`Trainer` from a YAML, JSON, or dict manifest.
 
@@ -146,31 +174,18 @@ class Trainer(ABC):
 
         :param manifest: Path to a YAML/JSON file, or a raw dict.
         :type manifest: str | Path | dict[str, Any]
+        :param resume_from_checkpoint: Path to resume from checkpoint.
+        :type resume_from_checkpoint: str | None
         :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
         :type device: str | torch.device
         :param accelerator: Accelerator instance.
         :type accelerator: Accelerator | None
-        :param resume_from_checkpoint: Path to resume from checkpoint.
-        :type resume_from_checkpoint: str | None
         :returns: A fully configured :class:`Trainer` instance.
         :rtype: SelfTrainerT
         """
-        # Load manifest from file or dictionary.
-        if isinstance(manifest, (str, Path)):
-            with open(manifest) as fh:
-                data = yaml.safe_load(fh)
-        else:
-            data = manifest
-
         # Validate manifest and resolve environment spec.
-        validated_manifest = TrainingManifest.model_validate(data)
+        validated_manifest = Trainer.get_validated_manifest(manifest)
         env_spec = cls._resolve_env_spec(validated_manifest)
-
-        # 'network' component of manifest corresponds to algorithm's net_config
-        if validated_manifest.network is not None and hasattr(
-            validated_manifest.algorithm, "net_config"
-        ):
-            validated_manifest.algorithm.net_config = validated_manifest.network
 
         return cls(
             algorithm=validated_manifest.algorithm,
@@ -239,9 +254,9 @@ class LocalTrainer(Trainer):
     :type environment: gym.Env | ParallelEnv
     :param training: Training parameters.
     :type training: TrainingSpec
-    :param mutation: Mutation probabilities and RL-HP ranges.  When an
+    :param mutation: Mutation probabilities and RL hyperparameter ranges.  When an
         :class:`RLAlgorithmSpec` is used and ``hp_config`` is not set on it,
-        HP ranges are derived from ``mutation.rl_hp_selection``.
+        hyperparameter ranges are derived from ``mutation.rl_hp_selection``.
     :type mutation: MutationSpec | Mutations | None
     :param tournament: Tournament selection configuration.
     :type tournament: TournamentSelectionSpec | TournamentSelection | None
@@ -297,14 +312,15 @@ class LocalTrainer(Trainer):
         self.population = create_population_from_spec(
             population_size=self.training_spec.population_size,
             algo_spec=self.algorithm_spec,
-            mutation_spec=self.mutation_spec,
             env=self.env,
+            mutation_spec=self.mutation_spec,
+            replay_buffer_spec=self.replay_buffer_spec,
             device=self.device,
             accelerator=self.accelerator,
             tokenizer=self.tokenizer,
             resume_from_checkpoint=self.resume_from_checkpoint,
         )
-        self.mutations = build_mutations_from_spec(self.mutation, self.device)
+        self.mutations = build_mutations_from_spec(self.mutation_spec, self.device)
         self.tournament_selection = build_tournament_from_spec(
             self.tournament_selection_spec, self.training_spec
         )
@@ -313,16 +329,19 @@ class LocalTrainer(Trainer):
         )
         self.train_fn = self.algorithm_spec.get_training_fn()
 
-    def _make_env(self) -> EnvT:
+    def _make_env(self) -> EnvironmentT:
         """Create the environment to train on.
 
         :returns: The environment to train on.
-        :rtype: GymEnvType | PzEnvType | LLMEnvType
+        :rtype: GymEnvType | PzEnvType | LLMEnvType | BanditEnv
         """
         if isinstance(self.env_spec, LLMEnvSpec):
             return self.env_spec.make_env(
                 tokenizer=self.tokenizer, accelerator=self.accelerator
             )
+
+        if isinstance(self.env_spec, BanditEnvSpec):
+            return self.env_spec.make_env()
 
         # Check if the environment contains an image-last observation space,
         # in which case we transpose through a wrapper -> (H,W,C) -> (C,H,W)
@@ -344,9 +363,9 @@ class LocalTrainer(Trainer):
     def _resolve_env_spec(cls, manifest: TrainingManifest) -> EnvSpecT:
         """Build the appropriate environment spec from the manifest.
 
-        Uses the algorithm's ``agent_type`` and ``offline`` flag to
-        choose the spec class.  For LLM algorithms, ``env_type`` is
-        injected from the algorithm spec so the manifest environment
+        Uses the algorithm's ``agent_type`` and ``offline`` / ``bandit``
+        flags to choose the spec class.  For LLM algorithms, ``env_type``
+        is injected from the algorithm spec so the manifest environment
         section doesn't need to duplicate it.
         """
         env_data = dict(manifest.environment)
@@ -363,6 +382,9 @@ class LocalTrainer(Trainer):
         if manifest.algorithm.offline:
             return OfflineEnvSpec(**env_data)
 
+        if manifest.algorithm.bandit:
+            return BanditEnvSpec(**env_data)
+
         return GymEnvSpec(**env_data)
 
     def train(
@@ -374,6 +396,9 @@ class LocalTrainer(Trainer):
         wb: bool = False,
         tensorboard: bool = False,
         tensorboard_log_dir: str | None = None,
+        checkpoint: int | None = None,
+        checkpoint_path: str | None = None,
+        overwrite_checkpoints: bool = False,
         wandb_api_key: str | None = None,
         wandb_kwargs: dict[str, Any] | None = None,
     ) -> tuple[PopulationT, list[list[float]]]:
@@ -391,6 +416,12 @@ class LocalTrainer(Trainer):
         :type tensorboard: bool
         :param tensorboard_log_dir: The path to save the TensorBoard logs.
         :type tensorboard_log_dir: str | None
+        :param checkpoint: The checkpoint number to resume from.
+        :type checkpoint: int | None
+        :param checkpoint_path: The path to save the checkpoint.
+        :type checkpoint_path: str | None
+        :param overwrite_checkpoints: If ``True``, overwrite the checkpoint.
+        :type overwrite_checkpoints: bool
         :param wandb_api_key: The Weights & Biases API key.
         :type wandb_api_key: str | None
         :param wandb_kwargs: The Weights & Biases keyword arguments.
@@ -401,9 +432,12 @@ class LocalTrainer(Trainer):
             *fitness_history* is a list of per-generation fitness scores.
         :rtype: tuple[PopulationT, list[list[float]]]
         """
+        manifest = self.to_manifest()
         kwargs: dict[str, Any] = {
             "pop": self.population,
             "env": self.env,
+            "INIT_HP": manifest,
+            "MUT_P": manifest["mutation"],
             "max_steps": self.training_spec.max_steps,
             "evo_steps": self.training_spec.evo_steps,
             "tournament": self.tournament_selection_spec,
@@ -418,6 +452,11 @@ class LocalTrainer(Trainer):
             "wandb_api_key": wandb_api_key,
             "wandb_kwargs": wandb_kwargs,
         }
+
+        # Add checkpointing to the training spec
+        self.training_spec.checkpoint = checkpoint
+        self.training_spec.checkpoint_path = checkpoint_path
+        self.training_spec.overwrite_checkpoints = overwrite_checkpoints
 
         # Extract algo-specific kwargs from the algorithm spec.
         kwargs.update(
@@ -437,25 +476,23 @@ class ArenaTrainer(Trainer):
     provided specs and submits it via
     :class:`~agilerl.arena.client.ArenaClient`.
 
-    :param algorithm: An :class:`RLAlgorithmSpec` or a string algorithm
-        name (uses the default spec from the registry).
+    :param algorithm: An `:class:`AlgorithmSpec` instance or a string algorithm name.
     :type algorithm: AlgorithmT
-    :param environment: An :class:`EnvironmentSpec` or a string env name.
-    :type environment: EnvironmentT
-    :param training: Training loop parameters.  Defaults to
-        :class:`TrainingSpec` with sensible values.
-    :type training: TrainingT
-    :param mutation: Mutation probabilities and RL-HP ranges.
-    :type mutation: MutationT | None
-    :param tournament: Tournament selection configuration.
-    :type tournament: TournamentSelectionT | None
-    :param replay_buffer: Replay buffer configuration.
-    :type replay_buffer: ReplayBufferT | None
+    :param environment: An `:class:`ArenaEnvSpec` instance or a string env name.
+    :type environment: ArenaEnvT
     :param client: An authenticated :class:`ArenaClient`.  One is created
         automatically if not provided.
     :type client: ArenaClient | None
-    :param device: Torch device string.
-    :type device: str | torch.device
+    :param api_key: The Arena API key.
+    :type api_key: str | None
+    :param training: Training loop parameters.
+    :type training: TrainingSpec
+    :param mutation: Mutation probabilities and RL-HP ranges.
+    :type mutation: MutationSpec | None
+    :param tournament: Tournament selection configuration.
+    :type tournament: TournamentSelectionSpec | None
+    :param replay_buffer: Replay buffer configuration.
+    :type replay_buffer: ReplayBufferT | None
     """
 
     def __init__(
@@ -490,6 +527,47 @@ class ArenaTrainer(Trainer):
             self._client = ArenaClient(api_key=api_key)
 
     @classmethod
+    def from_manifest(
+        cls,
+        manifest: str | Path | dict[str, Any],
+        *,
+        client: ArenaClient | None = None,
+        api_key: str | None = None,
+    ) -> Self:
+        """Instantiate a :class:`ArenaTrainer` from a YAML, JSON, or dict manifest.
+
+        The ``algorithm.name`` field is used to dispatch to the correct
+        :class:`~agilerl.models.algo.AlgorithmSpec` subclass via the
+        algorithm registry.  The environment section is resolved into
+        the appropriate env spec based on the concrete trainer subclass
+        (``cls``).
+
+        :param manifest: Path to a YAML/JSON file, or a raw dict.
+        :type manifest: str | Path | dict[str, Any]
+        :param client: An authenticated :class:`ArenaClient`.  One is created
+            automatically if not provided.
+        :type client: ArenaClient | None
+        :param api_key: The Arena API key.
+        :type api_key: str | None
+        :returns: A fully configured :class:`ArenaTrainer` instance.
+        :rtype: ArenaTrainer
+        """
+        # Validate manifest and resolve environment spec.
+        validated_manifest = Trainer.get_validated_manifest(manifest)
+        env_spec = cls._resolve_env_spec(validated_manifest)
+
+        return cls(
+            algorithm=validated_manifest.algorithm,
+            environment=env_spec,
+            client=client,
+            api_key=api_key,
+            training=validated_manifest.training,
+            mutation=validated_manifest.mutation,
+            tournament=validated_manifest.tournament_selection,
+            replay_buffer=validated_manifest.replay_buffer,
+        )
+
+    @classmethod
     def _resolve_env_spec(cls, manifest: TrainingManifest) -> ArenaEnvSpec:
         """Build an :class:`ArenaEnvSpec` from the manifest.
 
@@ -506,7 +584,7 @@ class ArenaTrainer(Trainer):
 
         return ArenaEnvSpec(
             name=env_data.get("name", ""),
-            num_envs=env_data.get("num_envs", 1),
+            num_envs=env_data.get("num_envs", 16),
             version=str(env_data.get("version", "latest")),
         )
 
@@ -522,21 +600,3 @@ class ArenaTrainer(Trainer):
         """
         manifest = self.to_manifest()
         return self._client.submit_job(manifest, stream=stream)
-
-    def get_environment_spec(self) -> ArenaEnvSpec:
-        """Return the environment as an :class:`ArenaEnvSpec`.
-
-        :returns: Environment spec instance.
-        :rtype: ArenaEnvSpec
-        :raises TypeError: If the environment is not a string or
-            :class:`ArenaEnvSpec`.
-        """
-        if isinstance(self.env_spec, ArenaEnvSpec):
-            return self.environment
-        if isinstance(self.env_spec, dict):
-            return ArenaEnvSpec(**self.env_spec)
-        msg = (
-            f"ArenaTrainer requires an ArenaEnvSpec or a dictionary with 'name', 'version', and 'num_envs' keys, "
-            f"got {type(self.env_spec).__name__}"
-        )
-        raise TypeError(msg)

@@ -1,15 +1,28 @@
 """PPO algorithm specification."""
 
 from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import Annotated, Any, ClassVar
 
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from agilerl.algorithms import PPO
 from agilerl.models.algo import RLAlgorithmSpec, register
 from agilerl.models.networks import StochasticActorSpec
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.typing import BPTTSequenceType
+
+
+def _coerce_bptt_sequence_type(v: Any) -> BPTTSequenceType:
+    if isinstance(v, BPTTSequenceType):
+        return v
+    if isinstance(v, str):
+        return BPTTSequenceType(v)
+    return v
+
+
+BPTTSequenceTypeFromManifest = Annotated[
+    BPTTSequenceType, BeforeValidator(_coerce_bptt_sequence_type)
+]
 
 
 @register(arena=True)
@@ -30,7 +43,9 @@ class PPOSpec(RLAlgorithmSpec):
     recurrent: bool = Field(default=False)
     max_seq_len: int | None = Field(default=32, ge=1)
     share_encoders: bool = Field(default=True)
-    bptt_sequence_type: BPTTSequenceType = Field(default=BPTTSequenceType.CHUNKED)
+    bptt_sequence_type: BPTTSequenceTypeFromManifest = Field(
+        default=BPTTSequenceType.CHUNKED
+    )
     lr: float = Field(default=0.0001, ge=0.0)
     net_config: StochasticActorSpec | None = Field(default=None)
 

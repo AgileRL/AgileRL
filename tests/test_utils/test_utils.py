@@ -39,7 +39,6 @@ from agilerl.utils.utils import (
     make_multi_agent_vect_envs,
     make_skill_vect_envs,
     make_vect_envs,
-    plot_population_score,
     print_hyperparams,
     save_llm_checkpoint,
     save_population_checkpoint,
@@ -438,28 +437,6 @@ def test_prints_hyperparams():
     with patch("builtins.print") as mock_print:
         print_hyperparams(pop)
         mock_print.assert_called_once_with(expected_output)
-
-
-# The function should correctly plot the fitness scores of all agents in the population.
-@patch("agilerl.utils.utils.plt")
-def test_plot_fitness_scores_all_agents(mock_plt):
-    # Create a population of agents with fitness scores
-    class Agent:
-        def __init__(self, fitness):
-            self.fitness = fitness
-            self.steps = list(range(len(fitness) + 1))
-
-    pop = [Agent([1, 2, 3]), Agent([4, 5, 6]), Agent([7, 8, 9])]
-
-    # Call the function under test
-    plot_population_score(pop)
-
-    # Assert plotting functions have been called with expected args
-    mock_plt.title.assert_called_once_with("Score History - Mutations")
-    mock_plt.xlabel.assert_called_once_with("Steps")
-
-    # Assert plt.figure got called
-    assert mock_plt.figure.called
 
 
 def test_save_with_accelerator(tmp_path):

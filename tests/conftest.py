@@ -4,11 +4,18 @@ import shutil
 import socket
 import sys
 
+import gymnasium as gym
 import numpy as np
 import pytest
 import torch
 from gymnasium import spaces
 from torch import nn
+
+# Register lightweight test environments
+gym.register(
+    id="DummyImage-v0",
+    entry_point="tests.envs.image_env:DummyImageEnv",
+)
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from tests.helper_functions import (

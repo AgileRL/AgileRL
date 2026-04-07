@@ -240,6 +240,9 @@ def train_off_policy(
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
         replay_dataloader = accelerator.prepare(replay_dataloader)
         sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
+        # NOTE: n-step sampling requires index-based lookups which the distributed
+        # sampler does not support (sample_distributed ignores return_idx).
+        n_step_sampler = None
     else:
         sampler = Sampler(memory=memory)
         n_step_sampler = (

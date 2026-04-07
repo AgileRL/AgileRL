@@ -31,9 +31,8 @@ def parse_args() -> argparse.Namespace:
         description="Run local evolutionary RL training from a manifest.",
     )
     parser.add_argument(
-        "--manifest",
+        "manifest",
         type=Path,
-        required=True,
         help="Path to a YAML/JSON training manifest.",
     )
     parser.add_argument(

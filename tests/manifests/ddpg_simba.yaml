@@ -6,7 +6,7 @@ algorithm:
     tau: 0.005
 
 environment:
-    name: HalfCheetah-v4
+    name: LunarLanderContinuous-v3
     num_envs: 16
 
 network:

@@ -215,8 +215,7 @@ class DQN(RLAlgorithm):
         """
         # Preprocess observations and convert inputs to torch tensors
         torch_obs = self.preprocess_observation(obs)
-        device = self.device if self.accelerator is None else self.accelerator.device
-        epsilon = torch.tensor(epsilon, device=device)
+        epsilon = torch.tensor(epsilon, device=self.device)
         if action_mask is not None:
             # Need to stack if vectorized env
             action_mask = (
@@ -224,7 +223,7 @@ class DQN(RLAlgorithm):
                 if action_mask.dtype == object or isinstance(action_mask, list)
                 else action_mask
             )
-            action_mask = torch.as_tensor(action_mask, device=device)
+            action_mask = torch.as_tensor(action_mask, device=self.device)
         else:
             if isinstance(torch_obs, dict):
                 sample = next(iter(torch_obs.values()))
@@ -234,7 +233,7 @@ class DQN(RLAlgorithm):
             else:
                 batch_size = torch_obs.size(0)
 
-            action_mask = torch.ones((batch_size, self.action_dim), device=device)
+            action_mask = torch.ones((batch_size, self.action_dim), device=self.device)
 
         #
         action = self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()

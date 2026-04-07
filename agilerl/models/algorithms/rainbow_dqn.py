@@ -7,7 +7,7 @@ from pydantic import Field, model_validator
 
 from agilerl.algorithms import RainbowDQN
 from agilerl.models.algo import RLAlgorithmSpec, off_policy, register
-from agilerl.models.networks import QNetworkSpec
+from agilerl.models.networks import RainbowQNetworkSpec
 from agilerl.training.train_off_policy import train_off_policy
 
 
@@ -26,7 +26,7 @@ class RainbowDQNSpec(RLAlgorithmSpec):
     n_step: int = Field(default=3, ge=1)
     combined_reward: bool = Field(default=False)
     lr: float = Field(default=0.0001, ge=0.0)
-    net_config: QNetworkSpec | None = Field(default=None)
+    net_config: RainbowQNetworkSpec | None = Field(default=None)
 
     algo_class: ClassVar[type[RainbowDQN]] = RainbowDQN
 

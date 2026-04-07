@@ -199,29 +199,34 @@ class TestBuildReplayBuffer:
 
 
 class TestGetTrainingKwargs:
-    def test_on_policy_has_no_memory(self, training_spec, ppo_spec):
+    @pytest.fixture()
+    def gym_env_spec(self):
+        from agilerl.models.env import GymEnvSpec
+
+        return GymEnvSpec(name="CartPole-v1", num_envs=1)
+
+    def test_on_policy_has_no_memory(self, training_spec, ppo_spec, gym_env_spec):
         kwargs = ppo_spec.get_training_kwargs(
-            training=training_spec, env_spec=None, memory=None
+            training=training_spec, env_spec=gym_env_spec, memory=None
         )
         assert "memory" not in kwargs
         assert kwargs["algo"] == "PPO"
         assert kwargs["eval_loop"] == training_spec.eval_loop
 
-    def test_off_policy_has_memory_and_delay(self, training_spec):
+    def test_off_policy_has_memory_and_delay(self, training_spec, gym_env_spec):
         dqn_spec = DQNSpec()
         buffer = ReplayBuffer(max_size=100, device="cpu")
         kwargs = dqn_spec.get_training_kwargs(
-            training=training_spec, env_spec=None, memory=buffer
+            training=training_spec, env_spec=gym_env_spec, memory=buffer
         )
         assert kwargs["memory"] is buffer
         assert "learning_delay" in kwargs
 
-    def test_base_spec_returns_empty(self, training_spec):
-        from agilerl.models.algo import AlgorithmSpec
-
-        spec = AlgorithmSpec.__new__(AlgorithmSpec)
-        kwargs = spec.get_training_kwargs(training=training_spec)
-        assert kwargs == {}
+    def test_env_name_forwarded(self, training_spec, ppo_spec, gym_env_spec):
+        kwargs = ppo_spec.get_training_kwargs(
+            training=training_spec, env_spec=gym_env_spec
+        )
+        assert kwargs["env_name"] == "CartPole-v1"
 
 
 # ---------------------------------------------------------------------------
@@ -234,8 +239,8 @@ class TestLocalTrainerConstruction:
     def test_string_algorithm(self, mock_create_pop, env, training_spec):
         mock_create_pop.return_value = [MagicMock()]
         trainer = LocalTrainer(algorithm="PPO", environment=env, training=training_spec)
-        assert isinstance(trainer.algorithm, PPOSpec)
-        assert trainer.training is training_spec
+        assert isinstance(trainer.algorithm_spec, PPOSpec)
+        assert trainer.training_spec is training_spec
 
     @patch("agilerl.training.trainer.create_population_from_spec")
     def test_spec_algorithm(self, mock_create_pop, env, ppo_spec, training_spec):
@@ -245,8 +250,8 @@ class TestLocalTrainerConstruction:
             environment=env,
             training=training_spec,
         )
-        assert trainer.algorithm is ppo_spec
-        assert trainer.training.population_size == 2
+        assert trainer.algorithm_spec is ppo_spec
+        assert trainer.training_spec.population_size == 2
 
     def test_unknown_algorithm_raises(self, env, training_spec):
         with pytest.raises((ValueError, KeyError)):
@@ -268,9 +273,9 @@ class TestLocalTrainerConstruction:
             replay_buffer=buffer_spec,
             device="cpu",
         )
-        assert trainer.mutation is mutation_spec
-        assert trainer.tournament is tournament_spec
-        assert trainer.replay_buffer is buffer_spec
+        assert trainer.mutation_spec is mutation_spec
+        assert trainer.tournament_selection_spec is tournament_spec
+        assert trainer.replay_buffer_spec is buffer_spec
 
 
 class TestLocalTrainerTrain:
@@ -311,7 +316,7 @@ class TestArenaTrainerConstruction:
             training=training_spec,
             client=mock_client,
         )
-        assert isinstance(trainer.algorithm, PPOSpec)
+        assert isinstance(trainer.algorithm_spec, PPOSpec)
         assert trainer._client is mock_client
 
     def test_spec_algorithm(self, mock_client, ppo_spec, training_spec):
@@ -322,7 +327,7 @@ class TestArenaTrainerConstruction:
             training=training_spec,
             client=mock_client,
         )
-        assert trainer.algorithm is ppo_spec
+        assert trainer.algorithm_spec is ppo_spec
 
     def test_env_spec(self, mock_client, training_spec):
         env_spec = ArenaEnvSpec(name="CartPole-v1", version="v1", num_envs=8)
@@ -332,7 +337,7 @@ class TestArenaTrainerConstruction:
             training=training_spec,
             client=mock_client,
         )
-        assert trainer.environment is env_spec
+        assert trainer.env_spec is env_spec
 
     def test_all_specs(self, mock_client, mutation_spec, tournament_spec, buffer_spec):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
@@ -345,10 +350,10 @@ class TestArenaTrainerConstruction:
             replay_buffer=buffer_spec,
             client=mock_client,
         )
-        assert trainer.mutation is mutation_spec
-        assert trainer.tournament is tournament_spec
-        assert trainer.replay_buffer is buffer_spec
-        assert trainer.training.population_size == 3
+        assert trainer.mutation_spec is mutation_spec
+        assert trainer.tournament_selection_spec is tournament_spec
+        assert trainer.replay_buffer_spec is buffer_spec
+        assert trainer.training_spec.population_size == 3
 
     @patch("agilerl.arena.client.ArenaClient")
     def test_auto_creates_client(self, mock_cls, training_spec):
@@ -503,12 +508,12 @@ class TestArenaTrainerManifest:
     def test_invalid_env_type_raises(self, mock_client, training_spec):
         """Passing a non-spec environment to ArenaTrainer.to_manifest raises TypeError."""
         trainer = ArenaTrainer.__new__(ArenaTrainer)
-        trainer.algorithm = PPOSpec()
-        trainer.environment = 42  # not an EnvironmentSpec or str
-        trainer.training = training_spec
-        trainer.mutation = None
-        trainer.tournament = None
-        trainer.replay_buffer = None
+        trainer.algorithm_spec = PPOSpec()
+        trainer.env_spec = 42  # not an EnvironmentSpec or str
+        trainer.training_spec = training_spec
+        trainer.mutation_spec = None
+        trainer.tournament_selection_spec = None
+        trainer.replay_buffer_spec = None
         trainer._client = mock_client
 
         with pytest.raises((TypeError, Exception)):

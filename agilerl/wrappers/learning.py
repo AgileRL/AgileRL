@@ -4,6 +4,7 @@ from typing import Any
 import gymnasium as gym
 import numpy as np
 import pandas as pd
+from gymnasium import spaces
 
 
 class Skill(gym.Wrapper, gym.utils.RecordConstructorArgs):
@@ -75,6 +76,12 @@ class BanditEnv:
         self.features = features
         self.targets = pd.factorize(targets.values.ravel())[0]
         self.prev_reward = np.zeros(self.arms)
+
+        self.single_observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=self.context_dim, dtype=np.float32
+        )
+        self.single_action_space = spaces.Discrete(self.arms)
+        self.num_envs = 1
 
     def _new_state_and_target_action(self) -> tuple[np.ndarray, int]:
         """Generate a new state and target action.

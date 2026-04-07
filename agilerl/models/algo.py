@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from agilerl.components.replay_buffer import MultiAgentReplayBuffer, ReplayBuffer
     from agilerl.models.env import (
+        BanditEnvSpec,
         GymEnvSpec,
         LLMEnvSpec,
         LLMEnvType,
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     )
     from agilerl.models.training import TrainingSpec
 
-    EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec
+    EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
     ReplayBufferT = ReplayBuffer | MultiAgentReplayBuffer
     PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
@@ -76,6 +77,7 @@ class AlgorithmRegistry:
         """
         if name in self._entries:
             logger.warning("Overriding existing registration for algorithm %r", name)
+
         self._entries[name] = RegistryEntry(spec_cls=spec_cls, arena=arena)
 
     def get(self, name: str) -> RegistryEntry:
@@ -179,6 +181,25 @@ def offline() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
     return decorator
 
 
+def bandit() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
+    """Decorate an algorithm to mark it as a contextual bandit.
+
+    Bandit algorithms learn from tabular datasets wrapped as
+    :class:`~agilerl.wrappers.learning.BanditEnv`.  They use a
+    replay buffer and the :func:`~agilerl.training.train_bandits.train_bandits`
+    training loop.
+
+    :return: Decorated algorithm spec class
+    :rtype: Callable[[type[AlgoSpecT]], type[AlgoSpecT]]
+    """
+
+    def decorator(algo_spec_class: type[AlgoSpecT]) -> type[AlgoSpecT]:
+        algo_spec_class.bandit = True
+        return algo_spec_class
+
+    return decorator
+
+
 class AlgorithmSpec(BaseModel):
     """Base specification for all algorithms.
 
@@ -190,8 +211,10 @@ class AlgorithmSpec(BaseModel):
 
     batch_size: int = Field(default=128, ge=1)
     hp_config: HyperparameterConfig | None = None
+
     off_policy: ClassVar[bool] = False
     offline: ClassVar[bool] = False
+    bandit: ClassVar[bool] = False
 
     algo_class: ClassVar[type[AlgoT]]
 
@@ -233,14 +256,17 @@ class AlgorithmSpec(BaseModel):
         self,
         *,
         training: TrainingSpec,
-        env_spec: EnvSpecT = None,
+        env_spec: EnvSpecT,
         memory: ReplayBufferT = None,
     ) -> dict[str, Any]:
-        """Return additional kwargs for multi-agent RL training loops.
+        """Return additional kwargs for the training loop.
 
         :param training: Training specification.
+        :type training: TrainingSpec
         :param env_spec: Environment specification.
+        :type env_spec: EnvSpecT
         :param memory: Replay buffer instance.
+        :type memory: ReplayBufferT | None
         :returns: Extra keyword arguments for the training function.
         :rtype: dict[str, Any]
         """
@@ -248,6 +274,9 @@ class AlgorithmSpec(BaseModel):
         if isinstance(self, LLMAlgorithmSpec):
             if env_spec.max_reward is not None:
                 kwargs["max_reward"] = env_spec.max_reward
+
+            if training.checkpoint is not None:
+                kwargs["checkpoint_steps"] = training.checkpoint
 
             return kwargs
 
@@ -259,10 +288,13 @@ class AlgorithmSpec(BaseModel):
                 "eval_steps": training.eval_steps,
                 "eval_loop": training.eval_loop,
                 "target": training.target_score,
+                "checkpoint": training.checkpoint,
+                "checkpoint_path": training.checkpoint_path,
+                "overwrite_checkpoints": training.overwrite_checkpoints,
             }
         )
 
-        if self.off_policy or self.offline:
+        if self.off_policy or self.offline or self.bandit:
             kwargs["memory"] = memory
 
         if self.off_policy:

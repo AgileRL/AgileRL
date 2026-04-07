@@ -1525,6 +1525,7 @@ def test_clone_after_learning(compile_mode, ma_vector_space):
     )
     maddpg.learn(experiences)
     clone_agent = maddpg.clone()
+
     assert isinstance(clone_agent, MADDPG)
     assert clone_agent.observation_spaces == maddpg.observation_spaces
     assert clone_agent.action_spaces == maddpg.action_spaces

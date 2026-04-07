@@ -6,12 +6,13 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from agilerl.algorithms import NeuralTS
-from agilerl.models.algo import RLAlgorithmSpec, register
+from agilerl.models.algo import RLAlgorithmSpec, bandit, register
 from agilerl.models.networks import QNetworkSpec
 from agilerl.training.train_bandits import train_bandits
 
 
 @register(arena=False)
+@bandit()
 class NeuralTSSpec(RLAlgorithmSpec):
     """Specification for NeuralTS (Neural Thompson Sampling) algorithm."""
 

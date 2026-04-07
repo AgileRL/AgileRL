@@ -652,10 +652,10 @@ class IPPO(MultiAgentRLAlgorithm):
 
         :param experiences: Tuple of dictionaries containing batched states, actions,
             rewards, next_states, dones in that order for each individual agent.
-        :type experiences: tuple[dict[str, torch.Tensor]]
+        :type experiences: ExperiencesType
 
         :return: Loss dictionary
-        :rtype: dict[str, torch.Tensor]
+        :rtype: StandardTensorDict
         """
         # Process experiences
         states, actions, log_probs, rewards, dones, values, next_states, next_dones = (
@@ -897,10 +897,13 @@ class IPPO(MultiAgentRLAlgorithm):
         mean_pg_loss /= num_samples * self.update_epochs
         mean_vf_loss /= num_samples * self.update_epochs
         mean_ent_loss /= num_samples * self.update_epochs
+
+        # Log metrics
         self.metrics.log("total_loss", agent_id, mean_loss)
         self.metrics.log("policy_loss", agent_id, mean_pg_loss)
         self.metrics.log("value_loss", agent_id, mean_vf_loss)
         self.metrics.log("entropy_loss", agent_id, mean_ent_loss)
+
         return mean_loss
 
     def test(

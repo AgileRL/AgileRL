@@ -15,11 +15,12 @@ from agilerl.models.algo import (
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.networks import NetworkSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
+from agilerl.typing import ConfigType
 
 AlgoSpecT = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec
 
 
-def _resolve_algorithm(v: Any) -> AlgoSpecT:
+def _resolve_algorithm(v: ConfigType) -> AlgoSpecT:
     """Dispatch to the concrete algorithm spec using ``ALGO_REGISTRY``.
 
     Reads the ``name`` key from the raw dict (e.g. ``"DQN"``), looks up
@@ -27,7 +28,7 @@ def _resolve_algorithm(v: Any) -> AlgoSpecT:
     with the remaining fields.
 
     :param v: The raw dict or AlgorithmSpec to resolve.
-    :type v: Any
+    :type v: ConfigType
     :returns: The resolved AlgorithmSpec.
     :rtype: AlgoSpecT
     :raises TypeError: If the input is not a dict or AlgorithmSpec.
@@ -49,7 +50,7 @@ def _resolve_algorithm(v: Any) -> AlgoSpecT:
     return entry.spec_cls(**data)
 
 
-def _coerce_environment(v: Any) -> dict[str, Any]:
+def _coerce_environment(v: ConfigType | BaseModel) -> dict[str, Any]:
     """Accept environment spec objects or raw dicts.
 
     If *v* is a Pydantic ``BaseModel`` (e.g. :class:`ArenaEnvSpec`,
@@ -57,7 +58,7 @@ def _coerce_environment(v: Any) -> dict[str, Any]:
     Plain dicts are passed through unchanged.
 
     :param v: An environment spec or raw dict.
-    :type v: Any
+    :type v: ConfigType
     :returns: A plain dictionary suitable for manifest serialization.
     :rtype: dict[str, Any]
     """
@@ -69,28 +70,32 @@ def _coerce_environment(v: Any) -> dict[str, Any]:
     raise TypeError(msg)
 
 
-def _resolve_network(v: Any) -> Any:
+def _resolve_network(data: ConfigType) -> dict[str, Any]:
     """Pre-process the network section for :class:`NetworkSpec` parsing.
 
     Moves the top-level ``arch`` value into ``encoder_config.arch`` so
-    the existing Pydantic discriminator can dispatch the encoder union,
-    and strips the manifest-only ``simba`` convenience field.
+    the existing Pydantic discriminator can dispatch the encoder union.
+    The ``simba`` flag is auto-detected by :class:`NetworkSpec._detect_simba`
+    from the encoder type after validation.
+
+    :param data: The network configuration dictionary.
+    :type data: ConfigType
     """
-    if isinstance(v, dict):
-        v = dict(v)
-        arch = v.pop("arch", None)
-        v.pop("simba", None)
-        if arch and "encoder_config" in v:
-            v["encoder_config"] = dict(v["encoder_config"])
-            v["encoder_config"].setdefault("arch", arch)
-        return v
-    return v
+    if isinstance(data, NetworkSpec):
+        return data.model_dump()
+
+    data = dict(data)
+    arch = data.pop("arch", None)
+    if arch and "encoder_config" in data:
+        data["encoder_config"] = dict(data["encoder_config"])
+        data["encoder_config"].setdefault("arch", arch)
+    return data
 
 
 AlgorithmFromManifest = Annotated[
     AlgoSpecT,
     BeforeValidator(_resolve_algorithm),
-    PlainSerializer(lambda v: v.to_manifest(), return_type=dict[str, Any]),
+    PlainSerializer(lambda data: data.to_manifest(), return_type=dict[str, Any]),
 ]
 EnvironmentFromManifest = Annotated[
     dict[str, Any], BeforeValidator(_coerce_environment)
