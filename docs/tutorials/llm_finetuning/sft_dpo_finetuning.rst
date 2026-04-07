@@ -3,15 +3,16 @@
 LLM Fine-Tuning with SFT and DPO
 =================================
 
-In this tutorial we cover two widely used LLM finetuning algorithms: Supervised Fine-Tuning (SFT) and Direct Preference Optimization (DPO).
+In this tutorial we cover two widely used LLM fine-tuning algorithms: Supervised Fine-Tuning (SFT) and Direct Preference Optimization (DPO).
 We show how to run each in the AgileRL framework, compare training curves, and examine qualitative outputs.
 
-Supervised Fine-Tuning (SFT) and Direct Preference Optimization (DPO) are two widely used LLM finetuning algorithms.
+Supervised Fine-Tuning (SFT) and Direct Preference Optimization (DPO) are two widely used LLM fine-tuning algorithms.
 SFT is a simple algorithm that fine-tunes an LLM on a dataset of human-generated examples,
 while DPO is a more advanced algorithm that fine-tunes an LLM on a dataset of human preferences.
 
-SFT, also known as instruction tuning, uses a supervised learning approach to fine-tune the LLM. It calculates a simple cross-entropy loss between the model's output logits for each token and the target token.
-DPO, on the other hand, constructs an implicit reward function by comparing the model's output logits for each token with the "chosen" and "rejected" tokens.
+SFT, also known as instruction tuning, uses a supervised learning approach to fine-tune the LLM. It calculates a simple cross-entropy loss between the model's output logits for each token and the target token from the dataset.
+
+DPO, on the other hand, constructs an implicit reward function by comparing the model's output logits for each token with "chosen" and "rejected" tokens from the set of preference data.
 The objective is to maximize the output logits similarity to the chosen tokens and minimize similarity to the rejected tokens.
 To prevent "reward hacking" leading to nonsensical outputs, an additional KL-divergence term (controlled by a \beta parameter) is added to the loss function to limit divergence from the base model.
 Additionally, we implement a negative log-likelihood (NLL) term to weight the model towards maximizing the likelihood of the chosen response, rather than simply maximizing the marginal reward, as proposed here (https://arxiv.org/pdf/2404.19733).
@@ -40,7 +41,7 @@ Take a look at the `benchmarking/benchmarking_sft.py` script for a full example 
 
 This will run SFT on the Human-Like-DPO-Dataset dataset using the Qwen2.5-0.5B model. Don't worry if you haven't downloaded the model or dataset - Huggingface will take care of this the first time you run the script, then cache the files for future use.
 
-The first block of code applies to model's tokenizer to the dataset, and creates an SFTGym environment. This is a wrapper around the dataset that allows for easy training of the LLM.
+The first block of code applies the model's tokenizer to the dataset, and creates an SFTGym environment. This is a wrapper around the dataset that allows for easy training of the LLM.
 
 .. code-block:: python
 
@@ -80,10 +81,6 @@ The next block of code configures the LoRA adapter and instantiates the SFT agen
     )
 
 If you want more detail on LoRA and how it works, see this blog post that gives a theoretical and empirical overview of how LoRA can achieve the same results as full finetuning, but with a much smaller number of parameters: https://thinkingmachines.ai/blog/lora/
-
-
-
-
 
 
 SFT Training Curves
