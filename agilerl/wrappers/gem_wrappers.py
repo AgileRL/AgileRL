@@ -268,11 +268,11 @@ class TokenObservationWrapper:
         :param max_prompt_tokens: Maximum number of tokens in the prompt passed
             to the model (after truncation).
         :type max_prompt_tokens: int
-        :return: Dict with ``model_input_ids``, ``model_attention_mask``,
-            ``model_text``, ``stitch_prefix_ids`` (tokens removed between the
+        :return: Dict with ``trajectory_input_ids``, ``trajectory_attention_mask``,
+            ``trajectory_text``, ``stitch_prefix_ids`` (tokens removed between the
             initial segment and the kept tail), and ``model_window_initial_len``.
             Chronological reconstruction is
-            ``cat(model_input_ids[:, :I], stitch_prefix_ids, model_input_ids[:, I:], dim=1)``
+            ``cat(trajectory_input_ids[:, :I], stitch_prefix_ids, trajectory_input_ids[:, I:], dim=1)``
             where ``I`` is ``model_window_initial_len``.
         :rtype: dict[str, Any]
         """
@@ -334,16 +334,16 @@ class TokenObservationWrapper:
         stitch = full[:, initial_len:drop_from_final]
 
         prompt_ids_1d = trunc[0]
-        model_text = self.tokenizer.decode(
+        trajectory_text = self.tokenizer.decode(
             prompt_ids_1d.tolist(),
             skip_special_tokens=True,
         )
         return {
-            "model_input_ids": trunc,
-            "model_attention_mask": torch.ones_like(trunc),
-            "model_text": model_text,
+            "trajectory_input_ids": trunc,
+            "trajectory_attention_mask": torch.ones_like(trunc),
+            "trajectory_text": trajectory_text,
             "stitch_prefix_ids": stitch,
-            "model_window_initial_len": initial_len,
+            "initial_prompt_len": initial_len,
         }
 
     def get_episode_data(

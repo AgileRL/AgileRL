@@ -236,10 +236,17 @@ def finetune_llm_reasoning(
                 action_masks,
                 rewards,
             )
-            loss, kl, pg_loss, critic_loss, entropy = agent.learn(
-                experiences, env.tokenizer
-            )
-            metrics = [loss, kl, rewards, completion_lengths]
+            metrics = [rewards, completion_lengths]
+            if isinstance(agent, (LLMPPO, LLMReinforce)):
+                loss, kl, pg_loss, critic_loss, entropy = agent.learn(
+                    experiences
+                )
+                metrics.extend([loss, kl, pg_loss, critic_loss, entropy])
+                
+            else:
+                loss, kl = agent.learn(experiences)
+                metrics.extend([loss, kl])
+            
             if max_reward is not None:
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
                 metrics.append(accuracy)
@@ -268,18 +275,23 @@ def finetune_llm_reasoning(
                     accelerator.wait_for_everyone()
 
             if accelerator is None or accelerator.is_main_process:
+                # metrics order: rewards, completion_lengths, loss, kl,
+                # then (LLMPPO/Reinforce) pg, critic, entropy; optional accuracy last.
                 metrics_dict = {
                     "global_step": total_steps,
-                    "Train/Loss": agg_metrics[0],
-                    "Train/KL-divergence": agg_metrics[1],
-                    "Train/Mean reward": agg_metrics[2],
-                    "Train/Average completion length": int(agg_metrics[3]),
-                    "Train/PG loss": pg_loss,
-                    "Train/Critic loss": critic_loss,
-                    "Train/Entropy": entropy,
+                    "Train/Mean reward": agg_metrics[0],
+                    "Train/Average completion length": int(agg_metrics[1]),
+                    "Train/Loss": agg_metrics[2],
+                    "Train/KL-divergence": agg_metrics[3],
                 }
+                if isinstance(agent, (LLMPPO, LLMReinforce)):
+                    metrics_dict |= {
+                        "Train/PG loss": agg_metrics[4],
+                        "Train/Critic loss": agg_metrics[5],
+                        "Train/Entropy": agg_metrics[6],
+                    }
                 if max_reward is not None:
-                    metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
+                    metrics_dict["Train/Accuracy"] = agg_metrics[-1]
                 agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
                 if agg_test_metrics is not None:
                     test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
@@ -289,7 +301,7 @@ def finetune_llm_reasoning(
                         test_metrics_dict
                     )
                 pbar.update(effective_data_batch_size)
-                agent.scores.append(agg_metrics[2])
+                agent.scores.append(agg_metrics[0])
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
@@ -317,22 +329,6 @@ def finetune_llm_reasoning(
 
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb_dict = {
-                "Train/Mean population PG loss": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/PG loss"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Mean population critic loss": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Critic loss"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
                 "Train/Best reward": np.max(
                     [
                         agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
@@ -373,6 +369,24 @@ def finetune_llm_reasoning(
                         for agent_idx, _ in enumerate(pop)
                     ],
                 ),
+            }
+            if isinstance(agent, (LLMPPO, LLMReinforce)):
+                wandb_dict |= {"Train/Mean population PG loss": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/PG loss"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
+                "Train/Mean population critic loss": np.mean(
+                    [
+                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
+                            "Train/Critic loss"
+                        ]
+                        for agent_idx, _ in enumerate(pop)
+                    ],
+                ),
                 "Train/Mean population entropy": np.mean(
                     [
                         agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
@@ -381,7 +395,7 @@ def finetune_llm_reasoning(
                         for agent_idx, _ in enumerate(pop)
                     ],
                 ),
-            }
+                }
             if max_reward is not None:
                 wandb_dict |= {
                     "Train/Mean population accuracy": np.mean(
@@ -486,7 +500,7 @@ def finetune_llm_reasoning(
             f"{centered_text}\n"
             f"{border}\n"
             f"Fitness:\t\t{fitness}\n"
-            f"Score:\t\t{agg_metrics[2]}\n"
+            f"Score:\t\t{agg_metrics[0]}\n"
             f"5 fitness avgs:\t{avg_fitness}\n"
             f"10 score avgs:\t{avg_score}\n"
             f"Agents:\t\t{agents}\n"
@@ -987,7 +1001,6 @@ def finetune_llm_multiturn(
             )
             loss, kl, pg_loss, critic_loss, entropy = agent.learn(
                 experiences,
-                tokenizer,
                 turn_ids=turn_ids_padded,
             )
 

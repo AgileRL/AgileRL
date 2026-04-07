@@ -21,6 +21,7 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
+from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 from agilerl.utils.llm_utils import (
     ReasoningGym,
     masked_mean,
@@ -28,8 +29,9 @@ from agilerl.utils.llm_utils import (
     move_params_to_cpu,
     move_params_to_gpu,
     pool_by_turns,
+    prepare_prompt_hf_generate,
+    stitch_completion_after_windowed_hf_generate,
 )
-from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
@@ -81,6 +83,7 @@ class PPO(LLMAlgorithm):
         wrap: bool = True,
         clone: bool = False,
         use_vllm: bool = False,
+        use_memory_efficient_params: bool = True,
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         turn_level_clip: bool = True,
@@ -116,6 +119,7 @@ class PPO(LLMAlgorithm):
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             hp_config=hp_config,
+            use_memory_efficient_params=use_memory_efficient_params,
             wrap=wrap,
             device=device,
             accelerator=accelerator,
@@ -218,39 +222,7 @@ class PPO(LLMAlgorithm):
     @lr_actor.setter
     def lr_actor(self, value: float) -> None:
         self.lr = value
-
-    @staticmethod
-    def _stitch_hf_completion_after_windowed_generate(
-        completion_id: torch.Tensor,
-        stitch: torch.Tensor,
-        initial_len: int,
-    ) -> torch.Tensor:
-        """Reinsert dropped middle tokens after HF ``generate`` on a windowed prompt.
-
-        ``completion_id`` is ``concat(model_input_ids, new_tokens)``. The full
-        chronological sequence is
-        ``concat(completion_id[:, :initial_len], stitch, completion_id[:, initial_len:])``.
-
-        :param completion_id: Output of ``generate`` on the truncated prompt,
-            shape ``(1, seq_len)``.
-        :type completion_id: torch.Tensor
-        :param stitch: Middle segment removed for context windowing, shape ``(1, K)``.
-        :type stitch: torch.Tensor
-        :param initial_len: ``model_window_initial_len`` (length of the initial
-            user segment within ``model_input_ids``).
-        :type initial_len: int
-        :return: Full prompt plus generation with stitch restored.
-        :rtype: torch.Tensor
-        """
-        stitch = stitch.to(completion_id.device, non_blocking=True)
-        return torch.cat(
-            [
-                completion_id[:, :initial_len],
-                stitch,
-                completion_id[:, initial_len:],
-            ],
-            dim=1,
-        )
+    
 
     def _apply_critic_lr(self) -> None:
         """Set the critic param-group lr to ``self.lr_critic``.
@@ -277,25 +249,8 @@ class PPO(LLMAlgorithm):
         obs: LLMObsType,
         training: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Return generated completion ids and corresponding action masks.
-
-        Each observation dict normally includes ``input_ids`` and ``attention_mask``.
-        Keys ``text`` and ``model_text`` are removed before the forward pass.
-
-        For sliding-window multi-turn prompts (HuggingFace path only), optional
-        keys are consumed: ``model_input_ids``, ``model_attention_mask``,
-        ``stitch_prefix_ids``, and ``model_window_initial_len`` (required when
-        ``stitch_prefix_ids`` is non-empty). vLLM colocate uses the same optional
-        keys via the base implementation.
-
-        :param obs: Batch of prompt dicts.
-        :type obs: LLMObsType
-        :param training: Unused; kept for API compatibility with other agents.
-        :type training: bool
-        :return: Lists of completion tensors and per-token action masks.
-        :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
-        """
-        prompt_batch = [obs] if isinstance(obs, dict) else list(obs)
+    
+        prompt_batch = [obs] if isinstance(obs, dict) else obs
 
         with self.select_adapter("actor"):
             self.actor.eval()
@@ -307,91 +262,45 @@ class PPO(LLMAlgorithm):
                     actor_device = torch.device(self.device)
                 with torch.inference_mode(), self._amp_ctx():
                     completion_ids = []
-                    action_masks = []
-                    for raw in prompt_batch:
-                        if not isinstance(raw, dict):
-                            msg = (
-                                "Each HuggingFace observation must be a dict with "
-                                "input_ids and attention_mask; got "
-                                f"{type(raw).__name__}. For string-observation GEM "
-                                "envs, wrap the env with TokenObservationWrapper."
-                            )
-                            raise TypeError(
-                                msg,
-                            )
-                        prompt = dict(raw)
-                        prompt.pop("text", None)
-                        prompt.pop("model_text", None)
-                        stitch = prompt.pop("stitch_prefix_ids", None)
-                        model_window_initial_len = prompt.pop(
-                            "model_window_initial_len",
-                            None,
-                        )
-                        model_input_ids = prompt.pop("model_input_ids", None)
-                        model_attention_mask = prompt.pop(
-                            "model_attention_mask",
-                            None,
-                        )
-                        if model_input_ids is not None:
-                            prompt["input_ids"] = model_input_ids.to(actor_device)
-                            if model_attention_mask is not None:
-                                prompt["attention_mask"] = model_attention_mask.to(
-                                    actor_device,
-                                )
-                        else:
-                            prompt["input_ids"] = prompt["input_ids"].to(actor_device)
-                            prompt["attention_mask"] = prompt["attention_mask"].to(
-                                actor_device,
-                            )
-                        model_in_len = prompt["input_ids"].shape[1]
+                    completion_masks = []
+
+                    for prompt_dict in prompt_batch:   
+                        prompt = prepare_prompt_hf_generate(prompt_dict, actor_device)
+                        stitch_ids = prompt.pop("stitch_prefix_ids", None)
+                        initial_prompt_len = prompt.pop("initial_prompt_len", None)
                         completion_id = self.actor.generate(
                             **prompt,
                             generation_config=self.generation_config,
                         )
-                        stitch_mid_len = 0
-                        if stitch is not None and stitch.shape[1] > 0:
-                            if model_window_initial_len is None:
-                                msg = (
-                                    "model_window_initial_len is required when "
-                                    "stitch_prefix_ids is non-empty"
-                                )
-                                raise ValueError(
-                                    msg,
-                                )
-                            stitch_mid_len = stitch.shape[1]
-                            completion_id = (
-                                self._stitch_hf_completion_after_windowed_generate(
-                                    completion_id,
-                                    stitch,
-                                    int(model_window_initial_len),
-                                )
-                            )
-                        full_prompt_len = model_in_len + stitch_mid_len
+                        completion_id, full_prompt_len = stitch_completion_after_windowed_hf_generate(
+                            completion_id,
+                            stitch_ids,
+                            initial_prompt_len,
+                        )
                         completion_ids.append(completion_id)
-                        action_mask = torch.zeros_like(
+                        completion_mask = torch.zeros_like(
                             completion_id,
                             dtype=torch.bool,
                             device=completion_id.device,
                         )
-                        action_mask[:, full_prompt_len:] = True
-                        action_mask[completion_id == self.pad_token_id] = False
-                        action_mask = action_mask[:, 1:]
-                        action_masks.append(action_mask)
+                        completion_mask[:, full_prompt_len:] = True
+                        completion_mask[completion_id == self.pad_token_id] = False
+                        completion_mask = completion_mask[:, 1:]
+                        completion_masks.append(completion_mask)
             else:
-                completion_ids, action_masks = self._generate_with_vllm_colocate(
+                completion_ids, completion_masks = self._generate_with_vllm_colocate(
                     prompt_batch,
-                    len(prompt_batch),
+                    1, # This does not support batching at the moment
                     temperature=self.temperature
                     if training
                     else 0.01,  # Almost deterministic for evaluation
                 )
 
-        return completion_ids, action_masks
+        return completion_ids, completion_masks
 
     def learn(
         self,
         experiences: ExperiencesType,
-        tokenizer,
         turn_ids: torch.Tensor | None = None,
     ) -> tuple[float, float, float, float, float]:
         """Update actor and critic adapters using turn-level PPO objectives.
@@ -403,7 +312,7 @@ class PPO(LLMAlgorithm):
             to its turn index (0-indexed). -1 for non-action tokens.
             When None, defaults to all action tokens belonging to turn 0.
         """
-        with self.memory_efficient_params():
+        with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards = stack_and_pad_experiences(
                 *experiences,
                 padding_values=[self.pad_token_id, False, None],
@@ -436,7 +345,7 @@ class PPO(LLMAlgorithm):
             )
             mean_pg_loss, mean_vf_loss, mean_loss, mean_kl, mean_entropy, updates = (
                 0.0,
-                0.0,
+                0.0,    
                 0.0,
                 0.0,
                 0.0,
@@ -803,39 +712,3 @@ class PPO(LLMAlgorithm):
             - (reference_log_probs - log_probs)
             - 1
         )
-
-    def _get_unwrapped_actor(self) -> Any:
-        if self.accelerator is not None:
-            return self.accelerator.unwrap_model(self.actor)
-        return self.actor
-
-    @contextmanager
-    def memory_efficient_params(self) -> None:
-        """Memory efficient params context manager.
-
-        :param agent: Distributed agent
-        :type agent: DistributedLLMAgent
-        :return: None
-        :rtype: None
-        """
-        # FIXME add in zero 3 compatibilitys
-        vllm_cfg = getattr(self, "vllm_config", None)
-        use_vllm = getattr(self, "use_vllm", False)
-        # Only offload params for vLLM colocate mode. If use_vllm is False,
-        # moving params to CPU between updates causes generate() device mismatches.
-        sleep_mode = use_vllm and vllm_cfg is not None and vllm_cfg.sleep_mode
-        if sleep_mode:
-            # Put LLM to sleep
-            self.llm.sleep(level=2)
-            unwrapped_model = (
-                self.accelerator.unwrap_model(self.actor)
-                if self.accelerator is not None
-                else self.actor
-            )
-            move_params_to_gpu(unwrapped_model, self.device)
-        yield
-        if sleep_mode:
-            move_params_to_cpu(unwrapped_model)
-            # Wake up LLM
-            self.llm.wake_up()
-            self._move_model_to_vllm()

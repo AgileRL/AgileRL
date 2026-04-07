@@ -80,6 +80,8 @@ class GRPO(LLMAlgorithm):
     :type lora_config: LoraConfigProtocol, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
     :type cosine_lr_schedule_config: CosineLRScheduleConfig, optional
+    :param use_memory_efficient_params: Use memory efficient params.
+    :type use_memory_efficient_params: bool
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -124,6 +126,7 @@ class GRPO(LLMAlgorithm):
         top_p: float = 0.95,
         top_k: int = 50,
         min_p: float = 0.0,
+        use_memory_efficient_params: bool = True,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         reduce_memory_peak: bool = False,
@@ -160,6 +163,7 @@ class GRPO(LLMAlgorithm):
             seed=seed,
             pad_token_id=pad_token_id,
             pad_token=pad_token,
+            use_memory_efficient_params=use_memory_efficient_params,
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
@@ -308,57 +312,47 @@ class GRPO(LLMAlgorithm):
         :param experiences: Batched completion_ids, action_masks and rewards
         :type experiences: ExperiencesType
         """
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        completion_ids, action_masks, rewards = stack_and_pad_experiences(
-            *experiences,
-            padding_values=[self.pad_token_id, False, None],
-        )
-        advantages = self._calculate_advantage(rewards).to(self.device)
-
-        num_samples = advantages.shape[0]
-        batch_idxs = np.arange(num_samples)
-        mean_loss, mean_kl = 0, 0
-        batch_size = min(num_samples, self.micro_batch_size_per_gpu)
-
-        with torch.no_grad():
-            reference_log_probs = self._get_logprobs(
-                completion_ids,
-                batch_size=batch_size,
-                use_reference=True,
-                eval_mode=True,
+        with self.memory_efficient_params_context():
+            completion_ids, action_masks, rewards = stack_and_pad_experiences(
+                *experiences,
+                padding_values=[self.pad_token_id, False, None],
             )
-            old_log_probs = self._get_logprobs(
-                completion_ids,
-                batch_size=batch_size,
-                use_reference=False,
-                eval_mode=True,
-            )
+            advantages = self._calculate_advantage(rewards).to(self.device)
 
-        for _ in range(self.update_epochs):
-            self.rng.shuffle(batch_idxs)
-            for start in range(0, num_samples, batch_size):
-                minibatch_idxs = batch_idxs[
-                    start : min((start + batch_size), num_samples)
-                ]
-                loss, kl = self._grpo_loss(
-                    batch_size,
-                    minibatch_idxs,
+            num_samples = advantages.shape[0]
+            batch_idxs = np.arange(num_samples)
+            mean_loss, mean_kl = 0, 0
+            batch_size = min(num_samples, self.micro_batch_size_per_gpu)
+
+            with torch.no_grad():
+                reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
                     completion_ids,
-                    action_masks,
-                    advantages,
-                    old_log_probs,
-                    reference_log_probs,
+                    batch_size,
                 )
-                if not loss.isfinite():
-                    msg = f"Loss is not finite: {loss}"
-                    raise ValueError(msg)
-                self._backward_pass(loss)
-                mean_loss += loss.item()
-                mean_kl += kl.item()
-        mean_loss /= len(completion_ids)
-        mean_kl /= len(completion_ids)
+
+            for _ in range(self.update_epochs):
+                self.rng.shuffle(batch_idxs)
+                for start in range(0, num_samples, batch_size):
+                    minibatch_idxs = batch_idxs[
+                        start : min((start + batch_size), num_samples)
+                    ]
+                    loss, kl = self._grpo_loss(
+                        batch_size,
+                        minibatch_idxs,
+                        completion_ids,
+                        action_masks,
+                        advantages,
+                        old_log_probs,
+                        reference_log_probs,
+                    )
+                    if not loss.isfinite():
+                        msg = f"Loss is not finite: {loss}"
+                        raise ValueError(msg)
+                    self._backward_pass(loss)
+                    mean_loss += loss.item()
+                    mean_kl += kl.item()
+            mean_loss /= len(completion_ids)
+            mean_kl /= len(completion_ids)
         return mean_loss, mean_kl
 
     def test(

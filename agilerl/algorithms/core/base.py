@@ -8,7 +8,7 @@ import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from importlib.metadata import version
 from pathlib import Path
@@ -18,7 +18,6 @@ from typing import (
     TypeVar,
     cast,
 )
-
 import dill
 import numpy as np
 import torch
@@ -113,6 +112,9 @@ if HAS_LLM_DEPENDENCIES:
     from agilerl.utils.llm_utils import (
         create_model_from_name_or_path,
         gather_if_zero3,
+        stitch_completion_after_windowed_vllm_generate,
+        move_params_to_gpu,
+        move_params_to_cpu,
     )
 
 __all__ = ["EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
@@ -1959,6 +1961,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         micro_batch_size_per_gpu: int | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         hp_config: HyperparameterConfig | None = None,
+        use_memory_efficient_params: bool = True,
         wrap: bool = True,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
@@ -2078,6 +2081,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             lora_config.exclude_modules = ["lm_head"]
         self.lr = lr
         self.lora_config = lora_config
+        self.memory_efficient_params_context = self._memory_efficient_params if use_memory_efficient_params else nullcontext
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
@@ -2239,89 +2243,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         raise NotImplementedError(
             msg,
         )
-
-    def _select_optim_class(self) -> type[OptimizerType] | type[DummyOptimizer]:
-        """Select the optimizer class based on the accelerator and deepspeed config.
-
-        :return: Optimizer class
-        :rtype: type[torch.optim.Optimizer] | type[DummyOptimizer]
-        """
-        if self.accelerator is None:
-            return AdamW
-        if (
-            self.accelerator.state.deepspeed_plugin is not None
-            and self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-                "optimizer",
-                None,
-            )
-            is not None
-        ):
-            return DummyOptimizer
-        return AdamW
-
-    def _save_distributed_actor(
-        self,
-        path: str,
-        tag: str = "intermediate_checkpoint",
-    ) -> None:
-        """Override the save_checkpoint method to provide guidance on the correct method to use.
-
-        :param path: Output directory to save the checkpoint at
-        :type path: str
-        """
-        if self.accelerator is not None:
-            Path(path).mkdir(parents=True, exist_ok=True)
-            assert self.actor is not None, (
-                "Actor is not defined, please check that the actor is defined."
-            )
-            self.actor.save_checkpoint(path, tag=tag)
-            self.use_adapter("actor")
-        else:
-            warnings.warn(
-                "Distributed actor save not supported for non-distributed training.",
-                stacklevel=2,
-            )
-
-    def _load_distributed_actor(
-        self,
-        path: str,
-        tag: str = "intermediate_checkpoint",
-    ) -> None:
-        """Override the load_checkpoint method to provide guidance on the correct method to use.
-
-        :param path: Output directory to load the checkpoint from
-        :type path: str
-        """
-        if self.accelerator is not None:
-            deepspeed_dirs = sorted(Path(path).glob(tag))
-            try:
-                assert len(deepspeed_dirs) > 0
-                load_path, _ = self.actor.load_checkpoint(
-                    str(path),
-                    tag=tag,
-                    load_module_strict=False,
-                    load_optimizer_states=True,
-                    load_lr_scheduler_states=True,
-                )
-                if load_path is None:
-                    msg = (
-                        "Load path is returned as None from deepspeed load_checkpoint."
-                    )
-                    raise ValueError(
-                        msg,
-                    )
-                self.use_adapter("actor")
-
-            except Exception as e:
-                msg = f"Deepspeed failed to resume from checkpoint {path}"
-                raise ValueError(
-                    msg,
-                ) from e
-        else:
-            warnings.warn(
-                "Distributed actor load not supported for non-distributed training.",
-                stacklevel=2,
-            )
 
     def wrap_models(self) -> None:
         """Wrap the models in the accelerator, DeepSpeed objects must be wrapped at the same time,
@@ -2627,6 +2548,130 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.wrap_models()
             self.reference_update_tracker += 1
 
+    def use_adapter(self, adapter_name: str) -> None:
+        """Switch the active PEFT adapter, handling all side-effects.
+
+        For "reference": switches adapter and freezes reference params (never trained).
+        For all others: switches adapter and restores requires_grad=True on all
+        training adapter LoRA params so that DeepSpeed ZeRO-2 gradient bucket hooks
+        keep firing correctly.
+
+        :param adapter_name: Name of the adapter to activate ("actor", "critic", "reference").
+        :type adapter_name: str
+        """
+        peft_model = self._peft_model
+        if adapter_name == "reference":
+            if self.use_separate_reference_adapter:
+                peft_model.set_adapter("reference")
+                for name, param in self.actor.named_parameters():
+                    if param is not None and "reference" in name:
+                        param.requires_grad = False
+            else:
+                peft_model.base_model.disable_adapter_layers()
+        else:
+            if self.use_separate_reference_adapter:
+                peft_model.set_adapter(adapter_name)
+            else:
+                peft_model.base_model.enable_adapter_layers()
+            self._restore_adapter_trainability(["actor", "critic"])
+
+    @contextmanager
+    def select_adapter(self, adapter_name: str) -> None:
+        """Temporarily switch adapter; restores the actor adapter on exit.
+
+        :param adapter_name: Name of the adapter to activate ("actor", "critic", "reference").
+        :type adapter_name: str
+        """
+        self.use_adapter(adapter_name)
+        try:
+            yield
+        finally:
+            self.use_adapter("actor")
+
+    
+    def _select_optim_class(self) -> type[OptimizerType] | type[DummyOptimizer]:
+        """Select the optimizer class based on the accelerator and deepspeed config.
+
+        :return: Optimizer class
+        :rtype: type[torch.optim.Optimizer] | type[DummyOptimizer]
+        """
+        if self.accelerator is None:
+            return AdamW
+        if (
+            self.accelerator.state.deepspeed_plugin is not None
+            and self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
+                "optimizer",
+                None,
+            )
+            is not None
+        ):
+            return DummyOptimizer
+        return AdamW
+
+    def _save_distributed_actor(
+        self,
+        path: str,
+        tag: str = "intermediate_checkpoint",
+    ) -> None:
+        """Override the save_checkpoint method to provide guidance on the correct method to use.
+
+        :param path: Output directory to save the checkpoint at
+        :type path: str
+        """
+        if self.accelerator is not None:
+            Path(path).mkdir(parents=True, exist_ok=True)
+            assert self.actor is not None, (
+                "Actor is not defined, please check that the actor is defined."
+            )
+            self.actor.save_checkpoint(path, tag=tag)
+            self.use_adapter("actor")
+        else:
+            warnings.warn(
+                "Distributed actor save not supported for non-distributed training.",
+                stacklevel=2,
+            )
+
+    def _load_distributed_actor(
+        self,
+        path: str,
+        tag: str = "intermediate_checkpoint",
+    ) -> None:
+        """Override the load_checkpoint method to provide guidance on the correct method to use.
+
+        :param path: Output directory to load the checkpoint from
+        :type path: str
+        """
+        if self.accelerator is not None:
+            deepspeed_dirs = sorted(Path(path).glob(tag))
+            try:
+                assert len(deepspeed_dirs) > 0
+                load_path, _ = self.actor.load_checkpoint(
+                    str(path),
+                    tag=tag,
+                    load_module_strict=False,
+                    load_optimizer_states=True,
+                    load_lr_scheduler_states=True,
+                )
+                if load_path is None:
+                    msg = (
+                        "Load path is returned as None from deepspeed load_checkpoint."
+                    )
+                    raise ValueError(
+                        msg,
+                    )
+                self.use_adapter("actor")
+
+            except Exception as e:
+                msg = f"Deepspeed failed to resume from checkpoint {path}"
+                raise ValueError(
+                    msg,
+                ) from e
+        else:
+            warnings.warn(
+                "Distributed actor load not supported for non-distributed training.",
+                stacklevel=2,
+            )
+
     def _initialize_actors(
         self,
         base_model: PreTrainedModelProtocol | None,
@@ -2671,49 +2716,25 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     base_model.pretrained_model.merge_and_unload()
                 )
 
-        if add_adapters and self.use_value_head:
-            # Apply PEFT to the inner pretrained model so the value-head
-            # wrapper (AutoModelForCausalLMWithValueHead) stays on top
-            base_model.pretrained_model = get_peft_model(
-                base_model.pretrained_model,
-                self.lora_config,
-                adapter_name="actor",
-            )
-            base_model.is_peft_model = True
-            self.actor = base_model
-
-            peft_model = self.actor.pretrained_model
+        if add_adapters:
+            peft_target = base_model.pretrained_model if self.use_value_head else base_model
+            peft_target = get_peft_model(peft_target, self.lora_config, adapter_name="actor")
+            
             if self.use_separate_reference_adapter:
-                peft_model.add_adapter(
-                    adapter_name="reference",
-                    peft_config=self.lora_config,  # type: ignore[arg-type]
-                )
-
-            import dataclasses
-
-            critic_config = dataclasses.replace(self.lora_config)
-            peft_model.add_adapter(
-                adapter_name="critic",
-                peft_config=critic_config,  # type: ignore[arg-type]
-            )
-        elif add_adapters:
-            self.actor: PeftModelProtocol = get_peft_model(
-                base_model, self.lora_config, adapter_name="actor"
-            )
-            if self.use_separate_reference_adapter:
-                self.actor.add_adapter(
-                    adapter_name="reference",
-                    peft_config=self.lora_config,  # type: ignore[arg-type]
-                )
+                peft_target.add_adapter("reference", peft_config=self.lora_config)
+            
+            if self.use_value_head:
+                peft_target.add_adapter("critic", peft_config=self.lora_config)
+                base_model.pretrained_model = peft_target
+                base_model.is_peft_model = True
+                self.actor = base_model
+            else:
+                self.actor = peft_target
         else:
             self.actor = base_model
 
         self.use_adapter("actor")
         patch_lora_for_fused_forward(self.actor)
-
-        for name, param in self.actor.named_parameters():
-            if "actor" in name and "lora" in name:
-                assert param.requires_grad is True
 
         if self.torch_compiler:
             if self._uses_deepspeed:
@@ -2759,6 +2780,38 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
 
     @contextmanager
+    def _memory_efficient_params(self) -> None:
+        """Memory efficient params context manager.
+
+        :param agent: Distributed agent
+        :type agent: DistributedLLMAgent
+        :return: None
+        :rtype: None
+        """
+        # FIXME add in zero 3 compatibilitys
+        vllm_cfg = getattr(self, "vllm_config", None)
+        use_vllm = getattr(self, "use_vllm", False)
+        # Only offload params for vLLM colocate mode. If use_vllm is False,
+        # moving params to CPU between updates causes generate() device mismatches.
+        sleep_mode = use_vllm and vllm_cfg is not None and vllm_cfg.sleep_mode
+        if sleep_mode:
+            # Put LLM to sleep
+            self.llm.sleep(level=2)
+            unwrapped_model = (
+                self.accelerator.unwrap_model(self.actor)
+                if self.accelerator is not None
+                else self.actor
+            )
+            move_params_to_gpu(unwrapped_model, self.device)
+        yield
+        if sleep_mode:
+            move_params_to_cpu(unwrapped_model)
+            # Wake up LLM
+            self.llm.wake_up()
+            self._move_model_to_vllm()
+
+
+    @contextmanager
     def _amp_ctx(self):
         """Yield a ``torch.amp.autocast`` context when running without an accelerator.
 
@@ -2781,7 +2834,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         fused_mask: torch.Tensor,
         routing: list[str],
         batch_size: int | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Run the model on a fused batch with per-sample adapter routing.
 
         When *batch_size* is ``None`` the full batch is processed in a single
@@ -2789,7 +2842,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         gradient-checkpoint recomputation sees the same routing.  When set,
         the batch is iterated in micro-batches (safe under ``no_grad``).
 
-        :return: ``(log_probs, values)`` each of shape ``(N*B, seq_len - 1)``.
+        :return: ``(log_probs, values)`` where *log_probs* has shape
+            ``(fused_ids.shape[0], seq_len - 1)`` and *values* matches that
+            batch dimension when ``use_value_head`` is set, else ``None``.
         """
         unwrapped = self._get_unwrapped_actor()
         total = fused_ids.shape[0]
@@ -2819,8 +2874,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
             with self._amp_ctx():
                 output = self.actor.forward(**model_kwargs)
-            logits = output[0] if isinstance(output, tuple) else output.logits
-            value = output[-1] if isinstance(output, tuple) else output[2]
+
+            if isinstance(output, tuple):
+                # Handle case where value head is used
+                logits = output[0]
+                value = output[2]
+            else:
+                logits = output.logits
+                value = None
+
             del output
             if self.temperature != 1.0:
                 logits = logits.div_(self.temperature)
@@ -2831,27 +2893,30 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     fused_ids[start:end, 1:],
                 )
             )
-            all_values.append(value[:, :-1])
+            if self.use_value_head and value is not None:
+                all_values.append(value[:, :-1])
 
-        if len(chunks) == 1:
-            return all_logprobs[0], all_values[0]
-        return torch.cat(all_logprobs, dim=0), torch.cat(all_values, dim=0)
+        if self.use_value_head:
+            values = torch.cat(all_values, dim=0) if len(chunks) > 1 else all_values[0]
+        else:
+            values = None
+        logprobs = torch.cat(all_logprobs, dim=0) if len(chunks) > 1 else all_logprobs[0]
+        return logprobs, values
 
     def _fused_forward(
         self,
         ids: torch.Tensor,
         batch_size: int,
         attention_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Single forward pass producing both actor log-probs and critic values.
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Actor log-probs, and optionally critic values, in one forward.
 
-        Concatenates the input twice (actor slice then critic slice) and uses
-        PEFT's ``_mixed_batch_forward`` to route each slice through its own
-        LoRA adapter.  The base model processes the doubled batch once,
-        eliminating the second forward pass and all adapter switching.
+        When ``use_value_head`` is set, the input is doubled (actor slice then
+        critic slice) and routed so the base model runs once. Otherwise only
+        the actor slice is run.
 
-        The full doubled batch is always processed in one ``model.forward``
-        call to preserve gradient-checkpoint correctness.
+        The doubled batch (value-head path) is always processed in one
+        ``model.forward`` call to preserve gradient-checkpoint correctness.
 
         .. note::
 
@@ -2867,28 +2932,36 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param ids: Token IDs ``(B, seq_len)``.
         :param batch_size: Unused (kept for API symmetry).
         :param attention_mask: Optional attention mask matching *ids*.
-        :return: ``(actor_log_probs, critic_values)`` each ``(B, seq_len-1)``.
+        :return: ``(actor_log_probs, critic_values)`` with shapes ``(B, seq_len-1)``;
+            *critic_values* is ``None`` when no value head is used.
         """
         B = ids.shape[0]
         if attention_mask is None:
             attention_mask = ids != self.pad_token_id
-        fused_ids = ids.repeat(2, 1)
-        fused_mask = attention_mask.repeat(2, 1)
-        routing = ["actor"] * B + ["critic"] * B
+        if self.use_value_head:
+            fused_ids = ids.repeat(2, 1)
+            fused_mask = attention_mask.repeat(2, 1)
+            routing = ["actor"] * B + ["critic"] * B
+        else:
+            fused_ids = ids
+            fused_mask = attention_mask
+            routing = ["actor"] * B
 
         log_probs, values = self._fused_model_pass(
             fused_ids,
             fused_mask,
             routing,
         )
-        return log_probs[:B], values[B:]
+        if self.use_value_head:
+            return log_probs[:B], values[B:]
+        return log_probs, None
 
     def _fused_forward_no_grad(
         self,
         ids: torch.Tensor,
         batch_size: int,
         attention_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute reference log-probs, actor log-probs, and critic values in
         one forward pass (under ``torch.no_grad``).
 
@@ -2914,9 +2987,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         with torch.inference_mode():
             if self.use_separate_reference_adapter:
-                adapters = ["reference", "actor", "critic"]
+                adapters = ["reference", "actor"]
             else:
-                adapters = ["actor", "critic"]
+                adapters = ["actor"]
+
+            if self.use_value_head:
+                adapters.append("critic")
 
             N = len(adapters)
             fused_ids = ids.repeat(N, 1)
@@ -2932,11 +3008,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 batch_size=batch_size,
             )
             clear_fused_adapter_routing(self._get_unwrapped_actor())
-
+            critic_values = None
             if self.use_separate_reference_adapter:
                 ref_logprobs = log_probs[:B]
                 actor_logprobs = log_probs[B : 2 * B]
-                critic_values = values[2 * B :]
+                if self.use_value_head:
+                    critic_values = values[2 * B :]
             else:
                 ref_logprobs = self._get_logprobs(
                     ids,
@@ -2946,7 +3023,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     attention_mask=attention_mask,
                 )
                 actor_logprobs = log_probs[:B]
-                critic_values = values[B:]
+                if self.use_value_head:
+                    critic_values = values[B:]
 
         return ref_logprobs, actor_logprobs, critic_values
 
@@ -3055,45 +3133,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             return self.actor.pretrained_model
         return self.actor
 
-    def use_adapter(self, adapter_name: str) -> None:
-        """Switch the active PEFT adapter, handling all side-effects.
-
-        For "reference": switches adapter and freezes reference params (never trained).
-        For all others: switches adapter and restores requires_grad=True on all
-        training adapter LoRA params so that DeepSpeed ZeRO-2 gradient bucket hooks
-        keep firing correctly.
-
-        :param adapter_name: Name of the adapter to activate ("actor", "critic", "reference").
-        :type adapter_name: str
-        """
-        peft_model = self._peft_model
-        if adapter_name == "reference":
-            if self.use_separate_reference_adapter:
-                peft_model.set_adapter("reference")
-                for name, param in self.actor.named_parameters():
-                    if param is not None and "reference" in name:
-                        param.requires_grad = False
-            else:
-                peft_model.base_model.disable_adapter_layers()
-        else:
-            if self.use_separate_reference_adapter:
-                peft_model.set_adapter(adapter_name)
-            else:
-                peft_model.base_model.enable_adapter_layers()
-            self._restore_adapter_trainability(["actor", "critic"])
-
-    @contextmanager
-    def select_adapter(self, adapter_name: str) -> None:
-        """Temporarily switch adapter; restores the actor adapter on exit.
-
-        :param adapter_name: Name of the adapter to activate ("actor", "critic", "reference").
-        :type adapter_name: str
-        """
-        self.use_adapter(adapter_name)
-        try:
-            yield
-        finally:
-            self.use_adapter("actor")
 
     def _restore_adapter_trainability(self, adapter_names: list[str]) -> None:
         """Restore requires_grad=True for all trainable parameters of specified adapters.
@@ -3154,61 +3193,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
                 llm_model.load_weights([(weight_name, param.data)])
             peft_ref.unmerge_adapter()
-
         self.llm.reset_prefix_cache()
 
-    def _stitch_sliding_window_completions(
-        self,
-        completion_ids: list[torch.Tensor],
-        stitch_prefixes: list[torch.Tensor],
-        group_prompts: list[dict[str, Any]],
-        group_size: int,
-        prompts: list[dict[str, Any]],
-    ) -> list[torch.Tensor]:
-        """Reinsert dropped middle segments into ``model_prompt | generation`` tensors.
-
-        For each logical prompt ``i``, ``block`` is
-        ``concat(model_input_ids, new_tokens)`` (batched over ``group_size``).
-        When ``stitch_prefix_ids`` is non-empty, the full chronological sequence is
-        ``concat(block[:, :I], stitch, block[:, I:], dim=1)`` with
-        ``I = model_window_initial_len`` from the corresponding prompt dict.
-
-        :param completion_ids: One tensor per logical prompt: prompt+gen per row.
-        :type completion_ids: list[torch.Tensor]
-        :param stitch_prefixes: Parallel to expanded ``group_prompts``; empty
-            tensors when no windowing for that slot.
-        :type stitch_prefixes: list[torch.Tensor]
-        :param group_prompts: ``prompts`` expanded so each original prompt repeats
-            ``group_size`` times (same order as vLLM batch).
-        :type group_prompts: list[dict[str, Any]]
-        :param group_size: Number of repeated entries per logical prompt.
-        :type group_size: int
-        :param prompts: Original batch of observation dicts (length ``N``).
-        :type prompts: list[dict[str, Any]]
-        :return: Same length as ``completion_ids``, with middle stitch applied
-            where ``stitch_prefixes`` is non-empty.
-        :rtype: list[torch.Tensor]
-        """
-        stitched: list[torch.Tensor] = []
-        for i, _ in enumerate(prompts):
-            block = completion_ids[i]
-            st = stitch_prefixes[group_size * i]
-            if st.shape[1] == 0:
-                stitched.append(block)
-                continue
-            il_t = group_prompts[group_size * i].get("model_window_initial_len")
-            if il_t is None:
-                msg = "model_window_initial_len required when stitch_prefix_ids is non-empty"
-                raise ValueError(
-                    msg,
-                )
-            il = int(il_t)
-            g = block.shape[0]
-            st_b = st.expand(g, -1)
-            stitched.append(
-                torch.cat([block[:, :il], st_b, block[:, il:]], dim=1),
-            )
-        return stitched
 
     def _generate_with_vllm_colocate(
         self, prompts: list[dict[str, Any]], group_size: int, temperature: float | None
@@ -3219,11 +3205,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         a flat list of length ``len(prompts) * group_size`` (e.g. GRPO groups).
 
         **Prompt dict fields:** ``input_ids`` and usually ``text`` for decoding.
-        For sliding-window multi-turn prompts, optionally set ``model_input_ids``,
-        ``model_text`` (decoded string passed to vLLM), ``stitch_prefix_ids``, and
-        ``model_window_initial_len`` (required when ``stitch_prefix_ids`` is
+        For sliding-window multi-turn prompts, optionally set ``trajectory_input_ids``,
+        ``trajectory_text`` (decoded string passed to vLLM), ``stitch_prefix_ids``, and
+        ``initial_prompt_len`` (required when ``stitch_prefix_ids`` is
         non-empty). Action masks use the full logical prompt length from
-        ``input_ids``, not only ``model_input_ids``.
+        ``input_ids``, not only ``trajectory_input_ids``.
 
         :param prompts: Length-``N`` list of observation dicts for this rank.
         :type prompts: list[dict[str, Any]]
@@ -3232,17 +3218,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Per-prompt completion token tensors and matching action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
-        group_prompts = [prompt for prompt in prompts for _ in range(group_size)]
-
-        def _model_input_ids(prompt: dict[str, Any]) -> torch.Tensor:
+        def _trajectory_input_ids(prompt: dict[str, Any]) -> torch.Tensor:
             return cast(
                 "torch.Tensor",
-                prompt.get("model_input_ids", prompt["input_ids"]),
+                prompt.get("trajectory_input_ids", prompt["input_ids"]),
             )
 
         def _prompt_text_for_vllm(prompt: dict[str, Any]) -> str:
-            if "model_text" in prompt:
-                return str(prompt["model_text"])
+            if "trajectory_text" in prompt:
+                return str(prompt["trajectory_text"])
             return str(prompt.get("text", ""))
 
         def _stitch_prefix(prompt: dict[str, Any], ref: torch.Tensor) -> torch.Tensor:
@@ -3251,7 +3235,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 return ref.new_zeros((ref.shape[0], 0))
             return cast("torch.Tensor", st)
 
-        prompts_ids = [_model_input_ids(p) for p in group_prompts]
+        def _vllm_max_new_tokens(model_prompt_len: int) -> int:
+            room = self.max_model_len - model_prompt_len
+            if room <= 0:
+                raise ValueError(f"Model prompt length ({model_prompt_len}) is greater than the model length ({self.max_model_len})")
+            max_out = min(max_token_cap, room)
+            if self.min_output_tokens is not None:
+                max_out = max(max_out, min(self.min_output_tokens, room))
+            return min(max_out, room)
+
+        group_prompts = [prompt for prompt in prompts for _ in range(group_size)]
+        prompts_ids = [_trajectory_input_ids(p) for p in group_prompts]
         stitch_prefixes = [
             _stitch_prefix(p, prompts_ids[i]) for i, p in enumerate(group_prompts)
         ]
@@ -3260,23 +3254,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             re.sub(rf"^({re.escape(str(self.pad_token))})+", "", text)
             for text in prompts_text
         ]
-
         max_token_cap = (
             self.max_output_tokens
             if self.max_output_tokens is not None
             else self.max_model_len
         )
-
-        def _vllm_max_new_tokens(model_prompt_len: int) -> int:
-            room = self.max_model_len - model_prompt_len
-            if room <= 0:
-                return 0
-            max_out = min(max_token_cap, room)
-            max_out = max(max_out, 1)
-            if self.min_output_tokens is not None:
-                max_out = max(max_out, min(self.min_output_tokens, room))
-            return min(max_out, room)
-
         max_output_tokens = [
             _vllm_max_new_tokens(int(prompt_id.shape[1])) for prompt_id in prompts_ids
         ]
@@ -3390,7 +3372,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         ]
 
         if any(int(sp.shape[1]) > 0 for sp in stitch_prefixes):
-            completion_ids = self._stitch_sliding_window_completions(
+            completion_ids = stitch_completion_after_windowed_vllm_generate(
                 completion_ids,
                 stitch_prefixes,
                 group_prompts,
@@ -3402,16 +3384,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             int(cast("torch.Tensor", prompts[i]["input_ids"]).shape[1])
             for i in range(len(prompts))
         ]
-        action_masks = []
+        completion_masks = []
 
         for i, completion_id in enumerate(completion_ids):
-            action_mask = torch.zeros_like(completion_id, device=self.device)
-            action_mask[:, num_input_tokens[i] :] = True
-            action_mask[completion_id == self.pad_token_id] = False
-            action_mask = action_mask[:, 1:]
-            action_masks.append(action_mask)
+            completion_mask = torch.zeros_like(completion_id, device=self.device)
+            completion_mask[:, num_input_tokens[i] :] = True
+            completion_mask[completion_id == self.pad_token_id] = False
+            completion_mask = completion_mask[:, 1:]
+            completion_masks.append(completion_mask)
 
-        return completion_ids, action_masks
+        return completion_ids, completion_masks
 
     @staticmethod
     def _memory_efficient_logits(
@@ -3764,3 +3746,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         Set use_liger_loss=False.
         """
         raise AttributeError(err_msg)
+
+
+    def _get_unwrapped_actor(self) -> Any:
+        if self.accelerator is not None:
+            return self.accelerator.unwrap_model(self.actor)
+        return self.actor

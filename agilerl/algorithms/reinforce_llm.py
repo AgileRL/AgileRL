@@ -26,6 +26,8 @@ from agilerl.utils.llm_utils import (
     move_params_to_cpu,
     move_params_to_gpu,
     pool_by_turns,
+    prepare_prompt_hf_generate,
+    stitch_completion_after_windowed_hf_generate
 )
 
 if HAS_LLM_DEPENDENCIES:
@@ -96,6 +98,8 @@ class REINFORCE(LLMAlgorithm):
     :type min_output_tokens: int | None
     :param max_model_len: Maximum context window length.
     :type max_model_len: int | None
+    :param use_memory_efficient_params: Use memory efficient params.
+    :type use_memory_efficient_params: bool
     :param lora_config: LoRA adapter configuration.
     :type lora_config: LoraConfigProtocol | None
     :param cosine_lr_schedule_config: Cosine LR schedule configuration.
@@ -141,6 +145,7 @@ class REINFORCE(LLMAlgorithm):
         top_p: float = 1.0,
         top_k: int = 50,
         min_p: float = 0.0,
+        use_memory_efficient_params: bool = True,
         use_separate_reference_adapter: bool = True,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
@@ -179,6 +184,7 @@ class REINFORCE(LLMAlgorithm):
             pad_token=pad_token,
             use_value_head=False,
             use_liger_loss=False,
+            use_memory_efficient_params=use_memory_efficient_params,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
@@ -266,13 +272,14 @@ class REINFORCE(LLMAlgorithm):
             self.llm.wake_up()
             self._move_model_to_vllm()
 
+    
     def get_action(
         self,
         obs: LLMObsType,
         training: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Return generated completion ids and corresponding action masks."""
-        prompt_batch = [obs] if isinstance(obs, dict) else list(obs)
+    
+        prompt_batch = [obs] if isinstance(obs, dict) else obs
 
         with self.select_adapter("actor"):
             self.actor.eval()
@@ -284,75 +291,45 @@ class REINFORCE(LLMAlgorithm):
                     actor_device = torch.device(self.device)
                 with torch.inference_mode(), self._amp_ctx():
                     completion_ids = []
-                    action_masks = []
-                    for raw in prompt_batch:
-                        if not isinstance(raw, dict):
-                            msg = (
-                                "Each HuggingFace observation must be a dict with "
-                                "input_ids and attention_mask; got "
-                                f"{type(raw).__name__}. For string-observation GEM "
-                                "envs, wrap the env with TokenObservationWrapper."
-                            )
-                            raise TypeError(
-                                msg,
-                            )
-                        prompt = dict(raw)
-                        prompt.pop("text", None)
-                        prompt.pop("model_text", None)
-                        stitch = prompt.pop("stitch_prefix_ids", None)
-                        if stitch is not None and stitch.shape[1] > 0:
-                            msg = (
-                                "LLMReinforce HuggingFace generation does not support "
-                                "sliding-window stitch_prefix_ids; use LLMPPO, vLLM, "
-                                "or disable sliding-window fields on observations."
-                            )
-                            raise ValueError(
-                                msg,
-                            )
-                        model_input_ids = prompt.pop("model_input_ids", None)
-                        model_attention_mask = prompt.pop(
-                            "model_attention_mask",
-                            None,
-                        )
-                        prompt.pop("model_window_initial_len", None)
-                        if model_input_ids is not None:
-                            prompt["input_ids"] = model_input_ids.to(actor_device)
-                            if model_attention_mask is not None:
-                                prompt["attention_mask"] = model_attention_mask.to(
-                                    actor_device,
-                                )
-                        else:
-                            prompt["input_ids"] = prompt["input_ids"].to(actor_device)
-                            prompt["attention_mask"] = prompt["attention_mask"].to(
-                                actor_device,
-                            )
-                        prompt_len = prompt["input_ids"].shape[1]
+                    completion_masks = []
+
+                    for prompt_dict in prompt_batch:   
+                        prompt = prepare_prompt_hf_generate(prompt_dict, actor_device)
+                        stitch_ids = prompt.pop("stitch_prefix_ids", None)
+                        initial_prompt_len = prompt.pop("initial_prompt_len", None)
                         completion_id = self.actor.generate(
                             **prompt,
                             generation_config=self.generation_config,
                         )
+                        completion_id, full_prompt_len = stitch_completion_after_windowed_hf_generate(
+                            completion_id,
+                            stitch_ids,
+                            initial_prompt_len,
+                        )
                         completion_ids.append(completion_id)
-                        action_mask = torch.zeros_like(
+                        completion_mask = torch.zeros_like(
                             completion_id,
                             dtype=torch.bool,
                             device=completion_id.device,
                         )
-                        action_mask[:, prompt_len:] = True
-                        action_mask[completion_id == self.pad_token_id] = False
-                        action_mask = action_mask[:, 1:]
-                        action_masks.append(action_mask)
+                        completion_mask[:, full_prompt_len:] = True
+                        completion_mask[completion_id == self.pad_token_id] = False
+                        completion_mask = completion_mask[:, 1:]
+                        completion_masks.append(completion_mask)
             else:
-                completion_ids, action_masks = self._generate_with_vllm_colocate(
+                completion_ids, completion_masks = self._generate_with_vllm_colocate(
                     prompt_batch,
-                    1,
+                    1, # This does not support batching at the moment
+                    temperature=self.temperature
+                    if training
+                    else 0.01,  # Almost deterministic for evaluation
                 )
 
-        return completion_ids, action_masks
+        return completion_ids, completion_masks
 
     def learn(
         self,
         experiences: ExperiencesType,
-        tokenizer,
         turn_ids: torch.Tensor | None = None,
     ) -> tuple[float, float, float, float, float]:
         """Update actor using REINFORCE with Return Batch Normalization.
@@ -366,7 +343,7 @@ class REINFORCE(LLMAlgorithm):
             When None, defaults to all action tokens belonging to turn 0.
         :return: (loss, kl, pg_loss, 0.0, entropy) — critic_loss is always 0.
         """
-        with self.memory_efficient_params():
+        with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards = stack_and_pad_experiences(
                 *experiences,
                 padding_values=[self.pad_token_id, False, None],
@@ -406,17 +383,9 @@ class REINFORCE(LLMAlgorithm):
             )
 
             with torch.inference_mode():
-                reference_log_probs = self._get_logprobs(
+                reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
                     completion_ids,
-                    batch_size=batch_size,
-                    use_reference=True,
-                    eval_mode=True,
-                )
-                old_log_probs = self._get_logprobs(
-                    completion_ids,
-                    batch_size=batch_size,
-                    use_reference=False,
-                    eval_mode=True,
+                    batch_size,
                 )
 
                 token_rewards = self._compute_token_rewards(
@@ -622,23 +591,3 @@ class REINFORCE(LLMAlgorithm):
         if self.accelerator is not None:
             return self.accelerator.unwrap_model(self.actor)
         return self.actor
-
-    @contextmanager
-    def memory_efficient_params(self) -> None:
-        """Memory efficient params context manager for vLLM colocate mode."""
-        vllm_cfg = getattr(self, "vllm_config", None)
-        use_vllm = getattr(self, "use_vllm", False)
-        sleep_mode = use_vllm and vllm_cfg is not None and vllm_cfg.sleep_mode
-        if sleep_mode:
-            self.llm.sleep(level=2)
-            unwrapped_model = (
-                self.accelerator.unwrap_model(self.actor)
-                if self.accelerator is not None
-                else self.actor
-            )
-            move_params_to_gpu(unwrapped_model, self.device)
-        yield
-        if sleep_mode:
-            move_params_to_cpu(unwrapped_model)
-            self.llm.wake_up()
-            self._move_model_to_vllm()

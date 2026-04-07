@@ -12,16 +12,29 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: LLMReinforce
-    BATCH_SIZE: 8
+    BATCH_SIZE: 16
     BETA: 0.01                # KL penalty — keeps policy close to reference
     LR: 0.000005
     CLIP_COEF: 0.2            # PPO-style clipping for multi-epoch stability
     MAX_GRAD_NORM: 1.0
     UPDATE_EPOCHS: 2          # Proximal updates for data reuse (GEM paper uses 2)
     TEMPERATURE: 0.7          # Lower than 1.0 for more focused generation
-    MAX_MODEL_LEN: 4096
+    MAX_MODEL_LEN: 1024
     TOURN_SIZE: 2
     GAMMA: 0.9                # Discount factor — key advantage over GRPO; <1 encourages efficiency
     ELITISM: true
-    POP_SIZE: 4
+    POP_SIZE: 1
     EVAL_LOOP: 1
+    USE_VLLM: true
+    MAX_MODEL_LEN: 1024
+    LORA_R: 16
+    LORA_ALPHA: 64
+    LORA_DROPOUT: 0.05
+    TARGET_MODULES:
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+        - up_proj
+        - down_proj
+        - gate_proj

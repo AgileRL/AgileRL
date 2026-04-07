@@ -121,6 +121,10 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
     def generation_config(self, value) -> None:
         self.pretrained_model.generation_config = value
 
+    @property
+    def device(self) -> torch.device:
+        return self.pretrained_model.device
+
     def forward(
         self,
         input_ids: torch.Tensor | None = None,

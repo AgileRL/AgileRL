@@ -324,7 +324,6 @@ class ReasoningGym(HuggingFaceGym):
         conversation_template: list[dict[str, str]],
         data_batch_size_per_gpu: int = 8,
         accelerator: Accelerator | None = None,
-        return_raw_completions: bool = False,
         max_context_length: int | None = None,
         seed: int = 42,
     ) -> None:
@@ -347,7 +346,6 @@ class ReasoningGym(HuggingFaceGym):
             seed=seed,
         )
         self.reward_fn = reward_fn
-        self.return_raw_completions = return_raw_completions
 
     def step(
         self,
@@ -441,8 +439,6 @@ class ReasoningGym(HuggingFaceGym):
                             skip_special_tokens=False,  # Needs to be False here as we need to provide context about user roles to the model
                             clean_up_tokenization_spaces=False,
                         )[0]
-                        if self.return_raw_completions
-                        else None
                     ),
                 }
                 for returned_prompt in batch["tokenized_prompts"]
@@ -948,8 +944,9 @@ def move_params_to_gpu(unwrapped_model: torch.nn.Module, device: torch.device) -
     :return: None
     :rtype: None
     """
-    unwrapped_model.to(device, non_blocking=True)
-    torch.cuda.synchronize()
+    if unwrapped_model.device != device:
+        unwrapped_model.to(device, non_blocking=True)
+        torch.cuda.synchronize()
 
 
 def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> None:
@@ -960,6 +957,130 @@ def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> None:
     :return: None
     :rtype: None
     """
-    unwrapped_model.to("cpu", non_blocking=True)
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
+    if unwrapped_model.device != "cpu":
+        unwrapped_model.to("cpu", non_blocking=True)
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+
+def stitch_completion_after_windowed_hf_generate(
+        completion_id: torch.Tensor,
+        stitch: torch.Tensor,
+        initial_len: int,
+    ) -> tuple[torch.Tensor, int]:
+        """Reinsert dropped middle tokens after HF ``generate`` on a windowed prompt.
+
+        ``completion_id`` is ``concat(model_input_ids, new_tokens)``. The full
+        chronological sequence is
+        ``concat(completion_id[:, :initial_len], stitch, completion_id[:, initial_len:])``.
+
+        :param completion_id: Output of ``generate`` on the truncated prompt,
+            shape ``(1, seq_len)``.
+        :type completion_id: torch.Tensor
+        :param stitch: Middle segment removed for context windowing, shape ``(1, K)``.
+        :type stitch: torch.Tensor
+        :param initial_len: ``model_window_initial_len`` (length of the initial
+            user segment within ``model_input_ids``).
+        :type initial_len: int
+        :return: Full prompt plus generation with stitch restored.
+        :rtype: torch.Tensor
+        """
+        stitch = stitch.to(completion_id.device, non_blocking=True)
+        stitch_len = stitch.shape[1] if stitch is not None else 0
+        full_prompt_len = initial_len + stitch_len
+        return (torch.cat(
+            [
+                completion_id[:, :initial_len],
+                stitch,
+                completion_id[:, initial_len:],
+            ],
+            dim=1,
+        ), full_prompt_len)
+
+
+def stitch_completion_after_windowed_vllm_generate(
+        completion_ids: list[torch.Tensor],
+        stitch_prefixes: list[torch.Tensor],
+        group_prompts: list[dict[str, Any]],
+        group_size: int,
+        prompts: list[dict[str, Any]],
+    ) -> list[torch.Tensor]:
+        """Reinsert dropped middle segments into ``model_prompt | generation`` tensors.
+
+        For each logical prompt ``i``, ``block`` is
+        ``concat(trajectory_input_ids, new_tokens)`` (batched over ``group_size``).
+        When ``stitch_prefix_ids`` is non-empty, the full chronological sequence is
+        ``concat(block[:, :I], stitch, block[:, I:], dim=1)`` with
+        ``I = initial_prompt_len`` from the corresponding prompt dict.
+
+        :param completion_ids: One tensor per logical prompt: prompt+gen per row.
+        :type completion_ids: list[torch.Tensor]
+        :param stitch_prefixes: Parallel to expanded ``group_prompts``; empty
+            tensors when no windowing for that slot.
+        :type stitch_prefixes: list[torch.Tensor]
+        :param group_prompts: ``prompts`` expanded so each original prompt repeats
+            ``group_size`` times (same order as vLLM batch).
+        :type group_prompts: list[dict[str, Any]]
+        :param group_size: Number of repeated entries per logical prompt.
+        :type group_size: int
+        :param prompts: Original batch of observation dicts (length ``N``).
+        :type prompts: list[dict[str, Any]]
+        :return: Same length as ``completion_ids``, with middle stitch applied
+            where ``stitch_prefixes`` is non-empty.
+        :rtype: list[torch.Tensor]
+        """
+        if group_size != 1:
+            error_msg = (
+                f"vLLM sliding-window stitch is only implemented for group_size=1 (got {group_size})."
+            )
+            raise ValueError(error_msg)
+        stitched: list[torch.Tensor] = []
+        for i, _ in enumerate(prompts):
+            completion_i = completion_ids[i]
+            stitch_i = stitch_prefixes[group_size * i]
+            if stitch_i.shape[1] == 0:
+                stitched.append(completion_i)
+                continue
+            initial_prompt_len_i = int(group_prompts[group_size * i].get("initial_prompt_len"))
+            if initial_prompt_len_i is None:
+                msg = "initial_prompt_len required when stitch_prefix_ids is non-empty"
+                raise ValueError(
+                    msg,
+                )
+            group_size_i = completion_i.shape[0]
+            stitch_group_i = stitch_i.expand(group_size_i, -1)
+            stitched.append(
+                torch.cat([completion_i[:, :initial_prompt_len_i], stitch_group_i, completion_i[:, initial_prompt_len_i:]], dim=1),
+            )
+        return stitched
+
+
+
+def prepare_prompt_hf_generate(prompt_dict: ReasoningPrompts, device: torch.device) -> dict[str, torch.Tensor | int]:
+    """Prepare a prompt dictionary for HuggingFace generate.
+
+    :param prompt_dict: The prompt dictionary to prepare.
+    :type prompt_dict: ReasoningPrompts
+    :param device: The device to move the prompt dictionary to.
+    :type device: torch.device
+    :return: The prepared prompt dictionary.
+    :rtype: dict[str, torch.Tensor | int]
+    """
+    # Prompt dict shouldn't contain text or model_text but remove anyway
+    prompt_dict.pop("text", None)
+    prompt_dict.pop("model_text", None)
+
+    prompt_dict["stitch_prefix_ids"] = prompt_dict.pop("stitch_prefix_ids", None)
+    prompt_dict["initial_prompt_len"] = prompt_dict.pop("initial_prompt_len", None)
+
+    if "trajectory_input_ids" in prompt_dict:
+        prompt_dict["input_ids"] = prompt_dict.pop("trajectory_input_ids").to(device)
+    else:
+        prompt_dict["input_ids"] = prompt_dict["input_ids"].to(device)
+
+    if "trajectory_attention_mask" in prompt_dict:
+        prompt_dict["attention_mask"] = prompt_dict.pop("trajectory_attention_mask").to(device)
+    else:
+        prompt_dict["attention_mask"] = prompt_dict["attention_mask"].to(device)
+
+    return prompt_dict
