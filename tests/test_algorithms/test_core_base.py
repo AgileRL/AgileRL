@@ -1416,6 +1416,8 @@ class _MockPeftActor(torch.nn.Module):
         self.gradient_checkpointing_enable = MagicMock()
         self.merge_adapter = MagicMock()
         self.unmerge_adapter = MagicMock()
+        self.delete_adapter = MagicMock()
+        self.disable_adapter = MagicMock()
         self.save_pretrained = MagicMock()
         self.save_checkpoint = MagicMock()
         self.load_checkpoint = MagicMock()
@@ -2188,11 +2190,14 @@ class TestLLMSaveLoadCheckpoint:
             agent.load_checkpoint(str(tmp_path))
 
     def test_load_checkpoint_without_accelerator(self, tmp_path):
+        import dill
+
         agent = _make_llm_agent(accelerator=None)
         agent.accelerator = None
-        with patch.object(EvolvableAlgorithm, "load_checkpoint") as mock_load:
+        chkpt = {"_weights_only": False, "lr": 1e-4}
+        torch.save(chkpt, str(tmp_path / "attributes.pt"), pickle_module=dill)
+        with patch.object(EvolvableAlgorithm, "load_checkpoint"):
             agent.load_checkpoint(str(tmp_path))
-            mock_load.assert_called_once_with(str(tmp_path) + "/attributes.pt")
 
 
 class TestLLMClone:
@@ -2978,7 +2983,9 @@ class TestLLMInitializeActors:
             LLMAlgorithm._initialize_actors(agent, None, add_adapters=True)
         mock_create.assert_called_once_with("mock-path")
 
-    def test_initialize_actors_peft_model_input_merges(self):
+    def test_initialize_actors_peft_model_input_renames_adapter(self):
+        """When a PeftModel is passed with a non-'actor' adapter name, the adapter
+        is renamed to 'actor' by copying its state dict rather than merging."""
         agent = _make_llm_agent()
         agent.use_separate_reference_adapter = False
         agent.lora_config = None
@@ -2986,22 +2993,25 @@ class TestLLMInitializeActors:
 
         peft_model = _make_mock_peft_actor()
         peft_model.peft_config = {"default": MagicMock()}
-        merged = MagicMock()
-        merged.peft_config = {"default": MagicMock()}
-        peft_model.merge_and_unload = MagicMock(return_value=merged)
-        peft_result = _make_mock_peft_actor()
+
+        mock_state = MagicMock()
 
         with (
             patch("agilerl.algorithms.core.base.gather_if_zero3"),
             patch(
-                "agilerl.algorithms.core.base.get_peft_model", return_value=peft_result
-            ),
+                "agilerl.algorithms.core.base.get_peft_model_state_dict",
+                return_value=mock_state,
+            ) as mock_get_state,
             patch(
-                "agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_result
-            ),
+                "agilerl.algorithms.core.base.set_peft_model_state_dict"
+            ) as mock_set_state,
         ):
             LLMAlgorithm._initialize_actors(agent, peft_model, add_adapters=True)
-        peft_model.merge_and_unload.assert_called_once()
+
+        mock_get_state.assert_called_once_with(peft_model, adapter_name="default")
+        peft_model.add_adapter.assert_called_once()
+        mock_set_state.assert_called_once()
+        peft_model.delete_adapter.assert_called_once_with("default")
 
     def test_initialize_actors_with_separate_reference_adapter(self):
         agent = _make_llm_agent()

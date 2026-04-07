@@ -216,9 +216,9 @@ class SFT(LLMAlgorithm):
         input_ids: torch.Tensor = experiences["input_ids"]
         attention_mask: torch.Tensor = experiences["attention_mask"]
         # Check first that all tensors have the same max length before calculating the masks
-        assert (
-            input_ids.shape[1] == attention_mask.shape[1]
-        ), "All tensors must have the same max length"
+        assert input_ids.shape[1] == attention_mask.shape[1], (
+            "All tensors must have the same max length"
+        )
         max_length = input_ids.shape[1]
         prompt_lengths: list[int] = experiences["prompt_lengths"]
         # Build the response mask on CPU (same device as dataloader tensors).
@@ -228,7 +228,9 @@ class SFT(LLMAlgorithm):
         # Mask has to be shifted by 1 as output log probs dims are 1 shorter than input ids as first token is used to predict the first log prob
         response_mask = (prompt_masks * attention_mask.cpu())[:, 1:]  # [B, L-1], CPU
         # Create labels for CE loss
-        labels = torch.where(response_mask.bool(), input_ids[:, 1:].cpu(), -100)  # [B, L-1]
+        labels = torch.where(
+            response_mask.bool(), input_ids[:, 1:].cpu(), -100
+        )  # [B, L-1]
 
         num_samples = input_ids.shape[0]
         micro_bs = min(

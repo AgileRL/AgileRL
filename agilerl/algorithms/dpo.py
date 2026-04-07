@@ -18,7 +18,7 @@ try:
 
         ``LigerFusedLinearDPOFunction`` passes ``compute_nll_loss`` as a bool
         but never forwards ``alpha`` to the base class (which defaults to 1.0).
-        This subclass re-uses the DPO preference loss and adds ``alpha`` so the
+        This subclass reuses the DPO preference loss and adds ``alpha`` so the
         fused kernel correctly scales the NLL component.
         """
 
@@ -272,9 +272,15 @@ class DPO(LLMAlgorithm):
             torch.mps.empty_cache()
         # The following tensors are size [batch_size, max_length]
         chosen_input_ids: torch.Tensor = experiences["chosen_input_ids"].to(self.device)
-        rejected_input_ids: torch.Tensor = experiences["rejected_input_ids"].to(self.device)
-        chosen_attention_mask: torch.Tensor = experiences["chosen_attention_mask"].to(self.device)
-        rejected_attention_mask: torch.Tensor = experiences["rejected_attention_mask"].to(self.device)
+        rejected_input_ids: torch.Tensor = experiences["rejected_input_ids"].to(
+            self.device
+        )
+        chosen_attention_mask: torch.Tensor = experiences["chosen_attention_mask"].to(
+            self.device
+        )
+        rejected_attention_mask: torch.Tensor = experiences[
+            "rejected_attention_mask"
+        ].to(self.device)
         # Check first that all tensors have the same max length before calculating the masks
         assert (
             chosen_input_ids.shape[1]

@@ -2,7 +2,6 @@ from .bc_lm import BC_LM, BC_Evaluator, BC_Policy
 from .cqn import CQN
 from .ddpg import DDPG
 from .dpo import DPO
-from .sft import SFT
 from .dqn import DQN
 from .dqn_rainbow import RainbowDQN
 from .grpo import GRPO
@@ -13,6 +12,7 @@ from .matd3 import MATD3
 from .neural_ts_bandit import NeuralTS
 from .neural_ucb_bandit import NeuralUCB
 from .ppo import PPO
+from .sft import SFT
 from .td3 import TD3
 
 __all__ = [
@@ -20,7 +20,6 @@ __all__ = [
     "CQN",
     "DDPG",
     "DPO",
-    "SFT",
     "DQN",
     "GRPO",
     "ILQL",
@@ -28,6 +27,7 @@ __all__ = [
     "MADDPG",
     "MATD3",
     "PPO",
+    "SFT",
     "TD3",
     "BC_Evaluator",
     "BC_Policy",

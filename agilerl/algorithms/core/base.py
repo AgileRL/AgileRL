@@ -2,6 +2,7 @@ import copy
 import gc
 import inspect
 import os
+import pickle
 import re
 import tempfile
 import warnings
@@ -21,7 +22,6 @@ from typing import (
 )
 
 import dill
-import pickle
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -113,7 +113,12 @@ if HAS_LLM_DEPENDENCIES:
         ) -> Any:
             return item
 
-    from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
+    from peft import (
+        LoraConfig,
+        get_peft_model,
+        get_peft_model_state_dict,
+        set_peft_model_state_dict,
+    )
     from safetensors.torch import load_file
 
     try:
@@ -2123,9 +2128,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type weights_only: bool, optional.
         """
         selected_adapters = (
-            ["actor", "reference"]
-            if self.use_separate_reference_adapter
-            else ["actor"]
+            ["actor", "reference"] if self.use_separate_reference_adapter else ["actor"]
         )
         if weights_only and self.accelerator is not None:
             model_ref = self.accelerator.unwrap_model(self.actor)
@@ -2170,12 +2173,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type path: string
         """
         pickle_module = dill if self.accelerator is None else pickle
-        checkpoint = torch.load(path + "/attributes.pt", weights_only=False, pickle_module=pickle_module)
+        checkpoint = torch.load(
+            path + "/attributes.pt", weights_only=False, pickle_module=pickle_module
+        )
         weights_only = checkpoint.get("_weights_only", False)
         for attr, value in checkpoint.items():
+            if attr == "lr_scheduler":
+                continue
             setattr(self, attr, value)
         if self.accelerator is not None:
-
             if weights_only:
                 if self.use_separate_reference_adapter:
                     self._update_existing_adapter(path, "reference")
@@ -2214,13 +2220,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         )
                 self.actor.set_adapter("actor")
                 for attr, value in checkpoint.items():
+                    if attr == "lr_scheduler":
+                        continue
                     setattr(self, attr, value)
                 self.optimizer = None
                 # N.B. that optimizer state is reset here
                 self.optimizer = OptimizerWrapper(
                     optimizer_cls=self._select_optim_class(),
-                    networks=[self.actor], network_names=["actor"], lr=self.lr, lr_name="lr",
+                    networks=[self.actor],
+                    network_names=["actor"],
+                    lr=self.lr,
+                    lr_name="lr",
                 )
+                if "lr_scheduler" in checkpoint and self.lr_scheduler is not None:
+                    self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
             else:
                 super().load_checkpoint(path + "/attributes.pt")
 
@@ -2661,23 +2674,36 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 # Use it directly so the trained LoRA weights are preserved and the base
                 # model is left unchanged — no merge_and_unload needed.
                 self.actor = base_model
-                if self.use_separate_reference_adapter and "reference" not in peft_adapter_names:
+                if (
+                    self.use_separate_reference_adapter
+                    and "reference" not in peft_adapter_names
+                ):
                     self.actor.add_adapter(
                         adapter_name="reference",
                         peft_config=self.lora_config,  # type: ignore[arg-type]
                     )
                 self.actor.set_adapter("actor")
             else:
-                # Backwards-compatibility path: user passed a PEFT model whose adapter
-                # isn't named "actor" (e.g. named "default"). Merge it into the base so
-                # we can re-apply a properly named adapter on top.
+                # The adapter exists but isn't named "actor".  Rename it so
+                # the rest of the codebase (save/load/clone) can rely on the
+                # canonical "actor" name.  We must NOT merge-and-unload here
+                # because the saved adapter would then lose the pre-trained
+                # weights at eval time (the base model is reloaded from the
+                # original checkpoint, not from the merged weights).
+                old_adapter_name = next(iter(base_model.peft_config.keys()))
                 if self.lora_config is None:
-                    adapter_name = list(base_model.peft_config.keys())
-                    self.lora_config = base_model.peft_config[adapter_name[0]]
+                    self.lora_config = base_model.peft_config[old_adapter_name]
                 with gather_if_zero3(self.zero_stage, list(base_model.parameters())):
-                    base_model = base_model.merge_and_unload()
-                self.actor = get_peft_model(base_model, self.lora_config, adapter_name="actor")
-                if self.use_separate_reference_adapter:
+                    old_state = get_peft_model_state_dict(
+                        base_model, adapter_name=old_adapter_name
+                    )
+                base_model.add_adapter("actor", self.lora_config)
+                set_peft_model_state_dict(base_model, old_state, adapter_name="actor")
+                base_model.delete_adapter(old_adapter_name)
+                self.actor = base_model
+                if self.use_separate_reference_adapter and "reference" not in set(
+                    base_model.peft_config.keys()
+                ):
                     self.actor.add_adapter(
                         adapter_name="reference",
                         peft_config=self.lora_config,  # type: ignore[arg-type]
