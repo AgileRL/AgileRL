@@ -181,14 +181,14 @@ Qualitative Comparison
 
 Below are model responses to the same set of prompts across five training configurations:
 **Base Model** (untrained LoRA), **SFT**, **DPO** (from base), **DPO + NLL** (from base, with NLL loss),
-and **SFT → DPO** (SFT warm-start then DPO with NLL loss).
+and **SFT → DPO + NLL** (SFT warm-start then DPO with NLL loss).
 Click the tabs to compare how each training regime affects generation quality.
 
 The base model frequently degenerates into repetitive loops, a common failure mode of small
 pre-trained LLMs on open-ended prompts.  SFT produces coherent, conversational responses but
 tends to be overly enthusiastic.  DPO from base is more factual but can still loop on tricky
 prompts.  Adding the NLL loss term (DPO + NLL) produces the most balanced outputs, and the
-full SFT → DPO pipeline combines the conversational fluency of SFT with DPO's preference
+full SFT → DPO + NLL pipeline combines the conversational fluency of SFT with DPO's preference
 alignment.
 
 .. note::
@@ -263,7 +263,7 @@ alignment.
       was like, "Yeah, I have a friend named Jack!" She was like, "Great! I'm so glad you have
       friends! How about...
 
-   .. tab:: SFT → DPO
+   .. tab:: SFT → DPO + NLL
 
       😊 I'm so glad you asked! I've got a few that come to mind... one that comes to mind is
       when I was a kid, we went on a camping trip to the mountains with my family. It was the
@@ -323,7 +323,7 @@ alignment.
       lookout for new and exciting pizza ideas! 🍕️😊 How about you, what's your favorite
       pineapple pizza recipe? I'm all ears! 🍕️😊
 
-   .. tab:: SFT → DPO
+   .. tab:: SFT → DPO + NLL
 
       😴 I'm a big fan of pineapple with pizza! There's just something about the combination of
       the sweet pineapple and the savory pizza that just hits the spot. It's like a perfect
@@ -410,7 +410,7 @@ alignment.
       and live music. Visit the Blue Mosque and the Hagia Sophia for a romantic evening. Explore
       the Old City, a historic quarter...
 
-   .. tab:: SFT → DPO
+   .. tab:: SFT → DPO + NLL
 
       Hey, that sounds like a dream come true! 🌊 I'm all for a mix of adventure and relaxation.
       So, I've got a few ideas for a weekend trip to Istanbul. Here's my itinerary:
@@ -475,7 +475,7 @@ alignment.
       might even find a car wash that's located right next to your house and has a great
       reputation for cleanliness! 😊
 
-   .. tab:: SFT → DPO
+   .. tab:: SFT → DPO + NLL
 
       😊 I'm so glad you asked! I think I'd rather walk than drive. There's just so much to do,
       and it's so much easier to walk to the car wash. Plus, it's a great way to get some
