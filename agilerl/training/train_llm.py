@@ -5,11 +5,11 @@ from typing import Any
 
 import numpy as np
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
-from agilerl.algorithms import DPO, GRPO, SFT
+import wandb
+from agilerl.algorithms import DPO, GRPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import PopulationType
@@ -24,7 +24,9 @@ from agilerl.utils.utils import (
 InitDictType = dict[str, Any] | None
 
 
-def safe_aggregate_metrics(accelerator: Accelerator | None, metrics: list[float]) -> float:
+def safe_aggregate_metrics(
+    accelerator: Accelerator | None, metrics: list[float]
+) -> float:
     if accelerator is None:
         return float(metrics) if not isinstance(metrics, float) else metrics
     return aggregate_metrics_across_gpus(accelerator, metrics)
@@ -418,7 +420,9 @@ def finetune_llm_reasoning(
         if accelerator is not None:
             accelerator.wait_for_everyone()
         if accelerator is None or accelerator.is_main_process:
-            elite = max(pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf"))
+            elite = max(
+                pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf")
+            )
             save_llm_checkpoint(elite, elite_path)
 
     if accelerator is not None:
@@ -511,7 +515,8 @@ def finetune_llm_preference(
             addl_args={
                 **({"name": wandb_run_name} if wandb_run_name is not None else {}),
                 **({"entity": wandb_entity} if wandb_entity is not None else {}),
-            } or None,
+            }
+            or None,
         )
 
     if accelerator is None or accelerator.is_main_process:
@@ -564,9 +569,9 @@ def finetune_llm_preference(
             loss, chosen_reward, rejected_reward = agent.learn(prompts)
             next_prompts = env.step()
             agg_metrics = [
-                safe_aggregate_metrics(accelerator, loss), 
-                safe_aggregate_metrics(accelerator, chosen_reward), 
-                safe_aggregate_metrics(accelerator, rejected_reward)
+                safe_aggregate_metrics(accelerator, loss),
+                safe_aggregate_metrics(accelerator, chosen_reward),
+                safe_aggregate_metrics(accelerator, rejected_reward),
             ]
             prompts = next_prompts
             agent.steps[-1] += effective_data_batch_size
@@ -612,32 +617,57 @@ def finetune_llm_preference(
 
         if _dpo_csv_writer is not None and agent_metrics_dict:
             mean_loss = np.mean(
-                [agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Loss"] for j in range(len(pop))]
+                [
+                    agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Loss"]
+                    for j in range(len(pop))
+                ]
             )
             mean_chosen = np.mean(
-                [agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Mean chosen reward"] for j in range(len(pop))]
+                [
+                    agent_metrics_dict[f"agent_{j}/train_metrics"][
+                        "Train/Mean chosen reward"
+                    ]
+                    for j in range(len(pop))
+                ]
             )
             mean_rejected = np.mean(
-                [agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Mean rejected reward"] for j in range(len(pop))]
+                [
+                    agent_metrics_dict[f"agent_{j}/train_metrics"][
+                        "Train/Mean rejected reward"
+                    ]
+                    for j in range(len(pop))
+                ]
             )
             mean_margin = np.mean(
-                [agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Mean reward margin"] for j in range(len(pop))]
+                [
+                    agent_metrics_dict[f"agent_{j}/train_metrics"][
+                        "Train/Mean reward margin"
+                    ]
+                    for j in range(len(pop))
+                ]
             )
             eval_margin = (
                 np.mean(
-                    [agent_metrics_dict[f"agent_{j}/test_metrics"]["Eval/Mean reward margin"] for j in range(len(pop))]
+                    [
+                        agent_metrics_dict[f"agent_{j}/test_metrics"][
+                            "Eval/Mean reward margin"
+                        ]
+                        for j in range(len(pop))
+                    ]
                 )
                 if agg_test_metrics is not None
                 else ""
             )
-            _dpo_csv_writer.writerow({
-                "step": total_steps,
-                "train_loss": mean_loss,
-                "train_chosen_reward": mean_chosen,
-                "train_rejected_reward": mean_rejected,
-                "train_reward_margin": mean_margin,
-                "eval_reward_margin": eval_margin,
-            })
+            _dpo_csv_writer.writerow(
+                {
+                    "step": total_steps,
+                    "train_loss": mean_loss,
+                    "train_chosen_reward": mean_chosen,
+                    "train_rejected_reward": mean_rejected,
+                    "train_reward_margin": mean_margin,
+                    "eval_reward_margin": eval_margin,
+                }
+            )
             _dpo_csv_file.flush()
 
         if accelerator is not None:
@@ -733,7 +763,7 @@ def finetune_llm_preference(
             break
     if verbose and (accelerator is None or accelerator.is_main_process):
         agent = pop[0]
-        scores = agent.scores   # reward margin per step
+        scores = agent.scores  # reward margin per step
         fitness = agent.fitness  # eval reward margin per eval step
 
         banner_text = f"Training complete — {total_steps} steps"
@@ -750,8 +780,7 @@ def finetune_llm_preference(
             ]
         if fitness:
             lines += [
-                f"  Eval margin  — final: {fitness[-1]:.4f}  "
-                f"best: {max(fitness):.4f}",
+                f"  Eval margin  — final: {fitness[-1]:.4f}  best: {max(fitness):.4f}",
             ]
         if evo_steps is not None:
             muts = [a.mut for a in pop]
@@ -764,7 +793,9 @@ def finetune_llm_preference(
         if accelerator is not None:
             accelerator.wait_for_everyone()
         if accelerator is None or accelerator.is_main_process:
-            elite = max(pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf"))
+            elite = max(
+                pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf")
+            )
             save_llm_checkpoint(elite, elite_path)
 
     if _dpo_csv_file is not None:
@@ -834,9 +865,8 @@ def finetune_llm_sft(
         )
 
     if (tournament is not None and mutation is not None) and evo_steps is None:
-        raise ValueError(
-            "'evo_steps' must be set when 'tournament' and 'mutation' are not None."
-        )
+        msg = "'evo_steps' must be set when 'tournament' and 'mutation' are not None."
+        raise ValueError(msg)
 
     if num_epochs is not None and max_steps is not None:
         warnings.warn(
@@ -861,9 +891,8 @@ def finetune_llm_sft(
     from agilerl.algorithms.sft import SFT as _SFT
 
     if not isinstance(pop[0], _SFT):
-        raise ValueError(
-            f"Population must contain SFT agents. Got {type(pop[0])}."
-        )
+        msg = f"Population must contain SFT agents. Got {type(pop[0])}."
+        raise ValueError(msg)
 
     if init_hp is None:
         init_hp = {}
@@ -887,7 +916,8 @@ def finetune_llm_sft(
             addl_args={
                 **({"name": wandb_run_name} if wandb_run_name is not None else {}),
                 **({"entity": wandb_entity} if wandb_entity is not None else {}),
-            } or None,
+            }
+            or None,
         )
 
     bar_format = (
@@ -932,8 +962,8 @@ def finetune_llm_sft(
             loss, perplexity = agent.learn(prompts)
             next_prompts = env.step()
             agg_metrics = [
-                safe_aggregate_metrics(accelerator, loss), 
-                safe_aggregate_metrics(accelerator, perplexity)
+                safe_aggregate_metrics(accelerator, loss),
+                safe_aggregate_metrics(accelerator, perplexity),
             ]
             prompts = next_prompts
             agent.steps[-1] += effective_data_batch_size
@@ -971,24 +1001,37 @@ def finetune_llm_sft(
 
         if _sft_csv_writer is not None and agent_metrics_dict:
             mean_loss = np.mean(
-                [agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Loss"] for j in range(len(pop))]
+                [
+                    agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Loss"]
+                    for j in range(len(pop))
+                ]
             )
             mean_ppl = np.mean(
-                [agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Perplexity"] for j in range(len(pop))]
+                [
+                    agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Perplexity"]
+                    for j in range(len(pop))
+                ]
             )
             eval_loss = (
                 -np.mean(
-                    [agent_metrics_dict[f"agent_{j}/test_metrics"]["Eval/Negative loss (fitness)"] for j in range(len(pop))]
+                    [
+                        agent_metrics_dict[f"agent_{j}/test_metrics"][
+                            "Eval/Negative loss (fitness)"
+                        ]
+                        for j in range(len(pop))
+                    ]
                 )
                 if agg_test_metrics is not None
                 else ""
             )
-            _sft_csv_writer.writerow({
-                "step": total_steps,
-                "train_loss": mean_loss,
-                "train_perplexity": mean_ppl,
-                "eval_loss": eval_loss,
-            })
+            _sft_csv_writer.writerow(
+                {
+                    "step": total_steps,
+                    "train_loss": mean_loss,
+                    "train_perplexity": mean_ppl,
+                    "eval_loss": eval_loss,
+                }
+            )
             _sft_csv_file.flush()
 
         if accelerator is not None:
@@ -1090,7 +1133,9 @@ def finetune_llm_sft(
         if accelerator is not None:
             accelerator.wait_for_everyone()
         if accelerator is None or accelerator.is_main_process:
-            elite = max(pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf"))
+            elite = max(
+                pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf")
+            )
             save_llm_checkpoint(elite, elite_path)
 
     if _sft_csv_file is not None:

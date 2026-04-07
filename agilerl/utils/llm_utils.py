@@ -1004,7 +1004,9 @@ def compare_responses(
             else:
                 output_ids = model.generate(**gen_kwargs)
         new_tokens = output_ids[0][prompt_len:]
-        return tokenizer.decode(new_tokens, skip_special_tokens=skip_special_tokens).strip()
+        return tokenizer.decode(
+            new_tokens, skip_special_tokens=skip_special_tokens
+        ).strip()
 
     def _wrap(text: str, indent: int = 2) -> str:
         prefix = " " * indent
@@ -1045,7 +1047,9 @@ def compare_responses(
         if i < total:
             nav = "  [Enter] next sample   [q + Enter] quit  "
             nav_padding = max(0, width - len(nav))
-            print(f"\n{'─' * (nav_padding // 2)}{nav}{'─' * (nav_padding - nav_padding // 2)}")
+            print(
+                f"\n{'─' * (nav_padding // 2)}{nav}{'─' * (nav_padding - nav_padding // 2)}"
+            )
             try:
                 if input().strip().lower() == "q":
                     break

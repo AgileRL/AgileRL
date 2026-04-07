@@ -464,7 +464,8 @@ def test_finetune_llm_preference_basic_training_loop(use_accelerator):
         assert mock_agent.get_action.call_count == 0
         assert mock_env.step.call_count == 6
         assert mock_agent.learn.call_count == 6
-        assert mock_agg.call_count == 21
+        expected_agg_calls = 0 if use_accelerator else 21
+        assert mock_agg.call_count == expected_agg_calls
         assert mock_agent.test.call_count == 3  # Should be called at step 2
 
 
@@ -608,7 +609,8 @@ def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
         assert mock_env.reset.call_args == call(reset_dataloaders=True)
         assert mock_env.step.call_count == 6
         assert mock_agent.learn.call_count == 6
-        assert mock_agg.call_count == 21
+        expected_agg_calls = 0 if use_accelerator else 21
+        assert mock_agg.call_count == expected_agg_calls
         assert mock_agent.test.call_count == 3  # Should be called at step 2
         assert (
             mock_tournament_selection_and_mutation.call_count == 6

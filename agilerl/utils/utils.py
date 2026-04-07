@@ -10,12 +10,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -1114,7 +1114,6 @@ def save_llm_checkpoint(
         agent.accelerator.wait_for_everyone()
     else:
         agent.save_checkpoint(path, weights_only=weights_only)
-
 
 
 def consolidate_mutations(population: list[LLMAlgorithm]) -> None:

@@ -944,7 +944,9 @@ def _make_tokenizer(vocab_size: int = 100, prompt_len: int = 3) -> MagicMock:
     # tokenizer(text, return_tensors="pt") → encoding with .to(device)
     encoding = MagicMock()
     encoding.__getitem__ = lambda self, key: (
-        torch.zeros(1, prompt_len, dtype=torch.long) if key == "input_ids" else torch.ones(1, prompt_len, dtype=torch.long)
+        torch.zeros(1, prompt_len, dtype=torch.long)
+        if key == "input_ids"
+        else torch.ones(1, prompt_len, dtype=torch.long)
     )
     encoding.to.return_value = {
         "input_ids": torch.zeros(1, prompt_len, dtype=torch.long),
@@ -977,13 +979,13 @@ def test_compare_responses_no_adapter_with_reference(capsys):
     """Without an adapter only the model response section is printed; reference is shown."""
     agent = _make_agent(has_adapter=False)
     tokenizer = _make_tokenizer()
-    samples = [("What is 2+2?", "It is 4.")]
+    samples = [("What is 2+2?", "It is 4.", None)]
 
     compare_responses(agent, tokenizer, samples)
 
     captured = capsys.readouterr().out
     assert "PROMPT" in captured
-    assert "DATASET RESPONSE" in captured
+    assert "DATASET RESPONSE (CHOSEN)" in captured
     assert "MODEL RESPONSE" in captured
     assert "BASE MODEL" not in captured
     assert "FINE-TUNED MODEL" not in captured
@@ -995,7 +997,7 @@ def test_compare_responses_no_adapter_no_reference(capsys):
     """When reference is None the DATASET RESPONSE section is skipped."""
     agent = _make_agent(has_adapter=False)
     tokenizer = _make_tokenizer()
-    samples = [("What is 2+2?", None)]
+    samples = [("What is 2+2?", None, None)]
 
     compare_responses(agent, tokenizer, samples)
 
@@ -1009,7 +1011,7 @@ def test_compare_responses_with_adapter_shows_base_and_finetuned(capsys):
     """With an adapter both BASE MODEL and FINE-TUNED MODEL sections are printed."""
     agent = _make_agent(has_adapter=True)
     tokenizer = _make_tokenizer()
-    samples = [("Tell me a joke.", "Why did the chicken cross the road?")]
+    samples = [("Tell me a joke.", "Why did the chicken cross the road?", None)]
 
     compare_responses(agent, tokenizer, samples)
 
@@ -1026,7 +1028,7 @@ def test_compare_responses_multiple_samples_enter_continues(capsys):
     """Pressing Enter (empty string) advances to the next sample."""
     agent = _make_agent(has_adapter=False)
     tokenizer = _make_tokenizer()
-    samples = [("Q1", "A1"), ("Q2", "A2"), ("Q3", "A3")]
+    samples = [("Q1", "A1", None), ("Q2", "A2", None), ("Q3", "A3", None)]
 
     with patch("builtins.input", return_value=""):
         compare_responses(agent, tokenizer, samples)
@@ -1042,7 +1044,7 @@ def test_compare_responses_quit_early(capsys):
     """Pressing 'q' stops processing remaining samples."""
     agent = _make_agent(has_adapter=False)
     tokenizer = _make_tokenizer()
-    samples = [("Q1", "A1"), ("Q2", "A2"), ("Q3", "A3")]
+    samples = [("Q1", "A1", None), ("Q2", "A2", None), ("Q3", "A3", None)]
 
     with patch("builtins.input", return_value="q"):
         compare_responses(agent, tokenizer, samples)
@@ -1055,7 +1057,7 @@ def test_compare_responses_eof_breaks_loop(capsys):
     """An EOFError from input() (non-interactive environment) stops the loop gracefully."""
     agent = _make_agent(has_adapter=False)
     tokenizer = _make_tokenizer()
-    samples = [("Q1", "A1"), ("Q2", "A2")]
+    samples = [("Q1", "A1", None), ("Q2", "A2", None)]
 
     with patch("builtins.input", side_effect=EOFError):
         compare_responses(agent, tokenizer, samples)
@@ -1068,7 +1070,7 @@ def test_compare_responses_single_sample_no_input_prompt(capsys):
     """With a single sample the navigation prompt and input() are never shown/called."""
     agent = _make_agent(has_adapter=False)
     tokenizer = _make_tokenizer()
-    samples = [("Only prompt", "Only response")]
+    samples = [("Only prompt", "Only response", None)]
 
     with patch("builtins.input") as mock_input:
         compare_responses(agent, tokenizer, samples)
@@ -1081,7 +1083,7 @@ def test_compare_responses_generation_kwargs_forwarded(do_sample, temperature):
     """do_sample and temperature are forwarded to model.generate."""
     agent = _make_agent(has_adapter=False)
     tokenizer = _make_tokenizer()
-    samples = [("prompt", None)]
+    samples = [("prompt", None, None)]
 
     compare_responses(
         agent,
@@ -1102,7 +1104,7 @@ def test_compare_responses_skip_special_tokens_forwarded():
     """skip_special_tokens is forwarded to tokenizer.decode."""
     agent = _make_agent(has_adapter=False)
     tokenizer = _make_tokenizer()
-    samples = [("prompt", None)]
+    samples = [("prompt", None, None)]
 
     compare_responses(agent, tokenizer, samples, skip_special_tokens=False)
 
