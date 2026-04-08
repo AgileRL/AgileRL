@@ -28,3 +28,4 @@ def _is_distribution_installed(distribution: str) -> bool:
 
 
 HAS_LLM_DEPENDENCIES = all(_is_distribution_installed(pkg) for pkg in LLM_PACKAGES)
+HAS_LIGER_KERNEL = _is_distribution_installed("liger-kernel")

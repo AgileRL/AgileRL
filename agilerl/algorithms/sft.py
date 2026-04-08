@@ -7,13 +7,12 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 
-try:
-    from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
+from agilerl import HAS_LIGER_KERNEL
 
-    HAS_LIGER_KERNEL = True
-except ImportError:
+if HAS_LIGER_KERNEL:
+    from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
+else:
     LigerCrossEntropyLoss = None
-    HAS_LIGER_KERNEL = False
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup

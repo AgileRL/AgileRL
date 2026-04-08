@@ -520,7 +520,6 @@ def test_dpo_liger_unavailable_behaviour(
     assertion_mode,
 ):
     monkeypatch.setattr("agilerl.algorithms.dpo.HAS_LIGER_KERNEL", False)
-    monkeypatch.setattr("agilerl.algorithms.dpo.LigerFusedLinearDPOFunction", None)
     if assertion_mode == "warns_and_fallback":
         with pytest.warns(
             UserWarning,

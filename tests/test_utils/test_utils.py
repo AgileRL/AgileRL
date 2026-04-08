@@ -508,7 +508,7 @@ def test_save_with_accelerator(tmp_path):
     save_llm_checkpoint(agent, str(tmp_path))
     agent.save_checkpoint.assert_called_once_with(
         str(tmp_path),
-        weights_only=False,
+        lora_only=False,
     )
     agent.accelerator.wait_for_everyone.assert_called()
 

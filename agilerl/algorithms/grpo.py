@@ -6,15 +6,12 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 
-try:
+from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
+
+if HAS_LIGER_KERNEL:
     from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
-
-    HAS_LIGER_KERNEL = True
-except ImportError:
+else:
     LigerFusedLinearGRPOFunction = None
-    HAS_LIGER_KERNEL = False
-
-from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import (
