@@ -117,6 +117,9 @@ exclude_lines = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.uv]
+no-build-isolation-package = ["box2d-py"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["agilerl"]
 

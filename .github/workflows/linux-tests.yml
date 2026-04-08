@@ -42,8 +42,10 @@ jobs:
             - name: Install dependencies
               run: |
                   apt-get update && apt-get install -y swig
+                  uv venv $UV_PROJECT_ENVIRONMENT
+                  uv pip install --python $UV_PROJECT_ENVIRONMENT/bin/python setuptools wheel
                   uv sync --locked --all-groups --extra all
-                  echo "/tmp/agilerl-venv/bin" >> $GITHUB_PATH
+                  echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
                   uv cache clean
                   rm -rf /tmp/uv-cache
 
