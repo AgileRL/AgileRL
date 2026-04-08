@@ -129,6 +129,8 @@ def main() -> None:
         trainer.training.max_steps,
     )
 
+    print("trainer.to_manifest(): ", trainer.to_manifest())
+
     # Train the population of agents
     _population, last_fitnesses = trainer.train(
         wb=args.wb,

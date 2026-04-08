@@ -1339,8 +1339,8 @@ def test_train_off_policy(env, population_off_policy, tournament, mutations, mem
         "algo",
         population_off_policy,
         memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1391,8 +1391,8 @@ def test_train_off_policy_agent_calls_made(
             "algo",
             mock_population,
             memory,
-            INIT_HP=None,
-            MUT_P=None,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -1451,8 +1451,8 @@ def test_train_off_policy_agent_calls_made_rainbow(
         "Rainbow DQN",
         mock_population,
         memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1490,8 +1490,8 @@ def test_train_off_policy_save_elite_warning(
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=None,
-            MUT_P=None,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -1525,8 +1525,8 @@ def test_train_off_policy_checkpoint_warning(
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=None,
-            MUT_P=None,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -1549,8 +1549,8 @@ def test_actions_histogram(env, population_off_policy, tournament, mutations, me
         "DQN",
         population_off_policy,
         memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1579,8 +1579,8 @@ def test_train_off_policy_replay_buffer_calls(
         "algo",
         population_off_policy,
         mocked_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1616,8 +1616,8 @@ def test_train_off_policy_alternate_buffer_calls(
         "algo",
         population_off_policy,
         memory=mocked_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1656,8 +1656,8 @@ def test_train_off_policy_env_calls(
         "algo",
         population_off_policy,
         memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1691,8 +1691,8 @@ def test_train_off_policy_tourn_mut_calls(
         "algo",
         population_off_policy,
         memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1721,8 +1721,8 @@ def test_train_off_policy_rgb_input(
         "algo",
         population_off_policy,
         memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1756,8 +1756,8 @@ def test_train_off_policy_using_alternate_buffers(
         "algo",
         population_off_policy,
         memory=memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1787,8 +1787,8 @@ def test_train_off_policy_using_alternate_buffers_rgb(
         "algo",
         population_off_policy,
         memory=memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1821,8 +1821,8 @@ def test_train_off_policy_distributed(
         "algo",
         population_off_policy,
         memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -1840,7 +1840,7 @@ def test_train_off_policy_distributed(
 
 @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
 def test_wandb_init_log(env, population_off_policy, tournament, mutations, memory):
-    INIT_HP = {
+    init_hp = {
         "BATCH_SIZE": 128,
         "LR": 1e-3,
         "GAMMA": 0.99,
@@ -1849,7 +1849,7 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
-    MUT_P = {
+    mut_p = {
         "NO_MUT": 0.4,
         "ARCH_MUT": 0.2,
         "PARAMS_MUT": 0.2,
@@ -1859,6 +1859,7 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
     with (
         patch("agilerl.utils.utils.wandb.login") as _,
         patch("agilerl.utils.utils.wandb.init") as mock_wandb_init,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log") as mock_wandb_log,
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -1869,8 +1870,8 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
+            init_hp=init_hp,
+            mut_p=mut_p,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -1919,7 +1920,7 @@ def test_wandb_init_log_distributed(
     accelerator,
 ):
     accelerator = Accelerator() if accelerator else None
-    INIT_HP = {
+    init_hp = {
         "BATCH_SIZE": 128,
         "LR": 1e-3,
         "GAMMA": 0.99,
@@ -1928,7 +1929,7 @@ def test_wandb_init_log_distributed(
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
-    MUT_P = {
+    mut_p = {
         "NO_MUT": 0.4,
         "ARCH_MUT": 0.2,
         "PARAMS_MUT": 0.2,
@@ -1938,6 +1939,7 @@ def test_wandb_init_log_distributed(
     with (
         patch("agilerl.utils.utils.wandb.login") as _,
         patch("agilerl.utils.utils.wandb.init") as mock_wandb_init,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log") as mock_wandb_log,
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -1948,8 +1950,8 @@ def test_wandb_init_log_distributed(
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
+            init_hp=init_hp,
+            mut_p=mut_p,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -1985,7 +1987,7 @@ def test_wandb_init_log_distributed(
 
 @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
 def test_early_stop_wandb(env, population_off_policy, tournament, mutations, memory):
-    INIT_HP = {
+    init_hp = {
         "BATCH_SIZE": 128,
         "LR": 1e-3,
         "GAMMA": 0.99,
@@ -1994,7 +1996,7 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
-    MUT_P = {
+    mut_p = {
         "NO_MUT": 0.4,
         "ARCH_MUT": 0.2,
         "PARAMS_MUT": 0.2,
@@ -2004,6 +2006,7 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
     with (
         patch("agilerl.utils.utils.wandb.login") as _,
         patch("agilerl.utils.utils.wandb.init") as _,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log") as _,
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -2014,8 +2017,8 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
+            init_hp=init_hp,
+            mut_p=mut_p,
             target=-10000,
             max_steps=50,
             evo_steps=50,
@@ -2048,8 +2051,8 @@ def test_train_off_policy_save_elite(
         "algo",
         population_off_policy,
         memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2086,8 +2089,8 @@ def test_train_save_checkpoint(
         "algo",
         population_off_policy,
         memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2121,8 +2124,8 @@ def test_train_on_policy_agent_calls_made(
             "env_name",
             "algo",
             mock_population,
-            INIT_HP=None,
-            MUT_P=None,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2157,8 +2160,8 @@ def test_train_on_policy_save_elite_warning(
             "env_name",
             "algo",
             population_on_policy,
-            INIT_HP=None,
-            MUT_P=None,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2187,8 +2190,8 @@ def test_train_on_policy_checkpoint_warning(
             "env_name",
             "algo",
             population_on_policy,
-            INIT_HP=None,
-            MUT_P=None,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2217,8 +2220,8 @@ def test_train_on_policy_env_calls(
         "env_name",
         "algo",
         population_on_policy,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2247,8 +2250,8 @@ def test_train_on_policy_tourn_mut_calls(
         "env_name",
         "algo",
         population_on_policy,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2274,8 +2277,8 @@ def test_train_on_policy(
         "env_name",
         "algo",
         population_on_policy,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=256,
         evo_steps=256,
         eval_loop=1,
@@ -2294,8 +2297,8 @@ def test_train_on_policy_rgb_input(env, population_on_policy, tournament, mutati
         "env_name",
         "algo",
         population_on_policy,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2318,8 +2321,8 @@ def test_train_on_policy_distributed(env, population_on_policy, tournament, muta
         "env_name",
         "algo",
         population_on_policy,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2344,7 +2347,7 @@ def test_wandb_init_log_on_policy(
     accelerator,
 ):
     accelerator = Accelerator() if accelerator else None
-    INIT_HP = {
+    init_hp = {
         "BATCH_SIZE": 128,
         "LR": 1e-3,
         "GAMMA": 0.99,
@@ -2352,7 +2355,7 @@ def test_wandb_init_log_on_policy(
         "TAU": 1e-3,
         "POP_SIZE": 6,
     }
-    MUT_P = {
+    mut_p = {
         "NO_MUT": 0.4,
         "ARCH_MUT": 0.2,
         "PARAMS_MUT": 0.2,
@@ -2362,6 +2365,7 @@ def test_wandb_init_log_on_policy(
     with (
         patch("agilerl.utils.utils.wandb.login") as _,
         patch("agilerl.utils.utils.wandb.init") as mock_wandb_init,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log") as mock_wandb_log,
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -2371,8 +2375,8 @@ def test_wandb_init_log_on_policy(
             "env_name",
             "algo",
             population_on_policy,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
+            init_hp=init_hp,
+            mut_p=mut_p,
             max_steps=50,
             evo_steps=10,
             eval_loop=1,
@@ -2397,7 +2401,7 @@ def test_wandb_init_log_on_policy(
 
 @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
 def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutations):
-    INIT_HP = {
+    init_hp = {
         "BATCH_SIZE": 128,
         "LR": 1e-3,
         "GAMMA": 0.99,
@@ -2406,7 +2410,7 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
-    MUT_P = {
+    mut_p = {
         "NO_MUT": 0.4,
         "ARCH_MUT": 0.2,
         "PARAMS_MUT": 0.2,
@@ -2416,6 +2420,7 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
     with (
         patch("agilerl.utils.utils.wandb.login") as _,
         patch("agilerl.utils.utils.wandb.init") as _,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log") as _,
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -2425,8 +2430,8 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
             "env_name",
             "algo",
             population_on_policy,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
+            init_hp=init_hp,
+            mut_p=mut_p,
             target=-10000,
             max_steps=500,
             evo_steps=10,
@@ -2459,8 +2464,8 @@ def test_train_on_policy_save_elite(
         "env_name",
         "algo",
         population_on_policy,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2493,8 +2498,8 @@ def test_train_on_policy_save_checkpoint(
         "env_name",
         "algo",
         population_on_policy,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=500,
         evo_steps=500,
         eval_loop=1,
@@ -2529,8 +2534,8 @@ def test_train_multi_agent_off_policy(
         "algo",
         pop=population_multi_agent,
         memory=multi_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2563,8 +2568,8 @@ def test_train_multi_agent_on_policy(
         "env_name",
         "algo",
         pop=population_multi_agent,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2594,8 +2599,8 @@ def test_train_multi_agent_off_policy_distributed(
         "algo",
         pop=population_multi_agent,
         memory=multi_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2627,8 +2632,8 @@ def test_train_multi_agent_off_policy_rgb(
         "algo",
         pop=population_multi_agent,
         memory=multi_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -2667,8 +2672,8 @@ def test_train_multi_agent_off_policy_rgb_vectorized(
         "algo",
         pop=population_multi_agent,
         memory=multi_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=10,
         evo_steps=5,
         eval_loop=1,
@@ -2706,8 +2711,8 @@ def test_train_multi_agent_on_policy_rgb_vectorized(
         "env_name",
         "algo",
         pop=population_multi_agent,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=10,
         evo_steps=5,
         eval_loop=1,
@@ -2739,8 +2744,8 @@ def test_train_multi_save_elite_warning(
             "algo",
             pop=population_multi_agent,
             memory=multi_memory,
-            INIT_HP=None,
-            MUT_P=None,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2771,8 +2776,8 @@ def test_train_multi_save_elite_warning_on_policy(
             "env_name",
             "algo",
             pop=population_multi_agent,
-            INIT_HP=None,
-            MUT_P=None,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2804,8 +2809,8 @@ def test_train_multi_checkpoint_warning(
             "algo",
             pop=population_multi_agent,
             memory=multi_memory,
-            INIT_HP=None,
-            MUT_P=None,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2836,8 +2841,8 @@ def test_train_multi_checkpoint_warning_on_policy(
             "env_name",
             "algo",
             pop=population_multi_agent,
-            INIT_HP=None,
-            MUT_P=None,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2862,7 +2867,7 @@ def test_train_multi_wandb_init_log(
     mutations,
     accelerator_flag,
 ):
-    INIT_HP = {
+    init_hp = {
         "BATCH_SIZE": 128,
         "LR_ACTOR": 1e-4,
         "LR_CRITIC": 1e-3,
@@ -2872,7 +2877,7 @@ def test_train_multi_wandb_init_log(
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
-    MUT_P = {
+    mut_p = {
         "NO_MUT": 0.4,
         "ARCH_MUT": 0.2,
         "PARAMS_MUT": 0.2,
@@ -2884,6 +2889,7 @@ def test_train_multi_wandb_init_log(
         patch(
             "agilerl.utils.utils.wandb.init",
         ) as mock_wandb_init,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch(
             "agilerl.logger.wandb.log",
         ) as mock_wandb_log,
@@ -2899,8 +2905,8 @@ def test_train_multi_wandb_init_log(
             "algo",
             population_multi_agent,
             multi_memory,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
+            init_hp=init_hp,
+            mut_p=mut_p,
             max_steps=50,
             evo_steps=10,
             eval_loop=1,
@@ -2937,7 +2943,7 @@ def test_train_multi_wandb_init_log_on_policy(
     mutations,
     accelerator_flag,
 ):
-    INIT_HP = {
+    init_hp = {
         "BATCH_SIZE": 128,
         "LR_ACTOR": 1e-4,
         "LR_CRITIC": 1e-3,
@@ -2947,7 +2953,7 @@ def test_train_multi_wandb_init_log_on_policy(
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
-    MUT_P = {
+    mut_p = {
         "NO_MUT": 0.4,
         "ARCH_MUT": 0.2,
         "PARAMS_MUT": 0.2,
@@ -2959,6 +2965,7 @@ def test_train_multi_wandb_init_log_on_policy(
         patch(
             "agilerl.utils.utils.wandb.init",
         ) as mock_wandb_init,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch(
             "agilerl.logger.wandb.log",
         ) as mock_wandb_log,
@@ -2973,8 +2980,8 @@ def test_train_multi_wandb_init_log_on_policy(
             "env_name",
             "algo",
             population_multi_agent,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
+            init_hp=init_hp,
+            mut_p=mut_p,
             max_steps=50,
             evo_steps=10,
             eval_loop=1,
@@ -3012,7 +3019,7 @@ def test_multi_agent_early_stop(
     tournament,
     mutations,
 ):
-    INIT_HP = {
+    init_hp = {
         "BATCH_SIZE": 128,
         "LR_ACTOR": 1e-4,
         "LR_CRITIC": 1e-3,
@@ -3022,7 +3029,7 @@ def test_multi_agent_early_stop(
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
-    MUT_P = {
+    mut_p = {
         "NO_MUT": 0.4,
         "ARCH_MUT": 0.2,
         "PARAMS_MUT": 0.2,
@@ -3032,6 +3039,7 @@ def test_multi_agent_early_stop(
     with (
         patch("agilerl.utils.utils.wandb.login") as _,
         patch("agilerl.utils.utils.wandb.init") as _,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log") as _,
         patch(
             "agilerl.logger.wandb.finish",
@@ -3044,8 +3052,8 @@ def test_multi_agent_early_stop(
             "algo",
             population_multi_agent,
             multi_memory,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
+            init_hp=init_hp,
+            mut_p=mut_p,
             target=-10000,
             max_steps=500,
             evo_steps=10,
@@ -3074,7 +3082,7 @@ def test_multi_agent_early_stop_on_policy(
     tournament,
     mutations,
 ):
-    INIT_HP = {
+    init_hp = {
         "BATCH_SIZE": 128,
         "LR_ACTOR": 1e-4,
         "LR_CRITIC": 1e-3,
@@ -3084,7 +3092,7 @@ def test_multi_agent_early_stop_on_policy(
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
-    MUT_P = {
+    mut_p = {
         "NO_MUT": 0.4,
         "ARCH_MUT": 0.2,
         "PARAMS_MUT": 0.2,
@@ -3094,6 +3102,7 @@ def test_multi_agent_early_stop_on_policy(
     with (
         patch("agilerl.utils.utils.wandb.login") as _,
         patch("agilerl.utils.utils.wandb.init") as _,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log") as _,
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -3103,8 +3112,8 @@ def test_multi_agent_early_stop_on_policy(
             "env_name",
             "algo",
             population_multi_agent,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
+            init_hp=init_hp,
+            mut_p=mut_p,
             target=-10000,
             max_steps=500,
             evo_steps=10,
@@ -3145,8 +3154,8 @@ def test_train_multi_agent_off_policy_calls(
         "algo",
         mock_population,
         multi_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3191,8 +3200,8 @@ def test_train_multi_agent_onpolicy_calls(
         "env_name",
         "algo",
         mock_population,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3232,8 +3241,8 @@ def test_train_multi_env_calls(
         "algo",
         population_multi_agent,
         multi_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3265,8 +3274,8 @@ def test_train_multi_env_calls_on_policy(
         "env_name",
         "algo",
         population_multi_agent,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3299,8 +3308,8 @@ def test_train_multi_tourn_mut_calls(
         "algo",
         population_multi_agent,
         multi_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3332,8 +3341,8 @@ def test_train_multi_tourn_mut_calls_on_policy(
         "env_name",
         "algo",
         population_multi_agent,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3366,8 +3375,8 @@ def test_train_multi_memory_calls(
         "algo",
         population_multi_agent,
         mocked_multi_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3402,8 +3411,8 @@ def test_train_multi_save_elite(
         "algo",
         population_multi_agent,
         multi_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3439,8 +3448,8 @@ def test_train_multi_save_elite_on_policy(
         "env_name",
         "algo",
         population_multi_agent,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3476,8 +3485,8 @@ def test_train_multi_save_checkpoint(
         "algo",
         population_multi_agent,
         multi_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3513,8 +3522,8 @@ def test_train_multi_save_checkpoint_on_policy(
         "env_name",
         "algo",
         population_multi_agent,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3554,8 +3563,8 @@ def test_train_offline(
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=offline_init_hp,
-            MUT_P=None,
+            init_hp=offline_init_hp,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3595,8 +3604,8 @@ def test_train_offline_save_elite_warning(
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=offline_init_hp,
-            MUT_P=None,
+            init_hp=offline_init_hp,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3635,8 +3644,8 @@ def test_train_offline_save_checkpoint_warning(
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=offline_init_hp,
-            MUT_P=None,
+            init_hp=offline_init_hp,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3666,7 +3675,7 @@ def test_train_offline_wandb_calls(
     accelerator_flag,
 ):
     accelerator = Accelerator() if accelerator_flag else None
-    MUT_P = {
+    mut_p = {
         "NO_MUT": 0.4,
         "ARCH_MUT": 0.2,
         "PARAMS_MUT": 0.2,
@@ -3676,6 +3685,7 @@ def test_train_offline_wandb_calls(
     with (
         patch("agilerl.utils.utils.wandb.login") as _,
         patch("agilerl.utils.utils.wandb.init") as mock_wandb_init,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log") as mock_wandb_log,
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -3687,8 +3697,8 @@ def test_train_offline_wandb_calls(
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=offline_init_hp,
-            MUT_P=MUT_P,
+            init_hp=offline_init_hp,
+            mut_p=mut_p,
             max_steps=50,
             evo_steps=10,
             eval_loop=1,
@@ -3728,7 +3738,7 @@ def test_train_offline_early_stop(
 ):
     for accelerator_flag in [True, False]:
         accelerator = Accelerator() if accelerator_flag else None
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -3738,6 +3748,7 @@ def test_train_offline_early_stop(
         with (
             patch("agilerl.utils.utils.wandb.login") as _,
             patch("agilerl.utils.utils.wandb.init") as _,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
             patch("agilerl.logger.wandb.log") as _,
             patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
@@ -3749,8 +3760,8 @@ def test_train_offline_early_stop(
                 "algo",
                 population_off_policy,
                 memory,
-                INIT_HP=offline_init_hp,
-                MUT_P=MUT_P,
+                init_hp=offline_init_hp,
+                mut_p=mut_p,
                 target=-10000,
                 max_steps=50,
                 evo_steps=10,
@@ -3792,8 +3803,8 @@ def test_offline_agent_calls(
             "algo",
             mock_population,
             memory,
-            INIT_HP=offline_init_hp,
-            MUT_P=None,
+            init_hp=offline_init_hp,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3834,8 +3845,8 @@ def test_offline_memory_calls(
             "algo",
             population_off_policy,
             mocked_memory,
-            INIT_HP=offline_init_hp,
-            MUT_P=None,
+            init_hp=offline_init_hp,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3873,8 +3884,8 @@ def test_offline_mut_tourn_calls(
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=offline_init_hp,
-            MUT_P=None,
+            init_hp=offline_init_hp,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3911,8 +3922,8 @@ def test_train_offline_save_elite(
         "algo",
         population_off_policy,
         memory,
-        INIT_HP=offline_init_hp,
-        MUT_P=None,
+        init_hp=offline_init_hp,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3950,8 +3961,8 @@ def test_train_offline_save_checkpoint(
         "algo",
         population_off_policy,
         memory,
-        INIT_HP=offline_init_hp,
-        MUT_P=None,
+        init_hp=offline_init_hp,
+        mut_p=None,
         max_steps=50,
         evo_steps=50,
         eval_loop=1,
@@ -3985,8 +3996,8 @@ def test_train_bandit(
         "algo",
         population_bandit,
         bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4024,8 +4035,8 @@ def test_train_bandit_agent_calls_made(
             "algo",
             mock_population,
             bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -4065,8 +4076,8 @@ def test_train_bandit_save_elite_warning(
             "algo",
             population_bandit,
             bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -4099,8 +4110,8 @@ def test_train_bandit_checkpoint_warning(
             "algo",
             population_bandit,
             bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -4128,8 +4139,8 @@ def test_bandit_actions_histogram(
         "DQN",
         population_bandit,
         bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4157,8 +4168,8 @@ def test_train_bandit_replay_buffer_calls(
         "algo",
         population_bandit,
         mocked_bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4191,8 +4202,8 @@ def test_train_bandit_bandit_env_calls(
         "algo",
         population_bandit,
         bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4225,8 +4236,8 @@ def test_train_bandit_tourn_mut_calls(
         "algo",
         population_bandit,
         bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4254,8 +4265,8 @@ def test_train_bandit_rgb_input(
         "algo",
         population_bandit,
         bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4286,8 +4297,8 @@ def test_train_bandit_using_alternate_buffers(
         "algo",
         population_bandit,
         memory=bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4315,8 +4326,8 @@ def test_train_bandit_using_alternate_buffers_rgb(
         "algo",
         population_bandit,
         memory=bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4345,8 +4356,8 @@ def test_train_bandit_distributed(
         "algo",
         population_bandit,
         bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4369,7 +4380,7 @@ def test_bandit_wandb_init_log(
     mutations,
     bandit_memory,
 ):
-    INIT_HP = {
+    init_hp = {
         "BATCH_SIZE": 128,
         "LR": 1e-3,
         "GAMMA": 1,
@@ -4379,7 +4390,7 @@ def test_bandit_wandb_init_log(
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
-    MUT_P = {
+    mut_p = {
         "NO_MUT": 0.4,
         "ARCH_MUT": 0.2,
         "PARAMS_MUT": 0.2,
@@ -4389,6 +4400,7 @@ def test_bandit_wandb_init_log(
     with (
         patch("agilerl.utils.utils.wandb.login") as _,
         patch("agilerl.utils.utils.wandb.init") as mock_wandb_init,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log") as mock_wandb_log,
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -4399,8 +4411,8 @@ def test_bandit_wandb_init_log(
             "algo",
             population_bandit,
             bandit_memory,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
+            init_hp=init_hp,
+            mut_p=mut_p,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -4448,7 +4460,7 @@ def test_bandit_wandb_init_log_distributed(
     accelerator,
 ):
     accelerator = Accelerator() if accelerator else None
-    INIT_HP = {
+    init_hp = {
         "BATCH_SIZE": 128,
         "LR": 1e-3,
         "GAMMA": 1,
@@ -4458,7 +4470,7 @@ def test_bandit_wandb_init_log_distributed(
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
-    MUT_P = {
+    mut_p = {
         "NO_MUT": 0.4,
         "ARCH_MUT": 0.2,
         "PARAMS_MUT": 0.2,
@@ -4468,6 +4480,7 @@ def test_bandit_wandb_init_log_distributed(
     with (
         patch("agilerl.utils.utils.wandb.login") as _,
         patch("agilerl.utils.utils.wandb.init") as mock_wandb_init,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log") as mock_wandb_log,
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -4478,8 +4491,8 @@ def test_bandit_wandb_init_log_distributed(
             "algo",
             population_bandit,
             bandit_memory,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
+            init_hp=init_hp,
+            mut_p=mut_p,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -4520,7 +4533,7 @@ def test_bandit_early_stop_wandb(
     mutations,
     bandit_memory,
 ):
-    INIT_HP = {
+    init_hp = {
         "BATCH_SIZE": 128,
         "LR": 1e-3,
         "GAMMA": 1,
@@ -4530,7 +4543,7 @@ def test_bandit_early_stop_wandb(
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
     }
-    MUT_P = {
+    mut_p = {
         "NO_MUT": 0.4,
         "ARCH_MUT": 0.2,
         "PARAMS_MUT": 0.2,
@@ -4540,6 +4553,7 @@ def test_bandit_early_stop_wandb(
     with (
         patch("agilerl.utils.utils.wandb.login") as _,
         patch("agilerl.utils.utils.wandb.init") as _,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log") as _,
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -4550,8 +4564,8 @@ def test_bandit_early_stop_wandb(
             "algo",
             population_bandit,
             bandit_memory,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
+            init_hp=init_hp,
+            mut_p=mut_p,
             target=-10000,
             max_steps=550,
             episode_steps=5,
@@ -4583,8 +4597,8 @@ def test_train_bandit_save_elite(
         "algo",
         population_bandit,
         bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4620,8 +4634,8 @@ def test_bandit_train_save_checkpoint(
         "algo",
         population_bandit,
         bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
+        init_hp=None,
+        mut_p=None,
         max_steps=50,
         episode_steps=5,
         evo_steps=25,
@@ -4645,6 +4659,7 @@ def test_train_off_policy_wandb_kwargs_update(env, memory):
 
     with (
         patch("agilerl.utils.utils.init_wandb") as mock_init_wandb,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log"),
         patch("agilerl.logger.wandb.finish"),
     ):
@@ -4734,6 +4749,7 @@ def test_train_off_policy_wandb_dqn_and_ddpg_loss_branches(env, monkeypatch):
 
     with (
         patch("agilerl.utils.utils.init_wandb"),
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log") as mock_wandb_log,
         patch("agilerl.logger.wandb.finish"),
     ):
@@ -4777,6 +4793,7 @@ def test_train_off_policy_early_stop_wb_branch(env):
 
     with (
         patch("agilerl.utils.utils.init_wandb"),
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log"),
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -4800,6 +4817,7 @@ def test_train_on_policy_wandb_kwargs_update(env):
     agent = DummyAgentOnPolicy(5, env)
     with (
         patch("agilerl.utils.utils.init_wandb") as mock_init_wandb,
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log"),
         patch("agilerl.logger.wandb.finish"),
     ):
@@ -4902,6 +4920,7 @@ def test_train_on_policy_early_stop_wb_branch(env):
     agent.steps = [0] * 100
     with (
         patch("agilerl.utils.utils.init_wandb"),
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log"),
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -4930,6 +4949,7 @@ def test_train_multi_agent_off_policy_learn_step_branch_and_early_stop(
 
     with (
         patch("agilerl.utils.utils.init_wandb"),
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log"),
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -4990,6 +5010,7 @@ def test_train_multi_agent_on_policy_compiled_clip_and_early_stop(
 
     with (
         patch("agilerl.utils.utils.init_wandb"),
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log"),
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):
@@ -5119,6 +5140,7 @@ def test_train_offline_minari_branch_and_early_stop(env, memory):
             side_effect=lambda *_args, **_kwargs: memory,
         ) as mock_minari,
         patch("agilerl.utils.utils.init_wandb"),
+        patch("agilerl.logger.wandb.run", new=MagicMock()),
         patch("agilerl.logger.wandb.log"),
         patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
     ):

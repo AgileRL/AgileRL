@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, get_args
 
 import yaml
 from typing_extensions import Self
@@ -32,6 +32,7 @@ from agilerl.models.env import (
 )
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.manifest import TrainingManifest
+from agilerl.models.networks import NetworkSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.protocols import AgentType
 from agilerl.utils.trainer_utils import (
@@ -146,12 +147,24 @@ class Trainer(ABC):
 
         validated_manifest = TrainingManifest.model_validate(data)
 
-        # 'network' component of manifest corresponds to algorithm's net_config
-        # NOTE: LLM algorithms dont build networks in the same way as the rest
-        if validated_manifest.network is not None and not isinstance(
-            validated_manifest.algorithm, LLMAlgorithmSpec
-        ):
-            validated_manifest.algorithm.net_config = validated_manifest.network
+        # 'network' component of manifest corresponds to algorithm's net_config.
+        # Resolve the raw dict into the algorithm's concrete NetworkSpec
+        # subclass (e.g. QNetworkSpec for DQN, StochasticActorSpec for PPO).
+        algo_spec_cls = type(validated_manifest.algorithm)
+        net_config_field = algo_spec_cls.model_fields.get("net_config")
+        if net_config_field is not None:
+            spec_cls: NetworkSpec = next(
+                (
+                    t
+                    for t in get_args(net_config_field.annotation)
+                    if t is not type(None)
+                ),
+                None,
+            )
+            if spec_cls is not None:
+                validated_manifest.algorithm.net_config = spec_cls.model_validate(
+                    validated_manifest.network
+                )
 
         return validated_manifest
 
@@ -357,6 +370,11 @@ class LocalTrainer(Trainer):
                 extra_wrappers = [ImageTranspose]
 
         probe.close()
+
+        if extra_wrappers is not None:
+            msg = "Found environment with channels-last observation space. Transposing to channels-first."
+            logger.warning(msg)
+
         return self.env_spec.make_env(extra_wrappers=extra_wrappers)
 
     @classmethod
@@ -396,7 +414,7 @@ class LocalTrainer(Trainer):
         wb: bool = False,
         tensorboard: bool = False,
         tensorboard_log_dir: str | None = None,
-        checkpoint: int | None = None,
+        checkpoint_steps: int | None = None,
         checkpoint_path: str | None = None,
         overwrite_checkpoints: bool = False,
         wandb_api_key: str | None = None,
@@ -416,9 +434,9 @@ class LocalTrainer(Trainer):
         :type tensorboard: bool
         :param tensorboard_log_dir: The path to save the TensorBoard logs.
         :type tensorboard_log_dir: str | None
-        :param checkpoint: The checkpoint number to resume from.
-        :type checkpoint: int | None
-        :param checkpoint_path: The path to save the checkpoint.
+        :param checkpoint_steps: The number of steps between checkpoints.
+        :type checkpoint_steps: int | None
+        :param checkpoint_path: The path to save the checkpoints.
         :type checkpoint_path: str | None
         :param overwrite_checkpoints: If ``True``, overwrite the checkpoint.
         :type overwrite_checkpoints: bool
@@ -436,8 +454,7 @@ class LocalTrainer(Trainer):
         kwargs: dict[str, Any] = {
             "pop": self.population,
             "env": self.env,
-            "INIT_HP": manifest,
-            "MUT_P": manifest["mutation"],
+            "init_hp": manifest,
             "max_steps": self.training_spec.max_steps,
             "evo_steps": self.training_spec.evo_steps,
             "tournament": self.tournament_selection_spec,
@@ -453,8 +470,8 @@ class LocalTrainer(Trainer):
             "wandb_kwargs": wandb_kwargs,
         }
 
-        # Add checkpointing to the training spec
-        self.training_spec.checkpoint = checkpoint
+        # Add checkpointing arguments to the training spec
+        self.training_spec.checkpoint_steps = checkpoint_steps
         self.training_spec.checkpoint_path = checkpoint_path
         self.training_spec.overwrite_checkpoints = overwrite_checkpoints
 

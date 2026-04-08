@@ -275,8 +275,8 @@ class AlgorithmSpec(BaseModel):
             if env_spec.max_reward is not None:
                 kwargs["max_reward"] = env_spec.max_reward
 
-            if training.checkpoint is not None:
-                kwargs["checkpoint_steps"] = training.checkpoint
+            if training.checkpoint_steps is not None:
+                kwargs["checkpoint_steps"] = training.checkpoint_steps
 
             return kwargs
 
@@ -288,7 +288,7 @@ class AlgorithmSpec(BaseModel):
                 "eval_steps": training.eval_steps,
                 "eval_loop": training.eval_loop,
                 "target": training.target_score,
-                "checkpoint": training.checkpoint,
+                "checkpoint": training.checkpoint_steps,
                 "checkpoint_path": training.checkpoint_path,
                 "overwrite_checkpoints": training.overwrite_checkpoints,
             }

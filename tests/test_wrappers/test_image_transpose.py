@@ -25,29 +25,17 @@ from agilerl.wrappers.image_transpose import (
 
 
 class TestIsChannelsLast:
-    def test_hwc_image(self):
-        assert is_channels_last(spaces.Box(0, 255, shape=(84, 84, 3), dtype=np.uint8))
-
-    def test_chw_image(self):
-        assert not is_channels_last(
-            spaces.Box(0, 255, shape=(3, 84, 84), dtype=np.uint8)
+    @pytest.mark.parametrize("num_channels", [1, 3, 32])
+    def test_image_hwc(self, num_channels):
+        assert is_channels_last(
+            spaces.Box(0, 255, shape=(84, 84, num_channels), dtype=np.uint8)
         )
 
-    def test_single_channel_hwc(self):
-        assert is_channels_last(spaces.Box(0, 255, shape=(84, 84, 1), dtype=np.uint8))
-
-    def test_single_channel_chw(self):
+    @pytest.mark.parametrize("num_channels", [1, 3, 32])
+    def test_image_chw(self, num_channels):
         assert not is_channels_last(
-            spaces.Box(0, 255, shape=(1, 84, 84), dtype=np.uint8)
+            spaces.Box(0, 255, shape=(num_channels, 84, 84), dtype=np.uint8)
         )
-
-    def test_stacked_frames_chw(self):
-        assert not is_channels_last(
-            spaces.Box(0, 255, shape=(4, 84, 84), dtype=np.uint8)
-        )
-
-    def test_stacked_frames_hwc(self):
-        assert is_channels_last(spaces.Box(0, 255, shape=(84, 84, 4), dtype=np.uint8))
 
     def test_2d_not_image(self):
         assert not is_channels_last(spaces.Box(0, 1, shape=(4, 4), dtype=np.float32))

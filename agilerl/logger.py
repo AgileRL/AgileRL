@@ -2,7 +2,7 @@
 
 Each logger consumes a :class:`~agilerl.population.MetricsReport` and writes
 it to a specific backend (console, wandb, CSV file, TensorBoard).  A training
-run typically uses several loggers in parallel, e.g. ``[StdOutLogger, WandbLogger]``.
+run typically uses several loggers at the same time, e.g. ``[StdOutLogger, WandbLogger]``.
 """
 
 from __future__ import annotations
@@ -95,18 +95,32 @@ class StdOutLogger(Logger):
 
 
 class WandbLogger(Logger):
-    """Logs a flat metrics dict to Weights & Biases. For this logger
-    to work, users should call wandb.init() before training. AgileRL
-    provides a helper function to do this: :func:`agilerl.utils.utils.init_wandb()`.
+    """Logs a flat metrics dict to Weights & Biases.
+
+    If ``wandb.init()`` has not been called before the first :meth:`write`,
+    this logger will call it automatically with ``project="AgileRL"``.
+    For more control over the run configuration, call ``wandb.init()``
+    (or :func:`agilerl.utils.utils.init_wandb`) before creating this logger.
 
     Handles distributed-training synchronisation when an
     :class:`~accelerate.Accelerator` is provided.
 
     :param accelerator: HuggingFace Accelerator, or ``None``.
+    :type accelerator: Accelerator | None
     """
 
-    def __init__(self, accelerator: Accelerator | None = None) -> None:
+    def __init__(
+        self,
+        accelerator: Accelerator | None = None,
+        project: str = "AgileRL",
+    ) -> None:
         self._accelerator = accelerator
+        self._project = project
+
+    def _maybe_init_wandb(self) -> None:
+        """Initialize a W&B run if one is not already active."""
+        if wandb.run is None:
+            wandb.init(project=self._project)
 
     def write(self, report: MetricsReport) -> None:
         """Write the metrics report to W&B.
@@ -116,6 +130,7 @@ class WandbLogger(Logger):
         """
         with Logger.on_main_process(self._accelerator) as is_main:
             if is_main:
+                self._maybe_init_wandb()
                 wandb.log(report.to_dict())
 
     def close(self) -> None:

@@ -131,10 +131,15 @@ If you use AgileRL in your work, please cite the repository:
    :caption: API
 
    api/algorithms/index
+   api/arena/index
    api/components/index
    api/hpo/index
+   api/logger
+   api/metrics
+   api/models/index
    api/modules/index
    api/networks/index
+   api/population
    api/train
    api/rollouts/index
    api/utils/index

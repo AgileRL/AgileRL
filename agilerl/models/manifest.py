@@ -20,7 +20,7 @@ from agilerl.typing import ConfigType
 AlgoSpecT = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec
 
 
-def _resolve_algorithm(v: ConfigType) -> AlgoSpecT:
+def _resolve_algorithm(v: ConfigType | AlgoSpecT) -> AlgoSpecT:
     """Dispatch to the concrete algorithm spec using ``ALGO_REGISTRY``.
 
     Reads the ``name`` key from the raw dict (e.g. ``"DQN"``), looks up
@@ -28,7 +28,7 @@ def _resolve_algorithm(v: ConfigType) -> AlgoSpecT:
     with the remaining fields.
 
     :param v: The raw dict or AlgorithmSpec to resolve.
-    :type v: ConfigType
+    :type v: ConfigType | AlgoSpecT
     :returns: The resolved AlgorithmSpec.
     :rtype: AlgoSpecT
     :raises TypeError: If the input is not a dict or AlgorithmSpec.
@@ -66,23 +66,37 @@ def _coerce_environment(v: ConfigType | BaseModel) -> dict[str, Any]:
         return v
     if isinstance(v, BaseModel):
         return v.model_dump()
+
     msg = f"Expected a dict or environment spec (BaseModel), got {type(v).__name__}"
     raise TypeError(msg)
 
 
-def _resolve_network(data: ConfigType) -> dict[str, Any]:
-    """Pre-process the network section for :class:`NetworkSpec` parsing.
+def _resolve_network(data: ConfigType | NetworkSpec) -> dict[str, Any]:
+    """Normalise the network section to a plain dict.
 
-    Moves the top-level ``arch`` value into ``encoder_config.arch`` so
-    the existing Pydantic discriminator can dispatch the encoder union.
-    The ``simba`` flag is auto-detected by :class:`NetworkSpec._detect_simba`
-    from the encoder type after validation.
+    Accepts either a raw dict (from YAML/JSON) or an already-validated
+    :class:`NetworkSpec` instance (from ``to_manifest``).  Always returns
+    a dict so the manifest stores network config in a uniform format.
 
-    :param data: The network configuration dictionary.
-    :type data: ConfigType
+    The concrete :class:`NetworkSpec` subclass (e.g.
+    :class:`StochasticActorSpec`) is determined later when the dict is
+    assigned to the algorithm's typed ``net_config`` field in
+    :meth:`Trainer.get_validated_manifest`.
+
+    For dicts, the top-level ``arch`` value is moved into
+    ``encoder_config.arch`` so the Pydantic discriminator works.
+    For :class:`NetworkSpec` instances, the ``arch`` discriminator is
+    re-injected since it is excluded from ``model_dump()``.
+
+    :param data: Network config dict or spec instance.
+    :type data: ConfigType | NetworkSpec
+    :returns: A plain dictionary suitable for manifest storage.
+    :rtype: dict[str, Any]
     """
     if isinstance(data, NetworkSpec):
-        return data.model_dump()
+        d = data.model_dump()
+        d["encoder_config"]["arch"] = data.encoder_config.arch
+        return d
 
     data = dict(data)
     arch = data.pop("arch", None)
@@ -100,7 +114,7 @@ AlgorithmFromManifest = Annotated[
 EnvironmentFromManifest = Annotated[
     dict[str, Any], BeforeValidator(_coerce_environment)
 ]
-NetworkFromManifest = Annotated[NetworkSpec, BeforeValidator(_resolve_network)]
+NetworkFromManifest = Annotated[dict[str, Any], BeforeValidator(_resolve_network)]
 
 
 class TrainingManifest(BaseModel):

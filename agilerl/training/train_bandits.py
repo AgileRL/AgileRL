@@ -31,8 +31,8 @@ def train_bandits(
     algo: str,
     pop: PopulationType,
     memory: ReplayBuffer,
-    INIT_HP: InitDictType = None,
-    MUT_P: InitDictType = None,
+    init_hp: InitDictType = None,
+    mut_p: InitDictType = None,
     max_steps: int = 20000,
     episode_steps: int = 500,
     evo_steps: int = 2500,
@@ -67,10 +67,10 @@ def train_bandits(
     :type pop: list[object]
     :param memory: Experience Replay Buffer
     :type memory: object
-    :param INIT_HP: Dictionary containing initial hyperparameters, defaults to None
-    :type INIT_HP: dict, optional
-    :param MUT_P: Dictionary containing mutation parameters, defaults to None
-    :type MUT_P: dict, optional
+    :param init_hp: Dictionary containing initial hyperparameters, defaults to None
+    :type init_hp: dict, optional
+    :param mut_p: Dictionary containing mutation parameters, defaults to None
+    :type mut_p: dict, optional
     :param max_steps: Maximum number of steps in environment, defaults to 20000
     :type max_steps: int, optional
     :param episode_steps: Number of steps in environment per episode, defaults to 500
@@ -180,8 +180,8 @@ def train_bandits(
         accelerator=accelerator,
         wandb_api_key=wandb_api_key,
         wandb_kwargs=wandb_kwargs,
-        init_hyperparams=INIT_HP,
-        mutation_hyperparams=MUT_P,
+        init_hyperparams=init_hp,
+        mutation_hyperparams=mut_p,
     )
 
     # Initialize population wrapper for metrics reporting

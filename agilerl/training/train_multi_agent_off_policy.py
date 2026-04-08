@@ -37,8 +37,8 @@ def train_multi_agent_off_policy(
     pop: PopulationType,
     memory: MultiAgentReplayBuffer,
     sum_scores: bool = True,
-    INIT_HP: InitDictType = None,
-    MUT_P: InitDictType = None,
+    init_hp: InitDictType = None,
+    mut_p: InitDictType = None,
     max_steps: int = 50000,
     evo_steps: int = 25,
     eval_steps: int | None = None,
@@ -76,10 +76,10 @@ def train_multi_agent_off_policy(
     :param sum_scores: Boolean flag indicating whether to sum sub-agents scores,
         typically True for co-operative environments, defaults to True
     :type sum_scores: bool, optional
-    :param INIT_HP: Dictionary containing initial hyperparameters.
-    :type INIT_HP: dict
-    :param MUT_P: Dictionary containing mutation parameters, defaults to None
-    :type MUT_P: dict, optional
+    :param init_hp: Dictionary containing initial hyperparameters.
+    :type init_hp: dict
+    :param mut_p: Dictionary containing mutation parameters, defaults to None
+    :type mut_p: dict, optional
     :param max_steps: Maximum number of steps in environment, defaults to 50000
     :type max_steps: int, optional
     :param evo_steps: Evolution frequency (steps), defaults to 25
@@ -196,8 +196,8 @@ def train_multi_agent_off_policy(
         accelerator=accelerator,
         wandb_api_key=wandb_api_key,
         wandb_kwargs={"project": "AgileRLMultiAgent", **(wandb_kwargs or {})},
-        init_hyperparams=INIT_HP,
-        mutation_hyperparams=MUT_P,
+        init_hyperparams=init_hp,
+        mutation_hyperparams=mut_p,
     )
 
     # Initialize population wrapper for metrics reporting

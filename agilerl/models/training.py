@@ -151,11 +151,11 @@ class TrainingSpec(BaseModel):
     :type eps_decay: float | None
     :param target_score: Target score for early stopping.
     :type target_score: float | None
-    :param checkpoint: The checkpoint number to resume from.
-    :type checkpoint: int | None
-    :param checkpoint_path: The path to save the checkpoint.
+    :param checkpoint_steps: The number of steps between checkpoints.
+    :type checkpoint_steps: int | None
+    :param checkpoint_path: The path to save the checkpoints.
     :type checkpoint_path: str | None
-    :param overwrite_checkpoints: If ``True``, overwrite the checkpoint.
+    :param overwrite_checkpoints: If ``True``, overwrite the checkpoints in the checkpoint directory.
     :type overwrite_checkpoints: bool
     """
 
@@ -180,7 +180,7 @@ class TrainingSpec(BaseModel):
     eps_decay: float | None = Field(default=None)
 
     # Model checkpoints (only relevant for local training)
-    checkpoint: int | None = Field(default=None)
+    checkpoint_steps: int | None = Field(default=None)
     checkpoint_path: str | None = Field(default=None)
     overwrite_checkpoints: bool = Field(default=False)
 

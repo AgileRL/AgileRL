@@ -208,8 +208,8 @@ class TestTrainingManifest:
             },
         )
         manifest = TrainingManifest.model_validate(data)
-        assert isinstance(manifest.network, NetworkSpec)
-        assert isinstance(manifest.network.encoder_config, expected_encoder_cls)
+        assert isinstance(manifest.network, dict)
+        assert manifest.network["encoder_config"]["arch"] == arch
 
     def test_simba_convenience_flag_stripped(self):
         data = _make_manifest(
@@ -223,7 +223,7 @@ class TestTrainingManifest:
             },
         )
         manifest = TrainingManifest.model_validate(data)
-        assert isinstance(manifest.network.encoder_config, MlpSpec)
+        assert manifest.network["encoder_config"]["arch"] == "mlp"
 
     # -- Field aliases ------------------------------------------------------
 
@@ -279,8 +279,8 @@ class TestTrainingManifest:
         assert manifest.algorithm.lr == pytest.approx(6.3e-4)
 
         assert isinstance(manifest.mutation, MutationSpec)
-        assert isinstance(manifest.network, NetworkSpec)
-        assert isinstance(manifest.network.encoder_config, MlpSpec)
+        assert isinstance(manifest.network, dict)
+        assert manifest.network["encoder_config"]["arch"] == "mlp"
         assert isinstance(manifest.replay_buffer, ReplayBufferSpec)
         assert manifest.replay_buffer.max_size == 100_000
         assert isinstance(manifest.tournament_selection, TournamentSelectionSpec)

@@ -283,17 +283,23 @@ class TestLocalTrainerTrain:
     def test_train_delegates_to_fn(
         self,
         mock_create_pop,
-        env,
         training_spec,
     ):
+        from agilerl.models.env import GymEnvSpec
+
+        env_spec = GymEnvSpec(name="CartPole-v1")
         mock_pop = [MagicMock()]
         mock_create_pop.return_value = mock_pop
         mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
+        mock_env = MagicMock()
 
-        with patch.object(PPOSpec, "get_training_fn", return_value=mock_train_fn):
+        with (
+            patch.object(PPOSpec, "get_training_fn", return_value=mock_train_fn),
+            patch.object(LocalTrainer, "_make_env", return_value=mock_env),
+        ):
             trainer = LocalTrainer(
                 algorithm="PPO",
-                environment=env,
+                environment=env_spec,
                 training=training_spec,
             )
             result = trainer.train()
