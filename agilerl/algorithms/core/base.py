@@ -2131,6 +2131,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             Defaults to True.
         :type lora_only: bool, optional.
         """
+        if (
+            lora_only
+            and not self.use_separate_reference_adapter
+            and self.reference_update_tracker > 0
+        ):
+            warnings.warn(
+                "The actor adapter has been merged into the base model "
+                "(use_separate_reference_adapter=False), but only LoRA weights are "
+                "being saved. Loading this checkpoint on a fresh base model will "
+                "produce incorrect results. Use use_separate_reference_adapter=True "
+                "or save with lora_only=False.",
+                stacklevel=2,
+                category=UserWarning,
+            )
+
         selected_adapters = (
             ["actor", "reference"] if self.use_separate_reference_adapter else ["actor"]
         )
