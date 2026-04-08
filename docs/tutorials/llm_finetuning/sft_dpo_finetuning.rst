@@ -32,33 +32,38 @@ First, we look at SFT, then DPO, then combine them in a pipeline SFT->DPO+NLL an
 Getting Started
 ---------------
 
-Take a look at ``benchmarking/benchmarking_sft.py`` and ``benchmarking/benchmarking_dpo.py`` for full examples.
+The unified demo script ``demos/demo_llm_finetuning.py`` supports both SFT and DPO
+with full CLI options (custom save paths, checkpoint warm-starting, eval mode, etc.).
+Run ``python demos/demo_llm_finetuning.py --help`` to see all available flags.
 Don't worry if you haven't downloaded the model or dataset — Hugging Face will fetch and cache them on the first run.
 
 Train SFT and save the LoRA adapter:
 
 .. code-block:: bash
 
-    python benchmarking/benchmarking_sft.py --save-path outputs/sft --no-timestamp
+    python demos/demo_llm_finetuning.py sft --save-path outputs/sft --no-timestamp
 
 Train DPO from the base model:
 
 .. code-block:: bash
 
-    python benchmarking/benchmarking_dpo.py --save-path outputs/dpo --no-timestamp
+    python demos/demo_llm_finetuning.py dpo --save-path outputs/dpo --no-timestamp
 
 Warm-start DPO from a prior SFT checkpoint:
 
 .. code-block:: bash
 
-    python benchmarking/benchmarking_dpo.py --save-path outputs/sft_dpo --load-path outputs/sft/actor --no-timestamp
+    python demos/demo_llm_finetuning.py dpo --load-path outputs/sft/actor --save-path outputs/sft_dpo --no-timestamp
 
 Evaluate a saved checkpoint interactively:
 
 .. code-block:: bash
 
-    python benchmarking/benchmarking_sft.py --eval --load-path outputs/sft/actor
-    python benchmarking/benchmarking_dpo.py --eval --load-path outputs/dpo/actor
+    python demos/demo_llm_finetuning.py sft --eval --load-path outputs/sft/actor
+    python demos/demo_llm_finetuning.py dpo --eval --load-path outputs/dpo/actor
+
+Minimal benchmarking scripts (no CLI args, default configs) are also available at
+``benchmarking/benchmarking_sft.py`` and ``benchmarking/benchmarking_dpo.py``.
 
 The first block of code applies the model's tokenizer to the dataset, and creates an SFTGym environment. This is a wrapper around the dataset that allows for easy training of the LLM.
 
@@ -170,7 +175,7 @@ genuinely becoming more likely to produce the preferred output.
 
 These plots can be reproduced from any training run's ``metrics.csv`` using the plotting script::
 
-    python benchmarking/plot_llm_metrics.py <path-to-metrics.csv> -o <output-dir>
+    python demos/plot_llm_metrics.py <path-to-metrics.csv> -o <output-dir>
 
 
 Training with this model and dataset proceeds at about 2 steps/sec for both SFT and DPO on an Apple M4 Max 36GB laptop or an Nvidia L4 GPU, so completes in about 90 minutes.
