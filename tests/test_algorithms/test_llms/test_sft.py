@@ -192,7 +192,7 @@ def test_init_sft(
     assert sft.lr == 1e-4 if use_deepspeed_optimizer else 5e-5
     assert sft.max_grad_norm == 0.1
     assert sft.update_epochs == 1
-    assert sft.temperature == 1
+    assert sft.temperature == 0
     assert sft.calc_position_embeddings
     assert sft.device == (
         sft.accelerator.device
