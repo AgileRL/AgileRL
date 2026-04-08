@@ -89,7 +89,7 @@ dependencies = [
 all = [
     { name = "datasets" },
     { name = "deepspeed", marker = "sys_platform != 'win32'" },
-    { name = "gymnasium", extra = ["box2d"] },
+    { name = "gymnasium", extra = ["box2d"], marker = "sys_platform != 'win32'" },
     { name = "liger-kernel", marker = "sys_platform == 'linux'" },
     { name = "peft" },
     { name = "transformers" },
@@ -97,7 +97,7 @@ all = [
     { name = "vllm", version = "0.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
 ]
 box2d = [
-    { name = "gymnasium", extra = ["box2d"] },
+    { name = "gymnasium", extra = ["box2d"], marker = "sys_platform != 'win32'" },
 ]
 llm = [
     { name = "datasets" },
@@ -136,8 +136,8 @@ requires-dist = [
     { name = "flatten-dict", specifier = "~=0.4.2" },
     { name = "google-cloud-storage", specifier = "~=2.5.0" },
     { name = "gymnasium", specifier = "~=1.0.0" },
-    { name = "gymnasium", extras = ["box2d"], marker = "extra == 'all'", specifier = "~=1.0.0" },
-    { name = "gymnasium", extras = ["box2d"], marker = "extra == 'box2d'", specifier = "~=1.0.0" },
+    { name = "gymnasium", extras = ["box2d"], marker = "sys_platform != 'win32' and extra == 'all'", specifier = "~=1.0.0" },
+    { name = "gymnasium", extras = ["box2d"], marker = "sys_platform != 'win32' and extra == 'box2d'", specifier = "~=1.0.0" },
     { name = "h5py", specifier = "~=3.15.0" },
     { name = "hydra-core", specifier = "~=1.3.2" },
     { name = "jax", extras = ["cpu"], specifier = "~=0.4.31" },
@@ -5917,8 +5917,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/0c/03/88ca92d3d8e9dd765a66985202db23745bd26a368570a8d8db9a218bfe90/swig-4.4.1-py3-none-musllinux_1_2_riscv64.whl", hash = "sha256:6a6a6331a5c7759ba5a910aa83aa5d33022b8e691b6cb466635c7fc2238facd2", size = 2967789, upload-time = "2025-12-27T03:25:40.24Z" },
     { url = "https://files.pythonhosted.org/packages/bf/97/5ca3d750f294048c983edfad1f2ad093a83480494fccb2f2e2496304f965/swig-4.4.1-py3-none-musllinux_1_2_s390x.whl", hash = "sha256:2d076358cded172d2f44b3c617923c593dbae664b3fa45051641f028f7f74010", size = 3203253, upload-time = "2025-12-27T03:25:41.953Z" },
     { url = "https://files.pythonhosted.org/packages/97/44/96586955c0f08b0b9b6c8b2b68ecb43a815da94d5362cfb6691ede3b9fdf/swig-4.4.1-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:43a0a876b4660f6addb6ae72d14a72324dc1388e1c168ed38bb00fd123048749", size = 3060721, upload-time = "2025-12-27T03:25:44.322Z" },
-    { url = "https://files.pythonhosted.org/packages/a7/2f/7a6b14eea6d0247d3f803649f50df3cf3905714bd82f2c386fcfde9544f3/swig-4.4.1-py3-none-win_amd64.whl", hash = "sha256:4548c06ea2ed60c91f003bbc3892db58e185f572705653ab1470ca770f70495d", size = 2548684, upload-time = "2025-12-27T03:25:46.255Z" },
-    { url = "https://files.pythonhosted.org/packages/26/c1/c316899d55a476ee9433bede6b94899b117c5e4b7947a073ef21053d4a21/swig-4.4.1-py3-none-win_arm64.whl", hash = "sha256:063224fe9a2f22fffc7d3b9add250112630f0e00f5f8dd9b9591ac106560177a", size = 2548683, upload-time = "2025-12-27T03:25:48.319Z" },
 ]
 
 [[package]]

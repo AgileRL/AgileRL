@@ -34,6 +34,8 @@ jobs:
             - name: Install dependencies
               run: |
                   pip install uv
+                  uv venv
+                  uv pip install swig
                   uv sync --locked --all-groups --extra all
 
             - name: Test with pytest
