@@ -2949,6 +2949,8 @@ class TestLLMInitializeActors:
         agent.lora_config = MagicMock()
         peft_actor = _make_mock_peft_actor()
 
+        base_model = MagicMock(spec=[])  # spec=[] prevents PeftModelProtocol match
+
         with (
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
@@ -2957,7 +2959,7 @@ class TestLLMInitializeActors:
                 "agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_actor
             ),
         ):
-            LLMAlgorithm._initialize_actors(agent, MagicMock(), add_adapters=True)
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
         peft_actor.set_adapter.assert_called_with("actor")
 
     def test_initialize_actors_with_none_creates_from_path(self):
