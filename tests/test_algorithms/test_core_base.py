@@ -1766,7 +1766,7 @@ class TestLLMMemoryEfficientLogits:
 
 class TestLLMCreatePromptMasks:
     def test_creates_correct_mask(self):
-        mask = LLMAlgorithm.create_prompt_masks([3, 5], 10)
+        mask = LLMAlgorithm._create_prompt_masks([3, 5], 10)
         assert mask.shape == (2, 10)
         assert not mask[0, 2].item()
         assert mask[0, 4].item()
