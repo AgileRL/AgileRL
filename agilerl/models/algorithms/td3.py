@@ -8,6 +8,7 @@ from pydantic import Field
 from agilerl.algorithms import TD3
 from agilerl.models.algo import RLAlgorithmSpec, off_policy, register
 from agilerl.models.networks import DeterministicActorSpec
+from agilerl.modules import EvolvableModule
 from agilerl.training.train_off_policy import train_off_policy
 
 
@@ -28,6 +29,8 @@ class TD3Spec(RLAlgorithmSpec):
     dt: float = Field(default=0.01)
     share_encoders: bool = Field(default=False)
     net_config: DeterministicActorSpec | None = Field(default=None)
+    actor_network: EvolvableModule | None = Field(default=None, exclude=True)
+    critic_networks: list[EvolvableModule] | None = Field(default=None, exclude=True)
 
     algo_class: ClassVar[type[TD3]] = TD3
 

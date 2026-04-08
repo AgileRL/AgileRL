@@ -6,6 +6,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from tensordict import TensorDict
 from torch import nn, optim
 
 from agilerl.algorithms.cqn import CQN
@@ -297,13 +298,8 @@ def test_learns_from_experiences(observation_space, request):
     batch_size = 64
 
     cqn = CQN(observation_space, action_space, batch_size=batch_size)
-    td = get_experiences_batch(observation_space, action_space, batch_size, cqn.device)
-    experiences = (
-        td["obs"],
-        td["action"],
-        td["reward"],
-        td["next_obs"],
-        td["done"],
+    experiences = get_experiences_batch(
+        observation_space, action_space, batch_size, cqn.device
     )
 
     # Copy state dict before learning - should be different to after updating weights
@@ -341,14 +337,17 @@ def test_handles_double_q_learning(discrete_space):
         accelerator=accelerator,
     )
 
-    # Create a batch of experiences
-    states = torch.randint(0, discrete_space.n, (batch_size, 1))
-    actions = torch.randint(0, action_space.n, (batch_size, 1))
-    rewards = torch.randn((batch_size, 1))
-    next_states = torch.randint(0, discrete_space.n, (batch_size, 1))
-    dones = torch.randint(0, 2, (batch_size, 1))
-
-    experiences = [states, actions, rewards, next_states, dones]
+    # Create a batch of experiences as a TensorDict
+    experiences = TensorDict(
+        {
+            "obs": torch.randint(0, discrete_space.n, (batch_size, 1)),
+            "action": torch.randint(0, action_space.n, (batch_size, 1)),
+            "reward": torch.randn((batch_size, 1)),
+            "next_obs": torch.randint(0, discrete_space.n, (batch_size, 1)),
+            "done": torch.randint(0, 2, (batch_size, 1)),
+        },
+        batch_size=batch_size,
+    )
 
     # Copy state dict before learning - should be different to after updating weights
     actor = cqn.actor
@@ -432,12 +431,16 @@ def test_learn_with_accelerator_moves_tensors(vector_space):
         batch_size=batch_size,
         accelerator=accelerator,
     )
-    states = torch.randn(batch_size, vector_space.shape[0])
-    actions = torch.randint(0, action_space.n, (batch_size, 1))
-    rewards = torch.randn((batch_size, 1))
-    next_states = torch.randn(batch_size, vector_space.shape[0])
-    dones = torch.randint(0, 2, (batch_size, 1))
-    experiences = (states, actions, rewards, next_states, dones)
+    experiences = TensorDict(
+        {
+            "obs": torch.randn(batch_size, vector_space.shape[0]),
+            "action": torch.randint(0, action_space.n, (batch_size, 1)),
+            "reward": torch.randn((batch_size, 1)),
+            "next_obs": torch.randn(batch_size, vector_space.shape[0]),
+            "done": torch.randint(0, 2, (batch_size, 1)),
+        },
+        batch_size=batch_size,
+    )
     loss = cqn.learn(experiences)
     assert isinstance(loss, float)
     cqn.clean_up()

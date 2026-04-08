@@ -129,7 +129,7 @@ def register(
     :returns: The decorator function.
     :rtype: Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]
 
-    Usage::
+    Example::
 
         @register(arena=True)
         class DQNSpec(RLAlgorithmSpec):
@@ -235,7 +235,7 @@ class AlgorithmSpec(BaseModel):
         """Serialize this spec for Arena manifest payloads."""
         return {
             "name": self.name,
-            **self.model_dump(mode="json", exclude_none=True, exclude={"hp_config"}),
+            **self.model_dump(mode="json", exclude_none=True),
         }
 
     @staticmethod
@@ -277,6 +277,10 @@ class AlgorithmSpec(BaseModel):
 
             if training.checkpoint_steps is not None:
                 kwargs["checkpoint_steps"] = training.checkpoint_steps
+
+            kwargs["evaluation_interval"] = training.evaluation_interval
+            if training.num_epochs is not None:
+                kwargs["num_epochs"] = training.num_epochs
 
             return kwargs
 
@@ -326,9 +330,9 @@ class RLAlgorithmSpec(AlgorithmSpec):
         observation_space: SupportedObservationSpace,
         action_space: SupportedActionSpace,
         index: int,
-        device: torch.device,
-        accelerator: Accelerator | None = None,
         resume_from_checkpoint: str | None = None,
+        device: str | torch.device = "cpu",
+        accelerator: Accelerator | None = None,
     ) -> RLAlgorithm:
         """Build a single-agent algorithm instance from spec fields.
 
@@ -338,10 +342,12 @@ class RLAlgorithmSpec(AlgorithmSpec):
         :type action_space: SupportedActionSpace
         :param index: Index of the algorithm in the population.
         :type index: int
-        :param device: Torch device.
-        :type device: torch.device
         :param resume_from_checkpoint: Path to resume from checkpoint.
         :type resume_from_checkpoint: str | None
+        :param device: Torch device. Defaults to "cpu".
+        :type device: str | torch.device
+        :param accelerator: Accelerator object for distributed computing.
+        :type accelerator: Accelerator | None
         :returns: Single-agent algorithm instance.
         :rtype: RLAlgorithm
         """
@@ -350,6 +356,7 @@ class RLAlgorithmSpec(AlgorithmSpec):
             action_space=action_space,
             index=index,
             device=device,
+            accelerator=accelerator,
             **self.model_dump(),
         )
 
@@ -378,9 +385,9 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         observation_spaces: dict[str, SupportedObservationSpace],
         action_spaces: dict[str, SupportedActionSpace],
         index: int,
-        device: torch.device,
-        accelerator: Accelerator | None = None,
         resume_from_checkpoint: str | None = None,
+        device: str | torch.device = "cpu",
+        accelerator: Accelerator | None = None,
     ) -> MultiAgentRLAlgorithm:
         """Build a multi-agent algorithm from spec fields.
 
@@ -390,10 +397,12 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         :type action_spaces: dict[str, SupportedActionSpace]
         :param index: Index of the algorithm in the population.
         :type index: int
-        :param device: Torch device.
-        :type device: torch.device
         :param resume_from_checkpoint: Path to resume from checkpoint.
         :type resume_from_checkpoint: str | None
+        :param device: Torch device. Defaults to "cpu".
+        :type device: str | torch.device
+        :param accelerator: Accelerator object for distributed computing.
+        :type accelerator: Accelerator | None
         :returns: Multi-agent algorithm instance.
         :rtype: MultiAgentRLAlgorithm
         """
@@ -439,10 +448,14 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     update_epochs: int = Field(..., ge=1)
     reduce_memory_peak: bool = Field(default=False)
     lora_config: LoraConfig
-    max_model_len: int
-    use_separate_reference_adapter: bool
-    pretrained_model_name_or_path: str
-    calc_position_embeddings: bool
+    max_model_len: int = Field(..., ge=1)
+    use_separate_reference_adapter: bool = Field(default=False)
+    calc_position_embeddings: bool = Field(default=True)
+    gradient_checkpointing: bool = Field(default=True)
+    use_liger_loss: bool = Field(default=False)
+    seed: int = Field(default=42)
+
+    pretrained_model_name_or_path: str = Field(..., min_length=1)
 
     agent_type: ClassVar[AgentType] = AgentType.LLMAgent
     env_type: ClassVar[LLMEnvType]
@@ -451,9 +464,9 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         self,
         tokenizer: Any,
         index: int = 0,
+        resume_from_checkpoint: str | None = None,
         accelerator: Accelerator | None = None,
         device: str | torch.device = "cpu",
-        resume_from_checkpoint: str | None = None,
     ) -> LLMAlgorithm:
         """Build an LLM algorithm instance from spec fields.
 
@@ -461,12 +474,12 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         :type tokenizer: Any
         :param index: Index of the algorithm in the population.
         :type index: int
-        :param accelerator: HuggingFace ``Accelerator`` instance.
-        :type accelerator: Accelerator | None
-        :param device: Torch device.
-        :type device: str | torch.device
         :param resume_from_checkpoint: Path to resume from checkpoint.
         :type resume_from_checkpoint: str | None
+        :param accelerator: HuggingFace ``Accelerator`` instance.
+        :type accelerator: Accelerator | None
+        :param device: Torch device. Defaults to "cpu".
+        :type device: str | torch.device
         :returns: LLM algorithm instance.
         :rtype: LLMAlgorithm
         """

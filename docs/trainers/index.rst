@@ -113,17 +113,17 @@ Below is a minimal off-policy manifest training DQN on LunarLander:
 .. note::
 
     Users can find example manifests for every supported algorithm in the repository
-    under ``configs/training/``
+    under ``configs/training/``.
 
 .. _local_trainer:
 
 LocalTrainer
 ------------
 
-:class:`~agilerl.training.trainer.LocalTrainer` is the primary way to run
+:class:`~agilerl.training.trainer.LocalTrainer` is the simplest way to run
 training on your own hardware. It resolves the manifest into concrete objects
 (vectorized environments, agent population, replay buffer, mutations, and
-tournament selection) and delegates to the algorithm-specific training loop.
+tournament selection) and delegates to the algorithm-specific training loops.
 
 **From a manifest file (recommended):**
 
@@ -132,15 +132,18 @@ tournament selection) and delegates to the algorithm-specific training loop.
    import torch
    from agilerl.training.trainer import LocalTrainer
 
-   device = "cuda" if torch.cuda.is_available() else "cpu"
+   # Instantiate the trainer from a manifest file.
    trainer = LocalTrainer.from_manifest(
       manifest="configs/training/dqn/dqn.yaml",
-      device=device
+      device="cuda" if torch.cuda.is_available() else "cpu"
   )
 
    population, fitnesses = trainer.train(wb=True, verbose=True)
 
 **From Pydantic Models:**
+
+Users can also choose to instantiate trainers explicitly from the Pydantic models used under-the-hood to validate a training
+configuration automatically.
 
 .. code-block:: python
 
@@ -165,6 +168,7 @@ tournament selection) and delegates to the algorithm-specific training loop.
        device="cuda",
    )
 
+   # Train the population of agents.
    population, fitnesses = trainer.train()
 
 

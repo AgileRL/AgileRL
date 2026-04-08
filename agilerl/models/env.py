@@ -1,21 +1,31 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from enum import Enum
 from importlib import import_module
-from importlib import util as importlib_util
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import pandas as pd
+from datasets import Dataset
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
 from pettingzoo import ParallelEnv
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 from typing_extensions import Self
 
+from agilerl.utils.env_utils import (
+    apply_wrappers,
+    get_reward_fn,
+    make_conversation_template,
+    resolve_entrypoint_target,
+)
 from agilerl.vector import AsyncPettingZooVecEnv
+
+if TYPE_CHECKING:
+    from accelerate import Accelerator
+
+    from agilerl.utils.llm_utils import PreferenceGym, ReasoningGym
 
 
 class LLMEnvType(str, Enum):
@@ -32,163 +42,6 @@ GymEnvType = AsyncVectorEnv | SyncVectorEnv
 PzEnvType = ParallelEnv | AsyncPettingZooVecEnv
 EnvFactory = Callable[[], Any]
 WrapperSpec = tuple[Any, dict[str, Any]] | str | Callable[..., Any]
-
-
-def _parse_entrypoint(entrypoint: str) -> tuple[str, str]:
-    """Parse an entrypoint string into a module reference and target name.
-
-    :param entrypoint: Entrypoint string to parse.
-    :type entrypoint: str
-    :returns: Tuple of module reference and target name.
-    :rtype: tuple[str, str]
-    """
-    if ":" not in entrypoint:
-        msg = (
-            "Invalid entrypoint format. Expected '{file_name}:ClassOrCallable', "
-            f"got '{entrypoint}'."
-        )
-        raise ValueError(msg)
-    module_ref, target_name = entrypoint.rsplit(":", maxsplit=1)
-    if not module_ref or not target_name:
-        msg = f"Entrypoint must include both module and target. Got '{entrypoint}'."
-        raise ValueError(msg)
-    return module_ref, target_name
-
-
-def _load_module_from_path(module_ref: str, script_path: Path) -> Any:
-    """Load a module from a file path.
-
-    :param module_ref: Module reference.
-    :type module_ref: str
-    :param script_path: File path to the module.
-    :type script_path: Path
-    :returns: Loaded module.
-    :rtype: Any
-    """
-    module_name = (
-        f"agilerl_custom_env_{module_ref.replace(os.sep, '_').replace('.', '_')}"
-    )
-    spec = importlib_util.spec_from_file_location(module_name, script_path)
-    if spec is None or spec.loader is None:
-        msg = f"Could not load module '{module_ref}' from '{script_path}'."
-        raise ImportError(msg)
-    module = importlib_util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _resolve_module(module_ref: str, path: str | None = None) -> Any:
-    """Resolve a module from a module reference and environment path.
-
-    :param module_ref: Module reference.
-    :type module_ref: str
-    :param path: Environment path.
-    :type env_path: str or None
-    :returns: Resolved module.
-    :rtype: Any
-    """
-    base_dir = Path(path).resolve() if path is not None else Path.cwd()
-    normalized_path = module_ref.replace(".", os.sep)
-    candidates = [Path(module_ref), Path(normalized_path)]
-    if not module_ref.endswith(".py"):
-        candidates.extend([Path(f"{module_ref}.py"), Path(f"{normalized_path}.py")])
-
-    for candidate in candidates:
-        script_path = candidate if candidate.is_absolute() else base_dir / candidate
-        if script_path.is_file():
-            return _load_module_from_path(module_ref, script_path)
-
-    try:
-        return import_module(module_ref)
-    except ModuleNotFoundError as err:
-        msg = (
-            f"Could not resolve module '{module_ref}' from path '{base_dir}'. "
-            "Expected a python file relative to path/cwd or an importable module."
-        )
-        raise ModuleNotFoundError(msg) from err
-
-
-def _resolve_entrypoint_target(entrypoint: str, path: str | None = None) -> Any:
-    """Resolve an entrypoint target from an entrypoint string and environment path.
-
-    :param entrypoint: Entrypoint string to resolve.
-    :type entrypoint: str
-    :param path: Environment path.
-    :type path: str or None
-    :returns: Resolved entrypoint target.
-    :rtype: Any
-    """
-    module_ref, target_name = _parse_entrypoint(entrypoint)
-    module = _resolve_module(module_ref, path=path)
-    if not hasattr(module, target_name):
-        msg = f"Module '{module_ref}' does not define '{target_name}'."
-        raise AttributeError(msg)
-    return getattr(module, target_name)
-
-
-def _resolve_wrapper(
-    wrapper: WrapperSpec, path: str | None = None
-) -> tuple[Any, dict[str, Any]]:
-    """Resolve a wrapper from a wrapper specification and environment path.
-
-    :param wrapper: Wrapper specification.
-    :type wrapper: WrapperSpec
-    :param path: Environment path.
-    :type path: str or None
-    :returns: Resolved wrapper and wrapper kwargs.
-    :rtype: tuple[Any, dict[str, Any]]
-    """
-    if isinstance(wrapper, tuple):
-        wrapper_spec, wrapper_kwargs = wrapper
-    else:
-        wrapper_spec, wrapper_kwargs = wrapper, {}
-
-    if isinstance(wrapper_spec, str):
-        if ":" in wrapper_spec:
-            wrapper_fn = _resolve_entrypoint_target(wrapper_spec, path=path)
-        elif "." in wrapper_spec:
-            module_ref, target_name = wrapper_spec.rsplit(".", maxsplit=1)
-            wrapper_fn = getattr(import_module(module_ref), target_name)
-        else:
-            msg = (
-                f"Invalid wrapper '{wrapper_spec}'. Use a callable, "
-                "a tuple(callable, kwargs), or a string import path."
-            )
-            raise ValueError(msg)
-    else:
-        wrapper_fn = wrapper_spec
-
-    if not callable(wrapper_fn):
-        msg = f"Wrapper '{wrapper_spec}' resolved to non-callable object."
-        raise TypeError(msg)
-    return wrapper_fn, wrapper_kwargs
-
-
-def _apply_wrappers(
-    env: Any,
-    wrappers: list[WrapperSpec] | None,
-    path: str | None = None,
-) -> Any:
-    """Apply environment wrappers to an environment.
-
-    :param env: Environment to apply wrappers to.
-    :type env: Any
-    :param wrappers: List of environment wrappers.
-    :type wrappers: list[WrapperSpec] or None
-    :param env_path: Environment path.
-    :type path: str or None
-    :returns: Wrapped environment.
-    :rtype: Any
-    """
-    if not wrappers:
-        return env
-
-    wrapped_env = env
-    for wrapper in wrappers:
-        wrapper_fn, wrapper_kwargs = _resolve_wrapper(wrapper, path=path)
-        wrapped_env = wrapper_fn(wrapped_env, **wrapper_kwargs)
-
-    return wrapped_env
 
 
 class EnvSpec(BaseModel):
@@ -252,12 +105,12 @@ class GymEnvSpec(EnvSpec):
         """
 
         def default_make_env() -> Any:
-            constructor = _resolve_entrypoint_target(entrypoint, path=path)
+            constructor = resolve_entrypoint_target(entrypoint, path=path)
             if not callable(constructor):
                 msg = f"Entrypoint '{entrypoint}' resolved to non-callable object."
                 raise TypeError(msg)
             env = constructor(**(config or {}))
-            return _apply_wrappers(env, wrappers, path=path)
+            return apply_wrappers(env, wrappers, path=path)
 
         return default_make_env
 
@@ -351,12 +204,12 @@ class PzEnvSpec(EnvSpec):
         """
 
         def default_make_env() -> ParallelEnv:
-            constructor = _resolve_entrypoint_target(entrypoint, path=path)
+            constructor = resolve_entrypoint_target(entrypoint, path=path)
             if not callable(constructor):
                 msg = f"Entrypoint '{entrypoint}' resolved to non-callable object."
                 raise TypeError(msg)
             env = constructor(**(config or {}))
-            return _apply_wrappers(env, wrappers, path=path)
+            return apply_wrappers(env, wrappers, path=path)
 
         return default_make_env
 
@@ -382,7 +235,7 @@ class PzEnvSpec(EnvSpec):
             raise AttributeError(msg)
 
         env = module.parallel_env(**(self.config or {}))
-        return _apply_wrappers(env, self.wrappers, path=self.path)
+        return apply_wrappers(env, self.wrappers, path=self.path)
 
     def make_env(
         self, extra_wrappers: list[type] | None = None
@@ -413,7 +266,7 @@ class PzEnvSpec(EnvSpec):
                     raise AttributeError(msg)
                 constructor = module.parallel_env
                 env = constructor(**(self.config or {}))
-                return _apply_wrappers(env, self.wrappers, path=self.path)
+                return apply_wrappers(env, self.wrappers, path=self.path)
 
         return make_multi_agent_vect_envs(
             env=make_env,
@@ -422,7 +275,6 @@ class PzEnvSpec(EnvSpec):
         )
 
 
-# TODO: Make this prettier
 class LLMEnvSpec(BaseModel):
     """Environment specification for LLM reasoning and preference training.
 
@@ -460,25 +312,41 @@ class LLMEnvSpec(BaseModel):
     prompt_template: dict[str, Any] | None = Field(default=None)
     max_reward: float | None = Field(default=None)
     train_test_split: float = Field(default=0.9, ge=0.0, le=1.0)
-    reward_file_path: str | None = Field(default="reward.py")
+    reward_file_path: str | None = Field(default=None)
+    reward_fn_name: str | None = Field(default=None)
     dataset_path: str = Field(default="dataset.parquet")
+    data_batch_size_per_gpu: int = Field(default=8, ge=1)
+    max_context_length: int | None = Field(default=None)
+    return_raw_completions: bool = Field(default=False)
+    seed: int | None = Field(default=None)
 
     @model_validator(mode="after")
     def _validate_reasoning_fields(self) -> Self:
-        if self.env_type == LLMEnvType.REASONING and self.reward_file_path is None:
-            msg = "reward_file_path is required for reasoning environments"
+        if self.env_type == LLMEnvType.REASONING:
+            if self.reward_file_path is None:
+                msg = "reward_file_path is required for reasoning environments"
+                raise ValueError(msg)
+            if self.reward_fn_name is None:
+                msg = "reward_fn_name is required for reasoning environments"
+                raise ValueError(msg)
+            if self.prompt_template is None:
+                msg = "Prompt template is required for reasoning environments"
+                raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_preference_fields(self) -> Self:
+        if self.env_type == LLMEnvType.PREFERENCE and self.reward_file_path is not None:
+            msg = "Reward file path has been specified, but is not supported for preference environments."
             raise ValueError(msg)
         return self
 
-    def _load_dataset(self) -> tuple[Any, Any]:
+    def load_dataset(self) -> tuple[Dataset, Dataset]:
         """Load and split the Parquet dataset into train/test.
 
         :returns: A ``(train_dataset, test_dataset)`` tuple.
         :rtype: tuple[Dataset, Dataset]
         """
-        import pandas as pd
-        from datasets import Dataset
-
         df = pd.read_parquet(self.dataset_path)
         if self.columns:
             df = df.rename(columns=self.columns)
@@ -487,46 +355,98 @@ class LLMEnvSpec(BaseModel):
         split = ds.train_test_split(test_size=1.0 - self.train_test_split)
         return split["train"], split["test"]
 
-    def _resolve_reward_fn(self) -> Callable[..., float]:
-        """Resolve the reward function from ``reward_file_path``.
+    def make_env(
+        self, tokenizer: Any, accelerator: Accelerator | None = None
+    ) -> ReasoningGym | PreferenceGym:
+        """Make the environment for the LLM agent.
 
-        The file is expected to contain a ``reward`` callable at module
-        level.
-
-        :returns: The resolved reward callable.
-        :rtype: Callable[..., float]
-        """
-        return _resolve_entrypoint_target(f"{self.reward_file_path}:reward")
-
-    def make_env(self, tokenizer: Any, accelerator: Any | None = None) -> Any:
-        """Construct the LLM gym environment.
-
-        :param tokenizer: A HuggingFace tokenizer instance.
+        :param tokenizer: The tokenizer.
         :type tokenizer: Any
-        :param accelerator: Optional HuggingFace ``Accelerator``.
+        :param accelerator: The accelerator.
         :type accelerator: Accelerator | None
-        :returns: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
-            :class:`~agilerl.utils.llm_utils.PreferenceGym`.
+        :return: The reasoning or preference gym environment.
+        :rtype: ReasoningGym | PreferenceGym
         """
-        from agilerl.utils.llm_utils import PreferenceGym, ReasoningGym
-
-        train_ds, test_ds = self._load_dataset()
+        train_ds, test_ds = self.load_dataset()
 
         if self.env_type == LLMEnvType.REASONING:
-            return ReasoningGym(
-                train_dataset=train_ds,
-                test_dataset=test_ds,
-                tokenizer=tokenizer,
-                reward_fn=self._resolve_reward_fn(),
-                conversation_template=self.prompt_template,
-                accelerator=accelerator,
-            )
+            return self._make_reasoning_env(train_ds, test_ds, tokenizer, accelerator)
+        if self.env_type == LLMEnvType.PREFERENCE:
+            return self._make_preference_env(train_ds, test_ds, tokenizer, accelerator)
+        msg = f"Invalid environment type: {self.env_type}"
+        raise ValueError(msg)
+
+    def _make_reasoning_env(
+        self,
+        train_dataset: Dataset,
+        test_dataset: Dataset,
+        tokenizer: Any,
+        accelerator: Accelerator | None = None,
+    ) -> ReasoningGym:
+        """Make the reasoning gym environment.
+
+        :param train_dataset: The training dataset.
+        :type train_dataset: Dataset
+        :param test_dataset: The test dataset.
+        :type test_dataset: Dataset
+        :param tokenizer: The tokenizer.
+        :type tokenizer: Any
+        :param accelerator: The accelerator.
+        :type accelerator: Accelerator | None
+        :return: The reasoning gym environment.
+        :rtype: ReasoningGym
+        """
+        from agilerl.utils.llm_utils import ReasoningGym
+
+        reward_fn = get_reward_fn(
+            reward_fn_name=self.reward_fn_name, file_path=self.reward_file_path
+        )
+        conversation_template = make_conversation_template(
+            prompt_template=self.prompt_template
+        )
+        return ReasoningGym(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            reward_fn=reward_fn,
+            conversation_template=conversation_template,
+            data_batch_size_per_gpu=self.data_batch_size_per_gpu,
+            accelerator=accelerator,
+            max_context_length=self.max_context_length,
+            return_raw_completions=self.return_raw_completions,
+            seed=self.seed,
+        )
+
+    def _make_preference_env(
+        self,
+        train_dataset: Dataset,
+        test_dataset: Dataset,
+        tokenizer: Any,
+        accelerator: Accelerator | None = None,
+    ) -> PreferenceGym:
+        """Make the environment for the LLM agent.
+
+        :param train_dataset: The training dataset.
+        :type train_dataset: Dataset
+        :param test_dataset: The test dataset.
+        :type test_dataset: Dataset
+        :param tokenizer: The tokenizer.
+        :type tokenizer: Any
+        :param accelerator: The accelerator.
+        :type accelerator: Accelerator | None
+        :return: The preference gym environment.
+        :rtype: PreferenceGym
+        """
+        from agilerl.utils.llm_utils import PreferenceGym
 
         return PreferenceGym(
-            train_dataset=train_ds,
-            test_dataset=test_ds,
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
             tokenizer=tokenizer,
+            data_batch_size_per_gpu=self.data_batch_size_per_gpu,
             accelerator=accelerator,
+            max_context_length=self.max_context_length,
+            seed=self.seed,
         )
 
 
@@ -587,6 +507,13 @@ class BanditEnvSpec(BaseModel):
     name: str = Field(default="BanditEnv")
     features: pd.DataFrame | str | Path
     targets: pd.DataFrame | str | Path
+
+    @field_serializer("features", "targets")
+    @classmethod
+    def _serialize_dataframe_fields(cls, v: pd.DataFrame | str | Path) -> str | None:
+        if isinstance(v, (str, Path)):
+            return str(v)
+        return None
 
     def _load_dataframe(self, value: str | Path) -> pd.DataFrame:
         """Load a DataFrame from a path.

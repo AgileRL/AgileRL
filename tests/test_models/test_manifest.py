@@ -298,6 +298,20 @@ class TestTrainingManifest:
 class TestLocalTrainerSingleAgent:
     """``LocalTrainer.from_manifest()`` for single-agent RL algorithms."""
 
+    @pytest.fixture(autouse=True)
+    def _patch_heavy_init(self):
+        """Avoid spawning real AsyncVectorEnv subprocesses and building
+        real neural-network populations; these tests only verify manifest
+        parsing and trainer construction."""
+        with (
+            patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=[MagicMock()],
+            ),
+        ):
+            yield
+
     # -- Parametrized: all single-agent algorithms --------------------------
 
     @pytest.mark.parametrize(
@@ -516,6 +530,18 @@ class TestLocalTrainerSingleAgent:
 class TestLocalTrainerMultiAgent:
     """``LocalTrainer.from_manifest()`` for multi-agent RL algorithms."""
 
+    @pytest.fixture(autouse=True)
+    def _patch_heavy_init(self):
+        """Avoid spawning real AsyncPettingZooVecEnv subprocesses."""
+        with (
+            patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=[MagicMock()],
+            ),
+        ):
+            yield
+
     @pytest.mark.parametrize(
         "manifest, expected_algo_cls",
         [
@@ -618,7 +644,11 @@ class TestLocalTrainerLLM:
             env={
                 "dataset_path": "train.parquet",
                 "reward_file_path": "reward.py",
-                "prompt_template": {"role": "user", "content": "{question}"},
+                "reward_fn_name": "combined_rewards",
+                "prompt_template": {
+                    "system_0": "You are a helpful assistant.",
+                    "user_1": "Solve {question} to get {answer}.",
+                },
                 "max_reward": 10.0,
                 "train_test_split": 0.8,
             },
@@ -693,11 +723,12 @@ class TestLocalTrainerLLM:
         trainer = LocalTrainer.from_manifest(self._grpo_manifest())
         assert trainer.env_spec.dataset_path == "train.parquet"
         assert trainer.env_spec.reward_file_path == "reward.py"
+        assert trainer.env_spec.reward_fn_name == "combined_rewards"
         assert trainer.env_spec.max_reward == 10.0
         assert trainer.env_spec.train_test_split == 0.8
         assert trainer.env_spec.prompt_template == {
-            "role": "user",
-            "content": "{question}",
+            "system_0": "You are a helpful assistant.",
+            "user_1": "Solve {question} to get {answer}.",
         }
 
     def test_dpo_produces_llm_env_spec(self):
@@ -835,6 +866,19 @@ _MULTI_AGENT_CONFIGS = [
 class TestFromConfigFiles:
     """Load every YAML config under ``configs/training/`` and verify that
     ``LocalTrainer.from_manifest()`` produces the expected types."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_heavy_init(self):
+        """Avoid spawning real environments and populations for config
+        file integration tests."""
+        with (
+            patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=[MagicMock()],
+            ),
+        ):
+            yield
 
     @pytest.mark.parametrize(
         "rel_path, expected_algo_cls, expected_encoder_cls",

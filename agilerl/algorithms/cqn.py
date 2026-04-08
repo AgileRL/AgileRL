@@ -12,7 +12,7 @@ from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
-from agilerl.typing import GymEnvType, ObservationType
+from agilerl.typing import ExperiencesType, GymEnvType, ObservationType
 from agilerl.utils.algo_utils import make_safe_deepcopies
 
 
@@ -219,16 +219,21 @@ class CQN(RLAlgorithm):
 
         return action
 
-    def learn(self, experiences: tuple[torch.Tensor, ...]) -> float:
+    def learn(self, experiences: ExperiencesType) -> float:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type obs: list[torch.Tensor[float]]
+        :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
+        :type experiences: tensordict.TensorDict
 
         :return: Loss from learning
         :rtype: float
         """
-        states, actions, rewards, next_states, dones = experiences
+        states = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_states = experiences["next_obs"]
+        dones = experiences["done"]
+
         if self.accelerator is not None:
             actions = actions.to(self.accelerator.device)
             rewards = rewards.to(self.accelerator.device)

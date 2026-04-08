@@ -64,24 +64,29 @@ class BanditEnv:
     Gym-style environment.
 
     :param features: Dataset features
-    :type features: Pandas DataFrame
+    :type features: pd.DataFrame
     :param targets: Dataset targets corresponding to features
-    :type features: Pandas DataFrame
+    :type targets: pd.DataFrame
     """
 
     def __init__(self, features: pd.DataFrame, targets: pd.DataFrame) -> None:
+        # Define the number of arms and the context dimension
         self.arms = int(targets.nunique()[0])
         self.context_dim = (len(np.array(features.loc[0])) * self.arms,)
 
         self.features = features
         self.targets = pd.factorize(targets.values.ravel())[0]
         self.prev_reward = np.zeros(self.arms)
+        self.num_envs = 1  # follow vec-env interface
 
+        # Define the observation and action spaces
         self.single_observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=self.context_dim, dtype=np.float32
+            low=features.values.min(),
+            high=features.values.max(),
+            shape=self.context_dim,
+            dtype=np.float32,
         )
         self.single_action_space = spaces.Discrete(self.arms)
-        self.num_envs = 1
 
     def _new_state_and_target_action(self) -> tuple[np.ndarray, int]:
         """Generate a new state and target action.
@@ -93,9 +98,9 @@ class BanditEnv:
         r = random.randint(0, len(self.features) - 1)
 
         # Create contextual input to bandit and corresponding target
-        context = np.array(self.features.loc[r])
+        context = np.array(self.features.loc[r], dtype=np.float32)
         target = self.targets[r]
-        next_state = np.zeros((self.arms, *self.context_dim))
+        next_state = np.zeros((self.arms, *self.context_dim), dtype=np.float32)
         for i, j in zip(
             range(self.arms), range(0, self.context_dim[0], len(context)), strict=False
         ):
@@ -117,7 +122,7 @@ class BanditEnv:
         next_state, target = self._new_state_and_target_action()
 
         # Save reward for next call to step()
-        next_reward = np.zeros(self.arms)
+        next_reward = np.zeros(self.arms, dtype=np.float32)
         next_reward[target] = 1
         self.prev_reward = next_reward
         return next_state, reward
@@ -129,7 +134,7 @@ class BanditEnv:
         :rtype: np.ndarray
         """
         next_state, target = self._new_state_and_target_action()
-        next_reward = np.zeros(self.arms)
+        next_reward = np.zeros(self.arms, dtype=np.float32)
         next_reward[target] = 1
         self.prev_reward = next_reward
         return next_state

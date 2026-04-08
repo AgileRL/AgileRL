@@ -8,6 +8,7 @@ from pydantic import Field
 from agilerl.algorithms import MATD3
 from agilerl.models.algo import MultiAgentRLAlgorithmSpec, off_policy, register
 from agilerl.models.networks import DeterministicActorSpec
+from agilerl.modules import ModuleDict
 from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
 
 
@@ -28,6 +29,8 @@ class MATD3Spec(MultiAgentRLAlgorithmSpec):
     dt: float = Field(default=0.01)
     torch_compiler: str | None = Field(default=None)
     net_config: DeterministicActorSpec | None = Field(default=None)
+    actor_networks: ModuleDict | None = Field(default=None, exclude=True)
+    critic_networks: list[ModuleDict] | None = Field(default=None, exclude=True)
 
     algo_class: ClassVar[type[MATD3]] = MATD3
 

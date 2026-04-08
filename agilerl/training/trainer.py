@@ -261,6 +261,11 @@ class Trainer(ABC):
 class LocalTrainer(Trainer):
     """Local trainer that streamlines the AgileRL evolutionary training process.
 
+    Automatically builds the components necessary for RL training with evolutionary HPO
+    from a series of Pydantic models that validate the specified training configuration,
+    and dispatches to the algorithm-specific training loop through `LocalTrainer.train()`.
+    Handles all of the RL training paradigms available in AgileRL.
+
     :param algorithm: An `:class:`AlgorithmSpec` instance or a string algorithm name.
     :type algorithm: AlgorithmSpec | str
     :param environment: An RL environment following Gymnasium or PettingZoo API.
@@ -310,15 +315,11 @@ class LocalTrainer(Trainer):
         )
 
         # For LLM algorithms, load the tokenizer once and share it.
-        self.tokenizer = None
-        if isinstance(self.algorithm_spec, LLMAlgorithmSpec):
-            if AutoTokenizer is None:
-                msg = "LLM dependencies are not installed. Please install them using: pip install agilerl[llm]"
-                raise ImportError(msg)
-
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.algorithm_spec.pretrained_model_name_or_path
-            )
+        self.tokenizer = (
+            self._make_tokenizer()
+            if isinstance(self.algorithm_spec, LLMAlgorithmSpec)
+            else None
+        )
 
         # Instantiate the training components from their specs.
         self.env = self._make_env()
@@ -333,7 +334,9 @@ class LocalTrainer(Trainer):
             tokenizer=self.tokenizer,
             resume_from_checkpoint=self.resume_from_checkpoint,
         )
-        self.mutations = build_mutations_from_spec(self.mutation_spec, self.device)
+        self.mutations = build_mutations_from_spec(
+            self.mutation_spec, self.device, accelerator=self.accelerator
+        )
         self.tournament_selection = build_tournament_from_spec(
             self.tournament_selection_spec, self.training_spec
         )
@@ -342,6 +345,36 @@ class LocalTrainer(Trainer):
         )
         self.train_fn = self.algorithm_spec.get_training_fn()
 
+    def _make_tokenizer(self) -> AutoTokenizer:
+        """Create the tokenizer for the LLM algorithm.
+
+        :returns: The tokenizer.
+        :rtype: AutoTokenizer
+        :raises ImportError: If the LLM dependencies are not installed.
+        """
+        if AutoTokenizer is None:
+            msg = "LLM dependencies are not installed. Please install them using: pip install agilerl[llm]"
+            raise ImportError(msg)
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.algorithm_spec.pretrained_model_name_or_path
+        )
+
+        # NOTE: For now we provide a simple chat template but could always give options to the user in
+        # in the future.
+        if tokenizer.chat_template is None:
+            tokenizer.chat_template = (
+                "{% for message in messages %}"
+                "{{ message['role'].capitalize() + ': ' + message['content'] + '\\n\\n' }}"
+                "{% endfor %}"
+                "{% if add_generation_prompt %}"
+                "{{ 'Assistant: ' }}"
+                "{% endif %}"
+            )
+        tokenizer.pad_token = tokenizer.eos_token
+
+        return tokenizer
+
     def _make_env(self) -> EnvironmentT:
         """Create the environment to train on.
 
@@ -349,6 +382,13 @@ class LocalTrainer(Trainer):
         :rtype: GymEnvType | PzEnvType | LLMEnvType | BanditEnv
         """
         if isinstance(self.env_spec, LLMEnvSpec):
+            # Some LLMEnvSpec fields are dependent on the algo configuration
+            self.env_spec.return_raw_completions = getattr(
+                self.algorithm_spec, "use_vllm", False
+            )
+            self.env_spec.max_context_length = self.algorithm_spec.max_model_len
+            self.env_spec.seed = self.algorithm_spec.seed
+
             return self.env_spec.make_env(
                 tokenizer=self.tokenizer, accelerator=self.accelerator
             )
@@ -457,8 +497,8 @@ class LocalTrainer(Trainer):
             "init_hp": manifest,
             "max_steps": self.training_spec.max_steps,
             "evo_steps": self.training_spec.evo_steps,
-            "tournament": self.tournament_selection_spec,
-            "mutation": self.mutation_spec,
+            "tournament": self.tournament_selection,
+            "mutation": self.mutations,
             "save_elite": save_elite,
             "elite_path": elite_path,
             "wb": wb,

@@ -8,6 +8,7 @@ from pydantic import BeforeValidator, Field
 from agilerl.algorithms import PPO
 from agilerl.models.algo import RLAlgorithmSpec, register
 from agilerl.models.networks import StochasticActorSpec
+from agilerl.modules import EvolvableModule
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.typing import BPTTSequenceType
 
@@ -48,6 +49,8 @@ class PPOSpec(RLAlgorithmSpec):
     )
     lr: float = Field(default=0.0001, ge=0.0)
     net_config: StochasticActorSpec | None = Field(default=None)
+    actor_network: EvolvableModule | None = Field(default=None)
+    critic_network: EvolvableModule | None = Field(default=None)
 
     algo_class: ClassVar[type[PPO]] = PPO
 

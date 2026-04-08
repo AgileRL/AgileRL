@@ -4,7 +4,16 @@ from __future__ import annotations
 
 import warnings
 from functools import singledispatch
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+from accelerate import Accelerator
+
+from agilerl import HAS_LLM_DEPENDENCIES
+
+if HAS_LLM_DEPENDENCIES:
+    from transformers import AutoTokenizer
+else:
+    AutoTokenizer = None
 
 from agilerl.algorithms.core.base import (
     LLMAlgorithm,
@@ -33,7 +42,6 @@ from agilerl.wrappers.learning import BanditEnv
 
 if TYPE_CHECKING:
     import torch
-    from accelerate import Accelerator
     from gymnasium import spaces
 
 LLMEnvType = ReasoningGym | PreferenceGym
@@ -130,7 +138,7 @@ def create_population_from_spec(
     device: str | torch.device = "cpu",
     resume_from_checkpoint: str | None = None,
     accelerator: Accelerator | None = None,
-    tokenizer: Any | None = None,
+    tokenizer: AutoTokenizer | None = None,
 ) -> PopulationT:
     """Instantiate a population of agents from an algorithm spec.
 
@@ -151,7 +159,7 @@ def create_population_from_spec(
     :param accelerator: Accelerator instance.
     :type accelerator: Accelerator | None
     :param tokenizer: Pre-loaded HuggingFace tokenizer for LLM algorithms.
-    :type tokenizer: Any | None
+    :type tokenizer: AutoTokenizer | None
     :returns: A list of algorithm instances.
     :rtype: PopulationT
     """
@@ -185,28 +193,38 @@ def create_population_from_spec(
                 observation_space,
                 action_space,
                 index=i,
+                resume_from_checkpoint=resume_from_checkpoint,
                 device=device,
                 accelerator=accelerator,
-                resume_from_checkpoint=resume_from_checkpoint,
             )
             for i in range(population_size)
         ]
 
-    # LLM algorithms
-    return [
-        algo_spec.build_algorithm(
-            tokenizer=tokenizer,
-            index=i,
-            accelerator=accelerator,
-            device=device,
-            resume_from_checkpoint=resume_from_checkpoint,
+    # LLM algorithms — each agent beyond the first gets a fresh Accelerator
+    # to avoid sharing the same DeepSpeed distributed context.
+    population = []
+    for i in range(population_size):
+        if i == 0 or accelerator is None:
+            agent_accelerator = accelerator
+        else:
+            agent_accelerator = Accelerator()
+
+        population.append(
+            algo_spec.build_algorithm(
+                tokenizer=tokenizer,
+                index=i,
+                resume_from_checkpoint=resume_from_checkpoint,
+                accelerator=agent_accelerator,
+                device=device,
+            )
         )
-        for i in range(population_size)
-    ]
+    return population
 
 
 def build_mutations_from_spec(
-    mutation_spec: MutationSpec | None, device: str | torch.device = "cpu"
+    mutation_spec: MutationSpec | None,
+    device: str | torch.device = "cpu",
+    accelerator: Accelerator | None = None,
 ) -> Mutations | None:
     """Convert a :class:`MutationSpec` into a :class:`Mutations` instance.
 
@@ -214,6 +232,8 @@ def build_mutations_from_spec(
     :type mutation_spec: MutationSpec | None
     :param device: Torch device string.
     :type device: str | torch.device
+    :param accelerator: Optional accelerator for distributed mutation operations.
+    :type accelerator: Accelerator | None
     :returns: A :class:`Mutations` instance, or ``None`` if *mutation_spec* is ``None``.
     :rtype: Mutations | None
     """
@@ -231,6 +251,7 @@ def build_mutations_from_spec(
         mutation_sd=mutation_spec.mutation_sd,
         rand_seed=mutation_spec.rand_seed,
         device=device,
+        accelerator=accelerator,
     )
 
 
@@ -278,8 +299,7 @@ def build_replay_buffer_from_spec(
     :returns: A replay buffer instance, or ``None`` for on-policy algorithms.
     :rtype: BufferT | None
     """
-    needs_buffer = algo_spec.off_policy or algo_spec.offline or algo_spec.bandit
-    if not needs_buffer:
+    if not (algo_spec.off_policy or algo_spec.offline or algo_spec.bandit):
         return None
 
     if buffer_spec is None:

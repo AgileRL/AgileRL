@@ -184,5 +184,9 @@ class TrainingSpec(BaseModel):
     checkpoint_path: str | None = Field(default=None)
     overwrite_checkpoints: bool = Field(default=False)
 
+    # LLM-specific training parameters
+    evaluation_interval: int = Field(default=10, ge=1)
+    num_epochs: int | None = Field(default=None)
+
     # NOTE: The following are only applicable to Arena training
     reporting_interval: int = Field(default=1024, ge=1)

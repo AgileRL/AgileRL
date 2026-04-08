@@ -8,6 +8,7 @@ from pydantic import Field
 from agilerl.algorithms import IPPO
 from agilerl.models.algo import MultiAgentRLAlgorithmSpec, register
 from agilerl.models.networks import StochasticActorSpec
+from agilerl.modules import ModuleDict
 from agilerl.training.train_multi_agent_on_policy import train_multi_agent_on_policy
 
 
@@ -28,6 +29,8 @@ class IPPOSpec(MultiAgentRLAlgorithmSpec):
     lr: float = Field(default=0.0001, ge=0.0)
     torch_compiler: str | None = Field(default=None)
     net_config: StochasticActorSpec | None = Field(default=None)
+    actor_networks: ModuleDict | None = Field(default=None)
+    critic_networks: ModuleDict | None = Field(default=None)
 
     algo_class: ClassVar[type[IPPO]] = IPPO
 
