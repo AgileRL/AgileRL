@@ -41,8 +41,7 @@ jobs:
 
             - name: Install dependencies
               run: |
-                  uv venv
-                  uv pip install swig
+                  apt-get update && apt-get install -y swig
                   uv sync --locked --all-groups --extra all
                   echo "/tmp/agilerl-venv/bin" >> $GITHUB_PATH
                   uv cache clean
