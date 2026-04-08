@@ -86,8 +86,16 @@ def _prepare_llm_algo_kwargs(
     lora_config: Any | None,
     vllm_config: Any | None,
     INIT_HP: dict[str, Any],
+    with_generation_defaults: bool = True,
 ) -> dict[str, Any]:
-    """Merge tokenizer / model / LoRA / vLLM defaults into ``algo_kwargs``."""
+    """Merge tokenizer / model / LoRA defaults into ``algo_kwargs``.
+
+    When ``with_generation_defaults`` is True (GRPO / LLMPPO / LLMReinforce), also
+    merges vLLM-related defaults. When False (DPO), skips generation stack keys so
+    callers do not inherit ``use_vllm`` / ``vllm_config``; reference-adapter
+    default matches offline preference training (False unless ``INIT_HP`` says
+    otherwise).
+    """
     merged = dict(algo_kwargs)
     if tokenizer is not None:
         merged.setdefault("pad_token_id", tokenizer.pad_token_id)
@@ -102,18 +110,24 @@ def _prepare_llm_algo_kwargs(
         built = _lora_config_from_init_hp(INIT_HP)
         if built is not None:
             merged["lora_config"] = built
-    if vllm_config is not None:
-        merged.setdefault("vllm_config", vllm_config)
-    merged.setdefault("use_vllm", bool(INIT_HP.get("USE_VLLM", False)))
-    merged.setdefault(
-        "use_separate_reference_adapter",
-        INIT_HP.get("USE_SEPARATE_REFERENCE_ADAPTER", True),
-    )
+    if with_generation_defaults:
+        if vllm_config is not None:
+            merged.setdefault("vllm_config", vllm_config)
+        merged.setdefault("use_vllm", bool(INIT_HP.get("USE_VLLM", False)))
+        merged.setdefault(
+            "use_separate_reference_adapter",
+            INIT_HP.get("USE_SEPARATE_REFERENCE_ADAPTER", True),
+        )
+    else:
+        merged.setdefault(
+            "use_separate_reference_adapter",
+            INIT_HP.get("USE_SEPARATE_REFERENCE_ADAPTER", False),
+        )
     if "micro_batch_size_per_gpu" not in merged:
         batch_size = INIT_HP.get("BATCH_SIZE", 16)
         merged["micro_batch_size_per_gpu"] = INIT_HP.get(
             "MICRO_BATCH_SIZE_PER_GPU",
-            min(8, batch_size) if batch_size else 8,
+            batch_size,
         )  # NOTE we should take a look into deepspeed auto batch-sizing
     return merged
 
@@ -123,13 +137,6 @@ def _validate_llm_kwargs(merged: dict[str, Any], *, actor_network: Any | None) -
         msg = (
             "LLM agents require pad_token_id and pad_token; pass tokenizer= to "
             "create_population or set them in algo_kwargs."
-        )
-        raise ValueError(msg)
-    if merged.get("lora_config") is None:
-        msg = (
-            "LLM agents require lora_config; pass lora_config=, set "
-            "TARGET_MODULES (or LORA_TARGET_MODULES) in INIT_HP, or supply "
-            "algo_kwargs['lora_config']."
         )
         raise ValueError(msg)
     if merged.get("model_name") is None and actor_network is None:
@@ -362,7 +369,7 @@ def create_population(
     :param torch_compiler: Torch compiler, defaults to None
     :type torch_compiler: Any, optional
     :param tokenizer: Hugging Face tokenizer; used to default ``pad_token_id`` /
-        ``pad_token`` for LLMPPO / LLMReinforce when not set in ``algo_kwargs``.
+        ``pad_token`` for GRPO / DPO / LLMPPO / LLMReinforce when not set in ``algo_kwargs``.
     :type tokenizer: Any, optional
     :param model_name: HF model id or path; defaults ``algo_kwargs['model_name']``
         or ``INIT_HP['MODEL_NAME']`` for LLM agents.
@@ -370,7 +377,7 @@ def create_population(
     :param lora_config: ``peft.LoraConfig``; if omitted, built from
         ``LORA_*`` / ``TARGET_MODULES`` keys in ``INIT_HP`` when present.
     :type lora_config: Any, optional
-    :param vllm_config: ``VLLMConfig`` for LLM agents using vLLM generation.
+    :param vllm_config: ``VLLMConfig`` for GRPO / LLMPPO / LLMReinforce (ignored for DPO).
     :type vllm_config: Any, optional
     :return: Population of agents
     :rtype: list[EvolvableAlgorithm]
@@ -687,54 +694,26 @@ def create_population(
             population.append(agent)
 
     elif algo == "GRPO":
+        if not HAS_LLM_DEPENDENCIES:
+            msg = "GRPO requires optional LLM dependencies (install agilerl[llm])."
+            raise ImportError(msg)
+
+        kwargs = _prepare_llm_algo_kwargs(
+            algo_kwargs,
+            tokenizer=tokenizer,
+            model_name=model_name,
+            lora_config=lora_config,
+            vllm_config=vllm_config,
+            INIT_HP=INIT_HP,
+        )
+        _validate_llm_kwargs(kwargs, actor_network=actor_network)
+        cosine_cfg = INIT_HP.get("COSINE_lR_SCHEDULER")
+        cosine_lr = (
+            CosineLRScheduleConfig(**cosine_cfg) if cosine_cfg is not None else None
+        )
         for idx in range(population_size):
-            agent = GRPO(
-                actor_network=(
-                    (
-                        clone_llm(
-                            actor_network,
-                            zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                            state_dict=(
-                                actor_network.state_dict()
-                                if accelerator is None
-                                else get_state_dict(actor_network)
-                            ),
-                        )
-                        if idx != 0
-                        else actor_network
-                    )
-                    if actor_network is not None
-                    else None
-                ),
-                hp_config=hp_config,
-                index=idx,
-                batch_size=INIT_HP.get("BATCH_SIZE", 2),
-                beta=INIT_HP.get("BETA", 0.001),
-                lr=INIT_HP.get("LR", 5e-7),
-                clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
-                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
-                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
-                group_size=INIT_HP.get("GROUP_SIZE", 8),
-                temperature=INIT_HP.get("TEMPERATURE", 0.9),
-                calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
-                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
-                min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
-                cosine_lr_schedule_config=(
-                    CosineLRScheduleConfig(**INIT_HP.get("COSINE_lR_SCHEDULER"))
-                    if INIT_HP.get("COSINE_lR_SCHEDULER") is not None
-                    else None
-                ),
-                accelerator=Accelerator() if accelerator else None,
-                device=device,
-                max_model_len=INIT_HP.get("MAX_MODEL_LEN"),
-                **algo_kwargs,
-            )
-            population.append(agent)
-    elif algo == "DPO":
-        for idx in range(population_size):
-            agent = DPO(
-                actor_network=(
+            act = (
+                (
                     clone_llm(
                         actor_network,
                         zero_stage=INIT_HP.get("ZERO_STAGE", 0),
@@ -746,20 +725,101 @@ def create_population(
                     )
                     if idx != 0
                     else actor_network
-                ),
+                )
+                if actor_network is not None
+                else None
+            )
+            kw = dict(kwargs)
+            kw.update(
                 hp_config=hp_config,
                 index=idx,
-                batch_size=INIT_HP.get("BATCH_SIZE", 2),
+                batch_size=INIT_HP.get("BATCH_SIZE", 16),
                 beta=INIT_HP.get("BETA", 0.001),
                 lr=INIT_HP.get("LR", 5e-7),
+                clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
+                group_size=INIT_HP.get("GROUP_SIZE", 8),
+                temperature=INIT_HP.get("TEMPERATURE", 0.9),
+                repetition_penalty=INIT_HP.get("REPETITION_PENALTY", 1.0),
+                top_p=INIT_HP.get("TOP_P", 0.95),
+                top_k=INIT_HP.get("TOP_K", 50),
+                min_p=INIT_HP.get("MIN_P", 0.0),
+                use_memory_efficient_params=INIT_HP.get(
+                    "USE_MEMORY_EFFICIENT_PARAMS", True
+                ),
+                calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
+                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
+                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
+                min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
+                max_model_len=INIT_HP.get("MAX_MODEL_LEN", 1024),
+                cosine_lr_schedule_config=cosine_lr,
+                accelerator=accelerator,
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
+                actor_network=act,
+                seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+            )
+            if torch_compiler is not None:
+                kw.setdefault("torch_compiler", torch_compiler)
+            agent = GRPO(**kw)
+            population.append(agent)
+    elif algo == "DPO":
+        if not HAS_LLM_DEPENDENCIES:
+            msg = "DPO requires optional LLM dependencies (install agilerl[llm])."
+            raise ImportError(msg)
+
+        kwargs = _prepare_llm_algo_kwargs(
+            algo_kwargs,
+            tokenizer=tokenizer,
+            model_name=model_name,
+            lora_config=lora_config,
+            vllm_config=vllm_config,
+            INIT_HP=INIT_HP,
+            with_generation_defaults=False,
+        )
+        _validate_llm_kwargs(kwargs, actor_network=actor_network)
+        kwargs.pop("use_vllm", None)
+        kwargs.pop("vllm_config", None)
+
+        for idx in range(population_size):
+            act = (
+                (
+                    clone_llm(
+                        actor_network,
+                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
+                        state_dict=(
+                            actor_network.state_dict()
+                            if accelerator is None
+                            else get_state_dict(actor_network)
+                        ),
+                    )
+                    if idx != 0
+                    else actor_network
+                )
+                if actor_network is not None
+                else None
+            )
+            kw = dict(kwargs)
+            kw.update(
+                hp_config=hp_config,
+                index=idx,
+                batch_size=INIT_HP.get("BATCH_SIZE", 16),
+                beta=INIT_HP.get("BETA", 0.001),
+                lr=INIT_HP.get("LR", 0.000005),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
                 reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
-                accelerator=Accelerator() if accelerator else None,
-                device=device,
-                **algo_kwargs,
+                accelerator=accelerator,
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
+                actor_network=act,
+                seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
             )
+            if torch_compiler is not None:
+                kw.setdefault("torch_compiler", torch_compiler)
+            agent = DPO(**kw)
             population.append(agent)
 
     elif _normalize_llm_algo_name(algo) == "LLMPPO":
@@ -813,10 +873,11 @@ def create_population(
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 temperature=INIT_HP.get("TEMPERATURE", 1.0),
-                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", 1024),
+                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
                 min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
                 max_model_len=INIT_HP.get("MAX_MODEL_LEN"),
                 reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
+                use_memory_efficient_params=INIT_HP.get("USE_MEMORY_EFFICIENT_PARAMS", True),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
                 cosine_lr_schedule_config=cosine_lr,
                 accelerator=accelerator,
@@ -875,12 +936,12 @@ def create_population(
                 batch_size=INIT_HP.get("BATCH_SIZE", 16),
                 beta=INIT_HP.get("BETA", 0.01),
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
-                gamma=INIT_HP.get("GAMMA", 1.0),
+                gamma=INIT_HP.get("GAMMA", 0.99),
                 lr=INIT_HP.get("LR", 5e-7),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 temperature=INIT_HP.get("TEMPERATURE", 1.0),
-                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", 1024),
+                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
                 min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
                 max_model_len=INIT_HP.get("MAX_MODEL_LEN"),
                 reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
@@ -1336,3 +1397,9 @@ def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
             agent.accelerator, agent.lr_scheduler = LLMAlgorithm.update_lr(
                 **update_lr_kw
             )
+
+def _distributed_world_size(accelerator: Accelerator | None) -> int:
+    """World size for batch accounting: prefer Accelerate, else torch.distributed."""
+    if accelerator is not None:
+        return accelerator.num_processes
+    return 1

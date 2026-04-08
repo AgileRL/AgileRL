@@ -143,14 +143,14 @@ class REINFORCE(LLMAlgorithm):
         top_p: float = 1.0,
         top_k: int = 50,
         min_p: float = 0.0,
-        use_memory_efficient_params: bool = True,
+        use_memory_efficient_params: bool = False,
         use_separate_reference_adapter: bool = True,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         reduce_memory_peak: bool = False,
-        max_output_tokens: int | None = 1024,
+        max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
-        max_model_len: int | None = None,
+        max_model_len: int | None = 1024,
         lora_config: LoraConfigProtocol | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
@@ -167,7 +167,7 @@ class REINFORCE(LLMAlgorithm):
         device = (
             f"cuda:{accelerator.process_index}"
             if accelerator is not None
-            else ("cuda" if torch.cuda.is_available() else "cpu")
+            else device
         )
         super().__init__(
             index=index,
@@ -235,7 +235,7 @@ class REINFORCE(LLMAlgorithm):
         self.max_output_tokens = max_output_tokens
         self.min_output_tokens = min_output_tokens
         self.max_model_len = (
-            max_model_len if max_model_len is not None else max_output_tokens + 512
+            max_model_len if max_model_len is not None else max_output_tokens
         )
         self.generation_config = GenerationConfig(
             do_sample=True,
@@ -265,7 +265,7 @@ class REINFORCE(LLMAlgorithm):
             if self.accelerator is not None
             else self.actor
         )
-        if self.use_vllm:
+        if self.use_vllm and self.use_memory_efficient_params:
             move_params_to_cpu(unwrapped_model)
             self.llm.wake_up()
             self._move_model_to_vllm()
@@ -585,8 +585,3 @@ class REINFORCE(LLMAlgorithm):
             - (reference_log_probs - log_probs)
             - 1
         )
-
-    def _get_unwrapped_actor(self) -> Any:
-        if self.accelerator is not None:
-            return self.accelerator.unwrap_model(self.actor)
-        return self.actor

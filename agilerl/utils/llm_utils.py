@@ -985,6 +985,8 @@ def stitch_completion_after_windowed_hf_generate(
     :return: Full prompt plus generation with stitch restored.
     :rtype: torch.Tensor
     """
+    if stitch is None:
+        return completion_id, initial_len
     stitch = stitch.to(completion_id.device, non_blocking=True)
     stitch_len = stitch.shape[1] if stitch is not None else 0
     full_prompt_len = initial_len + stitch_len

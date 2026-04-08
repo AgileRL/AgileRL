@@ -67,11 +67,11 @@ class GRPO(LLMAlgorithm):
         calculated to achieve the target batch_size. If None, uses existing
         gradient_accumulation_steps from DeepSpeed config, defaults to None
     :type micro_batch_size_per_gpu: int, optional
-    :param max_output_tokens: Max number of answer tokens, defaults to 512
+    :param max_output_tokens: Max number of answer tokens, defaults to None
     :type max_output_tokens: int, optional
     :param min_output_tokens: Minimum output tokens, defaults to 0
     :type min_output_tokens: int, optional
-    :param max_model_len: Maximum context window length, defaults to None
+    :param max_model_len: Maximum context window length, defaults to 1024
     :type max_model_len: int, optional
     :param lora_config: Config for LoRA, defaults to None
     :type lora_config: LoraConfigProtocol, optional
@@ -97,6 +97,8 @@ class GRPO(LLMAlgorithm):
     :type seed: int, optional
     :param gradient_checkpointing: Flag to indicate if gradient checkpointing should be used, defaults to True
     :type gradient_checkpointing: bool, optional
+    :param torch_compiler: Torch compile mode (e.g. ``'default'``), defaults to None
+    :type torch_compiler: str | None, optional
     :param use_liger_loss: Use Liger kernel for memory-efficient loss computation, defaults to False.
         Requires ``liger_kernel`` to be installed; pass ``False`` to fall back to the standard PyTorch path.
     :type use_liger_loss: bool, optional
@@ -123,13 +125,13 @@ class GRPO(LLMAlgorithm):
         top_p: float = 0.95,
         top_k: int = 50,
         min_p: float = 0.0,
-        use_memory_efficient_params: bool = True,
+        use_memory_efficient_params: bool = False,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         reduce_memory_peak: bool = False,
-        max_output_tokens: int | None = 1024,
+        max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
-        max_model_len: int | None = None,
+        max_model_len: int | None = 1024,
         lora_config: LoraConfigProtocol | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
@@ -141,13 +143,14 @@ class GRPO(LLMAlgorithm):
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         gradient_checkpointing: bool = True,
+        torch_compiler: str | None = None,
         use_liger_loss: bool = False,
     ) -> None:
 
         device = (
             f"cuda:{accelerator.process_index}"
             if accelerator is not None
-            else ("cuda" if torch.cuda.is_available() else "cpu")
+            else device
         )
         super().__init__(
             index=index,
@@ -175,6 +178,7 @@ class GRPO(LLMAlgorithm):
             accelerator=accelerator,
             name="GRPO",
             gradient_checkpointing=gradient_checkpointing,
+            torch_compiler=torch_compiler,
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
@@ -214,10 +218,10 @@ class GRPO(LLMAlgorithm):
             raise ValueError(
                 msg,
             )
-        self.max_output_tokens = max_output_tokens
+        self.max_output_tokens = max_output_tokens if max_output_tokens is not None else max_model_len
         self.min_output_tokens = min_output_tokens
         self.max_model_len = (
-            max_model_len if max_model_len is not None else max_output_tokens + 512
+            max_model_len if max_model_len is not None else max_output_tokens 
         )
         self.generation_config = GenerationConfig(
             do_sample=True,
@@ -249,10 +253,11 @@ class GRPO(LLMAlgorithm):
             else self.actor
         )
         # Wake up LLM
-        if self.use_vllm:
+        if self.use_vllm and self.use_memory_efficient_params:
             move_params_to_cpu(unwrapped_model)
             self.llm.wake_up()
             self._move_model_to_vllm()
+
 
     def get_action(
         self,

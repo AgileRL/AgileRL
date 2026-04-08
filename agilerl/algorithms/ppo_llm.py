@@ -72,9 +72,9 @@ class PPO(LLMAlgorithm):
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         reduce_memory_peak: bool = False,
-        max_output_tokens: int | None = 1024,
+        max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
-        max_model_len: int | None = None,
+        max_model_len: int | None = 1024,
         lora_config: LoraConfigProtocol | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
@@ -82,7 +82,7 @@ class PPO(LLMAlgorithm):
         wrap: bool = True,
         clone: bool = False,
         use_vllm: bool = False,
-        use_memory_efficient_params: bool = True,
+        use_memory_efficient_params: bool = False,
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         turn_level_clip: bool = True,
@@ -93,7 +93,7 @@ class PPO(LLMAlgorithm):
         device = (
             f"cuda:{accelerator.process_index}"
             if accelerator is not None
-            else ("cuda" if torch.cuda.is_available() else "cpu")
+            else device
         )
         super().__init__(
             index=index,
@@ -169,7 +169,7 @@ class PPO(LLMAlgorithm):
         self.max_output_tokens = max_output_tokens
         self.min_output_tokens = min_output_tokens
         self.max_model_len = (
-            max_model_len if max_model_len is not None else max_output_tokens + 512
+            max_model_len if max_model_len is not None else max_output_tokens
         )
         self.generation_config = GenerationConfig(
             do_sample=True,
@@ -204,10 +204,11 @@ class PPO(LLMAlgorithm):
             else self.actor
         )
         # Wake up LLM
-        if self.use_vllm:
+        if self.use_vllm and self.use_memory_efficient_params:
             move_params_to_cpu(unwrapped_model)
             self.llm.wake_up()
             self._move_model_to_vllm()
+
 
     def get_action(
         self,
@@ -663,19 +664,3 @@ class PPO(LLMAlgorithm):
                 )
 
             return torch.cat(values, dim=0)
-
-    def _calculate_kl_divergence(
-        self,
-        log_probs: torch.Tensor,
-        reference_log_probs: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute the per-token reverse-KL-style penalty term.
-
-        This corresponds to the common Schulman-style approximation used with a
-        fixed reference policy, matching the same sign convention as GRPO.
-        """
-        return (
-            torch.exp(reference_log_probs - log_probs)
-            - (reference_log_probs - log_probs)
-            - 1
-        )

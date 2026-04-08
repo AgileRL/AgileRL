@@ -1,3 +1,4 @@
+import copy
 import os
 from unittest.mock import MagicMock, Mock, patch
 
@@ -7,14 +8,18 @@ import pytest
 import torch
 from accelerate import Accelerator, DeepSpeedPlugin
 from gymnasium import spaces
+from peft import LoraConfig
 from pettingzoo.mpe import simple_speaker_listener_v4
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
     DDPG,
     DQN,
     GRPO,
     IPPO,
+    LLMPPO,
+    LLMReinforce,
     MADDPG,
     MATD3,
     PPO,
@@ -39,6 +44,7 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 from agilerl.wrappers.learning import Skill
+from tests.test_algorithms.test_llms.test_grpo import create_module as create_dummy_lm_for_reinforce
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -183,6 +189,89 @@ def test_create_initial_population_multi_agent():
             assert agent.action_spaces == action_space
             assert agent.device == "cpu"
             assert agent.accelerator is None
+
+
+@pytest.mark.skipif(
+    not HAS_LLM_DEPENDENCIES,
+    reason="agilerl[llm] not installed",
+)
+@pytest.mark.parametrize(
+    "algo,expected_type",
+    [
+        ("GRPO", GRPO),
+        ("LLMPPO", LLMPPO),
+        ("llmppo", LLMPPO),
+        ("LLMReinforce", LLMReinforce),
+    ],
+)
+def test_create_population_llm_policy_gradient_algorithms(
+    vector_space, algo, expected_type
+):
+    init_hp = {
+        "PAD_TOKEN_ID": 1000 - 1,
+        "PAD_TOKEN": "<pad>",
+        "BATCH_SIZE": 2,
+        "BETA": 0.001,
+        "LR": 0.001,
+        "MAX_GRAD_NORM": 0.5,
+        "UPDATE_EPOCHS": 1,
+        "MAX_MODEL_LEN": 100,
+        "GRADIENT_CHECKPOINTING": False,
+    }
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    population_size = 1
+
+    lora_kw = {
+        "r": 16,
+        "lora_alpha": 64,
+        "target_modules": ["linear_1"],
+        "task_type": "CAUSAL_LM",
+        "lora_dropout": 0.05,
+    }
+    actor = create_dummy_lm_for_reinforce(
+        input_size=10,
+        max_tokens=20,
+        vocab_size=1000,
+        device=device,
+    )
+    common_kw = dict(
+        algo=algo,
+        observation_space=vector_space,
+        action_space=copy.deepcopy(vector_space),
+        net_config=None,
+        INIT_HP=init_hp,
+        hp_config=None,
+        population_size=population_size,
+        device=device,
+        accelerator=None,
+        actor_network=actor,
+        algo_kwargs={
+            "lora_config": LoraConfig(**lora_kw),
+            "pad_token_id": 1000 - 1,
+            "pad_token": "<pad>",
+            "use_vllm": False,
+        },
+    )
+
+    if expected_type is LLMPPO:
+        mock_agent = MagicMock(spec=LLMPPO)
+        with patch("agilerl.utils.utils.LLMPPO", return_value=mock_agent) as mock_cls:
+            population = create_population(**common_kw)
+        assert len(population) == population_size
+        assert population[0] is mock_agent
+        mock_cls.assert_called_once()
+        call_kw = mock_cls.call_args.kwargs
+        assert call_kw["batch_size"] == init_hp["BATCH_SIZE"]
+        assert call_kw["beta"] == init_hp["BETA"]
+        assert call_kw["vf_coef"] == SHARED_INIT_HP["VF_COEF"]
+        assert call_kw["lr_actor"] == init_hp["LR"]
+    else:
+        population = create_population(**common_kw)
+        assert len(population) == population_size
+        for agent in population:
+            assert isinstance(agent, expected_type)
+            assert agent.accelerator is None
+            assert agent.batch_size == init_hp["BATCH_SIZE"]
 
 
 # The function returns a list of episode rewards from the first episode in each parallel environment.
@@ -491,6 +580,7 @@ def test_consolidate_mutations():
     for agent in population:
         agent.mut = "lr"
         agent.lr = 0.01
+        agent.lr_critic = None
         agent.optimizer = Mock()
         agent.optimizer.param_groups = [{"lr": 0.01}]
         agent.cosine_lr_schedule_config = {"warmup_steps": 0, "total_steps": 100}

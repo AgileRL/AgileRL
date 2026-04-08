@@ -20,7 +20,6 @@ from agilerl.utils.utils import create_population
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
-
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
     raw_dataset = (
         load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
@@ -95,7 +94,6 @@ def combined_rewards(completion, solution, prompt):
 def main(init_hp, mut_p):
     del mut_p
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    print("Tokenizer", tokenizer.pad_token, tokenizer.eos_token)
     train_dataset, test_dataset = make_dataset(DATASET)
 
     conversation_template = [
@@ -122,12 +120,12 @@ def main(init_hp, mut_p):
         max_context_length=init_hp["MAX_MODEL_LEN"],
     )
 
-    use_vllm = bool(init_hp.get("USE_VLLM", False))
+    use_vllm = bool(init_hp.get("USE_VLLM", True))
     vllm_config = (
         VLLMConfig(
             tensor_parallel_size=1,
-            gpu_memory_utilization=0.5,
-            max_num_seqs=2,
+            gpu_memory_utilization=0.8,
+            max_num_seqs=12,
             sleep_mode=True,
         )
         if use_vllm
@@ -167,7 +165,6 @@ def main(init_hp, mut_p):
 if __name__ == "__main__":
     with open("configs/training/llm_finetuning/ppo_llm.yaml") as file:
         config = yaml.safe_load(file)
-        print(config)
     init_hp = config["INIT_HP"]
     mut_p = config["MUTATION_PARAMS"]
     main(init_hp, mut_p)

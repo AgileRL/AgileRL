@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-import torch.distributed as dist
 from accelerate import Accelerator
 from tqdm import trange
 
@@ -21,64 +20,13 @@ from agilerl.utils.utils import (
     init_wandb,
     save_llm_checkpoint,
     tournament_selection_and_mutation,
+    _distributed_world_size,
 )
 
 if TYPE_CHECKING:
     from gem.core import Env as GemEnv
 
 InitDictType = dict[str, Any] | None
-
-
-def move_params_to_gpu(unwrapped_model: torch.nn.Module, device: torch.device) -> None:
-    """Move params to GPU.
-
-    :param agent: Distributed agent
-    :type agent: DistributedLLMAgent
-    :return: None
-    :rtype: None
-    """
-    unwrapped_model.to(device, non_blocking=True)
-    torch.cuda.synchronize()
-
-
-def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> None:
-    """Move params to CPU.
-
-    :param agent: Distributed agent
-    :type agent: DistributedLLMAgent
-    :return: None
-    :rtype: None
-    """
-    unwrapped_model.to("cpu", non_blocking=True)
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
-
-
-@contextmanager
-def memory_efficient_params(agent) -> None:
-    """Memory efficient params context manager.
-
-    :param agent: Distributed agent
-    :type agent: DistributedLLMAgent
-    :return: None
-    :rtype: None
-    """
-    # ZeRO-3: extend offload/wake logic when using vLLM colocate + sleep_mode.
-    vllm_cfg = getattr(agent, "vllm_config", None)
-    use_vllm = getattr(agent, "use_vllm", False)
-    # Only offload params for vLLM colocate mode. If use_vllm is False,
-    # moving params to CPU between updates causes generate() device mismatches.
-    sleep_mode = use_vllm and vllm_cfg is not None and vllm_cfg.sleep_mode
-    if sleep_mode:
-        unwrapped_model = (
-            agent.accelerator.unwrap_model(agent.actor)
-            if agent.accelerator is not None
-            else agent.actor
-        )
-        move_params_to_gpu(unwrapped_model, agent.device)
-    yield
-    if sleep_mode:
-        move_params_to_cpu(unwrapped_model)
 
 
 def finetune_llm_reasoning(
@@ -88,7 +36,7 @@ def finetune_llm_reasoning(
     save_elite: bool | None = None,
     elite_path: str | None = None,
     wb: bool = False,
-    evo_steps: int | None = 20,
+    evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
@@ -180,9 +128,7 @@ def finetune_llm_reasoning(
         init_hp = {}
         init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size_per_process
         init_hp["ALGO"] = pop[0].algo
-    data_increment = (
-        getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
-    )
+    data_increment = _distributed_world_size(accelerator)
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
 
     if wb and (accelerator is None or accelerator.is_main_process):
@@ -522,7 +468,7 @@ def finetune_llm_preference(
     save_elite: bool | None = None,
     elite_path: str | None = None,
     wb: bool = False,
-    evo_steps: int | None = 20,
+    evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
@@ -577,7 +523,7 @@ def finetune_llm_preference(
         init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size_per_process
         init_hp["ALGO"] = pop[0].algo
 
-    data_increment = accelerator.num_processes if accelerator is not None else 1
+    data_increment = _distributed_world_size(accelerator)
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
 
     if wb and (accelerator is None or accelerator.is_main_process):
@@ -799,7 +745,6 @@ def finetune_llm_preference(
 def finetune_llm_multiturn(
     pop: PopulationType,
     env: "GemEnv",
-    tokenizer: Any,
     max_turns: int,
     init_hp: dict[str, Any] | None = None,
     max_steps: int = 32768,
@@ -829,9 +774,6 @@ def finetune_llm_multiturn(
     :type pop: PopulationType
     :param env: Multi-turn environment (often a ``TokenObservationWrapper``).
     :type env: GemEnv
-    :param tokenizer: Tokenizer passed to ``agent.learn``; for ``TokenObservationWrapper``
-        it must be the same object as ``env.tokenizer``.
-    :type tokenizer: Any
     :param max_turns: Maximum interaction turns per episode.
     :type max_turns: int
     :param init_hp: Initial hyperparameters (e.g. ``BATCH_SIZE``, ``ALGO``).
@@ -909,9 +851,7 @@ def finetune_llm_multiturn(
 
     batch_size = init_hp.get("BATCH_SIZE", pop[0].batch_size)
     env_name = init_hp.get("env_name", "gem_multiturn")
-    data_increment = (
-        getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
-    )
+    data_increment = _distributed_world_size(accelerator)
     effective_data_batch_size = data_increment * batch_size
 
     if wb and (accelerator is None or accelerator.is_main_process):

@@ -175,12 +175,6 @@ class OptimizerWrapper:
                     "lr_name=('lr_actor', 'lr_critic')."
                 )
                 raise ValueError(msg)
-            if not isinstance(lr_name, tuple) or len(lr_name) != 2:
-                msg = "use_llm_param_groups requires lr_name to be a 2-tuple of attribute names."
-                raise ValueError(msg)
-            if lr_critic is None:
-                msg = "use_llm_param_groups requires lr_critic."
-                raise ValueError(msg)
             self.network_names = network_names
             self.lr_name = lr_name
         elif network_names is not None:

@@ -30,7 +30,7 @@ INIT_HP:
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
-    USE_VLLM: false
+    USE_VLLM: true
     LORA_R: 16
     LORA_ALPHA: 64
     LORA_DROPOUT: 0.05
