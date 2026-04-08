@@ -92,13 +92,7 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
     init_hp["PAD_TOKEN"] = tokenizer.eos_token
 
-    lora_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-        lora_dropout=0.05,
-        bias="none",
-    )
+    lora_config = LoraConfig(**init_hp["LORA"])
 
     print("Defining DPO agent population...")
     pop = [
@@ -107,6 +101,7 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
             pad_token_id=init_hp["PAD_TOKEN_ID"],
             pad_token=init_hp["PAD_TOKEN"],
             batch_size=init_hp["BATCH_SIZE"],
+            lr=init_hp["LR"],
             beta=init_hp["BETA"],
             nll_alpha=init_hp.get("NLL_ALPHA", 1.0),
             update_epochs=init_hp["UPDATE_EPOCHS"],

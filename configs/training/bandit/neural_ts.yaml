@@ -44,10 +44,10 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 10
 
 NET_CONFIG:
-    latent_dim: 128
+    latent_dim: 128                   # Latent representation dimension
 
     encoder_config:
-        hidden_size: [128]
+        hidden_size: [128]            # Encoder hidden layer sizes
 
     head_config:
-        hidden_size: [128]
+        hidden_size: [128]            # Head hidden layer sizes

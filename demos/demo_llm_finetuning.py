@@ -126,13 +126,7 @@ def main(
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
     init_hp["PAD_TOKEN"] = tokenizer.eos_token
 
-    lora_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-        lora_dropout=0.05,
-        bias="none",
-    )
+    lora_config = LoraConfig(**init_hp["LORA"])
 
     # --- Optional warm-start from a saved LoRA adapter ---------------------
     actor_network = None
@@ -153,6 +147,7 @@ def main(
         pad_token_id=init_hp["PAD_TOKEN_ID"],
         pad_token=init_hp["PAD_TOKEN"],
         batch_size=init_hp["BATCH_SIZE"],
+        lr=init_hp["LR"],
         update_epochs=init_hp["UPDATE_EPOCHS"],
         lora_config=lora_config if actor_network is None else None,
         accelerator=accelerator,

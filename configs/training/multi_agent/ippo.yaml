@@ -27,7 +27,7 @@ INIT_HP:
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     WANDB: false                # Log with Weights and Biases
-    TORCH_COMPILE: default
+    TORCH_COMPILE: default      # torch.compile mode (default, reduce-overhead, max-autotune)
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -40,7 +40,8 @@ MUTATION_PARAMS:
     RL_HP_SELECTION: [lr, batch_size, learn_step]
     MUT_SD: 0.1                            # Mutation strength
     RAND_SEED: 42                          # Random seed
-    MIN_LR: 0.000001                       # Define max and min limits for mutating RL hyperparams
+    # Define max and min limits for mutating RL hyperparams
+    MIN_LR: 0.000001
     MAX_LR: 0.01
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
@@ -50,28 +51,28 @@ MUTATION_PARAMS:
     MAX_ENT_COEF: 0.1
 
 NET_CONFIG:
-    latent_dim: 64
+    latent_dim: 64                    # Latent representation dimension
 
     encoder_config:
-        hidden_size: [64]
-        activation: ReLU
-        min_mlp_nodes: 32
-        max_mlp_nodes: 500
-        layer_norm: true
+        hidden_size: [64]             # Encoder hidden layer sizes
+        activation: ReLU              # Activation function
+        min_mlp_nodes: 32             # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 500            # Max MLP nodes for architecture mutation
+        layer_norm: true              # Apply layer normalization
         # channel_size: [32, 16]
         # kernel_size: [3, 3]
         # stride_size: [2, 2]
         # activation: ReLU
 
     head_config:
-        hidden_size: [64]
-        activation: ReLU
-        output_activation:
-        min_hidden_layers: 1
-        max_hidden_layers: 3
-        min_mlp_nodes: 32
-        max_mlp_nodes: 256
-        output_vanish: false
-        layer_norm: true
+        hidden_size: [64]             # Head hidden layer sizes
+        activation: ReLU              # Activation function
+        output_activation:            # Output activation (null = linear)
+        min_hidden_layers: 1          # Min hidden layers for architecture mutation
+        max_hidden_layers: 3          # Max hidden layers for architecture mutation
+        min_mlp_nodes: 32             # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 256            # Max MLP nodes for architecture mutation
+        output_vanish: false          # Initialize output layer weights near zero
+        layer_norm: true              # Apply layer normalization
 
-DISTRIBUTED_TRAINING: false
+DISTRIBUTED_TRAINING: false           # Enable distributed multi-GPU training

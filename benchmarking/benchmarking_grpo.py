@@ -153,13 +153,7 @@ def main(init_hp, mut_p):
     # Define the algorithm kwargs
     algo_kwargs = {
         "model_name": MODEL_PATH,
-        "lora_config": LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-            lora_dropout=0.05,
-            bias="none",
-        ),
+        "lora_config": LoraConfig(**init_hp["LORA"]),
         "use_vllm": USE_VLLM,
         "pad_token_id": tokenizer.pad_token_id,
         "pad_token": tokenizer.pad_token,

@@ -39,7 +39,8 @@ MUTATION_PARAMS:
     RL_HP_MUT: 0.2                         # Learning HP mutation
     MUT_SD: 0.1                            # Mutation strength
     RAND_SEED: 42                          # Random seed
-    MIN_LR: 0.0001                         # Define max and min limits for mutating RL hyperparams
+    # Define max and min limits for mutating RL hyperparams
+    MIN_LR: 0.0001
     MAX_LR: 0.01
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
@@ -51,22 +52,22 @@ MUTATION_PARAMS:
     MAX_UPDATE_EPOCHS: 10
 
 NET_CONFIG:
-    latent_dim: 64
-    squash_output: false
+    latent_dim: 64                    # Latent representation dimension
+    squash_output: false              # Apply tanh squashing to output
 
     encoder_config:
-        hidden_size: [64]
-        activation: ReLU
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
-        layer_norm: true
+        hidden_size: [64]             # Encoder hidden layer sizes
+        activation: ReLU              # Activation function
+        min_mlp_nodes: 64             # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 500            # Max MLP nodes for architecture mutation
+        layer_norm: true              # Apply layer normalization
 
     head_config:
-        hidden_size: [64]
-        activation: ReLU
-        min_hidden_layers: 1
-        max_hidden_layers: 3
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
-        output_vanish: true
-        layer_norm: true
+        hidden_size: [64]             # Head hidden layer sizes
+        activation: ReLU              # Activation function
+        min_hidden_layers: 1          # Min hidden layers for architecture mutation
+        max_hidden_layers: 3          # Max hidden layers for architecture mutation
+        min_mlp_nodes: 64             # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 500            # Max MLP nodes for architecture mutation
+        output_vanish: true           # Initialize output layer weights near zero
+        layer_norm: true              # Apply layer normalization
