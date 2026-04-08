@@ -3,8 +3,7 @@
 Supervised Fine-Tuning (SFT)
 ====================================
 
-`SFT <https://arxiv.org/pdf/2109.01652>`__ (Supervised Fine-Tuning) is a technique that trains an LLM to respond in a
-desired way in response to different queries. This doesn't require ReinforcementLearning but simply uses a dataset of (prompt, response) pairs.
+"`SFT <https://arxiv.org/pdf/2109.01652>`__ is a post-training technique used to align LLM responses to a set of desired responses using a dataset of (prompt, response) pairs. This technique is the simplest way to shift a model's behaviour toward a target style or task and does not utilise reinforcement learning."
 
 It's similar to a continuation of the pre-training stage of an LLM, but using a curated dataset that is specific to the LLM's application. Cross-entropy loss is computed exclusively on the **response tokens**, so the model is
 never penalised for how it encodes the prompt.
