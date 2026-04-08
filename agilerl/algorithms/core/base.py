@@ -2185,6 +2185,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if attr == "lr_scheduler":
                 continue
             setattr(self, attr, value)
+
         if self.accelerator is not None:
             if lora_only:
                 if self.use_separate_reference_adapter:
@@ -2206,23 +2207,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
         else:
             if lora_only:
-                # Adapters were saved via save_pretrained; reload them in-place.
-                # self.actor.module is the underlying PeftModel inside DummyEvolvable.
-                adapters_to_load = (
-                    ["actor", "reference"]
-                    if self.use_separate_reference_adapter
-                    else ["actor"]
-                )
-                for adapter_name in adapters_to_load:
-                    adapter_path = f"{path}/{adapter_name}/adapter_model.safetensors"
-                    adapter_state = load_file(adapter_path, device=str(self.device))
-                    with torch.no_grad():
-                        set_peft_model_state_dict(
-                            self.actor.module,
-                            adapter_state,
-                            adapter_name=adapter_name,
-                        )
-                self.actor.set_adapter("actor")
+                if self.use_separate_reference_adapter:
+                    self._update_existing_adapter(path, "reference")
+                self._update_existing_adapter(path, "actor")
                 for attr, value in checkpoint.items():
                     if attr == "lr_scheduler":
                         continue
@@ -3139,7 +3126,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         adapter_name: str,
     ) -> None:
         """Overwrite weights of an existing adapter in-place without creating new parameters.
-        xw
+
         :param checkpoint_dir: Checkpoint directory
         :type checkpoint_dir: str
         :param adapter_name: Adapter name
@@ -3148,12 +3135,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: None
         :rtype: None
         """
-        base_model = self.accelerator.unwrap_model(self.actor)
-        if hasattr(base_model, "module"):
-            base_model = base_model.module
+        if self.accelerator is not None:
+            base_model = self.accelerator.unwrap_model(self.actor)
+            if hasattr(base_model, "module"):
+                base_model = base_model.module
+            device = "cpu"
+        else:
+            base_model = self.actor.module
+            device = str(self.device)
 
         adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
-        adapter_state = load_file(adapter_path, device="cpu")
+        adapter_state = load_file(adapter_path, device=device)
 
         with gather_if_zero3(
             self.zero_stage,
@@ -3172,7 +3164,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             for name, param in base_model.named_parameters():
                 if "reference" in name:
                     param.requires_grad = False
-        self.accelerator.wait_for_everyone()
+
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
 
     @staticmethod
     def _create_prompt_masks(
