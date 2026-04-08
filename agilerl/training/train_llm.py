@@ -1,7 +1,8 @@
 import csv
 import os
 import warnings
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Literal
 
 import numpy as np
 import torch.distributed as dist
@@ -10,6 +11,7 @@ from accelerate import Accelerator
 from tqdm import trange
 
 from agilerl.algorithms import DPO, GRPO
+from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import PopulationType
@@ -30,6 +32,281 @@ def safe_aggregate_metrics(
     if accelerator is None:
         return float(metrics) if not isinstance(metrics, float) else metrics
     return aggregate_metrics_across_gpus(accelerator, metrics)
+
+
+def _is_main_process(accelerator: Accelerator | None) -> bool:
+    return accelerator is None or accelerator.is_main_process
+
+
+def _validate_finetune_args(
+    evo_steps: int | None,
+    tournament: TournamentSelection | None,
+    mutation: Mutations | None,
+    num_epochs: int | None,
+    max_steps: int | None,
+    pop: PopulationType,
+    expected_type: type,
+    algorithm_type_error: str,
+    *,
+    algo: Literal["grpo", "dpo", "sft"],
+) -> None:
+    if algo in ["grpo", "dpo"]:
+        if evo_steps is not None and (tournament is None or mutation is None):
+            warnings.warn(
+                "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place.",
+                stacklevel=2,
+            )
+        if (tournament is not None and mutation is not None) and evo_steps is None:
+            msg = "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
+            raise ValueError(msg)
+        if num_epochs is not None and max_steps is not None:
+            warnings.warn(
+                "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'.",
+                stacklevel=2,
+            )
+    else:
+        if evo_steps is not None and (tournament is None or mutation is None):
+            warnings.warn(
+                "'evo_steps' is set but 'tournament' or 'mutation' is None. "
+                "Evolution will not take place.",
+                stacklevel=2,
+            )
+        if (tournament is not None and mutation is not None) and evo_steps is None:
+            msg = "'evo_steps' must be set when 'tournament' and 'mutation' are not None."
+            raise ValueError(msg)
+        if num_epochs is not None and max_steps is not None:
+            warnings.warn(
+                "'num_epochs' overrides 'max_steps'.",
+                stacklevel=2,
+            )
+
+    if mutation is not None:
+        assert mutation.architecture_mut == 0, (
+            "Probability of architecture mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.new_layer_prob == 0, (
+            "Probability of new layer mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.parameters_mut == 0, (
+            "Probability of network parameters mutation must be 0 for LLM finetuning."
+        )
+        assert mutation.activation_mut == 0, (
+            "Probability of activation mutation must be 0 for LLM finetuning."
+        )
+
+    if not isinstance(pop[0], expected_type):
+        raise ValueError(algorithm_type_error)
+
+
+def _setup_wandb(
+    accelerator: Accelerator | None,
+    use_wandb: bool,
+    init_hp: dict[str, Any],
+    env_name: str,
+    wandb_api_key: str | None,
+    pop0: Any,
+    effective_data_batch_size: int,
+    *,
+    project: str = "AgileRL",
+    addl_args: dict[str, Any] | None = None,
+) -> None:
+    if not use_wandb or not _is_main_process(accelerator):
+        return
+    init_hp["effective_data_batch_size"] = effective_data_batch_size
+    init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
+    init_hp["distributed_training"] = accelerator is not None
+    init_hp["model_name"] = getattr(pop0, "pretrained_model_name_or_path", "")
+    init_wandb(
+        algo=init_hp["ALGO"],
+        env_name=env_name,
+        wandb_api_key=wandb_api_key,
+        init_hyperparams=init_hp,
+        project=project,
+        addl_args=addl_args,
+    )
+
+
+def _compute_training_steps(
+    max_steps: int | None,
+    num_epochs: int | None,
+    env_len: int,
+    effective_data_batch_size: int,
+) -> tuple[int, int]:
+    if max_steps is None and num_epochs is None:
+        max_steps = env_len
+    elif max_steps is None and num_epochs is not None:
+        max_steps = num_epochs * env_len
+    assert max_steps is not None
+    training_steps = -(max_steps // -effective_data_batch_size)
+    return max_steps, training_steps
+
+
+def _create_pbar(
+    accelerator: Accelerator | None,
+    max_steps: int,
+    *,
+    bar_format: str | None = None,
+) -> Any:
+    default_fmt = (
+        "{l_bar}{bar:10}| {n:4}/{total_fmt} "
+        "[{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
+    )
+    fmt = bar_format if bar_format is not None else default_fmt
+    if not _is_main_process(accelerator):
+        return None
+    return trange(
+        max_steps,
+        unit="step",
+        bar_format=fmt,
+        ascii=True,
+        dynamic_ncols=True,
+    )
+
+
+def _per_agent_metrics(
+    agent_metrics_dict: dict[str, Any], n_agents: int
+) -> Callable[[str, str], list[Any]]:
+    """Return ``metric_values(group, key)`` -> list of that metric across agents."""
+
+    def metric_values(group: str, key: str) -> list[Any]:
+        return [agent_metrics_dict[f"agent_{i}/{group}"][key] for i in range(n_agents)]
+
+    return metric_values
+
+
+def _wandb_extend_hpo_hyperparams(
+    wandb_dict: dict[str, Any], pop: PopulationType
+) -> None:
+    if not pop[0].registry.hp_config.config.keys():
+        return
+    wandb_dict |= {
+        f"HPO_agent_{agent_idx}/{key}": getattr(agent, key)
+        for agent_idx, agent in enumerate(pop)
+        for key in agent.registry.hp_config.config
+    }
+
+
+def _wandb_log(metrics: dict[str, Any]) -> None:
+    """Log to W&B; call only from ``if wb and _is_main_process(accelerator)`` blocks."""
+    wandb.log(metrics)
+
+
+def _handle_evolution_or_checkpoint(
+    i: int,
+    pop: PopulationType,
+    evo_steps: int | None,
+    tournament: TournamentSelection | None,
+    mutation: Mutations | None,
+    env_name: str,
+    accelerator: Accelerator | None,
+    elite_path: str | None,
+    save_elite: bool | None,
+    effective_data_batch_size: int,
+    max_steps: int,
+    checkpoint_steps: int | None,
+    agent: Any,
+    *,
+    require_evo_steps_for_hpo: bool,
+) -> PopulationType:
+    if require_evo_steps_for_hpo:
+        if (
+            tournament is not None
+            and mutation is not None
+            and evo_steps is not None
+            and (i + 1) % evo_steps == 0
+        ):
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+            pop = tournament_selection_and_mutation(
+                population=pop,
+                tournament=tournament,
+                mutation=mutation,
+                env_name=env_name,
+                accelerator=accelerator,
+                language_model=True,
+                elite_path=elite_path,
+                save_elite=save_elite,
+            )
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+        elif (i + 1) * effective_data_batch_size % max_steps == 0 or (
+            checkpoint_steps is not None
+            and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
+        ):
+            save_llm_checkpoint(agent, elite_path)
+    elif tournament and mutation is not None:
+        if (i + 1) % evo_steps == 0:
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+            pop = tournament_selection_and_mutation(
+                population=pop,
+                tournament=tournament,
+                mutation=mutation,
+                env_name=env_name,
+                accelerator=accelerator,
+                language_model=True,
+                elite_path=elite_path,
+                save_elite=save_elite,
+            )
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+    elif (i + 1) * effective_data_batch_size % max_steps == 0 or (
+        checkpoint_steps is not None
+        and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
+    ):
+        save_llm_checkpoint(agent, elite_path)
+    return pop
+
+
+def _save_elite_checkpoint(
+    pop: PopulationType,
+    save_elite: bool | None,
+    elite_path: str | None,
+    accelerator: Accelerator | None,
+) -> None:
+    if save_elite and elite_path is not None:
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        if _is_main_process(accelerator):
+            elite = max(
+                pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf")
+            )
+            save_llm_checkpoint(elite, elite_path)
+
+
+def _finalize_training_pbar_wandb(
+    accelerator: Accelerator | None,
+    pbar: Any,
+    use_wandb: bool,
+) -> None:
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    if _is_main_process(accelerator):
+        pbar.close()
+        if use_wandb:
+            wandb.finish()
+
+
+def _open_csv_log(
+    elite_path: str | None,
+    fieldnames: list[str],
+    accelerator: Accelerator | None,
+) -> tuple[Any, Any]:
+    if elite_path is None or not _is_main_process(accelerator):
+        return None, None
+    os.makedirs(elite_path, exist_ok=True)
+    csv_path = os.path.join(elite_path, "metrics.csv")
+    csv_file = open(csv_path, "w", newline="")
+    writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+    writer.writeheader()
+    csv_file.flush()
+    return csv_file, writer
+
+
+def _log_csv_row(writer: Any, csv_file: Any, row_dict: dict[str, Any]) -> None:
+    if writer is not None:
+        writer.writerow(row_dict)
+        csv_file.flush()
 
 
 def finetune_llm_reasoning(
@@ -86,87 +363,46 @@ def finetune_llm_reasoning(
     :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps, defaults to None
     :type num_epochs: int, optional
     """
-    if evo_steps is not None and (tournament is None or mutation is None):
-        warnings.warn(
-            "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place.",
-            stacklevel=2,
-        )
-
-    if (tournament is not None and mutation is not None) and evo_steps is None:
-        msg = "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
-        raise ValueError(
-            msg,
-        )
-
-    if num_epochs is not None and max_steps is not None:
-        warnings.warn(
-            "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'.",
-            stacklevel=2,
-        )
-
-    if mutation is not None:
-        assert mutation.architecture_mut == 0, (
-            "Probability of architecture mutation must be 0 for LLM finetuning."
-        )
-        assert mutation.new_layer_prob == 0, (
-            "Probability of new layer mutation must be 0 for LLM finetuning."
-        )
-        assert mutation.parameters_mut == 0, (
-            "Probability of network parameters mutation must be 0 for LLM finetuning."
-        )
-        assert mutation.activation_mut == 0, (
-            "Probability of activation mutation must be 0 for LLM finetuning."
-        )
-
-    if not isinstance(pop[0], GRPO):
-        msg = (
+    _validate_finetune_args(
+        evo_steps,
+        tournament,
+        mutation,
+        num_epochs,
+        max_steps,
+        pop,
+        GRPO,
+        (
             "The algorithm must be GRPO for reasoning-based reinforcement learning."
             f"Got {type(pop[0])} instead."
-        )
-        raise ValueError(
-            msg,
-        )
-
-    if init_hp is None:
-        init_hp = {}
-        init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size_per_process
-        init_hp["ALGO"] = pop[0].algo
+        ),
+        algo="grpo",
+    )
+    init_hp = {
+        "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
+        "ALGO": pop[0].algo,
+    } if init_hp is None else init_hp
     data_increment = (
         getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
     )
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
 
-    if wb and (accelerator is None or accelerator.is_main_process):
-        init_hp["effective_data_batch_size"] = effective_data_batch_size
-        init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
-        init_hp["distributed_training"] = accelerator is not None
-        init_hp["model_name"] = pop[0].pretrained_model_name_or_path
-        init_wandb(
-            algo=init_hp["ALGO"],
-            env_name=env.name,
-            wandb_api_key=wandb_api_key,
-            init_hyperparams=init_hp,
-        )
+    _setup_wandb(
+        accelerator,
+        wb,
+        init_hp,
+        env.name,
+        wandb_api_key,
+        pop[0],
+        effective_data_batch_size,
+    )
 
-    if accelerator is None or accelerator.is_main_process:
+    if _is_main_process(accelerator):
         print("\nTraining...")
 
-    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    if max_steps is None and num_epochs is None:
-        max_steps = len(env)
-
-    elif max_steps is None and num_epochs is not None:
-        max_steps = num_epochs * len(env)
-
-    training_steps = -(max_steps // -effective_data_batch_size)
-    if accelerator is None or accelerator.is_main_process:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-        )
+    max_steps, training_steps = _compute_training_steps(
+        max_steps, num_epochs, len(env), effective_data_batch_size
+    )
+    pbar = _create_pbar(accelerator, max_steps)
 
     total_steps = 0
 
@@ -216,7 +452,7 @@ def finetune_llm_reasoning(
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
 
-            if accelerator is None or accelerator.is_main_process:
+            if _is_main_process(accelerator):
                 metrics_dict = {
                     "global_step": total_steps,
                     "Train/Loss": agg_metrics[0],
@@ -239,141 +475,60 @@ def finetune_llm_reasoning(
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
-        if tournament and mutation is not None:
-            if (i + 1) % evo_steps == 0:
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-                pop = tournament_selection_and_mutation(
-                    population=pop,
-                    tournament=tournament,
-                    mutation=mutation,
-                    env_name=env.name,
-                    accelerator=accelerator,
-                    language_model=True,
-                    elite_path=elite_path,
-                    save_elite=save_elite,
-                )
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-        elif (i + 1) * effective_data_batch_size % max_steps == 0 or (
-            checkpoint_steps is not None
-            and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
-        ):
-            save_llm_checkpoint(agent, elite_path)
+        pop = _handle_evolution_or_checkpoint(
+            i,
+            pop,
+            evo_steps,
+            tournament,
+            mutation,
+            env.name,
+            accelerator,
+            elite_path,
+            save_elite,
+            effective_data_batch_size,
+            max_steps,
+            checkpoint_steps,
+            agent,
+            require_evo_steps_for_hpo=False,
+        )
 
-        if wb and (accelerator is None or accelerator.is_main_process):
+        if wb and _is_main_process(accelerator):
+            metric_values = _per_agent_metrics(agent_metrics_dict, len(pop))
             wandb_dict = {
-                "Train/Best reward": np.max(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Mean reward"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
+                "Train/Best reward": np.max(metric_values("train_metrics", "Train/Mean reward")),
                 "Train/Mean population reward": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Mean reward"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Mean population loss": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Loss"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
+                    metric_values("train_metrics", "Train/Mean reward")),
+                "Train/Mean population loss": np.mean(metric_values("train_metrics", "Train/Loss")),
                 "Train/Mean population KL divergence": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/KL-divergence"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
+                    metric_values("train_metrics", "Train/KL-divergence")),
                 "Train/Mean population completion length": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Average completion length"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
+                    metric_values("train_metrics", "Train/Average completion length")),
             }
             if max_reward is not None:
                 wandb_dict |= {
                     "Train/Mean population accuracy": np.mean(
-                        [
-                            agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                                "Train/Accuracy"
-                            ]
-                            for agent_idx, _ in enumerate(pop)
-                        ],
-                    ),
+                        metric_values("train_metrics", "Train/Accuracy")),
+                    "Train/Best accuracy": np.max(metric_values("train_metrics", "Train/Accuracy")),
                 }
-                wandb_dict |= {
-                    "Train/Best accuracy": np.max(
-                        [
-                            agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                                "Train/Accuracy"
-                            ]
-                            for agent_idx, _ in enumerate(pop)
-                        ],
-                    ),
-                }
-            if len(pop[0].registry.hp_config.config.keys()) > 0:
-                wandb_dict |= {
-                    f"HPO_agent_{agent_idx}/{key}": getattr(agent, key)
-                    for agent_idx, agent in enumerate(pop)
-                    for key in agent.registry.hp_config.config
-                }
+            _wandb_extend_hpo_hyperparams(wandb_dict, pop)
 
             if agg_test_metrics is not None:
                 test_dict = {
-                    "Eval/Best reward": np.max(
-                        [
-                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
-                                "Eval/Mean reward"
-                            ]
-                            for agent_idx, _ in enumerate(pop)
-                        ],
-                    ),
+                    "Eval/Best reward": np.max(metric_values("test_metrics", "Eval/Mean reward")),
                     "Eval/Mean population reward": np.mean(
-                        [
-                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
-                                "Eval/Mean reward"
-                            ]
-                            for agent_idx, _ in enumerate(pop)
-                        ],
-                    ),
+                        metric_values("test_metrics", "Eval/Mean reward")),
                 }
                 if max_reward is not None:
                     test_dict |= {
                         "Eval/Mean population accuracy": np.mean(
-                            [
-                                agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
-                                    "Eval/Accuracy"
-                                ]
-                                for agent_idx, _ in enumerate(pop)
-                            ],
-                        ),
+                            metric_values("test_metrics", "Eval/Accuracy")),
                     }
                     wandb_dict |= {
                         "Eval/Best accuracy": np.max(
-                            [
-                                agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
-                                    "Eval/Accuracy"
-                                ]
-                                for agent_idx, _ in enumerate(pop)
-                            ],
-                        ),
+                            metric_values("test_metrics", "Eval/Accuracy")),
                     }
                 wandb_dict |= test_dict
-            wandb.log(wandb_dict)
+            _wandb_log(wandb_dict)
 
         if env.num_epochs == num_epochs:
             break
@@ -381,7 +536,7 @@ def finetune_llm_reasoning(
     if (
         verbose
         and total_steps > evaluation_interval
-        and (accelerator is None or accelerator.is_main_process)
+        and _is_main_process(accelerator)
     ):
         fitness_calculated = len(agent.fitness) > 0
         fitness = (
@@ -416,21 +571,8 @@ def finetune_llm_reasoning(
             f"Mutations:\t\t{muts}",
         )
 
-    if save_elite and elite_path is not None:
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-        if accelerator is None or accelerator.is_main_process:
-            elite = max(
-                pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf")
-            )
-            save_llm_checkpoint(elite, elite_path)
-
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    if accelerator is None or accelerator.is_main_process:
-        pbar.close()
-        if wb:
-            wandb.finish()
+    _save_elite_checkpoint(pop, save_elite, elite_path, accelerator)
+    _finalize_training_pbar_wandb(accelerator, pbar, wb)
 
 
 def finetune_llm_preference(
@@ -454,112 +596,63 @@ def finetune_llm_preference(
     max_steps: int | None = None,
     num_epochs: int | None = None,
 ) -> None:
-    if evo_steps is not None and (tournament is None or mutation is None):
-        warnings.warn(
-            "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place.",
-            stacklevel=2,
-        )
-
-    if (tournament is not None and mutation is not None) and evo_steps is None:
-        msg = "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
-        raise ValueError(
-            msg,
-        )
-    if num_epochs is not None and max_steps is not None:
-        warnings.warn(
-            "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'.",
-            stacklevel=2,
-        )
-    if mutation is not None:
-        assert mutation.architecture_mut == 0, (
-            "Probability of architecture mutation must be 0 for LLM finetuning."
-        )
-        assert mutation.new_layer_prob == 0, (
-            "Probability of new layer mutation must be 0 for LLM finetuning."
-        )
-        assert mutation.parameters_mut == 0, (
-            "Probability of network parameters mutation must be 0 for LLM finetuning."
-        )
-        assert mutation.activation_mut == 0, (
-            "Probability of activation mutation must be 0 for LLM finetuning."
-        )
-
-    if not isinstance(pop[0], DPO):
-        msg = (
+    _validate_finetune_args(
+        evo_steps,
+        tournament,
+        mutation,
+        num_epochs,
+        max_steps,
+        pop,
+        DPO,
+        (
             "The algorithm must be DPO for preference-based reinforcement learning."
             f"Got {type(pop[0])} instead."
-        )
-        raise ValueError(
-            msg,
-        )
-
-    if init_hp is None:
-        init_hp = {}
-        init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size_per_process
-        init_hp["ALGO"] = pop[0].algo
+        ),
+        algo="dpo",
+    )
+    init_hp = {
+        "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
+        "ALGO": pop[0].algo,
+    } if init_hp is None else init_hp
 
     data_increment = accelerator.num_processes if accelerator is not None else 1
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
 
-    if wb and (accelerator is None or accelerator.is_main_process):
-        init_hp["effective_data_batch_size"] = effective_data_batch_size
-        init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
-        init_hp["distributed_training"] = accelerator is not None
-        init_hp["model_name"] = pop[0].pretrained_model_name_or_path
-        init_wandb(
-            algo=init_hp["ALGO"],
-            env_name=env.name,
-            wandb_api_key=wandb_api_key,
-            init_hyperparams=init_hp,
-            project=wandb_project,
-            addl_args={
-                **({"name": wandb_run_name} if wandb_run_name is not None else {}),
-                **({"entity": wandb_entity} if wandb_entity is not None else {}),
-            }
-            or None,
-        )
+    _setup_wandb(
+        accelerator,
+        wb,
+        init_hp,
+        env.name,
+        wandb_api_key,
+        pop[0],
+        effective_data_batch_size,
+        project=wandb_project,
+        addl_args={
+            **({"name": wandb_run_name} if wandb_run_name is not None else {}),
+            **({"entity": wandb_entity} if wandb_entity is not None else {}),
+        }
+        or None,
+    )
 
-    if accelerator is None or accelerator.is_main_process:
-        pass
-
-    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    if max_steps is None and num_epochs is None:
-        max_steps = len(env)
-
-    elif max_steps is None and num_epochs is not None:
-        max_steps = num_epochs * len(env)
-
-    training_steps = -(max_steps // -effective_data_batch_size)
-    if accelerator is None or accelerator.is_main_process:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-        )
+    max_steps, training_steps = _compute_training_steps(
+        max_steps, num_epochs, len(env), effective_data_batch_size
+    )
+    pbar = _create_pbar(accelerator, max_steps)
 
     total_steps = 0
 
-    _dpo_csv_file = None
-    _dpo_csv_writer = None
-    if elite_path is not None and (accelerator is None or accelerator.is_main_process):
-        os.makedirs(elite_path, exist_ok=True)
-        _dpo_csv_path = os.path.join(elite_path, "metrics.csv")
-        _dpo_csv_file = open(_dpo_csv_path, "w", newline="")
-        _dpo_csv_writer = csv.DictWriter(
-            _dpo_csv_file,
-            fieldnames=[
-                "step",
-                "train_loss",
-                "train_chosen_reward",
-                "train_rejected_reward",
-                "train_reward_margin",
-                "eval_reward_margin",
-            ],
-        )
-        _dpo_csv_writer.writeheader()
-        _dpo_csv_file.flush()
+    dpo_csv_file, dpo_csv_writer = _open_csv_log(
+        elite_path,
+        [
+            "step",
+            "train_loss",
+            "train_chosen_reward",
+            "train_rejected_reward",
+            "train_reward_margin",
+            "eval_reward_margin",
+        ],
+        accelerator,
+    )
 
     prompts = env.reset(reset_dataloaders=True)
     for i in range(training_steps):
@@ -585,7 +678,7 @@ def finetune_llm_preference(
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
 
-            if accelerator is None or accelerator.is_main_process:
+            if _is_main_process(accelerator):
                 metrics_dict = {
                     "global_step": total_steps,
                     "Train/Loss": agg_metrics[0],
@@ -615,153 +708,73 @@ def finetune_llm_preference(
                 )
                 agent.scores.append(agg_metrics[1] - agg_metrics[2])
 
-        if _dpo_csv_writer is not None and agent_metrics_dict:
-            mean_loss = np.mean(
-                [
-                    agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Loss"]
-                    for j in range(len(pop))
-                ]
-            )
-            mean_chosen = np.mean(
-                [
-                    agent_metrics_dict[f"agent_{j}/train_metrics"][
-                        "Train/Mean chosen reward"
-                    ]
-                    for j in range(len(pop))
-                ]
-            )
-            mean_rejected = np.mean(
-                [
-                    agent_metrics_dict[f"agent_{j}/train_metrics"][
-                        "Train/Mean rejected reward"
-                    ]
-                    for j in range(len(pop))
-                ]
-            )
-            mean_margin = np.mean(
-                [
-                    agent_metrics_dict[f"agent_{j}/train_metrics"][
-                        "Train/Mean reward margin"
-                    ]
-                    for j in range(len(pop))
-                ]
-            )
+        if dpo_csv_writer is not None and agent_metrics_dict:
+            metric_values = _per_agent_metrics(agent_metrics_dict, len(pop))
             eval_margin = (
-                np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{j}/test_metrics"][
-                            "Eval/Mean reward margin"
-                        ]
-                        for j in range(len(pop))
-                    ]
-                )
+                np.mean(metric_values("test_metrics", "Eval/Mean reward margin"))
                 if agg_test_metrics is not None
                 else ""
             )
-            _dpo_csv_writer.writerow(
+            _log_csv_row(
+                dpo_csv_writer,
+                dpo_csv_file,
                 {
                     "step": total_steps,
-                    "train_loss": mean_loss,
-                    "train_chosen_reward": mean_chosen,
-                    "train_rejected_reward": mean_rejected,
-                    "train_reward_margin": mean_margin,
+                    "train_loss": np.mean(metric_values("train_metrics", "Train/Loss")),
+                    "train_chosen_reward": np.mean(
+                        metric_values("train_metrics", "Train/Mean chosen reward")),
+                    "train_rejected_reward": np.mean(
+                        metric_values("train_metrics", "Train/Mean rejected reward")),
+                    "train_reward_margin": np.mean(
+                        metric_values("train_metrics", "Train/Mean reward margin")),
                     "eval_reward_margin": eval_margin,
-                }
+                },
             )
-            _dpo_csv_file.flush()
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
-        if tournament and mutation is not None:
-            if (i + 1) % evo_steps == 0:
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-                pop = tournament_selection_and_mutation(
-                    population=pop,
-                    tournament=tournament,
-                    mutation=mutation,
-                    env_name=env.name,
-                    accelerator=accelerator,
-                    language_model=True,
-                    elite_path=elite_path,
-                    save_elite=save_elite,
-                )
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-        elif (i + 1) * effective_data_batch_size % max_steps == 0 or (
-            checkpoint_steps is not None
-            and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
-        ):
-            save_llm_checkpoint(agent, elite_path)
+        pop = _handle_evolution_or_checkpoint(
+            i,
+            pop,
+            evo_steps,
+            tournament,
+            mutation,
+            env.name,
+            accelerator,
+            elite_path,
+            save_elite,
+            effective_data_batch_size,
+            max_steps,
+            checkpoint_steps,
+            agent,
+            require_evo_steps_for_hpo=False,
+        )
 
-        if wb and (accelerator is None or accelerator.is_main_process):
+        if wb and _is_main_process(accelerator):
+            metric_values = _per_agent_metrics(agent_metrics_dict, len(pop))
             wandb_dict = {
                 "Train/Best reward margin": np.max(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Mean reward margin"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
+                    metric_values("train_metrics", "Train/Mean reward margin")),
                 "Train/Mean population reward margin": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Mean reward margin"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
-                "Train/Mean population loss": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Loss"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
+                    metric_values("train_metrics", "Train/Mean reward margin")),
+                "Train/Mean population loss": np.mean(metric_values("train_metrics", "Train/Loss")),
                 "Train/Mean population chosen reward": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Mean chosen reward"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
+                    metric_values("train_metrics", "Train/Mean chosen reward")),
                 "Train/Mean population rejected reward": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{agent_idx}/train_metrics"][
-                            "Train/Mean rejected reward"
-                        ]
-                        for agent_idx, _ in enumerate(pop)
-                    ],
-                ),
+                    metric_values("train_metrics", "Train/Mean rejected reward")),
             }
             if agg_test_metrics is not None:
-                test_dict = {
+                wandb_dict |= {
                     "Eval/Best reward margin": np.max(
-                        [
-                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
-                                "Eval/Mean reward margin"
-                            ]
-                            for agent_idx, _ in enumerate(pop)
-                        ],
-                    ),
+                        metric_values("test_metrics", "Eval/Mean reward margin")),
                     "Eval/Mean population reward margin": np.mean(
-                        [
-                            agent_metrics_dict[f"agent_{agent_idx}/test_metrics"][
-                                "Eval/Mean reward margin"
-                            ]
-                            for agent_idx, _ in enumerate(pop)
-                        ],
-                    ),
+                        metric_values("test_metrics", "Eval/Mean reward margin")),
                 }
-                wandb_dict |= test_dict
-            wandb.log(wandb_dict)
+            _wandb_log(wandb_dict)
         if env.num_epochs == num_epochs:
             break
-    if verbose and (accelerator is None or accelerator.is_main_process):
+    if verbose and _is_main_process(accelerator):
         agent = pop[0]
         scores = agent.scores  # reward margin per step
         fitness = agent.fitness  # eval reward margin per eval step
@@ -789,25 +802,13 @@ def finetune_llm_preference(
 
         pbar.write("\n".join(lines))
 
-    if save_elite and elite_path is not None:
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-        if accelerator is None or accelerator.is_main_process:
-            elite = max(
-                pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf")
-            )
-            save_llm_checkpoint(elite, elite_path)
+    _save_elite_checkpoint(pop, save_elite, elite_path, accelerator)
 
-    if _dpo_csv_file is not None:
-        _dpo_csv_file.close()
+    if dpo_csv_file is not None:
+        dpo_csv_file.close()
         print(f"Training metrics saved to {os.path.join(elite_path, 'metrics.csv')}")
 
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    if accelerator is None or accelerator.is_main_process:
-        pbar.close()
-        if wb:
-            wandb.finish()
+    _finalize_training_pbar_wandb(accelerator, pbar, wb)
 
 
 def finetune_llm_sft(
@@ -830,7 +831,6 @@ def finetune_llm_sft(
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-    plot_path: str | None = None,
 ) -> None:
     """Finetune a population of SFT agents on (prompt, response) pairs.
 
@@ -855,106 +855,54 @@ def finetune_llm_sft(
     :param max_steps: Total samples to process (one epoch if None), defaults to None.
     :param num_epochs: Dataset passes; overrides max_steps when set, defaults to None.
     """
-    import warnings
-
-    if evo_steps is not None and (tournament is None or mutation is None):
-        warnings.warn(
-            "'evo_steps' is set but 'tournament' or 'mutation' is None. "
-            "Evolution will not take place.",
-            stacklevel=2,
-        )
-
-    if (tournament is not None and mutation is not None) and evo_steps is None:
-        msg = "'evo_steps' must be set when 'tournament' and 'mutation' are not None."
-        raise ValueError(msg)
-
-    if num_epochs is not None and max_steps is not None:
-        warnings.warn(
-            "'num_epochs' overrides 'max_steps'.",
-            stacklevel=2,
-        )
-
-    if mutation is not None:
-        assert mutation.architecture_mut == 0, (
-            "Architecture mutation must be 0 for LLM finetuning."
-        )
-        assert mutation.new_layer_prob == 0, (
-            "New-layer mutation must be 0 for LLM finetuning."
-        )
-        assert mutation.parameters_mut == 0, (
-            "Parameters mutation must be 0 for LLM finetuning."
-        )
-        assert mutation.activation_mut == 0, (
-            "Activation mutation must be 0 for LLM finetuning."
-        )
-
-    from agilerl.algorithms.sft import SFT as _SFT
-
-    if not isinstance(pop[0], _SFT):
-        msg = f"Population must contain SFT agents. Got {type(pop[0])}."
-        raise ValueError(msg)
-
-    if init_hp is None:
-        init_hp = {}
-        init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size_per_process
-        init_hp["ALGO"] = pop[0].algo
+    _validate_finetune_args(
+        evo_steps,
+        tournament,
+        mutation,
+        num_epochs,
+        max_steps,
+        pop,
+        SFT,
+        f"Population must contain SFT agents. Got {type(pop[0])}.",
+        algo="sft",
+    )
+    init_hp = {
+        "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
+        "ALGO": pop[0].algo,
+    } if init_hp is None else init_hp
 
     data_increment = accelerator.num_processes if accelerator is not None else 1
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
 
-    if wb and (accelerator is None or accelerator.is_main_process):
-        init_hp["effective_data_batch_size"] = effective_data_batch_size
-        init_hp["batch_size"] = init_hp.get("BATCH_SIZE", 1)
-        init_hp["distributed_training"] = accelerator is not None
-        init_hp["model_name"] = pop[0].pretrained_model_name_or_path
-        init_wandb(
-            algo=init_hp["ALGO"],
-            env_name=env.name,
-            wandb_api_key=wandb_api_key,
-            init_hyperparams=init_hp,
-            project=wandb_project,
-            addl_args={
-                **({"name": wandb_run_name} if wandb_run_name is not None else {}),
-                **({"entity": wandb_entity} if wandb_entity is not None else {}),
-            }
-            or None,
-        )
-
-    bar_format = (
-        "{l_bar}{bar:10}| {n:4}/{total_fmt} "
-        "[{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
+    _setup_wandb(
+        accelerator,
+        wb,
+        init_hp,
+        env.name,
+        wandb_api_key,
+        pop[0],
+        effective_data_batch_size,
+        project=wandb_project,
+        addl_args={
+            **({"name": wandb_run_name} if wandb_run_name is not None else {}),
+            **({"entity": wandb_entity} if wandb_entity is not None else {}),
+        }
+        or None,
     )
-    if max_steps is None and num_epochs is None:
-        max_steps = len(env)
-    elif max_steps is None and num_epochs is not None:
-        max_steps = num_epochs * len(env)
 
-    training_steps = -(max_steps // -effective_data_batch_size)
-
-    if accelerator is None or accelerator.is_main_process:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-        )
+    max_steps, training_steps = _compute_training_steps(
+        max_steps, num_epochs, len(env), effective_data_batch_size
+    )
+    pbar = _create_pbar(accelerator, max_steps)
 
     total_steps = 0
     prompts = env.reset(reset_dataloaders=True)
 
-    _sft_csv_file = None
-    _sft_csv_writer = None
-    if elite_path is not None and (accelerator is None or accelerator.is_main_process):
-        os.makedirs(elite_path, exist_ok=True)
-        _sft_csv_path = os.path.join(elite_path, "metrics.csv")
-        _sft_csv_file = open(_sft_csv_path, "w", newline="")
-        _sft_csv_writer = csv.DictWriter(
-            _sft_csv_file,
-            fieldnames=["step", "train_loss", "train_perplexity", "eval_loss"],
-        )
-        _sft_csv_writer.writeheader()
-        _sft_csv_file.flush()
+    sft_csv_file, sft_csv_writer = _open_csv_log(
+        elite_path,
+        ["step", "train_loss", "train_perplexity", "eval_loss"],
+        accelerator,
+    )
 
     for i in range(training_steps):
         agent_metrics_dict = {}
@@ -976,7 +924,7 @@ def finetune_llm_sft(
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
 
-            if accelerator is None or accelerator.is_main_process:
+            if _is_main_process(accelerator):
                 metrics_dict = {
                     "global_step": total_steps,
                     "Train/Loss": agg_metrics[0],
@@ -999,104 +947,62 @@ def finetune_llm_sft(
                 )
                 agent.scores.append(-agg_metrics[0])  # higher = better
 
-        if _sft_csv_writer is not None and agent_metrics_dict:
-            mean_loss = np.mean(
-                [
-                    agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Loss"]
-                    for j in range(len(pop))
-                ]
-            )
-            mean_ppl = np.mean(
-                [
-                    agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Perplexity"]
-                    for j in range(len(pop))
-                ]
-            )
+        if sft_csv_writer is not None and agent_metrics_dict:
+            metric_values = _per_agent_metrics(agent_metrics_dict, len(pop))
             eval_loss = (
-                -np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{j}/test_metrics"][
-                            "Eval/Negative loss (fitness)"
-                        ]
-                        for j in range(len(pop))
-                    ]
-                )
+                -np.mean(metric_values("test_metrics", "Eval/Negative loss (fitness)"))
                 if agg_test_metrics is not None
                 else ""
             )
-            _sft_csv_writer.writerow(
+            _log_csv_row(
+                sft_csv_writer,
+                sft_csv_file,
                 {
                     "step": total_steps,
-                    "train_loss": mean_loss,
-                    "train_perplexity": mean_ppl,
+                    "train_loss": np.mean(metric_values("train_metrics", "Train/Loss")),
+                    "train_perplexity": np.mean(
+                        metric_values("train_metrics", "Train/Perplexity")),
                     "eval_loss": eval_loss,
-                }
+                },
             )
-            _sft_csv_file.flush()
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
-        if tournament is not None and mutation is not None and evo_steps is not None:
-            if (i + 1) % evo_steps == 0:
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-                pop = tournament_selection_and_mutation(
-                    population=pop,
-                    tournament=tournament,
-                    mutation=mutation,
-                    env_name=env.name,
-                    accelerator=accelerator,
-                    language_model=True,
-                    elite_path=elite_path,
-                    save_elite=save_elite,
-                )
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-        elif (i + 1) * effective_data_batch_size % max_steps == 0 or (
-            checkpoint_steps is not None
-            and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
-        ):
-            save_llm_checkpoint(agent, elite_path)
+        pop = _handle_evolution_or_checkpoint(
+            i,
+            pop,
+            evo_steps,
+            tournament,
+            mutation,
+            env.name,
+            accelerator,
+            elite_path,
+            save_elite,
+            effective_data_batch_size,
+            max_steps,
+            checkpoint_steps,
+            agent,
+            require_evo_steps_for_hpo=True,
+        )
 
-        if wb and (accelerator is None or accelerator.is_main_process):
+        if wb and _is_main_process(accelerator):
+            metric_values = _per_agent_metrics(agent_metrics_dict, len(pop))
             wandb_dict = {
-                "Train/Mean population loss": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Loss"]
-                        for j in range(len(pop))
-                    ]
-                ),
+                "Train/Mean population loss": np.mean(metric_values("train_metrics", "Train/Loss")),
                 "Train/Mean population perplexity": np.mean(
-                    [
-                        agent_metrics_dict[f"agent_{j}/train_metrics"][
-                            "Train/Perplexity"
-                        ]
-                        for j in range(len(pop))
-                    ]
-                ),
-                "Train/Best loss": np.min(
-                    [
-                        agent_metrics_dict[f"agent_{j}/train_metrics"]["Train/Loss"]
-                        for j in range(len(pop))
-                    ]
-                ),
+                    metric_values("train_metrics", "Train/Perplexity")),
+                "Train/Best loss": np.min(metric_values("train_metrics", "Train/Loss")),
             }
             if agg_test_metrics is not None:
                 wandb_dict["Eval/Best fitness"] = np.max(
-                    [
-                        agent_metrics_dict[f"agent_{j}/test_metrics"][
-                            "Eval/Negative loss (fitness)"
-                        ]
-                        for j in range(len(pop))
-                    ]
-                )
-            wandb.log(wandb_dict)
+                    metric_values("test_metrics", "Eval/Negative loss (fitness)"))
+            _wandb_log(wandb_dict)
 
         if env.num_epochs == num_epochs:
             break
 
-    if verbose and (accelerator is None or accelerator.is_main_process):
+    if verbose and _is_main_process(accelerator):
         agent = pop[0]
         scores = agent.scores  # list of -loss per step
         fitness = agent.fitness  # list of -eval_loss per eval step
@@ -1129,22 +1035,10 @@ def finetune_llm_sft(
 
         pbar.write("\n".join(lines))
 
-    if save_elite and elite_path is not None:
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-        if accelerator is None or accelerator.is_main_process:
-            elite = max(
-                pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf")
-            )
-            save_llm_checkpoint(elite, elite_path)
+    _save_elite_checkpoint(pop, save_elite, elite_path, accelerator)
 
-    if _sft_csv_file is not None:
-        _sft_csv_file.close()
+    if sft_csv_file is not None:
+        sft_csv_file.close()
         print(f"Training metrics saved to {os.path.join(elite_path, 'metrics.csv')}")
 
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    if accelerator is None or accelerator.is_main_process:
-        pbar.close()
-        if wb:
-            wandb.finish()
+    _finalize_training_pbar_wandb(accelerator, pbar, wb)
