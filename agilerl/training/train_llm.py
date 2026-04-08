@@ -72,7 +72,9 @@ def _validate_finetune_args(
                 stacklevel=2,
             )
         if (tournament is not None and mutation is not None) and evo_steps is None:
-            msg = "'evo_steps' must be set when 'tournament' and 'mutation' are not None."
+            msg = (
+                "'evo_steps' must be set when 'tournament' and 'mutation' are not None."
+            )
             raise ValueError(msg)
         if num_epochs is not None and max_steps is not None:
             warnings.warn(
@@ -377,10 +379,14 @@ def finetune_llm_reasoning(
         ),
         algo="grpo",
     )
-    init_hp = {
-        "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
-        "ALGO": pop[0].algo,
-    } if init_hp is None else init_hp
+    init_hp = (
+        {
+            "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
+            "ALGO": pop[0].algo,
+        }
+        if init_hp is None
+        else init_hp
+    )
     data_increment = (
         getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
     )
@@ -495,37 +501,52 @@ def finetune_llm_reasoning(
         if wb and _is_main_process(accelerator):
             metric_values = _per_agent_metrics(agent_metrics_dict, len(pop))
             wandb_dict = {
-                "Train/Best reward": np.max(metric_values("train_metrics", "Train/Mean reward")),
+                "Train/Best reward": np.max(
+                    metric_values("train_metrics", "Train/Mean reward")
+                ),
                 "Train/Mean population reward": np.mean(
-                    metric_values("train_metrics", "Train/Mean reward")),
-                "Train/Mean population loss": np.mean(metric_values("train_metrics", "Train/Loss")),
+                    metric_values("train_metrics", "Train/Mean reward")
+                ),
+                "Train/Mean population loss": np.mean(
+                    metric_values("train_metrics", "Train/Loss")
+                ),
                 "Train/Mean population KL divergence": np.mean(
-                    metric_values("train_metrics", "Train/KL-divergence")),
+                    metric_values("train_metrics", "Train/KL-divergence")
+                ),
                 "Train/Mean population completion length": np.mean(
-                    metric_values("train_metrics", "Train/Average completion length")),
+                    metric_values("train_metrics", "Train/Average completion length")
+                ),
             }
             if max_reward is not None:
                 wandb_dict |= {
                     "Train/Mean population accuracy": np.mean(
-                        metric_values("train_metrics", "Train/Accuracy")),
-                    "Train/Best accuracy": np.max(metric_values("train_metrics", "Train/Accuracy")),
+                        metric_values("train_metrics", "Train/Accuracy")
+                    ),
+                    "Train/Best accuracy": np.max(
+                        metric_values("train_metrics", "Train/Accuracy")
+                    ),
                 }
             _wandb_extend_hpo_hyperparams(wandb_dict, pop)
 
             if agg_test_metrics is not None:
                 test_dict = {
-                    "Eval/Best reward": np.max(metric_values("test_metrics", "Eval/Mean reward")),
+                    "Eval/Best reward": np.max(
+                        metric_values("test_metrics", "Eval/Mean reward")
+                    ),
                     "Eval/Mean population reward": np.mean(
-                        metric_values("test_metrics", "Eval/Mean reward")),
+                        metric_values("test_metrics", "Eval/Mean reward")
+                    ),
                 }
                 if max_reward is not None:
                     test_dict |= {
                         "Eval/Mean population accuracy": np.mean(
-                            metric_values("test_metrics", "Eval/Accuracy")),
+                            metric_values("test_metrics", "Eval/Accuracy")
+                        ),
                     }
                     wandb_dict |= {
                         "Eval/Best accuracy": np.max(
-                            metric_values("test_metrics", "Eval/Accuracy")),
+                            metric_values("test_metrics", "Eval/Accuracy")
+                        ),
                     }
                 wandb_dict |= test_dict
             _wandb_log(wandb_dict)
@@ -533,11 +554,7 @@ def finetune_llm_reasoning(
         if env.num_epochs == num_epochs:
             break
 
-    if (
-        verbose
-        and total_steps > evaluation_interval
-        and _is_main_process(accelerator)
-    ):
+    if verbose and total_steps > evaluation_interval and _is_main_process(accelerator):
         fitness_calculated = len(agent.fitness) > 0
         fitness = (
             [str(round(agent.fitness[-1], 2)) for agent in pop]
@@ -610,10 +627,14 @@ def finetune_llm_preference(
         ),
         algo="dpo",
     )
-    init_hp = {
-        "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
-        "ALGO": pop[0].algo,
-    } if init_hp is None else init_hp
+    init_hp = (
+        {
+            "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
+            "ALGO": pop[0].algo,
+        }
+        if init_hp is None
+        else init_hp
+    )
 
     data_increment = accelerator.num_processes if accelerator is not None else 1
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
@@ -722,11 +743,14 @@ def finetune_llm_preference(
                     "step": total_steps,
                     "train_loss": np.mean(metric_values("train_metrics", "Train/Loss")),
                     "train_chosen_reward": np.mean(
-                        metric_values("train_metrics", "Train/Mean chosen reward")),
+                        metric_values("train_metrics", "Train/Mean chosen reward")
+                    ),
                     "train_rejected_reward": np.mean(
-                        metric_values("train_metrics", "Train/Mean rejected reward")),
+                        metric_values("train_metrics", "Train/Mean rejected reward")
+                    ),
                     "train_reward_margin": np.mean(
-                        metric_values("train_metrics", "Train/Mean reward margin")),
+                        metric_values("train_metrics", "Train/Mean reward margin")
+                    ),
                     "eval_reward_margin": eval_margin,
                 },
             )
@@ -755,21 +779,29 @@ def finetune_llm_preference(
             metric_values = _per_agent_metrics(agent_metrics_dict, len(pop))
             wandb_dict = {
                 "Train/Best reward margin": np.max(
-                    metric_values("train_metrics", "Train/Mean reward margin")),
+                    metric_values("train_metrics", "Train/Mean reward margin")
+                ),
                 "Train/Mean population reward margin": np.mean(
-                    metric_values("train_metrics", "Train/Mean reward margin")),
-                "Train/Mean population loss": np.mean(metric_values("train_metrics", "Train/Loss")),
+                    metric_values("train_metrics", "Train/Mean reward margin")
+                ),
+                "Train/Mean population loss": np.mean(
+                    metric_values("train_metrics", "Train/Loss")
+                ),
                 "Train/Mean population chosen reward": np.mean(
-                    metric_values("train_metrics", "Train/Mean chosen reward")),
+                    metric_values("train_metrics", "Train/Mean chosen reward")
+                ),
                 "Train/Mean population rejected reward": np.mean(
-                    metric_values("train_metrics", "Train/Mean rejected reward")),
+                    metric_values("train_metrics", "Train/Mean rejected reward")
+                ),
             }
             if agg_test_metrics is not None:
                 wandb_dict |= {
                     "Eval/Best reward margin": np.max(
-                        metric_values("test_metrics", "Eval/Mean reward margin")),
+                        metric_values("test_metrics", "Eval/Mean reward margin")
+                    ),
                     "Eval/Mean population reward margin": np.mean(
-                        metric_values("test_metrics", "Eval/Mean reward margin")),
+                        metric_values("test_metrics", "Eval/Mean reward margin")
+                    ),
                 }
             _wandb_log(wandb_dict)
         if env.num_epochs == num_epochs:
@@ -866,10 +898,14 @@ def finetune_llm_sft(
         f"Population must contain SFT agents. Got {type(pop[0])}.",
         algo="sft",
     )
-    init_hp = {
-        "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
-        "ALGO": pop[0].algo,
-    } if init_hp is None else init_hp
+    init_hp = (
+        {
+            "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
+            "ALGO": pop[0].algo,
+        }
+        if init_hp is None
+        else init_hp
+    )
 
     data_increment = accelerator.num_processes if accelerator is not None else 1
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
@@ -961,7 +997,8 @@ def finetune_llm_sft(
                     "step": total_steps,
                     "train_loss": np.mean(metric_values("train_metrics", "Train/Loss")),
                     "train_perplexity": np.mean(
-                        metric_values("train_metrics", "Train/Perplexity")),
+                        metric_values("train_metrics", "Train/Perplexity")
+                    ),
                     "eval_loss": eval_loss,
                 },
             )
@@ -989,14 +1026,18 @@ def finetune_llm_sft(
         if wb and _is_main_process(accelerator):
             metric_values = _per_agent_metrics(agent_metrics_dict, len(pop))
             wandb_dict = {
-                "Train/Mean population loss": np.mean(metric_values("train_metrics", "Train/Loss")),
+                "Train/Mean population loss": np.mean(
+                    metric_values("train_metrics", "Train/Loss")
+                ),
                 "Train/Mean population perplexity": np.mean(
-                    metric_values("train_metrics", "Train/Perplexity")),
+                    metric_values("train_metrics", "Train/Perplexity")
+                ),
                 "Train/Best loss": np.min(metric_values("train_metrics", "Train/Loss")),
             }
             if agg_test_metrics is not None:
                 wandb_dict["Eval/Best fitness"] = np.max(
-                    metric_values("test_metrics", "Eval/Negative loss (fitness)"))
+                    metric_values("test_metrics", "Eval/Negative loss (fitness)")
+                )
             _wandb_log(wandb_dict)
 
         if env.num_epochs == num_epochs:
