@@ -118,6 +118,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv]
+# This tells uv to build box2d-py using the project environment directly
+# (not an isolated one), where it can see system PATH and find swig.
 no-build-isolation-package = ["box2d-py"]
 
 [tool.hatch.build.targets.wheel]
