@@ -2143,7 +2143,7 @@ class TestLLMGetLogprobs:
 
 
 class TestLLMSaveLoadCheckpoint:
-    def test_save_checkpoint_weights_only_with_accelerator(self, tmp_path):
+    def test_save_checkpoint_lora_only_with_accelerator(self, tmp_path):
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
         agent.use_separate_reference_adapter = False
@@ -3323,7 +3323,7 @@ class TestLLMCleanUpCudaPaths:
         mock_sync.assert_called_once()
 
 
-class TestLLMLoadCheckpointWeightsOnlyWithRefAdapter:
+class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:
     """load_checkpoint updates both reference and actor adapters for LoRA-only checkpoints."""
 
     def test_load_checkpoint_updates_reference_adapter(self, tmp_path):
