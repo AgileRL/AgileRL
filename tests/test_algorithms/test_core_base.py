@@ -3048,6 +3048,31 @@ class TestLLMInitializeActors:
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=False)
         base_model.set_adapter.assert_called_with("actor")
 
+    def test_initialize_actors_unknown_adapter_is_deleted_with_warning(self):
+        """Adapters that are neither 'actor' nor 'reference' are deleted with a warning."""
+        agent = _make_llm_agent()
+        agent.use_separate_reference_adapter = False
+        agent.lora_config = MagicMock()
+        agent.zero_stage = None
+
+        peft_actor = _make_mock_peft_actor()
+        peft_actor.peft_config = {"actor": MagicMock(), "stray_adapter": MagicMock()}
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
+            ),
+            patch(
+                "agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_actor
+            ),
+            pytest.warns(UserWarning, match="stray_adapter"),
+        ):
+            LLMAlgorithm._initialize_actors(
+                agent, MagicMock(spec=[]), add_adapters=True
+            )
+
+        peft_actor.delete_adapter.assert_called_once_with("stray_adapter")
+
 
 class TestLLMUpdateExistingAdapter:
     """_update_existing_adapter overwrites adapter weights in-place."""

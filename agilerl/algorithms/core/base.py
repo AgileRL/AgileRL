@@ -2724,6 +2724,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
             self.actor.set_adapter("actor")
 
+        # Remove any adapters that aren't "actor" or "reference" and add a warning
+        if add_adapters and isinstance(self.actor, PeftModelProtocol):
+            for adapter_name in self.actor.peft_config.keys():
+                if adapter_name not in ["actor", "reference"]:
+                    warnings.warn(
+                        f"Adapter '{adapter_name}' found in the model but is not one of the expected adapter names 'actor' or 'reference'. This adapter will be removed and any weights will be lost.",
+                        stacklevel=2,
+                    )
+                    self.actor.delete_adapter(adapter_name)
+
         if self.accelerator is None:
             self.actor = DummyEvolvable(module=self.actor, device=self.device)
 
