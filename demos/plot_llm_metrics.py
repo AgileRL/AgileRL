@@ -6,10 +6,10 @@ reward-margin plots.
 
 Usage::
 
-    python benchmarking/plot_llm_metrics.py saved_lora/20260402_093644/metrics.csv
-    python benchmarking/plot_llm_metrics.py outputs/20260402_SFT/metrics.csv -o docs/tutorials/llm_finetuning/images
-    python benchmarking/plot_llm_metrics.py saved_lora/run1/metrics.csv --smoothing 0.85
-    python benchmarking/plot_llm_metrics.py saved_lora/run1/metrics.csv --algo DPO
+    python demos/plot_llm_metrics.py saved_lora/20260402_093644/metrics.csv
+    python demos/plot_llm_metrics.py outputs/20260402_SFT/metrics.csv -o docs/tutorials/llm_finetuning/images
+    python demos/plot_llm_metrics.py saved_lora/run1/metrics.csv --smoothing 0.85
+    python demos/plot_llm_metrics.py saved_lora/run1/metrics.csv --algo DPO
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 # ---------------------------------------------------------------------------
-# Colour palette – teal tones matching the AgileRL brand (#245c5c)
+# Colour palette – teal tones matching the AgileRL brand
 # ---------------------------------------------------------------------------
 COLORS = {
     "loss": "#245c5c",
@@ -56,23 +56,6 @@ def _apply_style(ax: plt.Axes) -> None:
     ax.spines["left"].set_color("#cccccc")
     ax.spines["bottom"].set_color("#cccccc")
     ax.tick_params(colors="#555555", labelsize=9)
-
-
-def _detect_algo(csv_path: Path, df: pd.DataFrame) -> str:
-    """Best-effort algorithm detection from path or CSV columns.
-
-    Checks the path components for known algorithm names (SFT, DPO, GRPO),
-    then falls back to column heuristics.
-    """
-    path_str = str(csv_path).upper()
-    for algo in ("SFT", "DPO", "GRPO"):
-        if re.search(rf"[\b_/]{algo}[\b_/.]", path_str) or path_str.endswith(algo):
-            return algo
-
-    has_rewards = {"train_chosen_reward", "train_rejected_reward"}.issubset(df.columns)
-    if has_rewards:
-        return "DPO"
-    return "SFT"
 
 
 def _build_title(algo: str, plot_type: str, params: str | None = None) -> str:
@@ -222,7 +205,7 @@ def main() -> None:
     parser.add_argument(
         "--algo",
         type=str,
-        default=None,
+        default="",
         help=(
             "Algorithm name used in titles and filenames (e.g. SFT, DPO, GRPO). "
             "Auto-detected from the CSV path or columns when not provided."
@@ -264,7 +247,7 @@ def main() -> None:
 
     df = pd.read_csv(csv_path)
 
-    algo = args.algo or _detect_algo(csv_path, df)
+    algo = args.algo
     if args.nll:
         algo += " + NLL"
     algo_lower = algo.lower().replace(" + ", "_plus_").replace(" ", "_")
