@@ -2674,7 +2674,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
 
         peft_config = getattr(base_model, "peft_config", None)
-        if isinstance(base_model, PeftModelProtocol) and add_adapters and peft_config:
+        if (
+            isinstance(base_model, PeftModelProtocol)
+            and add_adapters
+            and peft_config
+            and len(peft_config) > 0
+        ):
             peft_adapter_names = set(peft_config.keys())
             if "actor" in peft_adapter_names:
                 # The model already has the correct "actor" adapter (e.g. from clone_llm).
@@ -2728,7 +2733,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         # Remove any adapters that aren't "actor" or "reference" and add a warning
         if add_adapters and isinstance(self.actor, PeftModelProtocol):
-            for adapter_name in self.actor.peft_config.keys():
+            # Make list to avoid "dictionary changed size during iteration" error when deleting adapters
+            for adapter_name in list(self.actor.peft_config.keys()):
                 if adapter_name not in ["actor", "reference"]:
                     warnings.warn(
                         f"Adapter '{adapter_name}' found in the model but is not one of the expected adapter names 'actor' or 'reference'. This adapter will be removed and any weights will be lost.",

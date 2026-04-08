@@ -1416,7 +1416,11 @@ class _MockPeftActor(torch.nn.Module):
         self.gradient_checkpointing_enable = MagicMock()
         self.merge_adapter = MagicMock()
         self.unmerge_adapter = MagicMock()
-        self.delete_adapter = MagicMock()
+
+        def _delete_adapter(name: str) -> None:
+            self.peft_config.pop(name, None)
+
+        self.delete_adapter = MagicMock(side_effect=_delete_adapter)
         self.disable_adapter = MagicMock()
         self.save_pretrained = MagicMock()
         self.save_checkpoint = MagicMock()
