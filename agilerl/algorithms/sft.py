@@ -164,7 +164,7 @@ class SFT(LLMAlgorithm):
             name="SFT",
             gradient_checkpointing=gradient_checkpointing,
         )
-        self.temperature = 1
+        self.temperature = 0
         self.use_vllm = False
         self.update_epochs = update_epochs
         self.use_liger_loss = use_liger_loss
@@ -221,7 +221,7 @@ class SFT(LLMAlgorithm):
         max_length = input_ids.shape[1]
         prompt_lengths: list[int] = experiences["prompt_lengths"]
         # Build the response mask on CPU (same device as dataloader tensors).
-        prompt_masks = LLMAlgorithm.create_prompt_masks(
+        prompt_masks = LLMAlgorithm._create_prompt_masks(
             prompt_lengths, max_length=max_length
         )  # CPU tensor
         # Mask has to be shifted by 1 as output log probs dims are 1 shorter than input ids as first token is used to predict the first log prob

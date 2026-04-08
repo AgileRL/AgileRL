@@ -220,7 +220,7 @@ class DPO(LLMAlgorithm):
         max_length = chosen_input_ids.shape[1]
         prompt_lengths: list[int] = experiences["prompt_lengths"]
         # Build the response mask on CPU (same device as dataloader tensors).
-        prompt_masks = LLMAlgorithm.create_prompt_masks(
+        prompt_masks = LLMAlgorithm._create_prompt_masks(
             prompt_lengths,
             max_length=max_length,
         ).to(self.device)

@@ -2689,12 +2689,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     )
                 self.actor.set_adapter("actor")
             else:
-                # The adapter exists but isn't named "actor".  Rename it so
+                # An adapter exists but isn't named "actor".  Rename it so
                 # the rest of the codebase (save/load/clone) can rely on the
-                # canonical "actor" name.  We must NOT merge-and-unload here
-                # because the saved adapter would then lose the pre-trained
-                # weights at eval time (the base model is reloaded from the
-                # original checkpoint, not from the merged weights).
+                # canonical "actor" name.
                 old_adapter_name = next(iter(base_model.peft_config.keys()))
                 if self.lora_config is None:
                     self.lora_config = base_model.peft_config[old_adapter_name]
@@ -3168,7 +3165,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.accelerator.wait_for_everyone()
 
     @staticmethod
-    def create_prompt_masks(prompt_lengths: list[int], max_length: int) -> torch.Tensor:
+    def _create_prompt_masks(
+        prompt_lengths: list[int], max_length: int
+    ) -> torch.Tensor:
         """Create a mask for the prompts based on the prompt lengths (vectorized).
 
         :param prompt_lengths: List of prompt lengths
