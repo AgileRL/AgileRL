@@ -386,10 +386,10 @@ function and is an example of how we might choose to train our agent to exhibit 
                 ):
                     if agent.accelerator is not None:
                         unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
-                        agent.save_checkpoint(checkpoint_path, weights_only=True)
+                        agent.save_checkpoint(checkpoint_path, lora_only=True)
                         print(f"Saved checkpoint {save_path}")
                     else:
-                        agent.save_checkpoint(checkpoint_path, weights_only=True)
+                        agent.save_checkpoint(checkpoint_path, lora_only=True)
 
 
 Loading a Trained Agent for Inference

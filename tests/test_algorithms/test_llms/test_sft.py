@@ -591,7 +591,7 @@ def test_sft_clean_up(
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-@pytest.mark.parametrize("weights_only", [False, True])
+@pytest.mark.parametrize("lora_only", [False, True])
 def test_sft_save_load_checkpoint(
     deepspeed_env,
     sft_factory,
@@ -605,7 +605,7 @@ def test_sft_save_load_checkpoint(
     pretrained_model_name_or_path,
     reduce_memory_peak,
     micro_batch_size_per_gpu,
-    weights_only,
+    lora_only,
 ):
     sft = sft_factory(
         accelerator_factory,
@@ -621,7 +621,7 @@ def test_sft_save_load_checkpoint(
     )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with tempfile.TemporaryDirectory() as tmpdir:
-        sft.save_checkpoint(tmpdir, weights_only=weights_only)
+        sft.save_checkpoint(tmpdir, lora_only=lora_only)
         new_sft = SFT(
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,

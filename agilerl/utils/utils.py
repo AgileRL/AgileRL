@@ -10,12 +10,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -1080,11 +1080,11 @@ def aggregate_metrics_across_gpus(
 def save_llm_checkpoint(
     agent: LLMAlgorithm,
     checkpoint_path: str | None,
-    weights_only: bool = True,
+    lora_only: bool = True,
 ) -> None:
     """Checkpoint the LLM.
 
-    When ``weights_only=True`` (the default) the LoRA adapters are saved via HuggingFace
+    When ``lora_only=True`` (the default) the LoRA adapters are saved via HuggingFace
     ``save_pretrained``, producing a directory that can be reloaded with::
 
         from peft import PeftModel
@@ -1093,7 +1093,7 @@ def save_llm_checkpoint(
         base_model = AutoModelForCausalLM.from_pretrained("<base-model-name>")
         model = PeftModel.from_pretrained(base_model, "<checkpoint_path>/actor/")
 
-    When ``weights_only=False`` a full AgileRL checkpoint is saved (includes optimizer state
+    When ``lora_only=False`` a full AgileRL checkpoint is saved (includes optimizer state
     and all hyperparameters), which is larger but allows resuming training via
     ``agent.load_checkpoint(path)``.
 
@@ -1102,18 +1102,18 @@ def save_llm_checkpoint(
     :param checkpoint_path: Checkpoint path — used as-is (no algo sub-directory is appended).
         Defaults to ``"./saved_checkpoints"`` when ``None``.
     :type checkpoint_path: str
-    :param weights_only: Save only LoRA adapter weights (HuggingFace format), defaults to True
-    :type weights_only: bool, optional
+    :param lora_only: Save only LoRA adapter weights (HuggingFace format), defaults to True
+    :type lora_only: bool, optional
     """
     assert agent.actor is not None, "Actor is not initialized"
     path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
     Path(path).mkdir(parents=True, exist_ok=True)
     if agent.accelerator is not None:
         agent.accelerator.wait_for_everyone()
-        agent.save_checkpoint(path, weights_only=weights_only)
+        agent.save_checkpoint(path, lora_only=lora_only)
         agent.accelerator.wait_for_everyone()
     else:
-        agent.save_checkpoint(path, weights_only=weights_only)
+        agent.save_checkpoint(path, lora_only=lora_only)
 
 
 def consolidate_mutations(population: list[LLMAlgorithm]) -> None:

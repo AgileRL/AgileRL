@@ -508,7 +508,7 @@ def test_save_with_accelerator(tmp_path):
     save_llm_checkpoint(agent, str(tmp_path))
     agent.save_checkpoint.assert_called_once_with(
         str(tmp_path),
-        lora_only=False,
+        lora_only=True,
     )
     agent.accelerator.wait_for_everyone.assert_called()
 
@@ -522,7 +522,7 @@ def test_save_without_accelerator(tmp_path):
     save_llm_checkpoint(agent, str(tmp_path))
     agent.save_checkpoint.assert_called_once_with(
         str(tmp_path),
-        weights_only=False,
+        lora_only=True,
     )
 
 
@@ -655,18 +655,18 @@ def test_save_llm_checkpoint_with_path(tmp_path):
     agent.accelerator = None
     path = str(tmp_path / "my_ckpt")
     save_llm_checkpoint(agent, path)
-    agent.save_checkpoint.assert_called_once_with(path, weights_only=False)
+    agent.save_checkpoint.assert_called_once_with(path, lora_only=True)
 
 
-def test_save_llm_checkpoint_weights_only(tmp_path):
+def test_save_llm_checkpoint_lora_only(tmp_path):
     agent = Mock()
     agent.actor = Mock()
     agent.algo = "grpo"
     agent.accelerator = None
-    save_llm_checkpoint(agent, str(tmp_path), weights_only=True)
+    save_llm_checkpoint(agent, str(tmp_path), lora_only=True)
     agent.save_checkpoint.assert_called_once_with(
         str(tmp_path),
-        weights_only=True,
+        lora_only=True,
     )
 
 

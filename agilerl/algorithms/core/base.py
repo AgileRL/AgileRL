@@ -2167,7 +2167,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         elif self.accelerator is not None:
             self._save_distributed_actor(path, tag="save_checkpoint")
 
-        # Exclude model weights from attributes.pt when weights_only=True so that we only save LoRA adapter weights.
+        # Exclude model weights from attributes.pt when lora_only=True so that we only save LoRA adapter weights.
         checkpoint_dict = get_checkpoint_dict(
             self,
             omit_actor_info=self.accelerator is not None or lora_only,

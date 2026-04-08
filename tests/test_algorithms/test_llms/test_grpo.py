@@ -2433,7 +2433,7 @@ def test_grpo_load():
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-@pytest.mark.parametrize("weights_only", [False, True])
+@pytest.mark.parametrize("lora_only", [False, True])
 def test_grpo_save_load_checkpoint(
     deepspeed_env,
     grpo_factory,
@@ -2451,7 +2451,7 @@ def test_grpo_save_load_checkpoint(
     tmpdir,
     reduce_memory_peak,
     micro_batch_size_per_gpu,
-    weights_only,
+    lora_only,
 ):
     grpo = grpo_factory(
         accelerator_factory,
@@ -2470,7 +2470,7 @@ def test_grpo_save_load_checkpoint(
     )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with tempfile.TemporaryDirectory() as tmpdir:
-        grpo.save_checkpoint(tmpdir, weights_only=weights_only)
+        grpo.save_checkpoint(tmpdir, lora_only=lora_only)
         new_grpo = GRPO(
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,

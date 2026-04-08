@@ -3324,14 +3324,14 @@ class TestLLMCleanUpCudaPaths:
 
 
 class TestLLMLoadCheckpointWeightsOnlyWithRefAdapter:
-    """load_checkpoint updates both reference and actor adapters when weights_only."""
+    """load_checkpoint updates both reference and actor adapters for LoRA-only checkpoints."""
 
     def test_load_checkpoint_updates_reference_adapter(self, tmp_path):
         import dill
 
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc, use_separate_reference_adapter=True)
-        chkpt = {"_weights_only": True, "lr": 1e-4}
+        chkpt = {"_lora_only": True, "lr": 1e-4}
         torch.save(chkpt, str(tmp_path / "attributes.pt"), pickle_module=dill)
 
         with patch.object(LLMAlgorithm, "_update_existing_adapter") as mock_update:
