@@ -164,7 +164,7 @@ class RegistryMeta(_RegistryMeta, ABCMeta):
 
 def get_checkpoint_dict(
     agent: SelfEvolvableAlgorithm,
-    using_deepspeed: bool = False,
+    omit_actor_info: bool = False,
 ) -> dict[str, Any]:
     """Return a dictionary of the agent's attributes to save in a checkpoint.
 
@@ -172,8 +172,9 @@ def get_checkpoint_dict(
 
     :param agent: The agent to save.
     :type agent: EvolvableAlgorithm
-    :param using_deepspeed: Whether the agent is using deepspeed.
-    :type using_deepspeed: bool, optional
+    :param omit_actor_info: Whether to remove the 'actor' attribute prior to saving.
+        To be used when saving LoRA weights only or when using Deepspeed.
+    :type omit_actor_info: bool, optional
 
     :return: A dictionary of the agent's attributes.
     :rtype: dict[str, Any]
@@ -187,7 +188,7 @@ def get_checkpoint_dict(
     if attribute_dict.pop("lr_scheduler", None) is not None:
         attribute_dict["lr_scheduler"] = agent.lr_scheduler.state_dict()
 
-    if using_deepspeed:
+    if omit_actor_info:
         attribute_dict.pop("actor", None)
         return attribute_dict
 
@@ -195,13 +196,16 @@ def get_checkpoint_dict(
         attribute_dict.pop("rollout_buffer")
 
     # Get checkpoint dictionaries for evolvable modules and optimizers
-    network_info: dict[str, dict[str, Any]] = {"modules": {}, "optimizers": {}}
+    network_info: dict[str, dict[str, Any] | list[str]] = {
+        "modules": {},
+        "optimizers": {},
+    }
     for attr in agent.evolvable_attributes():
         evolvable_obj: EvolvableAttributeType = getattr(agent, attr)
         if isinstance(evolvable_obj, (OptimizedModule, EvolvableModule)):
             module_chkpt = module_checkpoint_dict(evolvable_obj, attr)
             network_info["modules"].update(module_chkpt)
-        elif isinstance(evolvable_obj, OptimizerWrapper) and not using_deepspeed:
+        elif isinstance(evolvable_obj, OptimizerWrapper) and not omit_actor_info:
             optimizer_chkpt = evolvable_obj.checkpoint_dict(attr)
             network_info["optimizers"].update(optimizer_chkpt)
 
@@ -2117,20 +2121,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         return cast("TorchObsType", observation)
 
-    def save_checkpoint(self, path: str, weights_only: bool = True) -> None:
+    def save_checkpoint(self, path: str, lora_only: bool = True) -> None:
         """Override the save_checkpoint method to provide guidance on the correct method to use.
         :param path: Location to save checkpoint at
         :type path: string
-        :param weights_only: If True, only save the LoRA adapter weights via HuggingFace
+        :param lora_only: If True, only save the LoRA adapter weights via HuggingFace
             ``save_pretrained`` (produces a directory loadable with ``PeftModel.from_pretrained``).
             If False, save a full AgileRL checkpoint including the complete model state dict.
             Defaults to True.
-        :type weights_only: bool, optional.
+        :type lora_only: bool, optional.
         """
         selected_adapters = (
             ["actor", "reference"] if self.use_separate_reference_adapter else ["actor"]
         )
-        if weights_only and self.accelerator is not None:
+        if lora_only and self.accelerator is not None:
             model_ref = self.accelerator.unwrap_model(self.actor)
             with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
                 model_ref.save_pretrained(
@@ -2138,7 +2142,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     selected_adapters=selected_adapters,
                     is_main_process=self.accelerator.is_main_process,
                 )
-        elif weights_only:
+        elif lora_only:
             # No accelerator: save_pretrained is forwarded to the underlying PeftModel
             # via DummyEvolvable.__getattr__.
             self.actor.save_pretrained(
@@ -2151,9 +2155,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # Exclude model weights from attributes.pt when weights_only=True so that we only save LoRA adapter weights.
         checkpoint_dict = get_checkpoint_dict(
             self,
-            using_deepspeed=self.accelerator is not None or weights_only,
+            omit_actor_info=self.accelerator is not None or lora_only,
         )
-        checkpoint_dict["_weights_only"] = weights_only
+        checkpoint_dict["_lora_only"] = lora_only
         checkpoint_dict.pop("llm", None)
         checkpoint_dict.pop("tp_group", None)
 
@@ -2176,13 +2180,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         checkpoint = torch.load(
             path + "/attributes.pt", weights_only=False, pickle_module=pickle_module
         )
-        weights_only = checkpoint.get("_weights_only", False)
+        lora_only = checkpoint.get("_lora_only", False)
         for attr, value in checkpoint.items():
             if attr == "lr_scheduler":
                 continue
             setattr(self, attr, value)
         if self.accelerator is not None:
-            if weights_only:
+            if lora_only:
                 if self.use_separate_reference_adapter:
                     self._update_existing_adapter(path, "reference")
                 self._update_existing_adapter(path, "actor")
@@ -2201,7 +2205,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 lr_name="lr",
             )
         else:
-            if weights_only:
+            if lora_only:
                 # Adapters were saved via save_pretrained; reload them in-place.
                 # self.actor.module is the underlying PeftModel inside DummyEvolvable.
                 adapters_to_load = (
@@ -2667,8 +2671,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.pretrained_model_name_or_path,
             )
 
-        if isinstance(base_model, PeftModelProtocol) and add_adapters:
-            peft_adapter_names = set(base_model.peft_config.keys())
+        peft_config = getattr(base_model, "peft_config", None)
+        if isinstance(base_model, PeftModelProtocol) and add_adapters and peft_config:
+            peft_adapter_names = set(peft_config.keys())
             if "actor" in peft_adapter_names:
                 # The model already has the correct "actor" adapter (e.g. from clone_llm).
                 # Use it directly so the trained LoRA weights are preserved and the base

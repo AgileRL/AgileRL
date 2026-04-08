@@ -58,7 +58,7 @@ class TestGetCheckpointDict:
         action_space = spaces.Discrete(2)
         agent = DummyRLAlgorithm(vector_space, action_space, index=0)
         agent.actor = agent.dummy_actor
-        chkpt = get_checkpoint_dict(agent, using_deepspeed=True)
+        chkpt = get_checkpoint_dict(agent, omit_actor_info=True)
         assert "actor" not in chkpt
 
     def test_checkpoint_dict_with_lr_scheduler(self, dummy_agent):
@@ -2166,15 +2166,15 @@ class TestLLMSaveLoadCheckpoint:
             ),
             patch("agilerl.algorithms.core.base.torch.save"),
         ):
-            agent.save_checkpoint(str(tmp_path), weights_only=False)
+            agent.save_checkpoint(str(tmp_path), lora_only=False)
         mock_save.assert_called_once()
 
-    def test_load_checkpoint_with_accelerator_weights_only(self, tmp_path):
+    def test_load_checkpoint_with_accelerator_lora_only(self, tmp_path):
         import dill
 
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
-        chkpt = {"_weights_only": True, "lr": 1e-4}
+        chkpt = {"_lora_only": True, "lr": 1e-4}
         torch.save(chkpt, str(tmp_path / "attributes.pt"), pickle_module=dill)
         with patch.object(LLMAlgorithm, "_update_existing_adapter"):
             agent.load_checkpoint(str(tmp_path))
@@ -2184,7 +2184,7 @@ class TestLLMSaveLoadCheckpoint:
 
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
-        chkpt = {"_weights_only": False, "lr": 1e-4}
+        chkpt = {"_lora_only": False, "lr": 1e-4}
         torch.save(chkpt, str(tmp_path / "attributes.pt"), pickle_module=dill)
         with patch.object(LLMAlgorithm, "_load_distributed_actor"):
             agent.load_checkpoint(str(tmp_path))
@@ -2194,7 +2194,7 @@ class TestLLMSaveLoadCheckpoint:
 
         agent = _make_llm_agent(accelerator=None)
         agent.accelerator = None
-        chkpt = {"_weights_only": False, "lr": 1e-4}
+        chkpt = {"_lora_only": False, "lr": 1e-4}
         torch.save(chkpt, str(tmp_path / "attributes.pt"), pickle_module=dill)
         with patch.object(EvolvableAlgorithm, "load_checkpoint"):
             agent.load_checkpoint(str(tmp_path))
@@ -3029,7 +3029,9 @@ class TestLLMInitializeActors:
                 "agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_actor
             ),
         ):
-            LLMAlgorithm._initialize_actors(agent, MagicMock(), add_adapters=True)
+            LLMAlgorithm._initialize_actors(
+                agent, MagicMock(spec=[]), add_adapters=True
+            )
         peft_actor.add_adapter.assert_called_once_with(
             adapter_name="reference", peft_config=agent.lora_config
         )
