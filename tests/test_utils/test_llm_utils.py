@@ -931,11 +931,6 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
         sys.modules["agilerl.utils.llm_utils"] = original_module
 
 
-# ---------------------------------------------------------------------------
-# compare_responses tests
-# ---------------------------------------------------------------------------
-
-
 def _make_tokenizer(vocab_size: int = 100, prompt_len: int = 3) -> MagicMock:
     """Return a mock tokenizer compatible with compare_responses."""
     tokenizer = MagicMock()
