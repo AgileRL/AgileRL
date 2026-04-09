@@ -160,7 +160,6 @@ class ArenaOAuth2:
             time.sleep(interval)
             try:
                 tokens = self.kc.token(
-                    # Device Authorization Grant requires this grant type.
                     grant_type="urn:ietf:params:oauth:grant-type:device_code",
                     device_code=device_code,
                 )

@@ -301,10 +301,9 @@ class ArenaClient:
         """Get the authenticated user's credit information."""
         return self._request("GET", "/api/users/credits")
 
-    def list_custom_environments(self) -> list[dict[str, Any]]:
+    def list_custom_environments(self) -> Any:
         """List custom environments available to the authenticated user."""
-        resp = self._request("GET", "/api/custom-gym-env-impls/list")
-        return resp if isinstance(resp, list) else [resp]
+        return self._request("GET", "/api/custom-gym-env-impls/list")
 
     def custom_environment_exists(self, name: str, version: str = "latest") -> bool:
         """Check whether a custom environment name/version exists."""
@@ -336,6 +335,71 @@ class ArenaClient:
             return [str(entrypoint) for entrypoint in resp]
         return []
 
+    def validate_custom_environment(
+        self,
+        *,
+        name: str,
+        version: str,
+        entrypoint: str | None = None,
+        do_rollouts: bool = True,
+        stream: bool = False,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Validate an already created custom environment version."""
+        payload: dict[str, Any] = {
+            "name": name,
+            "version": version,
+            "do_rollouts": do_rollouts,
+        }
+        if entrypoint:
+            payload["entrypoint"] = entrypoint
+
+        if not stream:
+            return self._request("POST", "/api/custom-gym-env-impls/validate", json=payload)
+
+        return self._stream_json_request(
+            "POST",
+            "/api/custom-gym-env-impls/validate",
+            json=payload,
+            timeout=self._upload_timeout,
+            on_chunk=on_chunk,
+        )
+
+    def profile_custom_environment(
+        self,
+        *,
+        name: str,
+        version: str,
+        multi_agent: bool,
+        custom_env_path: str | None = None,
+        stream: bool = False,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Profile a validated custom environment version by name and version."""
+        payload: dict[str, Any] = {
+            "name": name,
+            "version": version,
+            "multi_agent": multi_agent,
+        }
+        if custom_env_path:
+            payload["custom_env_path"] = custom_env_path
+
+        if not stream:
+            return self._request("POST", "/api/custom-gym-env-impls/profile", json=payload)
+
+        return self._stream_json_request(
+            "POST",
+            "/api/custom-gym-env-impls/profile",
+            json=payload,
+            timeout=self._upload_timeout,
+            on_chunk=on_chunk,
+        )
+
+    def delete_custom_environment(self, *, name: str, version: str) -> Any:
+        """Delete a custom environment version by name and version."""
+        payload = {"name": name, "version": version}
+        return self._request("DELETE", "/api/custom-gym-env-impls/delete", json=payload)
+
     def create_and_validate_custom_environment(
         self,
         *,
@@ -346,7 +410,7 @@ class ArenaClient:
         requirements_path: str | os.PathLike[str],
         multi_agent: bool = False,
         do_rollouts: bool = True,
-        entrypoint: str = "acrobot:AcrobotEnv",
+        entrypoint: str | None = None,
         stream: bool = False,
         on_chunk: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
@@ -370,8 +434,9 @@ class ArenaClient:
                 "version": version,
                 "multi_agent": str(multi_agent).lower(),
                 "do_rollouts": str(do_rollouts).lower(),
-                "entrypoint": entrypoint,
             }
+            if entrypoint:
+                payload["entrypoint"] = entrypoint
             files = {
                 "file": (env_archive.name, archive_handle, "application/gzip"),
                 "env_config": (env_config.name, config_handle, "application/x-yaml"),
@@ -459,16 +524,34 @@ class ArenaClient:
     def submit_experiment_job(
         self,
         *,
-        custom_gym_env_impl_id: int,
-        manifest: dict[str, Any],
+        manifest: dict[str, Any] | None = None,
+        custom_gym_env_impl_id: int | None = None,
+        experiment_id: int | None = None,
+        experiment_name: str | None = None,
+        gym_env_id: int | None = None,
         stream: bool = False,
         on_chunk: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         """Submit an experiment job to the script-aligned API endpoint."""
-        payload = {
-            "custom_gym_env_impl_id": custom_gym_env_impl_id,
-            "manifest": manifest,
-        }
+        payload: dict[str, Any] = {}
+        if manifest is not None:
+            payload["manifest"] = manifest
+        if custom_gym_env_impl_id is not None:
+            payload["custom_gym_env_impl_id"] = custom_gym_env_impl_id
+        if experiment_id is not None:
+            payload["experiment_id"] = experiment_id
+        if experiment_name is not None:
+            payload["experiment_name"] = experiment_name
+        if gym_env_id is not None:
+            payload["gym_env_id"] = gym_env_id
+
+        if not payload:
+            msg = (
+                "Provide at least one submit field: --manifest, --custom-gym-env-impl-id, "
+                "--experiment-id, --experiment-name, or --gym-env-id."
+            )
+            raise ArenaValidationError([{"message": msg}])
+
         if not stream:
             return self._request(
                 "POST",
@@ -540,6 +623,28 @@ class ArenaClient:
                     status_code=0,
                     detail=f"Network error communicating with Arena: {exc}",
                 ) from exc
+
+    def get_experiment_status(self, experiment_id: int) -> dict[str, Any]:
+        """Get status/details for an experiment."""
+        resp = self._request("GET", f"/api/experiments/{experiment_id}")
+        return resp if isinstance(resp, dict) else {"experiment_id": experiment_id, "status": resp}
+
+    def validate_job_run_spec(self, run_spec: dict[str, Any]) -> dict[str, Any]:
+        """Validate a runspec payload against backend schema/rules."""
+        result = self._request("POST", "/api/experiments/validate/run_spec", json=run_spec)
+        if result in ("", None):
+            return {"valid": True}
+        return result if isinstance(result, dict) else {"valid": True, "response": result}
+
+    def download_experiment_metrics(
+        self, experiment_id: int, metrics: list[str]
+    ) -> tuple[bytes, str | None, str | None]:
+        """Download experiment metrics payload (CSV or zipped CSV)."""
+        return self._request_raw(
+            "POST",
+            f"/api/experiments/{experiment_id}/metrics",
+            json={"metrics": metrics},
+        )
 
     # TODO: Print the environments in a table format using rich
     def list_environments(self) -> None:
@@ -831,6 +936,142 @@ class ArenaClient:
         if resp.headers.get("content-type", "").startswith("application/json"):
             return resp.json()
         return resp.text
+
+    def _request_raw(
+        self,
+        method: str,
+        path: str,
+        *,
+        timeout: int | None = None,
+        _retried: bool = False,
+        **kwargs: dict[str, Any],
+    ) -> tuple[bytes, str | None, str | None]:
+        request_headers = dict(kwargs.pop("headers", {}))
+        headers = dict(request_headers)
+        headers.update(self._auth_headers())
+
+        try:
+            resp = self._http.request(
+                method,
+                path,
+                headers=headers,
+                timeout=timeout,
+                **kwargs,
+            )
+        except httpx.HTTPError as exc:
+            raise ArenaAPIError(
+                status_code=0,
+                detail=f"Network error communicating with Arena: {exc}",
+            ) from exc
+
+        if (
+            resp.status_code == 401
+            and not _retried
+            and self._api_key is None
+            and self._tokens.refresh_token
+        ):
+            tokens = self._auth.refresh_access_token(self._tokens.refresh_token)
+            self._tokens.access_token = tokens["access_token"]
+            self._tokens.refresh_token = tokens.get(
+                "refresh_token", self._tokens.refresh_token
+            )
+            return self._request_raw(
+                method,
+                path,
+                timeout=timeout,
+                _retried=True,
+                headers=request_headers,
+                **kwargs,
+            )
+
+        if resp.status_code == 401:
+            detail = resp.text[:500] if resp.text else "No details"
+            msg = (
+                "Session expired and could not be refreshed. "
+                f"Please run client.login() again. Server response: {detail}"
+            )
+            raise ArenaAuthError(msg)
+
+        if not resp.is_success:
+            detail = resp.text[:500] if resp.text else "No details"
+            raise ArenaAPIError(status_code=resp.status_code, detail=detail)
+
+        content_type = resp.headers.get("content-type")
+        disposition = resp.headers.get("content-disposition")
+        return resp.content, content_type, disposition
+
+    def _stream_json_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        timeout: int | None = None,
+        on_chunk: Callable[[str], None] | None = None,
+        **kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        auth_retry = False
+        while True:
+            headers = self._auth_headers()
+            try:
+                with self._http.stream(
+                    method,
+                    path,
+                    headers=headers,
+                    timeout=timeout,
+                    **kwargs,
+                ) as resp:
+                    if (
+                        resp.status_code == 401
+                        and not auth_retry
+                        and self._api_key is None
+                        and self._tokens.refresh_token
+                    ):
+                        tokens = self._auth.refresh_access_token(
+                            self._tokens.refresh_token
+                        )
+                        self._tokens.access_token = tokens["access_token"]
+                        self._tokens.refresh_token = tokens.get(
+                            "refresh_token", self._tokens.refresh_token
+                        )
+                        auth_retry = True
+                        continue
+
+                    if resp.status_code == 401:
+                        msg = (
+                            "Session expired and could not be refreshed. "
+                            "Please run client.login() again."
+                        )
+                        raise ArenaAuthError(msg)
+
+                    if not resp.is_success:
+                        detail = (
+                            resp.read().decode("utf-8", errors="replace")[:500]
+                            or "No details"
+                        )
+                        raise ArenaAPIError(
+                            status_code=resp.status_code,
+                            detail=detail,
+                        )
+
+                    chunks: list[str] = []
+                    for chunk in resp.iter_text():
+                        if not chunk:
+                            continue
+                        chunks.append(chunk)
+                        if on_chunk is not None:
+                            on_chunk(chunk)
+                    body = "".join(chunks).strip()
+                    if not body:
+                        return {}
+                    try:
+                        return json.loads(body)
+                    except json.JSONDecodeError:
+                        return {"stream": body}
+            except httpx.HTTPError as exc:
+                raise ArenaAPIError(
+                    status_code=0,
+                    detail=f"Network error communicating with Arena: {exc}",
+                ) from exc
 
     @staticmethod
     def _check_validation_result(resp: dict[str, Any]) -> None:

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import click
+from rich.console import Console
+from rich.table import Table
 
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.exceptions import (
@@ -16,6 +21,15 @@ from agilerl.arena.exceptions import (
 )
 
 OutputFormat = Literal["json", "text"]
+console = Console()
+error_console = Console(stderr=True)
+
+
+def _print_rich(renderable: Any, *, is_error: bool = False) -> None:
+    if is_error:
+        error_console.print(renderable)
+        return
+    console.print(renderable)
 
 
 @dataclass(slots=True)
@@ -50,16 +64,98 @@ def _emit(result: Any, output: OutputFormat, *, is_error: bool = False) -> None:
         return
 
     if isinstance(result, dict):
-        for key, value in result.items():
-            click.echo(f"{key}: {value}", err=is_error)
+        if _looks_like_environment_catalog(result):
+            _emit_environment_catalog(result, is_error=is_error)
+            return
+        _emit_key_value_table(result, is_error=is_error)
         return
 
     if isinstance(result, list):
-        for item in result:
-            click.echo(item, err=is_error)
+        if result and all(isinstance(item, dict) for item in result):
+            _emit_list_of_dicts(result, is_error=is_error)
+            return
+        _emit_simple_list(result, is_error=is_error)
         return
 
-    click.echo(result, err=is_error)
+    _print_rich(str(result), is_error=is_error)
+
+
+def _emit_key_value_table(values: dict[str, Any], *, is_error: bool = False) -> None:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Field")
+    table.add_column("Value")
+    for key, value in values.items():
+        table.add_row(str(key), _format_cell(value))
+    _print_rich(table, is_error=is_error)
+
+
+def _emit_simple_list(values: list[Any], *, is_error: bool = False) -> None:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Value")
+    for value in values:
+        table.add_row(_format_cell(value))
+    _print_rich(table, is_error=is_error)
+
+
+def _emit_list_of_dicts(values: list[dict[str, Any]], *, is_error: bool = False) -> None:
+    columns: list[str] = []
+    for row in values:
+        for key in row:
+            if key not in columns:
+                columns.append(key)
+
+    table = Table(show_header=True, header_style="bold")
+    for column in columns:
+        table.add_column(str(column))
+
+    for row in values:
+        table.add_row(*[_format_cell(row.get(column)) for column in columns])
+    _print_rich(table, is_error=is_error)
+
+
+def _looks_like_environment_catalog(values: dict[str, Any]) -> bool:
+    if not values:
+        return False
+    for version_map in values.values():
+        if not isinstance(version_map, dict):
+            return False
+        for metadata in version_map.values():
+            if not isinstance(metadata, dict):
+                return False
+            if not {"validated", "profiled"}.issubset(metadata):
+                return False
+    return True
+
+
+def _emit_environment_catalog(values: dict[str, Any], *, is_error: bool = False) -> None:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Environment")
+    table.add_column("Version")
+    table.add_column("Validated")
+    table.add_column("Profiled")
+
+    if not values:
+        _print_rich("No environments found.", is_error=is_error)
+        return
+
+    for env_name, versions in values.items():
+        if not isinstance(versions, dict):
+            continue
+        for version_name, metadata in versions.items():
+            metadata_dict = metadata if isinstance(metadata, dict) else {}
+            table.add_row(
+                str(env_name),
+                str(version_name),
+                "yes" if bool(metadata_dict.get("validated")) else "no",
+                "yes" if bool(metadata_dict.get("profiled")) else "no",
+            )
+    _print_rich(table, is_error=is_error)
+
+
+def _format_cell(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, default=str)
+    return str(value)
 
 
 def _handle_error(exc: Exception, output: OutputFormat) -> None:
@@ -98,12 +194,15 @@ def _stream_chunk(chunk: str) -> None:
 def _load_json_payload(
     payload_json: str | None,
     payload_file: str | None,
+    *,
+    json_option_name: str,
+    file_option_name: str,
 ) -> dict[str, Any]:
     if payload_json is None and payload_file is None:
-        msg = "Provide either --manifest-json or --manifest-file."
+        msg = f"Provide either {json_option_name} or {file_option_name}."
         raise click.UsageError(msg)
     if payload_json is not None and payload_file is not None:
-        msg = "Use only one of --manifest-json or --manifest-file."
+        msg = f"Use only one of {json_option_name} or {file_option_name}."
         raise click.UsageError(msg)
 
     try:
@@ -116,7 +215,7 @@ def _load_json_payload(
         raise click.UsageError(msg) from exc
 
     if not isinstance(parsed, dict):
-        msg = "Manifest payload must be a JSON object."
+        msg = "Payload must be a JSON object."
         raise click.UsageError(msg)
     return parsed
 
@@ -152,9 +251,9 @@ def _load_json_payload(
 @click.option(
     "--output",
     type=click.Choice(["json", "text"]),
-    default="json",
+    default="text",
     show_default=True,
-    help="Output format.",
+    help="Output format. Use text for rich tables; json for scripting.",
 )
 @click.pass_context
 def main(
@@ -221,9 +320,14 @@ def logout(
         client.close()
 
 
-@main.command()
+@main.group("user")
+def user_group() -> None:
+    """User/account commands."""
+
+
+@user_group.command("profile")
 @click.pass_obj
-def user(
+def user_profile(
     config: CLIConfig,
 ) -> None:
     """Get current authenticated user profile."""
@@ -236,12 +340,12 @@ def user(
         client.close()
 
 
-@main.command()
+@user_group.command("credits")
 @click.pass_obj
-def credits(
+def user_credits(
     config: CLIConfig,
 ) -> None:
-    """Get current authenticated user credits."""
+    """Get remaining account credits."""
     client = _build_client(config)
     try:
         _emit(client.get_user_credits(), config.output)
@@ -251,17 +355,17 @@ def credits(
         client.close()
 
 
-@main.group()
-def env() -> None:
-    """Environment-related commands."""
+@main.group("environments")
+def environments() -> None:
+    """Manage custom gym environments."""
 
 
-@env.command("list")
+@environments.command("list")
 @click.pass_obj
 def env_list(
     config: CLIConfig,
 ) -> None:
-    """List custom environments."""
+    """List all available environments with validated/profiled metadata."""
     client = _build_client(config)
     try:
         _emit(client.list_custom_environments(), config.output)
@@ -271,7 +375,7 @@ def env_list(
         client.close()
 
 
-@env.command("exists")
+@environments.command("exists")
 @click.argument("name")
 @click.option("--version", default="latest", show_default=True)
 @click.pass_obj
@@ -291,7 +395,7 @@ def env_exists(
         client.close()
 
 
-@env.command("entrypoints")
+@environments.command("list-entrypoints")
 @click.argument("name")
 @click.option("--version", default="latest", show_default=True)
 @click.pass_obj
@@ -300,7 +404,7 @@ def env_entrypoints(
     name: str,
     version: str,
 ) -> None:
-    """List available environment entrypoints."""
+    """List available entrypoints for an existing environment version."""
     client = _build_client(config)
     try:
         _emit(
@@ -313,7 +417,7 @@ def env_entrypoints(
         client.close()
 
 
-@env.command("create-and-validate")
+@environments.command("create-and-validate")
 @click.option("--name", default=None, help="Environment name. Random UUID if omitted.")
 @click.option("--version", default="ident", show_default=True)
 @click.option(
@@ -334,7 +438,11 @@ def env_entrypoints(
     required=True,
     help="Path to requirements.txt file.",
 )
-@click.option("--entrypoint", default="acrobot:AcrobotEnv", show_default=True)
+@click.option(
+    "--entrypoint",
+    default=None,
+    help="Optional entrypoint. If omitted and multiple exist, backend returns options.",
+)
 @click.option("--multi-agent/--single-agent", default=False, show_default=True)
 @click.option("--do-rollouts/--no-do-rollouts", default=True, show_default=True)
 @click.option("--stream/--no-stream", default=True, show_default=True)
@@ -346,12 +454,12 @@ def env_create_and_validate(
     file_path: Path,
     env_config_path: Path,
     requirements_path: Path,
-    entrypoint: str,
+    entrypoint: str | None,
     multi_agent: bool,
     do_rollouts: bool,
     stream: bool,
 ) -> None:
-    """Upload and validate an environment with multipart request."""
+    """Upload and automatically validate a custom environment."""
     from uuid import uuid4
 
     client = _build_client(config)
@@ -378,17 +486,147 @@ def env_create_and_validate(
         client.close()
 
 
-@main.group()
-def experiments() -> None:
-    """Experiment-related commands."""
+@environments.command("validate")
+@click.argument("name")
+@click.option("--version", default="latest", show_default=True)
+@click.option(
+    "--entrypoint",
+    default=None,
+    help="Optional entrypoint override. Useful when multiple entrypoints exist.",
+)
+@click.option("--do-rollouts/--no-do-rollouts", default=True, show_default=True)
+@click.option("--stream/--no-stream", default=True, show_default=True)
+@click.pass_obj
+def env_validate(
+    config: CLIConfig,
+    name: str,
+    version: str,
+    entrypoint: str | None,
+    do_rollouts: bool,
+    stream: bool,
+) -> None:
+    """Validate an already-created environment version."""
+    client = _build_client(config)
+    try:
+        result = client.validate_custom_environment(
+            name=name,
+            version=version,
+            entrypoint=entrypoint,
+            do_rollouts=do_rollouts,
+            stream=stream,
+            on_chunk=_stream_chunk if stream else None,
+        )
+        if stream:
+            click.echo()
+        _emit(result, config.output)
+    except Exception as exc:  # noqa: BLE001
+        _handle_error(exc, config.output)
+    finally:
+        client.close()
 
 
-@experiments.command("submit")
+@environments.command("profile")
+@click.argument("name")
+@click.option("--version", default="latest", show_default=True)
+@click.option(
+    "--entrypoint",
+    "custom_env_path",
+    default=None,
+    help="Entrypoint/custom env path to profile. Defaults to saved entrypoint.",
+)
+@click.option("--multi-agent/--single-agent", default=False, show_default=True)
+@click.option("--stream/--no-stream", default=True, show_default=True)
+@click.pass_obj
+def env_profile(
+    config: CLIConfig,
+    name: str,
+    version: str,
+    custom_env_path: str | None,
+    multi_agent: bool,
+    stream: bool,
+) -> None:
+    """Profile a validated environment (returns cpu_per_env and ram_per_env)."""
+    client = _build_client(config)
+    try:
+        result = client.profile_custom_environment(
+            name=name,
+            version=version,
+            custom_env_path=custom_env_path,
+            multi_agent=multi_agent,
+            stream=stream,
+            on_chunk=_stream_chunk if stream else None,
+        )
+        if stream:
+            click.echo()
+        _emit(result, config.output)
+    except Exception as exc:  # noqa: BLE001
+        _handle_error(exc, config.output)
+    finally:
+        client.close()
+
+
+@environments.command("delete")
+@click.argument("name")
+@click.option("--version", default="latest", show_default=True)
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Confirm deletion without interactive prompt.",
+)
+@click.pass_obj
+def env_delete(
+    config: CLIConfig,
+    name: str,
+    version: str,
+    yes: bool,
+) -> None:
+    """Delete an environment version from Arena."""
+    if not yes and not click.confirm(f"Delete environment {name}:{version}?", default=False):
+        click.echo("Aborted.")
+        return
+
+    client = _build_client(config)
+    try:
+        result = client.delete_custom_environment(name=name, version=version)
+        if result in ("", None):
+            _emit({"deleted": True, "name": name, "version": version}, config.output)
+            return
+        _emit(result, config.output)
+    except Exception as exc:  # noqa: BLE001
+        _handle_error(exc, config.output)
+    finally:
+        client.close()
+
+
+@main.group("jobs")
+def jobs() -> None:
+    """Submit, validate, and inspect training jobs."""
+
+
+@jobs.command("submit")
 @click.option(
     "--custom-gym-env-impl-id",
     type=int,
-    required=True,
+    default=None,
     help="Custom gym environment implementation ID.",
+)
+@click.option(
+    "--experiment-id",
+    type=int,
+    default=None,
+    help="Existing experiment ID to submit.",
+)
+@click.option(
+    "--gym-env-id",
+    type=int,
+    default=None,
+    help="Gym environment ID to submit against.",
+)
+@click.option(
+    "--experiment-name",
+    default=None,
+    help="Optional experiment name for newly created jobs.",
 )
 @click.option(
     "--manifest-json",
@@ -405,18 +643,32 @@ def experiments() -> None:
 @click.pass_obj
 def experiments_submit(
     config: CLIConfig,
-    custom_gym_env_impl_id: int,
+    custom_gym_env_impl_id: int | None,
+    experiment_id: int | None,
+    gym_env_id: int | None,
+    experiment_name: str | None,
     manifest_json: str | None,
     manifest_file: str | None,
     stream: bool,
 ) -> None:
-    """Submit an experiment job to Arena."""
-    manifest = _load_json_payload(manifest_json, manifest_file)
+    """Submit a training job from run spec and/or existing experiment IDs."""
+    manifest: dict[str, Any] | None = None
+    if manifest_json is not None or manifest_file is not None:
+        manifest = _load_json_payload(
+            manifest_json,
+            manifest_file,
+            json_option_name="--manifest-json",
+            file_option_name="--manifest-file",
+        )
+
     client = _build_client(config)
     try:
         result = client.submit_experiment_job(
-            custom_gym_env_impl_id=custom_gym_env_impl_id,
             manifest=manifest,
+            custom_gym_env_impl_id=custom_gym_env_impl_id,
+            experiment_id=experiment_id,
+            gym_env_id=gym_env_id,
+            experiment_name=experiment_name,
             stream=stream,
             on_chunk=_stream_chunk if stream else None,
         )
@@ -427,3 +679,160 @@ def experiments_submit(
         _handle_error(exc, config.output)
     finally:
         client.close()
+
+
+@jobs.command("status")
+@click.argument("experiment_id", type=int)
+@click.pass_obj
+def jobs_status(config: CLIConfig, experiment_id: int) -> None:
+    """Get status/details for an experiment by ID."""
+    client = _build_client(config)
+    try:
+        _emit(client.get_experiment_status(experiment_id), config.output)
+    except Exception as exc:  # noqa: BLE001
+        _handle_error(exc, config.output)
+    finally:
+        client.close()
+
+
+@jobs.command("validate-runspec")
+@click.option("--runspec-json", default=None, help="Raw JSON runspec payload string.")
+@click.option(
+    "--runspec-file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Path to JSON file containing runspec payload.",
+)
+@click.pass_obj
+def jobs_validate_runspec(
+    config: CLIConfig,
+    runspec_json: str | None,
+    runspec_file: str | None,
+) -> None:
+    """Validate whether a run spec is structurally valid for training."""
+    run_spec = _load_json_payload(
+        runspec_json,
+        runspec_file,
+        json_option_name="--runspec-json",
+        file_option_name="--runspec-file",
+    )
+    client = _build_client(config)
+    try:
+        result = client.validate_job_run_spec(run_spec)
+        _emit(result, config.output)
+    except Exception as exc:  # noqa: BLE001
+        _handle_error(exc, config.output)
+    finally:
+        client.close()
+
+
+@jobs.command("get-metrics")
+@click.argument("experiment_id", type=int)
+@click.option(
+    "--metric",
+    "metrics",
+    multiple=True,
+    required=True,
+    help="Metric to download. Repeat for multiple metrics.",
+)
+@click.option(
+    "--output-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Destination file path. Defaults to ./experiment_<id>_metrics.csv (or .zip).",
+)
+@click.option(
+    "--preview-rows",
+    type=click.IntRange(0),
+    default=10,
+    show_default=True,
+    help="When CSV is returned, preview this many rows in a rich table.",
+)
+@click.pass_obj
+def jobs_get_metrics(
+    config: CLIConfig,
+    experiment_id: int,
+    metrics: tuple[str, ...],
+    output_file: Path | None,
+    preview_rows: int,
+) -> None:
+    """Download metrics data for an experiment as CSV (or zip)."""
+    client = _build_client(config)
+    try:
+        payload, content_type, disposition = client.download_experiment_metrics(
+            experiment_id=experiment_id, metrics=list(metrics)
+        )
+        target_path = _resolve_metrics_output_path(
+            experiment_id=experiment_id,
+            payload=payload,
+            content_type=content_type,
+            disposition=disposition,
+            output_file=output_file,
+        )
+        target_path.write_bytes(payload)
+        _emit(
+            {
+                "saved": str(target_path),
+                "bytes": len(payload),
+                "content_type": content_type or "unknown",
+            },
+            config.output,
+        )
+
+        if (
+            config.output == "text"
+            and preview_rows > 0
+            and (content_type or "").startswith("text/csv")
+        ):
+            _emit_csv_preview(payload, max_rows=preview_rows)
+    except Exception as exc:  # noqa: BLE001
+        _handle_error(exc, config.output)
+    finally:
+        client.close()
+
+
+def _resolve_metrics_output_path(
+    *,
+    experiment_id: int,
+    payload: bytes,
+    content_type: str | None,
+    disposition: str | None,
+    output_file: Path | None,
+) -> Path:
+    if output_file is not None:
+        return output_file
+
+    suggested_name = _filename_from_disposition(disposition)
+    if suggested_name:
+        return Path(suggested_name)
+
+    is_zip = payload.startswith(b"PK") or "zip" in (content_type or "").lower()
+    suffix = ".zip" if is_zip else ".csv"
+    return Path(f"experiment_{experiment_id}_metrics{suffix}")
+
+
+def _filename_from_disposition(disposition: str | None) -> str | None:
+    if not disposition:
+        return None
+    match = re.search(r'filename="?([^";]+)"?', disposition)
+    return match.group(1) if match else None
+
+
+def _emit_csv_preview(payload: bytes, *, max_rows: int) -> None:
+    text = payload.decode("utf-8", errors="replace")
+    reader = csv.reader(io.StringIO(text))
+    rows = list(reader)
+    if not rows:
+        return
+
+    header = rows[0]
+    data_rows = rows[1 : max_rows + 1]
+    table = Table(title=f"Metrics Preview (first {len(data_rows)} rows)")
+    for column in header:
+        table.add_column(column)
+    for row in data_rows:
+        padded = row + [""] * max(0, len(header) - len(row))
+        table.add_row(*padded[: len(header)])
+    console.print(table)
+
+

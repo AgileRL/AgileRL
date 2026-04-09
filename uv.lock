@@ -107,6 +107,7 @@ arena = [
     { name = "click" },
     { name = "httpx" },
     { name = "python-keycloak" },
+    { name = "rich" },
 ]
 llm = [
     { name = "datasets" },
@@ -173,6 +174,7 @@ requires-dist = [
     { name = "redis", specifier = "~=4.4.4" },
     { name = "rich", specifier = ">=13.0,<14" },
     { name = "rich", marker = "extra == 'all'", specifier = ">=13.0,<14" },
+    { name = "rich", marker = "extra == 'arena'", specifier = ">=13.0,<14" },
     { name = "supersuit", specifier = "~=3.9.0" },
     { name = "tabulate", specifier = ">=0.10.0" },
     { name = "tensordict", specifier = "~=0.8" },
