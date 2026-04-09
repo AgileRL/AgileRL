@@ -208,8 +208,6 @@ def main(
         accelerator=accelerator,
         max_steps=max_steps,
     )
-    if mode == "sft":
-        train_kwargs["plot_path"] = init_hp.get("PLOT_PATH")
 
     print(f"Fine-tuning {mode.upper()} agents...")
     train_fn(**train_kwargs)

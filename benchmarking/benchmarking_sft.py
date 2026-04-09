@@ -152,7 +152,6 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
         evaluation_interval=init_hp.get("EVALUATION_INTERVAL", 200),
         accelerator=accelerator,
         max_steps=max_steps,
-        plot_path=init_hp.get("PLOT_PATH"),
     )
 
     print("\nQualitative response comparison (elite agent):")
