@@ -96,7 +96,7 @@ if HAS_LLM_DEPENDENCIES:
 else:
     deepspeed = None
     _LigerDPOWithAlpha = None
-    AutoTokenizer: Any
+    AutoTokenizer = Any
     PreTrainedModel = Any
     BatchEncoding = Any
     Dataset = Any
