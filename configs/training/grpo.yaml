@@ -4,10 +4,10 @@ MUTATION_PARAMS:
     RL_HP_MUT: 0.6                        # Probability of learning HP mutation
     MUT_SD: 0.1                           # Mutation strength (std dev)
     RAND_SEED: 42                         # Random seed
-    MIN_LR: 1e-7                          # Min learning rate for HP mutation
-    MAX_LR: 1e-5                          # Max learning rate for HP mutation
-    MIN_BETA: 1e-4                        # Min KL penalty beta for HP mutation
-    MAX_BETA: 1e-2                        # Max KL penalty beta for HP mutation
+    MIN_LR: 1.0e-7                        # Min learning rate for HP mutation
+    MAX_LR: 1.0e-5                        # Max learning rate for HP mutation
+    MIN_BETA: 1.0e-4                      # Min KL penalty beta for HP mutation
+    MAX_BETA: 1.0e-2                      # Max KL penalty beta for HP mutation
     MIN_GROUP_SIZE: 4                     # Min group size for HP mutation
     MAX_GROUP_SIZE: 12                    # Max group size for HP mutation
 
@@ -15,8 +15,8 @@ MUTATION_PARAMS:
 INIT_HP:
     ALGO: GRPO                            # Algorithm — group relative policy optimization
     BATCH_SIZE: 16                        # Batch size (number of prompts per step)
-    BETA: 1e-3                            # KL divergence penalty coefficient
-    LR: 5e-6                              # Learning rate
+    BETA: 1.0e-3                          # KL divergence penalty coefficient
+    LR: 5.0e-6                            # Learning rate
     CLIP_COEF: 0.2                        # Surrogate clipping coefficient (PPO-style)
     MAX_GRAD_NORM: 0.1                    # Maximum norm for gradient clipping
     UPDATE_EPOCHS: 1                      # Number of training epochs per learn() call

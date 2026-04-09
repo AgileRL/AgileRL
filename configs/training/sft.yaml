@@ -2,7 +2,7 @@
 INIT_HP:
     ALGO: SFT                             # Algorithm — supervised fine-tuning
     BATCH_SIZE: 4                         # Batch size
-    LR: 5e-5                              # Learning rate
+    LR: 5.0e-5                            # Learning rate
     UPDATE_EPOCHS: 1                      # Number of training epochs per learn() call
     MAX_GRAD_NORM: 0.1                    # Maximum norm for gradient clipping
     MAX_CONTEXT_LENGTH: 512               # Cap sequence length to save memory
@@ -39,5 +39,5 @@ MUTATION_PARAMS:
     RL_HP_MUT: 0.6                        # Probability of learning HP mutation
     MUT_SD: 0.1                           # Mutation strength (std dev)
     RAND_SEED: 42                         # Random seed
-    MIN_LR: 1e-6                          # Min learning rate for HP mutation
-    MAX_LR: 1e-4                          # Max learning rate for HP mutation
+    MIN_LR: 1.0e-6                        # Min learning rate for HP mutation
+    MAX_LR: 1.0e-4                        # Max learning rate for HP mutation

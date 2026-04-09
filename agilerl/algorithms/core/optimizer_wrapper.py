@@ -95,7 +95,8 @@ class OptimizerWrapper:
 
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs if optimizer_kwargs is not None else {}
-        self.lr = lr
+        # Config sources (YAML, CLI) may pass lr as str; torch.optim requires a real float.
+        self.lr = float(lr)
 
         if isinstance(networks, nn.Module):
             self.networks = [networks]

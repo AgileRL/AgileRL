@@ -2066,7 +2066,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 stacklevel=2,
             )
             lora_config.exclude_modules = ["lm_head"]
-        self.lr = lr
+        # YAML / config loaders may supply LR as a string (e.g. "5e-5"); PyTorch optimizers require float.
+        self.lr = float(lr)
         self.lora_config = lora_config
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
