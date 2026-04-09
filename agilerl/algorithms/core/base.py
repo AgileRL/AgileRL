@@ -112,7 +112,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         set_peft_model_state_dict,
     )
     from safetensors.torch import load_file
-    from vllm import LLM, SamplingParams
 
     try:
         from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
