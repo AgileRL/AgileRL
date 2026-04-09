@@ -98,7 +98,6 @@ class TestReplayBufferSpecValidation:
         assert isinstance(spec.n_step_buffer_args, NStepBufferArgs)
         assert spec.per_buffer is False
         assert isinstance(spec.per_buffer_args, PerBufferArgs)
-        assert spec.n_step is None
 
     def test_custom_max_size(self):
         spec = ReplayBufferSpec(max_size=50_000)
@@ -150,10 +149,6 @@ class TestReplayBufferSpecValidation:
         spec = ReplayBufferSpec(combined_buffers=True)
         assert spec.combined_buffers is True
 
-    def test_n_step_override(self):
-        spec = ReplayBufferSpec(n_step=5)
-        assert spec.n_step == 5
-
     def test_from_dict(self):
         spec = ReplayBufferSpec.model_validate(
             {"memory_size": 75_000, "per_buffer": True}
@@ -193,11 +188,6 @@ class TestInitBufferStandard:
         buf = spec.init_buffer(algo_cls())
         assert isinstance(buf, ReplayBuffer)
         assert not isinstance(buf, (MultiStepReplayBuffer, PrioritizedReplayBuffer))
-
-    def test_sets_n_step_to_one(self):
-        spec = ReplayBufferSpec()
-        spec.init_buffer(DQNSpec())
-        assert spec.n_step == 1
 
 
 # ============================================================================

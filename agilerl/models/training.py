@@ -130,20 +130,9 @@ class TrainingSpec(BaseModel):
     :type eval_loop: int
     :param eval_steps: Number of steps to train for evaluation
     :type eval_steps: int | None
-    :param reporting_interval: Number of steps between metrics reporting. This is only applicable to
-        training on Arena. When training locally, we report metrics every `evo_steps` steps. Defaults to 1024.
-    :type reporting_interval: int
-    :param replay_buffer: Replay buffer configuration.
-    :type replay_buffer: ReplayBufferSpec | None
-    :param population_size: Population size
-    :type population_size: int
-    :param hpo: Whether to use evolutionary hyperparameter optimisation during training.
-    :type hpo: bool
-    :param experience_sharing: Whether to share experiences between individuals in a population.
-    :type experience_sharing: bool
+    :param episode_steps: Number of steps to train for each episode (only applicable for bandits)
+    :type episode_steps: int
     :param learning_delay: Number of steps before starting learning.
-    :type learning_delay: int
-    :param eps_start: Probability of taking a random action at the start of training.
     :type eps_start: float | None
     :param eps_end: Probability of taking a random action at the end of training.
     :type eps_end: float | None
@@ -170,11 +159,8 @@ class TrainingSpec(BaseModel):
     hpo: bool = Field(default=True)
     target_score: float | None = Field(default=None)
 
-    # Experience sharing / learning delay only applicable for off policy algorithms
-    experience_sharing: bool = Field(default=False)
+    # Learning delay / exploration parameters only applicable for off policy algorithms
     learning_delay: int = Field(default=0)
-
-    # Off-policy exploration parameters
     eps_start: float | None = Field(default=None)
     eps_end: float | None = Field(default=None)
     eps_decay: float | None = Field(default=None)
@@ -188,5 +174,11 @@ class TrainingSpec(BaseModel):
     evaluation_interval: int = Field(default=10, ge=1)
     num_epochs: int | None = Field(default=None)
 
+    # Bandit-specific training parameters
+    episode_steps: int = Field(default=500, ge=1)
+
     # NOTE: The following are only applicable to Arena training
     reporting_interval: int = Field(default=1024, ge=1)
+    experience_sharing: bool = Field(
+        default=False
+    )  # when training locally, we always share experiences

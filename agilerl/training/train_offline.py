@@ -1,3 +1,4 @@
+import logging
 import warnings
 from datetime import datetime
 from typing import Any
@@ -24,11 +25,12 @@ from agilerl.utils.utils import (
 InitDictType = dict[str, Any] | None
 PopulationType = list[CQN]
 
+logger = logging.getLogger(__name__)
+
 
 def train_offline(
     env: GymEnvType,
     env_name: str,
-    dataset: ReplayDataset,
     algo: str,
     pop: PopulationType,
     memory: ReplayBuffer,
@@ -51,6 +53,7 @@ def train_offline(
     tensorboard_log_dir: str | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
+    dataset: ReplayDataset | None = None,
     minari_dataset_id: str | None = None,
     remote: bool = False,
     wandb_api_key: str | None = None,
@@ -62,8 +65,6 @@ def train_offline(
     :type env: Gym-style environment
     :param env_name: Environment name
     :type env_name: str
-    :param dataset: Offline RL dataset
-    :type dataset: h5py-style dataset
     :param algo: RL algorithm name
     :type algo: str
     :param pop: Population of agents
@@ -110,6 +111,9 @@ def train_offline(
     :type verbose: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
+    :param dataset: Offline RL dataset (h5py file). Required when
+        ``minari_dataset_id`` is not provided, defaults to None
+    :type dataset: ReplayDataset | None, optional
     :param minari_dataset_id: Minari dataset ID for loading data, defaults to None
     :type minari_dataset_id: str, optional
     :param remote: Load Minari dataset from remote, defaults to False
@@ -165,15 +169,15 @@ def train_offline(
 
     if accelerator is not None:
         if accelerator.is_main_process:
-            print("Filling replay buffer with dataset...")
+            logger.info("Filling replay buffer with dataset...")
         accelerator.wait_for_everyone()
     else:
-        print("Filling replay buffer with dataset...")
+        logger.info("Filling replay buffer with dataset...")
 
     if minari_dataset_id:
         memory = minari_to_agile_buffer(minari_dataset_id, memory, accelerator, remote)
 
-    else:
+    elif dataset is not None:
         dataset_length = dataset["rewards"].shape[0]
         for i in range(dataset_length - 1):
             obs = dataset["observations"][i]
@@ -199,6 +203,10 @@ def train_offline(
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
+
+    else:
+        msg = "Either 'minari_dataset_id' or 'dataset' must be provided for offline training."
+        raise ValueError(msg)
 
     if accelerator is not None:
         # Create dataloader from replay buffer
@@ -271,6 +279,7 @@ def train_offline(
 
         # Check if we have met the target score
         if population.should_stop(target):
+            logger.info("Target score has been reached. Stopping training.")
             population.finish()
             pbar.close()
             return population.agents, population.last_fitnesses

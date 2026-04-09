@@ -117,10 +117,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     trained_pop, pop_fitnesses = train_offline(
         env,
         INIT_HP["ENV_NAME"],
-        dataset,
         INIT_HP["ALGO"],
         agent_pop,
         memory=memory,
+        dataset=dataset,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         max_steps=INIT_HP["MAX_STEPS"],

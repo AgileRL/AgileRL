@@ -272,3 +272,58 @@ class TestAgentRepr:
         agent = Agent.__new__(Agent)
         agent._endpoint = "http://test/get_action"
         assert repr(agent) == "<Agent endpoint='http://test/get_action'>"
+
+
+# ---------------------------------------------------------------------------
+# Serialize / deserialize — complex nested structures
+# ---------------------------------------------------------------------------
+
+
+class TestSerializeDeserializeComplex:
+    def test_dict_with_none_values(self):
+        data = {"obs": np.array([1.0, 2.0]), "mask": None}
+        encoded = Agent.serialize(data, batched=False)
+        assert isinstance(encoded, dict)
+        assert encoded["mask"] is None
+        decoded = Agent.deserialize(encoded, batched=False)
+        np.testing.assert_array_equal(decoded["obs"], data["obs"])
+        assert decoded["mask"] is None
+
+    def test_nested_dict_with_arrays_and_none(self):
+        data = {
+            "sensor_a": np.array([1.0, 2.0, 3.0]),
+            "sensor_b": None,
+            "group": {
+                "vel": np.array([4.0, 5.0]),
+                "empty": None,
+            },
+        }
+        encoded = Agent.serialize(data, batched=False)
+        decoded = Agent.deserialize(encoded, batched=False)
+        np.testing.assert_array_equal(decoded["sensor_a"], data["sensor_a"])
+        assert decoded["sensor_b"] is None
+        np.testing.assert_array_equal(decoded["group"]["vel"], data["group"]["vel"])
+        assert decoded["group"]["empty"] is None
+
+    def test_tuple_with_none_element(self):
+        data = (np.array([1.0]), None, np.array([2.0]))
+        encoded = Agent.serialize(data, batched=False)
+        decoded = Agent.deserialize(encoded, batched=False)
+        assert isinstance(decoded, tuple)
+        np.testing.assert_array_equal(decoded[0], data[0])
+        assert decoded[1] is None
+        np.testing.assert_array_equal(decoded[2], data[2])
+
+    def test_deeply_nested_dict_tuple_mix(self):
+        data = {
+            "level1": (
+                np.array([10.0, 20.0]),
+                {"inner": np.array([30.0])},
+            )
+        }
+        encoded = Agent.serialize(data, batched=False)
+        decoded = Agent.deserialize(encoded, batched=False)
+        np.testing.assert_array_equal(decoded["level1"][0], data["level1"][0])
+        np.testing.assert_array_equal(
+            decoded["level1"][1]["inner"], data["level1"][1]["inner"]
+        )

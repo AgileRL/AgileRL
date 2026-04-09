@@ -90,3 +90,28 @@ class TestArenaValidationError:
         errors = [{"code": "E001"}]
         err = ArenaValidationError(errors)
         assert "E001" in str(err) or "code" in str(err)
+
+
+# ---------------------------------------------------------------------------
+# arena/__init__.py import guard
+# ---------------------------------------------------------------------------
+
+
+class TestArenaInitImportGuard:
+    def test_import_error_when_deps_missing(self):
+        """Importing agilerl.arena raises ImportError when arena extras are
+        missing (HAS_ARENA_DEPENDENCIES is False)."""
+        import importlib
+        import sys
+
+        import agilerl.arena as arena_mod
+
+        saved_module = sys.modules.pop("agilerl.arena", None)
+        try:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr("agilerl.HAS_ARENA_DEPENDENCIES", False)
+                with pytest.raises(ImportError, match="Arena dependencies"):
+                    importlib.import_module("agilerl.arena")
+        finally:
+            if saved_module is not None:
+                sys.modules["agilerl.arena"] = saved_module

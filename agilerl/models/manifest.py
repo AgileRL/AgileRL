@@ -106,10 +106,36 @@ def _resolve_network(data: ConfigType | NetworkSpec) -> dict[str, Any]:
     return data
 
 
+_ALGO_NON_SERIALIZABLE_FIELDS: set[str] = {
+    "hp_config",
+    "net_config",
+    "actor_network",
+    "critic_network",
+    "critic_networks",
+    "actor_networks",
+}
+
+
+def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
+    """Serialize an algorithm spec to a JSON-safe dict for manifest storage.
+
+    Runtime-only fields (PyTorch modules, HP configs, network specs) are
+    excluded here rather than on the Pydantic model so that
+    ``model_dump(mode="python")`` still returns them for internal use.
+    """
+    dumped = spec.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude=_ALGO_NON_SERIALIZABLE_FIELDS,
+    )
+    dumped["name"] = spec.name
+    return dumped
+
+
 AlgorithmFromManifest = Annotated[
     AlgoSpecT,
     BeforeValidator(_resolve_algorithm),
-    PlainSerializer(lambda data: data.to_manifest(), return_type=dict[str, Any]),
+    PlainSerializer(_serialize_algorithm, return_type=dict[str, Any]),
 ]
 EnvironmentFromManifest = Annotated[
     dict[str, Any], BeforeValidator(_coerce_environment)

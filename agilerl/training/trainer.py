@@ -16,6 +16,7 @@ from agilerl.algorithms.core.base import (
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
+from agilerl.models import ArenaCluster
 from agilerl.models.algo import (
     ALGO_REGISTRY,
     LLMAlgorithmSpec,
@@ -51,9 +52,8 @@ from agilerl.wrappers.image_transpose import (
 logger = logging.getLogger(__name__)
 
 AlgoSpecT = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec
-AlgorithmT = AlgoSpecT | str
-EnvSpecT = str | GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
-ArenaEnvT = ArenaEnvSpec | dict[str, str]
+EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
+ArenaEnvT = ArenaEnvSpec | dict[str, str] | str
 ReplayBufferT = ReplayBufferSpec | None
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
@@ -79,11 +79,10 @@ class Trainer(ABC):
     """Abstract base trainer for AgileRL evolutionary training.
 
     :param algorithm: An algorithm spec or a string algorithm name.
-    :type algorithm: AlgorithmT
+    :type algorithm: AlgoSpecT | str
     :param environment: A ``gymnasium.Env`` instance, a PettingZoo ``ParallelEnv`` instance, or an env-name string.
-    :type environment: EnvironmentT
-    :param training: Training loop parameters (max steps, population size,
-        etc.).
+    :type environment: EnvSpecT | str
+    :param training: Training loop parameters (max steps, population size, etc.).
     :type training: TrainingSpec
     :param mutation: Mutation probabilities and RL-HP ranges.
     :type mutation: MutationSpec | None
@@ -102,8 +101,8 @@ class Trainer(ABC):
 
     def __init__(
         self,
-        algorithm: AlgorithmT,
-        environment: EnvSpecT,
+        algorithm: AlgoSpecT | str,
+        environment: EnvSpecT | str,
         training: TrainingSpec,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
@@ -118,6 +117,10 @@ class Trainer(ABC):
         if isinstance(algorithm, str):
             algorithm: AlgoSpecT = ALGO_REGISTRY.get(algorithm).spec_cls()
 
+        # Convert a plain environment name string to the appropriate spec.
+        if isinstance(environment, str):
+            environment = self._env_spec_from_string(algorithm, environment)
+
         self.algorithm_spec = algorithm
         self.env_spec = environment
         self.training_spec = training
@@ -127,6 +130,40 @@ class Trainer(ABC):
         self.device = device
         self.accelerator = accelerator
         self.resume_from_checkpoint = resume_from_checkpoint
+
+    @staticmethod
+    def _env_spec_from_string(
+        algorithm: AlgoSpecT,
+        name: str,
+    ) -> EnvSpecT:
+        """Build an environment spec from a plain environment name string.
+
+        Only standard Gymnasium and PettingZoo environments can be
+        resolved from a name alone.  Offline, bandit, and LLM algorithms
+        need richer configuration and must be given a full spec object.
+
+        :param algorithm: The resolved algorithm spec.
+        :type algorithm: AlgoSpecT
+        :param name: The environment name (e.g. ``"CartPole-v1"``).
+        :type name: str
+        :returns: The appropriate environment spec.
+        :rtype: EnvSpecT
+        :raises ValueError: When the algorithm's agent type is not
+            single-agent or multi-agent.
+        """
+        agent_type = algorithm.agent_type
+
+        if agent_type == AgentType.SingleAgent:
+            return GymEnvSpec(name=name)
+
+        if agent_type == AgentType.MultiAgent:
+            return PzEnvSpec(name=name)
+
+        msg = (
+            "Only Gym and PettingZoo-based environments support passing "
+            "a string for the environment."
+        )
+        raise ValueError(msg)
 
     @staticmethod
     def get_validated_manifest(
@@ -152,7 +189,8 @@ class Trainer(ABC):
         # subclass (e.g. QNetworkSpec for DQN, StochasticActorSpec for PPO).
         algo_spec_cls = type(validated_manifest.algorithm)
         net_config_field = algo_spec_cls.model_fields.get("net_config")
-        if net_config_field is not None:
+        if net_config_field is not None and validated_manifest.network is not None:
+            # get the NetworkSpec class from the type annotation and validate
             spec_cls: NetworkSpec = next(
                 (
                     t
@@ -199,7 +237,6 @@ class Trainer(ABC):
         # Validate manifest and resolve environment spec.
         validated_manifest = Trainer.get_validated_manifest(manifest)
         env_spec = cls._resolve_env_spec(validated_manifest)
-
         return cls(
             algorithm=validated_manifest.algorithm,
             environment=env_spec,
@@ -290,8 +327,8 @@ class LocalTrainer(Trainer):
 
     def __init__(
         self,
-        algorithm: AlgorithmT,
-        environment: EnvSpecT,
+        algorithm: AlgoSpecT | str,
+        environment: EnvSpecT | str,
         training: TrainingSpec,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
@@ -421,10 +458,10 @@ class LocalTrainer(Trainer):
     def _resolve_env_spec(cls, manifest: TrainingManifest) -> EnvSpecT:
         """Build the appropriate environment spec from the manifest.
 
-        Uses the algorithm's ``agent_type`` and ``offline`` / ``bandit``
-        flags to choose the spec class.  For LLM algorithms, ``env_type``
-        is injected from the algorithm spec so the manifest environment
-        section doesn't need to duplicate it.
+        Uses the algorithm's ``agent_type`` to choose the spec class.
+        For LLM algorithms, ``env_type`` is injected from the algorithm
+        spec so the manifest environment section doesn't need to
+        duplicate it.
         """
         env_data = dict(manifest.environment)
         env_data = {k: v for k, v in env_data.items() if v is not None}
@@ -437,10 +474,10 @@ class LocalTrainer(Trainer):
         if agent_type == AgentType.MultiAgent:
             return PzEnvSpec(**env_data)
 
-        if manifest.algorithm.offline:
+        if agent_type == AgentType.OfflineAgent:
             return OfflineEnvSpec(**env_data)
 
-        if manifest.algorithm.bandit:
+        if agent_type == AgentType.BanditAgent:
             return BanditEnvSpec(**env_data)
 
         return GymEnvSpec(**env_data)
@@ -462,27 +499,28 @@ class LocalTrainer(Trainer):
     ) -> tuple[PopulationT, list[list[float]]]:
         """Run a local training job given the passed configuration.
 
-        :param verbose: If ``True``, print verbose output.
+        :param verbose: If ``True``, print verbose output. Defaults to ``True``.
         :type verbose: bool
-        :param save_elite: If ``True``, save the elite agent.
+        :param save_elite: If ``True``, save the elite agent. Defaults to ``False``.
         :type save_elite: bool
-        :param elite_path: The path to save the elite agent.
+        :param elite_path: The path to save the elite agent. Defaults to ``None``.
         :type elite_path: str | None
-        :param wb: If ``True``, enable Weights & Biases logging.
+        :param wb: If ``True``, enable Weights & Biases logging. Defaults to ``False``.
         :type wb: bool
-        :param tensorboard: If ``True``, enable TensorBoard logging.
+        :param tensorboard: If ``True``, enable TensorBoard logging. Defaults to ``False``.
         :type tensorboard: bool
-        :param tensorboard_log_dir: The path to save the TensorBoard logs.
+        :param tensorboard_log_dir: The path to save the TensorBoard logs. Defaults to ``None``,
+            which will use the default TensorBoard log directory ``tensorboard_logs``.
         :type tensorboard_log_dir: str | None
-        :param checkpoint_steps: The number of steps between checkpoints.
+        :param checkpoint_steps: The number of steps between checkpoints. Defaults to ``None``.
         :type checkpoint_steps: int | None
-        :param checkpoint_path: The path to save the checkpoints.
+        :param checkpoint_path: The path to save the checkpoints. Defaults to ``None``.
         :type checkpoint_path: str | None
-        :param overwrite_checkpoints: If ``True``, overwrite the checkpoint.
+        :param overwrite_checkpoints: If ``True``, overwrite the checkpoint. Defaults to ``False``.
         :type overwrite_checkpoints: bool
-        :param wandb_api_key: The Weights & Biases API key.
+        :param wandb_api_key: The Weights & Biases API key. Defaults to ``None``.
         :type wandb_api_key: str | None
-        :param wandb_kwargs: The Weights & Biases keyword arguments.
+        :param wandb_kwargs: The Weights & Biases keyword arguments. Defaults to ``None``.
         :type wandb_kwargs: dict[str, Any] | None
 
         :returns: A tuple of ``(population, fitness_history)`` where
@@ -534,36 +572,39 @@ class ArenaTrainer(Trainer):
     :class:`~agilerl.arena.client.ArenaClient`.
 
     :param algorithm: An `:class:`AlgorithmSpec` instance or a string algorithm name.
-    :type algorithm: AlgorithmT
+    :type algorithm: AlgoSpecT | str
     :param environment: An `:class:`ArenaEnvSpec` instance or a string env name.
-    :type environment: ArenaEnvT
-    :param client: An authenticated :class:`ArenaClient`.  One is created
-        automatically if not provided.
-    :type client: ArenaClient | None
-    :param api_key: The Arena API key.
-    :type api_key: str | None
+    :type environment: ArenaEnvSpec | str
     :param training: Training loop parameters.
     :type training: TrainingSpec
-    :param mutation: Mutation probabilities and RL-HP ranges.
+    :param client: An authenticated :class:`ArenaClient`.  One is created
+        automatically using the provided API key. Defaults to ``None``.
+    :type client: ArenaClient | None
+    :param api_key: The Arena API key. Defaults to ``None``.
+    :type api_key: str | None
+    :param mutation: Mutation probabilities and RL-HP ranges. Defaults to ``None``.
     :type mutation: MutationSpec | None
-    :param tournament: Tournament selection configuration.
+    :param tournament: Tournament selection configuration. Defaults to ``None``.
     :type tournament: TournamentSelectionSpec | None
-    :param replay_buffer: Replay buffer configuration.
+    :param replay_buffer: Replay buffer configuration. Defaults to ``None``.
     :type replay_buffer: ReplayBufferT | None
     """
 
     def __init__(
         self,
-        algorithm: AlgorithmT,
+        algorithm: AlgoSpecT | str,
         environment: ArenaEnvT,
+        training: TrainingSpec,
         *,
         client: ArenaClient | None = None,
         api_key: str | None = None,
-        training: TrainingSpec,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
         replay_buffer: ReplayBufferT | None = None,
     ) -> None:
+
+        if isinstance(environment, str):
+            environment = ArenaEnvSpec(name=environment)
 
         super().__init__(
             algorithm,
@@ -593,11 +634,8 @@ class ArenaTrainer(Trainer):
     ) -> Self:
         """Instantiate a :class:`ArenaTrainer` from a YAML, JSON, or dict manifest.
 
-        The ``algorithm.name`` field is used to dispatch to the correct
-        :class:`~agilerl.models.algo.AlgorithmSpec` subclass via the
-        algorithm registry.  The environment section is resolved into
-        the appropriate env spec based on the concrete trainer subclass
-        (``cls``).
+        Automatically dispatches to the correct Pydantic models based on the manifest
+        fields.
 
         :param manifest: Path to a YAML/JSON file, or a raw dict.
         :type manifest: str | Path | dict[str, Any]
@@ -645,9 +683,13 @@ class ArenaTrainer(Trainer):
             version=str(env_data.get("version", "latest")),
         )
 
-    def train(self, *, stream: bool = False) -> dict[str, Any]:
+    def train(
+        self, resources: ArenaCluster | None = None, stream: bool = False
+    ) -> dict[str, Any]:
         """Build the manifest and submit the training job to Arena.
 
+        :param resources: The resources to use for the training job.
+        :type resources: ArenaCluster | None
         :param stream: If ``True``, stream logs to the terminal and block
             until the job finishes.
         :type stream: bool

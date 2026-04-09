@@ -27,8 +27,8 @@ class DDPGSpec(RLAlgorithmSpec):
     mean_noise: float = Field(default=0.0)
     theta: float = Field(default=0.15)
     dt: float = Field(default=0.01)
-    actor_network: EvolvableModule | None = Field(default=None, exclude=True)
-    critic_network: EvolvableModule | None = Field(default=None, exclude=True)
+    actor_network: EvolvableModule | None = Field(default=None)
+    critic_network: EvolvableModule | None = Field(default=None)
     share_encoders: bool = Field(default=False)
     net_config: DeterministicActorSpec | None = Field(default=None)
 

@@ -1,5 +1,5 @@
 Network Specifications
-=====================
+======================
 
 Pydantic models that configure the encoder and head architecture for
 evolvable networks. The ``encoder_config`` field uses a discriminated

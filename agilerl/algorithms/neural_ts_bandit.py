@@ -10,9 +10,9 @@ from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.modules import EvolvableModule
 from agilerl.networks.value_networks import ValueNetwork
+from agilerl.protocols import BanditEnvProtocol
 from agilerl.typing import (
     ExperiencesType,
-    GymEnvType,
     ObservationType,
     SupportedObservationSpace,
 )
@@ -276,7 +276,7 @@ class NeuralTS(RLAlgorithm):
         pred_rewards = self.actor(states)
 
         # loss backprop
-        loss = self.criterion(rewards, pred_rewards)
+        loss = self.criterion(pred_rewards, rewards)
         loss += (
             self.reg
             * torch.norm(
@@ -305,14 +305,14 @@ class NeuralTS(RLAlgorithm):
 
     def test(
         self,
-        env: GymEnvType,
+        env: BanditEnvProtocol,
         max_steps: int = 100,
         loop: int = 1,
     ) -> float:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
-        :param env: The environment to be tested in
-        :type env: Gym-style environment
+        :param env: The bandit environment to be tested in
+        :type env: BanditEnvProtocol
         :param max_steps: Maximum number of testing steps, defaults to 500
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 3

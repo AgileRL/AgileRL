@@ -176,6 +176,7 @@ def offline() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
 
     def decorator(algo_spec_class: type[AlgoSpecT]) -> type[AlgoSpecT]:
         algo_spec_class.offline = True
+        algo_spec_class.agent_type = AgentType.OfflineAgent
         return algo_spec_class
 
     return decorator
@@ -195,6 +196,7 @@ def bandit() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
 
     def decorator(algo_spec_class: type[AlgoSpecT]) -> type[AlgoSpecT]:
         algo_spec_class.bandit = True
+        algo_spec_class.agent_type = AgentType.BanditAgent
         return algo_spec_class
 
     return decorator
@@ -224,19 +226,12 @@ class AlgorithmSpec(BaseModel):
     @property
     def name(self) -> str:
         """Return the name of the algorithm."""
-        return self.__class__.__name__.rstrip("Spec")
+        return self.algo_class.__name__
 
     def build_algorithm(self) -> AlgoT:
         """Build the algorithm instance using spec fields + runtime args."""
         msg = "Algorithm specs must implement a build_algorithm method."
         raise NotImplementedError(msg)
-
-    def to_manifest(self) -> dict[str, Any]:
-        """Serialize this spec for Arena manifest payloads."""
-        return {
-            "name": self.name,
-            **self.model_dump(mode="json", exclude_none=True),
-        }
 
     @staticmethod
     def get_training_fn() -> Callable[..., tuple[PopulationT, list[list[float]]]]:
@@ -351,13 +346,14 @@ class RLAlgorithmSpec(AlgorithmSpec):
         :returns: Single-agent algorithm instance.
         :rtype: RLAlgorithm
         """
+        # Build algorithm
         algo = self.algo_class(
             observation_space=observation_space,
             action_space=action_space,
             index=index,
             device=device,
             accelerator=accelerator,
-            **self.model_dump(),
+            **self.model_dump(mode="python"),
         )
 
         # Load checkpoint if provided
@@ -406,13 +402,14 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         :returns: Multi-agent algorithm instance.
         :rtype: MultiAgentRLAlgorithm
         """
+        # Build algorithm
         algo = self.algo_class(
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
             index=index,
             device=device,
             accelerator=accelerator,
-            **self.model_dump(),
+            **self.model_dump(mode="python"),
         )
 
         # Load checkpoint if provided

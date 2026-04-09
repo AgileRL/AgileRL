@@ -72,7 +72,7 @@ tournament_selection:
 
 training:
     max_steps: 1_000_000
-    target_score: 010000.0
+    target_score: 10_000
     pop_size: 4
     evo_steps: 15_000
     eval_steps:

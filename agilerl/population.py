@@ -75,13 +75,17 @@ class PopulationMetrics:
 
     @property
     def mean_fitness(self) -> float | dict[str, float]:
-        if self.fitnesses and isinstance(self.fitnesses[0], dict):
+        if not self.fitnesses:
+            return float("nan")
+        if isinstance(self.fitnesses[0], dict):
             return get_nested_mean(self.fitnesses)
         return float(np.mean(self.fitnesses))
 
     @property
     def best_fitness(self) -> float | dict[str, float]:
-        if self.fitnesses and isinstance(self.fitnesses[0], dict):
+        if not self.fitnesses:
+            return float("nan")
+        if isinstance(self.fitnesses[0], dict):
             fitnesses = self.fitnesses
             return {
                 key: float(np.nanmax([fitness[key] for fitness in fitnesses]))
@@ -91,7 +95,9 @@ class PopulationMetrics:
 
     @property
     def mean_score(self) -> float | dict[str, float]:
-        if self.scores and isinstance(self.scores[0], dict):
+        if not self.scores:
+            return float("nan")
+        if isinstance(self.scores[0], dict):
             return get_nested_mean(self.scores)
         return float(np.nanmean(self.scores))
 
@@ -126,12 +132,13 @@ class PopulationMetrics:
             d["eval/mean_fitness"] = mean_fitness
             d["eval/best_fitness"] = self.best_fitness
 
-        mean_score = self.mean_score
-        if isinstance(mean_score, dict):
-            for agent_id, score in mean_score.items():
-                d[f"train/mean_score/{agent_id}"] = score
-        else:
-            d["train/mean_score"] = mean_score
+        if self.scores:
+            mean_score = self.mean_score
+            if isinstance(mean_score, dict):
+                for agent_id, score in mean_score.items():
+                    d[f"train/mean_score/{agent_id}"] = score
+            else:
+                d["train/mean_score"] = mean_score
 
         # Per-agent additional metrics
         for idx, agent_metrics in enumerate(self.additional_metrics):
@@ -227,6 +234,9 @@ class MetricsReport:
         :param rows: List of metric rows to add to.
         :type rows: list[ScalarMetricRow | NestedMetricRow]
         """
+        if not self.metrics.scores:
+            return
+
         rows.append(
             build_metric_row(
                 name="train/score",

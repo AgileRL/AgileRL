@@ -36,5 +36,5 @@ def test_return_state_reward():
     new_state, reward = env.step(action)
 
     assert state.shape == new_state.shape
-    assert isinstance(reward, (int, float))
+    assert isinstance(reward, (int, float, np.floating))
     assert reward == prev_reward[action]

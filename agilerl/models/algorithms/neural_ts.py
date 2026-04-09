@@ -23,7 +23,7 @@ class NeuralTSSpec(RLAlgorithmSpec):
     lr: float = Field(default=0.003, ge=0.0)
     learn_step: int = Field(default=2, ge=1)
     net_config: QNetworkSpec | None = Field(default=None)
-    actor_network: EvolvableModule | None = Field(default=None, exclude=True)
+    actor_network: EvolvableModule | None = Field(default=None)
 
     algo_class: ClassVar[type[NeuralTS]] = NeuralTS
 

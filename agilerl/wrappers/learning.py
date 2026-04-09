@@ -71,12 +71,12 @@ class BanditEnv:
 
     def __init__(self, features: pd.DataFrame, targets: pd.DataFrame) -> None:
         # Define the number of arms and the context dimension
-        self.arms = int(targets.nunique()[0])
+        self.arms = int(targets.nunique().iloc[0])
         self.context_dim = (len(np.array(features.loc[0])) * self.arms,)
 
         self.features = features
         self.targets = pd.factorize(targets.values.ravel())[0]
-        self.prev_reward = np.zeros(self.arms)
+        self.prev_reward = np.zeros(self.arms, dtype=np.float32)
         self.num_envs = 1  # follow vec-env interface
 
         # Define the observation and action spaces
@@ -105,6 +105,7 @@ class BanditEnv:
             range(self.arms), range(0, self.context_dim[0], len(context)), strict=False
         ):
             next_state[i, j : j + len(context)] = context
+
         return next_state, target
 
     def step(self, k: int) -> tuple[np.ndarray, float]:
@@ -125,7 +126,8 @@ class BanditEnv:
         next_reward = np.zeros(self.arms, dtype=np.float32)
         next_reward[target] = 1
         self.prev_reward = next_reward
-        return next_state, reward
+
+        return next_state, float(reward)
 
     def reset(self) -> np.ndarray:
         """Reset the environment and return the initial state.

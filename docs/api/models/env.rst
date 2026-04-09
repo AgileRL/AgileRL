@@ -1,5 +1,5 @@
 Environment Specifications
-=========================
+==========================
 
 Pydantic models describing the environment for each training scenario.
 

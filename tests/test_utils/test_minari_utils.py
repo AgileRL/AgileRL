@@ -121,8 +121,10 @@ def test_load_minari_dataset_errors(dataset_id: str) -> None:
     # test load a dataset absent in local
     with pytest.raises(
         FileNotFoundError,
-        match=f"No local Dataset found for dataset id {dataset_id}. check https://minari.farama.org/ "
-        "for more details on remote dataset. For loading a remote dataset assign remote=True",
+        match=f"No local Dataset found for dataset id {dataset_id}. "
+        "Check https://minari.farama.org/ "
+        "for more details on remote datasets. "
+        "For loading a remote dataset assign remote=True",
     ):
         minari_utils.load_minari_dataset(dataset_id)
 
@@ -130,8 +132,8 @@ def test_load_minari_dataset_errors(dataset_id: str) -> None:
     try:
         with pytest.raises(
             KeyError,
-            match="Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ "
-            "for more details.",
+            match="Enter a valid remote Minari Dataset ID. "
+            "Check https://minari.farama.org/ for more details.",
         ):
             minari_utils.load_minari_dataset(dataset_id, remote=True)
     except ReadTimeout as e:

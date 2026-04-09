@@ -28,7 +28,7 @@ class RainbowDQNSpec(RLAlgorithmSpec):
     combined_reward: bool = Field(default=False)
     lr: float = Field(default=0.0001, ge=0.0)
     net_config: RainbowQNetworkSpec | None = Field(default=None)
-    actor_network: EvolvableModule | None = Field(default=None, exclude=True)
+    actor_network: EvolvableModule | None = Field(default=None)
 
     algo_class: ClassVar[type[RainbowDQN]] = RainbowDQN
 

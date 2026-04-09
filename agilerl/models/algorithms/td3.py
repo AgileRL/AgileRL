@@ -29,8 +29,8 @@ class TD3Spec(RLAlgorithmSpec):
     dt: float = Field(default=0.01)
     share_encoders: bool = Field(default=False)
     net_config: DeterministicActorSpec | None = Field(default=None)
-    actor_network: EvolvableModule | None = Field(default=None, exclude=True)
-    critic_networks: list[EvolvableModule] | None = Field(default=None, exclude=True)
+    actor_network: EvolvableModule | None = Field(default=None)
+    critic_networks: list[EvolvableModule] | None = Field(default=None)
 
     algo_class: ClassVar[type[TD3]] = TD3
 

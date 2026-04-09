@@ -385,3 +385,90 @@ class TestTensorboardLogger:
         with patch("agilerl.logger.SummaryWriter", None):
             with pytest.raises(ImportError, match="TensorBoard is not installed"):
                 TensorboardLogger(log_dir="/tmp/tb")
+
+    @patch("agilerl.logger.SummaryWriter")
+    def test_custom_experiment_name(self, MockWriter):
+        MockWriter.return_value = MagicMock()
+        TensorboardLogger(log_dir="/tmp/tb", experiment_name="my_exp")
+        log_dir_arg = MockWriter.call_args.kwargs["log_dir"]
+        assert "/my_exp-" in log_dir_arg
+
+
+# ---------------------------------------------------------------------------
+# Logger.on_main_process — isolated tests
+# ---------------------------------------------------------------------------
+
+
+class TestOnMainProcess:
+    def test_yields_true_when_no_accelerator(self):
+        from agilerl.logger import Logger
+
+        with Logger.on_main_process(None) as is_main:
+            assert is_main is True
+
+    def test_yields_true_for_main_process(self):
+        from agilerl.logger import Logger
+
+        acc = _make_accelerator(is_main=True)
+        with Logger.on_main_process(acc) as is_main:
+            assert is_main is True
+        assert acc.wait_for_everyone.call_count == 2
+
+    def test_yields_false_for_non_main_process(self):
+        from agilerl.logger import Logger
+
+        acc = _make_accelerator(is_main=False)
+        with Logger.on_main_process(acc) as is_main:
+            assert is_main is False
+        assert acc.wait_for_everyone.call_count == 2
+
+    def test_waits_even_on_exception(self):
+        from agilerl.logger import Logger
+
+        acc = _make_accelerator(is_main=True)
+        with pytest.raises(RuntimeError):
+            with Logger.on_main_process(acc):
+                raise RuntimeError("boom")
+        assert acc.wait_for_everyone.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# StdOutLogger — no pbar path
+# ---------------------------------------------------------------------------
+
+
+class TestStdOutLoggerNoPbar:
+    def test_write_without_pbar_prints(self, report, capsys):
+        logger = StdOutLogger(pbar=None)
+        logger.write(report)
+        captured = capsys.readouterr()
+        assert "Global Steps" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# WandbLogger — edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestWandbLoggerEdgeCases:
+    @patch("agilerl.logger.wandb")
+    def test_skips_init_when_run_exists(self, mock_wandb, report):
+        mock_wandb.run = MagicMock()
+        logger = WandbLogger()
+        logger.write(report)
+        mock_wandb.init.assert_not_called()
+        mock_wandb.log.assert_called_once()
+
+    @patch("agilerl.logger.wandb")
+    def test_calls_init_when_no_run(self, mock_wandb, report):
+        mock_wandb.run = None
+        logger = WandbLogger()
+        logger.write(report)
+        mock_wandb.init.assert_called_once_with(project="AgileRL")
+
+    @patch("agilerl.logger.wandb")
+    def test_custom_project_name(self, mock_wandb, report):
+        mock_wandb.run = None
+        logger = WandbLogger(project="MyProject")
+        logger.write(report)
+        mock_wandb.init.assert_called_once_with(project="MyProject")

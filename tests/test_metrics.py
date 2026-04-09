@@ -210,3 +210,133 @@ class TestMultiAgentMetricsNonScalar:
         m.clear()
         assert m.get_histogram("h", "agent_0") is None
         assert m.get_histogram("h", "agent_1") is None
+
+    def test_log_histogram_accumulates_across_calls(self):
+        m = MultiAgentMetrics(self.AGENT_IDS)
+        m.register_histogram("action_dist")
+        m.log_histogram("action_dist", "agent_0", np.array([1, 2]))
+        m.log_histogram("action_dist", "agent_0", np.array([3, 4, 5]))
+        result = m.get_histogram("action_dist", "agent_0")
+        np.testing.assert_array_equal(result, [1, 2, 3, 4, 5])
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: __eq__, __exit__, error paths
+# ---------------------------------------------------------------------------
+
+
+class TestBaseMetricsEquality:
+    def test_equal_instances(self):
+        a = AgentMetrics()
+        b = AgentMetrics()
+        a.register("loss")
+        b.register("loss")
+        a.log("loss", 0.5)
+        b.log("loss", 0.5)
+        a.add_fitness(1.0)
+        b.add_fitness(1.0)
+        a.add_scores([10.0])
+        b.add_scores([10.0])
+        a.increment_steps(50)
+        b.increment_steps(50)
+        assert a == b
+
+    def test_unequal_different_fitness(self):
+        a = AgentMetrics()
+        b = AgentMetrics()
+        a.add_fitness(1.0)
+        b.add_fitness(2.0)
+        assert a != b
+
+    def test_unequal_different_steps(self):
+        a = AgentMetrics()
+        b = AgentMetrics()
+        a.increment_steps(10)
+        b.increment_steps(20)
+        assert a != b
+
+    def test_unequal_different_scores(self):
+        a = AgentMetrics()
+        b = AgentMetrics()
+        a.add_scores([1.0])
+        b.add_scores([2.0])
+        assert a != b
+
+    def test_unequal_different_metrics(self):
+        a = AgentMetrics()
+        b = AgentMetrics()
+        a.register("loss")
+        b.register("loss")
+        a.log("loss", 0.1)
+        b.log("loss", 0.9)
+        assert a != b
+
+    def test_comparison_with_non_metrics_returns_not_implemented(self):
+        m = AgentMetrics()
+        assert m.__eq__("not a metrics") is NotImplemented
+
+    def test_cross_type_comparison(self):
+        a = AgentMetrics()
+        b = MultiAgentMetrics(["x"])
+        # Both are BaseMetrics subclasses, so __eq__ runs and compares state.
+        # Fresh instances with no data differ because MultiAgentMetrics
+        # has a different scores type annotation, but BaseMetrics.__eq__
+        # only checks list equality — so empty vs empty compares equal.
+        # The key difference is _additional_metrics structure after register.
+        a.register("m")
+        b.register("m")
+        # After register, internal structures differ: list vs dict-of-lists.
+        assert a != b
+
+
+class TestBaseMetricsContextManager:
+    def test_exit_calls_clear(self):
+        m = AgentMetrics()
+        m.register("loss")
+        m.log("loss", 1.0)
+        m.add_scores([5.0])
+        m.__exit__(None, None, None)
+        assert m.scores == []
+        assert math.isnan(m.get_mean("loss"))
+
+
+class TestUnregisteredMetricErrors:
+    def test_log_unregistered_raises_key_error(self):
+        m = AgentMetrics()
+        with pytest.raises(KeyError):
+            m.log("unregistered", 1.0)
+
+    def test_get_mean_unregistered_raises_key_error(self):
+        m = AgentMetrics()
+        with pytest.raises(KeyError):
+            m.get_mean("unregistered")
+
+    def test_multi_agent_log_invalid_agent_id_raises(self):
+        m = MultiAgentMetrics(["a0", "a1"])
+        m.register("loss")
+        with pytest.raises(KeyError):
+            m.log("loss", "nonexistent_agent", 1.0)
+
+    def test_multi_agent_get_mean_invalid_agent_id_raises(self):
+        m = MultiAgentMetrics(["a0", "a1"])
+        m.register("loss")
+        with pytest.raises(KeyError):
+            m.get_mean("loss", "nonexistent_agent")
+
+
+class TestMultiAgentNestedScores:
+    def test_add_nested_scores(self):
+        m = MultiAgentMetrics(["a0", "a1"])
+        m.add_scores([[1.0, 2.0], [3.0, 4.0]])
+        assert len(m.scores) == 2
+        assert m.scores[0] == [1.0, 2.0]
+        assert m.scores[1] == [3.0, 4.0]
+
+
+class TestFinalizeEvoStepNearZeroElapsed:
+    def test_near_zero_elapsed_does_not_error(self):
+        m = AgentMetrics()
+        m._evo_start_time = time.monotonic()
+        m.finalize_evo_step(1000)
+        assert m.steps_per_second > 0
+        assert m.steps == 1000

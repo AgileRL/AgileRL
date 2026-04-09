@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Literal, Self, TypeVar
+from typing import Any, Literal, Self, TypeVar
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -59,6 +59,19 @@ class MlpSpec(BaseModel):
     max_mlp_nodes: int = Field(default=256, gt=1)
 
     arch: Literal["mlp"] = Field(default="mlp", exclude=True)
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        """Dump the model to a dictionary. Remove the ``output_activation`` field if it is ``None``.
+
+        :param kwargs: Keyword arguments to pass to the parent method.
+        :type kwargs: Any
+        :returns: The model as a dictionary.
+        :rtype: dict[str, Any]
+        """
+        d = super().model_dump(**kwargs)
+        if d.get("output_activation") is None:
+            d.pop("output_activation", None)
+        return d
 
     @model_validator(mode="after")
     def _check_hidden_layers(self) -> Self:

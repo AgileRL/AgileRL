@@ -21,11 +21,10 @@ Two concrete trainers are available:
    * - :ref:`LocalTrainer <local_trainer>`
      - Runs evolutionary RL training on your local machine (CPU or GPU).
    * - :ref:`ArenaTrainer <arena_trainer>`
-     - Submits the same manifest to `Arena <https://arena.agilerl.com>`_, AgileRL's managed RLOps platform.
+     - Run evolutionary RL training jobs on `Arena <https://arena.agilerl.com>`_, AgileRL's managed RLOps platform for cloud-scale distributed training.
 
 Both share the same ``from_manifest`` factory, making it trivial to switch
 between local experimentation and cloud-scale runs.
-
 
 .. _training_manifests:
 
@@ -180,30 +179,7 @@ and passes them to the algorithm's training function (e.g.
 ``train_off_policy``, ``train_on_policy``, ``train_multi_agent_off_policy``).
 The return value is always a tuple of ``(population, fitness_history)``.
 
-``train()`` accepts several optional keyword arguments for logging and
-persistence:
-
-.. list-table::
-   :widths: 25 75
-   :header-rows: 1
-
-   * - Parameter
-     - Description
-   * - ``wb``
-     - Enable Weights & Biases logging.
-   * - ``wandb_api_key``
-     - W&B API key (or set via environment variable).
-   * - ``tensorboard``
-     - Enable TensorBoard logging.
-   * - ``tensorboard_log_dir``
-     - Directory for TensorBoard log files.
-   * - ``save_elite``
-     - Persist the best agent after training.
-   * - ``elite_path``
-     - File path for the saved elite agent.
-   * - ``verbose``
-     - Print training progress to stdout.
-
+``train()`` accepts several optional keyword arguments for logging - please refer to the :ref:`API documentation <trainers_api>` for more details.
 
 CLI entry point
 ~~~~~~~~~~~~~~~
@@ -212,14 +188,7 @@ The ``agilerl/train.py`` script wraps ``LocalTrainer`` for command-line use:
 
 .. code-block:: bash
 
-   python -m agilerl.train configs/training/ppo/ppo.yaml --device cuda --wb
-
-   python -m agilerl.train configs/training/dqn/dqn.yaml \
-       --save-elite --elite-path ./elite_dqn.pt
-
-   python -m agilerl.train configs/training/ddpg/ddpg.yaml \
-       --use-accelerator --tensorboard
-
+   python -m agilerl.train -m configs/training/ppo/ppo.yaml --device cuda --wb
 
 .. _arena_trainer:
 
@@ -228,9 +197,42 @@ ArenaTrainer
 
 :class:`~agilerl.training.trainer.ArenaTrainer` submits the same
 manifest-based configuration to `Arena <https://arena.agilerl.com>`_, AgileRL's
-managed cloud platform. The trainer serializes its state to a
+managed RLOps platform. The trainer serializes its state to a
 :class:`~agilerl.models.manifest.TrainingManifest`, then uses an
-:class:`~agilerl.arena.client.ArenaClient` to POST the job.
+:class:`~agilerl.arena.client.ArenaClient` to submit the job for remote execution.
+
+Pre-requisites
+~~~~~~~~~~~~~~
+
+A pre-requisite for using ArenaTrainer is to have an Arena account and API key. You can get your API key by logging in to Arena and clicking on the "API Keys" tab in the left sidebar.
+You can then set the ``ARENA_API_KEY`` environment variable to your API key.
+
+.. code-block:: bash
+
+  export ARENA_API_KEY="your-arena-api-key"
+
+Alternatively, you can pass the API key to the ``ArenaTrainer`` constructor.
+
+.. code-block:: python
+
+  from agilerl.training.trainer import ArenaTrainer
+  from agilerl.arena.client import ArenaClient
+
+  client = ArenaClient(api_key="your-arena-api-key")
+
+  trainer = ArenaTrainer.from_manifest(
+      manifest="configs/training/dqn/dqn.yaml",
+      client=client,
+  )
+
+You must also have the extra dependencies for Arena installed, available via:
+
+.. code-block:: bash
+
+  pip install agilerl[arena]
+
+
+**From a manifest file (recommended):**
 
 .. code-block:: python
 
@@ -257,47 +259,9 @@ managed cloud platform. The trainer serializes its state to a
 
    trainer = ArenaTrainer(
        algorithm="DQN",
-       environment=ArenaEnvSpec(name="LunarLander-v3", num_envs=16),
+       environment=ArenaEnvSpec(name="Your-Arena-Env", num_envs=16),
        training=TrainingSpec(max_steps=500_000, evo_steps=10_000, population_size=4),
        api_key="your-arena-api-key",
    )
 
    response = trainer.train()
-
-The key difference from ``LocalTrainer`` is that ``ArenaTrainer`` does **not**
-create environments or agent populations locally — it delegates everything to
-the Arena backend. Install Arena dependencies with:
-
-.. code-block:: bash
-
-   pip install agilerl[arena]
-
-
-Manifest Examples by Scenario
------------------------------
-
-Below are annotated examples showing how manifests differ across training
-scenarios.
-
-
-Switching Between Local and Arena
----------------------------------
-
-Because both trainers consume the same manifest schema, moving from local
-prototyping to cloud training requires changing only the trainer class:
-
-.. code-block:: python
-
-   manifest_path = "configs/training/dqn/dqn.yaml"
-
-   # Local development
-   from agilerl.training.trainer import LocalTrainer
-
-   local_trainer = LocalTrainer.from_manifest(manifest_path, device="cuda")
-   population, fitnesses = local_trainer.train(verbose=True)
-
-   # Cloud training on Arena
-   from agilerl.training.trainer import ArenaTrainer
-
-   arena_trainer = ArenaTrainer.from_manifest(manifest_path)
-   response = arena_trainer.train(stream=True)

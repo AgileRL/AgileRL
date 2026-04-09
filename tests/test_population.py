@@ -509,6 +509,152 @@ class TestPopulation:
         assert "train/agent_1/action_dist" not in ns
 
 
+# ---------------------------------------------------------------------------
+# Edge-case tests — Population / PopulationMetrics / MetricsReport
+# ---------------------------------------------------------------------------
+
+
+class TestPopulationEdgeCases:
+    def test_empty_agents_raises(self):
+        with pytest.raises(ValueError, match="at least one agent"):
+            Population(agents=[])
+
+    def test_local_step(self, two_agents):
+        two_agents[0].metrics.increment_steps(50)
+        two_agents[1].metrics.increment_steps(200)
+        pop = Population(agents=two_agents)
+        assert pop.local_step == max(a.metrics.steps for a in two_agents)
+
+    def test_is_nested_scores_false_for_scalar(self, two_agents):
+        pop = Population(agents=two_agents)
+        assert pop.is_nested_scores() is False
+
+    def test_is_nested_scores_true_for_nested(self):
+        agent_ids = ["a0", "a1"]
+        agents = [MockMultiAgent(agent_ids, index=i) for i in range(2)]
+        for a in agents:
+            a.metrics.add_scores([[1.0, 2.0]])
+            a.metrics.add_fitness(1.0)
+            a.metrics.increment_steps(10)
+        pop = Population(agents=agents)
+        assert pop.is_nested_scores() is True
+
+    def test_is_nested_scores_empty(self, two_agents):
+        two_agents[0].metrics.scores.clear()
+        two_agents[1].metrics.scores.clear()
+        pop = Population(agents=two_agents)
+        assert pop.is_nested_scores() is False
+
+    def test_report_metrics_clear_false_preserves(self, two_agents):
+        pop = Population(agents=two_agents)
+        pop.report_metrics(clear=False)
+        assert two_agents[0].metrics.scores != []
+
+    def test_collect_fitnesses_dict_values(self):
+        agent_ids = ["a0", "a1"]
+        agents = [MockMultiAgent(agent_ids, index=i) for i in range(2)]
+        for a in agents:
+            a.metrics.fitness.append({"a0": 1.0, "a1": 2.0})
+            a.metrics.add_scores([1.0])
+            a.metrics.increment_steps(10)
+        pop = Population(agents=agents)
+        fitnesses = pop._collect_fitnesses()
+        assert isinstance(fitnesses[0], dict)
+        assert fitnesses[0]["a0"] == 1.0
+        assert fitnesses[0]["a1"] == 2.0
+
+    def test_collect_fitnesses_empty_deque_returns_nan(self, two_agents):
+        for a in two_agents:
+            a.metrics.fitness.clear()
+        pop = Population(agents=two_agents)
+        fitnesses = pop._collect_fitnesses()
+        assert all(math.isnan(f) for f in fitnesses)
+
+    def test_collect_fitnesses_ndarray_without_agent_ids_raises(self):
+        agents = [MockAgent(index=0)]
+        agents[0].metrics.fitness.append(np.array([1.0, 2.0]))
+        agents[0].metrics.add_scores([1.0])
+        agents[0].metrics.increment_steps(10)
+        pop = Population(agents=agents)
+        with pytest.raises(ValueError, match="without configured agent_ids"):
+            pop._collect_fitnesses()
+
+    def test_gather_metrics_with_accelerator(self, two_agents):
+        acc = MagicMock()
+        acc.is_main_process = True
+        acc.state = MagicMock()
+        acc.state.num_processes = 4
+        pop = Population(agents=two_agents, accelerator=acc)
+        metrics = pop._gather_metrics()
+        for step, agent in zip(metrics.steps, two_agents):
+            assert step == agent.metrics.steps * 4
+
+
+class TestPopulationMetricsEdgeCases:
+    def test_empty_additional_metrics_names_raises(self):
+        pm = _make_pop_metrics(additional_metrics=[])
+        with pytest.raises(IndexError):
+            _ = pm.additional_metric_names
+
+    def test_to_dict_dict_fitnesses(self):
+        pm = _make_pop_metrics(
+            fitnesses=[{"a0": 1.0, "a1": 2.0}, {"a0": 3.0, "a1": 4.0}],
+        )
+        d = pm.to_dict()
+        assert "eval/mean_fitness/a0" in d
+        assert "eval/mean_fitness/a1" in d
+        assert "eval/best_fitness/a0" in d
+        assert "eval/best_fitness/a1" in d
+
+    def test_to_dict_empty_scores_omits_score_key(self):
+        pm = _make_pop_metrics(scores=[])
+        d = pm.to_dict()
+        assert "train/mean_score" not in d
+
+    def test_empty_fitnesses_returns_nan(self):
+        pm = _make_pop_metrics(fitnesses=[])
+        assert math.isnan(pm.mean_fitness)
+        assert math.isnan(pm.best_fitness)
+
+    def test_empty_scores_returns_nan(self):
+        pm = _make_pop_metrics(scores=[])
+        assert math.isnan(pm.mean_score)
+
+
+class TestMetricsReportEdgeCases:
+    def _make_report(self, **overrides) -> MetricsReport:
+        return MetricsReport(_make_pop_metrics(**overrides))
+
+    def test_render_no_scores_succeeds(self):
+        report = self._make_report(scores=[])
+        rendered = report.render()
+        assert "score" not in rendered.lower() or "score" in rendered
+
+    def test_render_no_additional_metrics_succeeds(self):
+        report = self._make_report(additional_metrics=[])
+        rendered = report.render()
+        assert "Global Steps" in rendered
+
+    def test_render_empty_hyperparameters_succeeds(self):
+        report = self._make_report(hyperparameters=[])
+        rendered = report.render()
+        assert "Global Steps" in rendered
+        assert "lr" not in rendered
+
+    def test_train_rows_empty_scores(self):
+        report = self._make_report(scores=[])
+        rows = report.train_rows()
+        names = [r.name if hasattr(r, "name") else "" for r in rows]
+        assert "train/score" not in names
+
+    def test_train_rows_empty_additional_metrics_still_has_scores(self):
+        report = self._make_report(additional_metrics=[])
+        rows = report.train_rows()
+        names = [r.name for r in rows if hasattr(r, "name")]
+        assert "train/score" in names
+        assert all("loss" not in n for n in names)
+
+
 class TestStdOutLogger:
     def test_write(self, pop_metrics):
         pbar = MagicMock()

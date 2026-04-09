@@ -1,7 +1,7 @@
 ---
 algorithm:
     name: NeuralTS
-    batch_size: 64
+    batch_size: 128
     lr: 0.003
     learn_step: 2
     gamma: 1.0
@@ -52,8 +52,9 @@ tournament_selection:
 
 training:
     max_steps: 10_000
-    target_score: 96.0
+    target_score: 450.0
     pop_size: 4
     evo_steps: 500
     eval_steps: 500
+    episode_steps: 500
     eval_loop: 1

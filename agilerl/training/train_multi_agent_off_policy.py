@@ -1,3 +1,4 @@
+import logging
 import warnings
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
 
 InitDictType = dict[str, Any] | None
 PopulationType = list[MADDPG | MATD3]
+
+logger = logging.getLogger(__name__)
 
 
 def train_multi_agent_off_policy(
@@ -336,6 +339,7 @@ def train_multi_agent_off_policy(
 
         # Check if we have met the target score
         if population.should_stop(target):
+            logger.info("Target score has been reached. Stopping training.")
             population.finish()
             pbar.close()
             return population.agents, population.last_fitnesses

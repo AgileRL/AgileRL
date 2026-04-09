@@ -24,7 +24,7 @@ mutation:
         arch_mut: 0.2
         new_layer: 0.2
         params_mut: 0.2
-        act_mut: 0.2
+        act_mut: 0.0
         rl_hp_mut: 0.2
     rl_hp_selection:
         lr:

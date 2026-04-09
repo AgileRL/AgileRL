@@ -1,5 +1,5 @@
 Algorithm Specifications
-=======================
+========================
 
 Base classes and the algorithm registry that maps names (e.g. ``"DQN"``)
 to their concrete :class:`AlgorithmSpec` subclass.

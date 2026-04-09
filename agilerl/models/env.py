@@ -14,6 +14,7 @@ from pettingzoo import ParallelEnv
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 from typing_extensions import Self
 
+from agilerl.protocols import BanditEnvProtocol
 from agilerl.utils.env_utils import (
     apply_wrappers,
     get_reward_fn,
@@ -488,29 +489,74 @@ class OfflineEnvSpec(GymEnvSpec):
 class BanditEnvSpec(BaseModel):
     """Environment specification for contextual bandit training.
 
-    Stores the features and targets that define a bandit problem.  Each
-    field can be either a :class:`~pandas.DataFrame` or a **file path**
-    (CSV, Parquet, or any format supported by :func:`pandas.read_csv`
-    / :func:`pandas.read_parquet`).  When a string path is given, the
-    data is loaded lazily at :meth:`make_env` time.
+    Supports two modes:
+
+    **Dataset mode:** provide ``features`` and ``targets`` (as DataFrames or
+    file paths) to construct a :class:`~agilerl.wrappers.learning.BanditEnv`
+    from a labelled dataset.
+
+    **Custom entrypoint mode:** provide an ``entrypoint`` (e.g.
+    ``"my_module:MyBanditEnv"``) to instantiate an arbitrary bandit
+    environment.  The resolved callable is invoked with ``**config``..
+
+    Exactly one of (``features`` + ``targets``) or ``entrypoint`` must be
+    provided.
 
     :param name: Human-readable name for the environment / dataset.
     :type name: str
-    :param features: Dataset features — a DataFrame or a path to a file.
-    :type features: pandas.DataFrame | str
-    :param targets: Dataset targets — a DataFrame or a path to a file.
-    :type targets: pandas.DataFrame | str
+    :param features: Dataset features. A pd.DataFrame or a path to a file.
+    :type features: pandas.DataFrame | str | Path | None
+    :param targets: Dataset targets. A pd.DataFrame or a path to a file.
+    :type targets: pandas.DataFrame | str | Path | None
+    :param entrypoint: Dotted path to a callable that returns a bandit
+        environment (e.g. ``"my_module:MyBanditEnv"``).
+    :type entrypoint: str | None
+    :param path: Optional filesystem path added to ``sys.path`` before
+        resolving the entrypoint.
+    :type path: str | None
+    :param config: Keyword arguments forwarded to the entrypoint callable.
+    :type config: dict[str, Any] | None
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: str = Field(default="BanditEnv")
-    features: pd.DataFrame | str | Path
-    targets: pd.DataFrame | str | Path
+    features: pd.DataFrame | str | Path | None = Field(default=None)
+    targets: pd.DataFrame | str | Path | None = Field(default=None)
+    entrypoint: str | None = Field(default=None)
+    path: str | None = Field(default=None)
+    config: dict[str, Any] | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> Self:
+        has_features = self.features is not None
+        has_targets = self.targets is not None
+        has_entrypoint = self.entrypoint is not None
+
+        if has_features != has_targets:
+            msg = "Both 'features' and 'targets' must be provided together."
+            raise ValueError(msg)
+
+        has_dataset = has_features and has_targets
+
+        if has_dataset and has_entrypoint:
+            msg = "Provide either (features + targets) or entrypoint, not both."
+            raise ValueError(msg)
+
+        if not has_dataset and not has_entrypoint:
+            msg = (
+                "BanditEnvSpec requires either (features + targets) for "
+                "dataset-based environments, or an entrypoint for custom environments."
+            )
+            raise ValueError(msg)
+
+        return self
 
     @field_serializer("features", "targets")
     @classmethod
-    def _serialize_dataframe_fields(cls, v: pd.DataFrame | str | Path) -> str | None:
+    def _serialize_dataframe_fields(
+        cls, v: pd.DataFrame | str | Path | None
+    ) -> str | None:
         if isinstance(v, (str, Path)):
             return str(v)
         return None
@@ -536,12 +582,23 @@ class BanditEnvSpec(BaseModel):
             raise ValueError(msg)
         return data
 
-    def make_env(self) -> Any:
-        """Construct a :class:`~agilerl.wrappers.learning.BanditEnv`.
+    def make_env(self) -> BanditEnvProtocol:
+        """Construct a bandit environment.
 
-        :returns: A bandit environment ready for training.
-        :rtype: BanditEnv
+        In dataset mode, returns a :class:`~agilerl.wrappers.learning.BanditEnv`
+        built from ``features`` and ``targets``.  In entrypoint mode, resolves
+        the callable and invokes it with ``**config``.
+
+        :returns: A bandit environment satisfying :class:`~agilerl.protocols.BanditEnvProtocol`.
+        :rtype: BanditEnvProtocol
         """
+        if self.entrypoint is not None:
+            constructor = resolve_entrypoint_target(self.entrypoint, path=self.path)
+            if not callable(constructor):
+                msg = f"Entrypoint '{self.entrypoint}' resolved to non-callable object."
+                raise TypeError(msg)
+            return constructor(**(self.config or {}))
+
         from agilerl.wrappers.learning import BanditEnv
 
         features = (

@@ -11,7 +11,7 @@ algorithm:
 environment:
     name: CartPole-v1
     num_envs: 16
-    minari_dataset_id: cartpole-v0
+    minari_dataset_id: cartpole/random-v0
 mutation:
     probabilities:
         no_mut: 0.4

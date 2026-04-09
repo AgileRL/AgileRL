@@ -184,17 +184,18 @@ class TensorboardLogger(Logger):
     Each key in :meth:`MetricsReport.to_dict` is written as a scalar at the
     ``train/global_step`` value.
 
-    :param log_dir: Directory for TensorBoard event files, defaults to "tensorboard_logs"
-    :type log_dir: str | Path, optional
+    :param log_dir: Directory for TensorBoard event files, defaults to ``None``,
+        which will use the default TensorBoard log directory ``tensorboard_logs``.
+    :type log_dir: str | Path | None
+    :param experiment_name: Name of the experiment, defaults to ``None``.
+    :type experiment_name: str | None
     :param accelerator: HuggingFace Accelerator, or ``None``.
     :type accelerator: Accelerator | None
-    :param experiment_name: Name of the experiment, defaults to None.
-    :type experiment_name: str | None
     """
 
     def __init__(
         self,
-        log_dir: str | Path = "tensorboard_logs",
+        log_dir: str | Path | None = None,
         experiment_name: str | None = None,
         accelerator: Accelerator | None = None,
     ) -> None:
@@ -202,6 +203,7 @@ class TensorboardLogger(Logger):
             msg = "TensorBoard is not installed. Please install it with `pip install tensorboard`."
             raise ImportError(msg)
 
+        log_dir = log_dir or "tensorboard_logs"
         date = datetime.now().strftime("%m%d%Y%H%M%S")
         experiment_name = (
             date if experiment_name is None else f"{experiment_name}-{date}"

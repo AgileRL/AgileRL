@@ -1,3 +1,4 @@
+import logging
 import warnings
 from datetime import datetime
 from typing import Any
@@ -13,20 +14,22 @@ from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
+from agilerl.protocols import BanditEnvProtocol
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
-from agilerl.wrappers.learning import BanditEnv
 
 InitDictType = dict[str, Any] | None
 PopulationType = list[NeuralTS | NeuralUCB]
 
+logger = logging.getLogger(__name__)
+
 
 def train_bandits(
-    env: BanditEnv,
+    env: BanditEnvProtocol,
     env_name: str,
     algo: str,
     pop: PopulationType,
@@ -57,8 +60,8 @@ def train_bandits(
     """Run the general bandit training; returns trained population of agents
     and their fitnesses.
 
-    :param env: The environment to train in.
-    :type env: BanditEnv
+    :param env: The bandit environment to train in.
+    :type env: BanditEnvProtocol
     :param env_name: Environment name
     :type env_name: str
     :param algo: RL algorithm name
@@ -215,8 +218,7 @@ def train_bandits(
                 next_context, reward = env.step(action)
 
                 # Save experience to replay buffer
-                transition_dict = {"obs": context, "reward": reward}
-                transition = TensorDict(transition_dict)
+                transition = TensorDict({"obs": context[action], "reward": reward})
                 transition = transition.unsqueeze(0)
                 transition.batch_size = [1]
                 memory.add(transition)
@@ -249,14 +251,16 @@ def train_bandits(
         # Aggregate metrics from all agents and log -> clear metrics after reporting
         population.report_metrics(clear=True)
 
+        # Check if target score has been reached
         if population.should_stop(target):
+            logger.info("Target score has been reached. Stopping training.")
             population.finish()
             pbar.close()
             return population.agents, population.last_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
-            if population.local_step // evo_steps > evo_count:
+            if (population.local_step // evo_steps) > evo_count:
                 population.update(
                     tournament_selection_and_mutation(
                         population=population.agents,

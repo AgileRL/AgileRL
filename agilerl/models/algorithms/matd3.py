@@ -29,8 +29,8 @@ class MATD3Spec(MultiAgentRLAlgorithmSpec):
     dt: float = Field(default=0.01)
     torch_compiler: str | None = Field(default=None)
     net_config: DeterministicActorSpec | None = Field(default=None)
-    actor_networks: ModuleDict | None = Field(default=None, exclude=True)
-    critic_networks: list[ModuleDict] | None = Field(default=None, exclude=True)
+    actor_networks: ModuleDict | None = Field(default=None)
+    critic_networks: list[ModuleDict] | None = Field(default=None)
 
     algo_class: ClassVar[type[MATD3]] = MATD3
 

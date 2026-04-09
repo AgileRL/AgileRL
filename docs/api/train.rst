@@ -23,7 +23,7 @@ usage examples and manifest reference.
 Training Functions
 ------------------
 
-If you are using a Gym-style environment, it is easiest to use our training function, which returns a population of trained agents and logged training metrics.
+If you are using a Gym-style environment, our on- and off-policy training functions return a population of trained agents and logged training metrics.
 
 .. autofunction:: agilerl.training.train_off_policy.train_off_policy
 

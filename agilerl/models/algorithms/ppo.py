@@ -54,6 +54,13 @@ class PPOSpec(RLAlgorithmSpec):
 
     algo_class: ClassVar[type[PPO]] = PPO
 
+    @property
+    def name(self) -> str:
+        """Return the name of the algorithm."""
+        algo_name = self.algo_class.__name__
+        prefix = "Recurrent " if self.recurrent else ""
+        return f"{prefix}{algo_name}"
+
     @staticmethod
     def get_training_fn() -> Callable[..., Any]:
         """Get the training function for PPO.

@@ -494,10 +494,8 @@ class TestArenaTrainerManifest:
             client=mock_client,
         )
         manifest = trainer.to_manifest()
-        assert manifest["algorithm"]["net_config"]["encoder_config"]["hidden_size"] == [
-            64
-        ]
-        assert manifest["algorithm"]["net_config"]["head_config"]["hidden_size"] == [64]
+        assert manifest["network"]["encoder_config"]["hidden_size"] == [64]
+        assert manifest["network"]["head_config"]["hidden_size"] == [64]
 
     def test_manifest_payload_uses_spec_serializers(
         self, mock_client, ppo_spec, training_spec
@@ -868,18 +866,16 @@ class TestLLMSpecConstruction:
 
         assert grpo_spec.get_training_fn() is finetune_llm_reasoning
 
-    def test_dpo_model_dump_excludes_pretrained_path(self, dpo_spec):
-        """``pretrained_model_name_or_path`` is ``exclude=True`` and should
-        not leak into serialized payloads."""
+    def test_dpo_model_dump_contains_expected_fields(self, dpo_spec):
         dumped = dpo_spec.model_dump(mode="python", exclude={"hp_config"})
-        assert "pretrained_model_name_or_path" not in dumped
+        assert dumped["pretrained_model_name_or_path"] == "gpt2"
         assert dumped["update_epochs"] == 1
         assert dumped["beta"] == pytest.approx(0.001)
 
     def test_grpo_model_dump_contains_group_size(self, grpo_spec):
         dumped = grpo_spec.model_dump(mode="python", exclude={"hp_config"})
         assert dumped["group_size"] == 4
-        assert "pretrained_model_name_or_path" not in dumped
+        assert dumped["pretrained_model_name_or_path"] == "gpt2"
 
 
 class TestLLMGetTrainingKwargs:
@@ -1564,3 +1560,240 @@ class TestLocalTrainerIntegration:
             assert isinstance(call_kwargs["env"], PreferenceGym)
             assert call_kwargs["max_steps"] == 8
             assert "evaluation_interval" in call_kwargs
+
+
+# ---------------------------------------------------------------------------
+# String environment resolution
+# ---------------------------------------------------------------------------
+
+
+class TestStringEnvironmentResolution:
+    """Verify that passing a plain string as the ``environment`` parameter
+    produces the correct env spec and that the constructed environment
+    corresponds to the requested gym / PettingZoo id."""
+
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_gym_env_from_string(self, mock_create_pop, training_spec):
+        """A string environment for a single-agent algo resolves to GymEnvSpec
+        and the constructed env matches the requested id."""
+        from agilerl.models.env import GymEnvSpec
+
+        mock_create_pop.return_value = [MagicMock()]
+        trainer = LocalTrainer(
+            algorithm="DQN",
+            environment="LunarLander-v3",
+            training=training_spec,
+        )
+        assert isinstance(trainer.env_spec, GymEnvSpec)
+        assert trainer.env_spec.name == "LunarLander-v3"
+        assert trainer.env is not None
+        assert hasattr(trainer.env, "single_observation_space")
+
+    @patch("agilerl.training.trainer.LocalTrainer._make_env", return_value=MagicMock())
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_pz_env_from_string(self, mock_create_pop, _mock_make_env, training_spec):
+        """A string environment for a multi-agent algo resolves to PzEnvSpec."""
+        from agilerl.models.env import PzEnvSpec
+
+        mock_create_pop.return_value = [MagicMock()]
+        trainer = LocalTrainer(
+            algorithm="MADDPG",
+            environment="simple_spread_v3",
+            training=training_spec,
+        )
+        assert isinstance(trainer.env_spec, PzEnvSpec)
+        assert trainer.env_spec.name == "simple_spread_v3"
+
+    def test_offline_string_raises(self, training_spec):
+        """Offline algorithms must be given a full OfflineEnvSpec."""
+        with pytest.raises(ValueError, match="Only Gym and PettingZoo"):
+            LocalTrainer(
+                algorithm="CQN",
+                environment="CartPole-v1",
+                training=training_spec,
+            )
+
+    def test_bandit_string_raises(self, training_spec):
+        """Bandit algorithms must be given a full BanditEnvSpec."""
+        with pytest.raises(ValueError, match="Only Gym and PettingZoo"):
+            LocalTrainer(
+                algorithm="NeuralUCB",
+                environment="BanditEnv",
+                training=training_spec,
+            )
+
+    def test_arena_trainer_string_env(self, mock_client, training_spec):
+        """ArenaTrainer converts a plain string to ArenaEnvSpec."""
+        trainer = ArenaTrainer(
+            algorithm="DQN",
+            environment="CartPole-v1",
+            client=mock_client,
+            training=training_spec,
+        )
+        assert isinstance(trainer.env_spec, ArenaEnvSpec)
+        assert trainer.env_spec.name == "CartPole-v1"
+
+    def test_llm_string_raises(self, training_spec):
+        """LLM algorithms must be given a full LLMEnvSpec."""
+        _DPO, _ = _rebuild_llm_specs()
+        spec = _DPO(**_LLM_COMMON_KWARGS)
+        with pytest.raises(ValueError, match="Only Gym and PettingZoo"):
+            LocalTrainer(
+                algorithm=spec,
+                environment="SomeEnv",
+                training=training_spec,
+            )
+
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_on_policy_string_env(self, mock_create_pop, training_spec):
+        """On-policy algo with a string env resolves to GymEnvSpec."""
+        from agilerl.models.env import GymEnvSpec
+
+        mock_create_pop.return_value = [MagicMock()]
+        trainer = LocalTrainer(
+            algorithm="PPO",
+            environment="CartPole-v1",
+            training=training_spec,
+        )
+        assert isinstance(trainer.env_spec, GymEnvSpec)
+        assert trainer.env_spec.name == "CartPole-v1"
+
+
+# ---------------------------------------------------------------------------
+# Trainer.get_validated_manifest — direct / dict
+# ---------------------------------------------------------------------------
+
+
+class TestGetValidatedManifest:
+    def test_from_yaml_file(self):
+        from agilerl.training.trainer import Trainer
+
+        manifest = Trainer.get_validated_manifest("configs/training/ppo/ppo.yaml")
+        assert manifest.algorithm.name == "PPO"
+        assert manifest.training.max_steps == 6_000_000
+
+    def test_from_dict(self):
+        from agilerl.training.trainer import Trainer
+
+        data = {
+            "algorithm": {"name": "DQN", "learn_step": 1},
+            "environment": {"name": "CartPole-v1", "num_envs": 1},
+            "training": {"max_steps": 100, "evo_steps": 50, "pop_size": 2},
+        }
+        manifest = Trainer.get_validated_manifest(data)
+        assert manifest.algorithm.name == "DQN"
+        assert manifest.training.max_steps == 100
+        assert manifest.training.population_size == 2
+
+
+# ---------------------------------------------------------------------------
+# LocalTrainer.to_manifest
+# ---------------------------------------------------------------------------
+
+
+class TestLocalTrainerToManifest:
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_to_manifest_returns_dict(self, mock_create_pop, training_spec):
+        from agilerl.models.env import GymEnvSpec
+
+        mock_create_pop.return_value = [MagicMock()]
+        env_spec = GymEnvSpec(name="CartPole-v1")
+        mock_env = MagicMock()
+        with patch.object(LocalTrainer, "_make_env", return_value=mock_env):
+            trainer = LocalTrainer(
+                algorithm="PPO", environment=env_spec, training=training_spec
+            )
+        manifest = trainer.to_manifest()
+        assert isinstance(manifest, dict)
+        assert manifest["algorithm"]["name"] == "PPO"
+        assert manifest["training"]["max_steps"] == 500
+
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_to_manifest_includes_network_when_present(self, mock_create_pop):
+        from agilerl.models.env import GymEnvSpec
+
+        mock_create_pop.return_value = [MagicMock()]
+        spec = DQNSpec(
+            net_config=QNetworkSpec(
+                encoder_config=MlpSpec(hidden_size=[64]),
+                head_config=MlpSpec(hidden_size=[64]),
+            )
+        )
+        env_spec = GymEnvSpec(name="CartPole-v1")
+        mock_env = MagicMock()
+        with patch.object(LocalTrainer, "_make_env", return_value=mock_env):
+            trainer = LocalTrainer(
+                algorithm=spec,
+                environment=env_spec,
+                training=TrainingSpec(max_steps=100, evo_steps=50, pop_size=2),
+            )
+        manifest = trainer.to_manifest()
+        assert "network" in manifest
+        assert manifest["network"]["encoder_config"]["hidden_size"] == [64]
+
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_to_manifest_excludes_none_sections(self, mock_create_pop, training_spec):
+        from agilerl.models.env import GymEnvSpec
+
+        mock_create_pop.return_value = [MagicMock()]
+        env_spec = GymEnvSpec(name="CartPole-v1")
+        mock_env = MagicMock()
+        with patch.object(LocalTrainer, "_make_env", return_value=mock_env):
+            trainer = LocalTrainer(
+                algorithm="PPO", environment=env_spec, training=training_spec
+            )
+        manifest = trainer.to_manifest()
+        assert manifest.get("replay_buffer") is None or "replay_buffer" not in manifest
+
+
+# ---------------------------------------------------------------------------
+# LocalTrainer.train optional kwargs forwarding
+# ---------------------------------------------------------------------------
+
+
+class TestLocalTrainerTrainKwargs:
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_train_kwargs_forwarded(self, mock_create_pop, training_spec):
+        from agilerl.models.env import GymEnvSpec
+
+        env_spec = GymEnvSpec(name="CartPole-v1")
+        mock_pop = [MagicMock()]
+        mock_create_pop.return_value = mock_pop
+        mock_train_fn = MagicMock(return_value=(mock_pop, [[1.0]]))
+        mock_env = MagicMock()
+
+        with (
+            patch.object(PPOSpec, "get_training_fn", return_value=mock_train_fn),
+            patch.object(LocalTrainer, "_make_env", return_value=mock_env),
+        ):
+            trainer = LocalTrainer(
+                algorithm="PPO",
+                environment=env_spec,
+                training=training_spec,
+            )
+            trainer.train(
+                verbose=False,
+                wb=True,
+                tensorboard=True,
+                tensorboard_log_dir="/tmp/tb",
+                save_elite=True,
+                elite_path="/tmp/elite",
+                wandb_api_key="test-key",
+                wandb_kwargs={"project": "test"},
+                checkpoint_steps=50,
+                checkpoint_path="/tmp/ckpt",
+                overwrite_checkpoints=True,
+            )
+
+        call_kwargs = mock_train_fn.call_args[1]
+        assert call_kwargs["verbose"] is False
+        assert call_kwargs["wb"] is True
+        assert call_kwargs["tensorboard"] is True
+        assert call_kwargs["tensorboard_log_dir"] == "/tmp/tb"
+        assert call_kwargs["save_elite"] is True
+        assert call_kwargs["elite_path"] == "/tmp/elite"
+        assert call_kwargs["wandb_api_key"] == "test-key"
+        assert call_kwargs["wandb_kwargs"] == {"project": "test"}
+        assert trainer.training_spec.checkpoint_steps == 50
+        assert trainer.training_spec.checkpoint_path == "/tmp/ckpt"
+        assert trainer.training_spec.overwrite_checkpoints is True

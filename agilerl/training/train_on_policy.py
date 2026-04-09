@@ -1,3 +1,4 @@
+import logging
 import warnings
 from collections.abc import Callable
 from datetime import datetime
@@ -21,6 +22,8 @@ from agilerl.vector import DummyVecEnv
 InitDictType = dict[str, Any] | None
 OnPolicyAlgorithms = PPO
 PopulationType = list[OnPolicyAlgorithms]
+
+logger = logging.getLogger(__name__)
 
 
 def train_on_policy(
@@ -254,6 +257,7 @@ def train_on_policy(
 
         # Check if we have met the target score
         if population.should_stop(target):
+            logger.info("Target score has been reached. Stopping training.")
             population.finish()
             pbar.close()
             return population.agents, population.last_fitnesses

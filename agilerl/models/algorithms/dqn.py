@@ -21,7 +21,7 @@ class DQNSpec(RLAlgorithmSpec):
     double: bool = Field(default=False)
     lr: float = Field(default=0.0001, ge=0.0)
     cudagraphs: bool = Field(default=False)
-    actor_network: EvolvableModule | None = Field(default=None, exclude=True)
+    actor_network: EvolvableModule | None = Field(default=None)
     net_config: QNetworkSpec | None = Field(default=None)
 
     algo_class: ClassVar[type[DQN]] = DQN

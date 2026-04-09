@@ -575,3 +575,77 @@ class TestTryRestoreSession:
             assert client._tokens.refresh_token == "saved_rt"
         finally:
             ArenaOAuth2.CREDENTIALS_FILE = orig
+
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_restores_access_token_only(self, _kc, tmp_path):
+        """Credentials file with access_token but no refresh_token."""
+        cred_file = tmp_path / "creds.json"
+        cred_file.write_text(
+            json.dumps({"access_token": "at_only"}),
+            encoding="utf-8",
+        )
+
+        from agilerl.arena.auth import ArenaOAuth2
+
+        orig = ArenaOAuth2.CREDENTIALS_FILE
+        try:
+            ArenaOAuth2.CREDENTIALS_FILE = cred_file
+            with patch.dict(os.environ, {}, clear=False):
+                env = os.environ.copy()
+                env.pop("ARENA_API_KEY", None)
+                with patch.dict(os.environ, env, clear=True):
+                    client = ArenaClient()
+            assert client._tokens.access_token == "at_only"
+            assert client._tokens.refresh_token is None
+        finally:
+            ArenaOAuth2.CREDENTIALS_FILE = orig
+
+
+# ---------------------------------------------------------------------------
+# ValidateEnvironment — parameter forwarding
+# ---------------------------------------------------------------------------
+
+
+class TestValidateEnvironmentParams:
+    def test_forwards_rollouts_and_max_steps(self, api_key_client):
+        api_key_client._validate = MagicMock(return_value={"valid": True})
+        api_key_client.validate_environment(
+            "MyEnv",
+            rollouts=True,
+            max_steps=500,
+        )
+        call_kwargs = api_key_client._validate.call_args[1]
+        assert call_kwargs["rollouts"] == "true"
+        assert call_kwargs["max_steps"] == "500"
+
+    def test_forwards_version_and_entrypoint(self, api_key_client):
+        api_key_client._validate = MagicMock(return_value={"valid": True})
+        api_key_client.validate_environment(
+            "MyEnv",
+            version="v2",
+            entrypoint="my_env:make",
+        )
+        call_kwargs = api_key_client._validate.call_args[1]
+        assert call_kwargs["version"] == "v2"
+        assert call_kwargs["entrypoint"] == "my_env:make"
+
+    def test_register_forwards_multi_agent_and_description(
+        self, api_key_client, tmp_path
+    ):
+        src = tmp_path / "env"
+        src.mkdir()
+        (src / "env.py").write_text("pass")
+
+        api_key_client.is_registered_environment = MagicMock(return_value=False)
+        api_key_client._register_environment = MagicMock(
+            return_value={"registered": True}
+        )
+        api_key_client.validate_environment(
+            "MyEnv",
+            source=src,
+            multi_agent=True,
+            description="A test env",
+        )
+        call_kwargs = api_key_client._register_environment.call_args[1]
+        assert call_kwargs["multi_agent"] is True
+        assert call_kwargs["description"] == "A test env"

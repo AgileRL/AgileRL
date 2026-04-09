@@ -1,3 +1,4 @@
+import logging
 import warnings
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -35,6 +36,8 @@ InitDictType = dict[str, Any] | None
 SupportedOffPolicy = DQN | RainbowDQN | DDPG | TD3
 PopulationType = list[SupportedOffPolicy]
 BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer
+
+logger = logging.getLogger(__name__)
 
 
 def _learn_from_buffer(
@@ -414,6 +417,7 @@ def train_off_policy(
         population.report_metrics(clear=True)
 
         if population.should_stop(target):
+            logger.info("Target score has been reached. Stopping training.")
             population.finish()
             pbar.close()
             return population.agents, population.last_fitnesses
