@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 import gc
 import inspect
@@ -32,10 +34,9 @@ from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import SequentialLR
 from typing_extensions import Self
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LLM_DEPENDENCIES, HAS_VLLM
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -50,7 +51,6 @@ from agilerl.protocols import (
     EvolvableAttributeDict,
     EvolvableAttributeType,
     EvolvableModuleProtocol,
-    LoraConfigProtocol,
     ModuleDictProtocol,
     PeftModelProtocol,
     PretrainedConfigProtocol,
@@ -97,11 +97,23 @@ from agilerl.utils.evolvable_networks import (
     is_image_space,
     is_vector_space,
 )
+from agilerl.utils.llm_utils import create_model_from_name_or_path, gather_if_zero3
 
 if TYPE_CHECKING:
     from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
+    from torch.optim.lr_scheduler import SequentialLR
 
-if HAS_LLM_DEPENDENCIES:
+# Make imports visibe to typechecker and import when required
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from peft import (
+        LoraConfig,
+        get_peft_model,
+        get_peft_model_state_dict,
+        set_peft_model_state_dict,
+    )
+    from safetensors.torch import load_file
+    from vllm import LLM, SamplingParams
+
     try:
         from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
     except ImportError:
@@ -113,24 +125,10 @@ if HAS_LLM_DEPENDENCIES:
         ) -> Any:
             return item
 
-    from peft import (
-        LoraConfig,
-        get_peft_model,
-        get_peft_model_state_dict,
-        set_peft_model_state_dict,
-    )
-    from safetensors.torch import load_file
 
-    try:
-        from vllm import LLM, SamplingParams
-    except ImportError:
-        LLM = None
-        SamplingParams = None
+if TYPE_CHECKING or HAS_VLLM:
+    from vllm import LLM, SamplingParams
 
-    from agilerl.utils.llm_utils import (
-        create_model_from_name_or_path,
-        gather_if_zero3,
-    )
 
 __all__ = ["EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
 
@@ -663,7 +661,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             self,
             config.name,
         )
-        optimizer = opt.optimizer if hasattr(opt, "optimizer") else None
+        optimizer = getattr(opt, "optimizer", None)
 
         if isinstance(self, LLMAlgorithm):
             if hasattr(self.actor, "optimizer"):
@@ -1967,7 +1965,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         pad_token_id: int,
         pad_token: str,
         use_liger_loss: bool,
-        lora_config: LoraConfigProtocol | None,
+        lora_config: LoraConfig | None,
         use_separate_reference_adapter: bool,
         model_name: str | None = None,
         actor_network: PreTrainedModelProtocol | None = None,
@@ -1983,9 +1981,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
-            raise ImportError(
-                msg,
-            )
+            raise ImportError(msg)
 
         if model_name is None and actor_network is None:
             msg = "At least one of model_name or actor_network must be provided."
@@ -2268,7 +2264,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             msg,
         )
 
-    def _select_optim_class(self) -> type[OptimizerType] | type[DummyOptimizer]:
+    def _select_optim_class(self) -> type[OptimizerType | DummyOptimizer]:
         """Select the optimizer class based on the accelerator and deepspeed config.
 
         :return: Optimizer class
@@ -3207,6 +3203,27 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         positions = torch.arange(max_length, dtype=torch.long).unsqueeze(0)
         return positions > prompt_lengths_tensor.unsqueeze(1)
 
+    @staticmethod
+    def _resolve_model_path_for_vllm(model_path: str) -> str:
+        """Resolve a Hugging Face repo id or path for vLLM's ``model`` argument.
+
+        vLLM validates that ``model`` points at a local directory with recognized
+        config files or a resolvable HF repo. In CI (e.g. ``HF_HUB_OFFLINE``), a
+        repo id can fail that check even when weights are already cached for
+        ``transformers``; ``snapshot_download`` returns the on-disk cache path.
+        """
+        path = Path(model_path)
+        from huggingface_hub import snapshot_download
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        if path.is_dir() and (path / "config.json").is_file():
+            return str(path.resolve())
+
+        try:
+            return snapshot_download(repo_id=model_path, local_files_only=True)
+        except LocalEntryNotFoundError:
+            return snapshot_download(repo_id=model_path)
+
     def _configure_vllm(self) -> None:
         """Configure vLLM for efficient inference during generation in 'get_action'."""
         if LLM is None:
@@ -3254,7 +3271,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
 
             llm_kwargs = {
-                "model": self.pretrained_model_name_or_path,
+                "model": self._resolve_model_path_for_vllm(
+                    self.pretrained_model_name_or_path,
+                ),
                 "tensor_parallel_size": self.vllm_config.tensor_parallel_size,
                 "gpu_memory_utilization": self.vllm_config.gpu_memory_utilization,
                 "max_num_seqs": self.vllm_config.max_num_seqs,

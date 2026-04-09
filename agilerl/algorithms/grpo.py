@@ -1,21 +1,23 @@
 import gc
 import warnings
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 from accelerate import Accelerator
+from peft import LoraConfig
+from transformers import GenerationConfig
 
-from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LIGER_KERNEL
 
 if HAS_LIGER_KERNEL:
     from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
-else:
+elif not TYPE_CHECKING:
     LigerFusedLinearGRPOFunction = None
+
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import (
-    LoraConfigProtocol,
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
@@ -29,9 +31,6 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.llm_utils import (
     ReasoningGym,
 )
-
-if HAS_LLM_DEPENDENCIES:
-    from transformers import GenerationConfig
 
 
 class GRPO(LLMAlgorithm):
@@ -82,7 +81,7 @@ class GRPO(LLMAlgorithm):
     :param max_model_len: Maximum context window length, defaults to None
     :type max_model_len: int, optional
     :param lora_config: Config for LoRA, defaults to None
-    :type lora_config: LoraConfigProtocol, optional
+    :type lora_config: LoraConfig, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
     :type cosine_lr_schedule_config: CosineLRScheduleConfig, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -135,7 +134,7 @@ class GRPO(LLMAlgorithm):
         max_output_tokens: int | None = 1024,
         min_output_tokens: int | None = None,
         max_model_len: int | None = None,
-        lora_config: LoraConfigProtocol | None = None,
+        lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
         device: str = "cpu",
@@ -575,7 +574,7 @@ class GRPO(LLMAlgorithm):
         :return: Mean loss and mean KL divergence.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
-        if LigerFusedLinearGRPOFunction is None:
+        if not HAS_LIGER_KERNEL:
             msg = (
                 "Liger GRPO loss was requested but `liger-kernel` is not available. "
                 "Set use_liger_loss=False."

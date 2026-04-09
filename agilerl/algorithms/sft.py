@@ -1,24 +1,22 @@
 import gc
 import warnings
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
+from peft import LoraConfig
 
 from agilerl import HAS_LIGER_KERNEL
-
-if HAS_LIGER_KERNEL:
-    from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
-else:
-    LigerCrossEntropyLoss = None
-
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.protocols import LoraConfigProtocol, PreTrainedModelProtocol
+from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.llm_utils import SFTGym
+
+if HAS_LIGER_KERNEL or TYPE_CHECKING:
+    from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
 
 
 class SFT(LLMAlgorithm):
@@ -34,8 +32,7 @@ class SFT(LLMAlgorithm):
     1. **SFT** (this class) — warm-up the model to follow instructions by
        minimising cross-entropy on ``(prompt, good_response)`` pairs.
     2. **DPO** — further align the SFT-initialised model using
-       ``(prompt, chosen_response, rejected_response)`` triples, where the
-       ``rejected`` response is usually sampled from the SFT model itself.
+       ``(prompt, chosen_response, rejected_response)`` triples.
 
     :param pad_token_id: Pad token id
     :type pad_token_id: int
@@ -74,7 +71,7 @@ class SFT(LLMAlgorithm):
     :type device: str, optional
     :param lora_config: LoRA config; when supplied the base model is wrapped with
         PEFT adapters, defaults to None
-    :type lora_config: LoraConfigProtocol, optional
+    :type lora_config: LoraConfig, optional
     :param accelerator: Accelerate distributed-training handle, defaults to None
     :type accelerator: accelerate.Accelerator, optional
     :param wrap: Wrap models for distributed training on construction, defaults to
@@ -111,7 +108,7 @@ class SFT(LLMAlgorithm):
         micro_batch_size_per_gpu: int | None = None,
         reduce_memory_peak: bool = False,
         device: str = "cpu",
-        lora_config: LoraConfigProtocol | None = None,
+        lora_config: LoraConfig | None = None,
         accelerator: Accelerator | None = None,
         wrap: bool = True,
         clone: bool = False,

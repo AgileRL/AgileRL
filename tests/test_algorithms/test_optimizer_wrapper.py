@@ -1104,7 +1104,7 @@ class TestOptimizerWrapper:
 
 
 def test_optimizer_wrapper_fallback_peft_type_when_no_llm_dependencies():
-    """Test that optimizer_wrapper sets PeftModelType to string when HAS_LLM_DEPENDENCIES is False."""
+    """Test that optimizer_wrapper sets PeftModel to string when HAS_LLM_DEPENDENCIES is False."""
     original_module = sys.modules.pop("agilerl.algorithms.core.optimizer_wrapper", None)
 
     try:
@@ -1113,7 +1113,7 @@ def test_optimizer_wrapper_fallback_peft_type_when_no_llm_dependencies():
             # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
             import agilerl.algorithms.core.optimizer_wrapper as optimizer_wrapper_reloaded
 
-            assert optimizer_wrapper_reloaded.PeftModelType == "PeftModel"
+            assert optimizer_wrapper_reloaded.PeftModel == "PeftModel"
     finally:
         # Restore original module to avoid affecting other tests
         sys.modules["agilerl.algorithms.core.optimizer_wrapper"] = original_module
@@ -1125,7 +1125,7 @@ def test_optimizer_wrapper_peft_type_when_llm_dependencies_available():
         with patch("agilerl.HAS_LLM_DEPENDENCIES", True):
             import agilerl.algorithms.core.optimizer_wrapper as optimizer_wrapper_reloaded
 
-            assert optimizer_wrapper_reloaded.PeftModelType.__name__ == "PeftModel"
+            assert optimizer_wrapper_reloaded.PeftModel.__name__ == "PeftModel"
     finally:
         sys.modules["agilerl.algorithms.core.optimizer_wrapper"] = original_module
 

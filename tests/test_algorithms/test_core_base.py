@@ -1503,6 +1503,8 @@ def _make_llm_agent(
     agent.optimizer.optimizer.param_groups = [{"lr": 1e-4}]
     agent.lr_scheduler = None
     agent.use_vllm = False
+    agent.max_output_tokens = None
+    agent.max_model_len = 512
     agent.temperature = 1.0
     agent.registry = MagicMock()
     agent.registry.hooks = []
@@ -3128,7 +3130,12 @@ class TestLLMConfigureVllmAcceleratorPaths:
         agent.pretrained_model_name_or_path = "mock-model"
 
         mock_llm_instance = MagicMock()
-        with patch("agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance):
+        with (
+            patch("agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance),
+            patch.object(
+                LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
+            ),
+        ):
             agent._configure_vllm()
         assert agent.llm is mock_llm_instance
         acc.wait_for_everyone.assert_called()
@@ -3148,6 +3155,9 @@ class TestLLMConfigureVllmAcceleratorPaths:
         mock_llm_instance = MagicMock()
         with (
             patch("agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance),
+            patch.object(
+                LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
+            ),
             patch(
                 "torch.distributed.new_subgroups_by_enumeration",
                 return_value=(MagicMock(), MagicMock()),
@@ -3176,6 +3186,9 @@ class TestLLMConfigureVllmAcceleratorPaths:
                 "agilerl.algorithms.core.base.LLM",
                 side_effect=ValueError("unsupported backend"),
             ),
+            patch.object(
+                LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
+            ),
             patch.dict(os.environ, {"VLLM_ATTENTION_BACKEND": "FLASH_ATTN"}),
         ):
             with pytest.raises(ValueError, match="VLLM_ATTENTION_BACKEND"):
@@ -3202,6 +3215,9 @@ class TestLLMConfigureVllmAcceleratorPaths:
             patch(
                 "agilerl.algorithms.core.base.LLM",
                 side_effect=ValueError("other error"),
+            ),
+            patch.object(
+                LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
             ),
             patch.dict(os.environ, env, clear=True),
         ):
