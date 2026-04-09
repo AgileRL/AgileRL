@@ -20,6 +20,7 @@ from agilerl.utils.utils import create_population
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
 
+
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
     raw_dataset = (
         load_dataset(dataset_name, split="train").shuffle(seed=42).select(range(50000))
@@ -163,7 +164,7 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
-    with open("configs/training/llm_finetuning/ppo_llm.yaml") as file:
+    with open("configs/training/llm_finetuning/reinforce_llm.yaml") as file:
         config = yaml.safe_load(file)
     init_hp = config["INIT_HP"]
     mut_p = config["MUTATION_PARAMS"]

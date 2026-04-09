@@ -26,7 +26,8 @@ class DPO(LLMAlgorithm):
     :type model_name: str, optional
     :param actor_network: HuggingFace LLM
     :type actor_network: PreTrainedModelProtocol
-    :param model_config: Model configuration, to be used when creating the model from a name or path
+    :param model_config: Model configuration, to be used when creating the model from a name or path.
+    :type model_config: dict[str, Any] | None
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
@@ -100,9 +101,7 @@ class DPO(LLMAlgorithm):
         use_liger_loss: bool = False,
     ) -> None:
         device = (
-            f"cuda:{accelerator.process_index}"
-            if accelerator is not None
-            else device
+            f"cuda:{accelerator.process_index}" if accelerator is not None else device
         )
         super().__init__(
             index=index,
@@ -255,7 +254,7 @@ class DPO(LLMAlgorithm):
     def _dpo_loss(
         self,
         batch_size: int,
-        minibatch_idxs: torch.Tensor,
+        minibatch_idxs: np.ndarray,
         chosen_input_ids: torch.Tensor,
         chosen_attention_mask: torch.Tensor,
         rejected_input_ids: torch.Tensor,
@@ -270,8 +269,8 @@ class DPO(LLMAlgorithm):
 
         :param batch_size: Batch size
         :type batch_size: int
-        :param minibatch_idxs: Minibatch indices
-        :type minibatch_idxs: torch.Tensor
+        :param minibatch_idxs: Indices selecting rows for this minibatch.
+        :type minibatch_idxs: numpy.ndarray
         :param chosen_input_ids: Chosen input IDs
         :type chosen_input_ids: torch.Tensor
         :param chosen_attention_mask: Chosen attention mask
@@ -354,18 +353,22 @@ class DPO(LLMAlgorithm):
         chosen_mask: torch.Tensor,
         rejected_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Calculate the DPO loss.xw.
+        """Calculate the DPO loss (standard PyTorch path, summed log-probs per sequence).
 
-        :param chosen_mask: Mask for the prompt and padding tokens of the chosen completions
-        :type chosen_mask: torch.Tensor
-        :param rejected_mask: Mask for the prompt and padding tokens of the rejected completions
-        :type rejected_mask: torch.Tensor
-        :param chosen_log_probs: Log probabilities of the chosen completions
+        :param chosen_log_probs: Policy log-probs for chosen completions ``[B, seq_len-1]``.
         :type chosen_log_probs: torch.Tensor
-        :param rejected_log_probs: Log probabilities of the rejected completions
+        :param rejected_log_probs: Policy log-probs for rejected completions ``[B, seq_len-1]``.
         :type rejected_log_probs: torch.Tensor
-        :param ref_chosen_log_probs: Log probabilities of the chosen completions using the reference model
-
+        :param ref_chosen_log_probs: Reference log-probs for chosen ``[B, seq_len-1]``.
+        :type ref_chosen_log_probs: torch.Tensor
+        :param ref_rejected_log_probs: Reference log-probs for rejected ``[B, seq_len-1]``.
+        :type ref_rejected_log_probs: torch.Tensor
+        :param chosen_mask: Mask over completion tokens (shifted) for chosen.
+        :type chosen_mask: torch.Tensor
+        :param rejected_mask: Mask over completion tokens (shifted) for rejected.
+        :type rejected_mask: torch.Tensor
+        :return: Tuple of ``(loss, implicit_chosen_reward, implicit_rejected_reward)``.
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         # Mask and sum the logprobs
         assert chosen_log_probs.shape == chosen_mask.shape, (
@@ -432,7 +435,15 @@ class DPO(LLMAlgorithm):
         lm_head_bias = lm_head.bias
 
         def _get_hidden(ids, attn_mask):
-            """Run forward pass; capture the input to lm_head via a pre-hook."""
+            """Run a forward pass and return hidden states fed into the language-model head.
+
+            :param ids: Token IDs ``[batch, seq_len]``.
+            :type ids: torch.Tensor
+            :param attn_mask: Attention mask ``[batch, seq_len]``.
+            :type attn_mask: torch.Tensor
+            :return: Hidden states before the LM head ``[batch, seq_len, hidden]``.
+            :rtype: torch.Tensor
+            """
             captured = []
             hook = lm_head.register_forward_pre_hook(
                 lambda m, inputs: captured.append(inputs[0])
@@ -522,14 +533,14 @@ class DPO(LLMAlgorithm):
         log_probs: torch.Tensor,
         ref_log_probs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Calculate the preference reward for the chosen and rejected completions.
+        """Compute the implicit reward ``beta * (log pi - log pi_ref)`` per sequence.
 
-        :param log_probs: Log probabilities of the completions
+        :param log_probs: Summed log-probabilities under the policy (1-D per batch row).
         :type log_probs: torch.Tensor
-        :param ref_log_probs: Log probabilities of the completions using the reference model
+        :param ref_log_probs: Summed log-probabilities under the reference policy.
         :type ref_log_probs: torch.Tensor
-        :return: Implicit reward for the chosen and rejected completions
-        :rtype: tuple[torch.Tensor, torch.Tensor]
+        :return: Implicit reward tensor (same shape as ``log_probs``).
+        :rtype: torch.Tensor
         """
         implicit_reward = log_probs - ref_log_probs
         return self.beta * implicit_reward
@@ -537,11 +548,11 @@ class DPO(LLMAlgorithm):
     def test(self, env: PreferenceGym, loop: int = 1) -> torch.Tensor:
         """Return the fitness (test) score tensor of the agent.
 
-        :param env: The environment to be tested in
-        :type env: PreferenceGym environment
-        :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
-        :type loop: int, optional
-        :return: Test score tensor of the agent
+        :param env: Preference dataset environment with ``reset``, ``step``, and ``eval_mode``.
+        :type env: PreferenceGym
+        :param loop: Number of evaluation passes over the test split.
+        :type loop: int
+        :return: Scalar margin tensor from the final iteration (see implementation).
         :rtype: torch.Tensor
         """
         with env.eval_mode(), torch.no_grad():

@@ -34,15 +34,23 @@ try:
 except ImportError:
     LoraLayer = None  # type: ignore[assignment, misc]
 
-_CACHE_ATTR = "_fused_lora_layers"
-
 
 def _fused_routing_pre_hook(
     module: nn.Module,
     args: tuple,
     kwargs: dict,
 ) -> tuple[tuple, dict]:
-    """Forward pre-hook that injects ``adapter_names`` when fused routing is active."""
+    """Forward pre-hook that injects ``adapter_names`` when fused routing is active.
+
+    :param module: The LoRA layer about to run ``forward``.
+    :type module: nn.Module
+    :param args: Positional arguments passed to ``forward``.
+    :type args: tuple
+    :param kwargs: Keyword arguments passed to ``forward``.
+    :type kwargs: dict
+    :return: ``args`` unchanged and ``kwargs`` possibly updated with ``adapter_names``.
+    :rtype: tuple[tuple, dict]
+    """
     routing = getattr(module, "_fused_adapter_routing", None)
     if routing is not None:
         kwargs["adapter_names"] = routing
@@ -50,8 +58,16 @@ def _fused_routing_pre_hook(
 
 
 def _get_cached_lora_layers(model: nn.Module) -> list[nn.Module]:
-    """Return the cached list of LoRA layers, falling back to a full traversal."""
-    cached = getattr(model, _CACHE_ATTR, None)
+    """Return the cached list of LoRA layers, falling back to a full traversal.
+
+    :param model: Root module that may store ``_fused_lora_layers`` after
+        ``patch_lora_for_fused_forward`` runs.
+    :type model: nn.Module
+    :return: All ``LoraLayer`` instances under ``model``, or an empty list if PEFT
+        is not installed.
+    :rtype: list[nn.Module]
+    """
+    cached = getattr(model, "_fused_lora_layers", None)
     if cached is not None:
         return cached
     if LoraLayer is None:
@@ -81,6 +97,9 @@ def patch_lora_for_fused_forward(model: nn.Module) -> None:
 
     :param model: A ``PeftModel`` (or any ``nn.Module`` containing
         ``LoraLayer`` sub-modules).
+    :type model: nn.Module
+    :return: ``None``
+    :rtype: None
     """
     if LoraLayer is None:
         return
@@ -103,15 +122,25 @@ def set_fused_adapter_routing(model: nn.Module, routing: list[str]) -> None:
     """Activate fused adapter routing on all LoRA layers.
 
     :param model: The model whose LoRA layers should use fused routing.
-    :param routing: A list of adapter names, one per sample in the batch.
-        For example ``["actor"] * B + ["critic"] * B`` when the batch is
-        the concatenation of actor and critic inputs.
+    :type model: nn.Module
+    :param routing: Adapter names, one per row of the fused batch (e.g.
+        ``["actor"] * B + ["critic"] * B`` when the batch concatenates actor and
+        critic inputs).
+    :type routing: list[str]
+    :return: ``None``
+    :rtype: None
     """
     for module in _get_cached_lora_layers(model):
         module._fused_adapter_routing = routing  # type: ignore[attr-defined]
 
 
 def clear_fused_adapter_routing(model: nn.Module) -> None:
-    """Deactivate fused routing, restoring standard single-adapter forward."""
+    """Deactivate fused routing, restoring standard single-adapter forward.
+
+    :param model: The model whose LoRA layers should clear fused routing.
+    :type model: nn.Module
+    :return: ``None``
+    :rtype: None
+    """
     for module in _get_cached_lora_layers(model):
         module._fused_adapter_routing = None  # type: ignore[attr-defined]

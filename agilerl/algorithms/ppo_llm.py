@@ -91,9 +91,7 @@ class PPO(LLMAlgorithm):
     ) -> None:
 
         device = (
-            f"cuda:{accelerator.process_index}"
-            if accelerator is not None
-            else device
+            f"cuda:{accelerator.process_index}" if accelerator is not None else device
         )
         super().__init__(
             index=index,
@@ -209,13 +207,20 @@ class PPO(LLMAlgorithm):
             self.llm.wake_up()
             self._move_model_to_vllm()
 
-
     def get_action(
         self,
         obs: LLMObsType,
         training: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Generate completion tokens for each prompt in the batch.
 
+        :param obs: A single prompt dict or a list of HF-style prompt dicts.
+        :type obs: LLMObsType
+        :param training: If ``False``, use near-deterministic decoding where applicable.
+        :type training: bool
+        :return: Per-prompt completion token IDs and masks over generated positions.
+        :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
+        """
         prompt_batch = [obs] if isinstance(obs, dict) else obs
 
         with self.select_adapter("actor"):
@@ -273,12 +278,15 @@ class PPO(LLMAlgorithm):
     ) -> tuple[float, float, float, float, float]:
         """Update actor and critic adapters using turn-level PPO objectives.
 
-        :param experiences: Tuple of (completion_ids, action_masks, rewards).
-            For single-turn, rewards is a flat list/tensor of scalars.
-            For multi-turn, rewards should be [batch, max_turns] per-turn rewards.
-        :param turn_ids: Optional [batch, seq_len] tensor mapping each token
-            to its turn index (0-indexed). -1 for non-action tokens.
-            When None, defaults to all action tokens belonging to turn 0.
+        :param experiences: ``(completion_ids, action_masks, rewards)``. For
+            single-turn, ``rewards`` is a flat tensor of scalars; for multi-turn,
+            shape ``[batch, max_turns]`` per-turn rewards.
+        :type experiences: ExperiencesType
+        :param turn_ids: Optional ``[batch, seq_len - 1]`` tensor of turn indices;
+            ``-1`` for non-action tokens. If ``None``, all action tokens are turn ``0``.
+        :type turn_ids: torch.Tensor | None
+        :return: ``(mean_loss, mean_kl, mean_pg_loss, mean_vf_loss, mean_entropy)``.
+        :rtype: tuple[float, float, float, float, float]
         """
         with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards = stack_and_pad_experiences(
@@ -490,6 +498,14 @@ class PPO(LLMAlgorithm):
         every episode.
 
         Any other env must follow the ``ReasoningGym`` batching contract above.
+
+        :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
+            :class:`~agilerl.wrappers.gem_wrappers.TokenObservationWrapper`.
+        :type env: ReasoningGym | TokenObservationWrapper
+        :param loop: Number of outer test iterations (dataloader passes or episodes).
+        :type loop: int
+        :return: Concatenated per-step rewards from the test loop.
+        :rtype: torch.Tensor
         """
         eval_context = getattr(env, "eval_mode", nullcontext)
         with eval_context(), torch.inference_mode():
@@ -549,6 +565,17 @@ class PPO(LLMAlgorithm):
         Each generation turn is treated as a single RL action.  Per-turn values
         are the mean of critic values over the turn's action tokens, and gamma
         discounts between turns (not between tokens within a turn).
+
+        :param rewards: Per-token (penalised) rewards ``[batch, seq_len]``.
+        :type rewards: torch.Tensor
+        :param values: Per-token critic values ``[batch, seq_len]``.
+        :type values: torch.Tensor
+        :param action_mask: Bool mask of valid action positions ``[batch, seq_len]``.
+        :type action_mask: torch.Tensor
+        :param turn_ids: Turn index per token ``[batch, seq_len]``; ``-1`` for padding.
+        :type turn_ids: torch.Tensor
+        :return: Tuple of ``(token_returns, token_advantages)``, each ``[batch, seq_len]``.
+        :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         batch_size = values.shape[0]
         num_turns = turn_ids.max().item() + 1
@@ -601,9 +628,14 @@ class PPO(LLMAlgorithm):
     ) -> torch.Tensor:
         """Assign per-turn rewards to each action token based on turn_ids.
 
-        :param action_mask: [batch, seq_len] bool mask of action positions.
-        :param rewards: [batch, max_turns] per-turn reward scalars.
-        :param turn_ids: [batch, seq_len] turn index per token (-1 for non-action).
+        :param action_mask: Bool mask of action positions ``[batch, seq_len]``.
+        :type action_mask: torch.Tensor
+        :param rewards: Per-turn scalars ``[batch, max_turns]``.
+        :type rewards: torch.Tensor
+        :param turn_ids: Turn index per token ``[batch, seq_len]``; ``-1`` for non-action.
+        :type turn_ids: torch.Tensor
+        :return: Per-token rewards ``[batch, seq_len]``.
+        :rtype: torch.Tensor
         """
         num_turns = rewards.shape[1]
         token_rewards = torch.zeros_like(action_mask, dtype=torch.float)
@@ -619,6 +651,19 @@ class PPO(LLMAlgorithm):
         eval_mode: bool = False,
         attention_mask: torch.Tensor | None = None,
     ):
+        """Compute critic values for each prompt token (excluding the last logits position).
+
+        :param ids: Token IDs ``[batch, seq_len]``.
+        :type ids: torch.Tensor
+        :param batch_size: Micro-batch size for forward passes.
+        :type batch_size: int
+        :param eval_mode: If ``True``, run the critic in eval mode (no dropout).
+        :type eval_mode: bool
+        :param attention_mask: Optional mask matching ``ids``; defaults to non-pad tokens.
+        :type attention_mask: torch.Tensor | None
+        :return: Values aligned to next-token prediction, shape ``[batch, seq_len - 1]``.
+        :rtype: torch.Tensor
+        """
         with self.select_adapter("critic"):
             # With DeepSpeed we cannot split backward into separate actor/critic
             # passes (engine.backward triggers allreduce per call).  Instead we

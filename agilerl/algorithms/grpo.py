@@ -148,9 +148,7 @@ class GRPO(LLMAlgorithm):
     ) -> None:
 
         device = (
-            f"cuda:{accelerator.process_index}"
-            if accelerator is not None
-            else device
+            f"cuda:{accelerator.process_index}" if accelerator is not None else device
         )
         super().__init__(
             index=index,
@@ -218,10 +216,12 @@ class GRPO(LLMAlgorithm):
             raise ValueError(
                 msg,
             )
-        self.max_output_tokens = max_output_tokens if max_output_tokens is not None else max_model_len
+        self.max_output_tokens = (
+            max_output_tokens if max_output_tokens is not None else max_model_len
+        )
         self.min_output_tokens = min_output_tokens
         self.max_model_len = (
-            max_model_len if max_model_len is not None else max_output_tokens 
+            max_model_len if max_model_len is not None else max_output_tokens
         )
         self.generation_config = GenerationConfig(
             do_sample=True,
@@ -258,19 +258,18 @@ class GRPO(LLMAlgorithm):
             self.llm.wake_up()
             self._move_model_to_vllm()
 
-
     def get_action(
         self,
         obs: LLMObsType,
         training: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Return the next action to take in the environment.
+        """Return generated completions for each prompt (GRPO groups when training).
 
-        :param obs: Environment observation, or multiple observations in a batch
-        :type obs: numpy.ndarray[float]
-        :param training: Flag to indicate training mode, defaults to True
-        :type training: bool, optional
-        :return: Completion IDs and action masks
+        :param obs: List of HF-style prompt dicts (this implementation mutates them).
+        :type obs: LLMObsType
+        :param training: If ``True``, duplicate each prompt ``group_size`` times for GRPO.
+        :type training: bool
+        :return: Completion token IDs and per-sequence action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
         group_size = self.group_size if training else 1
@@ -323,8 +322,10 @@ class GRPO(LLMAlgorithm):
     def learn(self, experiences: ExperiencesType) -> tuple[float, float]:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: Batched completion_ids, action_masks and rewards
+        :param experiences: ``(completion_ids, action_masks, rewards)`` stacked batch.
         :type experiences: ExperiencesType
+        :return: ``(mean_loss, mean_kl)`` averaged over the update.
+        :rtype: tuple[float, float]
         """
         with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards = stack_and_pad_experiences(
@@ -376,12 +377,12 @@ class GRPO(LLMAlgorithm):
     ) -> torch.Tensor:
         """Return fitness (test) score tensor of llm on test sub-set.
 
-        :param env: The environment to be tested in
-        :type env: ReasoningGym environment
-        :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
-        :type loop: int, optional
-        :return: Mean test score of the agent
-        :rtype: float
+        :param env: Dataset-style environment with ``reset``, ``step``, and ``eval_mode``.
+        :type env: ReasoningGym
+        :param loop: Number of outer test iterations over ``reset`` / ``step``.
+        :type loop: int
+        :return: Concatenated reward tensor from the test loop.
+        :rtype: torch.Tensor
         """
         with env.eval_mode(), torch.no_grad():
             prompts = env.reset()
@@ -588,7 +589,19 @@ class GRPO(LLMAlgorithm):
         lm_head_bias = lm_head.bias
 
         def _get_hidden(input_ids, attention_mask, use_cache=False, position_ids=None):
-            """Run forward pass; capture the input to lm_head via a pre-hook."""
+            """Run a forward pass and return hidden states fed into the language-model head.
+
+            :param input_ids: Token IDs ``[batch, seq_len]``.
+            :type input_ids: torch.Tensor
+            :param attention_mask: Attention mask ``[batch, seq_len]``.
+            :type attention_mask: torch.Tensor
+            :param use_cache: Passed to the underlying model ``forward``.
+            :type use_cache: bool
+            :param position_ids: Optional explicit position IDs.
+            :type position_ids: torch.Tensor | None
+            :return: Hidden states immediately before the LM head ``[batch, seq_len, hidden]``.
+            :rtype: torch.Tensor
+            """
             captured = []
             hook = lm_head.register_forward_pre_hook(
                 lambda m, inputs: captured.append(inputs[0])

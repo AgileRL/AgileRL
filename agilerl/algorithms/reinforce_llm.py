@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
@@ -27,6 +28,7 @@ from agilerl.utils.llm_utils import (
     prepare_prompt_hf_generate,
     stitch_completion_after_windowed_hf_generate,
 )
+from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
@@ -165,9 +167,7 @@ class REINFORCE(LLMAlgorithm):
     ) -> None:
 
         device = (
-            f"cuda:{accelerator.process_index}"
-            if accelerator is not None
-            else device
+            f"cuda:{accelerator.process_index}" if accelerator is not None else device
         )
         super().__init__(
             index=index,
@@ -275,7 +275,15 @@ class REINFORCE(LLMAlgorithm):
         obs: LLMObsType,
         training: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Generate completion tokens for each prompt in the batch.
 
+        :param obs: A single prompt dict or a list of HF-style prompt dicts.
+        :type obs: LLMObsType
+        :param training: If ``False``, use near-deterministic decoding where applicable.
+        :type training: bool
+        :return: Per-prompt completion token IDs and masks over generated positions.
+        :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
+        """
         prompt_batch = [obs] if isinstance(obs, dict) else obs
 
         with self.select_adapter("actor"):
@@ -333,14 +341,17 @@ class REINFORCE(LLMAlgorithm):
     ) -> tuple[float, float, float, float, float]:
         """Update actor using REINFORCE with Return Batch Normalization.
 
-        :param experiences: Tuple of (completion_ids, action_masks, rewards).
-            For single-turn, rewards is a flat list/tensor of scalars.
-            For multi-turn, rewards should be [batch, max_turns] per-turn rewards.
-        :param tokenizer: Tokenizer (unused, kept for API compatibility with LLMPPO).
-        :param turn_ids: Optional [batch, seq_len] tensor mapping each token
-            to its turn index (0-indexed). -1 for non-action tokens.
-            When None, defaults to all action tokens belonging to turn 0.
-        :return: (loss, kl, pg_loss, 0.0, entropy) — critic_loss is always 0.
+        :param experiences: ``(completion_ids, action_masks, rewards)``. For
+            single-turn, ``rewards`` is a flat tensor of scalars; for multi-turn,
+            shape ``[batch, max_turns]`` per-turn rewards.
+        :type experiences: ExperiencesType
+        :param turn_ids: Optional ``[batch, seq_len - 1]`` tensor of turn indices per
+            token; ``-1`` for non-action tokens. If ``None``, all action tokens are
+            treated as turn ``0``.
+        :type turn_ids: torch.Tensor | None
+        :return: ``(mean_loss, mean_kl, mean_pg_loss, 0.0, mean_entropy)``. The
+            fourth value is always ``0.0`` (no critic).
+        :rtype: tuple[float, float, float, float, float]
         """
         with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards = stack_and_pad_experiences(
@@ -476,20 +487,64 @@ class REINFORCE(LLMAlgorithm):
 
     def test(
         self,
-        env: ReasoningGym,
+        env: ReasoningGym | TokenObservationWrapper,
         loop: int = 1,
     ) -> torch.Tensor:
-        """Return fitness (test) score tensor of llm on test sub-set."""
-        with env.eval_mode(), torch.inference_mode():
-            prompts = env.reset()
-            rewards = []
-            for _ in range(loop):
-                completion_ids, _ = self.get_action(prompts, training=False)
-                next_prompts, reward = env.step(completion_ids)
-                prompts = next_prompts
-                rewards.append(reward)
-        reward_tensor = torch.cat(rewards)
-        mean_fit = torch.mean(reward_tensor).item()
+        """Return fitness (test) score tensor of llm on test sub-set.
+
+        Matches :meth:`agilerl.algorithms.ppo_llm.PPO.test` env handling.
+
+        :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
+            :class:`~agilerl.wrappers.gem_wrappers.TokenObservationWrapper`.
+        :type env: ReasoningGym | TokenObservationWrapper
+        :param loop: Number of outer test iterations (dataloader passes or episodes).
+        :type loop: int
+        :return: Concatenated per-step rewards from the test loop.
+        :rtype: torch.Tensor
+        """
+        eval_context = getattr(env, "eval_mode", nullcontext)
+        with eval_context(), torch.inference_mode():
+            if isinstance(env, ReasoningGym):
+                prompts = env.reset()
+                rewards = []
+                for _ in range(loop):
+                    completion_ids, _ = self.get_action(prompts, training=False)
+                    next_prompts, reward = env.step(completion_ids)
+                    prompts = next_prompts
+                    rewards.append(reward)
+                reward_tensor = torch.cat(rewards)
+            elif isinstance(env, TokenObservationWrapper):
+                all_rewards: list[torch.Tensor] = []
+                for _ in range(loop):
+                    prompt_dict, _info = env.reset()
+                    terminated, truncated = False, False
+
+                    while not terminated and not truncated:
+                        completion_ids, _ = self.get_action(
+                            [prompt_dict],
+                            training=False,
+                        )
+                        full = completion_ids[0]
+                        prompt_dict, reward, terminated, truncated, _step_info = (
+                            env.step(
+                                full,
+                            )
+                        )
+                        all_rewards.append(
+                            torch.tensor(
+                                [float(reward)],
+                                dtype=torch.float32,
+                                device=full.device,
+                            ),
+                        )
+                reward_tensor = torch.cat(all_rewards)
+            else:
+                msg = (
+                    "env must be a ReasoningGym (or subclass) or "
+                    f"TokenObservationWrapper; got {type(env).__name__}"
+                )
+                raise TypeError(msg)
+        mean_fit = torch.mean(reward_tensor.float()).item()
         self.fitness.append(mean_fit)
         return reward_tensor
 
@@ -506,12 +561,17 @@ class REINFORCE(LLMAlgorithm):
         z-scores all per-turn returns across the batch to produce advantages.
         Advantages are broadcast back to token level for the policy gradient.
 
-        :param rewards: [batch, seq_len] per-token rewards (already assigned
-            from per-turn rewards by ``_compute_token_rewards``).
-        :param action_mask: [batch, seq_len] float mask of action positions.
-        :param turn_ids: [batch, seq_len] turn index per token, -1 for non-action.
-        :param eps: Epsilon for numerical stability.
-        :return: [batch, seq_len] token-level advantages.
+        :param rewards: Per-token rewards ``[batch, seq_len]`` (from
+            :meth:`_compute_token_rewards`).
+        :type rewards: torch.Tensor
+        :param action_mask: Mask of action positions ``[batch, seq_len]``.
+        :type action_mask: torch.Tensor
+        :param turn_ids: Turn index per token ``[batch, seq_len]``; ``-1`` for padding.
+        :type turn_ids: torch.Tensor
+        :param eps: Small constant added to the standard deviation when z-scoring.
+        :type eps: float
+        :return: Token-level advantages ``[batch, seq_len]``.
+        :rtype: torch.Tensor
         """
         batch_size = rewards.shape[0]
         num_turns = turn_ids.max().item() + 1
@@ -562,10 +622,14 @@ class REINFORCE(LLMAlgorithm):
     ) -> torch.Tensor:
         """Assign per-turn rewards to each action token based on turn_ids.
 
-        :param action_mask: [batch, seq_len] bool mask of action positions.
-        :param rewards: [batch, max_turns] per-turn reward scalars.
-        :param turn_ids: [batch, seq_len] turn index per token (-1 for non-action).
-        :return: [batch, seq_len] per-token rewards.
+        :param action_mask: Bool mask of action positions ``[batch, seq_len]``.
+        :type action_mask: torch.Tensor
+        :param rewards: Per-turn scalars ``[batch, max_turns]``.
+        :type rewards: torch.Tensor
+        :param turn_ids: Turn index per token ``[batch, seq_len]``; ``-1`` for non-action.
+        :type turn_ids: torch.Tensor
+        :return: Per-token rewards ``[batch, seq_len]``.
+        :rtype: torch.Tensor
         """
         num_turns = rewards.shape[1]
         token_rewards = torch.zeros_like(action_mask, dtype=torch.float)
@@ -579,7 +643,15 @@ class REINFORCE(LLMAlgorithm):
         log_probs: torch.Tensor,
         reference_log_probs: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute the per-token reverse-KL-style penalty term."""
+        """Compute the per-token reverse-KL-style penalty term.
+
+        :param log_probs: Current policy log-probabilities ``[batch, seq_len - 1]``.
+        :type log_probs: torch.Tensor
+        :param reference_log_probs: Reference policy log-probabilities, same shape.
+        :type reference_log_probs: torch.Tensor
+        :return: Per-token penalty values.
+        :rtype: torch.Tensor
+        """
         return (
             torch.exp(reference_log_probs - log_probs)
             - (reference_log_probs - log_probs)

@@ -877,7 +877,9 @@ def create_population(
                 min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
                 max_model_len=INIT_HP.get("MAX_MODEL_LEN"),
                 reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
-                use_memory_efficient_params=INIT_HP.get("USE_MEMORY_EFFICIENT_PARAMS", True),
+                use_memory_efficient_params=INIT_HP.get(
+                    "USE_MEMORY_EFFICIENT_PARAMS", True
+                ),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
                 cosine_lr_schedule_config=cosine_lr,
                 accelerator=accelerator,
@@ -946,6 +948,9 @@ def create_population(
                 max_model_len=INIT_HP.get("MAX_MODEL_LEN"),
                 reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
+                use_memory_efficient_params=INIT_HP.get(
+                    "USE_MEMORY_EFFICIENT_PARAMS", True
+                ),
                 cosine_lr_schedule_config=cosine_lr,
                 accelerator=accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
@@ -1397,6 +1402,7 @@ def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
             agent.accelerator, agent.lr_scheduler = LLMAlgorithm.update_lr(
                 **update_lr_kw
             )
+
 
 def _distributed_world_size(accelerator: Accelerator | None) -> int:
     """World size for batch accounting: prefer Accelerate, else torch.distributed."""

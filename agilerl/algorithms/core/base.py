@@ -2109,7 +2109,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.lr = lr
         self.lr_critic = lr_critic
         self.lora_config = lora_config
-        self.use_memory_efficient_params = use_memory_efficient_params 
+        self.use_memory_efficient_params = use_memory_efficient_params
         self.memory_efficient_params_context = (
             self._memory_efficient_params
             if use_memory_efficient_params
@@ -2154,7 +2154,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     stacklevel=2,
                 )
 
-        # FIXME we need to corret this seeding logic
+        # FIXME we need to correct this seeding logic
         if self.accelerator is not None:
             if self.accelerator.is_main_process:
                 seed = np.random.randint(0, 2**32 - 1)
@@ -2940,9 +2940,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 output = self.actor.forward(**model_kwargs)
 
             if isinstance(output, tuple):
-                # Handle case where value head is used
+                # Value-head models may return (loss, logits, value, ...); Peft/causal
+                # paths may return shorter tuples — only index when present.
                 logits = output[0]
-                value = output[2]
+                value = output[2] if len(output) > 2 else None
             else:
                 logits = output.logits
                 value = None
