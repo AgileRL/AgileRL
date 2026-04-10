@@ -46,8 +46,6 @@ class DPO(LLMAlgorithm):
     :type calc_position_embeddings: bool, optional
     :param micro_batch_size_per_gpu: Micro batch size per GPU, defaults to None
     :type micro_batch_size_per_gpu: int, optional
-    :param reduce_memory_peak: Flag to indicate if memory peak should be reduced, defaults to False
-    :type reduce_memory_peak: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param lora_config: Config for LoRA, defaults to None
@@ -88,7 +86,6 @@ class DPO(LLMAlgorithm):
         update_epochs: int = 1,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
-        reduce_memory_peak: bool = False,
         device: str = "cpu",
         lora_config: LoraConfigProtocol | None = None,
         accelerator: Accelerator | None = None,
@@ -109,7 +106,6 @@ class DPO(LLMAlgorithm):
             lr=lr,
             max_grad_norm=max_grad_norm,
             clone=clone,
-            reduce_memory_peak=reduce_memory_peak,
             calc_position_embeddings=calc_position_embeddings,
             seed=seed,
             pad_token_id=pad_token_id,
@@ -167,15 +163,15 @@ class DPO(LLMAlgorithm):
         self,
         experiences: ExperiencesType,
         training: bool = True,
-    ) -> tuple[float, float, float]:
+    ) -> dict[str, float]:
         """Update agent network parameters to learn from preference data.
 
         :param experiences: Batched chosen_input_ids, rejected_input_ids, chosen_attention_mask, rejected_attention_mask and rewards
         :type experiences: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
         :param training: Whether the agent is training or not
         :type training: bool
-        :return: mean loss, mean chosen reward, mean rejected reward
-        :rtype: tuple[float, float, float]
+        :return: Dict with keys ``mean_loss``, ``mean_chosen_reward``, ``mean_rejected_reward``.
+        :rtype: dict[str, float]
         """
         gc.collect()
         torch.cuda.empty_cache()
@@ -204,7 +200,11 @@ class DPO(LLMAlgorithm):
         num_samples = chosen_input_ids.shape[0]
         batch_size = min(num_samples, self.micro_batch_size_per_gpu)
         batch_idxs = np.arange(num_samples)
-        mean_loss, mean_chosen_reward, mean_rejected_reward = 0.0, 0.0, 0.0
+        learn_metrics = {
+            "mean_loss": 0.0,
+            "mean_chosen_reward": 0.0,
+            "mean_rejected_reward": 0.0,
+        }
         ref_rejected_log_probs, ref_chosen_log_probs = None, None
         if not self.use_liger_loss:
             with torch.no_grad():
@@ -243,13 +243,11 @@ class DPO(LLMAlgorithm):
                 )
                 if training:
                     self._backward_pass(loss)
-                mean_loss += loss.item()
-                mean_chosen_reward += chosen_reward.mean().item()
-                mean_rejected_reward += rejected_reward.mean().item()
-        mean_loss /= num_samples
-        mean_chosen_reward /= num_samples
-        mean_rejected_reward /= num_samples
-        return mean_loss, mean_chosen_reward, mean_rejected_reward
+                learn_metrics["mean_loss"] += loss.item()
+                learn_metrics["mean_chosen_reward"] += chosen_reward.mean().item()
+                learn_metrics["mean_rejected_reward"] += rejected_reward.mean().item()
+        updates = num_samples
+        return {key: value / updates for key, value in learn_metrics.items()}
 
     def _dpo_loss(
         self,
@@ -559,7 +557,9 @@ class DPO(LLMAlgorithm):
             prompts = env.reset()
             rewards = []
             for _ in range(loop):
-                _, chosen_reward, rejected_reward = self.learn(prompts, training=False)
+                learn_result = self.learn(prompts, training=False)
+                chosen_reward = learn_result["mean_chosen_reward"]
+                rejected_reward = learn_result["mean_rejected_reward"]
                 reward_margin = chosen_reward - rejected_reward
                 rewards.append(reward_margin)
                 prompts = env.step()

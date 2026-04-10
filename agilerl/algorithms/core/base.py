@@ -116,6 +116,8 @@ if HAS_LLM_DEPENDENCIES:
         move_params_to_cpu,
         move_params_to_gpu,
         stitch_completion_after_windowed_vllm_generate,
+        get_model_name_or_path,
+        align_deepspeed_lr,
     )
 
 __all__ = ["EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
@@ -1022,6 +1024,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             optimizer_cls = get_optimizer_cls(opt_dict[f"{name}_cls"])
             opt_networks = opt_dict[f"{name}_networks"]
             opt_lr = opt_dict[f"{name}_lr"]
+            use_llm_param_groups = opt_dict.get(f"{name}_use_llm_param_groups", False)
             networks = [getattr(self, net) for net in opt_networks]
             optimizer = OptimizerWrapper(
                 optimizer_cls=optimizer_cls,
@@ -1030,6 +1033,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 optimizer_kwargs=opt_kwargs,
                 network_names=opt_networks,
                 lr_name=opt_lr,
+                use_llm_param_groups=use_llm_param_groups,
+                lr_critic=getattr(self, "lr_critic", None),
             )
 
             # Load optimizer state
@@ -1921,8 +1926,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :type max_grad_norm: float
     :param clone: Whether to clone the model.
     :type clone: bool
-    :param reduce_memory_peak: Whether to reduce memory peak.
-    :type reduce_memory_peak: bool
     :param calc_position_embeddings: Whether to calculate position embeddings.
     :type calc_position_embeddings: bool
     :param seed: The seed.
@@ -1965,6 +1968,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         'reduce-overhead', or 'max-autotune'), defaults to None.
     :type torch_compiler: str | None, optional
     """
+    _separate_reference_adapter_deprecation_emitted = False
 
     def __init__(
         self,
@@ -1973,7 +1977,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         lr: float,
         max_grad_norm: float,
         clone: bool,
-        reduce_memory_peak: bool,
         calc_position_embeddings: bool,
         seed: int,
         pad_token_id: int,
@@ -2008,6 +2011,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             raise ValueError(
                 msg,
             )
+
         if (
             accelerator is not None
             and cosine_lr_schedule_config is not None
@@ -2020,77 +2024,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             cosine_lr_schedule_config = None
 
-        super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
-        self.gradient_checkpointing = gradient_checkpointing
-        self.zero_stage = None
-        self.reference_update_tracker = 0  # Updated every time the reference policy is updated which is updated each time we pass through the train dataset
-        self.calc_position_embeddings = calc_position_embeddings
-        self.pad_token_id = pad_token_id
-        self.pad_token = pad_token
-
-        if model_name is not None:
-            self.pretrained_model_name_or_path = model_name
-        elif hasattr(actor_network, "name_or_path"):
-            self.pretrained_model_name_or_path = actor_network.name_or_path
-        elif hasattr(actor_network, "pretrained_model") and hasattr(
-            actor_network.pretrained_model, "name_or_path"
-        ):
-            self.pretrained_model_name_or_path = (
-                actor_network.pretrained_model.name_or_path
-            )
-        elif hasattr(actor_network, "base_model") and hasattr(
-            actor_network.base_model, "name_or_path"
-        ):
-            self.pretrained_model_name_or_path = actor_network.base_model.name_or_path
-        elif hasattr(actor_network, "base_model") and hasattr(
-            actor_network.base_model, "pretrained_model"
-        ):
-            self.pretrained_model_name_or_path = (
-                actor_network.base_model.pretrained_model.name_or_path
-            )
-        else:
-            msg = "Actor network name or path not found."
-            raise ValueError(msg)
-
-        self.model_config = model_config
-
-        if not clone and reduce_memory_peak and micro_batch_size_per_gpu is not None:
-            msg = "Cannot specify micro_batch_size_per_gpu when reduce_memory_peak is True."
-            raise ValueError(
-                msg,
-            )
-
-        self._configure_batch_size(
-            batch_size,
-            clone,
-            reduce_memory_peak,
-            micro_batch_size_per_gpu,
-        )
-        self.batch_size = self.batch_size_per_process * (
-            self.accelerator.num_processes if self.accelerator is not None else 1
-        )
-        if (
-            self.accelerator is not None
-            and self.accelerator.state.deepspeed_plugin is not None
-            and self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
-                "optimizer",
-                None,
-            )
-            is not None
-        ):
-            optim_lr = self.accelerator.state.deepspeed_plugin.deepspeed_config[
-                "optimizer"
-            ]["params"]["lr"]
-            if optim_lr is not None and optim_lr != lr:
-                warnings.warn(
-                    "Argument 'lr' will be overwritten by the 'lr' value set in the deepspeed config.",
-                    stacklevel=2,
-                )
-                lr = optim_lr
-
         if lora_config is None and not isinstance(actor_network, PeftModelProtocol):
             warnings.warn(
-                "No LoRA config provided. AgileRL can only be used to finetune adapters at present. Using default LoRA configuration for RL finetuning.",
+                "No LoRA config provided. AgileRL can only be used to finetune adapters at present. "
+                "Using default LoRA configuration for RL finetuning: "
+                "r=16, lora_alpha=32, target_modules='all-linear', task_type='CAUSAL_LM', lora_dropout=0.05.",
                 stacklevel=2,
             )
             lora_config = LoraConfig(
@@ -2106,7 +2044,22 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 stacklevel=2,
             )
             lora_config.exclude_modules = ["lm_head"]
-        self.lr = lr
+
+        super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
+        self.gradient_checkpointing = gradient_checkpointing
+        self.zero_stage = None
+        self.reference_update_tracker = 0  # Updated every time the reference policy is updated which is updated each time we pass through the train dataset
+        self.calc_position_embeddings = calc_position_embeddings
+        self.pad_token_id = pad_token_id
+        self.pad_token = pad_token
+        self.pretrained_model_name_or_path = model_name if model_name is not None else get_model_name_or_path(actor_network)
+        self.model_config = model_config
+        self._configure_batch_size_per_process(
+            batch_size,
+            micro_batch_size_per_gpu,
+        )
+        self.batch_size = batch_size
+        self.lr = align_deepspeed_lr(lr, self.accelerator)
         self.lr_critic = lr_critic
         self.lora_config = lora_config
         self.use_memory_efficient_params = use_memory_efficient_params
@@ -2117,6 +2070,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
+        self._warn_separate_reference_adapter_deprecation()
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
         self.use_value_head = use_value_head
         if (
@@ -2133,9 +2087,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 "gradient_clipping"
             ] = max_grad_norm
             self.register_mutation_hook(self._sync_deepspeed_gradient_clipping)
-
         self.max_grad_norm = max_grad_norm
-        self.reduce_memory_peak = reduce_memory_peak
 
         if (
             self.accelerator is not None
@@ -2154,13 +2106,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     stacklevel=2,
                 )
 
-        # FIXME we need to correct this seeding logic
-        if self.accelerator is not None:
-            if self.accelerator.is_main_process:
-                seed = np.random.randint(0, 2**32 - 1)
-            if self.accelerator.num_processes > 1:
-                seed = broadcast_object_list([seed], from_process=0)[0]
-        self.rng = np.random.RandomState(seed)
+        if self.accelerator is not None and self.accelerator.num_processes > 1:
+            seed = broadcast_object_list([seed], from_process=0)[0]
+        process_seed = seed + (
+            self.accelerator.process_index if self.accelerator is not None else 0
+        )
+        self.rng = np.random.RandomState(process_seed)
         if self.accelerator is not None:
             set_seed(seed, device_specific=True)
         self._uses_deepspeed = (
@@ -2179,6 +2130,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         return cast("TorchObsType", observation)
 
+    def _warn_separate_reference_adapter_deprecation(self) -> None:
+        """Warn once per process about the pending adapter-mode deprecation."""
+        if not self.use_separate_reference_adapter:
+            return
+        if LLMAlgorithm._separate_reference_adapter_deprecation_emitted:
+            return
+        warnings.warn(
+            "`use_separate_reference_adapter=True` is deprecated and will be "
+            "removed in a future release. Prefer using LoRA adapters while "
+            "keeping the base model untouched.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
+        LLMAlgorithm._separate_reference_adapter_deprecation_emitted = True
+
     def save_checkpoint(self, path: str, weights_only: bool = True) -> None:
         """Override the save_checkpoint method to provide guidance on the correct method to use.
         :param path: Location to save checkpoint at
@@ -2187,32 +2153,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type weights_only: bool, optional.
         """
         if self.accelerator is not None:
-            if not weights_only:
-                self._save_distributed_actor(path, tag="save_checkpoint")
-            else:
-                selected_adapters = self._get_selected_adapter_names()
-                model_ref = self.accelerator.unwrap_model(self.actor)
-                with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
-                    model_ref.save_pretrained(
-                        save_directory=path,
-                        selected_adapters=selected_adapters,
-                        is_main_process=self.accelerator.is_main_process,
-                    )
+            self._save_model_checkpoint(path, weights_only=weights_only)
 
-        checkpoint_dict = get_checkpoint_dict(
-            self,
-            using_deepspeed=self.accelerator is not None,
-        )
-        checkpoint_dict["_weights_only"] = weights_only
-        checkpoint_dict.pop("llm", None)
-        checkpoint_dict.pop("tp_group", None)
-
-        if self.accelerator is None or self.accelerator.is_main_process:
-            torch.save(
-                checkpoint_dict,
-                path + "/attributes.pt",
-                pickle_module=dill,
-            )
+        checkpoint_dict = self._build_attribute_checkpoint(weights_only=weights_only)
+        self._save_attribute_checkpoint(path, checkpoint_dict)
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
@@ -2223,40 +2167,145 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type path: string
         """
         if self.accelerator is not None:
-            checkpoint = torch.load(path + "/attributes.pt", weights_only=False)
+            checkpoint = self._load_attribute_checkpoint(path)
             weights_only = checkpoint.get("_weights_only", False)
-
-            if weights_only:
-                if self.use_separate_reference_adapter:
-                    self._update_existing_adapter(
-                        path,
-                        "reference",
-                    )
-
-                self._update_existing_adapter(
-                    path,
-                    "actor",
-                )
-            else:
-                self._load_distributed_actor(path, tag="save_checkpoint")
-
-            for attr, value in checkpoint.items():
-                setattr(self, attr, value)
-
+            self._load_model_checkpoint(path, weights_only=weights_only)
+            self._restore_checkpoint_attributes(checkpoint)
             self.device = self.accelerator.device
-
-            self.optimizer = None
-            self.optimizer = OptimizerWrapper(
-                optimizer_cls=self._select_optim_class(),
-                networks=[self.actor],
-                network_names=["actor"],
-                lr=self.lr,
-                lr_critic=self.lr_critic,
-                use_llm_param_groups=True,
-                lr_name="lr" if self.lr_critic is None else ("lr_actor", "lr_critic"),
-            )
+            self._rebuild_optimizer_after_load()
         else:
             super().load_checkpoint(path + "/attributes.pt")
+
+    def _save_model_checkpoint(self, path: str, weights_only: bool) -> None:
+        """Save model state for distributed LLM checkpoints.
+
+        When ``weights_only`` is ``False``, saves DeepSpeed engine state via
+        :meth:`_save_distributed_actor`. Otherwise saves adapter weights only.
+
+        :param path: Directory where model state should be saved.
+        :type path: str
+        :param weights_only: Whether to save adapter weights only.
+        :type weights_only: bool
+        """
+        if not weights_only:
+            self._save_distributed_actor(path, tag="save_checkpoint")
+            return
+
+        selected_adapters = self._get_selected_adapter_names()
+        model_ref = self.accelerator.unwrap_model(self.actor)
+        with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
+            model_ref.save_pretrained(
+                save_directory=path,
+                selected_adapters=selected_adapters,
+                is_main_process=self.accelerator.is_main_process,
+            )
+
+    def _build_attribute_checkpoint(self, weights_only: bool) -> dict[str, Any]:
+        """Build non-model checkpoint payload.
+
+        This payload mirrors :func:`get_checkpoint_dict` and appends the
+        ``_weights_only`` flag used by load-time branching.
+
+        :param weights_only: Whether the corresponding model save was
+            adapter-only.
+        :type weights_only: bool
+        :return: Serialized attribute payload for ``attributes.pt``.
+        :rtype: dict[str, Any]
+        """
+        checkpoint_dict = get_checkpoint_dict(
+            self,
+            using_deepspeed=self.accelerator is not None,
+        )
+        checkpoint_dict["_weights_only"] = weights_only
+        checkpoint_dict.pop("llm", None)
+        checkpoint_dict.pop("tp_group", None)
+        return checkpoint_dict
+
+    def _save_attribute_checkpoint(
+        self,
+        path: str,
+        checkpoint_dict: dict[str, Any],
+    ) -> None:
+        """Persist non-model attributes to ``attributes.pt``.
+
+        In distributed runs only the main process writes the file.
+
+        :param path: Checkpoint directory path.
+        :type path: str
+        :param checkpoint_dict: Attribute payload to serialize.
+        :type checkpoint_dict: dict[str, Any]
+        """
+        if self.accelerator is not None and not self.accelerator.is_main_process:
+            return
+
+        checkpoint_path = Path(path) / "attributes.pt"
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            checkpoint_dict,
+            str(checkpoint_path),
+            pickle_module=dill,
+        )
+
+    def _load_attribute_checkpoint(self, path: str) -> dict[str, Any]:
+        """Load non-model attributes from ``attributes.pt``.
+
+        :param path: Checkpoint directory path.
+        :type path: str
+        :return: Deserialized attribute payload.
+        :rtype: dict[str, Any]
+        """
+        return torch.load(str(Path(path) / "attributes.pt"), weights_only=False)
+
+    def _load_model_checkpoint(self, path: str, weights_only: bool) -> None:
+        """Load model state for distributed LLM checkpoints.
+
+        When ``weights_only`` is ``False``, restores DeepSpeed engine state.
+        Otherwise restores adapter weights for actor (and reference when used).
+
+        :param path: Checkpoint directory path.
+        :type path: str
+        :param weights_only: Whether checkpoint contains adapter weights only.
+        :type weights_only: bool
+        """
+        if not weights_only:
+            self._load_distributed_actor(path, tag="save_checkpoint")
+            return
+
+        if self.use_separate_reference_adapter:
+            self._update_existing_adapter(
+                path,
+                "reference",
+            )
+        self._update_existing_adapter(
+            path,
+            "actor",
+        )
+
+    def _restore_checkpoint_attributes(self, checkpoint: dict[str, Any]) -> None:
+        """Restore algorithm attributes from payload.
+
+        :param checkpoint: Loaded attribute payload.
+        :type checkpoint: dict[str, Any]
+        """
+        for attr, value in checkpoint.items():
+            setattr(self, attr, value)
+
+    def _rebuild_optimizer_after_load(self) -> None:
+        """Recreate the optimizer wrapper after distributed checkpoint load.
+
+        Distributed load restores model weights/engine state first, then this
+        method rebuilds the wrapper metadata used by training paths.
+        """
+        self.optimizer = None
+        self.optimizer = OptimizerWrapper(
+            optimizer_cls=self._select_optim_class(),
+            networks=[self.actor],
+            network_names=["actor"],
+            lr=self.lr,
+            lr_critic=self.lr_critic,
+            use_llm_param_groups=True,
+            lr_name="lr" if self.lr_critic is None else ("lr_actor", "lr_critic"),
+        )
 
     @classmethod
     def load(
@@ -2367,102 +2416,161 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: EvolvableAlgorithm
         """
         with tempfile.TemporaryDirectory() as temp_dir:
-            # We need to use the same temp_dir for all processes, so we broadcast the temp_dir from the main process
-            if self.accelerator is not None and self.accelerator.num_processes > 1:
-                work_dir = broadcast_object_list([temp_dir], from_process=0)[0]
-            else:
-                work_dir = temp_dir
-
-            if (
-                self.accelerator is not None
-                and self.zero_stage is not None
-                and self.zero_stage >= 2
-            ):
-                self.accelerator.wait_for_everyone()
-                self._save_distributed_actor(f"{work_dir}/agent_{self.index}")
-                self.accelerator.wait_for_everyone()
-
-            input_args = EvolvableAlgorithm.inspect_attributes(
-                self,
-                input_args_only=True,
-            )
-            input_args["wrap"] = False
-            input_args["clone"] = True
-
-            actor = (
-                self.accelerator.unwrap_model(self.actor)
-                if self.accelerator is not None
-                else self.actor
-            )
-
-            if self.use_value_head:
-                inner_peft = actor.pretrained_model
-                inner_sd = None
-                if self.zero_stage is None or self.zero_stage < 2:
-                    inner_sd = clone_tensors_for_torch_save(inner_peft.state_dict())
-                cloned_inner = clone_llm(
-                    inner_peft, self.zero_stage, state_dict=inner_sd
-                )
-                cloned_model = type(actor)(cloned_inner)
-                cloned_model.v_head.load_state_dict(actor.v_head.state_dict())
-                cloned_model.is_peft_model = True
-            else:
-                actor_state_dict = None
-                if self.zero_stage is None or self.zero_stage < 2:
-                    actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
-                cloned_model = clone_llm(
-                    actor, self.zero_stage, state_dict=actor_state_dict
-                )
-            input_args["actor_network"] = cloned_model
-            input_args["accelerator"] = (
-                Accelerator() if self.accelerator is not None else None
-            )
-
-            clone = type(self)(**input_args)
+            work_dir = self._resolve_clone_work_dir(temp_dir)
+            self._save_clone_distributed_actor_state(work_dir)
+            clone = self._create_clone_instance()
             clone.mutation_hook()
-
-            # Clone attributes
-            accelerator = clone.accelerator
-            lr_scheduler = clone.lr_scheduler
-            cloned_lr_scheduler = clone.lr_scheduler
-            original_lr_scheduler = self.lr_scheduler
-            clone.lr_scheduler = None
-            self.lr_scheduler = None
-            if self.use_vllm:
-                original_llm = self.llm
-                cloned_llm = clone.llm
-                clone.llm = None
-                self.llm = None
-            clone = EvolvableAlgorithm.copy_attributes(self, clone)
-            clone.accelerator = accelerator
-            clone.lr_scheduler = lr_scheduler
-            clone.lr_scheduler = cloned_lr_scheduler
-            self.lr_scheduler = original_lr_scheduler
-            if self.use_vllm:
-                clone.llm = cloned_llm
-                self.llm = original_llm
-
-            if self.accelerator is None:
-                clone.optimizer.optimizer.load_state_dict(
-                    state_dict=self.optimizer.optimizer.state_dict(),
-                )
-                if self.lr_scheduler is not None:
-                    clone.lr_scheduler.load_state_dict(self.lr_scheduler.state_dict())
+            clone = self._copy_clone_attributes(clone)
+            self._restore_clone_optimizer_and_scheduler(clone)
 
             # Set the index
             if index is not None:
                 clone.index = index
 
             clone.wrap_models()
-
-            if self.zero_stage is not None and self.zero_stage >= 2:
-                clone.accelerator.wait_for_everyone()
-                clone._load_distributed_actor(f"{work_dir}/agent_{self.index}")
-                clone.accelerator.wait_for_everyone()
-            elif self.accelerator is not None:
-                self.accelerator.wait_for_everyone()
+            self._load_clone_distributed_actor_state(clone, work_dir)
 
         return clone
+
+    def _resolve_clone_work_dir(self, temp_dir: str) -> str:
+        """Resolve a clone workspace path visible to all ranks.
+
+        :param temp_dir: Local temporary directory path.
+        :type temp_dir: str
+        :return: Shared working directory path for clone artifacts.
+        :rtype: str
+        """
+        if self.accelerator is not None and self.accelerator.num_processes > 1:
+            return broadcast_object_list([temp_dir], from_process=0)[0]
+        return temp_dir
+
+    def _save_clone_distributed_actor_state(self, work_dir: str) -> None:
+        """Save distributed actor state for ZeRO-2/3 clone workflows.
+
+        :param work_dir: Shared clone workspace directory.
+        :type work_dir: str
+        """
+        if (
+            self.accelerator is None
+            or self.zero_stage is None
+            or self.zero_stage < 2
+        ):
+            return
+
+        self.accelerator.wait_for_everyone()
+        self._save_distributed_actor(f"{work_dir}/agent_{self.index}")
+        self.accelerator.wait_for_everyone()
+
+    def _create_clone_instance(self) -> Self:
+        """Instantiate a clone with cloned actor weights and runtime args.
+
+        :return: Newly constructed clone instance.
+        :rtype: Self
+        """
+        input_args = EvolvableAlgorithm.inspect_attributes(
+            self,
+            input_args_only=True,
+        )
+        input_args["wrap"] = False
+        input_args["clone"] = True
+        input_args["actor_network"] = self._clone_actor_network()
+        input_args["accelerator"] = (
+            Accelerator() if self.accelerator is not None else None
+        )
+        return type(self)(**input_args)
+
+    def _clone_actor_network(self) -> PreTrainedModelProtocol:
+        """Clone actor network while preserving value-head state when enabled.
+
+        :return: Cloned actor network suitable for clone instantiation.
+        :rtype: PreTrainedModelProtocol
+        """
+        actor = (
+            self.accelerator.unwrap_model(self.actor)
+            if self.accelerator is not None
+            else self.actor
+        )
+
+        if self.use_value_head:
+            inner_peft = actor.pretrained_model
+            inner_sd = None
+            if self.zero_stage is None or self.zero_stage < 2:
+                inner_sd = clone_tensors_for_torch_save(inner_peft.state_dict())
+            cloned_inner = clone_llm(
+                inner_peft, self.zero_stage, state_dict=inner_sd
+            )
+            cloned_model = type(actor)(cloned_inner)
+            cloned_model.v_head.load_state_dict(actor.v_head.state_dict())
+            cloned_model.is_peft_model = True
+            return cloned_model
+
+        actor_state_dict = None
+        if self.zero_stage is None or self.zero_stage < 2:
+            actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
+        return clone_llm(actor, self.zero_stage, state_dict=actor_state_dict)
+
+    def _copy_clone_attributes(self, clone: Self) -> Self:
+        """Copy non-network attributes while preserving clone runtime members.
+
+        Keeps clone-owned accelerator/scheduler (and vLLM handles when used)
+        intact while copying remaining algorithm attributes.
+
+        :param clone: Clone instance to mutate.
+        :type clone: Self
+        :return: Updated clone instance.
+        :rtype: Self
+        """
+        accelerator = clone.accelerator
+        cloned_lr_scheduler = clone.lr_scheduler
+        original_lr_scheduler = self.lr_scheduler
+
+        clone.lr_scheduler = None
+        self.lr_scheduler = None
+        if self.use_vllm:
+            original_llm = self.llm
+            cloned_llm = clone.llm
+            clone.llm = None
+            self.llm = None
+
+        clone = EvolvableAlgorithm.copy_attributes(self, clone)
+        clone.accelerator = accelerator
+        clone.lr_scheduler = cloned_lr_scheduler
+        self.lr_scheduler = original_lr_scheduler
+
+        if self.use_vllm:
+            clone.llm = cloned_llm
+            self.llm = original_llm
+        return clone
+
+    def _restore_clone_optimizer_and_scheduler(self, clone: Self) -> None:
+        """Restore optimizer/scheduler state for non-accelerated clones.
+
+        :param clone: Clone instance receiving optimizer/scheduler states.
+        :type clone: Self
+        """
+        if self.accelerator is not None:
+            return
+
+        clone.optimizer.optimizer.load_state_dict(
+            state_dict=self.optimizer.optimizer.state_dict(),
+        )
+        if self.lr_scheduler is not None and clone.lr_scheduler is not None:
+            clone.lr_scheduler.load_state_dict(self.lr_scheduler.state_dict())
+
+    def _load_clone_distributed_actor_state(self, clone: Self, work_dir: str) -> None:
+        """Load saved distributed actor state into clone for ZeRO-2/3.
+
+        :param clone: Clone instance receiving distributed actor state.
+        :type clone: Self
+        :param work_dir: Shared clone workspace directory.
+        :type work_dir: str
+        """
+        if self.zero_stage is not None and self.zero_stage >= 2:
+            clone.accelerator.wait_for_everyone()
+            clone._load_distributed_actor(f"{work_dir}/agent_{self.index}")
+            clone.accelerator.wait_for_everyone()
+        elif self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
 
     @staticmethod
     def update_lr(
@@ -2652,10 +2760,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Optimizer class
         :rtype: type[torch.optim.Optimizer] | type[DummyOptimizer]
         """
-        if self.accelerator is None:
-            return AdamW
         if (
-            self.accelerator.state.deepspeed_plugin is not None
+            self.accelerator is not None 
+            and self.accelerator.state.deepspeed_plugin is not None
             and self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
                 "optimizer",
                 None,
@@ -2670,7 +2777,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         path: str,
         tag: str = "intermediate_checkpoint",
     ) -> None:
-        """Override the save_checkpoint method to provide guidance on the correct method to use.
+        """Save actor/optimizer/scheduler state via DeepSpeed checkpointing.
 
         :param path: Output directory to save the checkpoint at
         :type path: str
@@ -2861,7 +2968,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         sleep_mode = use_vllm and vllm_cfg is not None and vllm_cfg.sleep_mode
         if sleep_mode:
             # Put LLM to sleep
-            self.llm.sleep(level=2)
+            self._maybe_sleep_vllm(level=2)
             unwrapped_model = (
                 self.accelerator.unwrap_model(self.actor)
                 if self.accelerator is not None
@@ -2872,7 +2979,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if sleep_mode:
             move_params_to_cpu(unwrapped_model)
             # Wake up LLM
-            self.llm.wake_up()
+            self._maybe_wake_vllm()
             self._move_model_to_vllm()
 
     @contextmanager
@@ -2949,8 +3056,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 value = None
 
             del output
-            if self.temperature != 1.0:
-                logits = logits.div_(self.temperature)
+            logits = logits / self.temperature
 
             all_logprobs.append(
                 LLMAlgorithm._memory_efficient_logits(
@@ -3170,9 +3276,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if not uses_deepspeed:
                 for group in self.optimizer.optimizer.param_groups:
                     clip_grad_norm_(group["params"], self.max_grad_norm)
-
-            self.optimizer.step()
-            self.optimizer.zero_grad()
+                self.optimizer.step()
+                self.optimizer.zero_grad()
             if self.lr_scheduler is not None:
                 self.lr_scheduler.step()
                 self.lr = self.lr_scheduler.get_last_lr()[0]
@@ -3259,7 +3364,31 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
                 llm_model.load_weights([(weight_name, param.data)])
             peft_ref.unmerge_adapter()
-        self.llm.reset_prefix_cache()
+        self._maybe_reset_prefix_cache()
+
+    def _maybe_sleep_vllm(self, level: int = 2) -> None:
+        if not hasattr(self, "llm"):
+            return
+        sleep_fn = getattr(self.llm, "sleep", None)
+        if sleep_fn is None:
+            return
+        sleep_fn(level=level)
+
+    def _maybe_wake_vllm(self) -> None:
+        if not hasattr(self, "llm"):
+            return
+        wake_fn = getattr(self.llm, "wake_up", None)
+        if wake_fn is None:
+            return
+        wake_fn()
+
+    def _maybe_reset_prefix_cache(self) -> None:
+        if not hasattr(self, "llm"):
+            return
+        reset_fn = getattr(self.llm, "reset_prefix_cache", None)
+        if reset_fn is None:
+            return
+        reset_fn()
 
     def _generate_with_vllm_colocate(
         self, prompts: list[dict[str, Any]], group_size: int, temperature: float | None
@@ -3283,7 +3412,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Per-prompt completion token tensors and matching action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
-
         def _trajectory_input_ids(prompt: dict[str, Any]) -> torch.Tensor:
             return cast(
                 "torch.Tensor",
@@ -3335,12 +3463,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             "repetition_penalty": self.repetition_penalty,
             "temperature": temperature,
             "top_p": self.top_p,
-            "top_k": -1 if self.top_k is None else self.top_k,
+            "top_k": -1 if (self.top_k is None or self.top_k == 0) else self.top_k,
             "min_p": 0.0 if self.min_p is None else self.min_p,
             "min_tokens": (
                 0 if self.min_output_tokens is None else self.min_output_tokens
             ),
+            "presence_penalty": self.vllm_config.presence_penalty,
+            "frequency_penalty": self.vllm_config.frequency_penalty,
         }
+        if self.vllm_config.stop_sequences:
+            generation_kwargs["stop"] = self.vllm_config.stop_sequences
         sampling_params = [
             SamplingParams(**generation_kwargs, max_tokens=max_output_token)
             for max_output_token in max_output_tokens
@@ -3508,38 +3640,27 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             per_token_logps.append(per_token_logps_chunk)
         return torch.cat(per_token_logps, dim=0)
 
-    def _configure_batch_size(
+    def _configure_batch_size_per_process(
         self,
         batch_size: int,
-        clone: bool,
-        reduce_memory_peak: bool,
         micro_batch_size_per_gpu: int | None,
     ) -> None:
-        if self.accelerator is None or clone:
+        if self.accelerator is None:
             self.batch_size_per_process = batch_size
             return
+
+        ds_plugin = self.accelerator.state.deepspeed_plugin
+        if ds_plugin is None:
+            err_msg = """DeepSpeed plugin is not initialized. If using an accelerator, 
+            ensure to launch your training script with `accelerate launch --num_processes <your_script.py>`."""
+            raise ValueError(err_msg)
+        ds_config = ds_plugin.deepspeed_config
 
         if batch_size % self.accelerator.num_processes != 0:
             msg = f"Batch size ({batch_size}) must be divisible by the number of processes ({self.accelerator.num_processes})."
             raise ValueError(
                 msg,
             )
-
-        if self.accelerator.state.deepspeed_plugin is None:
-            self.batch_size_per_process = int(
-                batch_size / self.accelerator.num_processes
-            )
-            return
-
-        ds_config = self.accelerator.state.deepspeed_plugin.deepspeed_config
-
-        if reduce_memory_peak:
-            self.batch_size_per_process = 1
-            self.micro_batch_size_per_gpu = 1
-            ds_config["train_micro_batch_size_per_gpu"] = self.micro_batch_size_per_gpu
-            gradient_accumulation_steps = batch_size / self.accelerator.num_processes
-            ds_config["gradient_accumulation_steps"] = int(gradient_accumulation_steps)
-            return
 
         self.batch_size_per_process = int(batch_size / self.accelerator.num_processes)
 
@@ -3550,24 +3671,31 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 != 0
             ):
                 msg = (
-                    f"Batch size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and gradient accumulation steps ({self.accelerator.state.deepspeed_plugin.deepspeed_config.get('gradient_accumulation_steps', 1)})."
+                    f"Batch size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and gradient accumulation steps ({ds_config.get('gradient_accumulation_steps', 1)})."
                     "Gradient accumulation steps can be updated in the deepspeed config by changing the 'gradient_accumulation_steps' parameter."
                 )
                 raise ValueError(
                     msg,
                 )
+
+            gradient_accumulation_steps = ds_config.get("gradient_accumulation_steps", 1)
             self.micro_batch_size_per_gpu = (
                 self.batch_size_per_process
-                // ds_config.get("gradient_accumulation_steps", 1)
+                // gradient_accumulation_steps
             )
-            if self.micro_batch_size_per_gpu == 0:
-                msg = "Calculated micro_batch_size_per_gpu is 0..."
-                raise ValueError(msg)
 
-            if ds_config.get("train_micro_batch_size_per_gpu", "auto") == "auto":
-                ds_config["train_micro_batch_size_per_gpu"] = (
-                    self.micro_batch_size_per_gpu
+            prev_micro = ds_config.get("train_micro_batch_size_per_gpu")
+            if prev_micro is not None:
+                warnings.warn(
+                    "Overwriting DeepSpeed config train_micro_batch_size_per_gpu "
+                    f"from {prev_micro!r} to {self.micro_batch_size_per_gpu} "
+                    f"(batch_size_per_process={self.batch_size_per_process} "
+                    f"// gradient_accumulation_steps={gradient_accumulation_steps}).",
+                    stacklevel=2,
                 )
+            ds_config["train_micro_batch_size_per_gpu"] = (
+                self.micro_batch_size_per_gpu
+            )
             return
 
         self.micro_batch_size_per_gpu = int(micro_batch_size_per_gpu)
@@ -3579,6 +3707,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             msg = f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and micro_batch_size_per_gpu ({self.micro_batch_size_per_gpu})."
             raise ValueError(
                 msg,
+            )
+        prev_micro = ds_config.get("train_micro_batch_size_per_gpu")
+        if prev_micro is not None:
+            warnings.warn(
+                "Overwriting DeepSpeed config train_micro_batch_size_per_gpu "
+                f"from {prev_micro!r} to {self.micro_batch_size_per_gpu} ",
+                stacklevel=2,
             )
         ds_config["train_micro_batch_size_per_gpu"] = self.micro_batch_size_per_gpu
         gradient_accumulation_steps = (
@@ -3749,22 +3884,27 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
             os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
 
-            self.llm = LLM(
-                model=self.pretrained_model_name_or_path,
-                tensor_parallel_size=self.vllm_config.tensor_parallel_size,
-                gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
-                max_num_seqs=self.vllm_config.max_num_seqs,
-                max_model_len=self.max_model_len,
-                distributed_executor_backend="external_launcher",
-                seed=self.accelerator.process_index
+            llm_kwargs = {
+                "model": self.pretrained_model_name_or_path,
+                "tensor_parallel_size": self.vllm_config.tensor_parallel_size,
+                "gpu_memory_utilization": self.vllm_config.gpu_memory_utilization,
+                "max_num_seqs": self.vllm_config.max_num_seqs,
+                "max_model_len": self.max_model_len,
+                "distributed_executor_backend": "external_launcher",
+                "seed": self.accelerator.process_index
                 // self.vllm_config.tensor_parallel_size,
-                max_num_batched_tokens=self.vllm_config.max_num_seqs
+                "max_num_batched_tokens": self.vllm_config.max_num_seqs
                 * self.max_model_len,
-                model_impl="vllm",
-                enable_sleep_mode=self.vllm_config.sleep_mode,
-            )
+                "model_impl": "vllm",
+                "enable_sleep_mode": self.vllm_config.sleep_mode,
+            }
+            if self.vllm_config.dtype is not None:
+                llm_kwargs["dtype"] = self.vllm_config.dtype
+            if self.vllm_config.quantization is not None:
+                llm_kwargs["quantization"] = self.vllm_config.quantization
+            self.llm = LLM(**llm_kwargs)
             if self.vllm_config.sleep_mode:
-                self.llm.sleep(level=2)
+                self._maybe_sleep_vllm(level=2)
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()

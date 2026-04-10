@@ -749,7 +749,6 @@ def create_population(
                     "USE_MEMORY_EFFICIENT_PARAMS", True
                 ),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
                 max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
                 min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
                 max_model_len=INIT_HP.get("MAX_MODEL_LEN", 1024),
@@ -759,6 +758,17 @@ def create_population(
                 actor_network=act,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                use_kl_advantage_shaping=INIT_HP.get(
+                    "USE_KL_ADVANTAGE_SHAPING", False
+                ),
+                adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
+                importance_sampling_level=INIT_HP.get(
+                    "IMPORTANCE_SAMPLING_LEVEL", "token"
+                ),
+                whiten_advantages=INIT_HP.get("WHITEN_ADVANTAGES", False),
+                adv_clip_range=INIT_HP.get("ADV_CLIP_RANGE"),
+                filter_zero_advantages=INIT_HP.get("FILTER_ZERO_ADVANTAGES", False),
+                advantage_filter_eps=INIT_HP.get("ADVANTAGE_FILTER_EPS", 0.0),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -810,7 +820,6 @@ def create_population(
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
                 accelerator=accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
@@ -876,7 +885,6 @@ def create_population(
                 max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
                 min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
                 max_model_len=INIT_HP.get("MAX_MODEL_LEN"),
-                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
                 use_memory_efficient_params=INIT_HP.get(
                     "USE_MEMORY_EFFICIENT_PARAMS", True
                 ),
@@ -946,7 +954,6 @@ def create_population(
                 max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
                 min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
                 max_model_len=INIT_HP.get("MAX_MODEL_LEN"),
-                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
                 use_memory_efficient_params=INIT_HP.get(
                     "USE_MEMORY_EFFICIENT_PARAMS", True

@@ -27,6 +27,7 @@ from agilerl.utils.llm_utils import (
     pool_by_turns,
     prepare_prompt_hf_generate,
     stitch_completion_after_windowed_hf_generate,
+    compute_token_rewards,
 )
 from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 
@@ -90,8 +91,6 @@ class REINFORCE(LLMAlgorithm):
     :type calc_position_embeddings: bool
     :param micro_batch_size_per_gpu: Micro-batch size for gradient accumulation.
     :type micro_batch_size_per_gpu: int | None
-    :param reduce_memory_peak: Reduce memory peak in log-prob computation.
-    :type reduce_memory_peak: bool
     :param max_output_tokens: Maximum new tokens per generation.
     :type max_output_tokens: int | None
     :param min_output_tokens: Minimum new tokens per generation.
@@ -145,11 +144,10 @@ class REINFORCE(LLMAlgorithm):
         top_p: float = 1.0,
         top_k: int = 50,
         min_p: float = 0.0,
-        use_memory_efficient_params: bool = False,
+        use_memory_efficient_params: bool = True,
         use_separate_reference_adapter: bool = True,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
-        reduce_memory_peak: bool = False,
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int | None = 1024,
@@ -175,7 +173,6 @@ class REINFORCE(LLMAlgorithm):
             lr=lr,
             max_grad_norm=max_grad_norm,
             clone=clone,
-            reduce_memory_peak=reduce_memory_peak,
             calc_position_embeddings=calc_position_embeddings,
             seed=seed,
             pad_token_id=pad_token_id,
@@ -260,14 +257,14 @@ class REINFORCE(LLMAlgorithm):
         if self.wrap:
             self.wrap_models()
 
-        unwrapped_model = (
-            self.accelerator.unwrap_model(self.actor)
-            if self.accelerator is not None
-            else self.actor
-        )
         if self.use_vllm and self.use_memory_efficient_params:
+            unwrapped_model = (
+                self.accelerator.unwrap_model(self.actor)
+                if self.accelerator is not None
+                else self.actor
+            )
             move_params_to_cpu(unwrapped_model)
-            self.llm.wake_up()
+            self._maybe_wake_vllm()
             self._move_model_to_vllm()
 
     def get_action(
@@ -324,13 +321,20 @@ class REINFORCE(LLMAlgorithm):
                         completion_mask = completion_mask[:, 1:]
                         completion_masks.append(completion_mask)
             else:
+                if not self.use_memory_efficient_params:
+                    if self.vllm_config.sleep_mode:
+                        torch.cuda.empty_cache()
+                        self._maybe_wake_vllm()
+                    self._move_model_to_vllm()
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
-                    prompt_batch,
-                    1,  # This does not support batching at the moment
+                    obs,
+                    1,
                     temperature=self.temperature
                     if training
                     else 0.01,  # Almost deterministic for evaluation
                 )
+                if self.vllm_config.sleep_mode and not self.use_memory_efficient_params:
+                    self._maybe_sleep_vllm(level=2)
 
         return completion_ids, completion_masks
 
@@ -338,7 +342,7 @@ class REINFORCE(LLMAlgorithm):
         self,
         experiences: ExperiencesType,
         turn_ids: torch.Tensor | None = None,
-    ) -> tuple[float, float, float, float, float]:
+    ) -> dict[str, float]:
         """Update actor using REINFORCE with Return Batch Normalization.
 
         :param experiences: ``(completion_ids, action_masks, rewards)``. For
@@ -349,9 +353,9 @@ class REINFORCE(LLMAlgorithm):
             token; ``-1`` for non-action tokens. If ``None``, all action tokens are
             treated as turn ``0``.
         :type turn_ids: torch.Tensor | None
-        :return: ``(mean_loss, mean_kl, mean_pg_loss, 0.0, mean_entropy)``. The
-            fourth value is always ``0.0`` (no critic).
-        :rtype: tuple[float, float, float, float, float]
+        :return: Dict with keys ``mean_loss``, ``mean_kl``, ``mean_pg_loss``,
+            ``mean_entropy``, averaged over all minibatch updates.
+        :rtype: dict[str, float]
         """
         with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards = stack_and_pad_experiences(
@@ -384,13 +388,13 @@ class REINFORCE(LLMAlgorithm):
                 if hasattr(self, "micro_batch_size_per_gpu")
                 else num_samples
             )
-            mean_pg_loss, mean_loss, mean_kl, mean_entropy, updates = (
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0,
-            )
+            learn_metrics = {
+                "mean_loss": 0.0,
+                "mean_kl": 0.0,
+                "mean_pg_loss": 0.0,
+                "mean_entropy": 0.0,
+            }
+            updates = 0
 
             with torch.inference_mode():
                 reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
@@ -471,19 +475,13 @@ class REINFORCE(LLMAlgorithm):
 
                     self._backward_pass(pg_loss)
 
-                    mean_kl += masked_mean(kl, batch_action_mask).item()
-                    mean_entropy += masked_entropy.mean().item()
-                    mean_pg_loss += pg_loss.mean().item()
-                    mean_loss += pg_loss.item()
+                    learn_metrics["mean_kl"] += masked_mean(kl, batch_action_mask).item()
+                    learn_metrics["mean_entropy"] += masked_entropy.item()
+                    learn_metrics["mean_pg_loss"] += pg_loss.item()
+                    learn_metrics["mean_loss"] += pg_loss.item()
                     updates += 1
 
-        return (
-            mean_loss / max(updates, 1),
-            mean_kl / max(updates, 1),
-            mean_pg_loss / max(updates, 1),
-            0.0,
-            mean_entropy / max(updates, 1),
-        )
+        return {metric: value / max(updates, 1) for metric, value in learn_metrics.items()}
 
     def test(
         self,
@@ -638,22 +636,3 @@ class REINFORCE(LLMAlgorithm):
             token_rewards += mask_t * rewards[:, t : t + 1]
         return token_rewards
 
-    def _calculate_kl_divergence(
-        self,
-        log_probs: torch.Tensor,
-        reference_log_probs: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute the per-token reverse-KL-style penalty term.
-
-        :param log_probs: Current policy log-probabilities ``[batch, seq_len - 1]``.
-        :type log_probs: torch.Tensor
-        :param reference_log_probs: Reference policy log-probabilities, same shape.
-        :type reference_log_probs: torch.Tensor
-        :return: Per-token penalty values.
-        :rtype: torch.Tensor
-        """
-        return (
-            torch.exp(reference_log_probs - log_probs)
-            - (reference_log_probs - log_probs)
-            - 1
-        )

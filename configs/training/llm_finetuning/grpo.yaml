@@ -14,28 +14,33 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: GRPO
-    BATCH_SIZE: 16
+    BATCH_SIZE: 4
     BETA: 0.001
     LR: 0.000005
     CLIP_COEF: 0.2
     MAX_GRAD_NORM: 1.0
     UPDATE_EPOCHS: 1
-    GROUP_SIZE: 6
-    TEMPERATURE: 0.9
-    MAX_MODEL_LEN: 512  # Maximum context length for the model
+    GROUP_SIZE: 16
+    TEMPERATURE: 0.7
+    MAX_MODEL_LEN: 1024  # Maximum context length for the model
+    MAX_OUTPUT_TOKENS: 64
     COSINE_lR_SCHEDULER:
     TOURN_SIZE: 2
+    ADV_NORM: "mean_only"
     USE_MEMORY_EFFICIENT_PARAMS: true
+    USE_KL_ADVANTAGE_SHAPING: true
+    IMPORTANCE_SAMPLING_LEVEL: "sequence"
+    FILTER_ZERO_ADVANTAGES: true
     USE_LIGER_LOSS: false
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
     USE_VLLM: true
-    LORA_R: 16
-    LORA_ALPHA: 64
-    LORA_DROPOUT: 0.05
-    TARGET_MODULES: 
-        - "q_proj"
-        - "k_proj"
-        - "v_proj"
-        - "o_proj"
+    # LORA_R: 16
+    # LORA_ALPHA: 64
+    # LORA_DROPOUT: 0.05
+    # TARGET_MODULES: 
+    #     - "q_proj"
+    #     - "k_proj"
+    #     - "v_proj"
+    #     - "o_proj"

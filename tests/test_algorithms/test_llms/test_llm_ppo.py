@@ -197,7 +197,6 @@ def generate_ppo(
     max_tokens,
     use_vllm,
     pretrained_model_name_or_path,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
     lr=1e-5,
     lr_actor=None,
@@ -268,7 +267,6 @@ def generate_ppo(
         vllm_config=vllm_config,
         max_output_tokens=max_tokens,
         max_model_len=max_tokens + 5,
-        reduce_memory_peak=reduce_memory_peak,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_memory_efficient_params=use_memory_efficient_params,
     )
@@ -288,7 +286,6 @@ def ppo_factory():
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("use_vllm", [True, False])
 @pytest.mark.parametrize("pretrained_model_name_or_path", ["facebook/opt-125m"])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("batch_size", [8])
 def test_ppo_learns(
@@ -300,7 +297,6 @@ def test_ppo_learns(
     use_deepspeed_optimizer,
     use_vllm,
     pretrained_model_name_or_path,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
     vocab_size,
     input_size,
@@ -317,7 +313,6 @@ def test_ppo_learns(
         max_tokens=max_tokens,
         use_vllm=use_vllm,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        reduce_memory_peak=reduce_memory_peak,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         lr_actor=0.01,
     )
@@ -402,7 +397,6 @@ def test_ppo_init_memory_efficient_vllm_calls_wake_and_move(
             max_tokens=max_tokens,
             use_vllm=True,
             pretrained_model_name_or_path="facebook/opt-125m",
-            reduce_memory_peak=True,
             micro_batch_size_per_gpu=None,
             use_memory_efficient_params=True,
         )
@@ -418,7 +412,6 @@ def test_ppo_init_memory_efficient_vllm_calls_wake_and_move(
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("pretrained_model_name_or_path", ["facebook/opt-125m"])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_llmppo_get_action_vllm_training_temperature(
     deepspeed_env,
@@ -431,7 +424,6 @@ def test_llmppo_get_action_vllm_training_temperature(
     input_size,
     max_tokens,
     pretrained_model_name_or_path,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     with patch("agilerl.algorithms.core.base.LLM", DummyVLLM):
@@ -445,7 +437,6 @@ def test_llmppo_get_action_vllm_training_temperature(
             max_tokens=max_tokens,
             use_vllm=True,
             pretrained_model_name_or_path=pretrained_model_name_or_path,
-            reduce_memory_peak=reduce_memory_peak,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         )
     obs = {

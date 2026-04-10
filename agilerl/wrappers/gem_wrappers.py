@@ -160,7 +160,7 @@ class TokenObservationWrapper:
             obs.update(self.build_model_prompt_fields(max_pt))
         return obs
 
-    def reset(self) -> tuple[dict[str, Any], dict[str, Any]]:
+    def reset(self, seed: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
         """Create a fresh episode and return the policy-ready observation plus info.
 
         The observation includes ``input_ids``, ``attention_mask``, ``text``, and
@@ -168,10 +168,19 @@ class TokenObservationWrapper:
         :meth:`build_model_prompt_fields`. Sets ``_initial_prompt_len`` and
         ``_last_full_prompt_token_len`` for :meth:`step`.
 
+        :param seed: Optional RNG seed forwarded to the underlying env ``reset`` so
+            parallel GRPO rollouts can share the same stochastic initial state.
+        :type seed: int | None
         :return: ``(observation, info)`` with ``info`` from the underlying GEM env.
         :rtype: tuple[dict[str, Any], dict[str, Any]]
         """
-        obs_text, info = self._env.reset()
+        if seed is not None:
+            try:
+                obs_text, info = self._env.reset(seed=seed)
+            except TypeError:
+                obs_text, info = self._env.reset()
+        else:
+            obs_text, info = self._env.reset()
         obs_text = self._format_obs(obs_text, info)
 
         encoded = self._tokenize_initial_prompt(obs_text)

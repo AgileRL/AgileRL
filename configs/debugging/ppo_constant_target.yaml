@@ -1,0 +1,26 @@
+INIT_HP:
+  ALGO: LLMPPO
+  BATCH_SIZE: 32
+  BETA: 0.0
+  CLIP_COEF: 0.2
+  GAE_LAMBDA: 1.0
+  GAMMA: 1.0
+  LR_ACTOR: 0.001
+  LR_CRITIC: 0.001
+  MAX_GRAD_NORM: 1.0
+  TEMPERATURE: 0.5
+  UPDATE_EPOCHS: 2
+  VF_COEF: 0.5
+
+DEBUG:
+  target_token_id: 3
+  eval_episodes: 128
+  max_context_length: 128
+  max_output_tokens: 1
+  max_sample_steps: 4096
+  evaluation_interval: 20
+  seeds: [0]
+  lora:
+    r: 8
+    lora_alpha: 16
+    target_modules: [c_attn, c_proj, c_fc]

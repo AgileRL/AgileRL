@@ -71,7 +71,6 @@ class PPO(LLMAlgorithm):
         use_separate_reference_adapter: bool = True,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
-        reduce_memory_peak: bool = False,
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int | None = 1024,
@@ -82,7 +81,7 @@ class PPO(LLMAlgorithm):
         wrap: bool = True,
         clone: bool = False,
         use_vllm: bool = False,
-        use_memory_efficient_params: bool = False,
+        use_memory_efficient_params: bool = True,
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         turn_level_clip: bool = True,
@@ -100,7 +99,6 @@ class PPO(LLMAlgorithm):
             lr_critic=lr_critic,
             max_grad_norm=max_grad_norm,
             clone=clone,
-            reduce_memory_peak=reduce_memory_peak,
             calc_position_embeddings=calc_position_embeddings,
             seed=seed,
             pad_token_id=pad_token_id,
@@ -196,15 +194,14 @@ class PPO(LLMAlgorithm):
             self.wrap_models()
 
         # We call get_action before learn so we need to put the model to CPU and wake it up
-        unwrapped_model = (
-            self.accelerator.unwrap_model(self.actor)
-            if self.accelerator is not None
-            else self.actor
-        )
-        # Wake up LLM
         if self.use_vllm and self.use_memory_efficient_params:
+            unwrapped_model = (
+                self.accelerator.unwrap_model(self.actor)
+                if self.accelerator is not None
+                else self.actor
+            )
             move_params_to_cpu(unwrapped_model)
-            self.llm.wake_up()
+            self._maybe_wake_vllm()
             self._move_model_to_vllm()
 
     def get_action(
@@ -261,6 +258,11 @@ class PPO(LLMAlgorithm):
                         completion_mask = completion_mask[:, 1:]
                         completion_masks.append(completion_mask)
             else:
+                if not self.use_memory_efficient_params:
+                    if self.vllm_config.sleep_mode:
+                        torch.cuda.empty_cache()
+                        self._maybe_wake_vllm()
+                    self._move_model_to_vllm()
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
                     prompt_batch,
                     1,  # This does not support batching at the moment
@@ -268,6 +270,8 @@ class PPO(LLMAlgorithm):
                     if training
                     else 0.01,  # Almost deterministic for evaluation
                 )
+                if self.vllm_config.sleep_mode and not self.use_memory_efficient_params:
+                    self._maybe_sleep_vllm(level=2)
 
         return completion_ids, completion_masks
 
@@ -319,15 +323,15 @@ class PPO(LLMAlgorithm):
                 if hasattr(self, "micro_batch_size_per_gpu")
                 else num_samples
             )
-            mean_pg_loss, mean_vf_loss, mean_loss, mean_kl, mean_entropy, updates = (
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0,
-            )
-
+            updates = 0
+            learn_metrics = {
+                "mean_loss": 0.0,
+                "mean_pg_loss": 0.0,
+                "mean_vf_loss": 0.0,
+                "mean_loss": 0.0,
+                "mean_kl": 0.0,
+                "mean_entropy": 0.0,
+            }
             with torch.inference_mode():
                 reference_log_probs, old_log_probs, old_values = (
                     self._fused_forward_no_grad(
@@ -463,20 +467,15 @@ class PPO(LLMAlgorithm):
                     self._backward_pass(total_loss)
                     clear_fused_adapter_routing(self._get_unwrapped_actor())
 
-                    mean_kl += masked_mean(kl, batch_action_mask).item()
-                    mean_entropy += masked_entropy.mean().item()
-                    mean_pg_loss += pg_loss.mean().item()
-                    mean_vf_loss += vf_loss.mean().item()
-                    mean_loss += total_loss.item()
+                    learn_metrics["mean_kl"] += masked_mean(kl, batch_action_mask).item()
+                    learn_metrics["mean_entropy"] += masked_entropy.mean().item()
+                    learn_metrics["mean_pg_loss"] += pg_loss.mean().item()
+                    learn_metrics["mean_vf_loss"] += vf_loss.mean().item()
+                    learn_metrics["mean_loss"] += total_loss.item()
                     updates += 1
 
-        return (
-            mean_loss / max(updates, 1),
-            mean_kl / max(updates, 1),
-            mean_pg_loss / max(updates, 1),
-            mean_vf_loss / max(updates, 1),
-            mean_entropy / max(updates, 1),
-        )
+        return {metric: value / max(updates, 1) for metric, value in learn_metrics.items()}
+        
 
     def test(
         self,

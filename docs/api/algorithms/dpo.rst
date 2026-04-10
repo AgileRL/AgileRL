@@ -64,7 +64,6 @@ Example
     beta=0.001,
     update_epochs=1,
     seed=42,
-    reduce_memory_peak=True,
     accelerator=accelerator,
   )
 

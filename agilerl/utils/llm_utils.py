@@ -802,6 +802,70 @@ def pool_by_turns(
     return turn_values
 
 
+def compute_token_rewards(
+    rewards: torch.Tensor,
+    turn_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Assign per-turn rewards to each action token via a vectorised gather.
+
+    Vectorised alternative to the loop-based ``_compute_token_rewards`` used in
+    PPO and REINFORCE.  Validity is derived from ``turn_ids >= 0`` directly so
+    no separate action mask is required.
+
+    :param rewards: ``[batch, max_turns]`` per-turn reward scalars.
+        For single-turn pass shape ``[batch, 1]``.
+    :type rewards: torch.Tensor
+    :param turn_ids: ``[batch, seq_len]`` turn index per token; ``-1`` marks
+        non-action positions (prompt tokens, padding).
+    :type turn_ids: torch.Tensor
+    :return: ``[batch, seq_len]`` per-token rewards; 0 for non-action positions.
+    :rtype: torch.Tensor
+    """
+    valid = turn_ids >= 0                         # [B, seq_len]
+    safe_turn_ids = turn_ids.clamp(min=0)         # map -1 → 0 to keep gather in-bounds
+    return torch.gather(rewards, 1, safe_turn_ids) * valid.float()
+
+
+# FIXME maybe we can remove?
+def compute_advantages_token_broadcast_vectorised(
+    turn_level_values: torch.Tensor,
+    turn_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Broadcast turn-level scalars (advantages / returns) to token level.
+
+    Vectorised alternative to the ``for t in range(num_turns)`` loops in
+    ``_compute_rebn_advantages`` (REINFORCE) and ``_compute_gae_returns`` (PPO).
+
+    :param turn_level_values: ``[batch, num_turns]`` per-turn scalars.
+    :type turn_level_values: torch.Tensor
+    :param turn_ids: ``[batch, seq_len]`` turn index per token; ``-1`` marks
+        non-action positions.
+    :type turn_ids: torch.Tensor
+    :return: ``[batch, seq_len]`` token-level values; 0 for non-action positions.
+    :rtype: torch.Tensor
+    """
+    valid = turn_ids >= 0
+    safe_turn_ids = turn_ids.clamp(min=0)
+    return torch.gather(turn_level_values, 1, safe_turn_ids) * valid.float()
+
+
+def compute_kl_divergence(
+    log_probs: torch.Tensor,
+    reference_log_probs: torch.Tensor,
+) -> torch.Tensor:
+    """Per-token reverse-KL penalty: ``exp(r - p) - (r - p) - 1``.
+
+    Shared implementation used by both GRPO and REINFORCE.
+
+    :param log_probs: Current policy log-probabilities.
+    :param reference_log_probs: Reference policy log-probabilities.
+    :return: Per-token KL penalty (same shape as inputs).
+    :rtype: torch.Tensor
+    """
+    diff = reference_log_probs - log_probs
+    return torch.exp(diff) - diff - 1
+
+
 def create_llm_accelerator(
     *,
     model_size_gb: float | None = None,
@@ -869,7 +933,7 @@ def create_llm_accelerator(
 
     if num_gpus == 1 and zero_stage is None:
         logger.info("Single GPU detected — using plain Accelerator (no DeepSpeed).")
-        return Accelerator(mixed_precision=mixed_precision)
+        return Accelerator()
 
     stage = (
         zero_stage
@@ -1081,7 +1145,7 @@ def prepare_prompt_hf_generate(
     """
     # Prompt dict shouldn't contain text or model_text but remove anyway
     prompt_dict.pop("text", None)
-    prompt_dict.pop("model_text", None)
+    prompt_dict.pop("trajectory_text", None)
 
     prompt_dict["stitch_prefix_ids"] = prompt_dict.pop("stitch_prefix_ids", None)
     prompt_dict["initial_prompt_len"] = prompt_dict.pop("initial_prompt_len", None)
@@ -1099,3 +1163,59 @@ def prepare_prompt_hf_generate(
         prompt_dict["attention_mask"] = prompt_dict["attention_mask"].to(device)
 
     return prompt_dict
+
+
+def get_model_name_or_path(model: PreTrainedModel) -> str:
+    """Get the name or path of a model.
+
+    :param model: The model to get the name or path of.
+    :type model: PreTrainedModel
+    :return: The name or path of the model.
+    :rtype: str
+    """
+
+    if hasattr(model, "name_or_path"):
+        return model.name_or_path
+
+    if hasattr(model, "pretrained_model") and hasattr(
+        model.pretrained_model, "name_or_path"
+    ):
+        return model.pretrained_model.name_or_path
+
+    if hasattr(model, "base_model") and hasattr(
+        model.base_model, "name_or_path"
+    ):
+        return model.base_model.name_or_path
+
+    if hasattr(model, "base_model") and hasattr(
+        model.base_model, "pretrained_model"
+    ):
+        return model.base_model.pretrained_model.name_or_path
+        
+    msg = "Model name or path not found."
+    raise ValueError(msg)
+
+
+
+def align_deepspeed_lr(lr: float, accelerator: Accelerator) -> float:
+    """Align the learning rate for DeepSpeed.
+
+    :param lr: The learning rate to align.
+    :type lr: float
+    :param accelerator: The accelerator to align the learning rate for.
+    :type accelerator: Accelerator
+    :return: The aligned learning rate.
+    :rtype: float
+    """
+    if accelerator is not None:
+        optim_lr = accelerator.state.deepspeed_plugin.deepspeed_config.get(
+            "optimizer", {}
+        ).get("params", {}).get("lr", None)
+        if optim_lr is not None and optim_lr != lr:
+            warnings.warn(
+                "DeepSpeed learning rate is set to {optim_lr} but the argument 'lr' is set to {lr}."
+                "Overwriting deepspeed learning rate with the argument 'lr'.",
+                stacklevel=2,
+            )
+            accelerator.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"]["lr"] = lr
+    return lr

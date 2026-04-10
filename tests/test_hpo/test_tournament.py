@@ -282,7 +282,7 @@ def test_language_model_tournament(use_accelerator, elitism, num_processes):
     init_hp = {
         "ALGO": "GRPO",
         "BATCH_SIZE": 1,
-        "REDUCE_MEMORY_PEAK": True,
+        "USE_MEMORY_EFFICIENT_PARAMS": True,
         "BETA": 0.001,
         "LR": 0.000005,
         "CLIP_COEF": 0.2,
@@ -334,7 +334,10 @@ def test_language_model_tournament(use_accelerator, elitism, num_processes):
             group_size=INIT_HP.get("GROUP_SIZE", 8),
             temperature=INIT_HP.get("TEMPERATURE", 0.9),
             calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-            reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
+            use_memory_efficient_params=INIT_HP.get(
+                "USE_MEMORY_EFFICIENT_PARAMS",
+                False,
+            ),
             max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", 1024),
             min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
             lora_config=LoraConfig(

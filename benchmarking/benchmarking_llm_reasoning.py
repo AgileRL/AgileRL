@@ -150,7 +150,7 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,

@@ -9,14 +9,15 @@ if not HAS_LLM_DEPENDENCIES:
 import argparse
 
 import gem
+from huggingface_hub import snapshot_download
 from gem.tools.tool_env_wrapper import ToolEnvWrapper
 import yaml
-from peft import LoraConfig
 from transformers import AutoTokenizer
-from agilerl.algorithms import LLMPPO, LLMReinforce
+from agilerl.algorithms import LLMPPO, LLMReinforce, GRPO
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
+from agilerl.utils.utils import create_population
 from agilerl.wrappers.gem_wrappers import (
     FormatRewardWrapper,
     SearchTool,
@@ -24,85 +25,29 @@ from agilerl.wrappers.gem_wrappers import (
 )
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
-ENV_NAME = "qa:NaturalQuestions"
-MAX_CONTEXT_LENGTH = 4096
-MAX_OUTPUT_TOKENS = 256
+ENV_NAME = "game:GuessTheNumber-v0-easy"
+MAX_CONTEXT_LENGTH = 1024
+MAX_OUTPUT_TOKENS = 64
 USE_TINY_DEBUG_MODEL = False
 USE_VLLM = not USE_TINY_DEBUG_MODEL
+PRELOAD_MODEL = True
 
 ALGO_REGISTRY = {
     "LLMPPO": LLMPPO,
     "LLMReinforce": LLMReinforce,
+    "GRPO": GRPO,
 }
 
 
-def _build_agent(
-    algo_cls,
-    init_hp,
-    *,
-    model_name,
-    actor_network,
-    target_modules,
-    tokenizer,
-    accelerator,
-):
-    """Construct the agent from the YAML config, passing only the kwargs each
-    algorithm class accepts."""
-    lora_config = LoraConfig(
-        r=16,
-        lora_alpha=64,
-        target_modules=target_modules,
-        bias="none",
-        task_type="CAUSAL_LM",
+def _download_model_to_cache(model_name: str) -> str:
+    """Pre-download model artifacts into local HF cache and return cache path."""
+    print(f"Pre-downloading model to HF cache: {model_name}")
+    local_path = snapshot_download(
+        repo_id=model_name,
+        resume_download=True,
     )
-    vllm_config = (
-        VLLMConfig(
-            tensor_parallel_size=1,
-            gpu_memory_utilization=0.3,
-            max_num_seqs=4,
-            sleep_mode=True,
-        )
-        if USE_VLLM
-        else None
-    )
-
-    common_kwargs = dict(
-        model_name=model_name,
-        actor_network=actor_network,
-        lora_config=lora_config,
-        micro_batch_size_per_gpu=1,
-        use_vllm=USE_VLLM,
-        pad_token_id=tokenizer.pad_token_id,
-        pad_token=tokenizer.pad_token,
-        use_separate_reference_adapter=True,
-        batch_size=init_hp["BATCH_SIZE"],
-        beta=init_hp["BETA"],
-        clip_coef=init_hp["CLIP_COEF"],
-        max_grad_norm=init_hp["MAX_GRAD_NORM"],
-        update_epochs=init_hp["UPDATE_EPOCHS"],
-        temperature=init_hp["TEMPERATURE"],
-        max_output_tokens=MAX_OUTPUT_TOKENS,
-        max_model_len=MAX_CONTEXT_LENGTH,
-        accelerator=accelerator,
-        vllm_config=vllm_config,
-        gradient_checkpointing=True,
-    )
-
-    if algo_cls is LLMPPO:
-        common_kwargs |= dict(
-            lr_actor=init_hp["LR_ACTOR"],
-            lr_critic=init_hp.get("LR_CRITIC"),
-            vf_coef=init_hp.get("VF_COEF", 0.5),
-            gamma=init_hp.get("GAMMA", 1.0),
-            gae_lambda=init_hp.get("GAE_LAMBDA", 1.0),
-        )
-    elif algo_cls is LLMReinforce:
-        common_kwargs |= dict(
-            lr=init_hp["LR"],
-            gamma=init_hp.get("GAMMA", 1.0),
-        )
-
-    return algo_cls(**common_kwargs)
+    print(f"Model cached at: {local_path}")
+    return local_path
 
 
 def main(init_hp, mut_p):
@@ -123,6 +68,8 @@ def main(init_hp, mut_p):
     else:
         actor_network = None
         model_name = MODEL_PATH
+        if PRELOAD_MODEL:
+            _download_model_to_cache(model_name)
         tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
         target_modules = [
             "q_proj",
@@ -135,48 +82,73 @@ def main(init_hp, mut_p):
         ]
         apply_chat_template = True
     search_tool = SearchTool(search_url="http://localhost:8888/search")
-    sample_env = gem.make(ENV_NAME)
-    tool_env = ToolEnvWrapper(
-        env=sample_env,
-        tools=[search_tool],
-        tool_success_reward=0.1,
-        max_tool_uses=2,
-    )
-    max_turns = tool_env.max_tool_uses + 1
-    fmt_env = FormatRewardWrapper(tool_env)
-    env = TokenObservationWrapper(
-        fmt_env,
-        tokenizer,
-        max_turns,
-        tokenizer.pad_token_id,
-        apply_chat_template=apply_chat_template,
-        max_model_len=None if USE_TINY_DEBUG_MODEL else MAX_CONTEXT_LENGTH,
-        max_output_tokens=None if USE_TINY_DEBUG_MODEL else MAX_OUTPUT_TOKENS,
-    )
+    base_env = gem.make(ENV_NAME)
+    # tool_env = ToolEnvWrapper(
+    #     env=sample_env,
+    #     tools=[search_tool],
+    #     tool_success_reward=0.1,
+    #     max_tool_uses=2,
+    # )
+    max_turns = base_env.max_turns
+    # fmt_env = FormatRewardWrapper(tool_env)
+    def _make_wrapped_env():
+        env = gem.make(ENV_NAME)
+        return TokenObservationWrapper(
+            env,
+            tokenizer,
+            max_turns,
+            tokenizer.pad_token_id,
+            apply_chat_template=apply_chat_template,
+            max_model_len=None if USE_TINY_DEBUG_MODEL else MAX_CONTEXT_LENGTH,
+            max_output_tokens=None if USE_TINY_DEBUG_MODEL else MAX_OUTPUT_TOKENS,
+        )
+
+    env = _make_wrapped_env()
     accelerator = create_llm_accelerator() if not USE_TINY_DEBUG_MODEL else None
 
     init_hp["MAX_MODEL_LEN"] = MAX_CONTEXT_LENGTH
+    init_hp["MAX_OUTPUT_TOKENS"] = MAX_OUTPUT_TOKENS
+    init_hp["USE_VLLM"] = USE_VLLM
+    init_hp.setdefault("MICRO_BATCH_SIZE_PER_GPU", 1)
+    init_hp.setdefault("USE_SEPARATE_REFERENCE_ADAPTER", True)
+    init_hp.setdefault("GRADIENT_CHECKPOINTING", True)
+    init_hp.setdefault("LORA_R", 16)
+    init_hp.setdefault("LORA_ALPHA", 64)
+    init_hp.setdefault("LORA_DROPOUT", 0.0)
+    init_hp.setdefault("TARGET_MODULES", target_modules)
     assert tokenizer.pad_token_id != tokenizer.eos_token_id, (
         "Pad token and eos token are the same"
     )
 
-    agent = _build_agent(
-        algo_cls,
-        init_hp,
+    vllm_config = (
+        VLLMConfig(
+            tensor_parallel_size=1,
+            gpu_memory_utilization=0.85,
+            max_num_seqs=16,
+            sleep_mode=True,
+        )
+        if USE_VLLM
+        else None
+    )
+    pop = create_population(
+        algo=algo_name,
+        net_config=None,
+        INIT_HP=init_hp,
+        population_size=1,
+        accelerator=accelerator,
+        tokenizer=tokenizer,
         model_name=model_name,
         actor_network=actor_network,
-        target_modules=target_modules,
-        tokenizer=tokenizer,
-        accelerator=accelerator,
+        vllm_config=vllm_config,
     )
+    agent = pop[0]
 
     finetune_llm_multiturn(
         pop=[agent],
         env=env,
-        tokenizer=tokenizer,
         max_turns=max_turns,
         init_hp=init_hp,
-        wb=False,
+        wb=True,
         save_elite=True,
         elite_path="saved_llms",
         evo_steps=None,
@@ -186,6 +158,7 @@ def main(init_hp, mut_p):
         max_reward=1.0,
         verbose=True,
         accelerator=accelerator,
+        env_factory=_make_wrapped_env,
     )
     if accelerator is not None:
         accelerator.end_training()
@@ -196,7 +169,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/training/llm_finetuning/ppo_llm.yaml",
+        default="configs/training/llm_finetuning/grpo.yaml",
         help="Path to the YAML config file",
     )
     args = parser.parse_args()

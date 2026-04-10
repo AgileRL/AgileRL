@@ -76,10 +76,6 @@ def init_llm_optimizer(
         ):
             param.requires_grad = True
 
-        # Check if v_head params require grad
-        if "v_head.summary" in name_lower:
-            assert param.requires_grad
-
     actor_params = [
         p
         for n, p in network.named_parameters()

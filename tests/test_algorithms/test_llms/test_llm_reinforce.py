@@ -13,7 +13,7 @@ from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
-from agilerl.utils.llm_utils import ReasoningGym
+from agilerl.utils.llm_utils import ReasoningGym, compute_kl_divergence
 from tests.utils import spawn_new_process_for_each_test
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -192,7 +192,6 @@ def generate_reinforce(
     max_tokens,
     use_vllm,
     pretrained_model_name_or_path,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
     lr=1e-5,
     lr_eff=None,
@@ -264,7 +263,6 @@ def generate_reinforce(
         vllm_config=vllm_config,
         max_output_tokens=max_tokens,
         max_model_len=max_tokens + 5,
-        reduce_memory_peak=reduce_memory_peak,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_memory_efficient_params=use_memory_efficient_params,
     )
@@ -284,7 +282,6 @@ def reinforce_factory():
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("use_vllm", [True, False])
 @pytest.mark.parametrize("pretrained_model_name_or_path", ["facebook/opt-125m"])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("batch_size", [8])
 def test_reinforce_learns(
@@ -296,7 +293,6 @@ def test_reinforce_learns(
     use_deepspeed_optimizer,
     use_vllm,
     pretrained_model_name_or_path,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
     vocab_size,
     input_size,
@@ -313,7 +309,6 @@ def test_reinforce_learns(
         max_tokens=max_tokens,
         use_vllm=use_vllm,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        reduce_memory_peak=reduce_memory_peak,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         lr_eff=0.01,
     )
@@ -340,13 +335,14 @@ def test_reinforce_learns(
         name: param.clone().detach() for name, param in rf.actor.named_parameters()
     }
 
-    mean_loss, mean_kl, mean_pg_loss, critic_loss, mean_entropy = rf.learn(
-        (completions, action_masks, rewards)
-    )
+    learn_result = rf.learn((completions, action_masks, rewards))
+    mean_loss = learn_result["mean_loss"]
+    mean_kl = learn_result["mean_kl"]
+    mean_pg_loss = learn_result["mean_pg_loss"]
+    mean_entropy = learn_result["mean_entropy"]
     assert isinstance(mean_loss, float)
     assert isinstance(mean_kl, float)
     assert isinstance(mean_pg_loss, float)
-    assert critic_loss == 0.0
     assert isinstance(mean_entropy, float)
 
     for param_name, param in rf.actor.named_parameters():
@@ -392,7 +388,6 @@ def test_reinforce_init_memory_efficient_vllm_calls_wake_and_move(
             max_tokens=max_tokens,
             use_vllm=True,
             pretrained_model_name_or_path="facebook/opt-125m",
-            reduce_memory_peak=True,
             micro_batch_size_per_gpu=None,
             use_memory_efficient_params=True,
         )
@@ -408,7 +403,6 @@ def test_reinforce_init_memory_efficient_vllm_calls_wake_and_move(
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("pretrained_model_name_or_path", ["facebook/opt-125m"])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_llmreinforce_get_action_vllm_training_temperature(
     deepspeed_env,
@@ -421,7 +415,6 @@ def test_llmreinforce_get_action_vllm_training_temperature(
     input_size,
     max_tokens,
     pretrained_model_name_or_path,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     with patch("agilerl.algorithms.core.base.LLM", DummyVLLM):
@@ -435,7 +428,6 @@ def test_llmreinforce_get_action_vllm_training_temperature(
             max_tokens=max_tokens,
             use_vllm=True,
             pretrained_model_name_or_path=pretrained_model_name_or_path,
-            reduce_memory_peak=reduce_memory_peak,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         )
     obs = {
@@ -522,10 +514,9 @@ class TestComputeRebnAdvantages:
 
 
 def test_calculate_kl_divergence_formula():
-    rf = _cpu_llmreinforce()
     log_probs = torch.tensor([[-0.5, 0.0], [1.0, -1.0]])
     reference_log_probs = torch.tensor([[0.0, 0.2], [1.0, -0.5]])
-    out = rf._calculate_kl_divergence(log_probs, reference_log_probs)
+    out = compute_kl_divergence(log_probs, reference_log_probs)
     expected = (
         torch.exp(reference_log_probs - log_probs)
         - (reference_log_probs - log_probs)

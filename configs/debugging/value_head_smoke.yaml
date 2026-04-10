@@ -1,0 +1,29 @@
+INIT_HP:
+  BATCH_SIZE: 32
+  BETA: 0.0
+  CLIP_COEF: 0.2
+  GAE_LAMBDA: 1.0
+  GAMMA: 1.0
+  LR_ACTOR: 0.001
+  LR_CRITIC: 0.001
+  MAX_GRAD_NORM: 1.0
+  TEMPERATURE: 1.0
+  UPDATE_EPOCHS: 4
+  VF_COEF: 1.0
+
+DEBUG:
+  constant_reward: 1.0
+  data_batch_size_per_gpu: 32
+  dataset_size: 4096
+  log_interval: 1
+  max_context_length: 128
+  max_output_tokens: 1
+  micro_batch_size_per_gpu: 8
+  min_output_tokens: 1
+  num_train_steps: 200
+  tolerance: 0.15
+  lora:
+    r: 8
+    lora_alpha: 16
+    target_modules: [c_attn, c_proj, c_fc]
+    modules_to_save: [summary]

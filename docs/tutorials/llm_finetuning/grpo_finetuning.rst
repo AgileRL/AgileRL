@@ -229,7 +229,6 @@ training in this tutorial, we use deepspeed and accelerate.
         max_output_tokens=1024,
         batch_size=4,
         group_size=12,
-        reduce_memory_peak=True,
         accelerator=Accelerator(),
         use_vllm=True,
         vllm_config=VLLMConfig(

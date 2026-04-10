@@ -1,4 +1,5 @@
 from typing import Any
+import warnings
 
 import numpy as np
 import torch
@@ -20,7 +21,12 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.utils.llm_utils import ReasoningGym, move_params_to_cpu
+from agilerl.utils.llm_utils import (
+    ReasoningGym,
+    move_params_to_cpu,
+    prepare_prompt_hf_generate,
+    stitch_completion_after_windowed_hf_generate,
+)
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
@@ -61,8 +67,6 @@ class GRPO(LLMAlgorithm):
     :type temperature: float, optional
     :param calc_position_embeddings: Flag indicating whether to calculate position embeddings, defaults to True
     :type calc_position_embeddings: bool, optional
-    :param reduce_memory_peak: Flag to reduce memory peak in the _get_logprobs method, defaults to False
-    :type reduce_memory_peak: bool, optional
     :param micro_batch_size_per_gpu: If specified, gradient_accumulation_steps will be
         calculated to achieve the target batch_size. If None, uses existing
         gradient_accumulation_steps from DeepSpeed config, defaults to None
@@ -125,10 +129,9 @@ class GRPO(LLMAlgorithm):
         top_p: float = 0.95,
         top_k: int = 50,
         min_p: float = 0.0,
-        use_memory_efficient_params: bool = False,
+        use_memory_efficient_params: bool = True,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
-        reduce_memory_peak: bool = False,
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int | None = 1024,
@@ -145,6 +148,13 @@ class GRPO(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         use_liger_loss: bool = False,
+        use_kl_advantage_shaping: bool = False,
+        adv_norm: str = "mean_std",
+        importance_sampling_level: str = "token",
+        whiten_advantages: bool = False,
+        adv_clip_range: float | None = None,
+        filter_zero_advantages: bool = False,
+        advantage_filter_eps: float = 0.0,
     ) -> None:
 
         device = (
@@ -156,7 +166,6 @@ class GRPO(LLMAlgorithm):
             lr=lr,
             max_grad_norm=max_grad_norm,
             clone=clone,
-            reduce_memory_peak=reduce_memory_peak,
             calc_position_embeddings=calc_position_embeddings,
             seed=seed,
             pad_token_id=pad_token_id,
@@ -211,6 +220,45 @@ class GRPO(LLMAlgorithm):
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
+        if adv_norm not in {"mean_std", "mean_only"}:
+            msg = (
+                f"Invalid adv_norm '{adv_norm}'. Expected one of "
+                "['mean_std', 'mean_only']."
+            )
+            raise ValueError(msg)
+        self.adv_norm = adv_norm
+        if importance_sampling_level not in {"token", "sequence", "average"}:
+            msg = (
+                f"Invalid importance_sampling_level '{importance_sampling_level}'. "
+                "Expected one of ['token', 'sequence', 'average']."
+            )
+            raise ValueError(msg)
+        if adv_clip_range is not None and adv_clip_range <= 0:
+            msg = "adv_clip_range must be > 0 when provided."
+            raise ValueError(msg)
+        if advantage_filter_eps < 0:
+            msg = "advantage_filter_eps must be >= 0."
+            raise ValueError(msg)
+        self.importance_sampling_level = importance_sampling_level
+        self.whiten_advantages = whiten_advantages
+        self.adv_clip_range = adv_clip_range
+        self.filter_zero_advantages = filter_zero_advantages
+        self.advantage_filter_eps = advantage_filter_eps
+        if use_liger_loss and use_kl_advantage_shaping:
+            warnings.warn(
+                "use_kl_advantage_shaping is not supported with use_liger_loss=True; "
+                "disabling KL advantage shaping.",
+                stacklevel=2,
+            )
+            use_kl_advantage_shaping = False
+        if use_liger_loss and self.importance_sampling_level != "token":
+            warnings.warn(
+                "importance_sampling_level!='token' is not supported with "
+                "use_liger_loss=True; falling back to 'token'.",
+                stacklevel=2,
+            )
+            self.importance_sampling_level = "token"
+        self.use_kl_advantage_shaping = use_kl_advantage_shaping
         if max_output_tokens is None and max_model_len is None:
             msg = "Either max_output_tokens or max_model_len must be specified"
             raise ValueError(
@@ -247,97 +295,190 @@ class GRPO(LLMAlgorithm):
             self.wrap_models()
 
         # We call get_action before learn so we need to put the model to CPU and wake it up
-        unwrapped_model = (
-            self.accelerator.unwrap_model(self.actor)
-            if self.accelerator is not None
-            else self.actor
-        )
-        # Wake up LLM
         if self.use_vllm and self.use_memory_efficient_params:
+            unwrapped_model = (
+                self.accelerator.unwrap_model(self.actor)
+                if self.accelerator is not None
+                else self.actor
+            )
             move_params_to_cpu(unwrapped_model)
-            self.llm.wake_up()
+            self._maybe_wake_vllm()
             self._move_model_to_vllm()
 
     def get_action(
         self,
         obs: LLMObsType,
         training: bool = True,
+        repeat_prompts: bool = True,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Return generated completions for each prompt (GRPO groups when training).
 
         :param obs: List of HF-style prompt dicts (this implementation mutates them).
         :type obs: LLMObsType
-        :param training: If ``True``, duplicate each prompt ``group_size`` times for GRPO.
+        :param training: If ``True``, generate with training sampling settings.
         :type training: bool
+        :param repeat_prompts: If ``True`` and ``training=True``, duplicate each
+            prompt ``self.group_size`` times (legacy GRPO grouped mode). If
+            ``False``, treat the batch as already expanded trajectories.
+        :type repeat_prompts: bool
         :return: Completion token IDs and per-sequence action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
-        group_size = self.group_size if training else 1
-        self.actor.eval()
-        if not self.use_vllm:
-            with torch.no_grad():
-                completion_ids = []
-                action_masks = []
-                for prompt in obs:
-                    prompt.pop("text", None)
-                    prompt["input_ids"] = (
-                        prompt["input_ids"].repeat(group_size, 1).to(self.actor.device)
-                    )
-                    prompt["attention_mask"] = (
-                        prompt["attention_mask"]
-                        .repeat(group_size, 1)
-                        .to(self.actor.device)
-                    )
-                    completion_id = self.actor.generate(
-                        **prompt,
-                        generation_config=self.generation_config,
-                    )
-                    completion_ids.append(completion_id)
-                    action_mask = torch.zeros_like(
-                        completion_id,
-                        dtype=torch.bool,
-                        device=self.device,
-                    )
-                    action_mask[:, prompt["input_ids"].shape[1] :] = True
-                    action_mask[completion_id == self.pad_token_id] = False
-                    action_mask = action_mask[:, 1:]
-                    action_masks.append(action_mask)
-        else:
-            if self.vllm_config.sleep_mode:
-                torch.cuda.empty_cache()
-                self.llm.wake_up()
-            self._move_model_to_vllm()
-            completion_ids, action_masks = self._generate_with_vllm_colocate(
-                obs,
-                group_size,
-                temperature=self.temperature
-                if training
-                else 0.01,  # Almost deterministic for evaluation
-            )
-            if self.vllm_config.sleep_mode:
-                self.llm.sleep(level=2)
+        prompt_batch = [obs] if isinstance(obs, dict) else obs
+        group_size = self.group_size if training and repeat_prompts else 1
+        with self.select_adapter("actor"):
+            self.actor.eval()
+            if not self.use_vllm:
+                actor_module = self._get_unwrapped_actor()
+                try:
+                    actor_device = next(actor_module.parameters()).device
+                except StopIteration:
+                    actor_device = torch.device(self.device)
+                with torch.inference_mode(), self._amp_ctx():
+                    completion_ids = []
+                    completion_masks = []
 
-        return completion_ids, action_masks
+                    for prompt_dict in prompt_batch:
+                        prompt = prepare_prompt_hf_generate(prompt_dict, actor_device)
+                        if training and group_size > 1:
+                            prompt["input_ids"] = prompt["input_ids"].repeat(
+                                group_size,
+                                1,
+                            )
+                            prompt["attention_mask"] = prompt["attention_mask"].repeat(
+                                group_size,
+                                1,
+                            )
+                        stitch_ids = prompt.pop("stitch_prefix_ids", None)
+                        if (
+                            stitch_ids is not None
+                            and training
+                            and group_size > 1
+                            and stitch_ids.shape[0] == 1
+                        ):
+                            stitch_ids = stitch_ids.repeat(group_size, 1)
+                        initial_prompt_len = prompt.pop("initial_prompt_len", None)
+                        completion_id = self.actor.generate(
+                            **prompt,
+                            generation_config=self.generation_config,
+                        )
+                        completion_id, full_prompt_len = (
+                            stitch_completion_after_windowed_hf_generate(
+                                completion_id,
+                                stitch_ids,
+                                initial_prompt_len,
+                            )
+                        )
+                        completion_ids.append(completion_id)
+                        completion_mask = torch.zeros_like(
+                            completion_id,
+                            dtype=torch.bool,
+                            device=completion_id.device,
+                        )
+                        completion_mask[:, full_prompt_len:] = True
+                        completion_mask[completion_id == self.pad_token_id] = False
+                        completion_mask = completion_mask[:, 1:]
+                        completion_masks.append(completion_mask)
+            else:
+                if not self.use_memory_efficient_params:
+                    if self.vllm_config.sleep_mode:
+                        torch.cuda.empty_cache()
+                        self._maybe_wake_vllm()
+                    self._move_model_to_vllm()
+                completion_ids, completion_masks = self._generate_with_vllm_colocate(
+                    prompt_batch,
+                    group_size,
+                    temperature=self.temperature
+                    if training
+                    else 0.01,  # Almost deterministic for evaluation
+                )
+                if self.vllm_config.sleep_mode and not self.use_memory_efficient_params:
+                    self._maybe_sleep_vllm(level=2)
 
-    def learn(self, experiences: ExperiencesType) -> tuple[float, float]:
+        return completion_ids, completion_masks
+
+    def learn(
+        self,
+        experiences: ExperiencesType,
+    ) -> dict[str, float]:
         """Update agent network parameters to learn from experiences.
 
         :param experiences: ``(completion_ids, action_masks, rewards)`` stacked batch.
         :type experiences: ExperiencesType
-        :return: ``(mean_loss, mean_kl)`` averaged over the update.
-        :rtype: tuple[float, float]
+        :return: Dict with keys ``mean_loss`` and ``mean_kl``, averaged over the update.
+        :rtype: dict[str, float]
         """
         with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards = stack_and_pad_experiences(
                 *experiences,
                 padding_values=[self.pad_token_id, False, None],
             )
-            advantages = self._calculate_advantage(rewards).to(self.device)
+            action_masks = action_masks.to(self.device)
+            rewards = rewards.to(self.device).float()
+            completion_ids = completion_ids.to(self.device)
+            # GRPO expects one scalar reward per trajectory. If callers pass
+            # per-turn rewards [batch, max_turns], collapse to episode returns.
+            if rewards.dim() > 1:
+                rewards = rewards.sum(dim=1)
+            rewards = rewards.flatten()
+            if rewards.shape[0] != completion_ids.shape[0]:
+                msg = (
+                    "Rewards must provide one scalar per trajectory after collapse: "
+                    f"got rewards={tuple(rewards.shape)} and "
+                    f"completion_ids={tuple(completion_ids.shape)}."
+                )
+                raise ValueError(msg)
 
-            num_samples = advantages.shape[0]
-            batch_idxs = np.arange(num_samples)
-            mean_loss, mean_kl = 0, 0
-            batch_size = min(num_samples, self.micro_batch_size_per_gpu)
+            num_samples = rewards.shape[0]
+            if num_samples % self.group_size != 0:
+                msg = (
+                    f"Batch size ({num_samples}) must be divisible by "
+                    f"group_size ({self.group_size}) for GRPO."
+                )
+                raise ValueError(msg)
+
+            advantages = self._calculate_advantage(rewards).to(self.device)
+            active_adv_mask = None
+            if self.filter_zero_advantages:
+                active_adv_mask = (
+                    advantages.squeeze(-1).abs() > self.advantage_filter_eps
+                )
+            if self.whiten_advantages:
+                advantages = advantages.squeeze(-1)
+                if active_adv_mask is not None and active_adv_mask.any():
+                    active_advantages = advantages[active_adv_mask]
+                    whitened_active = (
+                        active_advantages - active_advantages.mean()
+                    ) / (active_advantages.std(unbiased=False) + 1e-8)
+                    advantages[active_adv_mask] = whitened_active
+                else:
+                    advantages = (advantages - advantages.mean()) / (
+                        advantages.std(unbiased=False) + 1e-8
+                    )
+                advantages = advantages.unsqueeze(-1)
+            if self.adv_clip_range is not None:
+                advantages = advantages.clamp(-self.adv_clip_range, self.adv_clip_range)
+
+            if active_adv_mask is not None:
+                batch_idxs = np.where(active_adv_mask.detach().cpu().numpy())[0]
+                if batch_idxs.size == 0:
+                    warnings.warn(
+                        "All samples were filtered by advantage threshold; skipping GRPO update.",
+                        stacklevel=2,
+                    )
+                    return {"mean_loss": 0.0, "mean_kl": 0.0}
+            else:
+                batch_idxs = np.arange(num_samples)
+            learn_metrics = {
+                "mean_loss": 0.0,
+                "mean_kl": 0.0,
+            }
+            updates = 0
+            batch_size = (
+                min(num_samples, self.micro_batch_size_per_gpu)
+                if hasattr(self, "micro_batch_size_per_gpu")
+                else num_samples
+            )
 
             with torch.no_grad():
                 reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
@@ -345,12 +486,25 @@ class GRPO(LLMAlgorithm):
                     batch_size,
                 )
 
+            effective_num_samples = len(batch_idxs)
+            if effective_num_samples == 0:
+                warnings.warn(
+                    "No active samples after filtering; skipping GRPO update.",
+                    stacklevel=2,
+                )
+                return {"mean_loss": 0.0, "mean_kl": 0.0}
+
+            # Ensure batch_size is not larger than the number of active samples
+            batch_size = min(batch_size, effective_num_samples)
+
             for _ in range(self.update_epochs):
                 self.rng.shuffle(batch_idxs)
-                for start in range(0, num_samples, batch_size):
+                for start in range(0, effective_num_samples, batch_size):
                     minibatch_idxs = batch_idxs[
-                        start : min((start + batch_size), num_samples)
+                        start : min((start + batch_size), effective_num_samples)
                     ]
+                    if len(minibatch_idxs) == 0:
+                        continue
                     loss, kl = self._grpo_loss(
                         batch_size,
                         minibatch_idxs,
@@ -364,11 +518,10 @@ class GRPO(LLMAlgorithm):
                         msg = f"Loss is not finite: {loss}"
                         raise ValueError(msg)
                     self._backward_pass(loss)
-                    mean_loss += loss.item()
-                    mean_kl += kl.item()
-            mean_loss /= len(completion_ids)
-            mean_kl /= len(completion_ids)
-        return mean_loss, mean_kl
+                    learn_metrics["mean_loss"] += loss.item()
+                    learn_metrics["mean_kl"] += kl.item()
+                    updates += 1
+        return {metric: value / max(updates, 1) for metric, value in learn_metrics.items()}
 
     def test(
         self,
@@ -411,12 +564,13 @@ class GRPO(LLMAlgorithm):
         :return: Tensor of group relative advantages.
         :rtype: torch.Tensor
         """
-        if len(rewards.shape) == 1:
-            rewards = rewards.unsqueeze(0)
-
-        advantage = (rewards - rewards.mean(dim=1).unsqueeze(1)) / (
-            rewards.std(dim=1).unsqueeze(1) + eps
-        )
+        rewards = rewards.view(-1, self.group_size)
+        if self.adv_norm == "mean_only":
+            advantage = rewards - rewards.mean(dim=1, keepdim=True)
+        else:
+            advantage = (rewards - rewards.mean(dim=1, keepdim=True)) / (
+                rewards.std(dim=1, keepdim=True) + eps
+            )
         return advantage.flatten().unsqueeze(1)
 
     def _calculate_kl_divergence(
@@ -439,6 +593,7 @@ class GRPO(LLMAlgorithm):
             - 1
         )
 
+    
     def _grpo_loss(
         self,
         batch_size: int,
@@ -529,14 +684,36 @@ class GRPO(LLMAlgorithm):
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
-        log_probs_ratio = torch.exp(log_probs - old_log_probs)
+        if self.use_kl_advantage_shaping:
+            mask_f = mask.float()
+            masked_kl = kl * mask_f
+            avg_kl = masked_kl.sum(dim=-1, keepdim=True) / mask_f.sum(
+                dim=-1, keepdim=True
+            ).clamp(min=1.0)
+            # ART-style zero-mean KL shaping of token advantages:
+            # lower-then-average KL gets boosted, higher KL gets damped.
+            advantages = advantages + self.beta * (avg_kl - masked_kl)
+        token_log_ratio = log_probs - old_log_probs
+        log_probs_ratio = torch.exp(token_log_ratio)
+        if self.importance_sampling_level != "token":
+            mask_f = mask.float()
+            seq_log_ratio = (token_log_ratio * mask_f).sum(dim=-1, keepdim=True) / mask_f.sum(
+                dim=-1, keepdim=True
+            ).clamp(min=1.0)
+            seq_log_probs_ratio = torch.exp(seq_log_ratio)
+            if self.importance_sampling_level == "sequence":
+                log_probs_ratio = seq_log_probs_ratio
+            else:  # average
+                log_probs_ratio = 0.5 * (log_probs_ratio + seq_log_probs_ratio)
         clipped_log_probs_ratio = log_probs_ratio.clamp(
             1 - self.clip_coef,
             1 + self.clip_coef,
         )
         surrogate = log_probs_ratio * advantages
         clipped_surrogate = clipped_log_probs_ratio * advantages
-        loss = -torch.min(surrogate, clipped_surrogate) + self.beta * kl
+        loss = -torch.min(surrogate, clipped_surrogate)
+        if not self.use_kl_advantage_shaping:
+            loss = loss + self.beta * kl
         denominator = mask.sum(dim=-1)
         denominator = torch.where(
             denominator > 0,

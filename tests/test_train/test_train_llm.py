@@ -37,9 +37,30 @@ def _make_multiturn_mock_env(*, turn_boundaries_len: int = 3):
 def _make_multiturn_mock_agent(*, spec=LLMPPO):
     mock_agent = MagicMock(spec=spec)
     mock_agent.fitness = [0.0]
-    mock_agent.algo = "LLMPPO" if spec is LLMPPO else "LLMReinforce"
-    mock_agent.get_action.return_value = ([torch.ones(1, 5, dtype=torch.long)], None)
-    mock_agent.learn.return_value = (0.5, 0.2, 0.1, 0.1, 1.0)
+    if spec is LLMPPO:
+        mock_agent.algo = "LLMPPO"
+    elif spec is LLMReinforce:
+        mock_agent.algo = "LLMReinforce"
+    elif spec is GRPO:
+        mock_agent.algo = "GRPO"
+        mock_agent.group_size = 1
+    else:
+        mock_agent.algo = getattr(spec, "__name__", "MOCK")
+    def _mock_get_action(obs, training=True, **kwargs):
+        batch = 1 if isinstance(obs, dict) else len(obs)
+        return ([torch.ones(1, 5, dtype=torch.long) for _ in range(batch)], None)
+
+    mock_agent.get_action.side_effect = _mock_get_action
+    if spec is GRPO:
+        mock_agent.learn.return_value = {"mean_loss": 0.5, "mean_kl": 0.2}
+    else:
+        mock_agent.learn.return_value = {
+            "mean_loss": 0.5,
+            "mean_kl": 0.2,
+            "mean_pg_loss": 0.1,
+            "mean_vf_loss": 0.1,
+            "mean_entropy": 1.0,
+        }
     mock_agent.batch_size = 16
     mock_agent.batch_size_per_process = 16
     mock_agent.max_model_len = 1024
@@ -51,6 +72,10 @@ def _make_multiturn_mock_agent(*, spec=LLMPPO):
     mock_agent.device = torch.device("cpu")
     mock_agent.set_reference_policy = MagicMock()
     return mock_agent
+
+
+def _make_multiturn_env_factory(*, turn_boundaries_len: int = 3):
+    return lambda: _make_multiturn_mock_env(turn_boundaries_len=turn_boundaries_len)
 
 
 @pytest.mark.parametrize("use_accelerator", [True, False])
@@ -873,7 +898,7 @@ def test_finetune_llm_reasoning_llmppo_learn_unpack_and_wandb_ppo_metrics():
 # --- finetune_llm_multiturn ---
 
 
-@pytest.mark.parametrize("agent_spec", [LLMPPO, LLMReinforce])
+@pytest.mark.parametrize("agent_spec", [LLMPPO, LLMReinforce, GRPO])
 @pytest.mark.parametrize("use_accelerator", [True, False])
 def test_finetune_llm_multiturn_basic_training_loop(agent_spec, use_accelerator):
     """Smoke: episode collection, learn with turn_ids, step accounting; no agent.test."""
@@ -911,10 +936,29 @@ def test_finetune_llm_multiturn_basic_training_loop(agent_spec, use_accelerator)
     assert mock_agent.learn.call_count == num_outer
     assert mock_agent.set_reference_policy.call_count == num_outer
     assert mock_agent.test.call_count == 0
-    n_metrics = 4
+    n_metrics = 4 if agent_spec is GRPO else 7
     assert mock_agg.call_count == num_outer * n_metrics
     mock_agent.learn.assert_called_with(ANY, turn_ids=ANY)
     assert mock_save.call_count == 1
+
+
+def test_finetune_llm_multiturn_grpo_requires_batch_multiple_of_group_size():
+    mock_agent = _make_multiturn_mock_agent(spec=GRPO)
+    mock_agent.group_size = 2
+    mock_agent.batch_size = 16
+    mock_agent.batch_size_per_process = 16
+    mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
+    with pytest.raises(ValueError, match="divisible by"):
+        finetune_llm_multiturn(
+            pop=[mock_agent],
+            env=mock_env,
+            max_turns=1,
+            env_factory=_make_multiturn_env_factory(turn_boundaries_len=3),
+            init_hp={"BATCH_SIZE": 3, "ALGO": "GRPO"},
+            max_steps=100,
+            accelerator=None,
+            verbose=False,
+        )
 
 
 @pytest.mark.parametrize("use_accelerator", [True, False])
@@ -1037,19 +1081,19 @@ def test_finetune_llm_multiturn_warns_when_evo_steps_without_tournament():
 
 
 def test_finetune_llm_multiturn_value_error_if_algo_not_supported():
-    mock_agent = MagicMock(spec=GRPO)
-    mock_agent.algo = "GRPO"
+    mock_agent = MagicMock(spec=DPO)
+    mock_agent.algo = "DPO"
     mock_agent.batch_size = 16
     mock_agent.batch_size_per_process = 16
     with pytest.raises(
         ValueError,
-        match="The algorithm must be LLMPPO or LLMReinforce for multi-turn GEM finetuning",
+        match="The algorithm must be LLMPPO, LLMReinforce, or GRPO for multi-turn GEM",
     ):
         finetune_llm_multiturn(
             pop=[mock_agent],
             env=MagicMock(),
             max_turns=1,
-            init_hp={"BATCH_SIZE": 1, "ALGO": "GRPO"},
+            init_hp={"BATCH_SIZE": 1, "ALGO": "DPO"},
             max_steps=0,
             accelerator=None,
             verbose=False,
@@ -1082,7 +1126,7 @@ def test_finetune_llm_multiturn_eval_fn_interval():
         )
 
     assert eval_fn.call_count == 3
-    n_metrics = 4
+    n_metrics = 7
     n_eval_agg = 3
     assert mock_agg.call_count == 3 * n_metrics + n_eval_agg
 
@@ -1112,7 +1156,7 @@ def test_finetune_llm_multiturn_max_reward_adds_accuracy_metric():
         )
 
     num_outer = 3
-    assert mock_agg.call_count == num_outer * 5
+    assert mock_agg.call_count == num_outer * 8
 
 
 def test_finetune_llm_multiturn_init_hp_none_uses_agent_fields():

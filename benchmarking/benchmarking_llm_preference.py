@@ -100,7 +100,7 @@ def main(init_hp, mut_p):
         init_hp=init_hp,
         save_elite=True,
         elite_path="saved_llms",
-        wb=True,
+        wb=False,
         evo_steps=5,
         tournament=tournament,
         mutation=mutations,
@@ -112,7 +112,7 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
-    with open("configs/training/dpo.yaml") as file:
+    with open("configs/training/llm_finetuning/dpo.yaml") as file:
         config = yaml.safe_load(file)
     init_hp = config["INIT_HP"]
     mut_p = config["MUTATION_PARAMS"]

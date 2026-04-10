@@ -1392,18 +1392,37 @@ class CosineLRScheduleConfig:
 
 @dataclass
 class VLLMConfig:
-    """Data class to configure a VLLM client.
+    """Data class to configure a colocated vLLM instance.
 
-    Note: has the same defaults as the VLLMClient class from trl library.
-
-    :param base_url: Base URL of the VLLM server, defaults to None
-    :type base_url: str | None, optional
-    :param host: Host of the VLLM server, defaults to "0.0.0.0"
-    :type host: str, optional
-    :param server_port: Server port of the VLLM server, defaults to 8000
-    :type server_port: int, optional
-    :param group_port: Group port of the VLLM server, defaults to 51216
-    :type group_port: int, optional
+    :param tensor_parallel_size: Number of GPUs for tensor parallelism, defaults to 1.
+    :type tensor_parallel_size: int, optional
+    :param gpu_memory_utilization: Fraction of GPU memory to reserve for vLLM KV cache,
+        defaults to 0.3.
+    :type gpu_memory_utilization: float, optional
+    :param max_num_seqs: Maximum number of sequences processed concurrently.  For GRPO,
+        set this to at least ``group_size`` to avoid request queuing, defaults to 8.
+    :type max_num_seqs: int, optional
+    :param sleep_mode: Put vLLM to sleep between ``get_action`` calls to free GPU memory
+        for training.  Cannot be used with agent populations on a single device,
+        defaults to False.
+    :type sleep_mode: bool, optional
+    :param dtype: Model weight dtype passed to the vLLM ``LLM`` constructor
+        (e.g. ``"bfloat16"``, ``"float16"``).  ``None`` lets vLLM choose,
+        defaults to None.
+    :type dtype: str | None, optional
+    :param quantization: Quantization method passed to the vLLM ``LLM`` constructor
+        (e.g. ``"awq"``, ``"gptq"``).  ``None`` disables quantization, defaults to None.
+    :type quantization: str | None, optional
+    :param stop_sequences: List of strings that terminate generation early (e.g.
+        ``["</answer>"]``).  Passed as ``stop`` to ``SamplingParams``, defaults to None.
+    :type stop_sequences: list[str] | None, optional
+    :param presence_penalty: Penalise tokens that have already appeared in the output;
+        positive values discourage repetition.  Passed to ``SamplingParams``,
+        defaults to 0.0 (disabled).
+    :type presence_penalty: float, optional
+    :param frequency_penalty: Penalise tokens proportionally to how often they have
+        appeared so far.  Passed to ``SamplingParams``, defaults to 0.0 (disabled).
+    :type frequency_penalty: float, optional
     """
 
     # Colocate mode parameters
@@ -1411,6 +1430,11 @@ class VLLMConfig:
     gpu_memory_utilization: float = 0.3
     max_num_seqs: int = 8
     sleep_mode: bool = False
+    dtype: str | None = None
+    quantization: str | None = None
+    stop_sequences: list[str] | None = None
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
 
     def __post_init__(self) -> None:
         if self.sleep_mode:
@@ -1721,13 +1745,11 @@ def clone_llm(
 class DummyOptimizer:
     """Placeholder optimizer class to pass to the OptimizerWrapper when the optimizer is defined in the deepspeed config."""
 
-    def __init__(self, params: list[torch.Tensor], lr: float, **kwargs) -> None:
+    def __init__(self, params: list[torch.Tensor], **kwargs) -> None:
         """Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
 
         :param params: Parameters to optimize.
         :type params: list[torch.Tensor]
-        :param lr: Learning rate.
-        :type lr: float
         """
 
     def step(self, closure: Callable[[], torch.Tensor] | None = None) -> NoReturn:

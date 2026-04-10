@@ -43,7 +43,6 @@ For more details on how to set up GRPO and use it for training, check out the :r
     device="cuda" if torch.cuda.is_available() else "cpu",
     batch_size=8,
     group_size=8,
-    reduce_memory_peak=True,
   )
 
 Saving and Loading Agents
