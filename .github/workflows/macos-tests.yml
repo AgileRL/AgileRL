@@ -34,7 +34,6 @@ jobs:
             - name: Install dependencies
               # swig is needed to build box2d-py from source (no pre-built wheels for py3.10+).
               run: |
-                  brew install swig
                   uv sync --locked --all-groups --extra all
 
             - name: Test with pytest

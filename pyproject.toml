@@ -41,6 +41,7 @@ dependencies = [
 
 [project.optional-dependencies]
 box2d = [
+    "swig~=4.4.1; sys_platform != 'win32'",
     "gymnasium[box2d]~=1.0.0; sys_platform != 'win32'",
 ]
 llm = [
@@ -53,6 +54,7 @@ llm = [
     "vllm==0.11.0; sys_platform == 'darwin'",
 ]
 all = [
+    "swig~=4.4.1; sys_platform != 'win32'",
     "gymnasium[box2d]~=1.0.0; sys_platform != 'win32'",
     "datasets==4.4.1",
     "deepspeed~=0.17.1; sys_platform != 'win32'",
@@ -118,8 +120,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv]
-# This tells uv to build box2d-py using the project environment directly
-# (not an isolated one), where it can see system PATH and find swig.
+# box2d has a bug where it doesn't declare swig as a build dependency.
+# This workaround tells uv to build box2d-py using the project environment directly
+# (not an isolated one), where it can see system PATH and find swig, which is already installed as a dependency
+# (no-build-isolation packages are built after the others).
 no-build-isolation-package = ["box2d-py"]
 
 [tool.hatch.build.targets.wheel]

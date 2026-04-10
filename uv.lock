@@ -92,12 +92,14 @@ all = [
     { name = "gymnasium", extra = ["box2d"], marker = "sys_platform != 'win32'" },
     { name = "liger-kernel", marker = "sys_platform == 'linux'" },
     { name = "peft" },
+    { name = "swig", marker = "sys_platform != 'win32'" },
     { name = "transformers" },
     { name = "vllm", version = "0.11.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
     { name = "vllm", version = "0.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
 ]
 box2d = [
     { name = "gymnasium", extra = ["box2d"], marker = "sys_platform != 'win32'" },
+    { name = "swig", marker = "sys_platform != 'win32'" },
 ]
 llm = [
     { name = "datasets" },
@@ -157,6 +159,8 @@ requires-dist = [
     { name = "pymunk", specifier = "~=6.2.0" },
     { name = "redis", specifier = "~=4.4.4" },
     { name = "supersuit", specifier = "~=3.9.0" },
+    { name = "swig", marker = "sys_platform != 'win32' and extra == 'all'", specifier = "~=4.4.1" },
+    { name = "swig", marker = "sys_platform != 'win32' and extra == 'box2d'", specifier = "~=4.4.1" },
     { name = "tensordict", specifier = "~=0.8" },
     { name = "termcolor", specifier = "~=1.1.0" },
     { name = "torch", marker = "sys_platform != 'darwin'", specifier = "==2.9.0" },
