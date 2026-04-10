@@ -1997,6 +1997,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
 
         super().__init__(index, hp_config, device, accelerator, None, name)
+        self.use_liger_loss = use_liger_loss
         self.gradient_checkpointing = gradient_checkpointing
         self.zero_stage = None
         self.reference_update_tracker = 0  # Updated every time the reference policy is updated, which is each time we pass through the train dataset
@@ -2039,7 +2040,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 lora_dropout=0.05,
             )
 
-        if use_liger_loss:
+        if self.use_liger_loss:
             warnings.warn(
                 "Liger Loss used with LoRA, deactivating LoRA for the lm_head by setting exclude_modules to ['lm_head']",
                 stacklevel=2,

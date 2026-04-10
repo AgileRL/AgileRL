@@ -217,7 +217,6 @@ class DPO(LLMAlgorithm):
         )
         self.use_vllm = False  # DPO does not use VLLM
         self.update_epochs = update_epochs
-        self.use_liger_loss = use_liger_loss
 
         self._initialize_actors(actor_network, not clone)
         # Register network groups for mutations
