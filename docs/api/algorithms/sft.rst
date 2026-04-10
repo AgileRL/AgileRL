@@ -22,7 +22,7 @@ Example
 .. code-block:: python
 
   from agilerl.algorithms.sft import SFT
-  from agilerl.utils.llm_utils import SFTGym
+  from agilerl.wrappers.llm_envs import SFTGym
   from accelerate import Accelerator
   from datasets import load_dataset
   from peft import LoraConfig

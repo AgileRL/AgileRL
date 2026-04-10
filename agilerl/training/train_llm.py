@@ -7,22 +7,22 @@ from typing import Any, Literal
 import numpy as np
 import torch
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DPO, GRPO
 from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import PopulationType
-from agilerl.utils.llm_utils import ReasoningGym, SFTGym
 from agilerl.utils.utils import (
     aggregate_metrics_across_gpus,
     init_wandb,
     save_llm_checkpoint,
     tournament_selection_and_mutation,
 )
+from agilerl.wrappers.llm_envs import ReasoningGym, SFTGym
 
 InitDictType = dict[str, Any] | None
 

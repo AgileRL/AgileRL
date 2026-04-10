@@ -19,7 +19,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_reasoning
-from agilerl.utils.llm_utils import ReasoningGym
+from agilerl.wrappers.llm_envs import ReasoningGym
 from agilerl.utils.utils import create_population
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"

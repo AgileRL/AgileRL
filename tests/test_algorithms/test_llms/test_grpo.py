@@ -397,7 +397,9 @@ def grpo_factory():
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
+    # Use the same tiny Qwen fixture as test_grpo_save_load_checkpoint (not OPT):
+    # vLLM + OPT can fail on Linux CI when resolving GPT2 tokenizer files from the hub cache.
+    [(True, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])

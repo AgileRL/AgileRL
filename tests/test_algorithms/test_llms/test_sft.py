@@ -19,7 +19,7 @@ from transformers import AutoTokenizer
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
 from agilerl.algorithms.sft import SFT
-from agilerl.utils.llm_utils import SFTGym
+from agilerl.wrappers.llm_envs import SFTGym
 from tests.test_algorithms.test_llms.test_grpo import (
     create_module,
     deepspeed_config_stage_1,

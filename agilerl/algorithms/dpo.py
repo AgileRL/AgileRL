@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from accelerate import Accelerator
     from peft import LoraConfig
 
-    from agilerl.utils.llm_utils import PreferenceGym
+    from agilerl.wrappers.llm_envs import PreferenceGym
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup

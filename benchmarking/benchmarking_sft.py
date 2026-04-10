@@ -35,7 +35,8 @@ from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_sft
-from agilerl.utils.llm_utils import SFTGym, compare_responses, sample_eval_prompts
+from agilerl.utils.llm_utils import compare_responses, sample_eval_prompts
+from agilerl.wrappers.llm_envs import SFTGym
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "HumanLLMs/Human-Like-DPO-Dataset"

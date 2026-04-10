@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from accelerate import Accelerator
     from peft import LoraConfig
 
-    from agilerl.utils.llm_utils import SFTGym
+    from agilerl.wrappers.llm_envs import SFTGym
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
@@ -197,7 +197,7 @@ class SFT(LLMAlgorithm):
 
         :param experiences: Dict with keys ``input_ids`` (prompt + response token
             IDs), ``attention_mask``, and ``prompt_lengths`` (number of prompt
-            tokens per sample) as produced by :class:`~agilerl.utils.llm_utils.SFTGym`.
+            tokens per sample) as produced by :class:`~agilerl.wrappers.llm_envs.SFTGym`.
         :type experiences: ExperiencesType
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool

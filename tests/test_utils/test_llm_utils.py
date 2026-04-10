@@ -16,12 +16,11 @@ from transformers.tokenization_utils_base import BatchEncoding
 
 from agilerl.utils.algo_utils import DummyOptimizer
 from agilerl.utils.llm_utils import (
-    PreferenceGym,
-    ReasoningGym,
     compare_responses,
     gather_if_zero3,
     get_state_dict,
 )
+from agilerl.wrappers.llm_envs import PreferenceGym, ReasoningGym
 
 pytestmark = pytest.mark.llm
 

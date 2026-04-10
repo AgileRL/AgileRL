@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from accelerate import Accelerator
     from peft import LoraConfig
 
-    from agilerl.utils.llm_utils import ReasoningGym
+    from agilerl.wrappers.llm_envs import ReasoningGym
 
 if HAS_LIGER_KERNEL:
     from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
