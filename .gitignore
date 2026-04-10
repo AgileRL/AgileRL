@@ -106,6 +106,8 @@ celerybeat.pid
 # Environments
 .env
 .vscode/
+.cursor/
+.claude/
 .venv*/
 venv/
 env.bak/
