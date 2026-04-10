@@ -302,6 +302,8 @@ class GRPO(LLMAlgorithm):
         else:
             if self.vllm_config.sleep_mode:
                 torch.cuda.empty_cache()
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
                 self.llm.wake_up()
             self._move_model_to_vllm()
             completion_ids, action_masks = self._generate_with_vllm_colocate(
