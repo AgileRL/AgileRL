@@ -11,6 +11,7 @@ from accelerate import Accelerator
 from gymnasium import spaces
 from torch import optim
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
@@ -20,6 +21,7 @@ from agilerl.algorithms.core.base import (
 )
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
+from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.modules import EvolvableMLP
 from tests.test_algorithms.test_base import DummyMARLAlgorithm, DummyRLAlgorithm
 
@@ -1468,6 +1470,8 @@ def _make_llm_agent(
     actor_network=None,
 ):
     """Helper to create a _StubLLMAlgorithm with heavily mocked internals."""
+    if not HAS_LLM_DEPENDENCIES:
+        pytest.skip("LLM dependencies not installed")
     if actor_network is None:
         actor_network = _make_mock_peft_actor()
 
@@ -1582,20 +1586,23 @@ class TestLLMUpdateLr:
         assert acc is None
         assert scheduler is None
 
-    def test_update_lr_raises_without_deepspeed_plugin(self):
+    def test_update_lr_without_deepspeed_plugin(self):
         opt = torch.optim.Adam([torch.tensor([1.0], requires_grad=True)], lr=1e-3)
         acc = MagicMock()
         acc.state.deepspeed_plugin = None
-        with pytest.raises(ValueError, match="deepspeed plugin"):
-            LLMAlgorithm.update_lr(opt, 5e-4, accelerator=acc)
+        returned_acc, scheduler = LLMAlgorithm.update_lr(opt, 5e-4, accelerator=acc)
+        assert returned_acc is acc
+        assert scheduler is None
+        assert opt.param_groups[0]["lr"] == 5e-4
 
-    def test_update_lr_raises_without_deepspeed_config(self):
+    def test_update_lr_without_deepspeed_config(self):
         opt = torch.optim.Adam([torch.tensor([1.0], requires_grad=True)], lr=1e-3)
         acc = MagicMock()
         plugin = MagicMock(spec=[])
         acc.state.deepspeed_plugin = plugin
-        with pytest.raises(ValueError, match="Deepspeed config not found"):
-            LLMAlgorithm.update_lr(opt, 5e-4, accelerator=acc)
+        returned_acc, scheduler = LLMAlgorithm.update_lr(opt, 5e-4, accelerator=acc)
+        assert returned_acc is acc
+        assert scheduler is None
 
     def test_update_lr_updates_scheduler_config(self):
         opt = torch.optim.Adam([torch.tensor([1.0], requires_grad=True)], lr=1e-3)
@@ -1780,6 +1787,7 @@ class TestLLMCreatePromptMasks:
         assert mask[1, 6].item()
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 class TestLLMConfigureBatchSize:
     def test_clone_mode_sets_batch_size_directly(self):
         agent = _make_llm_agent(clone=True)
@@ -1891,6 +1899,7 @@ class TestLLMConfigureBatchSize:
             _make_llm_agent(accelerator=acc, clone=False)
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 class TestLLMInitWarnings:
     def test_cosine_lr_with_accelerator_warns_and_nullifies(self):
         acc = _make_mock_accelerator()
@@ -2044,11 +2053,17 @@ class TestLLMConfigureVllm:
         agent = _make_llm_agent(accelerator=None)
         agent.accelerator = None
         agent.vllm_config = None
+        mock_llm_cls = MagicMock()
         with (
-            patch("agilerl.algorithms.core.base.LLM", MagicMock()),
+            patch("agilerl.algorithms.core.base.LLM", mock_llm_cls),
+            patch.object(
+                LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
+            ),
             pytest.warns(UserWarning, match="No VLLM config"),
         ):
             agent._configure_vllm()
+        assert isinstance(agent.vllm_config, VLLMConfig)
+        mock_llm_cls.assert_called_once()
 
     def test_raises_when_tp_size_invalid(self):
         acc = _make_mock_accelerator(num_processes=3)
@@ -2220,8 +2235,9 @@ class TestLLMInitMiscPaths:
     def test_use_liger_loss_modifies_lora_config(self):
         lora = MagicMock()
         acc = _make_mock_accelerator()
-        with pytest.warns(UserWarning, match="Liger Loss"):
-            _make_llm_agent(accelerator=acc, use_liger_loss=True, lora_config=lora)
+        with patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True):
+            with pytest.warns(UserWarning, match="Liger Loss"):
+                _make_llm_agent(accelerator=acc, use_liger_loss=True, lora_config=lora)
         assert lora.exclude_modules == ["lm_head"]
 
     def test_seed_broadcast_with_multi_process(self):
@@ -2251,9 +2267,6 @@ class TestLLMMoveModelToVllm:
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
         agent.llm = MagicMock()
-        agent.llm.llm_engine.model_executor.driver_worker.model_runner.model = (
-            MagicMock()
-        )
         model_ref = MagicMock()
         model_ref.named_parameters.return_value = [
             ("base_model.model.layer.weight", torch.tensor([1.0])),
@@ -2262,9 +2275,11 @@ class TestLLMMoveModelToVllm:
         acc.unwrap_model = MagicMock(return_value=model_ref)
         with patch("agilerl.algorithms.core.base.gather_if_zero3"):
             agent._move_model_to_vllm()
+        agent.llm.apply_model.assert_called_once()
         agent.llm.reset_prefix_cache.assert_called_once()
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 class TestConditionalImportFallbacks:
     def test_clone_tensors_fallback_when_deepspeed_import_fails(self):
         from agilerl.algorithms.core.base import clone_tensors_for_torch_save
@@ -2377,6 +2392,7 @@ class TestLLMPreprocessObservation:
         assert result == obs
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 class TestLLMInitMissingDeps:
     def test_raises_when_no_llm_deps(self):
         with patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False):
@@ -2701,27 +2717,38 @@ class TestLLMUseReferencePolicySeparateAdapter:
 
 
 class TestLLMMoveModelToVllmSkipsPrefixAndOriginalModule:
-    """_move_model_to_vllm skips prefix and original_module params."""
+    """_move_model_to_vllm skips PEFT adapter params (lora_, original_module, etc.)."""
 
-    def test_skips_prefix_and_original_module(self):
+    def test_skips_peft_adapter_params(self):
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
         agent.llm = MagicMock()
-        llm_model = MagicMock()
-        agent.llm.llm_engine.model_executor.driver_worker.model_runner.model = llm_model
         model_ref = MagicMock()
-        model_ref.prefix = "model"
+        model_ref.prefix = "base_model"
         model_ref.named_parameters.return_value = [
-            ("base_model.model.model.layer.weight", torch.tensor([1.0])),
-            ("base_model.model.original_module.layer.weight", torch.tensor([2.0])),
-            ("base_model.model.dense.weight", torch.tensor([3.0])),
+            ("base_model.model.model.layer.base_layer.weight", torch.tensor([1.0])),
+            ("base_model.model.model.layer.lora_A.actor.weight", torch.tensor([2.0])),
+            ("base_model.model.model.layer.lora_B.actor.weight", torch.tensor([3.0])),
+            (
+                "base_model.model.model.layer.original_module.weight",
+                torch.tensor([4.0]),
+            ),
+            ("base_model.model.dense.weight", torch.tensor([5.0])),
         ]
         acc.unwrap_model = MagicMock(return_value=model_ref)
         with patch("agilerl.algorithms.core.base.gather_if_zero3"):
             agent._move_model_to_vllm()
-        llm_model.load_weights.assert_called_once_with(
-            [("dense.weight", torch.tensor([3.0]))]
-        )
+        agent.llm.apply_model.assert_called_once()
+        call_args = agent.llm.apply_model.call_args
+        load_fn = call_args[0][0]
+        mock_model = MagicMock()
+        load_fn(mock_model)
+        mock_model.load_weights.assert_called_once()
+        loaded = mock_model.load_weights.call_args[0][0]
+        names = [n for n, _ in loaded]
+        assert len(loaded) == 2
+        assert "model.layer.weight" in names
+        assert "dense.weight" in names
 
 
 class TestLLMCloneWithoutAccelerator:

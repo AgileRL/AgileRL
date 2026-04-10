@@ -121,7 +121,7 @@ def main(init_hp, mut_p):
     ]
 
     # Convert the HuggingFace dataset into a Gymnasium environment
-    accelerator = Accelerator()
+    accelerator = None  # Accelerator()
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -134,10 +134,14 @@ def main(init_hp, mut_p):
         return_raw_completions=USE_VLLM,
     )
 
-    # Add the zero stage to the initialization hyperparameters
-    init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
-        "zero_optimization"
-    ]["stage"]
+    init_hp["ZERO_STAGE"] = 0
+    if (
+        accelerator is not None
+        and getattr(accelerator.state, "deepspeed_plugin", None) is not None
+    ):
+        init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
+            "zero_optimization"
+        ]["stage"]
     init_hp["MAX_MODEL_LEN"] = MAX_CONTEXT_LENGTH
 
     hp_config = HyperparameterConfig(
@@ -203,7 +207,8 @@ def main(init_hp, mut_p):
         accelerator=accelerator,
         verbose=True,
     )
-    accelerator.end_training()
+    if accelerator is not None:
+        accelerator.end_training()
 
 
 if __name__ == "__main__":

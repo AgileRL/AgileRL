@@ -6,6 +6,7 @@ import torch
 from gymnasium import spaces
 from torch import nn
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules import EvolvableModule, ModuleDict
@@ -1119,6 +1120,7 @@ def test_optimizer_wrapper_fallback_peft_type_when_no_llm_dependencies():
         sys.modules["agilerl.algorithms.core.optimizer_wrapper"] = original_module
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 def test_optimizer_wrapper_peft_type_when_llm_dependencies_available():
     original_module = sys.modules.pop("agilerl.algorithms.core.optimizer_wrapper", None)
     try:

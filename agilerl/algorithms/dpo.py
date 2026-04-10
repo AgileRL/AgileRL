@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gc
-import warnings
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -14,12 +13,13 @@ if TYPE_CHECKING:
     from accelerate import Accelerator
     from peft import LoraConfig
 
+    from agilerl.utils.llm_utils import PreferenceGym
+
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import get_experiences_samples
-from agilerl.utils.llm_utils import PreferenceGym
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOFunction
@@ -173,14 +173,6 @@ class DPO(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         use_liger_loss: bool = False,
     ) -> None:
-        if use_liger_loss and not HAS_LIGER_KERNEL:
-            warnings.warn(
-                "use_liger_loss=True requested, but `liger-kernel` is not available on this platform/environment. "
-                "Falling back to standard loss.",
-                stacklevel=2,
-            )
-            use_liger_loss = False
-
         resolved_device = (
             f"cuda:{accelerator.process_index}"
             if accelerator is not None

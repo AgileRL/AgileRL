@@ -94,7 +94,7 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
 
     lora_config = LoraConfig(**init_hp["LORA"])
 
-    print("Defining DPO agent population...")
+    print("Setting up DPO agent population...")
     pop = [
         DPO(
             model_name=MODEL_PATH,
@@ -139,7 +139,7 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
     num_batches = init_hp.get("NUM_BATCHES")
     max_steps = num_batches * init_hp["BATCH_SIZE"] if num_batches is not None else None
 
-    print("Finetuning DPO agents...")
+    print("Fine-tuning DPO agents...")
     finetune_llm_preference(
         pop=pop,
         env=env,

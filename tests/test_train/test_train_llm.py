@@ -4,6 +4,8 @@ import pytest
 import torch
 from accelerate import Accelerator
 
+pytest.importorskip("transformers", reason="LLM dependencies not installed")
+
 from agilerl.algorithms import DPO, GRPO
 from agilerl.algorithms.sft import SFT
 from agilerl.training.train_llm import (

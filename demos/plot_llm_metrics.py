@@ -4,15 +4,14 @@ Reads the ``metrics.csv`` produced by :func:`finetune_llm_sft` or
 :func:`finetune_llm_preference` and produces publication-quality loss and
 reward-margin plots.
 
-Styling uses :mod:`agilerl.utils.plot_style` (AgileRL palette + Inter from the
+Styling uses :mod:`agilerl.demos.plot_style` (AgileRL palette + Inter from the
 user cache, e.g. ``~/.cache/agilerl/fonts/inter``).
 
 Usage::
 
-    python demos/plot_llm_metrics.py saved_lora/20260402_093644/metrics.csv
     python demos/plot_llm_metrics.py outputs/SFT/metrics.csv -o docs/tutorials/llm_finetuning/images
-    python demos/plot_llm_metrics.py saved_lora/run1/metrics.csv --smoothing 0.85
-    python demos/plot_llm_metrics.py saved_lora/run1/metrics.csv --algo DPO
+    python demos/plot_llm_metrics.py outputs/SFT/metrics.csv --smoothing 0.85
+    python demos/plot_llm_metrics.py outputs/DPO/metrics.csv --algo DPO
 """
 
 from __future__ import annotations

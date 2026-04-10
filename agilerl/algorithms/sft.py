@@ -1,19 +1,23 @@
+from __future__ import annotations
+
 import gc
-import warnings
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from accelerate import Accelerator
-from peft import LoraConfig
 
 from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import ExperiencesType, LLMObsType
-from agilerl.utils.llm_utils import SFTGym
+
+if TYPE_CHECKING:
+    from accelerate import Accelerator
+    from peft import LoraConfig
+
+    from agilerl.utils.llm_utils import SFTGym
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
@@ -116,14 +120,6 @@ class SFT(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         use_liger_loss: bool = False,
     ) -> None:
-        if use_liger_loss and not HAS_LIGER_KERNEL:
-            warnings.warn(
-                "use_liger_loss=True requested, but `liger-kernel` is not available on this platform/environment. "
-                "Falling back to standard loss.",
-                stacklevel=2,
-            )
-            use_liger_loss = False
-
         resolved_device = (
             f"cuda:{accelerator.process_index}"
             if accelerator is not None
@@ -165,6 +161,12 @@ class SFT(LLMAlgorithm):
         self.use_vllm = False
         self.update_epochs = update_epochs
         self.use_liger_loss = use_liger_loss
+
+        self.loss_fn = (
+            LigerCrossEntropyLoss(ignore_index=-100)
+            if use_liger_loss
+            else F.cross_entropy
+        )
 
         self._initialize_actors(actor_network, not clone)
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
@@ -296,11 +298,7 @@ class SFT(LLMAlgorithm):
         shift_logits = logits[:, :-1, :].contiguous()  # [B, L-1, V]
         flat_logits = shift_logits.view(-1, shift_logits.size(-1))
         flat_labels = labels.view(-1)
-        if self.use_liger_loss:
-            loss = LigerCrossEntropyLoss(ignore_index=-100)(flat_logits, flat_labels)
-        else:
-            loss = F.cross_entropy(flat_logits, flat_labels, ignore_index=-100)
-        return loss
+        return self.loss_fn(flat_logits, flat_labels, ignore_index=-100)
 
     def test(
         self,
@@ -318,7 +316,7 @@ class SFT(LLMAlgorithm):
         :return: Mean negative loss (scalar numpy array)
         :rtype: np.ndarray
         """
-        with env.eval_mode(), torch.no_grad():
+        with env.eval_mode(), torch.inference_mode():
             prompts = env.reset()
             losses = []
             for _ in range(loop):

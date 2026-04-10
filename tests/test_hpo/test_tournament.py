@@ -2,9 +2,9 @@ from unittest.mock import MagicMock
 
 import pytest
 from accelerate import Accelerator
-from peft import LoraConfig
 
-from agilerl.algorithms import CQN, DDPG, DQN, GRPO, MADDPG, MATD3, PPO, TD3, RainbowDQN
+from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.algorithms import CQN, DDPG, DQN, MADDPG, MATD3, PPO, TD3, RainbowDQN
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import clone_llm
 from agilerl.utils.utils import create_population
@@ -14,7 +14,12 @@ from tests.helper_functions import (
     generate_multi_agent_discrete_spaces,
     generate_random_box_space,
 )
-from tests.test_algorithms.test_llms.test_grpo import create_module
+
+if HAS_LLM_DEPENDENCIES:
+    from peft import LoraConfig
+
+    from agilerl.algorithms import GRPO
+    from tests.test_algorithms.test_llms.test_grpo import create_module
 
 # Shared HP dict that can be used by any algorithm
 INIT_HP = {
@@ -266,6 +271,7 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
         assert len(new_population) == population_size
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 @pytest.mark.parametrize("use_accelerator", [True, False])
 @pytest.mark.parametrize("elitism", [True, False])
 @pytest.mark.parametrize("num_processes", [1, 2])

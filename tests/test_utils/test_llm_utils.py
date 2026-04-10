@@ -8,6 +8,9 @@ import pytest
 import torch
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
+
+pytest.importorskip("datasets", reason="LLM dependencies not installed")
+
 from datasets import Dataset as Datasets
 from torch import nn
 from torch.utils.data import DataLoader, Dataset

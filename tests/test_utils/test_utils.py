@@ -8,11 +8,11 @@ from accelerate import Accelerator, DeepSpeedPlugin
 from gymnasium import spaces
 from pettingzoo.mpe import simple_speaker_listener_v4
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
     DDPG,
     DQN,
-    GRPO,
     IPPO,
     MADDPG,
     MATD3,
@@ -23,6 +23,9 @@ from agilerl.algorithms import (
     RainbowDQN,
 )
 from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
+
+if HAS_LLM_DEPENDENCIES:
+    from agilerl.algorithms import GRPO
 from agilerl.typing import BatchDimension
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -797,6 +800,7 @@ def test_consolidate_mutations_warning_if_not_llm_algorithm():
         consolidate_mutations(population)
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 def test_consolidate_mutations():
     population = [MagicMock(spec=GRPO) for _ in range(3)]
     for agent in population:

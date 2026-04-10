@@ -10,23 +10,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
     DDPG,
-    DPO,
     DQN,
-    GRPO,
     IPPO,
     MADDPG,
     MATD3,
     PPO,
-    SFT,
     TD3,
     NeuralTS,
     NeuralUCB,
@@ -39,8 +37,11 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
-from agilerl.utils.llm_utils import get_state_dict
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+
+if HAS_LLM_DEPENDENCIES:
+    from agilerl.algorithms import DPO, GRPO, SFT
+    from agilerl.utils.llm_utils import get_state_dict
 
 SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
 

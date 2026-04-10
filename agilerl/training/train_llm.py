@@ -5,11 +5,12 @@ from collections.abc import Callable
 from typing import Any, Literal
 
 import numpy as np
+import torch
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DPO, GRPO
 from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
@@ -27,10 +28,17 @@ InitDictType = dict[str, Any] | None
 
 
 def safe_aggregate_metrics(
-    accelerator: Accelerator | None, metrics: list[float]
+    accelerator: Accelerator | None,
+    metrics: torch.Tensor | np.ndarray | float,
 ) -> float:
     if accelerator is None:
-        return float(metrics) if not isinstance(metrics, float) else metrics
+        if isinstance(metrics, (torch.Tensor, np.ndarray)):
+            return float(
+                np.mean(metrics)
+                if isinstance(metrics, np.ndarray)
+                else metrics.float().mean().item()
+            )
+        return float(metrics)
     return aggregate_metrics_across_gpus(accelerator, metrics)
 
 
@@ -435,7 +443,7 @@ def finetune_llm_reasoning(
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
                 metrics.append(accuracy)
             agg_metrics = [
-                aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
+                safe_aggregate_metrics(accelerator, metric) for metric in metrics
             ]
             prompts = next_prompts
             agent.steps[-1] += effective_data_batch_size
@@ -451,7 +459,7 @@ def finetune_llm_reasoning(
                     )
                     test_metrics.append(test_accuracy)
                 agg_test_metrics = [
-                    aggregate_metrics_across_gpus(accelerator, metric)
+                    safe_aggregate_metrics(accelerator, metric)
                     for metric in test_metrics
                 ]
 
