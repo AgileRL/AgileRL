@@ -6,10 +6,11 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import click
 from rich.console import Console
+from rich.live import Live
 from rich.table import Table
 
 from agilerl.arena.client import ArenaClient
@@ -189,6 +190,183 @@ def _handle_error(exc: Exception, output: OutputFormat) -> None:
 
 def _stream_chunk(chunk: str) -> None:
     click.echo(chunk, nl=False)
+
+
+@dataclass(slots=True)
+class _StreamRow:
+    event_type: str
+    name: str
+    status: str
+    details: str
+
+
+class _StreamTableRenderer:
+    """Incrementally render newline-delimited JSON chunks as a Rich table."""
+
+    def __init__(self, *, is_error: bool = False) -> None:
+        self._console = error_console if is_error else console
+        self._buffer = ""
+        self._rows: list[_StreamRow] = []
+        self._live: Live | None = None
+        self._completion_payload: dict[str, Any] | None = None
+        self._final_status_payload: dict[str, Any] | None = None
+
+    def on_chunk(self, chunk: str) -> None:
+        if not chunk:
+            return
+        self._ensure_live()
+        self._buffer += chunk
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._consume_line(line.strip())
+        self._refresh()
+
+    def finalize_result(self, result: Any) -> Any | None:
+        self.close()
+        if not isinstance(result, dict):
+            return result
+
+        cleaned = {
+            key: value for key, value in result.items() if key not in {"stream", "events"}
+        }
+        if self._completion_payload is None:
+            return cleaned or None
+
+        merged = {**cleaned, **self._completion_payload}
+        if self._final_status_payload is not None:
+            merged.setdefault("final_status", self._final_status_payload.get("status"))
+            merged.setdefault("final_stage", self._final_status_payload.get("stage"))
+            merged.setdefault("final_message", self._final_status_payload.get("message"))
+        return merged or None
+
+    def close(self) -> None:
+        if self._buffer.strip():
+            self._consume_line(self._buffer.strip())
+            self._buffer = ""
+        if self._live is not None:
+            self._refresh()
+            self._live.stop()
+            self._live = None
+
+    def _ensure_live(self) -> None:
+        if self._live is not None:
+            return
+        self._live = Live(
+            self._build_table(),
+            console=self._console,
+            refresh_per_second=8,
+        )
+        self._live.start()
+
+    def _refresh(self) -> None:
+        if self._live is not None:
+            self._live.update(self._build_table())
+
+    def _build_table(self) -> Table:
+        table = Table(title="Stream Updates")
+        table.add_column("Type", no_wrap=True)
+        table.add_column("Name")
+        table.add_column("Status", no_wrap=True)
+        table.add_column("Details")
+        for row in self._rows:
+            table.add_row(row.event_type, row.name, row.status, row.details)
+        return table
+
+    def _consume_line(self, line: str) -> None:
+        if not line:
+            return
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            self._rows.append(_StreamRow("log", "-", "-", line))
+            return
+
+        if not isinstance(payload, dict):
+            self._rows.append(_StreamRow("event", "-", "-", _format_cell(payload)))
+            return
+
+        if payload.get("kind") == "status":
+            stage = str(payload.get("stage", "-"))
+            status = str(payload.get("status", "-"))
+            raw_message = payload.get("message", "")
+            message = str(raw_message)
+            parsed_message = self._parse_json_message(message)
+            if parsed_message is not None:
+                message = self._summarize_payload(parsed_message)
+            self._rows.append(_StreamRow("status", stage, status, message))
+            if status == "completed":
+                self._final_status_payload = payload
+                if isinstance(parsed_message, dict):
+                    self._completion_payload = parsed_message
+            return
+
+        if "check" in payload and isinstance(payload.get("result"), dict):
+            check_name = str(payload["check"])
+            result = payload["result"]
+            success = result.get("success")
+            status = "PASS" if success is True else "FAIL" if success is False else "UNKNOWN"
+            error_msg = result.get("error msg") or result.get("error") or ""
+            warnings = result.get("warnings")
+            warning_text = ""
+            if isinstance(warnings, list) and warnings:
+                warning_text = f"warnings: {', '.join(str(item) for item in warnings)}"
+            details = "; ".join(part for part in (str(error_msg), warning_text) if part).strip()
+            self._rows.append(_StreamRow("check", check_name, status, details or "-"))
+            return
+
+        if payload.get("complete") is True:
+            self._completion_payload = payload
+            env_name = (
+                payload.get("env_info", {}).get("env_name")
+                if isinstance(payload.get("env_info"), dict)
+                else None
+            )
+            details = f"env: {env_name}" if env_name else "Validation payload received"
+            self._rows.append(_StreamRow("result", "validation", "complete", details))
+            return
+
+        self._rows.append(_StreamRow("event", "-", "-", _format_cell(payload)))
+
+    @staticmethod
+    def _parse_json_message(message: str) -> dict[str, Any] | list[Any] | None:
+        message = message.strip()
+        if not message or message[0] not in "{[":
+            return None
+        try:
+            parsed = json.loads(message)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, (dict, list)):
+            return parsed
+        return None
+
+    @staticmethod
+    def _summarize_payload(payload: dict[str, Any] | list[Any]) -> str:
+        if isinstance(payload, list):
+            return f"items: {len(payload)}"
+        accepted = payload.get("accepted")
+        experiment_id = payload.get("experimentId") or payload.get("experiment_id")
+        submissions = payload.get("submissions")
+        parts: list[str] = []
+        if accepted is not None:
+            parts.append(f"accepted: {accepted}")
+        if experiment_id is not None:
+            parts.append(f"experiment_id: {experiment_id}")
+        if isinstance(submissions, list):
+            parts.append(f"submissions: {len(submissions)}")
+        if parts:
+            return ", ".join(parts)
+        keys = ", ".join(str(key) for key in list(payload.keys())[:4])
+        return f"result keys: {keys}" if keys else "completed"
+
+
+def _build_stream_handler(
+    output: OutputFormat,
+) -> tuple[Callable[[str], None], _StreamTableRenderer | None]:
+    if output == "json":
+        return _stream_chunk, None
+    renderer = _StreamTableRenderer()
+    return renderer.on_chunk, renderer
 
 
 def _load_json_payload(
@@ -464,7 +642,11 @@ def env_create_and_validate(
 
     client = _build_client(config)
     env_name = name or str(uuid4())
+    stream_renderer: _StreamTableRenderer | None = None
     try:
+        on_chunk: Callable[[str], None] | None = None
+        if stream:
+            on_chunk, stream_renderer = _build_stream_handler(config.output)
         result = client.create_and_validate_custom_environment(
             name=env_name,
             version=version,
@@ -475,14 +657,19 @@ def env_create_and_validate(
             multi_agent=multi_agent,
             do_rollouts=do_rollouts,
             stream=stream,
-            on_chunk=_stream_chunk if stream else None,
+            on_chunk=on_chunk,
         )
-        if stream:
+        if stream and stream_renderer is not None:
+            result = stream_renderer.finalize_result(result)
+        elif stream:
             click.echo()
-        _emit(result, config.output)
+        if result is not None:
+            _emit(result, config.output)
     except Exception as exc:  # noqa: BLE001
         _handle_error(exc, config.output)
     finally:
+        if stream_renderer is not None:
+            stream_renderer.close()
         client.close()
 
 
@@ -507,21 +694,30 @@ def env_validate(
 ) -> None:
     """Validate an already-created environment version."""
     client = _build_client(config)
+    stream_renderer: _StreamTableRenderer | None = None
     try:
+        on_chunk: Callable[[str], None] | None = None
+        if stream:
+            on_chunk, stream_renderer = _build_stream_handler(config.output)
         result = client.validate_custom_environment(
             name=name,
             version=version,
             entrypoint=entrypoint,
             do_rollouts=do_rollouts,
             stream=stream,
-            on_chunk=_stream_chunk if stream else None,
+            on_chunk=on_chunk,
         )
-        if stream:
+        if stream and stream_renderer is not None:
+            result = stream_renderer.finalize_result(result)
+        elif stream:
             click.echo()
-        _emit(result, config.output)
+        if result is not None:
+            _emit(result, config.output)
     except Exception as exc:  # noqa: BLE001
         _handle_error(exc, config.output)
     finally:
+        if stream_renderer is not None:
+            stream_renderer.close()
         client.close()
 
 
@@ -547,21 +743,30 @@ def env_profile(
 ) -> None:
     """Profile a validated environment (returns cpu_per_env and ram_per_env)."""
     client = _build_client(config)
+    stream_renderer: _StreamTableRenderer | None = None
     try:
+        on_chunk: Callable[[str], None] | None = None
+        if stream:
+            on_chunk, stream_renderer = _build_stream_handler(config.output)
         result = client.profile_custom_environment(
             name=name,
             version=version,
             custom_env_path=custom_env_path,
             multi_agent=multi_agent,
             stream=stream,
-            on_chunk=_stream_chunk if stream else None,
+            on_chunk=on_chunk,
         )
-        if stream:
+        if stream and stream_renderer is not None:
+            result = stream_renderer.finalize_result(result)
+        elif stream:
             click.echo()
-        _emit(result, config.output)
+        if result is not None:
+            _emit(result, config.output)
     except Exception as exc:  # noqa: BLE001
         _handle_error(exc, config.output)
     finally:
+        if stream_renderer is not None:
+            stream_renderer.close()
         client.close()
 
 
@@ -662,7 +867,11 @@ def experiments_submit(
         )
 
     client = _build_client(config)
+    stream_renderer: _StreamTableRenderer | None = None
     try:
+        on_chunk: Callable[[str], None] | None = None
+        if stream:
+            on_chunk, stream_renderer = _build_stream_handler(config.output)
         result = client.submit_experiment_job(
             manifest=manifest,
             custom_gym_env_impl_id=custom_gym_env_impl_id,
@@ -670,14 +879,19 @@ def experiments_submit(
             gym_env_id=gym_env_id,
             experiment_name=experiment_name,
             stream=stream,
-            on_chunk=_stream_chunk if stream else None,
+            on_chunk=on_chunk,
         )
-        if stream:
+        if stream and stream_renderer is not None:
+            result = stream_renderer.finalize_result(result)
+        elif stream:
             click.echo()
-        _emit(result, config.output)
+        if result is not None:
+            _emit(result, config.output)
     except Exception as exc:  # noqa: BLE001
         _handle_error(exc, config.output)
     finally:
+        if stream_renderer is not None:
+            stream_renderer.close()
         client.close()
 
 
