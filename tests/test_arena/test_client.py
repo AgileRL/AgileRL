@@ -649,3 +649,93 @@ class TestValidateEnvironmentParams:
         call_kwargs = api_key_client._register_environment.call_args[1]
         assert call_kwargs["multi_agent"] is True
         assert call_kwargs["description"] == "A test env"
+
+
+class TestCliV1EnvironmentAndExperimentEndpoints:
+    def test_list_custom_environments_uses_cli_v1(self, api_key_client):
+        api_key_client._request = MagicMock(
+            return_value={"ok": True, "data": {"MyEnv": {"v1": {"validated": True}}}}
+        )
+        result = api_key_client.list_custom_environments()
+        api_key_client._request.assert_called_once_with("GET", "/api/cli/v1/environments")
+        assert "MyEnv" in result
+
+    def test_custom_environment_exists_unwraps_standard_payload(self, api_key_client):
+        api_key_client._request = MagicMock(
+            return_value={"ok": True, "data": {"exists": True}}
+        )
+        exists = api_key_client.custom_environment_exists("MyEnv", "v1")
+        assert exists is True
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/environments/exists",
+            params={"name": "MyEnv", "version": "v1"},
+        )
+
+    def test_list_custom_environment_entrypoints_unwraps_standard_payload(
+        self, api_key_client
+    ):
+        api_key_client._request = MagicMock(
+            return_value={"ok": True, "data": ["main:Env", "alt:Env"]}
+        )
+        entrypoints = api_key_client.list_custom_environment_entrypoints("MyEnv", "v1")
+        assert entrypoints == ["main:Env", "alt:Env"]
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/environments/entrypoints",
+            params={"name": "MyEnv", "version": "v1"},
+        )
+
+    def test_validate_custom_environment_uses_cli_v1_path(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"ok": True})
+        api_key_client.validate_custom_environment(name="MyEnv", version="v1", stream=False)
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/environments/validate",
+            json={"name": "MyEnv", "version": "v1", "do_rollouts": True},
+        )
+
+    def test_profile_custom_environment_uses_cli_v1_path(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"ok": True})
+        api_key_client.profile_custom_environment(
+            name="MyEnv", version="v1", multi_agent=False, stream=False
+        )
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/environments/profile",
+            json={"name": "MyEnv", "version": "v1", "multi_agent": False},
+        )
+
+    def test_delete_custom_environment_uses_cli_v1_path_and_unwraps(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"ok": True, "data": None})
+        result = api_key_client.delete_custom_environment(name="MyEnv", version="v1")
+        assert result is None
+        api_key_client._request.assert_called_once_with(
+            "DELETE",
+            "/api/cli/v1/environments/delete",
+            json={"name": "MyEnv", "version": "v1"},
+        )
+
+    def test_submit_experiment_job_uses_cli_v1_path(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"ok": True})
+        api_key_client.submit_experiment_job(
+            manifest={"algorithm": {}},
+            custom_gym_env_impl_id=1,
+            stream=False,
+        )
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/experiments/jobs/submit",
+            json={"manifest": {"algorithm": {}}, "custom_gym_env_impl_id": 1},
+            timeout=api_key_client._upload_timeout,
+        )
+
+    def test_validate_job_run_spec_uses_cli_v1_and_handles_null_data(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"ok": True, "data": None})
+        result = api_key_client.validate_job_run_spec({"algorithm": {"name": "DQN"}})
+        assert result == {"valid": True}
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/experiments/validate-run-spec",
+            json={"algorithm": {"name": "DQN"}},
+        )

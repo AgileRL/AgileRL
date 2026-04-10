@@ -344,9 +344,21 @@ class _StreamTableRenderer:
     def _summarize_payload(payload: dict[str, Any] | list[Any]) -> str:
         if isinstance(payload, list):
             return f"items: {len(payload)}"
+        if payload.get("ok") is True and "data" in payload:
+            data = payload.get("data")
+            if data in ("", None):
+                return "ok"
+            if isinstance(data, list):
+                return f"ok, items: {len(data)}"
+            if isinstance(data, dict):
+                payload = data
+            else:
+                return f"ok, data: {data}"
         accepted = payload.get("accepted")
         experiment_id = payload.get("experimentId") or payload.get("experiment_id")
         submissions = payload.get("submissions")
+        error_code = payload.get("error_code")
+        error_message = payload.get("error")
         parts: list[str] = []
         if accepted is not None:
             parts.append(f"accepted: {accepted}")
@@ -354,6 +366,10 @@ class _StreamTableRenderer:
             parts.append(f"experiment_id: {experiment_id}")
         if isinstance(submissions, list):
             parts.append(f"submissions: {len(submissions)}")
+        if error_code is not None:
+            parts.append(f"error_code: {error_code}")
+        if error_message is not None:
+            parts.append(f"error: {error_message}")
         if parts:
             return ", ".join(parts)
         keys = ", ".join(str(key) for key in list(payload.keys())[:4])

@@ -303,14 +303,18 @@ class ArenaClient:
 
     def list_custom_environments(self) -> Any:
         """List custom environments available to the authenticated user."""
-        return self._request("GET", "/api/custom-gym-env-impls/list")
+        return self._unwrap_cli_data(
+            self._request("GET", "/api/cli/v1/environments")
+        )
 
     def custom_environment_exists(self, name: str, version: str = "latest") -> bool:
         """Check whether a custom environment name/version exists."""
-        resp = self._request(
+        resp = self._unwrap_cli_data(
+            self._request(
             "GET",
-            "/api/custom-gym-env-impls/exists",
+            "/api/cli/v1/environments/exists",
             params={"name": name, "version": version},
+            )
         )
         if isinstance(resp, dict):
             for key in ("exists", "is_registered", "isRegistered"):
@@ -322,10 +326,12 @@ class ArenaClient:
         self, name: str, version: str = "latest"
     ) -> list[str]:
         """List available entrypoints for a custom environment version."""
-        resp = self._request(
+        resp = self._unwrap_cli_data(
+            self._request(
             "GET",
-            "/api/custom-gym-env-impls/entrypoints",
+            "/api/cli/v1/environments/entrypoints",
             params={"name": name, "version": version},
+            )
         )
         if isinstance(resp, dict):
             entrypoints = resp.get("entrypoints", [])
@@ -355,11 +361,11 @@ class ArenaClient:
             payload["entrypoint"] = entrypoint
 
         if not stream:
-            return self._request("POST", "/api/custom-gym-env-impls/validate", json=payload)
+            return self._request("POST", "/api/cli/v1/environments/validate", json=payload)
 
         return self._stream_json_request(
             "POST",
-            "/api/custom-gym-env-impls/validate",
+            "/api/cli/v1/environments/validate",
             json=payload,
             timeout=self._upload_timeout,
             on_chunk=on_chunk,
@@ -385,11 +391,11 @@ class ArenaClient:
             payload["custom_env_path"] = custom_env_path
 
         if not stream:
-            return self._request("POST", "/api/custom-gym-env-impls/profile", json=payload)
+            return self._request("POST", "/api/cli/v1/environments/profile", json=payload)
 
         return self._stream_json_request(
             "POST",
-            "/api/custom-gym-env-impls/profile",
+            "/api/cli/v1/environments/profile",
             json=payload,
             timeout=self._upload_timeout,
             on_chunk=on_chunk,
@@ -398,7 +404,9 @@ class ArenaClient:
     def delete_custom_environment(self, *, name: str, version: str) -> Any:
         """Delete a custom environment version by name and version."""
         payload = {"name": name, "version": version}
-        return self._request("DELETE", "/api/custom-gym-env-impls/delete", json=payload)
+        return self._unwrap_cli_data(
+            self._request("DELETE", "/api/cli/v1/environments/delete", json=payload)
+        )
 
     def create_and_validate_custom_environment(
         self,
@@ -450,7 +458,7 @@ class ArenaClient:
             if not stream:
                 return self._request(
                     "POST",
-                    "/api/custom-gym-env-impls/create-and-validate",
+                    "/api/cli/v1/environments/create-and-validate",
                     data=payload,
                     files=files,
                     timeout=self._upload_timeout,
@@ -462,7 +470,7 @@ class ArenaClient:
                 try:
                     with self._http.stream(
                         "POST",
-                        "/api/custom-gym-env-impls/create-and-validate",
+                        "/api/cli/v1/environments/create-and-validate",
                         headers=headers,
                         data=payload,
                         files=files,
@@ -555,7 +563,7 @@ class ArenaClient:
         if not stream:
             return self._request(
                 "POST",
-                "/api/experiments/jobs/submit",
+                "/api/cli/v1/experiments/jobs/submit",
                 json=payload,
                 timeout=self._upload_timeout,
             )
@@ -566,7 +574,7 @@ class ArenaClient:
             try:
                 with self._http.stream(
                     "POST",
-                    "/api/experiments/jobs/submit",
+                    "/api/cli/v1/experiments/jobs/submit",
                     headers=headers,
                     json=payload,
                     timeout=self._upload_timeout,
@@ -631,7 +639,9 @@ class ArenaClient:
 
     def validate_job_run_spec(self, run_spec: dict[str, Any]) -> dict[str, Any]:
         """Validate a runspec payload against backend schema/rules."""
-        result = self._request("POST", "/api/experiments/validate/run_spec", json=run_spec)
+        result = self._unwrap_cli_data(
+            self._request("POST", "/api/cli/v1/experiments/validate-run-spec", json=run_spec)
+        )
         if result in ("", None):
             return {"valid": True}
         return result if isinstance(result, dict) else {"valid": True, "response": result}
@@ -1078,3 +1088,10 @@ class ArenaClient:
         errors = resp.get("errors")
         if errors:
             raise ArenaValidationError(errors)
+
+    @staticmethod
+    def _unwrap_cli_data(resp: Any) -> Any:
+        """Unwrap standardized CLI envelope responses when present."""
+        if isinstance(resp, dict) and resp.get("ok") is True and "data" in resp:
+            return resp["data"]
+        return resp
