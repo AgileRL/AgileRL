@@ -1485,7 +1485,13 @@ def test_init_grpo_with_no_accelerator(
     assert isinstance(grpo.cosine_lr_schedule_config, CosineLRScheduleConfig), type(
         grpo.cosine_lr_schedule_config,
     )
-    assert grpo.device == ("cuda" if torch.cuda.is_available() else "cpu")
+    assert grpo.device == (
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
     assert grpo.index == 0
     assert grpo.scores == []
     assert grpo.fitness == []
