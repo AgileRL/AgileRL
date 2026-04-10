@@ -483,6 +483,7 @@ def test_sft_liger_unavailable_behaviour(
     model_factory,
     assertion_mode,
 ):
+    monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
     monkeypatch.setattr("agilerl.algorithms.sft.HAS_LIGER_KERNEL", False)
     if assertion_mode == "warns_and_fallback":
         with pytest.warns(

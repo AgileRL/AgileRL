@@ -3842,6 +3842,7 @@ def test_grpo_liger_unavailable_behaviour(
     accelerator_factory,
     assertion_mode,
 ):
+    monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
     monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", False)
     monkeypatch.setattr("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction", None)
     if assertion_mode == "warns_and_fallback":

@@ -519,6 +519,10 @@ def test_dpo_liger_unavailable_behaviour(
     model_factory,
     assertion_mode,
 ):
+    # LLMAlgorithm reads HAS_LIGER_KERNEL from core.base; DPO's module copy is
+    # separate. Patch both so fallback warning runs on machines where liger is
+    # installed and _dpo_loss_liger still raises when called directly.
+    monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
     monkeypatch.setattr("agilerl.algorithms.dpo.HAS_LIGER_KERNEL", False)
     if assertion_mode == "warns_and_fallback":
         with pytest.warns(
