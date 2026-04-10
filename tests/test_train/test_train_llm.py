@@ -63,7 +63,10 @@ def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
         assert mock_agent.get_action.call_count == 6
         assert mock_env.step.call_count == 6
         assert mock_agent.learn.call_count == 6
-        assert mock_agg.call_count == 36
+        # aggregate_metrics_across_gpus is only used when an Accelerator is passed;
+        # safe_aggregate_metrics handles the no-accelerator case locally.
+        expected_agg_calls = 36 if not use_accelerator else 0
+        assert mock_agg.call_count == expected_agg_calls
         assert mock_agent.test.call_count == 3  # Should be called at step 2
 
 
@@ -200,7 +203,8 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
         assert mock_agent.get_action.call_count == 6
         assert mock_env.step.call_count == 6
         assert mock_agent.learn.call_count == 6
-        assert mock_agg.call_count == 36
+        expected_agg_calls = 36 if not use_accelerator else 0
+        assert mock_agg.call_count == expected_agg_calls
         assert mock_agent.test.call_count == 3  # Should be called at step 2
         assert (
             mock_tournament_selection_and_mutation.call_count == 6

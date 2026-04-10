@@ -3386,7 +3386,7 @@ def test_init_grpo_lora_config_warning(
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(
         UserWarning,
-        match=r"No LoRA config provided. AgileRL can only be used to finetune adapters at present. Using default LoRA configuration for RL finetuning.",
+        match=r"No LoRA config provided\.\s+AgileRL can only be used to finetune adapters at present\.\s+Using default LoRA configuration for RL fine-tuning\.",
     ):
         gc.collect()
         vocab_size = 1000

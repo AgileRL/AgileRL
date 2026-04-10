@@ -128,6 +128,9 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 
 if TYPE_CHECKING or HAS_VLLM:
     from vllm import LLM, SamplingParams
+else:
+    LLM = None
+    SamplingParams = None
 
 
 __all__ = ["EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]

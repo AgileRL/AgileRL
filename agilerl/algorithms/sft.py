@@ -160,11 +160,10 @@ class SFT(LLMAlgorithm):
         self.temperature = 0
         self.use_vllm = False
         self.update_epochs = update_epochs
-        self.use_liger_loss = use_liger_loss
 
         self.loss_fn = (
             LigerCrossEntropyLoss(ignore_index=-100)
-            if use_liger_loss
+            if self.use_liger_loss
             else F.cross_entropy
         )
 

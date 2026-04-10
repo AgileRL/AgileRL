@@ -209,7 +209,6 @@ class GRPO(LLMAlgorithm):
                 actor_network,
                 (PeftModelProtocol, PreTrainedModelProtocol),
             ), "Actor network must be a PeftModelProtocol or PreTrainedModelProtocol"
-        self.use_liger_loss = use_liger_loss
         self.clip_coef = clip_coef
         self.update_epochs = update_epochs
         self.group_size = group_size
