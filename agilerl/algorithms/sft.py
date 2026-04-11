@@ -297,7 +297,7 @@ class SFT(LLMAlgorithm):
         shift_logits = logits[:, :-1, :].contiguous()  # [B, L-1, V]
         flat_logits = shift_logits.view(-1, shift_logits.size(-1))
         flat_labels = labels.view(-1)
-        return self.loss_fn(flat_logits, flat_labels, ignore_index=-100)
+        return self.loss_fn(flat_logits, flat_labels)
 
     def test(
         self,
