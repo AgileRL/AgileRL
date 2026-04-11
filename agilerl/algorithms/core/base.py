@@ -3249,24 +3249,61 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     @staticmethod
     def _resolve_model_path_for_vllm(model_path: str) -> str:
-        """Resolve a Hugging Face repo id or path for vLLM's ``model`` argument.
+        """Return an on-disk path for vLLM's ``model`` (weights and tokenizer).
 
-        vLLM validates that ``model`` points at a local directory with recognized
-        config files or a resolvable HF repo. In CI (e.g. ``HF_HUB_OFFLINE``), a
-        repo id can fail that check even when weights are already cached for
-        ``transformers``; ``snapshot_download`` returns the on-disk cache path.
+        :param model_path: Hugging Face repo id or a local folder with ``config.json``.
+        :type model_path: str
+        :return: Path to a snapshot directory.
+        :rtype: str
+        :raises ValueError: If the resolved path is not an existing directory (e.g. bad
+            cache or unexpected ``snapshot_download`` result).
+
+        Repo ids are turned into a cache path via ``snapshot_download`` (so vLLM
+        always receives a directory; helps when only the cache, not the id, is usable).
+
+        vLLM loads the tokenizer from that same directory. A cache that has weights but
+        not tokenizer files can make ``AutoTokenizer`` fail (e.g. slow GPT2 path with
+        ``vocab_file`` unset). If the usual tokenizer files are missing and
+        ``model_path`` is a repo id, we call ``snapshot_download`` again with
+        ``local_files_only=False`` to fill the gap. Local paths are never modified.
         """
         path = Path(model_path)
         from huggingface_hub import snapshot_download
         from huggingface_hub.errors import LocalEntryNotFoundError
 
-        if path.is_dir() and (path / "config.json").is_file():
-            return str(path.resolve())
+        # Local checkpoint: use as-is (caller is responsible for a complete tree).
+        local_model_dir = path.is_dir() and (path / "config.json").is_file()
+        if local_model_dir:
+            resolved = str(path.resolve())
+        else:
+            # Repo id: snapshot on disk first, then hit the network if needed.
+            try:
+                resolved = snapshot_download(repo_id=model_path, local_files_only=True)
+            except LocalEntryNotFoundError:
+                resolved = snapshot_download(repo_id=model_path)
 
+        resolved_path = Path(resolved)
+        if not resolved_path.is_dir():
+            msg = (
+                "Expected a model directory for vLLM, but the resolved path is not a "
+                f"directory (missing, not a folder, or inaccessible): {resolved!r} "
+                f"(model_path={model_path!r})."
+            )
+            raise ValueError(msg)
+
+        # Files vLLM/transformers typically need to load a tokenizer from the snapshot.
+        has_tokenizer_files = any(
+            (resolved_path / name).is_file()
+            for name in ("tokenizer.json", "vocab.json", "tokenizer.model")
+        )
+        if has_tokenizer_files or local_model_dir:
+            return resolved
+
+        # Incomplete Hub cache: fetch remaining files (e.g. tokenizer) if allowed.
         try:
-            return snapshot_download(repo_id=model_path, local_files_only=True)
+            return snapshot_download(repo_id=model_path, local_files_only=False)
         except LocalEntryNotFoundError:
-            return snapshot_download(repo_id=model_path)
+            return resolved
 
     def _configure_vllm(self) -> None:
         """Configure vLLM for efficient inference during generation in 'get_action'."""
