@@ -19,6 +19,7 @@ from agilerl.utils.llm_utils import (
     compare_responses,
     gather_if_zero3,
     get_state_dict,
+    sample_eval_prompts,
 )
 from agilerl.wrappers.llm_envs import PreferenceGym, ReasoningGym
 
@@ -1083,3 +1084,88 @@ def test_compare_responses_skip_special_tokens_forwarded():
 
     _, decode_kwargs = tokenizer.decode.call_args
     assert decode_kwargs["skip_special_tokens"] is False
+
+
+def test_sample_eval_prompts_sft_style_response_column():
+    """Covers SFTGym-style envs that expose ``response_column``."""
+    from types import SimpleNamespace
+
+    ds = Datasets.from_dict(
+        {"prompt": ["p0", "p1"], "response": ["r0", "r1"]},
+    )
+    env = SimpleNamespace(
+        response_column="response",
+        test_dataloader=SimpleNamespace(dataset=ds),
+    )
+    rows = sample_eval_prompts(env, n=2, seed=0)
+    assert len(rows) == 2
+    assert {rows[0][0], rows[1][0]} == {"p0", "p1"}
+    assert all(r[2] is None for r in rows)
+
+
+def test_sample_eval_prompts_preference_style_chosen_rejected():
+    """Covers PreferenceGym-style datasets with ``chosen`` / ``rejected`` columns."""
+    from types import SimpleNamespace
+
+    ds = Datasets.from_dict(
+        {
+            "prompt": ["p0", "p1"],
+            "chosen": ["c0", "c1"],
+            "rejected": ["x0", "x1"],
+        },
+    )
+    env = SimpleNamespace(test_dataloader=SimpleNamespace(dataset=ds))
+    rows = sample_eval_prompts(env, n=2, seed=0)
+    assert len(rows) == 2
+    prompts = {r[0] for r in rows}
+    assert prompts == {"p0", "p1"}
+    for p, c, r in rows:
+        if p == "p0":
+            assert (c, r) == ("c0", "x0")
+        else:
+            assert (c, r) == ("c1", "x1")
+
+
+def test_gather_if_zero3_stage_not_three_noop():
+    """ZeRO stages other than 3 should be a no-op context manager."""
+    with gather_if_zero3(1, []):
+        assert True
+
+
+def test_preference_gym_collate_max_context_length_branch():
+    """Exercise ``max_context_length is not None`` tokenisation in PreferenceGym."""
+    from datasets import Dataset as HFDataset
+
+    from agilerl.wrappers.llm_envs import PreferenceGym
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+    )
+    train_ds = HFDataset.from_dict(
+        {
+            "prompt": ["hello"],
+            "chosen": ["yes"],
+            "rejected": ["no"],
+        },
+    )
+    test_ds = HFDataset.from_dict(
+        {
+            "prompt": ["hello"],
+            "chosen": ["yes"],
+            "rejected": ["no"],
+        },
+    )
+    env = PreferenceGym(
+        train_dataset=train_ds,
+        test_dataset=test_ds,
+        tokenizer=tokenizer,
+        data_batch_size_per_gpu=1,
+        max_context_length=64,
+    )
+    collate = env.create_collate_fn(tokenizer)
+    batch = [
+        {"prompt": "hello", "chosen": "yes please", "rejected": "no thanks"},
+    ]
+    out = collate(batch)
+    assert "chosen_input_ids" in out
+    assert out["chosen_input_ids"].shape[1] == 64

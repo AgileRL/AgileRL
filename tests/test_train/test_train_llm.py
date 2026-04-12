@@ -1057,3 +1057,54 @@ def test_finetune_llm_sft_evo_steps_not_set():
             "'evo_steps' must be set when 'tournament' and 'mutation' are not None."
             in str(evo_steps_not_set_error.value)
         )
+
+
+def test_create_pbar_custom_bar_format():
+    from agilerl.training.train_llm import _create_pbar
+
+    with patch("agilerl.training.train_llm.trange") as mock_trange:
+        _create_pbar(None, 3, bar_format="x")
+    assert mock_trange.call_args.kwargs["bar_format"] == "x"
+
+
+def test_wandb_extend_hpo_skips_empty_config():
+    from agilerl.training.train_llm import _wandb_extend_hpo_hyperparams
+
+    wandb_dict: dict[str, object] = {}
+    agent = MagicMock()
+    agent.registry.hp_config.config = {}
+    _wandb_extend_hpo_hyperparams(wandb_dict, [agent])
+    assert wandb_dict == {}
+
+
+def test_wandb_extend_hpo_adds_keys():
+    from agilerl.training.train_llm import _wandb_extend_hpo_hyperparams
+
+    wandb_dict: dict[str, object] = {}
+    agent = MagicMock()
+    agent.lr = 0.1
+    agent.registry.hp_config.config = {"lr": 0.1}
+    _wandb_extend_hpo_hyperparams(wandb_dict, [agent])
+    assert wandb_dict["HPO_agent_0/lr"] == 0.1
+
+
+def test_save_elite_checkpoint_picks_best_agent(tmp_path):
+    from agilerl.training.train_llm import _save_elite_checkpoint
+
+    with patch("agilerl.training.train_llm.save_llm_checkpoint") as save:
+        worse = MagicMock()
+        worse.fitness = [1.0]
+        better = MagicMock()
+        better.fitness = [3.0]
+        elite_dir = str(tmp_path / "elite")
+        _save_elite_checkpoint([worse, better], True, elite_dir, None)
+    save.assert_called_once_with(better, elite_dir)
+
+
+def test_open_csv_log_and_log_row(tmp_path):
+    from agilerl.training.train_llm import _log_csv_row, _open_csv_log
+
+    csv_file, writer = _open_csv_log(str(tmp_path), ["step"], None)
+    assert csv_file is not None and writer is not None
+    _log_csv_row(writer, csv_file, {"step": 1})
+    csv_file.close()

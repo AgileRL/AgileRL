@@ -289,6 +289,14 @@ def create_module(input_size, max_tokens, vocab_size, device):
     )
 
 
+def _patch_mps_learn_hooks(monkeypatch: pytest.MonkeyPatch, module: str) -> MagicMock:
+    """Make ``learn`` think MPS is available and record ``torch.mps.empty_cache`` calls."""
+    mock_empty = MagicMock()
+    monkeypatch.setattr(f"{module}.torch.backends.mps.is_available", lambda: True)
+    monkeypatch.setattr(f"{module}.torch.mps.empty_cache", mock_empty)
+    return mock_empty
+
+
 def generate_grpo(
     accelerator_factory,
     model_factory,
@@ -4049,3 +4057,142 @@ def test_sync_deepspeed_updates_actor_optimizer_clip_grad():
 
     # Verify that optimizer clip_grad was updated
     assert mock_optimizer.clip_grad == 1.0
+
+
+def test_grpo_learn_raises_when_loss_not_finite(
+    deepspeed_env,
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+):
+    grpo = grpo_factory(
+        accelerator_factory,
+        model_factory,
+        config=None,
+        use_deepspeed_optimizer=False,
+        vocab_size=30,
+        input_size=5,
+        max_tokens=10,
+        group_size=2,
+        use_separate_reference_adapter=False,
+        use_vllm=False,
+        pretrained_model_name_or_path=None,
+        reduce_memory_peak=False,
+        micro_batch_size_per_gpu=None,
+        from_name=False,
+    )
+
+    completions = [
+        torch.randint(0, 30, (2, 15), device=grpo.device),
+    ]
+    action_masks = [torch.ones((2, 14), device=grpo.device, dtype=torch.bool)]
+    rewards = torch.stack([torch.rand(2, dtype=torch.float32)], dim=0)
+
+    with (
+        patch.object(
+            grpo,
+            "_grpo_loss",
+            return_value=(
+                torch.tensor(float("nan"), device=grpo.device),
+                torch.tensor(0.0, device=grpo.device),
+            ),
+        ),
+        pytest.raises(ValueError, match="Loss is not finite"),
+    ):
+        grpo.learn((completions, action_masks, rewards))
+    grpo.clean_up()
+
+
+def test_grpo_learn_restores_gradient_checkpointing_after_base_disable(
+    deepspeed_env,
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+):
+    grpo = grpo_factory(
+        accelerator_factory,
+        model_factory,
+        config=None,
+        use_deepspeed_optimizer=False,
+        vocab_size=30,
+        input_size=5,
+        max_tokens=10,
+        group_size=2,
+        use_separate_reference_adapter=False,
+        use_vllm=False,
+        pretrained_model_name_or_path=None,
+        reduce_memory_peak=False,
+        micro_batch_size_per_gpu=None,
+        from_name=False,
+    )
+    for name, param in grpo.actor.named_parameters():
+        if ("lora_A" in name or "lora_B" in name) and param is not None:
+            param.data.normal_(mean=0, std=0.01)
+
+    base_lm = MagicMock()
+    base_lm.is_gradient_checkpointing = True
+    base_lm.gradient_checkpointing_disable = MagicMock()
+    base_lm.gradient_checkpointing_enable = MagicMock()
+
+    completions = [
+        torch.randint(0, 30, (2, 15), device=grpo.device),
+    ]
+    action_masks = [torch.ones((2, 14), device=grpo.device, dtype=torch.bool)]
+    rewards = torch.stack([torch.rand(2, dtype=torch.float32)], dim=0)
+
+    with patch.object(
+        grpo,
+        "_get_base_lm_for_gradient_checkpointing",
+        return_value=base_lm,
+    ):
+        grpo.learn((completions, action_masks, rewards))
+
+    base_lm.gradient_checkpointing_disable.assert_called_once()
+    base_lm.gradient_checkpointing_enable.assert_called_once()
+    grpo.clean_up()
+
+
+def test_grpo_learn_calls_mps_empty_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    accelerator_factory,
+    model_factory,
+) -> None:
+    """Patch MPS on CI so ``torch.mps.empty_cache()`` in ``learn()`` is exercised."""
+    empty = _patch_mps_learn_hooks(monkeypatch, "agilerl.algorithms.grpo")
+    grpo = generate_grpo(
+        accelerator_factory,
+        model_factory,
+        config=None,
+        use_deepspeed_optimizer=False,
+        vocab_size=30,
+        input_size=5,
+        max_tokens=10,
+        group_size=2,
+        use_separate_reference_adapter=False,
+        use_vllm=False,
+        pretrained_model_name_or_path=None,
+        reduce_memory_peak=False,
+        micro_batch_size_per_gpu=None,
+        from_name=False,
+    )
+    for name, param in grpo.actor.named_parameters():
+        if ("lora_A" in name or "lora_B" in name) and param is not None:
+            param.data.normal_(mean=0, std=0.01)
+
+    completions = [
+        torch.randint(
+            0,
+            30,
+            (2, 5 + 10),
+            device=grpo.device,
+        ),
+    ]
+    action_masks = [
+        torch.ones((2, 5 + 10 - 1), device=grpo.device, dtype=torch.bool),
+    ]
+    rewards = torch.stack([torch.rand(2, dtype=torch.float32) for _ in range(1)], dim=0)
+
+    grpo.learn((completions, action_masks, rewards))
+    empty.assert_called()
+    grpo.clean_up()
+    AcceleratorState._reset_state(True)

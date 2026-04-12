@@ -21,6 +21,7 @@ from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
 from agilerl.algorithms.sft import SFT
 from agilerl.wrappers.llm_envs import SFTGym
 from tests.test_algorithms.test_llms.test_grpo import (
+    _patch_mps_learn_hooks,
     create_module,
     deepspeed_config_stage_1,
     deepspeed_config_stage_2,
@@ -420,6 +421,7 @@ def test_sft_learn(
 @pytest.mark.parametrize("data_batch_size", [2])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+@pytest.mark.parametrize("loop", [1, 2])
 def test_sft_test(
     deepspeed_env,
     sft_factory,
@@ -434,6 +436,7 @@ def test_sft_test(
     data_batch_size,
     reduce_memory_peak,
     micro_batch_size_per_gpu,
+    loop,
 ):
     sft = sft_factory(
         accelerator_factory,
@@ -467,7 +470,7 @@ def test_sft_test(
         data_batch_size_per_gpu=data_batch_size,
         accelerator=sft.accelerator,
     )
-    fitness = sft.test(env)
+    fitness = sft.test(env, loop=loop)
     assert isinstance(fitness, np.ndarray)
     assert fitness <= 0.0  # fitness is negative mean loss
     assert len(sft.fitness) == 1
@@ -877,3 +880,36 @@ def test_sft_preprocess_observation(
     )
     assert torch.equal(obs, orig_obs)
     sft.clean_up()
+
+
+def test_sft_learn_calls_mps_empty_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    accelerator_factory,
+    model_factory,
+) -> None:
+    """Patch MPS on CI so ``torch.mps.empty_cache()`` in ``learn()`` is exercised."""
+    empty = _patch_mps_learn_hooks(monkeypatch, "agilerl.algorithms.sft")
+    sft = generate_sft(
+        accelerator_factory,
+        model_factory,
+        config=None,
+        use_deepspeed_optimizer=False,
+        vocab_size=30,
+        input_size=5,
+        max_tokens=10,
+        pretrained_model_name_or_path=None,
+        reduce_memory_peak=False,
+        micro_batch_size_per_gpu=None,
+        from_name=False,
+    )
+    seq_len = 5 + 10
+    prompt_len = 4
+    experiences = {
+        "input_ids": torch.randint(0, 30, (2, seq_len)),
+        "attention_mask": torch.ones(2, seq_len, dtype=torch.long),
+        "prompt_lengths": [prompt_len, prompt_len],
+    }
+    sft.learn(experiences, training=True)
+    empty.assert_called()
+    sft.clean_up()
+    AcceleratorState._reset_state(True)

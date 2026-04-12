@@ -2160,6 +2160,22 @@ class TestLLMGetLogprobs:
 
 
 class TestLLMSaveLoadCheckpoint:
+    def test_save_checkpoint_warns_when_reference_merged_lora_only(self, tmp_path):
+        """Merged reference + LoRA-only save should emit UserWarning (base.py ~2131–2144)."""
+        agent = _make_llm_agent(accelerator=None)
+        agent.use_separate_reference_adapter = False
+        agent.reference_update_tracker = 1
+        with pytest.warns(UserWarning, match="merged into the base model"):
+            with (
+                patch.object(agent.actor, "save_pretrained"),
+                patch(
+                    "agilerl.algorithms.core.base.get_checkpoint_dict",
+                    return_value={},
+                ),
+                patch("agilerl.algorithms.core.base.torch.save"),
+            ):
+                agent.save_checkpoint(str(tmp_path), lora_only=True)
+
     def test_save_checkpoint_lora_only_with_accelerator(self, tmp_path):
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)

@@ -26,6 +26,7 @@ from agilerl.algorithms.core.base import (
 from agilerl.algorithms.dpo import DPO
 from agilerl.wrappers.llm_envs import PreferenceGym
 from tests.test_algorithms.test_llms.test_grpo import (
+    _patch_mps_learn_hooks,
     create_module,
     deepspeed_config_stage_1,
     deepspeed_config_stage_2,
@@ -1059,5 +1060,41 @@ def test_dpo_set_reference_policy_with_wrong_adapter_name(
         )
         dpo.actor.add_adapter("wrong_adapter", peft_config=lora_config)
         dpo.set_reference_policy(reference_update_tracker=1)
+    dpo.clean_up()
+    AcceleratorState._reset_state(True)
+
+
+def test_dpo_learn_calls_mps_empty_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    accelerator_factory,
+    model_factory,
+) -> None:
+    """Patch MPS on CI so ``torch.mps.empty_cache()`` in ``learn()`` is exercised."""
+    empty = _patch_mps_learn_hooks(monkeypatch, "agilerl.algorithms.dpo")
+    dpo = generate_dpo(
+        accelerator_factory,
+        model_factory,
+        config=None,
+        use_deepspeed_optimizer=False,
+        vocab_size=30,
+        input_size=5,
+        max_tokens=10,
+        use_separate_reference_adapter=False,
+        pretrained_model_name_or_path=None,
+        reduce_memory_peak=False,
+        micro_batch_size_per_gpu=None,
+        from_name=False,
+    )
+    seq_len = 5 + 10
+    batch = 2
+    experiences = {
+        "chosen_input_ids": torch.randint(0, 30, (batch, seq_len)),
+        "rejected_input_ids": torch.randint(0, 30, (batch, seq_len)),
+        "chosen_attention_mask": torch.ones(batch, seq_len, dtype=torch.long),
+        "rejected_attention_mask": torch.ones(batch, seq_len, dtype=torch.long),
+        "prompt_lengths": [4, 4],
+    }
+    dpo.learn(experiences, training=True)
+    empty.assert_called()
     dpo.clean_up()
     AcceleratorState._reset_state(True)

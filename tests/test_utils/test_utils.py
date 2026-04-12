@@ -870,3 +870,88 @@ def test_tournament_selection_and_mutation_language_model():
     tournament.select.assert_called_once_with(population)
     mutation.mutation.assert_called_once_with(population)
     accelerator.wait_for_everyone.assert_called()
+
+
+def test_check_box2d_available_raises_when_box2d_missing(monkeypatch):
+    """Covers the ImportError path when Box2D is required but not installed."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "Box2D":
+            raise ImportError
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    from agilerl.utils.utils import _check_box2d_available
+
+    with pytest.raises(ImportError, match="Box2D physics engine"):
+        _check_box2d_available("LunarLander-v2")
+
+
+@pytest.mark.llm
+def test_create_population_sft_cpu():
+    """Exercise ``create_population`` SFT branch (clone after first agent)."""
+    pytest.importorskip("peft")
+    from peft import LoraConfig
+
+    from agilerl.algorithms.sft import SFT
+    from tests.test_algorithms.test_llms.test_grpo import create_module
+
+    lora_config = LoraConfig(
+        r=8,
+        lora_alpha=16,
+        target_modules=["linear_1"],
+        task_type="CAUSAL_LM",
+        lora_dropout=0.05,
+    )
+    actor = create_module(5, 10, 30, "cpu")
+    pop = create_population(
+        algo="SFT",
+        net_config=None,
+        INIT_HP=SHARED_INIT_HP,
+        population_size=2,
+        actor_network=actor,
+        algo_kwargs={
+            "pad_token_id": 29,
+            "pad_token": "<pad>",
+            "lora_config": lora_config,
+        },
+    )
+    assert len(pop) == 2
+    assert all(isinstance(agent, SFT) for agent in pop)
+
+
+@pytest.mark.llm
+def test_create_population_dpo_cpu():
+    """Exercise ``create_population`` DPO branch (clone after first agent)."""
+    pytest.importorskip("peft")
+    from peft import LoraConfig
+
+    from agilerl.algorithms.dpo import DPO
+    from tests.test_algorithms.test_llms.test_grpo import create_module
+
+    lora_config = LoraConfig(
+        r=8,
+        lora_alpha=16,
+        target_modules=["linear_1"],
+        task_type="CAUSAL_LM",
+        lora_dropout=0.05,
+    )
+    actor = create_module(5, 10, 30, "cpu")
+    pop = create_population(
+        algo="DPO",
+        net_config=None,
+        INIT_HP=SHARED_INIT_HP,
+        population_size=2,
+        actor_network=actor,
+        algo_kwargs={
+            "pad_token_id": 29,
+            "pad_token": "<pad>",
+            "lora_config": lora_config,
+            "use_separate_reference_adapter": False,
+        },
+    )
+    assert len(pop) == 2
+    assert all(isinstance(agent, DPO) for agent in pop)
