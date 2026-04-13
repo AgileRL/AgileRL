@@ -82,6 +82,10 @@ docs = [
 
 [tool.pytest.ini_options]
 # Deterministic ordering for tests; useful for pytest-xdist.
+addopts = [
+    "--durations=0",
+    "--durations-min=1.0",
+]
 env = [
     "PYTHONHASHSEED=0",
     "VLLM_USE_FLASHINFER_SAMPLER=0",
