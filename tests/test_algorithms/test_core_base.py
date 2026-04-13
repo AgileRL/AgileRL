@@ -2936,6 +2936,7 @@ class TestLLMCloneWithoutAccelerator:
             patch(
                 "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
                 return_value={},
+                create=True,
             ),
             patch("agilerl.algorithms.core.base.clone_llm", return_value=MagicMock()),
             patch.object(
@@ -2991,6 +2992,7 @@ class TestLLMCloneWithAccelerator:
             patch(
                 "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
                 return_value={},
+                create=True,
             ),
             patch("agilerl.algorithms.core.base.clone_llm", return_value=MagicMock()),
             patch("agilerl.algorithms.core.base.Accelerator", return_value=MagicMock()),
@@ -3102,6 +3104,7 @@ class TestLLMCloneWithVllm:
             patch(
                 "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
                 return_value={},
+                create=True,
             ),
             patch("agilerl.algorithms.core.base.clone_llm", return_value=MagicMock()),
             patch.object(
@@ -3741,6 +3744,7 @@ class TestLLMCloneBroadcastMultiProcess:
             patch(
                 "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
                 return_value={},
+                create=True,
             ),
             patch("agilerl.algorithms.core.base.clone_llm", return_value=MagicMock()),
             patch("agilerl.algorithms.core.base.Accelerator", return_value=MagicMock()),
