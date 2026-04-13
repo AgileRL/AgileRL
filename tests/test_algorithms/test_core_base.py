@@ -2066,7 +2066,7 @@ class TestLLMConfigureVllm:
         agent.vllm_config = None
         mock_llm_cls = MagicMock()
         with (
-            patch("agilerl.algorithms.core.base.LLM", mock_llm_cls),
+            patch("agilerl.algorithms.core.base.LLM", mock_llm_cls, create=True),
             patch.object(
                 LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
             ),
@@ -2081,7 +2081,7 @@ class TestLLMConfigureVllm:
         agent = _make_llm_agent(accelerator=acc)
         agent.vllm_config = MagicMock()
         agent.vllm_config.tensor_parallel_size = 2
-        with patch("agilerl.algorithms.core.base.LLM", MagicMock()):
+        with patch("agilerl.algorithms.core.base.LLM", MagicMock(), create=True):
             with pytest.raises(ValueError, match="Tensor parallel size"):
                 agent._configure_vllm()
 
@@ -3319,7 +3319,11 @@ class TestLLMConfigureVllmAcceleratorPaths:
 
         mock_llm_instance = MagicMock()
         with (
-            patch("agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance),
+            patch(
+                "agilerl.algorithms.core.base.LLM",
+                return_value=mock_llm_instance,
+                create=True,
+            ),
             patch.object(
                 LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
             ),
@@ -3342,7 +3346,11 @@ class TestLLMConfigureVllmAcceleratorPaths:
 
         mock_llm_instance = MagicMock()
         with (
-            patch("agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance),
+            patch(
+                "agilerl.algorithms.core.base.LLM",
+                return_value=mock_llm_instance,
+                create=True,
+            ),
             patch.object(
                 LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
             ),
@@ -3373,6 +3381,7 @@ class TestLLMConfigureVllmAcceleratorPaths:
             patch(
                 "agilerl.algorithms.core.base.LLM",
                 side_effect=ValueError("unsupported backend"),
+                create=True,
             ),
             patch.object(
                 LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
@@ -3403,6 +3412,7 @@ class TestLLMConfigureVllmAcceleratorPaths:
             patch(
                 "agilerl.algorithms.core.base.LLM",
                 side_effect=ValueError("other error"),
+                create=True,
             ),
             patch.object(
                 LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
