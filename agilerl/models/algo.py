@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 import h5py
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,8 +14,10 @@ from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.protocols import AgentType
 from agilerl.typing import SupportedActionSpace, SupportedObservationSpace
 
-if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
-    from peft import LoraConfig  # noqa: TC002
+if HAS_LLM_DEPENDENCIES:
+    from peft import LoraConfig
+else:
+    LoraConfig = None
 
 if TYPE_CHECKING:
     import torch
@@ -419,15 +421,6 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         return algo
 
 
-class LoraConfigDict(TypedDict):
-    """Configuration for LoRA (Low-Rank Adaptation) fine-tuning."""
-
-    lora_r: int
-    lora_alpha: int
-    lora_dropout: float
-    task_type: str
-
-
 class LLMAlgorithmSpec(AlgorithmSpec):
     """Specification for LLM fine-tuning algorithms.
 
@@ -442,17 +435,18 @@ class LLMAlgorithmSpec(AlgorithmSpec):
 
     beta: float = Field(default=0.001, ge=0.0, le=1.0)
     max_grad_norm: float = Field(default=0.1, ge=0.0)
-    update_epochs: int = Field(..., ge=1)
+    update_epochs: int = Field(default=1, ge=1)
     reduce_memory_peak: bool = Field(default=False)
-    lora_config: LoraConfig
-    max_model_len: int = Field(..., ge=1)
     use_separate_reference_adapter: bool = Field(default=False)
     calc_position_embeddings: bool = Field(default=True)
     gradient_checkpointing: bool = Field(default=True)
     use_liger_loss: bool = Field(default=False)
     seed: int = Field(default=42)
 
-    pretrained_model_name_or_path: str = Field(..., min_length=1)
+    # These fields come from the "network" section of the manifest
+    pretrained_model_name_or_path: str | None = Field(default=None, min_length=1)
+    max_model_len: int = Field(default=1024, ge=1)
+    lora_config: LoraConfig | None = Field(default=None)
 
     agent_type: ClassVar[AgentType] = AgentType.LLMAgent
     env_type: ClassVar[LLMEnvType]

@@ -3,11 +3,26 @@ algorithm:
     name: DPO
     batch_size: 16
     beta: 0.001
+    lr: 0.000005
     update_epochs: 1
     max_grad_norm: 0.1
     reduce_memory_peak: false
     calc_position_embeddings: true
     use_separate_reference_adapter: true
+
+environment:
+    env_type: preference
+    dataset_path: human_like_dpo.parquet
+    # Parquet should keep HF columns: prompt, chosen, rejected
+    data_batch_size_per_gpu: 16
+
+training:
+    max_steps: 100000
+    evo_steps: 5
+    pop_size: 4
+    eval_loop: 1
+    evaluation_interval: 10
+    num_epochs: 1
 
 mutation:
     mutation_sd: 0.1
@@ -31,8 +46,16 @@ tournament_selection:
     tournament_size: 2
     elitism: true
 
-training:
-    pop_size: 4
-    max_steps: 100_000
-    evo_steps: 20
-    eval_loop: 1
+network:
+    pretrained_model_name_or_path: Qwen/Qwen2.5-0.5B
+    max_context_length: 1024
+    lora_config:
+        lora_r: 16
+        lora_alpha: 64
+        target_modules:
+            - q_proj
+            - k_proj
+            - v_proj
+            - o_proj
+        lora_dropout: 0.05
+        task_type: CAUSAL_LM

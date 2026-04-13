@@ -33,7 +33,7 @@ from agilerl.models.env import (
 )
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.manifest import TrainingManifest
-from agilerl.models.networks import NetworkSpec
+from agilerl.models.networks import FinetuningNetworkSpec, NetworkSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.protocols import AgentType
 from agilerl.utils.trainer_utils import (
@@ -184,25 +184,49 @@ class Trainer(ABC):
 
         validated_manifest = TrainingManifest.model_validate(data)
 
-        # 'network' component of manifest corresponds to algorithm's net_config.
-        # Resolve the raw dict into the algorithm's concrete NetworkSpec
-        # subclass (e.g. QNetworkSpec for DQN, StochasticActorSpec for PPO).
+        # 'network' component of manifest corresponds to algorithm's underlying networks
         algo_spec_cls = type(validated_manifest.algorithm)
-        net_config_field = algo_spec_cls.model_fields.get("net_config")
-        if net_config_field is not None and validated_manifest.network is not None:
-            # get the NetworkSpec class from the type annotation and validate
-            spec_cls: NetworkSpec = next(
-                (
-                    t
-                    for t in get_args(net_config_field.annotation)
-                    if t is not type(None)
-                ),
-                None,
-            )
-            if spec_cls is not None:
-                validated_manifest.algorithm.net_config = spec_cls.model_validate(
+        if validated_manifest.network is not None:
+            # Resolve the raw dict into the algorithm's concrete NetworkSpec
+            # if `net_config` field is present in the algorithm spec.
+            net_config_field = algo_spec_cls.model_fields.get("net_config")
+            if net_config_field is not None:
+                # get the NetworkSpec class from the type annotation and validate
+                spec_cls: NetworkSpec = next(
+                    (
+                        t
+                        for t in get_args(net_config_field.annotation)
+                        if t is not type(None)
+                    ),
+                    None,
+                )
+                if spec_cls is not None:
+                    validated_manifest.algorithm.net_config = spec_cls.model_validate(
+                        validated_manifest.network
+                    )
+            # LLM algorithms expect a pretrained model
+            elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
+                llm_network = FinetuningNetworkSpec.model_validate(
                     validated_manifest.network
                 )
+                validated_manifest.algorithm.pretrained_model_name_or_path = (
+                    llm_network.pretrained_model_name_or_path
+                )
+                validated_manifest.algorithm.max_model_len = (
+                    llm_network.max_context_length
+                )
+                validated_manifest.algorithm.lora_config = llm_network.lora_config
+
+        if (
+            issubclass(algo_spec_cls, LLMAlgorithmSpec)
+            and validated_manifest.algorithm.pretrained_model_name_or_path is None
+        ):
+            msg = (
+                "Required field 'pretrained_model_name_or_path' wasn't found in the manifest. "
+                "This is required for LLM finetuning algorithms, and can be added under either the "
+                "'algorithm' or 'network' sections."
+            )
+            raise ValueError(msg)
 
         return validated_manifest
 
@@ -255,7 +279,15 @@ class Trainer(ABC):
         :returns: A fully validated manifest ready for submission to Arena.
         :rtype: dict[str, Any]
         """
-        network = getattr(self.algorithm_spec, "net_config", None)
+        if isinstance(self.algorithm_spec, LLMAlgorithmSpec):
+            network = FinetuningNetworkSpec(
+                pretrained_model_name_or_path=self.algorithm_spec.pretrained_model_name_or_path,
+                max_context_length=self.algorithm_spec.max_model_len,
+                lora_config=self.algorithm_spec.lora_config,
+            )
+        else:
+            network = getattr(self.algorithm_spec, "net_config", None)
+
         manifest = TrainingManifest(
             algorithm=self.algorithm_spec,
             environment=self.env_spec,
@@ -454,8 +486,8 @@ class LocalTrainer(Trainer):
 
         return self.env_spec.make_env(extra_wrappers=extra_wrappers)
 
-    @classmethod
-    def _resolve_env_spec(cls, manifest: TrainingManifest) -> EnvSpecT:
+    @staticmethod
+    def _resolve_env_spec(manifest: TrainingManifest) -> EnvSpecT:
         """Build the appropriate environment spec from the manifest.
 
         Uses the algorithm's ``agent_type`` to choose the spec class.
@@ -662,8 +694,8 @@ class ArenaTrainer(Trainer):
             replay_buffer=validated_manifest.replay_buffer,
         )
 
-    @classmethod
-    def _resolve_env_spec(cls, manifest: TrainingManifest) -> ArenaEnvSpec:
+    @staticmethod
+    def _resolve_env_spec(manifest: TrainingManifest) -> ArenaEnvSpec:
         """Build an :class:`ArenaEnvSpec` from the manifest.
 
         :param manifest: The validated training manifest.

@@ -170,6 +170,23 @@ configuration automatically.
    # Train the population of agents.
    population, fitnesses = trainer.train()
 
+**Minimal example:**
+
+.. code-block:: python
+
+  training_spec = TrainingSpec(
+      max_steps=1_000_000,
+      evo_steps=10_000, # Number of steps between metric reports in the absence of evo-HPO
+      population_size=4
+  )
+
+  trainer = LocalTrainer(
+      algorithm="PPO",
+      environment="LunarLanderContinuous-v3",
+      training=training_spec
+  )
+
+  trainer.train()
 
 How ``train()`` works
 ~~~~~~~~~~~~~~~~~~~~~

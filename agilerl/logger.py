@@ -68,6 +68,17 @@ class Logger(ABC):
         """Release any resources held by the logger."""
 
 
+def _is_notebook() -> bool:
+    """Detect whether we are running inside a Jupyter/IPython notebook."""
+    try:
+        from IPython import get_ipython
+
+        shell = get_ipython()
+        return shell is not None and shell.__class__.__name__ == "ZMQInteractiveShell"
+    except (ImportError, AttributeError, NameError):
+        return False
+
+
 class StdOutLogger(Logger):
     """Writes the tabular :class:`MetricsReport` to the console via a tqdm progress bar
     if provided, else just writes the report to the console.
@@ -78,6 +89,7 @@ class StdOutLogger(Logger):
 
     def __init__(self, pbar: tqdm | None = None) -> None:
         self._pbar = pbar
+        self._notebook = _is_notebook()
 
     def write(self, report: MetricsReport) -> None:
         """Write the metrics report to the console.
@@ -85,10 +97,11 @@ class StdOutLogger(Logger):
         :param report: The metrics report to write.
         :type report: MetricsReport
         """
-        if self._pbar is not None:
-            self._pbar.write(str(report))
+        text = str(report)
+        if self._pbar is not None and not self._notebook:
+            self._pbar.write(text)
         else:
-            print(report)
+            print(text)
 
     def close(self) -> None:
         pass

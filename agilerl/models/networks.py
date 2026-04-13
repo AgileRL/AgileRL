@@ -1,7 +1,20 @@
 from collections.abc import Callable
 from typing import Any, Literal, Self, TypeVar
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializationInfo,
+    field_serializer,
+    model_validator,
+)
+
+from agilerl import HAS_LLM_DEPENDENCIES
+
+if HAS_LLM_DEPENDENCIES:
+    from peft import LoraConfig
+else:
+    LoraConfig = None
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -303,3 +316,72 @@ class StochasticActorSpec(NetworkSpec):
 
 class ValueNetworkSpec(NetworkSpec):
     """Model specification for evolvable value networks."""
+
+
+class LoraConfigDict(BaseModel):
+    """Model specification for LLM LoRA configuration."""
+
+    lora_r: int = Field(default=16, ge=1)
+    lora_alpha: int = Field(default=32, ge=1)
+    target_modules: list[str] | str = Field(default="all-linear")
+    task_type: str = Field(default="CAUSAL_LM", min_length=1)
+    lora_dropout: float = Field(default=0.05, ge=0.0, le=1.0)
+
+
+def _peft_lora_config_to_manifest_dict(cfg: LoraConfig) -> dict[str, Any]:
+    """Map a PEFT :class:`~peft.LoraConfig` to manifest / :class:`LoraConfigDict` keys.
+
+    :param cfg: The PEFT :class:`~peft.LoraConfig` to convert.
+    :type cfg: LoraConfig
+    :returns: The manifest / :class:`LoraConfigDict` keys.
+    :rtype: dict[str, Any]
+    """
+    task_type = cfg.task_type
+    if hasattr(task_type, "value"):
+        task_type = task_type.value
+    task_type = str(task_type)
+
+    tm = cfg.target_modules
+    if tm is None:
+        tm_out: list[str] | str = "all-linear"
+    elif isinstance(tm, set):
+        tm_out = sorted(tm)
+    else:
+        tm_out = tm
+
+    return {
+        "lora_r": cfg.r,
+        "lora_alpha": cfg.lora_alpha,
+        "target_modules": tm_out,
+        "task_type": task_type,
+        "lora_dropout": cfg.lora_dropout,
+    }
+
+
+class FinetuningNetworkSpec(BaseModel):
+    """Model specification for LLM finetuning networks."""
+
+    pretrained_model_name_or_path: str = Field(..., min_length=1)
+    max_context_length: int = Field(..., ge=1)
+    lora_config: LoraConfigDict | LoraConfig | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _check_lora_config(self) -> Self:
+        if isinstance(self.lora_config, LoraConfigDict):
+            if not HAS_LLM_DEPENDENCIES or LoraConfig is None:
+                msg = "LLM dependencies are required to resolve LoRA configuration."
+                raise ImportError(msg)
+            peft_lora = self.lora_config.model_dump()
+            peft_lora["r"] = peft_lora.pop("lora_r")
+            self.lora_config = LoraConfig(**peft_lora)
+        return self
+
+    @field_serializer("lora_config")
+    def _serialize_lora_config(self, value: Any, info: SerializationInfo) -> Any:
+        if info.mode != "json":
+            return value
+        if value is None:
+            return None
+        if isinstance(value, LoraConfigDict):
+            return value.model_dump(mode="json")
+        return _peft_lora_config_to_manifest_dict(value)

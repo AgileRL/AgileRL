@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from gymnasium.spaces import Box, Discrete
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -36,7 +37,7 @@ from agilerl.models.hpo import (
     TournamentSelectionSpec,
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-from agilerl.training.trainer import ArenaTrainer, LocalTrainer
+from agilerl.training.trainer import ArenaTrainer, LocalTrainer, Trainer
 from agilerl.utils.trainer_utils import (
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
@@ -1744,6 +1745,74 @@ class TestLocalTrainerToManifest:
             )
         manifest = trainer.to_manifest()
         assert manifest.get("replay_buffer") is None or "replay_buffer" not in manifest
+
+
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+class TestLocalTrainerToManifestLLM:
+    """``LocalTrainer.to_manifest()`` for LLM algorithms."""
+
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_to_manifest_llm_network_json_shape_and_round_trip(self, mock_create_pop):
+        import json
+
+        from peft import LoraConfig
+
+        from agilerl.models.algorithms.dpo import DPOSpec
+        from agilerl.models.env import LLMEnvSpec
+
+        mock_create_pop.return_value = [MagicMock()]
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.chat_template = None
+        mock_tokenizer.eos_token_id = 0
+        mock_tokenizer.eos_token = "<eos>"
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=9,
+            target_modules=["q_proj"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.11,
+        )
+        spec = DPOSpec(
+            batch_size=4,
+            pretrained_model_name_or_path="test-model",
+            max_model_len=333,
+            lora_config=lora,
+        )
+        env_spec = LLMEnvSpec(
+            env_type="preference",
+            dataset_path="data.parquet",
+            columns={"prompt": "q", "chosen": "ok"},
+        )
+        mock_env = MagicMock()
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer.from_pretrained",
+                return_value=mock_tokenizer,
+            ),
+            patch.object(LocalTrainer, "_make_env", return_value=mock_env),
+        ):
+            trainer = LocalTrainer(
+                algorithm=spec,
+                environment=env_spec,
+                training=TrainingSpec(max_steps=100, evo_steps=10, pop_size=2),
+            )
+        manifest = trainer.to_manifest()
+        json.dumps(manifest)
+
+        net = manifest["network"]
+        assert net["pretrained_model_name_or_path"] == "test-model"
+        assert net["max_context_length"] == 333
+        lc = net["lora_config"]
+        assert lc["lora_r"] == 4
+        assert lc["lora_alpha"] == 9
+        assert lc["lora_dropout"] == pytest.approx(0.11)
+        assert "peft_type" not in lc
+
+        round_trip = Trainer.get_validated_manifest(manifest)
+        assert round_trip.algorithm.pretrained_model_name_or_path == "test-model"
+        assert round_trip.algorithm.max_model_len == 333
+        assert round_trip.algorithm.lora_config.r == 4
+        assert round_trip.algorithm.lora_config.lora_alpha == 9
 
 
 # ---------------------------------------------------------------------------

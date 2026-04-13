@@ -57,6 +57,32 @@ class ReplayBuffer:
     def __len__(self) -> int:
         return self._size
 
+    @staticmethod
+    def _normalize_dims(data: TensorDict, n: int) -> TensorDict:
+        """Normalize the dimensions of the data.
+
+        :param data: Data to normalize
+        :type data: TensorDict
+        :param n: Number of transitions
+        :type n: int
+        :return: Normalized data
+        :rtype: TensorDict
+        """
+        # Normalize the dimensions of the data
+        for key, item in data.items():
+            if is_tensor_collection(item):
+                item: TensorDictBase = item
+                for k, v in item.items():
+                    if v.ndim == 1:
+                        item[k] = v.reshape(n, 1)
+
+            elif item.ndim == 1:
+                item = item.reshape(n, 1)
+
+            data[key] = item
+
+        return data
+
     def _init(self, data: TensorDict) -> None:
         """Initialize the buffer given the passed data. For each key,
         we inspect the shape of the value and initialize the storage
@@ -82,16 +108,7 @@ class ReplayBuffer:
         # Ensure all tensors in data have proper dimensions beyond batch dimension
         # Handles the case of scalar observations that become (batch_size,)
         # instead of (batch_size, 1)
-        for key, item in data.items():
-            if is_tensor_collection(item):
-                item: TensorDictBase = item
-                for k, v in item.items():
-                    if v.ndim == 1:
-                        item[k] = v.reshape(_n_transitions, 1)
-            elif item.ndim == 1:
-                item = item.reshape(_n_transitions, 1)
-
-            data[key] = item
+        data = self._normalize_dims(data, _n_transitions)
 
         if self._storage is None:
             self._init(data)
@@ -160,7 +177,15 @@ class MultiAgentReplayBuffer(ReplayBuffer):
 
         Walks two levels deep to handle the ``field -> agent_id -> tensor``
         nesting that is standard in multi-agent transitions.
+
+        :param data: Data to normalize
+        :type data: TensorDict
+        :param n: Number of transitions
+        :type n: int
+        :return: Normalized data
+        :rtype: TensorDict
         """
+        # Normalize the dimensions of the data
         for key, item in data.items():
             if is_tensor_collection(item):
                 item: TensorDictBase = item
@@ -176,32 +201,6 @@ class MultiAgentReplayBuffer(ReplayBuffer):
             elif item.ndim == 1:
                 data[key] = item.reshape(n, 1)
         return data
-
-    def add(self, data: TensorDict) -> None:
-        """Add a batch of multi-agent transitions to the circular buffer.
-
-        :param data: Batched nested TensorDict with ``shape[0] == n_transitions``.
-        :type data: TensorDict
-        """
-        data = data.to(self.device)
-        _n_transitions = data.shape[0]
-        data = self._normalize_dims(data, _n_transitions)
-
-        if self._storage is None:
-            self._init(data)
-
-        start = self._cursor
-        end = self._cursor + _n_transitions
-        if end > self.max_size:
-            n = self.max_size - start
-            self._storage[start:] = data[:n]
-            self._storage[: _n_transitions - n] = data[n:]
-        else:
-            self._storage[start:end] = data
-
-        self._cursor = end % self.max_size
-        self._size = min(self._size + _n_transitions, self.max_size)
-        self.counter += _n_transitions
 
 
 class MultiStepReplayBuffer(ReplayBuffer):

@@ -120,38 +120,58 @@ class ReplayBufferSpec(BaseModel):
 
 
 class TrainingSpec(BaseModel):
-    """Pydantic model for AgileRL training.
+    """Pydantic model for AgileRL training arguments.
 
     :param max_steps: Maximum number of steps to train for
     :type max_steps: int
     :param evo_steps: Number of steps to train between evolutions.
     :type evo_steps: int
-    :param eval_loop: Number of evaluation episodes
-    :type eval_loop: int
+    :param population_size: Number of agents in the population.
+    :type population_size: int
     :param eval_steps: Number of steps to train for evaluation
     :type eval_steps: int | None
-    :param episode_steps: Number of steps to train for each episode (only applicable for bandits)
-    :type episode_steps: int
+    :param eval_loop: Number of evaluation episodes
+    :type eval_loop: int
+    :param replay_buffer: Replay buffer specification.
+    :type replay_buffer: ReplayBufferSpec | None
+    :param hpo: Whether to use hyperparameter optimization.
+    :type hpo: bool
+    :param target_score: Target score for early stopping.
+    :type target_score: float | None
     :param learning_delay: Number of steps before starting learning.
+    :type learning_delay: int
+    :param eps_start: Initial exploration probability.
     :type eps_start: float | None
-    :param eps_end: Probability of taking a random action at the end of training.
+    :param eps_end: Final exploration probability.
     :type eps_end: float | None
     :param eps_decay: Rate of decay of the exploration probability.
     :type eps_decay: float | None
-    :param target_score: Target score for early stopping.
-    :type target_score: float | None
     :param checkpoint_steps: The number of steps between checkpoints.
     :type checkpoint_steps: int | None
     :param checkpoint_path: The path to save the checkpoints.
     :type checkpoint_path: str | None
     :param overwrite_checkpoints: If ``True``, overwrite the checkpoints in the checkpoint directory.
     :type overwrite_checkpoints: bool
+    :param evaluation_interval: Number of steps between evaluations.
+    :type evaluation_interval: int
+    :param num_epochs: Number of epochs to train for.
+    :type num_epochs: int | None
+    :param episode_steps: Number of steps to train for each episode (only applicable for bandits).
+    :type episode_steps: int
+    :param reporting_interval: Number of steps between reporting.
+    :type reporting_interval: int
+    :param experience_sharing: Whether to share experiences between agents.
+    :type experience_sharing: bool
     """
 
     max_steps: int = Field(..., ge=1)
-    evo_steps: int = Field(..., ge=1)
+    evo_steps: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("metrics_interval", "evo_steps"),
+    )
     population_size: int = Field(
-        ..., ge=1, validation_alias=AliasChoices("population_size", "pop_size")
+        default=1, ge=1, validation_alias=AliasChoices("population_size", "pop_size")
     )
     eval_steps: int | None = Field(default=None)
     eval_loop: int = Field(default=1, ge=1)

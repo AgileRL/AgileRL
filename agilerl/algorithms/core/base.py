@@ -180,6 +180,7 @@ def get_checkpoint_dict(
     attribute_dict = EvolvableAlgorithm.inspect_attributes(agent)
     attribute_dict["agilerl_version"] = version("agilerl")
     attribute_dict.pop("accelerator", None)
+    attribute_dict.pop("rollout_buffer", None)
 
     if attribute_dict.pop("lr_scheduler", None) is not None:
         attribute_dict["lr_scheduler"] = agent.lr_scheduler.state_dict()
@@ -187,9 +188,6 @@ def get_checkpoint_dict(
     if using_deepspeed:
         attribute_dict.pop("actor", None)
         return attribute_dict
-
-    if "rollout_buffer" in attribute_dict:
-        attribute_dict.pop("rollout_buffer")
 
     # Get checkpoint dictionaries for evolvable modules and optimizers
     network_info: dict[str, dict[str, Any]] = {"modules": {}, "optimizers": {}}
@@ -706,9 +704,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         if isinstance(self, LLMAlgorithm):
             if hasattr(self.actor, "optimizer"):
-                optimizer = (
-                    self.actor.optimizer
-                )  # If the optimizer is defined in the deepspeed config, we do this
+                # If the optimizer is defined in the deepspeed config, we do this
+                optimizer = self.actor.optimizer
             else:
                 optimizer = opt.optimizer
 
@@ -1520,9 +1517,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         for name, network in self.evolvable_attributes(networks_only=True).items():
             if isinstance(network, ModuleDict):
                 for key in network:
-                    if (key not in self.agent_ids) and (
-                        key not in self.shared_agent_ids
-                    ):
+                    if key not in set(self.agent_ids + self.shared_agent_ids):
                         msg = (
                             f"Network '{name}' contains key '{key}' which is not present in `self.agent_ids` "
                             f"or `self.shared_agent_ids`. Please initialize multi-agent networks through agilerl.modules.ModuleDict "

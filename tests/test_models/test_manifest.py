@@ -45,7 +45,7 @@ from agilerl.models.networks import (
     SimbaSpec,
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-from agilerl.training.trainer import ArenaTrainer, LocalTrainer
+from agilerl.training.trainer import ArenaTrainer, LocalTrainer, Trainer
 
 if HAS_LLM_DEPENDENCIES:
     from agilerl.models.algorithms.dpo import DPOSpec
@@ -596,6 +596,92 @@ class TestLocalTrainerMultiAgent:
         trainer = LocalTrainer.from_manifest(MADDPG_MANIFEST)
         assert isinstance(trainer.replay_buffer_spec, ReplayBufferSpec)
         assert trainer.replay_buffer_spec.max_size == 100_000
+
+
+# ============================================================================
+# Trainer.get_validated_manifest – LLM ``network`` section
+# ============================================================================
+
+
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+class TestTrainerGetValidatedManifestLLMNetwork:
+    """``network`` fills or overrides LLM algorithm model fields after manifest parse."""
+
+    def test_network_fills_pretrained_and_lora_when_absent_in_algorithm(self):
+        data = _make_manifest(
+            algo={"name": "DPO", "batch_size": 8},
+            env={
+                "env_type": "preference",
+                "dataset_path": "d.parquet",
+                "columns": {"prompt": "p", "chosen": "c"},
+            },
+            network={
+                "pretrained_model_name_or_path": "net-model",
+                "max_context_length": 256,
+                "lora_config": {
+                    "lora_r": 8,
+                    "lora_alpha": 16,
+                    "target_modules": ["q_proj", "v_proj"],
+                },
+            },
+        )
+        manifest = Trainer.get_validated_manifest(data)
+        assert isinstance(manifest.algorithm, DPOSpec)
+        assert manifest.algorithm.pretrained_model_name_or_path == "net-model"
+        assert manifest.algorithm.max_model_len == 256
+        assert manifest.algorithm.lora_config is not None
+        assert manifest.algorithm.lora_config.r == 8
+        assert manifest.algorithm.lora_config.lora_alpha == 16
+
+    def test_network_overrides_algorithm_pretrained_max_len_and_lora(self):
+        from peft import LoraConfig
+
+        data = _make_manifest(
+            algo={
+                "name": "DPO",
+                "batch_size": 8,
+                "pretrained_model_name_or_path": "algo-model",
+                "max_model_len": 128,
+                "lora_config": LoraConfig(
+                    r=2,
+                    lora_alpha=4,
+                    target_modules=["k_proj"],
+                    task_type="CAUSAL_LM",
+                ),
+            },
+            env={
+                "env_type": "preference",
+                "dataset_path": "d.parquet",
+                "columns": {"prompt": "p", "chosen": "c"},
+            },
+            network={
+                "pretrained_model_name_or_path": "network-model",
+                "max_context_length": 512,
+                "lora_config": {
+                    "lora_r": 32,
+                    "lora_alpha": 64,
+                    "target_modules": ["o_proj"],
+                },
+            },
+        )
+        manifest = Trainer.get_validated_manifest(data)
+        assert manifest.algorithm.pretrained_model_name_or_path == "network-model"
+        assert manifest.algorithm.max_model_len == 512
+        assert manifest.algorithm.lora_config.r == 32
+        tm = manifest.algorithm.lora_config.target_modules
+        assert tm == {"o_proj"} or tm == ["o_proj"]
+
+    def test_missing_pretrained_after_merge_raises(self):
+        data = _make_manifest(
+            algo={"name": "DPO", "batch_size": 8},
+            env={
+                "env_type": "preference",
+                "dataset_path": "d.parquet",
+                "columns": {"prompt": "p", "chosen": "c"},
+            },
+        )
+        with pytest.raises(ValueError, match="pretrained_model_name_or_path"):
+            Trainer.get_validated_manifest(data)
 
 
 # ============================================================================

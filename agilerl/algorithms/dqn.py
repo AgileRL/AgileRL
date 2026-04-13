@@ -235,7 +235,6 @@ class DQN(RLAlgorithm):
 
             action_mask = torch.ones((batch_size, self.action_dim), device=self.device)
 
-        #
         action = self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
 
         if self.training:

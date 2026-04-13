@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.models.algo import (
     ALGO_REGISTRY,
-    AlgorithmSpec,
     LLMAlgorithmSpec,
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,
@@ -34,7 +33,20 @@ from agilerl.models.env import (
 )
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.manifest import TrainingManifest
-from agilerl.models.networks import NetworkSpec
+from agilerl.models.networks import (
+    CnnSpec,
+    ContinuousQNetworkSpec,
+    DeterministicActorSpec,
+    FinetuningNetworkSpec,
+    LstmSpec,
+    MlpSpec,
+    MultiInputSpec,
+    NetworkSpec,
+    QNetworkSpec,
+    SimbaSpec,
+    StochasticActorSpec,
+    ValueNetworkSpec,
+)
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 
 if HAS_LLM_DEPENDENCIES:
@@ -101,19 +113,25 @@ class ArenaCluster(BaseModel):
 
 __all__ = [
     "ALGO_REGISTRY",
-    "AlgorithmSpec",
     "ArenaCluster",
     "ArenaResource",
     "CQNSpec",
+    "CnnSpec",
+    "ContinuousQNetworkSpec",
     "DDPGSpec",
     "DQNSpec",
+    "DeterministicActorSpec",
+    "FinetuningNetworkSpec",
     "GymEnvSpec",
     "IPPOSpec",
     "LLMAlgorithmSpec",
     "LLMEnvSpec",
+    "LstmSpec",
     "MADDPGSpec",
     "MATD3Spec",
+    "MlpSpec",
     "MultiAgentRLAlgorithmSpec",
+    "MultiInputSpec",
     "MutationSpec",
     "NetworkSpec",
     "NeuralTSSpec",
@@ -121,13 +139,17 @@ __all__ = [
     "OfflineEnvSpec",
     "PPOSpec",
     "PzEnvSpec",
+    "QNetworkSpec",
     "RLAlgorithmSpec",
     "RainbowDQNSpec",
     "ReplayBufferSpec",
+    "SimbaSpec",
+    "StochasticActorSpec",
     "TD3Spec",
     "TournamentSelectionSpec",
     "TrainingManifest",
     "TrainingSpec",
+    "ValueNetworkSpec",
 ]
 
 if HAS_LLM_DEPENDENCIES:
