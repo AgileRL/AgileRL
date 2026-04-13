@@ -144,3 +144,6 @@ data/wordle.zip
 
 # WandB
 wandb/
+
+# Cursor
+.cursor
