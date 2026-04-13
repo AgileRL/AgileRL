@@ -2056,7 +2056,7 @@ class TestLLMGetLmHead:
 class TestLLMConfigureVllm:
     def test_raises_when_vllm_not_installed(self):
         agent = _make_llm_agent()
-        with patch("agilerl.algorithms.core.base.LLM", None):
+        with patch("agilerl.algorithms.core.base.LLM", None, create=True):
             with pytest.raises(ImportError, match="vLLM is required"):
                 agent._configure_vllm()
 

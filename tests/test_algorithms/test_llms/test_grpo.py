@@ -144,7 +144,7 @@ class DummyMLPPreTrainedModel(PreTrainedModel):
         input_ids: torch.Tensor | None = None,
         *args,
         **kwargs,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> DummyForwardOutput:
         input_ids = input_ids.to(self.datatype)
         output = self.linear_2(self.linear_1(input_ids)).reshape(
             input_ids.shape[0],
