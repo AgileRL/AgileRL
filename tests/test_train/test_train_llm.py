@@ -1059,6 +1059,391 @@ def test_finetune_llm_sft_evo_steps_not_set():
         )
 
 
+def test_finetune_llm_reasoning_csv_logging_without_wandb(tmp_path):
+    """csv_check True, wb_check False: aggregate block runs; CSV written; wandb.log unused."""
+    mock_agent = MagicMock(spec=GRPO)
+    mock_agent.registry = MagicMock()
+    mock_agent.registry.hp_config = MagicMock()
+    mock_agent.registry.hp_config.config = {}
+    mock_agent.fitness = [0.0]
+    mock_agent.get_action.return_value = (
+        [torch.ones(1, 100) for _ in range(2)],
+        Mock(),
+    )
+    mock_agent.learn.return_value = (0.5, 0.2)
+    mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.algo = "GRPO"
+    mock_agent.batch_size_per_process = 32
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
+    mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+
+    mock_env = MagicMock()
+    mock_env.__len__.return_value = 4
+    mock_env.reset.return_value = "initial_prompts"
+    mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
+    mock_env.data_batch_size_per_gpu = 1
+
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.wandb") as mock_wandb,
+    ):
+        mock_agg.return_value = 0.5
+        finetune_llm_reasoning(
+            pop=[mock_agent],
+            env=mock_env,
+            evaluation_interval=2,
+            max_reward=2.0,
+            accelerator=None,
+            elite_path=str(tmp_path),
+            wb=False,
+            verbose=False,
+        )
+    mock_wandb.log.assert_not_called()
+    metrics_csv = tmp_path / "metrics.csv"
+    assert metrics_csv.is_file()
+    assert "Train/Best reward" in metrics_csv.read_text()
+
+
+def test_finetune_llm_reasoning_wandb_and_csv_both(tmp_path):
+    """wb_check and csv_check True: wandb.log and CSV row logging both run."""
+    mock_agent = MagicMock(spec=GRPO)
+    mock_agent.registry = MagicMock()
+    mock_agent.registry.hp_config = MagicMock()
+    mock_agent.registry.hp_config.config = {}
+    mock_agent.fitness = [0.0]
+    mock_agent.get_action.return_value = (
+        [torch.ones(1, 100) for _ in range(2)],
+        Mock(),
+    )
+    mock_agent.learn.return_value = (0.5, 0.2)
+    mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.algo = "GRPO"
+    mock_agent.batch_size_per_process = 32
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
+    mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+    mock_agent.lr = 0.01
+
+    mock_env = MagicMock()
+    mock_env.__len__.return_value = 4
+    mock_env.reset.return_value = "initial_prompts"
+    mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
+    mock_env.data_batch_size_per_gpu = 1
+
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.init_wandb"),
+        patch("agilerl.training.train_llm.wandb") as mock_wandb,
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+    ):
+        mock_agg.return_value = 0.5
+        finetune_llm_reasoning(
+            pop=[mock_agent],
+            env=mock_env,
+            evaluation_interval=2,
+            max_reward=2.0,
+            accelerator=None,
+            elite_path=str(tmp_path),
+            wb=True,
+            wandb_api_key="fake_key",
+            verbose=False,
+        )
+    assert mock_wandb.log.call_count >= 1
+    assert "Train/Best reward" in (tmp_path / "metrics.csv").read_text()
+
+
+def test_finetune_llm_reasoning_aggregate_skips_eval_when_never_evaluates(tmp_path):
+    """agg_test_metrics stays None: inner eval merge in wb/csv block is skipped."""
+    mock_agent = MagicMock(spec=GRPO)
+    mock_agent.registry = MagicMock()
+    mock_agent.registry.hp_config = MagicMock()
+    mock_agent.registry.hp_config.config = {}
+    mock_agent.fitness = [0.0]
+    mock_agent.get_action.return_value = (
+        [torch.ones(1, 100) for _ in range(2)],
+        Mock(),
+    )
+    mock_agent.learn.return_value = (0.5, 0.2)
+    mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.algo = "GRPO"
+    mock_agent.batch_size_per_process = 32
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
+    mock_agent.pretrained_model_name_or_path = "x"
+
+    mock_env = MagicMock()
+    mock_env.__len__.return_value = 4
+    mock_env.reset.return_value = "initial_prompts"
+    mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
+    mock_env.data_batch_size_per_gpu = 1
+
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.wandb") as mock_wandb,
+    ):
+        mock_agg.return_value = 0.5
+        finetune_llm_reasoning(
+            pop=[mock_agent],
+            env=mock_env,
+            evaluation_interval=100,
+            max_reward=2.0,
+            accelerator=None,
+            elite_path=str(tmp_path),
+            wb=False,
+            verbose=False,
+        )
+    mock_agent.test.assert_not_called()
+    mock_wandb.log.assert_not_called()
+
+
+def test_finetune_llm_reasoning_max_reward_none_skips_accuracy_in_aggregate(tmp_path):
+    """max_reward None: train/accuracy population keys omitted in aggregate block."""
+    mock_agent = MagicMock(spec=GRPO)
+    mock_agent.registry = MagicMock()
+    mock_agent.registry.hp_config = MagicMock()
+    mock_agent.registry.hp_config.config = {}
+    mock_agent.fitness = [0.0]
+    mock_agent.get_action.return_value = (
+        [torch.ones(1, 100) for _ in range(2)],
+        Mock(),
+    )
+    mock_agent.learn.return_value = (0.5, 0.2)
+    mock_agent.test.return_value = torch.tensor([0.8])
+    mock_agent.algo = "GRPO"
+    mock_agent.batch_size_per_process = 32
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
+    mock_agent.pretrained_model_name_or_path = "x"
+
+    mock_env = MagicMock()
+    mock_env.__len__.return_value = 4
+    mock_env.reset.return_value = "initial_prompts"
+    mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
+    mock_env.data_batch_size_per_gpu = 1
+
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.wandb") as mock_wandb,
+    ):
+        mock_agg.return_value = 0.5
+        finetune_llm_reasoning(
+            pop=[mock_agent],
+            env=mock_env,
+            evaluation_interval=2,
+            max_reward=None,
+            accelerator=None,
+            elite_path=str(tmp_path),
+            wb=False,
+            verbose=False,
+        )
+    text = (tmp_path / "metrics.csv").read_text()
+    assert "Train/Best reward" in text
+    mock_wandb.log.assert_not_called()
+
+
+def test_finetune_llm_preference_csv_logging_without_wandb(tmp_path, capsys):
+    """DPO: csv_check only path; teardown closes CSV and prints path (train_llm.py ~858–860)."""
+    mock_agent = MagicMock(spec=DPO)
+    mock_agent.algo = "DPO"
+    mock_agent.fitness = [0.0]
+    mock_agent.get_action = MagicMock()
+    mock_agent.learn.return_value = (0.5, 0.2, 0.1)
+    mock_agent.test.return_value = 0.87
+    mock_agent.batch_size = 32
+    mock_agent.batch_size_per_process = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
+    mock_agent.pretrained_model_name_or_path = "x"
+
+    example = {
+        "prompt": ["This is a mock prompt"],
+        "prompt_lengths": [10],
+        "chosen": ["This is a mock chosen prompt"],
+        "rejected": ["This is a mock rejected prompt"],
+        "chosen_input_ids": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "chosen_attention_mask": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        "rejected_input_ids": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "rejected_attention_mask": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    }
+    mock_env = MagicMock()
+    mock_env.__len__.return_value = 4
+    mock_env.reset.return_value = example
+    mock_env.step.return_value = example
+    mock_env.data_batch_size_per_gpu = 1
+
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.wandb") as mock_wandb,
+    ):
+        mock_agg.return_value = 0.5
+        finetune_llm_preference(
+            pop=[mock_agent],
+            env=mock_env,
+            evaluation_interval=2,
+            accelerator=None,
+            elite_path=str(tmp_path),
+            wb=False,
+            verbose=False,
+        )
+    mock_wandb.log.assert_not_called()
+    csv_path = tmp_path / "metrics.csv"
+    assert csv_path.is_file()
+    assert "Train/Best reward margin" in csv_path.read_text()
+    out = capsys.readouterr().out
+    assert "Training metrics saved to" in out
+    assert "metrics.csv" in out
+
+
+def test_finetune_llm_preference_aggregate_skips_eval_when_never_evaluates(
+    tmp_path, capsys
+):
+    """DPO: agg_test_metrics None skips eval keys in aggregate block."""
+    mock_agent = MagicMock(spec=DPO)
+    mock_agent.algo = "DPO"
+    mock_agent.fitness = [0.0]
+    mock_agent.get_action = MagicMock()
+    mock_agent.learn.return_value = (0.5, 0.2, 0.1)
+    mock_agent.test.return_value = 0.87
+    mock_agent.batch_size = 32
+    mock_agent.batch_size_per_process = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
+
+    example = {
+        "prompt": ["This is a mock prompt"],
+        "prompt_lengths": [10],
+        "chosen": ["This is a mock chosen prompt"],
+        "rejected": ["This is a mock rejected prompt"],
+        "chosen_input_ids": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "chosen_attention_mask": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        "rejected_input_ids": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "rejected_attention_mask": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    }
+    mock_env = MagicMock()
+    mock_env.__len__.return_value = 4
+    mock_env.reset.return_value = example
+    mock_env.step.return_value = example
+    mock_env.data_batch_size_per_gpu = 1
+
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.wandb") as mock_wandb,
+    ):
+        mock_agg.return_value = 0.5
+        finetune_llm_preference(
+            pop=[mock_agent],
+            env=mock_env,
+            evaluation_interval=100,
+            accelerator=None,
+            elite_path=str(tmp_path),
+            wb=False,
+            verbose=False,
+        )
+    mock_agent.test.assert_not_called()
+    assert "Training metrics saved to" in capsys.readouterr().out
+
+
+def test_finetune_llm_sft_csv_logging_without_wandb(tmp_path, capsys):
+    """SFT: csv_check only; teardown closes CSV and prints path (train_llm.py ~1094–1096)."""
+    mock_agent = MagicMock(spec=SFT)
+    mock_agent.algo = "SFT"
+    mock_agent.fitness = [0.0]
+    mock_agent.learn.return_value = (0.5, 1.65)
+    mock_agent.test.return_value = -0.4
+    mock_agent.batch_size_per_process = 32
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
+    mock_agent.pretrained_model_name_or_path = "x"
+
+    mock_env = MagicMock()
+    mock_env.__len__.return_value = 4
+    mock_env.reset.return_value = "initial_prompts"
+    mock_env.step.return_value = "next_prompts"
+    mock_env.data_batch_size_per_gpu = 1
+
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_safe_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.wandb") as mock_wandb,
+    ):
+        mock_safe_agg.side_effect = lambda acc, val: (
+            float(val) if not isinstance(val, float) else val
+        )
+        finetune_llm_sft(
+            pop=[mock_agent],
+            env=mock_env,
+            evaluation_interval=2,
+            accelerator=None,
+            elite_path=str(tmp_path),
+            wb=False,
+            verbose=False,
+        )
+    mock_wandb.log.assert_not_called()
+    metrics_csv = tmp_path / "metrics.csv"
+    assert metrics_csv.is_file()
+    assert "Train/Best loss" in metrics_csv.read_text(encoding="utf-8")
+    out = capsys.readouterr().out
+    assert "Training metrics saved to" in out
+    assert "metrics.csv" in out
+
+
+def test_finetune_llm_sft_aggregate_skips_eval_fitness_when_never_evaluates(tmp_path):
+    """SFT: agg_test_metrics None skips Eval/Best fitness in aggregate block."""
+    mock_agent = MagicMock(spec=SFT)
+    mock_agent.algo = "SFT"
+    mock_agent.fitness = [0.0]
+    mock_agent.learn.return_value = (0.5, 1.65)
+    mock_agent.test.return_value = -0.4
+    mock_agent.batch_size_per_process = 32
+    mock_agent.batch_size = 32
+    mock_agent.steps = [10]
+    mock_agent.scores = [0.0]
+
+    mock_env = MagicMock()
+    mock_env.__len__.return_value = 4
+    mock_env.reset.return_value = "initial_prompts"
+    mock_env.step.return_value = "next_prompts"
+    mock_env.data_batch_size_per_gpu = 1
+
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_safe_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.wandb") as mock_wandb,
+    ):
+        mock_safe_agg.side_effect = lambda acc, val: (
+            float(val) if not isinstance(val, float) else val
+        )
+        finetune_llm_sft(
+            pop=[mock_agent],
+            env=mock_env,
+            evaluation_interval=100,
+            accelerator=None,
+            elite_path=str(tmp_path),
+            wb=False,
+            verbose=False,
+        )
+    mock_agent.test.assert_not_called()
+
+
 def test_create_pbar_custom_bar_format():
     from agilerl.training.train_llm import _create_pbar
 

@@ -1,6 +1,10 @@
 """Tests for agilerl.algorithms.core.base module."""
 
 import inspect
+import os
+import subprocess
+import sys
+import textwrap
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import numpy as np
@@ -2017,6 +2021,13 @@ class TestLLMSyncDeepSpeedGradientClipping:
         agent = _make_llm_agent(accelerator=acc)
         agent._sync_deepspeed_gradient_clipping()
 
+    def test_sync_noop_without_deepspeed_plugin(self):
+        """Non-DeepSpeed accelerator: ``deepspeed_plugin`` is None → return before touching config."""
+        acc = _make_mock_accelerator()
+        acc.state.deepspeed_plugin = None
+        agent = _make_llm_agent(accelerator=acc)
+        agent._sync_deepspeed_gradient_clipping()
+
 
 class TestLLMGetLmHead:
     def test_finds_lm_head_on_base_model(self):
@@ -2247,6 +2258,155 @@ class TestLLMClone:
         assert agent.batch_size_per_process == 4
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
+class TestLLMConfigureBatchSizeNoDeepSpeedPlugin:
+    """``_configure_batch_size`` when ``accelerator.state.deepspeed_plugin`` is None."""
+
+    @staticmethod
+    def _accelerator_without_deepspeed(num_processes: int = 1):
+        acc = _make_mock_accelerator(num_processes=num_processes)
+        acc.state.deepspeed_plugin = None
+        return acc
+
+    def test_explicit_micro_batch_size(self):
+        acc = self._accelerator_without_deepspeed()
+        agent = _make_llm_agent(
+            accelerator=acc,
+            clone=False,
+            micro_batch_size_per_gpu=3,
+        )
+        assert agent.batch_size_per_process == 4
+        assert agent.micro_batch_size_per_gpu == 3
+
+    def test_reduce_memory_peak_sets_unit_batches(self):
+        acc = self._accelerator_without_deepspeed()
+        agent = _make_llm_agent(
+            accelerator=acc,
+            clone=False,
+            reduce_memory_peak=True,
+            micro_batch_size_per_gpu=None,
+        )
+        assert agent.batch_size_per_process == 1
+        assert agent.micro_batch_size_per_gpu == 1
+
+    def test_micro_batch_defaults_to_per_process(self):
+        acc = self._accelerator_without_deepspeed()
+        agent = _make_llm_agent(
+            accelerator=acc,
+            clone=False,
+            reduce_memory_peak=False,
+            micro_batch_size_per_gpu=None,
+        )
+        assert agent.batch_size_per_process == 4
+        assert agent.micro_batch_size_per_gpu == 4
+
+    def test_multi_process_splits_batch(self):
+        acc = self._accelerator_without_deepspeed(num_processes=2)
+        agent = _make_llm_agent(
+            accelerator=acc,
+            clone=False,
+            reduce_memory_peak=False,
+            micro_batch_size_per_gpu=None,
+        )
+        assert agent.batch_size_per_process == 2
+        assert agent.micro_batch_size_per_gpu == 2
+
+
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
+class TestLLMResolveModelPathForVllm:
+    def test_local_directory_with_config_json(self, tmp_path):
+        """Local tree with ``config.json`` uses the path as-is (resolved)."""
+        (tmp_path / "config.json").write_text("{}")
+        out = LLMAlgorithm._resolve_model_path_for_vllm(str(tmp_path))
+        assert out == str(tmp_path.resolve())
+
+    def test_repo_id_cached_snapshot_local_only_succeeds(self, tmp_path):
+        """Hub repo id: ``snapshot_download(..., local_files_only=True)`` returns a snapshot."""
+        snap = tmp_path / "cached"
+        snap.mkdir()
+        (snap / "tokenizer.json").write_text("{}")
+        with patch(
+            "huggingface_hub.snapshot_download", return_value=str(snap)
+        ) as mock_sd:
+            out = LLMAlgorithm._resolve_model_path_for_vllm("org/test-model")
+        mock_sd.assert_called_once_with(repo_id="org/test-model", local_files_only=True)
+        assert out == str(snap)
+
+    def test_repo_id_retries_without_local_only_when_cache_miss(self, tmp_path):
+        """If local-only snapshot raises, fall back to a full hub fetch (no local_files_only)."""
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        snap = tmp_path / "after_retry"
+        snap.mkdir()
+        (snap / "tokenizer.json").write_text("{}")
+
+        def fake_snapshot_download(*, repo_id, local_files_only=False, **kwargs):
+            if local_files_only:
+                raise LocalEntryNotFoundError("not in cache")
+            assert repo_id == "org/test-model"
+            return str(snap)
+
+        with patch(
+            "huggingface_hub.snapshot_download",
+            side_effect=fake_snapshot_download,
+        ) as mock_sd:
+            out = LLMAlgorithm._resolve_model_path_for_vllm("org/test-model")
+        assert out == str(snap)
+        assert mock_sd.call_count == 2
+
+    def test_raises_when_resolved_path_is_not_a_directory(self):
+        with (
+            patch(
+                "huggingface_hub.snapshot_download", return_value="/no/such/dir/abc123"
+            ),
+            pytest.raises(ValueError, match="Expected a model directory for vLLM"),
+        ):
+            LLMAlgorithm._resolve_model_path_for_vllm("org/test-model")
+
+    def test_incomplete_hub_cache_triggers_network_snapshot(self, tmp_path):
+        """Cached dir without tokenizer files triggers ``snapshot_download(..., local_files_only=False)``."""
+        cached = tmp_path / "partial"
+        cached.mkdir()
+        (cached / "config.json").write_text("{}")
+        filled = tmp_path / "complete"
+        filled.mkdir()
+        (filled / "tokenizer.json").write_text("{}")
+        calls: list[bool] = []
+
+        def fake_snapshot_download(*, repo_id, local_files_only=True, **kwargs):
+            calls.append(local_files_only)
+            if local_files_only:
+                return str(cached)
+            assert repo_id == "org/test-model"
+            return str(filled)
+
+        with patch(
+            "huggingface_hub.snapshot_download", side_effect=fake_snapshot_download
+        ):
+            out = LLMAlgorithm._resolve_model_path_for_vllm("org/test-model")
+        assert out == str(filled)
+        assert calls == [True, False]
+
+    def test_network_snapshot_failure_returns_partial_cache(self, tmp_path):
+        """If the network refill raises ``LocalEntryNotFoundError``, return the cached path."""
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        cached = tmp_path / "partial"
+        cached.mkdir()
+        (cached / "config.json").write_text("{}")
+
+        def fake_snapshot_download(*, repo_id, local_files_only=True, **kwargs):
+            if local_files_only:
+                return str(cached)
+            raise LocalEntryNotFoundError("offline")
+
+        with patch(
+            "huggingface_hub.snapshot_download", side_effect=fake_snapshot_download
+        ):
+            out = LLMAlgorithm._resolve_model_path_for_vllm("org/test-model")
+        assert out == str(cached)
+
+
 class TestLLMInitMiscPaths:
     def test_use_liger_loss_modifies_lora_config(self):
         lora = MagicMock()
@@ -2303,11 +2463,68 @@ class TestConditionalImportFallbacks:
         result = clone_tensors_for_torch_save({"a": 1})
         assert isinstance(result, dict)
 
+    def test_clone_tensors_stub_no_deepspeed_branch(self):
+        """Cover identity stub in base.py when HAS_DEEPSPEED is false at import time.
+
+        When DeepSpeed is installed, the module binds the real helper; patching
+        HAS_DEEPSPEED and importing in a fresh subprocess exercises the else branch.
+        """
+        script = textwrap.dedent(
+            """
+            from unittest.mock import patch
+            import agilerl
+            with patch.object(agilerl, "HAS_DEEPSPEED", False):
+                import agilerl.algorithms.core.base as base_mod
+            payload = {"a": 1}
+            out = base_mod.clone_tensors_for_torch_save(
+                payload, "ignored_pos", ignored_kw=1,
+            )
+            assert out is payload
+            """,
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
+        )
+        assert result.returncode == 0, f"{result.stderr}\n{result.stdout}"
+
     def test_vllm_fallback_when_import_fails(self):
         from agilerl.algorithms.core import base as base_mod
 
         assert hasattr(base_mod, "LLM")
         assert hasattr(base_mod, "SamplingParams")
+
+
+class TestVllmConditionalImportFallback:
+    """Exercises base.py when vLLM is treated as unavailable (else: LLM = None)."""
+
+    def test_llm_and_sampling_params_none_when_has_vllm_false(self):
+        """Cover base.py lines that set LLM and SamplingParams to None without vLLM.
+
+        When vLLM is installed, the module imports the real classes; patching
+        HAS_VLLM and importing in a fresh subprocess exercises the else branch.
+        """
+        script = textwrap.dedent(
+            """
+            from unittest.mock import patch
+            import agilerl
+            with patch.object(agilerl, "HAS_VLLM", False):
+                import agilerl.algorithms.core.base as base_mod
+            assert base_mod.LLM is None
+            assert base_mod.SamplingParams is None
+            """,
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
+        )
+        assert result.returncode == 0, f"{result.stderr}\n{result.stdout}"
 
 
 class TestMultiAgentPreprocessObservation:

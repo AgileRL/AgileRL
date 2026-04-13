@@ -448,7 +448,60 @@ class ReasoningGym(HuggingFaceGym):
         return collate_fn
 
 
-class PreferenceGym(HuggingFaceGym):
+class IterablePromptBatchGym(HuggingFaceGym):
+    """HuggingFaceGym whose ``step`` only advances the dataloader (no reward decoding).
+
+    Shared by Preference and SFT envs: same ``reset`` / ``step`` / epoch-wrapping
+    iterator logic; subclasses differ in ``create_collate_fn`` and dataset checks.
+    """
+
+    def reset(
+        self,
+        reset_dataloaders: bool = False,
+    ) -> Any:
+        """Reset the environment and get the next batch from the dataloader."""
+        if reset_dataloaders:
+            self._reset_dataloaders()
+            warnings.warn(
+                "env.reset() called with reset_dataloaders=True, this will reset "
+                "the dataloaders to the beginning of the dataset, proceed with caution.",
+                stacklevel=2,
+            )
+        if self.reset_called:
+            warnings.warn(
+                "env.reset() called more than once sequentially, it should typically "
+                "follow with env.step().",
+                stacklevel=2,
+            )
+        self.reset_called = True
+        return self._get_next_batch()
+
+    def step(
+        self,
+        completions: torch.Tensor | None = None,
+    ) -> Any:
+        """Advance the iterator and return the next batch.
+
+        :param completions: Unused; kept for API compatibility with other Gym types.
+        """
+        self.reset_called = False
+        return self._get_next_batch()
+
+    def _get_next_batch(self) -> Any:
+        try:
+            batch = next(self.dataloader)
+        except StopIteration:
+            if not self.evaluation_mode:
+                self.num_epochs += 1
+            self._reset_dataloaders(
+                reset_train=not self.evaluation_mode,
+                reset_test=self.evaluation_mode,
+            )
+            return self._get_next_batch()
+        return batch
+
+
+class PreferenceGym(IterablePromptBatchGym):
     """Class to convert HuggingFace preference datasets into Gymnasium style environment.
 
     :param dataset_name: Dataset name to be loaded from HuggingFace datasets.
@@ -500,44 +553,14 @@ class PreferenceGym(HuggingFaceGym):
 
     def reset(self, reset_dataloaders: bool = False) -> PreferencePrompts:
         """Reset the environment and get the next batch of tokenized prompts."""
-        if reset_dataloaders:
-            self._reset_dataloaders()
-            warnings.warn(
-                "env.reset() called with reset_dataloaders=True, this will reset the dataloaders to the beginning of the dataset, proceed with caution.",
-                stacklevel=2,
-            )
-        if self.reset_called:
-            warnings.warn(
-                "env.reset() called more than once sequentially, it should typically follow with env.step().",
-                stacklevel=2,
-            )
-        self.reset_called = True
-        return self._get_next_batch()
+        return super().reset(reset_dataloaders)
 
     def step(
         self,
         completions: torch.Tensor | None = None,
     ) -> PreferencePrompts:
-        """Take a step in the PreferenceGym environment, calculate rewards from completions generated from previous prompt and provide new batch
-        of prompts.
-
-        :param completions: Completions from the model (unused in PreferenceGym; kept for signature compatibility with HuggingFaceGym).
-        """
-        self.reset_called = False
-        return self._get_next_batch()
-
-    def _get_next_batch(self) -> PreferencePrompts:
-        try:
-            batch = next(self.dataloader)
-        except StopIteration:
-            if not self.evaluation_mode:
-                self.num_epochs += 1
-            self._reset_dataloaders(
-                reset_train=not self.evaluation_mode,
-                reset_test=self.evaluation_mode,
-            )
-            return self._get_next_batch()
-        return batch
+        """Return the next batch (``completions`` is unused; API matches other gyms)."""
+        return super().step(completions)
 
     def create_collate_fn(
         self,
@@ -637,7 +660,7 @@ class PreferenceGym(HuggingFaceGym):
         return collate_fn
 
 
-class SFTGym(HuggingFaceGym):
+class SFTGym(IterablePromptBatchGym):
     """Gymnasium-style environment for supervised fine-tuning (SFT) datasets.
 
     Each batch yields tokenised ``(prompt + response)`` pairs that can be
@@ -709,49 +732,14 @@ class SFTGym(HuggingFaceGym):
 
     def reset(self, reset_dataloaders: bool = False) -> SFTPrompts:
         """Reset the environment and return the first batch of tokenised data."""
-        if reset_dataloaders:
-            self._reset_dataloaders()
-            import warnings
-
-            warnings.warn(
-                "env.reset() called with reset_dataloaders=True; dataloaders are "
-                "rewound to the beginning of the dataset.",
-                stacklevel=2,
-            )
-        if self.reset_called:
-            import warnings
-
-            warnings.warn(
-                "env.reset() called more than once sequentially; it should be "
-                "followed by env.step().",
-                stacklevel=2,
-            )
-        self.reset_called = True
-        return self._get_next_batch()
+        return super().reset(reset_dataloaders)
 
     def step(
         self,
         completions: torch.Tensor | None = None,
     ) -> SFTPrompts:
-        """Advance the data iterator and return the next batch.
-
-        :param completions: Unused; kept for API compatibility with other Gym types.
-        """
-        self.reset_called = False
-        return self._get_next_batch()
-
-    def _get_next_batch(self) -> SFTPrompts:
-        try:
-            batch = next(self.dataloader)
-        except StopIteration:
-            if not self.evaluation_mode:
-                self.num_epochs += 1
-            self._reset_dataloaders(
-                reset_train=not self.evaluation_mode,
-                reset_test=self.evaluation_mode,
-            )
-            return self._get_next_batch()
-        return batch
+        """Advance the data iterator and return the next batch."""
+        return super().step(completions)
 
     def create_collate_fn(
         self,
