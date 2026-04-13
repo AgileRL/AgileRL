@@ -7,10 +7,10 @@ from typing import Any, Literal
 import numpy as np
 import torch
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DPO, GRPO
 from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
@@ -196,11 +196,6 @@ def _wandb_extend_hpo_hyperparams(
     }
 
 
-def _wandb_log(metrics: dict[str, Any]) -> None:
-    """Log to W&B; call only from ``if wb and _is_main_process(accelerator)`` blocks."""
-    wandb.log(metrics)
-
-
 def _handle_evolution_or_checkpoint(
     i: int,
     pop: PopulationType,
@@ -307,7 +302,7 @@ def _open_csv_log(
     os.makedirs(elite_path, exist_ok=True)
     csv_path = os.path.join(elite_path, "metrics.csv")
     csv_file = open(csv_path, "w", newline="")
-    writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+    writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     csv_file.flush()
     return csv_file, writer
@@ -418,6 +413,26 @@ def finetune_llm_reasoning(
     )
     pbar = _create_pbar(accelerator, max_steps)
 
+    csv_file, csv_writer = _open_csv_log(
+        elite_path,
+        [
+            "Train/Best reward",
+            "Train/Mean population reward",
+            "Train/Mean population loss",
+            "Train/Mean population KL divergence",
+            "Train/Mean population completion length",
+            "Train/Mean population accuracy",
+            "Train/Best accuracy",
+            "Eval/Best reward",
+            "Eval/Mean population reward",
+            "Eval/Mean population accuracy",
+            "Eval/Best accuracy",
+        ],
+        accelerator,
+    )
+
+    agg_metrics = []
+    agg_test_metrics = None
     total_steps = 0
 
     # calling env.reset() supplies the first batch of training data
@@ -506,9 +521,11 @@ def finetune_llm_reasoning(
             require_evo_steps_for_hpo=False,
         )
 
-        if wb and _is_main_process(accelerator):
+        wb_check = wb and _is_main_process(accelerator)
+        csv_check = csv_writer is not None and agent_metrics_dict
+        if wb_check or csv_check:
             metric_values = _per_agent_metrics(agent_metrics_dict, len(pop))
-            wandb_dict = {
+            metrics_dict = {
                 "Train/Best reward": np.max(
                     metric_values("train_metrics", "Train/Mean reward")
                 ),
@@ -526,7 +543,7 @@ def finetune_llm_reasoning(
                 ),
             }
             if max_reward is not None:
-                wandb_dict |= {
+                metrics_dict |= {
                     "Train/Mean population accuracy": np.mean(
                         metric_values("train_metrics", "Train/Accuracy")
                     ),
@@ -534,7 +551,7 @@ def finetune_llm_reasoning(
                         metric_values("train_metrics", "Train/Accuracy")
                     ),
                 }
-            _wandb_extend_hpo_hyperparams(wandb_dict, pop)
+            _wandb_extend_hpo_hyperparams(metrics_dict, pop)
 
             if agg_test_metrics is not None:
                 test_dict = {
@@ -551,13 +568,20 @@ def finetune_llm_reasoning(
                             metric_values("test_metrics", "Eval/Accuracy")
                         ),
                     }
-                    wandb_dict |= {
+                    metrics_dict |= {
                         "Eval/Best accuracy": np.max(
                             metric_values("test_metrics", "Eval/Accuracy")
                         ),
                     }
-                wandb_dict |= test_dict
-            _wandb_log(wandb_dict)
+                metrics_dict |= test_dict
+            if csv_check:
+                _log_csv_row(
+                    csv_writer,
+                    csv_file,
+                    metrics_dict,
+                )
+            if wb_check:
+                wandb.log(metrics_dict)
 
         if env.num_epochs == num_epochs:
             break
@@ -668,17 +692,20 @@ def finetune_llm_preference(
     )
     pbar = _create_pbar(accelerator, max_steps)
 
+    agg_metrics = []
+    agg_test_metrics = None
     total_steps = 0
 
-    dpo_csv_file, dpo_csv_writer = _open_csv_log(
+    csv_file, csv_writer = _open_csv_log(
         elite_path,
         [
-            "step",
-            "train_loss",
-            "train_chosen_reward",
-            "train_rejected_reward",
-            "train_reward_margin",
-            "eval_reward_margin",
+            "Train/Best reward margin",
+            "Train/Mean population reward margin",
+            "Train/Mean population loss",
+            "Train/Mean population chosen reward",
+            "Train/Mean population rejected reward",
+            "Eval/Best reward margin",
+            "Eval/Mean population reward margin",
         ],
         accelerator,
     )
@@ -737,32 +764,6 @@ def finetune_llm_preference(
                 )
                 agent.scores.append(agg_metrics[1] - agg_metrics[2])
 
-        if dpo_csv_writer is not None and agent_metrics_dict:
-            metric_values = _per_agent_metrics(agent_metrics_dict, len(pop))
-            eval_margin = (
-                np.mean(metric_values("test_metrics", "Eval/Mean reward margin"))
-                if agg_test_metrics is not None
-                else ""
-            )
-            _log_csv_row(
-                dpo_csv_writer,
-                dpo_csv_file,
-                {
-                    "step": total_steps,
-                    "train_loss": np.mean(metric_values("train_metrics", "Train/Loss")),
-                    "train_chosen_reward": np.mean(
-                        metric_values("train_metrics", "Train/Mean chosen reward")
-                    ),
-                    "train_rejected_reward": np.mean(
-                        metric_values("train_metrics", "Train/Mean rejected reward")
-                    ),
-                    "train_reward_margin": np.mean(
-                        metric_values("train_metrics", "Train/Mean reward margin")
-                    ),
-                    "eval_reward_margin": eval_margin,
-                },
-            )
-
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
@@ -783,9 +784,11 @@ def finetune_llm_preference(
             require_evo_steps_for_hpo=False,
         )
 
-        if wb and _is_main_process(accelerator):
+        wb_check = wb and _is_main_process(accelerator)
+        csv_check = csv_writer is not None and agent_metrics_dict
+        if wb_check or csv_check:
             metric_values = _per_agent_metrics(agent_metrics_dict, len(pop))
-            wandb_dict = {
+            metrics_dict = {
                 "Train/Best reward margin": np.max(
                     metric_values("train_metrics", "Train/Mean reward margin")
                 ),
@@ -803,7 +806,7 @@ def finetune_llm_preference(
                 ),
             }
             if agg_test_metrics is not None:
-                wandb_dict |= {
+                metrics_dict |= {
                     "Eval/Best reward margin": np.max(
                         metric_values("test_metrics", "Eval/Mean reward margin")
                     ),
@@ -811,7 +814,15 @@ def finetune_llm_preference(
                         metric_values("test_metrics", "Eval/Mean reward margin")
                     ),
                 }
-            _wandb_log(wandb_dict)
+            if csv_check:
+                _log_csv_row(
+                    csv_writer,
+                    csv_file,
+                    metrics_dict,
+                )
+            if wb_check:
+                wandb.log(metrics_dict)
+
         if env.num_epochs == num_epochs:
             break
     if verbose and _is_main_process(accelerator):
@@ -843,12 +854,10 @@ def finetune_llm_preference(
         pbar.write("\n".join(lines))
 
     _save_elite_checkpoint(pop, save_elite, elite_path, accelerator)
-
-    if dpo_csv_file is not None:
-        dpo_csv_file.close()
-        print(f"Training metrics saved to {os.path.join(elite_path, 'metrics.csv')}")
-
     _finalize_training_pbar_wandb(accelerator, pbar, wb)
+    if csv_file is not None:
+        csv_file.close()
+        print(f"Training metrics saved to {os.path.join(elite_path, 'metrics.csv')}")
 
 
 def finetune_llm_sft(
@@ -939,12 +948,19 @@ def finetune_llm_sft(
     )
     pbar = _create_pbar(accelerator, max_steps)
 
+    agg_metrics = []
+    agg_test_metrics = None
     total_steps = 0
     prompts = env.reset(reset_dataloaders=True)
 
-    sft_csv_file, sft_csv_writer = _open_csv_log(
+    csv_file, csv_writer = _open_csv_log(
         elite_path,
-        ["step", "train_loss", "train_perplexity", "eval_loss"],
+        [
+            "Train/Mean population loss",
+            "Train/Mean population perplexity",
+            "Train/Best loss",
+            "Eval/Best fitness",
+        ],
         accelerator,
     )
 
@@ -991,26 +1007,6 @@ def finetune_llm_sft(
                 )
                 agent.scores.append(-agg_metrics[0])  # higher = better
 
-        if sft_csv_writer is not None and agent_metrics_dict:
-            metric_values = _per_agent_metrics(agent_metrics_dict, len(pop))
-            eval_loss = (
-                -np.mean(metric_values("test_metrics", "Eval/Negative loss (fitness)"))
-                if agg_test_metrics is not None
-                else ""
-            )
-            _log_csv_row(
-                sft_csv_writer,
-                sft_csv_file,
-                {
-                    "step": total_steps,
-                    "train_loss": np.mean(metric_values("train_metrics", "Train/Loss")),
-                    "train_perplexity": np.mean(
-                        metric_values("train_metrics", "Train/Perplexity")
-                    ),
-                    "eval_loss": eval_loss,
-                },
-            )
-
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
@@ -1031,9 +1027,11 @@ def finetune_llm_sft(
             require_evo_steps_for_hpo=True,
         )
 
-        if wb and _is_main_process(accelerator):
+        wb_check = wb and _is_main_process(accelerator)
+        csv_check = csv_writer is not None and agent_metrics_dict
+        if wb_check or csv_check:
             metric_values = _per_agent_metrics(agent_metrics_dict, len(pop))
-            wandb_dict = {
+            metrics_dict = {
                 "Train/Mean population loss": np.mean(
                     metric_values("train_metrics", "Train/Loss")
                 ),
@@ -1043,10 +1041,17 @@ def finetune_llm_sft(
                 "Train/Best loss": np.min(metric_values("train_metrics", "Train/Loss")),
             }
             if agg_test_metrics is not None:
-                wandb_dict["Eval/Best fitness"] = np.max(
+                metrics_dict["Eval/Best fitness"] = np.max(
                     metric_values("test_metrics", "Eval/Negative loss (fitness)")
                 )
-            _wandb_log(wandb_dict)
+            if csv_check:
+                _log_csv_row(
+                    csv_writer,
+                    csv_file,
+                    metrics_dict,
+                )
+            if wb_check:
+                wandb.log(metrics_dict)
 
         if env.num_epochs == num_epochs:
             break
@@ -1085,9 +1090,7 @@ def finetune_llm_sft(
         pbar.write("\n".join(lines))
 
     _save_elite_checkpoint(pop, save_elite, elite_path, accelerator)
-
-    if sft_csv_file is not None:
-        sft_csv_file.close()
-        print(f"Training metrics saved to {os.path.join(elite_path, 'metrics.csv')}")
-
     _finalize_training_pbar_wandb(accelerator, pbar, wb)
+    if csv_file is not None:
+        csv_file.close()
+        print(f"Training metrics saved to {os.path.join(elite_path, 'metrics.csv')}")
