@@ -392,7 +392,11 @@ def transpose_image_observation(
                 return observation.permute(2, 0, 1)
             if ndim == 4:
                 return observation.permute(0, 3, 1, 2)
-        return np.asarray(observation).transpose(2, 0, 1)
+        arr = np.asarray(observation)
+        if arr.ndim == 3:
+            return arr.transpose(2, 0, 1)
+        if arr.ndim == 4:
+            return arr.transpose(0, 3, 1, 2)
 
     if isinstance(original_space, spaces.Dict):
         return {
@@ -1124,12 +1128,12 @@ def preprocess_box_observation(
     if placeholder_value is not None:
         observation = add_placeholder_value(observation, placeholder_value)
 
+    if swap_channels:
+        observation = transpose_image_observation(observation, observation_space)
+
     # Normalize images if applicable and specified
     if len(observation_space.shape) == 3 and normalize_images:
         observation = apply_image_normalization(observation, observation_space)
-
-    if swap_channels:
-        observation = transpose_image_observation(observation, observation_space)
 
     # Check add batch dimension if necessary
     return maybe_add_batch_dim(observation, observation_space)

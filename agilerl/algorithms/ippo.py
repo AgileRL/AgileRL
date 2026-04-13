@@ -470,6 +470,7 @@ class IPPO(MultiAgentRLAlgorithm):
                     observation=agent_obs,
                     device=self.device,
                     normalize_images=self.normalize_images,
+                    swap_channels=self.swap_channels,
                 ),
             )
 
@@ -753,6 +754,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 next_obs,
                 self.device,
                 self.normalize_images,
+                swap_channels=self.swap_channels,
             )
             next_value = critic(next_obs).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
@@ -824,6 +826,7 @@ class IPPO(MultiAgentRLAlgorithm):
                         batch_obs,
                         self.device,
                         self.normalize_images,
+                        swap_channels=self.swap_channels,
                     )
                     _, _, entropy = actor(batch_obs)
                     value = critic(batch_obs).squeeze(-1)

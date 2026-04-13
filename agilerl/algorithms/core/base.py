@@ -1335,6 +1335,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.normalize_images = normalize_images
         self.action_dim = get_output_size_from_space(self.action_space)
         self.swap_channels = needs_image_transpose(self.observation_space)
+        self.env_observation_space = observation_space
         if self.swap_channels:
             logger.warning(
                 "Found channels-last observation space. "
@@ -1460,6 +1461,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         # Check if any observation space is channels-last and transpose if necessary
         self.swap_channels = needs_image_transpose(self.possible_observation_spaces)
+        self.env_observation_spaces = self.possible_observation_spaces
         if self.swap_channels:
             logger.warning(
                 "Found channels-last observation space. "

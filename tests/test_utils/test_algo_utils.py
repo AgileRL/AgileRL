@@ -367,6 +367,12 @@ class TestTransposeImageObservation:
         result = transpose_image_observation(obs, space)
         assert result.shape == (3, 4, 6)
 
+    def test_4d_batched_numpy_array(self):
+        space = spaces.Box(0, 255, (4, 6, 3), np.uint8)
+        obs = np.zeros((8, 4, 6, 3), dtype=np.uint8)
+        result = transpose_image_observation(obs, space)
+        assert result.shape == (8, 3, 4, 6)
+
     def test_3d_tensor(self):
         space = spaces.Box(0, 255, (4, 6, 3), np.uint8)
         obs = torch.zeros(4, 6, 3)

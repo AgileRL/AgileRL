@@ -338,7 +338,7 @@ class PPO(RLAlgorithm):
         """Create a rollout buffer with the current configuration."""
         self.rollout_buffer = RolloutBuffer(
             capacity=-(self.learn_step // -self.num_envs),
-            observation_space=self.observation_space,
+            observation_space=self.env_observation_space,
             action_space=self.action_space,
             device=self.device,
             num_envs=self.num_envs,
