@@ -1,8 +1,9 @@
-from agilerl.arena.client import ArenaClient
 import json
 import os
 from pathlib import Path
 from uuid import uuid4
+
+from agilerl.arena.client import ArenaClient
 
 
 def _run_test(name: str, fn):

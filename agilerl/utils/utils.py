@@ -8,12 +8,12 @@ from typing import Any
 import gymnasium as gym
 import numpy as np
 import tqdm
+import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
-import wandb
 from agilerl.algorithms import (
     CQN,
     DDPG,

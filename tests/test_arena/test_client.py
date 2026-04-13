@@ -657,7 +657,9 @@ class TestCliV1EnvironmentAndExperimentEndpoints:
             return_value={"ok": True, "data": {"MyEnv": {"v1": {"validated": True}}}}
         )
         result = api_key_client.list_custom_environments()
-        api_key_client._request.assert_called_once_with("GET", "/api/cli/v1/environments")
+        api_key_client._request.assert_called_once_with(
+            "GET", "/api/cli/v1/environments"
+        )
         assert "MyEnv" in result
 
     def test_custom_environment_exists_unwraps_standard_payload(self, api_key_client):
@@ -688,7 +690,9 @@ class TestCliV1EnvironmentAndExperimentEndpoints:
 
     def test_validate_custom_environment_uses_cli_v1_path(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"ok": True})
-        api_key_client.validate_custom_environment(name="MyEnv", version="v1", stream=False)
+        api_key_client.validate_custom_environment(
+            name="MyEnv", version="v1", stream=False
+        )
         api_key_client._request.assert_called_once_with(
             "POST",
             "/api/cli/v1/environments/validate",
@@ -706,7 +710,9 @@ class TestCliV1EnvironmentAndExperimentEndpoints:
             json={"name": "MyEnv", "version": "v1", "multi_agent": False},
         )
 
-    def test_delete_custom_environment_uses_cli_v1_path_and_unwraps(self, api_key_client):
+    def test_delete_custom_environment_uses_cli_v1_path_and_unwraps(
+        self, api_key_client
+    ):
         api_key_client._request = MagicMock(return_value={"ok": True, "data": None})
         result = api_key_client.delete_custom_environment(name="MyEnv", version="v1")
         assert result is None
@@ -730,7 +736,9 @@ class TestCliV1EnvironmentAndExperimentEndpoints:
             timeout=api_key_client._upload_timeout,
         )
 
-    def test_validate_job_run_spec_uses_cli_v1_and_handles_null_data(self, api_key_client):
+    def test_validate_job_run_spec_uses_cli_v1_and_handles_null_data(
+        self, api_key_client
+    ):
         api_key_client._request = MagicMock(return_value={"ok": True, "data": None})
         result = api_key_client.validate_job_run_spec({"algorithm": {"name": "DQN"}})
         assert result == {"valid": True}

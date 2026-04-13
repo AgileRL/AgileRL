@@ -3,8 +3,9 @@ from __future__ import annotations
 import csv
 import io
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import click
 from rich.console import Console
@@ -132,7 +133,9 @@ def format_cell(value: Any) -> str:
 
 def handle_error(exc: Exception, output: OutputFormat) -> None:
     if isinstance(exc, ArenaValidationError):
-        emit({"error": "validation_failed", "details": exc.errors}, output, is_error=True)
+        emit(
+            {"error": "validation_failed", "details": exc.errors}, output, is_error=True
+        )
         raise click.exceptions.Exit(1)
     if isinstance(exc, ArenaAuthError):
         emit(
@@ -198,7 +201,9 @@ class StreamTableRenderer:
             return result
 
         cleaned = {
-            key: value for key, value in result.items() if key not in {"stream", "events"}
+            key: value
+            for key, value in result.items()
+            if key not in {"stream", "events"}
         }
         if self._completion_payload is None:
             return cleaned or None
@@ -207,7 +212,9 @@ class StreamTableRenderer:
         if self._final_status_payload is not None:
             merged.setdefault("final_status", self._final_status_payload.get("status"))
             merged.setdefault("final_stage", self._final_status_payload.get("stage"))
-            merged.setdefault("final_message", self._final_status_payload.get("message"))
+            merged.setdefault(
+                "final_message", self._final_status_payload.get("message")
+            )
         return merged or None
 
     def close(self) -> None:
@@ -275,13 +282,17 @@ class StreamTableRenderer:
             check_name = str(payload["check"])
             result = payload["result"]
             success = result.get("success")
-            status = "PASS" if success is True else "FAIL" if success is False else "UNKNOWN"
+            status = (
+                "PASS" if success is True else "FAIL" if success is False else "UNKNOWN"
+            )
             error_msg = result.get("error msg") or result.get("error") or ""
             warnings = result.get("warnings")
             warning_text = ""
             if isinstance(warnings, list) and warnings:
                 warning_text = f"warnings: {', '.join(str(item) for item in warnings)}"
-            details = "; ".join(part for part in (str(error_msg), warning_text) if part).strip()
+            details = "; ".join(
+                part for part in (str(error_msg), warning_text) if part
+            ).strip()
             self._rows.append(StreamRow("check", check_name, status, details or "-"))
             return
 

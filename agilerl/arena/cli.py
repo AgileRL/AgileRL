@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 import click
@@ -95,7 +96,7 @@ def login(
     try:
         client.login(timeout=timeout)
         click.echo("Login successful.")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         client.close()
@@ -111,7 +112,7 @@ def logout(
     try:
         client.logout()
         click.echo("Logout successful.")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         client.close()
@@ -131,7 +132,7 @@ def user_profile(
     client = build_client(config)
     try:
         emit(client.get_current_user(), config.output)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         client.close()
@@ -146,7 +147,7 @@ def user_credits(
     client = build_client(config)
     try:
         emit(client.get_user_credits(), config.output)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         client.close()
@@ -166,7 +167,7 @@ def env_list(
     client = build_client(config)
     try:
         emit(client.list_custom_environments(), config.output)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         client.close()
@@ -186,7 +187,7 @@ def env_exists(
     try:
         exists = client.custom_environment_exists(name=name, version=version)
         emit({"name": name, "version": version, "exists": exists}, config.output)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         client.close()
@@ -208,7 +209,7 @@ def env_entrypoints(
             client.list_custom_environment_entrypoints(name=name, version=version),
             config.output,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         client.close()
@@ -282,7 +283,7 @@ def env_create_and_validate(
             click.echo()
         if result is not None:
             emit(result, config.output)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         if stream_renderer is not None:
@@ -330,7 +331,7 @@ def env_validate(
             click.echo()
         if result is not None:
             emit(result, config.output)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         if stream_renderer is not None:
@@ -379,7 +380,7 @@ def env_profile(
             click.echo()
         if result is not None:
             emit(result, config.output)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         if stream_renderer is not None:
@@ -404,7 +405,9 @@ def env_delete(
     yes: bool,
 ) -> None:
     """Delete an environment version from Arena."""
-    if not yes and not click.confirm(f"Delete environment {name}:{version}?", default=False):
+    if not yes and not click.confirm(
+        f"Delete environment {name}:{version}?", default=False
+    ):
         click.echo("Aborted.")
         return
 
@@ -415,7 +418,7 @@ def env_delete(
             emit({"deleted": True, "name": name, "version": version}, config.output)
             return
         emit(result, config.output)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         client.close()
@@ -504,7 +507,7 @@ def experiments_submit(
             click.echo()
         if result is not None:
             emit(result, config.output)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         if stream_renderer is not None:
@@ -520,7 +523,7 @@ def jobs_status(config: CommandConfig, experiment_id: int) -> None:
     client = build_client(config)
     try:
         emit(client.get_experiment_status(experiment_id), config.output)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         client.close()
@@ -551,7 +554,7 @@ def jobs_validate_runspec(
     try:
         result = client.validate_job_run_spec(run_spec)
         emit(result, config.output)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         client.close()
@@ -616,7 +619,7 @@ def jobs_get_metrics(
             and (content_type or "").startswith("text/csv")
         ):
             emit_csv_preview(payload, max_rows=preview_rows)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         handle_error(exc, config.output)
     finally:
         client.close()

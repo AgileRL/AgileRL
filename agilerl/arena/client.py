@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Self
+from typing import Any, ClassVar, Self
 
 import httpx
 
@@ -23,34 +24,40 @@ from agilerl.utils.arena_utils import (
 
 logger = logging.getLogger(__name__)
 
-_ARCHIVE_EXCLUDE_DIRS = frozenset({
-    ".git",
-    "__pycache__",
-    "node_modules",
-    ".tox",
-    ".nox",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".venv",
-    "venv",
-    ".eggs",
-    "*.egg-info",
-})
+_ARCHIVE_EXCLUDE_DIRS = frozenset(
+    {
+        ".git",
+        "__pycache__",
+        "node_modules",
+        ".tox",
+        ".nox",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "venv",
+        ".eggs",
+        "*.egg-info",
+    }
+)
 
-_ARCHIVE_EXCLUDE_SUFFIXES = frozenset({
-    ".pyc",
-    ".pyo",
-    ".so",
-    ".dylib",
-    ".egg",
-})
+_ARCHIVE_EXCLUDE_SUFFIXES = frozenset(
+    {
+        ".pyc",
+        ".pyo",
+        ".so",
+        ".dylib",
+        ".egg",
+    }
+)
 
-_ARCHIVE_EXCLUDE_FILES = frozenset({
-    ".env",
-    ".DS_Store",
-    "Thumbs.db",
-})
+_ARCHIVE_EXCLUDE_FILES = frozenset(
+    {
+        ".env",
+        ".DS_Store",
+        "Thumbs.db",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -303,17 +310,15 @@ class ArenaClient:
 
     def list_custom_environments(self) -> Any:
         """List custom environments available to the authenticated user."""
-        return self._unwrap_cli_data(
-            self._request("GET", "/api/cli/v1/environments")
-        )
+        return self._unwrap_cli_data(self._request("GET", "/api/cli/v1/environments"))
 
     def custom_environment_exists(self, name: str, version: str = "latest") -> bool:
         """Check whether a custom environment name/version exists."""
         resp = self._unwrap_cli_data(
             self._request(
-            "GET",
-            "/api/cli/v1/environments/exists",
-            params={"name": name, "version": version},
+                "GET",
+                "/api/cli/v1/environments/exists",
+                params={"name": name, "version": version},
             )
         )
         if isinstance(resp, dict):
@@ -328,9 +333,9 @@ class ArenaClient:
         """List available entrypoints for a custom environment version."""
         resp = self._unwrap_cli_data(
             self._request(
-            "GET",
-            "/api/cli/v1/environments/entrypoints",
-            params={"name": name, "version": version},
+                "GET",
+                "/api/cli/v1/environments/entrypoints",
+                params={"name": name, "version": version},
             )
         )
         if isinstance(resp, dict):
@@ -361,7 +366,9 @@ class ArenaClient:
             payload["entrypoint"] = entrypoint
 
         if not stream:
-            return self._request("POST", "/api/cli/v1/environments/validate", json=payload)
+            return self._request(
+                "POST", "/api/cli/v1/environments/validate", json=payload
+            )
 
         return self._stream_json_request(
             "POST",
@@ -391,7 +398,9 @@ class ArenaClient:
             payload["custom_env_path"] = custom_env_path
 
         if not stream:
-            return self._request("POST", "/api/cli/v1/environments/profile", json=payload)
+            return self._request(
+                "POST", "/api/cli/v1/environments/profile", json=payload
+            )
 
         return self._stream_json_request(
             "POST",
@@ -635,16 +644,24 @@ class ArenaClient:
     def get_experiment_status(self, experiment_id: int) -> dict[str, Any]:
         """Get status/details for an experiment."""
         resp = self._request("GET", f"/api/experiments/{experiment_id}")
-        return resp if isinstance(resp, dict) else {"experiment_id": experiment_id, "status": resp}
+        return (
+            resp
+            if isinstance(resp, dict)
+            else {"experiment_id": experiment_id, "status": resp}
+        )
 
     def validate_job_run_spec(self, run_spec: dict[str, Any]) -> dict[str, Any]:
         """Validate a runspec payload against backend schema/rules."""
         result = self._unwrap_cli_data(
-            self._request("POST", "/api/cli/v1/experiments/validate-run-spec", json=run_spec)
+            self._request(
+                "POST", "/api/cli/v1/experiments/validate-run-spec", json=run_spec
+            )
         )
         if result in ("", None):
             return {"valid": True}
-        return result if isinstance(result, dict) else {"valid": True, "response": result}
+        return (
+            result if isinstance(result, dict) else {"valid": True, "response": result}
+        )
 
     def download_experiment_metrics(
         self, experiment_id: int, metrics: list[str]
