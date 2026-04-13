@@ -114,23 +114,11 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 
     from agilerl.utils.llm_utils import create_model_from_name_or_path, gather_if_zero3
 
-    if HAS_DEEPSPEED:
-        from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
-    else:
-
-        def clone_tensors_for_torch_save(
-            item: Any,
-            *args: Any,
-            **kwargs: Any,
-        ) -> Any:
-            return item
-
+if TYPE_CHECKING or HAS_DEEPSPEED:
+    from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 
 if TYPE_CHECKING or HAS_VLLM:
     from vllm import LLM, SamplingParams
-else:
-    LLM = None
-    SamplingParams = None
 
 
 __all__ = ["EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
@@ -2464,7 +2452,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
             actor_state_dict = None
             if self.zero_stage is None or self.zero_stage < 2:
-                actor_state_dict = clone_tensors_for_torch_save(actor.state_dict())
+                actor_state_dict = (
+                    clone_tensors_for_torch_save(actor.state_dict())
+                    if HAS_DEEPSPEED
+                    else actor.state_dict()
+                )
 
             cloned_model = clone_llm(
                 actor,
