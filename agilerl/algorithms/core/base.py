@@ -1,6 +1,7 @@
 import copy
 import gc
 import inspect
+import logging
 import os
 import re
 import tempfile
@@ -86,10 +87,12 @@ from agilerl.utils.algo_utils import (
     isroutine,
     key_in_nested_dict,
     module_checkpoint_dict,
+    needs_image_transpose,
     preprocess_observation,
     recursive_check_module_attrs,
     stack_and_pad_experiences,
     stack_experiences,
+    transpose_image_space,
 )
 from agilerl.utils.evolvable_networks import (
     compile_model,
@@ -132,6 +135,8 @@ __all__ = ["EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
+
+logger = logging.getLogger(__name__)
 
 
 class _RegistryMeta(type):
@@ -1329,14 +1334,22 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.action_space = action_space
         self.normalize_images = normalize_images
         self.action_dim = get_output_size_from_space(self.action_space)
+        self.swap_channels = needs_image_transpose(self.observation_space)
+        if self.swap_channels:
+            logger.warning(
+                "Found channels-last observation space. "
+                "AgileRL automatically transposes images to be channels-first to support PyTorch convolutions.",
+                stacklevel=2,
+            )
+            self.observation_space = transpose_image_space(self.observation_space)
+
         self.metrics = AgentMetrics()
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.
 
-        :param observations: Observations of environment
-        :type observations: ObservationType
-
+        :param observation: Observations of environment
+        :type observation: ObservationType
         :return: Preprocessed observations
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
@@ -1345,6 +1358,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             observation=observation,
             device=self.device,
             normalize_images=self.normalize_images,
+            swap_channels=self.swap_channels,
         )
 
 
@@ -1443,6 +1457,18 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         self.observation_spaces = list(self.possible_observation_spaces.values())
         self.action_spaces = list(self.possible_action_spaces.values())
         self.action_dims = get_output_size_from_space(self.possible_action_spaces)
+
+        # Check if any observation space is channels-last and transpose if necessary
+        self.swap_channels = needs_image_transpose(self.possible_observation_spaces)
+        if self.swap_channels:
+            logger.warning(
+                "Found channels-last observation space. "
+                "AgileRL automatically transposes images to be channels-first to support PyTorch convolutions.",
+                stacklevel=2,
+            )
+            self.possible_observation_spaces = transpose_image_space(
+                self.possible_observation_spaces
+            )
 
         # Determine groups of agents from their IDs
         self.shared_agent_ids = []
@@ -1574,6 +1600,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 observation=agent_obs,
                 device=self.device,
                 normalize_images=self.normalize_images,
+                swap_channels=self.swap_channels,
                 placeholder_value=self.placeholder_value,
             )
 

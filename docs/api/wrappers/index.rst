@@ -8,4 +8,3 @@ Wrappers
    make_evolvable
    learning
    pettingzoo
-   image_transpose

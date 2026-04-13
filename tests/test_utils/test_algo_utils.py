@@ -45,6 +45,7 @@ from agilerl.utils.algo_utils import (
     get_num_actions,
     get_obs_shape,
     get_vect_dim,
+    is_channels_last,
     is_image_space,
     is_peft_model,
     is_vectorized_experiences,
@@ -61,8 +62,11 @@ from agilerl.utils.algo_utils import (
     remove_nested_files,
     reshape_from_space,
     share_encoder_parameters,
+    needs_image_transpose,
     stack_and_pad_experiences,
     stack_experiences,
+    transpose_image_observation,
+    transpose_image_space,
     vectorize_experiences_by_agent,
 )
 
@@ -241,6 +245,161 @@ def test_is_image_space():
     # Test with 4D space (not an image)
     not_image_space_4d = spaces.Box(low=0, high=1, shape=(1, 84, 84, 3))
     assert not is_image_space(not_image_space_4d)
+
+
+# ---------------------------------------------------------------------------
+# is_channels_last
+# ---------------------------------------------------------------------------
+
+
+class TestIsChannelsLast:
+    @pytest.mark.parametrize("num_channels", [1, 3, 32])
+    def test_image_hwc(self, num_channels):
+        assert is_channels_last(
+            spaces.Box(0, 255, shape=(84, 84, num_channels), dtype=np.uint8)
+        )
+
+    @pytest.mark.parametrize("num_channels", [1, 3, 32])
+    def test_image_chw(self, num_channels):
+        assert not is_channels_last(
+            spaces.Box(0, 255, shape=(num_channels, 84, 84), dtype=np.uint8)
+        )
+
+    def test_2d_not_image(self):
+        assert not is_channels_last(spaces.Box(0, 1, shape=(4, 4), dtype=np.float32))
+
+    def test_1d_not_image(self):
+        assert not is_channels_last(spaces.Box(0, 1, shape=(8,), dtype=np.float32))
+
+    def test_non_box_returns_false(self):
+        assert not is_channels_last(spaces.Discrete(5))  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# needs_image_transpose
+# ---------------------------------------------------------------------------
+
+
+class TestNeedsImageTranspose:
+    def test_hwc_box(self):
+        assert needs_image_transpose(spaces.Box(0, 255, (84, 84, 3), np.uint8))
+
+    def test_chw_box(self):
+        assert not needs_image_transpose(spaces.Box(0, 255, (3, 84, 84), np.uint8))
+
+    def test_dict_with_hwc(self):
+        s = spaces.Dict(
+            {
+                "image": spaces.Box(0, 255, (84, 84, 3), np.uint8),
+                "velocity": spaces.Box(-1, 1, (3,), np.float32),
+            }
+        )
+        assert needs_image_transpose(s)
+
+    def test_dict_without_hwc(self):
+        s = spaces.Dict(
+            {
+                "velocity": spaces.Box(-1, 1, (3,), np.float32),
+            }
+        )
+        assert not needs_image_transpose(s)
+
+    def test_tuple_with_hwc(self):
+        s = spaces.Tuple(
+            (
+                spaces.Box(0, 255, (84, 84, 3), np.uint8),
+                spaces.Discrete(5),
+            )
+        )
+        assert needs_image_transpose(s)
+
+    def test_discrete(self):
+        assert not needs_image_transpose(spaces.Discrete(5))
+
+
+# ---------------------------------------------------------------------------
+# transpose_image_space
+# ---------------------------------------------------------------------------
+
+
+class TestTransposeImageSpace:
+    def test_box_3d(self):
+        s = spaces.Box(0, 255, shape=(84, 84, 3), dtype=np.uint8)
+        t = transpose_image_space(s)
+        assert t.shape == (3, 84, 84)
+
+    def test_dict(self):
+        s = spaces.Dict(
+            {
+                "img": spaces.Box(0, 255, (84, 84, 3), np.uint8),
+                "vel": spaces.Box(-1, 1, (3,), np.float32),
+            }
+        )
+        t = transpose_image_space(s)
+        assert t["img"].shape == (3, 84, 84)
+        assert t["vel"].shape == (3,)
+
+    def test_tuple(self):
+        s = spaces.Tuple(
+            (
+                spaces.Box(0, 255, (84, 84, 3), np.uint8),
+                spaces.Discrete(5),
+            )
+        )
+        t = transpose_image_space(s)
+        assert t.spaces[0].shape == (3, 84, 84)
+        assert isinstance(t.spaces[1], spaces.Discrete)
+
+    def test_passthrough_non_image(self):
+        s = spaces.Discrete(10)
+        assert transpose_image_space(s) is s
+
+
+# ---------------------------------------------------------------------------
+# transpose_image_observation
+# ---------------------------------------------------------------------------
+
+
+class TestTransposeImageObservation:
+    def test_3d_numpy_array(self):
+        space = spaces.Box(0, 255, (4, 6, 3), np.uint8)
+        obs = np.zeros((4, 6, 3), dtype=np.uint8)
+        result = transpose_image_observation(obs, space)
+        assert result.shape == (3, 4, 6)
+
+    def test_3d_tensor(self):
+        space = spaces.Box(0, 255, (4, 6, 3), np.uint8)
+        obs = torch.zeros(4, 6, 3)
+        result = transpose_image_observation(obs, space)
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == (3, 4, 6)
+
+    def test_4d_batched_tensor(self):
+        space = spaces.Box(0, 255, (4, 6, 3), np.uint8)
+        obs = torch.zeros(2, 4, 6, 3)
+        result = transpose_image_observation(obs, space)
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == (2, 3, 4, 6)
+
+    def test_dict_obs(self):
+        space = spaces.Dict(
+            {
+                "img": spaces.Box(0, 255, (4, 6, 3), np.uint8),
+                "vel": spaces.Box(-1, 1, (3,), np.float32),
+            }
+        )
+        obs = {
+            "img": np.zeros((4, 6, 3), dtype=np.uint8),
+            "vel": np.zeros((3,), dtype=np.float32),
+        }
+        result = transpose_image_observation(obs, space)
+        assert result["img"].shape == (3, 4, 6)
+        assert result["vel"].shape == (3,)
+
+    def test_passthrough(self):
+        space = spaces.Discrete(5)
+        obs = 3
+        assert transpose_image_observation(obs, space) == 3
 
 
 def test_key_in_nested_dict():

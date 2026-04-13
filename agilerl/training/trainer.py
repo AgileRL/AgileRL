@@ -43,11 +43,6 @@ from agilerl.utils.trainer_utils import (
     build_tournament_from_spec,
     create_population_from_spec,
 )
-from agilerl.wrappers.image_transpose import (
-    ImageTranspose,
-    PettingZooImageTranspose,
-    needs_image_transpose,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -462,29 +457,7 @@ class LocalTrainer(Trainer):
                 tokenizer=self.tokenizer, accelerator=self.accelerator
             )
 
-        if isinstance(self.env_spec, BanditEnvSpec):
-            return self.env_spec.make_env()
-
-        # Check if the environment contains an image-last observation space,
-        # in which case we transpose through a wrapper -> (H,W,C) -> (C,H,W)
-        extra_wrappers = None
-        probe = self.env_spec.make_single_env()
-        if isinstance(self.env_spec, PzEnvSpec):
-            sample_agent = probe.possible_agents[0]
-            if needs_image_transpose(probe.observation_space(sample_agent)):
-                extra_wrappers = [PettingZooImageTranspose]
-
-        elif isinstance(self.env_spec, GymEnvSpec):
-            if needs_image_transpose(probe.observation_space):
-                extra_wrappers = [ImageTranspose]
-
-        probe.close()
-
-        if extra_wrappers is not None:
-            msg = "Found environment with channels-last observation space. Transposing to channels-first."
-            logger.warning(msg)
-
-        return self.env_spec.make_env(extra_wrappers=extra_wrappers)
+        return self.env_spec.make_env()
 
     @staticmethod
     def _resolve_env_spec(manifest: TrainingManifest) -> EnvSpecT:

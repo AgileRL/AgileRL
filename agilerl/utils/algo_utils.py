@@ -311,6 +311,104 @@ def is_image_space(space: spaces.Space) -> bool:
     return isinstance(space, spaces.Box) and len(space.shape) == 3
 
 
+def is_channels_last(space: spaces.Box) -> bool:
+    """Detect whether a 3-D Box space is in channels-last (HWC) format.
+
+    Uses a simple heuristic: if the smallest dimension is last, the
+    observation is assumed to be ``(H, W, C)`` — i.e. channels-last.
+
+    :param space: A gymnasium Box space.
+    :type space: spaces.Box
+    :returns: ``True`` when the space looks like a channels-last image.
+    :rtype: bool
+    """
+    if not is_image_space(space):
+        return False
+    return int(np.argmin(space.shape)) == 2
+
+
+def needs_image_transpose(observation_space: spaces.Space) -> bool:
+    """Check whether *any* image subspace requires a channels-last → first transpose.
+
+    Recursively inspects :class:`~gymnasium.spaces.Dict` and
+    :class:`~gymnasium.spaces.Tuple` spaces.
+
+    :param observation_space: The observation space to inspect.
+    :type observation_space: spaces.Space
+    :returns: ``True`` if at least one Box subspace is channels-last.
+    :rtype: bool
+    """
+    if isinstance(observation_space, spaces.Box):
+        return is_channels_last(observation_space)
+    if isinstance(observation_space, spaces.Dict):
+        return any(needs_image_transpose(s) for s in observation_space.spaces.values())
+    if isinstance(observation_space, spaces.Tuple):
+        return any(needs_image_transpose(s) for s in observation_space.spaces)
+    return False
+
+
+def transpose_image_space(space: spaces.Space) -> spaces.Space:
+    """Return a copy of *space* with all 3-D Box subspaces transposed to CHW.
+
+    :param space: Space to transpose
+    :type space: spaces.Space
+    :return: Transposed space
+    :rtype: spaces.Space
+    """
+    if isinstance(space, spaces.Box) and len(space.shape) == 3:
+        low = space.low.transpose(2, 0, 1)
+        high = space.high.transpose(2, 0, 1)
+        return spaces.Box(low=low, high=high, dtype=space.dtype)
+
+    if isinstance(space, spaces.Dict):
+        return spaces.Dict(
+            {key: transpose_image_space(s) for key, s in space.spaces.items()}
+        )
+
+    if isinstance(space, spaces.Tuple):
+        return spaces.Tuple(tuple(transpose_image_space(s) for s in space.spaces))
+
+    return space
+
+
+def transpose_image_observation(
+    observation: NumpyObsType | torch.Tensor, original_space: spaces.Space
+) -> NumpyObsType | torch.Tensor:
+    """Transpose 3-D observations from HWC to CHW.
+
+    Supports both NumPy arrays and PyTorch tensors.
+
+    :param observation: Observation
+    :type observation: np.ndarray | torch.Tensor
+    :param original_space: Original observation space
+    :type original_space: spaces.Space
+    :return: Transposed observation
+    :rtype: np.ndarray | torch.Tensor
+    """
+    if isinstance(original_space, spaces.Box) and len(original_space.shape) == 3:
+        if isinstance(observation, torch.Tensor):
+            ndim = observation.ndim
+            if ndim == 3:
+                return observation.permute(2, 0, 1)
+            if ndim == 4:
+                return observation.permute(0, 3, 1, 2)
+        return np.asarray(observation).transpose(2, 0, 1)
+
+    if isinstance(original_space, spaces.Dict):
+        return {
+            key: transpose_image_observation(observation[key], original_space[key])
+            for key in observation
+        }
+
+    if isinstance(original_space, spaces.Tuple):
+        return tuple(
+            transpose_image_observation(o, s)
+            for o, s in zip(observation, original_space.spaces, strict=True)
+        )
+
+    return observation
+
+
 def get_obs_shape(space: spaces.Space) -> tuple[int, ...] | dict[str, tuple[int, ...]]:
     """Return the shape of the observation space.
 
@@ -875,6 +973,7 @@ def preprocess_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> TorchObsType:
     """Preprocesses observations for forward pass through neural network.
 
@@ -888,7 +987,8 @@ def preprocess_observation(
     :type normalize_images: bool, optional
     :param placeholder_value: The value to use as placeholder for missing observations, defaults to None.
     :type placeholder_value: Any | None, optional
-
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed observations
     :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
     """
@@ -905,15 +1005,24 @@ def preprocess_dict_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> dict[str, TorchObsType]:
     """Preprocess dictionary observations.
 
     :param observation: Dictionary observation
+    :type observation: dict[str, np.ndarray | torch.Tensor]
     :param observation_space: Dictionary observation space
+    :type observation_space: spaces.Dict
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed dictionary observation
+    :rtype: dict[str, torch.Tensor[float]]
     """
     assert isinstance(
         observation,
@@ -928,6 +1037,7 @@ def preprocess_dict_observation(
             device=device,
             normalize_images=normalize_images,
             placeholder_value=placeholder_value,
+            swap_channels=swap_channels,
         )
 
     return preprocessed_obs
@@ -940,14 +1050,22 @@ def preprocess_tuple_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> tuple[TorchObsType, ...]:
     """Preprocess tuple observations.
 
     :param observation: Tuple observation
+    :type observation: tuple[np.ndarray | torch.Tensor, ...]
     :param observation_space: Tuple observation space
+    :type observation_space: spaces.Tuple
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed tuple observation
     """
     if isinstance(observation, TensorDict):
@@ -968,6 +1086,7 @@ def preprocess_tuple_observation(
             device=device,
             normalize_images=normalize_images,
             placeholder_value=placeholder_value,
+            swap_channels=swap_channels,
         )
         for _obs, _space in zip(observation, observation_space.spaces, strict=False)
     )
@@ -980,14 +1099,22 @@ def preprocess_box_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> torch.Tensor:
     """Preprocess box observations (continuous spaces).
 
     :param observation: Box observation
+    :type observation: np.ndarray | torch.Tensor
     :param observation_space: Box observation space
+    :type observation_space: spaces.Box
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed box observation
     """
     # Convert to tensor
@@ -1001,6 +1128,9 @@ def preprocess_box_observation(
     if len(observation_space.shape) == 3 and normalize_images:
         observation = apply_image_normalization(observation, observation_space)
 
+    if swap_channels:
+        observation = transpose_image_observation(observation, observation_space)
+
     # Check add batch dimension if necessary
     return maybe_add_batch_dim(observation, observation_space)
 
@@ -1012,14 +1142,22 @@ def preprocess_discrete_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> torch.Tensor:
     """Preprocess discrete observations.
 
     :param observation: Discrete observation
+    :type observation: np.ndarray | torch.Tensor
     :param observation_space: Discrete observation space
+    :type observation_space: spaces.Discrete
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed discrete observation (one-hot encoded)
     """
     # Convert to tensor
@@ -1049,15 +1187,24 @@ def preprocess_multidiscrete_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> torch.Tensor:
     """Preprocess multi-discrete observations.
 
     :param observation: Multi-discrete observation
+    :type observation: np.ndarray | torch.Tensor
     :param observation_space: Multi-discrete observation space
+    :type observation_space: spaces.MultiDiscrete
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed multi-discrete observation (one-hot encoded)
+    :rtype: torch.Tensor
     """
     # Convert to tensor
     observation = obs_to_tensor(observation, device)
@@ -1088,15 +1235,24 @@ def preprocess_multibinary_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> torch.Tensor:
     """Preprocess multi-binary observations.
 
     :param observation: Multi-binary observation
+    :type observation: np.ndarray | torch.Tensor
     :param observation_space: Multi-binary observation space
+    :type observation_space: spaces.MultiBinary
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed multi-binary observation
+    :rtype: torch.Tensor
     """
     # Convert to tensor
     observation = obs_to_tensor(observation, device)
