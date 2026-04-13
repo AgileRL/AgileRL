@@ -2433,7 +2433,7 @@ class TestLLMInitMiscPaths:
 class TestLLMGenerateWithVllmColocate:
     def test_raises_when_sampling_params_none(self):
         agent = _make_llm_agent()
-        with patch("agilerl.algorithms.core.base.SamplingParams", None):
+        with patch("agilerl.algorithms.core.base.SamplingParams", None, create=True):
             with pytest.raises(ImportError, match="vLLM is required"):
                 agent._generate_with_vllm_colocate([], 1)
 
@@ -3594,7 +3594,11 @@ class TestLLMGenerateWithVllmColocateFullPaths:
 
         mock_sp = MagicMock()
         with (
-            patch("agilerl.algorithms.core.base.SamplingParams", return_value=mock_sp),
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                return_value=mock_sp,
+                create=True,
+            ),
             patch(
                 "agilerl.algorithms.core.base.stack_and_pad_experiences",
                 return_value=(torch.zeros(2, 5), None),
@@ -3640,7 +3644,11 @@ class TestLLMGenerateWithVllmColocateAccelerator:
 
         mock_sp = MagicMock()
         with (
-            patch("agilerl.algorithms.core.base.SamplingParams", return_value=mock_sp),
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                return_value=mock_sp,
+                create=True,
+            ),
             patch(
                 "agilerl.algorithms.core.base.stack_and_pad_experiences",
                 return_value=(torch.zeros(2, 5), None),
@@ -3692,7 +3700,11 @@ class TestLLMGenerateWithVllmColocateTP:
                 dest[i] = src
 
         with (
-            patch("agilerl.algorithms.core.base.SamplingParams", return_value=mock_sp),
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                return_value=mock_sp,
+                create=True,
+            ),
             patch(
                 "agilerl.algorithms.core.base.stack_and_pad_experiences",
                 return_value=(torch.zeros(2, 5), None),
