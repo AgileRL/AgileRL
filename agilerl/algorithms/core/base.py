@@ -2404,6 +2404,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             torch.cuda.empty_cache()
             if torch.cuda.is_initialized():
                 torch.cuda.synchronize()
+        elif torch.mps.is_available():
+            torch.mps.empty_cache()
+            torch.mps.synchronize()
 
     def clone(self, index: int | None = None, wrap: bool = True) -> Self:
         """Create a clone of the algorithm.
@@ -2752,26 +2755,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         ``disable_adapter_layers``. Either can leave layers merged or adapters misaligned with
         training, which yields a loss tensor with no ``grad_fn``.
         """
-        peft = self._unwrap_peft_model()
-        if not hasattr(peft, "unmerge_adapter"):
-            return
-        peft.unmerge_adapter()
-        if hasattr(peft, "base_model") and hasattr(
-            peft.base_model, "enable_adapter_layers"
-        ):
-            peft.base_model.enable_adapter_layers()
-        if hasattr(peft, "set_adapter"):
-            peft.set_adapter("actor")
+        actor = self._unwrap_peft_model()
+        actor.unmerge_adapter()
+        actor.base_model.enable_adapter_layers()
+        actor.set_adapter("actor")
 
     def _get_base_lm_for_gradient_checkpointing(self) -> Any | None:
         """Return the underlying transformers model for toggling gradient checkpointing."""
-        peft = self._unwrap_peft_model()
-        if hasattr(peft, "get_base_model"):
-            try:
-                return peft.get_base_model()
-            except Exception:
-                return None
-        return None
+        actor = self._unwrap_peft_model()
+        return actor.get_base_model()
 
     def _get_logprobs(
         self,
