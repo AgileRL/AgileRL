@@ -15,10 +15,8 @@ if TYPE_CHECKING:
 
     from agilerl.wrappers.llm_envs import ReasoningGym
 
-if HAS_LIGER_KERNEL:
+if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
-elif not TYPE_CHECKING:
-    LigerFusedLinearGRPOFunction = None
 
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
