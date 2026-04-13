@@ -17,6 +17,7 @@ from agilerl.wrappers.llm_envs import (
     PreferenceGym,
     ReasoningGym,
     SFTGym,
+    apply_chat_template,
 )
 
 pytestmark = pytest.mark.llm
@@ -1014,3 +1015,138 @@ def test_sft_gym_max_context_length_warning():
             max_context_length=10,
         )
     assert len(env.train_dataloader) == 1
+
+
+def test_apply_chat_template():
+    """Directly test the apply_chat_template helper."""
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    template = [
+        {"role": "user", "content": "Q: {question}"},
+        {"role": "assistant", "content": "{answer}"},
+    ]
+    result = apply_chat_template(template, "What is 2+2?", "4", tokenizer)
+    assert isinstance(result, BatchEncoding)
+    assert "input_ids" in result
+    assert "attention_mask" in result
+    assert isinstance(result["input_ids"], torch.Tensor)
+    assert result["input_ids"].ndim == 2
+    decoded = tokenizer.decode(result["input_ids"][0], skip_special_tokens=False)
+    assert "2+2" in decoded
+
+
+@pytest.mark.parametrize("num_samples", [20])
+def test_eval_mode_preserves_last_tokenized_prompts(reasoning_dataset, num_samples):
+    """eval_mode() should save and restore last_tokenized_prompts."""
+    train_dataset, test_dataset = reasoning_dataset
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    env = ReasoningGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        reward_fn=dummy_reward_fn,
+        conversation_template=DUMMY_CONVERSATION_TEMPLATE,
+        data_batch_size_per_gpu=4,
+    )
+    env.reset()
+    saved_ids = [p["input_ids"].clone() for p in env.last_tokenized_prompts]
+
+    with env.eval_mode():
+        env.reset()
+        assert env.evaluation_mode
+
+    assert not env.evaluation_mode
+    for original, restored in zip(saved_ids, env.last_tokenized_prompts, strict=False):
+        assert torch.equal(original, restored["input_ids"])
+
+
+def test_filter_dataset_non_string_early_return():
+    """_filter_dataset_by_max_context_length returns early when values are not strings."""
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    train_dataset = HFDataset.from_dict(
+        {
+            "question": [["token1", "token2"], ["token3"]],
+            "answer": ["a", "b"],
+        },
+    )
+    test_dataset = HFDataset.from_dict(
+        {
+            "question": [["token1"]],
+            "answer": ["a"],
+        },
+    )
+    env = ReasoningGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        reward_fn=dummy_reward_fn,
+        conversation_template=DUMMY_CONVERSATION_TEMPLATE,
+        data_batch_size_per_gpu=1,
+        max_context_length=5,
+    )
+    assert len(env.train_dataloader.dataset) == 2
+    assert len(env.test_dataloader.dataset) == 1
+
+
+def test_reasoning_gym_init_missing_features():
+    """ReasoningGym raises AssertionError when dataset lacks required features."""
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    good_dataset = HFDataset.from_dict({"question": ["q"], "answer": ["a"]})
+    bad_dataset = HFDataset.from_dict({"text": ["t"]})
+    with pytest.raises(AssertionError, match="'question' and 'answer'"):
+        ReasoningGym(
+            train_dataset=bad_dataset,
+            test_dataset=good_dataset,
+            tokenizer=tokenizer,
+            reward_fn=dummy_reward_fn,
+            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
+        )
+    with pytest.raises(AssertionError, match="'question' and 'answer'"):
+        ReasoningGym(
+            train_dataset=good_dataset,
+            test_dataset=bad_dataset,
+            tokenizer=tokenizer,
+            reward_fn=dummy_reward_fn,
+            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
+        )
+
+
+def test_preference_gym_init_missing_features():
+    """PreferenceGym raises AssertionError when dataset lacks required features."""
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    good_dataset = HFDataset.from_dict(
+        {"prompt": ["p"], "chosen": ["c"], "rejected": ["r"]},
+    )
+    # Has "prompt" (so super().__init__ filter works) but missing "chosen"/"rejected"
+    bad_dataset = HFDataset.from_dict({"prompt": ["p"], "other": ["o"]})
+    with pytest.raises(AssertionError, match="'prompt', 'chosen', and 'rejected'"):
+        PreferenceGym(
+            train_dataset=bad_dataset,
+            test_dataset=good_dataset,
+            tokenizer=tokenizer,
+        )
+    with pytest.raises(AssertionError, match="'prompt', 'chosen', and 'rejected'"):
+        PreferenceGym(
+            train_dataset=good_dataset,
+            test_dataset=bad_dataset,
+            tokenizer=tokenizer,
+        )
+
+
+def test_sft_gym_init_missing_features():
+    """SFTGym raises AssertionError when dataset lacks required features."""
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    good_dataset = HFDataset.from_dict({"prompt": ["p"], "response": ["r"]})
+    # Has "prompt" (so super().__init__ filter works) but missing "response"
+    bad_dataset = HFDataset.from_dict({"prompt": ["p"], "other": ["o"]})
+    with pytest.raises(AssertionError, match="must contain"):
+        SFTGym(
+            train_dataset=bad_dataset,
+            test_dataset=good_dataset,
+            tokenizer=tokenizer,
+        )
+    with pytest.raises(AssertionError, match="must contain"):
+        SFTGym(
+            train_dataset=good_dataset,
+            test_dataset=bad_dataset,
+            tokenizer=tokenizer,
+        )
