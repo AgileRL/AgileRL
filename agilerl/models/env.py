@@ -8,10 +8,17 @@ from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import pandas as pd
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
 from pettingzoo import ParallelEnv
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    model_validator,
+)
 from typing_extensions import Self
 
 from agilerl.protocols import BanditEnvProtocol
@@ -302,24 +309,33 @@ class LLMEnvSpec(BaseModel):
     :param reward_file_path: Path to a Python file containing the reward
         function.  Required for reasoning environments.
     :type reward_file_path: str | None
-    :param dataset_path: Path to a Parquet dataset file.
-    :type dataset_path: str
+    :param dataset: Path to a Parquet dataset file or a HuggingFace dataset. Required.
+    :type dataset: str
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     env_type: LLMEnvType
+    dataset: str = Field(
+        ..., min_length=1, validation_alias=AliasChoices("dataset", "name")
+    )
     columns: dict[str, str] | None = Field(default=None)
     prompt_template: dict[str, Any] | None = Field(default=None)
     max_reward: float | None = Field(default=None)
     train_test_split: float = Field(default=0.9, ge=0.0, le=1.0)
     reward_file_path: str | None = Field(default=None)
     reward_fn_name: str | None = Field(default=None)
-    dataset_path: str = Field(default="dataset.parquet")
-    data_batch_size_per_gpu: int = Field(default=8, ge=1)
-    max_context_length: int | None = Field(default=None)
-    return_raw_completions: bool = Field(default=False)
-    seed: int | None = Field(default=None)
+
+    # These fields are overridden given the rest of the training configuration
+    data_batch_size_per_gpu: int = Field(default=8, ge=1, exclude=True)
+    return_raw_completions: bool = Field(default=False, exclude=True)
+    max_context_length: int | None = Field(default=None, exclude=True)
+    seed: int | None = Field(default=None, exclude=True)
+
+    @property
+    def name(self) -> str:
+        """Alias for ``dataset``."""
+        return self.dataset
 
     @model_validator(mode="after")
     def _validate_reasoning_fields(self) -> Self:
@@ -342,19 +358,42 @@ class LLMEnvSpec(BaseModel):
             raise ValueError(msg)
         return self
 
-    def load_dataset(self) -> tuple[Dataset, Dataset]:
+    def _load_dataset_hf(self) -> tuple[Dataset, Dataset]:
+        """Load the HuggingFace dataset.
+
+        :returns: A ``(train_dataset, test_dataset)`` tuple.
+        :rtype: tuple[Dataset, Dataset]
+        """
+        ds = load_dataset(self.dataset, split="train").shuffle(seed=self.seed)
+        if self.columns:
+            ds = ds.rename_columns(self.columns)
+
+        split = ds.train_test_split(test_size=1.0 - self.train_test_split)
+        return split["train"], split["test"]
+
+    def _load_dataset_file(self) -> tuple[Dataset, Dataset]:
         """Load and split the Parquet dataset into train/test.
 
         :returns: A ``(train_dataset, test_dataset)`` tuple.
         :rtype: tuple[Dataset, Dataset]
         """
-        df = pd.read_parquet(self.dataset_path)
+        df = pd.read_parquet(self.dataset)
         if self.columns:
             df = df.rename(columns=self.columns)
 
         ds = Dataset.from_pandas(df)
         split = ds.train_test_split(test_size=1.0 - self.train_test_split)
         return split["train"], split["test"]
+
+    def _load_dataset(self) -> tuple[Dataset, Dataset]:
+        """Load the dataset.
+
+        :returns: A ``(train_dataset, test_dataset)`` tuple.
+        :rtype: tuple[Dataset, Dataset]
+        """
+        if self.dataset.endswith((".parquet", ".pq")):
+            return self._load_dataset_file()
+        return self._load_dataset_hf()
 
     def make_env(
         self, tokenizer: Any, accelerator: Accelerator | None = None
@@ -368,7 +407,7 @@ class LLMEnvSpec(BaseModel):
         :return: The reasoning or preference gym environment.
         :rtype: ReasoningGym | PreferenceGym
         """
-        train_ds, test_ds = self.load_dataset()
+        train_ds, test_ds = self._load_dataset()
 
         if self.env_type == LLMEnvType.REASONING:
             return self._make_reasoning_env(train_ds, test_ds, tokenizer, accelerator)

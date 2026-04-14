@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
+from typing_extensions import Self
 
 from agilerl.components.replay_buffer import (
     MultiAgentReplayBuffer,
@@ -192,7 +193,7 @@ class TrainingSpec(BaseModel):
 
     # LLM-specific training parameters
     evaluation_interval: int = Field(default=10, ge=1)
-    num_epochs: int | None = Field(default=None)
+    num_epochs: int | None = Field(default=None, ge=1)
 
     # Bandit-specific training parameters
     episode_steps: int = Field(default=500, ge=1)
@@ -202,3 +203,10 @@ class TrainingSpec(BaseModel):
     experience_sharing: bool = Field(
         default=False
     )  # when training locally, we always share experiences
+
+    @model_validator(mode="after")
+    def _validate_training_parameters(self) -> Self:
+        if self.eval_steps is not None and self.eval_steps <= self.evaluation_interval:
+            msg = "eval_steps must be greater than evaluation_interval"
+            raise ValueError(msg)
+        return self

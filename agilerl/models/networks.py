@@ -323,9 +323,16 @@ class LoraConfigDict(BaseModel):
 
     lora_r: int = Field(default=16, ge=1)
     lora_alpha: int = Field(default=32, ge=1)
-    target_modules: list[str] | str = Field(default="all-linear")
+    target_modules: list[str] | str | set[str] = Field(default="all-linear")
     task_type: str = Field(default="CAUSAL_LM", min_length=1)
     lora_dropout: float = Field(default=0.05, ge=0.0, le=1.0)
+
+    @field_serializer("target_modules")
+    @classmethod
+    def _serialize_target_modules(
+        cls, v: list[str] | str | set[str], _info: SerializationInfo
+    ) -> list[str] | str:
+        return sorted(v) if isinstance(v, set) else v
 
 
 def _peft_lora_config_to_manifest_dict(cfg: LoraConfig) -> dict[str, Any]:
@@ -343,7 +350,7 @@ def _peft_lora_config_to_manifest_dict(cfg: LoraConfig) -> dict[str, Any]:
 
     tm = cfg.target_modules
     if tm is None:
-        tm_out: list[str] | str = "all-linear"
+        tm_out: list[str] | str | set[str] = "all-linear"
     elif isinstance(tm, set):
         tm_out = sorted(tm)
     else:

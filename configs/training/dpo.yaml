@@ -11,17 +11,14 @@ algorithm:
     use_separate_reference_adapter: true
 
 environment:
-    env_type: preference
-    dataset_path: human_like_dpo.parquet
-    # Parquet should keep HF columns: prompt, chosen, rejected
-    data_batch_size_per_gpu: 16
+    dataset: HumanLLMs/Human-Like-DPO-Dataset
 
 training:
     max_steps: 100000
-    evo_steps: 5
+    evo_steps: 10
     pop_size: 4
     eval_loop: 1
-    evaluation_interval: 10
+    evaluation_interval: 5
     num_epochs: 1
 
 mutation:

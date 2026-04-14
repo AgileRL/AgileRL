@@ -452,6 +452,7 @@ class LocalTrainer(Trainer):
             )
             self.env_spec.max_context_length = self.algorithm_spec.max_model_len
             self.env_spec.seed = self.algorithm_spec.seed
+            self.env_spec.data_batch_size_per_gpu = self.algorithm_spec.batch_size
 
             return self.env_spec.make_env(
                 tokenizer=self.tokenizer, accelerator=self.accelerator

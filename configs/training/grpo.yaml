@@ -1,13 +1,13 @@
 ---
 algorithm:
     name: GRPO
-    batch_size: 16
+    batch_size: 6
     beta: 0.001
     lr: 0.000005
     clip_coef: 0.2
     max_grad_norm: 0.1
     update_epochs: 1
-    group_size: 8
+    group_size: 2
     temperature: 0.9
     use_vllm: false
     vllm_config:
@@ -20,11 +20,11 @@ algorithm:
 
 environment:
     env_type: reasoning
-    dataset_path: countdown_tasks.parquet
+    dataset: Jiayi-Pan/Countdown-Tasks-3to4
     columns:
-        question: question
-        answer: answer
-    reward_file_path: benchmarking/benchmarking_grpo.py
+        nums: question
+        target: answer
+    reward_file_path: reward.py
     reward_fn_name: combined_rewards
     prompt_template:
         system_0: You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.
@@ -34,16 +34,13 @@ environment:
         assistant_2: "Let me solve this step by step.\n<redacted_thinking>"
     max_reward: 2.0
     train_test_split: 0.8
-    data_batch_size_per_gpu: 10
-    max_context_length: 1024
-    return_raw_completions: true
 
 training:
     max_steps: 100000
-    evo_steps: 10
-    pop_size: 4
+    evo_steps: 5
+    pop_size: 2
     eval_loop: 1
-    evaluation_interval: 10
+    evaluation_interval: 5
 
 mutation:
     mutation_sd: 0.1
@@ -69,7 +66,7 @@ tournament_selection:
 
 network:
     pretrained_model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
-    max_context_length: 1024
+    max_context_length: 512
     lora_config:
         lora_r: 16
         lora_alpha: 64
