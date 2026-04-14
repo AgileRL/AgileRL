@@ -128,7 +128,14 @@ build-backend = "hatchling.build"
 # This workaround tells uv to build box2d-py using the project environment directly
 # (not an isolated one), where it can see system PATH and find swig, which is already installed as a dependency
 # (no-build-isolation packages are built after the others).
-no-build-isolation-package = ["box2d-py"]
+#
+# DeepSpeed can be built with env vars to specify compiler flags
+# e.g. DS_BUILD_FUSED_ADAM=1 is essential on L4 GPU
+# to pre-build the fused Adam kernel and prevent timeout during tests.
+no-build-isolation-package = [
+    "box2d-py",
+    "deepspeed"
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["agilerl"]

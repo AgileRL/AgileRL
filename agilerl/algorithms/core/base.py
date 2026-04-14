@@ -2756,13 +2756,24 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         training, which yields a loss tensor with no ``grad_fn``.
         """
         actor = self._unwrap_peft_model()
+        if not hasattr(actor, "unmerge_adapter"):
+            return  # Not a PeftModel (could be DeepSpeedEngine) -> nothing to do
+            # Fails this test otherwise: test_grpo_learn[False-None-6-False-trl-internal-testing/tiny-Qwen2ForCausalLM-2.5-True-6-20-10-1000-False-False-config0]
         actor.unmerge_adapter()
-        actor.base_model.enable_adapter_layers()
-        actor.set_adapter("actor")
+        if hasattr(actor, "base_model"):
+            if hasattr(actor.base_model, "enable_adapter_layers"):
+                actor.base_model.enable_adapter_layers()
+        if hasattr(actor, "set_adapter"):
+            actor.set_adapter("actor")
 
     def _get_base_lm_for_gradient_checkpointing(self) -> Any | None:
         """Return the underlying transformers model for toggling gradient checkpointing."""
         actor = self._unwrap_peft_model()
+        if hasattr(actor, "get_base_model"):
+            try:
+                return actor.get_base_model()
+            except Exception:
+                return None
         return actor.get_base_model()
 
     def _get_logprobs(
