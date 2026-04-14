@@ -2,7 +2,7 @@ import copy
 import gc
 import tempfile
 from unittest import mock
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -26,7 +26,6 @@ from agilerl.algorithms.core.base import (
 from agilerl.algorithms.dpo import DPO
 from agilerl.wrappers.llm_envs import PreferenceGym
 from tests.test_algorithms.test_llms.test_grpo import (
-    _patch_mps_learn_hooks,
     create_module,
     deepspeed_config_stage_1,
     deepspeed_config_stage_2,
@@ -584,6 +583,32 @@ def test_dpo_load():
         DPO.load("path")
 
 
+def test_liger_dpo_with_alpha_backward_returns_sixteen_outputs_with_trailing_nones() -> (
+    None
+):
+    """``_LigerDPOWithAlpha.backward`` forwards to the base, keeps four grads, pads twelve ``None``."""
+    from agilerl import HAS_LIGER_KERNEL
+
+    if not HAS_LIGER_KERNEL:
+        pytest.skip("liger-kernel not installed")
+
+    import agilerl.algorithms.dpo as dpo_mod
+
+    def fake_parent_backward(ctx, grad_output):
+        return tuple(range(16))
+
+    with patch.object(
+        dpo_mod.LigerFusedLinearPreferenceBase,
+        "backward",
+        staticmethod(fake_parent_backward),
+    ):
+        out = dpo_mod._LigerDPOWithAlpha.backward(MagicMock(), torch.tensor(1.0))
+
+    assert len(out) == 16
+    assert out[:4] == (0, 1, 2, 3)
+    assert out[4:] == (None,) * 12
+
+
 @pytest.mark.parametrize(
     "config, use_deepspeed_optimizer",
     [(None, False)],
@@ -1060,41 +1085,5 @@ def test_dpo_set_reference_policy_with_wrong_adapter_name(
         )
         dpo.actor.add_adapter("wrong_adapter", peft_config=lora_config)
         dpo.set_reference_policy(reference_update_tracker=1)
-    dpo.clean_up()
-    AcceleratorState._reset_state(True)
-
-
-def test_dpo_learn_calls_mps_empty_cache(
-    monkeypatch: pytest.MonkeyPatch,
-    accelerator_factory,
-    model_factory,
-) -> None:
-    """Patch MPS on CI so ``torch.mps.empty_cache()`` in ``learn()`` is exercised."""
-    empty = _patch_mps_learn_hooks(monkeypatch, "agilerl.algorithms.dpo")
-    dpo = generate_dpo(
-        accelerator_factory,
-        model_factory,
-        config=None,
-        use_deepspeed_optimizer=False,
-        vocab_size=30,
-        input_size=5,
-        max_tokens=10,
-        use_separate_reference_adapter=False,
-        pretrained_model_name_or_path=None,
-        reduce_memory_peak=False,
-        micro_batch_size_per_gpu=None,
-        from_name=False,
-    )
-    seq_len = 5 + 10
-    batch = 2
-    experiences = {
-        "chosen_input_ids": torch.randint(0, 30, (batch, seq_len)),
-        "rejected_input_ids": torch.randint(0, 30, (batch, seq_len)),
-        "chosen_attention_mask": torch.ones(batch, seq_len, dtype=torch.long),
-        "rejected_attention_mask": torch.ones(batch, seq_len, dtype=torch.long),
-        "prompt_lengths": [4, 4],
-    }
-    dpo.learn(experiences, training=True)
-    empty.assert_called()
     dpo.clean_up()
     AcceleratorState._reset_state(True)

@@ -27,6 +27,7 @@ from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.modules import EvolvableMLP
+from agilerl.modules.dummy import DummyEvolvable
 from tests.test_algorithms.test_base import DummyMARLAlgorithm, DummyRLAlgorithm
 
 
@@ -2438,19 +2439,61 @@ class TestLLMGenerateWithVllmColocate:
                 agent._generate_with_vllm_colocate([], 1)
 
 
+class TestLLMGetBaseLmForGradientCheckpointing:
+    def test_get_base_lm_returns_model_or_none_when_get_base_model_fails(self):
+        agent = _make_llm_agent()
+        base_lm = object()
+        actor = MagicMock()
+        actor.get_base_model = MagicMock(return_value=base_lm)
+        agent.actor = actor
+        assert agent._get_base_lm_for_gradient_checkpointing() is base_lm
+
+        actor.get_base_model = MagicMock(side_effect=RuntimeError("unwrap failed"))
+        assert agent._get_base_lm_for_gradient_checkpointing() is None
+
+
 class TestLLMMoveModelToVllm:
-    def test_move_model_to_vllm_with_accelerator(self):
+    def test_move_model_to_vllm_resolves_model_ref(self):
+        """``model_ref`` from unwrap (accelerator), ``DummyEvolvable.module``, or ``actor``."""
+        p = torch.nn.Parameter(torch.tensor([1.0]))
+        named = [("base_model.model.layer.weight", p)]
+        gather = patch("agilerl.algorithms.core.base.gather_if_zero3")
+
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
+        unwrapped = MagicMock()
+        unwrapped.parameters.return_value = [p]
+        unwrapped.named_parameters.return_value = named
+        unwrapped.prefix = "model"
+        acc.unwrap_model = MagicMock(return_value=unwrapped)
         agent.llm = MagicMock()
-        model_ref = MagicMock()
-        model_ref.named_parameters.return_value = [
-            ("base_model.model.layer.weight", torch.tensor([1.0])),
-        ]
-        model_ref.prefix = "model"
-        acc.unwrap_model = MagicMock(return_value=model_ref)
-        with patch("agilerl.algorithms.core.base.gather_if_zero3"):
+        with gather:
             agent._move_model_to_vllm()
+        agent.llm.apply_model.assert_called_once()
+        agent.llm.reset_prefix_cache.assert_called_once()
+
+        agent = _make_llm_agent(accelerator=None)
+        inner = MagicMock()
+        inner.to.return_value = inner
+        inner.parameters.return_value = [p]
+        inner.named_parameters.return_value = named
+        agent.actor = DummyEvolvable(device="cpu", module=inner)
+        agent.llm = MagicMock()
+        with gather:
+            agent._move_model_to_vllm()
+        inner.merge_adapter.assert_called_once()
+        agent.llm.apply_model.assert_called_once()
+        agent.llm.reset_prefix_cache.assert_called_once()
+
+        agent = _make_llm_agent(accelerator=None)
+        actor = MagicMock()
+        actor.parameters.return_value = [p]
+        actor.named_parameters.return_value = named
+        agent.actor = actor
+        agent.llm = MagicMock()
+        with gather:
+            agent._move_model_to_vllm()
+        actor.merge_adapter.assert_called_once()
         agent.llm.apply_model.assert_called_once()
         agent.llm.reset_prefix_cache.assert_called_once()
 
@@ -3518,7 +3561,7 @@ class TestLLMReinitOptFromConfig:
 
 
 class TestLLMCleanUpCudaPaths:
-    """clean_up calls CUDA cache/sync when CUDA is available."""
+    """clean_up clears device caches (CUDA or Apple MPS) when available."""
 
     def test_clean_up_calls_cuda_empty_cache_when_available(self):
         agent = _make_llm_agent(accelerator=None)
@@ -3534,6 +3577,25 @@ class TestLLMCleanUpCudaPaths:
                 return_value=True,
             ),
             patch("agilerl.algorithms.core.base.torch.cuda.synchronize") as mock_sync,
+        ):
+            LLMAlgorithm.clean_up(agent)
+        mock_empty.assert_called_once()
+        mock_sync.assert_called_once()
+
+    def test_clean_up_calls_mps_empty_cache_when_available(self):
+        agent = _make_llm_agent(accelerator=None)
+        agent.accelerator = None
+        with (
+            patch(
+                "agilerl.algorithms.core.base.torch.cuda.is_available",
+                return_value=False,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.torch.mps.is_available",
+                return_value=True,
+            ),
+            patch("agilerl.algorithms.core.base.torch.mps.empty_cache") as mock_empty,
+            patch("agilerl.algorithms.core.base.torch.mps.synchronize") as mock_sync,
         ):
             LLMAlgorithm.clean_up(agent)
         mock_empty.assert_called_once()

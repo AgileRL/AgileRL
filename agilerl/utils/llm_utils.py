@@ -3,17 +3,17 @@ import shutil
 import textwrap
 from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
 from transformers import AutoModelForCausalLM
 from transformers.modeling_utils import PreTrainedModel
 
-try:
+from agilerl import HAS_DEEPSPEED
+
+if TYPE_CHECKING or HAS_DEEPSPEED:
     import deepspeed
-except ImportError:
-    deepspeed = None
 
 
 @contextmanager
@@ -32,7 +32,7 @@ def gather_if_zero3(
     :type modifier_rank: int | None
     """
     if zero_stage == 3:
-        if deepspeed is None:
+        if not HAS_DEEPSPEED:
             msg = (
                 "DeepSpeed is required for ZeRO stage 3 parameter gathering, but it "
                 "is not installed."
