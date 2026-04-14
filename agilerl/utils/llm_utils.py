@@ -759,6 +759,7 @@ def create_model_from_name_or_path(
     model_name_or_path: str,
     model_config: dict[str, Any] | None = None,
     add_value_head: bool = False,
+    use_accelerator: bool = False,
 ) -> PreTrainedModel:
     """Create a model from a name or path.
 
@@ -768,12 +769,14 @@ def create_model_from_name_or_path(
     :type model_config: dict[str, Any ] | None
     :param use_value_head: Flag to indicate if a value head should be added to the model, defaults to False
     :type use_value_head: bool, optional
+    :param use_accelerator: Flag to indicate if the model should be created with the accelerator, defaults to False
+    :type use_accelerator: bool, optional
     :return: The created model.
     :rtype: PreTrainedModel
     """
     if model_config is None:
         model_config = {
-            "torch_dtype": torch.bfloat16,
+            "torch_dtype": torch.bfloat16 if not use_accelerator else torch.float16,
             "attn_implementation": "sdpa",
         }
     print("model_config", model_config)
@@ -1064,7 +1067,7 @@ def move_params_to_gpu(unwrapped_model: torch.nn.Module, device: torch.device) -
     :return: None
     :rtype: None
     """
-    if unwrapped_model.device != device:
+    if next(unwrapped_model.parameters()).device != device:
         unwrapped_model.to(device, non_blocking=True)
         torch.cuda.synchronize()
 
@@ -1077,7 +1080,7 @@ def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> None:
     :return: None
     :rtype: None
     """
-    if unwrapped_model.device != "cpu":
+    if next(unwrapped_model.parameters()).device != "cpu":
         unwrapped_model.to("cpu", non_blocking=True)
         torch.cuda.synchronize()
         torch.cuda.empty_cache()

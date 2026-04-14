@@ -1986,6 +1986,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         use_separate_reference_adapter: bool,
         lr_critic: float | None = None,
         use_value_head: bool = False,
+        use_vllm: bool = False,
+        vllm_config: VLLMConfig | None = None,
         model_name: str | None = None,
         actor_network: PreTrainedModelProtocol | None = None,
         micro_batch_size_per_gpu: int | None = None,
@@ -2028,12 +2030,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             warnings.warn(
                 "No LoRA config provided. AgileRL can only be used to finetune adapters at present. "
                 "Using default LoRA configuration for RL finetuning: "
-                "r=16, lora_alpha=32, target_modules='all-linear', task_type='CAUSAL_LM', lora_dropout=0.05.",
+                "r=16, lora_alpha=64, target_modules='all-linear', task_type='CAUSAL_LM', lora_dropout=0.05."
+                "To use a different LoRA configuration, please pass lora_config to the constructor.",
                 stacklevel=2,
             )
             lora_config = LoraConfig(
                 r=16,
-                lora_alpha=32,
+                lora_alpha=64,
                 target_modules="all-linear",
                 task_type="CAUSAL_LM",
                 lora_dropout=0.05,
@@ -2044,6 +2047,29 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 stacklevel=2,
             )
             lora_config.exclude_modules = ["lm_head"]
+
+        if use_memory_efficient_params and use_vllm and not vllm_config.sleep_mode:
+            warnings.warn(
+                "Memory efficient params is only supported when using vLLM in sleep mode."
+                "Setting use_memory_efficient_params to False.",
+                stacklevel=2,
+            )
+            use_memory_efficient_params = False
+
+        if use_memory_efficient_params and not use_vllm:
+            warnings.warn(
+                "Memory efficient params is only supported when using vLLM."
+                "Setting use_memory_efficient_params to False.",
+                stacklevel=2,
+            )
+            use_memory_efficient_params = False
+
+        if vllm_config is not None and not use_vllm:
+            warnings.warn(
+                "vllm_config is provided but use_vllm is False. Setting vllm_config to None.",
+                stacklevel=2,
+            )
+            vllm_config = None
 
         super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
         self.gradient_checkpointing = gradient_checkpointing
@@ -2066,6 +2092,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.lr = align_deepspeed_lr(lr, self.accelerator)
         self.lr_critic = lr_critic
         self.lora_config = lora_config
+        self.use_vllm = use_vllm
+        self.vllm_config = vllm_config
         self.use_memory_efficient_params = use_memory_efficient_params
         self.memory_efficient_params_context = (
             self._memory_efficient_params
@@ -2105,7 +2133,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 and self.zero_stage > 2
                 and self.accelerator.is_main_process
             ):
-                warnings.warn(
+                warnings.warn( 
                     "DeepSpeed ZeRO Stage 3 is nascent and may not work as expected, proceed with caution when using this feature.",
                     stacklevel=2,
                 )
@@ -2122,6 +2150,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.accelerator is not None
             and getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
         )
+        self._vllm_awake = (
+            self.use_vllm and not self.vllm_config.sleep_mode
+        )
+        self._vllm_moved = False
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocess observations (dummy) for forward pass through neural network.
@@ -2850,6 +2882,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             base_model = create_model_from_name_or_path(
                 self.pretrained_model_name_or_path,
                 add_value_head=self.use_value_head,
+                use_accelerator=self.accelerator is not None,
             )
 
         if isinstance(base_model, PeftModelProtocol) and add_adapters:
@@ -2958,27 +2991,22 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: None
         :rtype: None
         """
-        # FIXME add in zero 3 compatibilitys
-        vllm_cfg = getattr(self, "vllm_config", None)
-        use_vllm = getattr(self, "use_vllm", False)
-        # Only offload params for vLLM colocate mode. If use_vllm is False,
-        # moving params to CPU between updates causes generate() device mismatches.
-        sleep_mode = use_vllm and vllm_cfg is not None and vllm_cfg.sleep_mode
-        if sleep_mode:
-            # Put LLM to sleep
-            self._maybe_sleep_vllm(level=2)
-            unwrapped_model = (
-                self.accelerator.unwrap_model(self.actor)
-                if self.accelerator is not None
-                else self.actor
+        if self.zero_stage == 3:
+            warnings.warn(
+                "Memory efficient params is not yet compatible with DeepSpeed ZeRO-3; "
+                "memory efficient params will be disabled for this run.",
+                stacklevel=2,
             )
-            move_params_to_gpu(unwrapped_model, self.device)
+            yield
+            return
+        unwrapped_model = (
+            self.accelerator.unwrap_model(self.actor)
+            if self.accelerator is not None
+            else self.actor
+        )
+        move_params_to_gpu(unwrapped_model, self.device)
         yield
-        if sleep_mode:
-            move_params_to_cpu(unwrapped_model)
-            # Wake up LLM
-            self._maybe_wake_vllm()
-            self._move_model_to_vllm()
+        move_params_to_cpu(unwrapped_model)
 
     @contextmanager
     def _amp_ctx(self):
@@ -3336,15 +3364,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _move_model_to_vllm(self) -> None:
         """Move the deepspeed model to vllm."""
+        if self._vllm_moved:
+            return
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
-        model_ref = self.accelerator.unwrap_model(self.actor)
+            model_ref = self.accelerator.unwrap_model(self.actor)
+        else:
+            model_ref = self.actor
         peft_ref = model_ref.pretrained_model if self.use_value_head else model_ref
-        peft_ref.set_adapter("actor")
+        self.use_adapter("actor")
         with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
             peft_ref.merge_adapter()
             for name, param in model_ref.named_parameters():
-                weight_name = name.removeprefix("pretrained_model.")
+                weight_name = name.removeprefix("module.")
+                weight_name = weight_name.removeprefix("pretrained_model.")
                 weight_name = weight_name.removeprefix("base_model.model.")
                 weight_name = weight_name.replace(".base_layer", "")
                 if peft_ref.prefix in weight_name:
@@ -3362,31 +3395,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
                 llm_model.load_weights([(weight_name, param.data)])
             peft_ref.unmerge_adapter()
-        self._maybe_reset_prefix_cache()
+        self.llm.reset_prefix_cache()
+        self._vllm_moved = True
 
-    def _maybe_sleep_vllm(self, level: int = 2) -> None:
-        if not hasattr(self, "llm"):
-            return
-        sleep_fn = getattr(self.llm, "sleep", None)
-        if sleep_fn is None:
-            return
-        sleep_fn(level=level)
-
-    def _maybe_wake_vllm(self) -> None:
-        if not hasattr(self, "llm"):
-            return
-        wake_fn = getattr(self.llm, "wake_up", None)
-        if wake_fn is None:
-            return
-        wake_fn()
-
-    def _maybe_reset_prefix_cache(self) -> None:
-        if not hasattr(self, "llm"):
-            return
-        reset_fn = getattr(self.llm, "reset_prefix_cache", None)
-        if reset_fn is None:
-            return
-        reset_fn()
 
     def _generate_with_vllm_colocate(
         self, prompts: list[dict[str, Any]], group_size: int, temperature: float | None
@@ -3852,62 +3863,64 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 stacklevel=2,
             )
             self.vllm_config = VLLMConfig()
-        if self.accelerator is not None:
-            if (
-                self.accelerator.num_processes % self.vllm_config.tensor_parallel_size
-                != 0
-            ):
-                msg = f"Tensor parallel size {self.vllm_config.tensor_parallel_size} must be a multiple of the number of processes {self.accelerator.num_processes}."
-                raise ValueError(
-                    msg,
-                )
+        num_processes = self.accelerator.num_processes if self.accelerator is not None else 1
+        process_index = self.accelerator.process_index if self.accelerator is not None else 0
+        local_process_index = self.accelerator.local_process_index if self.accelerator is not None else 0
+        if (
+            num_processes % self.vllm_config.tensor_parallel_size
+            != 0
+        ):
+            msg = f"Tensor parallel size {self.vllm_config.tensor_parallel_size} must be a multiple of the number of processes {num_processes}."
+            raise ValueError(
+                msg,
+            )
 
-            if self.vllm_config.tensor_parallel_size > 1:
-                # Create subgroups of ranks for TP, each group with `vllm_tensor_parallel_size` ranks.
-                # For example, if world_size=8 and vllm_tensor_parallel_size=2 → groups: [0,1], [2,3], [4,5], [6,7]
-                self.tp_group, _ = torch.distributed.new_subgroups_by_enumeration(
-                    [
-                        list(
-                            range(
-                                i * self.vllm_config.tensor_parallel_size,
-                                (i + 1) * self.vllm_config.tensor_parallel_size,
-                            ),
-                        )
-                        for i in range(
-                            self.accelerator.num_processes
-                            // self.vllm_config.tensor_parallel_size,
-                        )
-                    ],
-                )
+        if self.vllm_config.tensor_parallel_size > 1:
+            # Create subgroups of ranks for TP, each group with `vllm_tensor_parallel_size` ranks.
+            # For example, if world_size=8 and vllm_tensor_parallel_size=2 → groups: [0,1], [2,3], [4,5], [6,7]
+            self.tp_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                [
+                    list(
+                        range(
+                            i * self.vllm_config.tensor_parallel_size,
+                            (i + 1) * self.vllm_config.tensor_parallel_size,
+                        ),
+                    )
+                    for i in range(
+                        num_processes
+                        // self.vllm_config.tensor_parallel_size,
+                    )
+                ],
+            )
 
-            # vLLM requires the environment variables to be set for distributed training.
-            os.environ["RANK"] = str(self.accelerator.process_index)
-            os.environ["LOCAL_RANK"] = str(self.accelerator.local_process_index)
-            os.environ["WORLD_SIZE"] = str(self.accelerator.num_processes)
-            os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
-            os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
+        # vLLM requires the environment variables to be set for distributed training.
+        os.environ["RANK"] = str(process_index)
+        os.environ["LOCAL_RANK"] = str(local_process_index)
+        os.environ["WORLD_SIZE"] = str(num_processes)
+        os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
+        os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "12345")
 
-            llm_kwargs = {
-                "model": self.pretrained_model_name_or_path,
-                "tensor_parallel_size": self.vllm_config.tensor_parallel_size,
-                "gpu_memory_utilization": self.vllm_config.gpu_memory_utilization,
-                "max_num_seqs": self.vllm_config.max_num_seqs,
-                "max_model_len": self.max_model_len,
-                "distributed_executor_backend": "external_launcher",
-                "seed": self.accelerator.process_index
-                // self.vllm_config.tensor_parallel_size,
-                "max_num_batched_tokens": self.vllm_config.max_num_seqs
-                * self.max_model_len,
-                "model_impl": "vllm",
-                "enable_sleep_mode": self.vllm_config.sleep_mode,
-            }
-            if self.vllm_config.dtype is not None:
-                llm_kwargs["dtype"] = self.vllm_config.dtype
-            if self.vllm_config.quantization is not None:
-                llm_kwargs["quantization"] = self.vllm_config.quantization
-            self.llm = LLM(**llm_kwargs)
-            if self.vllm_config.sleep_mode:
-                self._maybe_sleep_vllm(level=2)
+        llm_kwargs = {
+            "model": self.pretrained_model_name_or_path,
+            "tensor_parallel_size": self.vllm_config.tensor_parallel_size,
+            "gpu_memory_utilization": self.vllm_config.gpu_memory_utilization,
+            "max_num_seqs": self.vllm_config.max_num_seqs,
+            "max_model_len": self.max_model_len,
+            "distributed_executor_backend": "external_launcher",
+            "seed": process_index
+            // self.vllm_config.tensor_parallel_size,
+            "max_num_batched_tokens": self.vllm_config.max_num_seqs
+            * self.max_model_len,
+            "model_impl": "vllm",
+            "enable_sleep_mode": self.vllm_config.sleep_mode,
+        }
+        if self.vllm_config.dtype is not None:
+            llm_kwargs["dtype"] = self.vllm_config.dtype
+        if self.vllm_config.quantization is not None:
+            llm_kwargs["quantization"] = self.vllm_config.quantization
+        self.llm = LLM(**llm_kwargs)
+        if self.vllm_config.sleep_mode:
+            self.llm.sleep(level=2)
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
@@ -3961,3 +3974,28 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.accelerator is not None:
             return self.accelerator.unwrap_model(self.actor)
         return self.actor
+
+    def _prepare_vllm_for_training(self) -> None:
+        """Prepare vLLM for learning."""
+        if self._vllm_awake and (self.accelerator is None or self.accelerator.is_main_process):
+            torch.cuda.empty_cache()
+            self.llm.sleep(level=2)
+            self._vllm_awake = False
+
+        if self.use_vllm:
+            self._vllm_moved = False
+
+
+    def _prepare_vllm_for_generation(self) -> None:
+        if not self._vllm_awake and (self.accelerator is None or self.accelerator.is_main_process):
+            torch.cuda.empty_cache()
+            self.llm.wake_up()
+            self._vllm_awake = True
+        if self.use_memory_efficient_params:
+            unwrapped_model = (
+                self.accelerator.unwrap_model(self.actor)
+                if self.accelerator is not None
+                else self.actor
+            )
+            move_params_to_cpu(unwrapped_model)
+        self._move_model_to_vllm()

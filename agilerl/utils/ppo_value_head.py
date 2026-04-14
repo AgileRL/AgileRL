@@ -164,6 +164,9 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
             msg = "Base model did not return hidden_states (output_hidden_states must be True)."
             raise RuntimeError(msg)
         last_hidden_state = base_out.hidden_states[-1]
+        head_dtype = self.v_head.summary.weight.dtype
+        if last_hidden_state.dtype != head_dtype:
+            last_hidden_state = last_hidden_state.to(head_dtype)
         value = self.v_head(last_hidden_state).squeeze(-1)
 
         if return_past_key_values:

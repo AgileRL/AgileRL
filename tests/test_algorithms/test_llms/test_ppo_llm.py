@@ -198,13 +198,14 @@ def generate_ppo(
     use_vllm,
     pretrained_model_name_or_path,
     micro_batch_size_per_gpu,
-    lr=1e-5,
-    lr_actor=None,
+    lr_actor=1e-5,
+    lr_critic=1e-4,
     sleep_mode=False,
     from_name=False,
-    use_memory_efficient_params=False,
+    use_memory_efficient_params=True,
+    use_scheduler=False,
 ):
-    lr_actor_eff = lr_actor if lr_actor is not None else lr
+
     gc.collect()
     torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
@@ -245,14 +246,15 @@ def generate_ppo(
             target_modules=target_modules,
             task_type="CAUSAL_LM",
             lora_dropout=0.05,
-            modules_to_save=["summary"],
+            # modules_to_save=["summary"], # I'm not sure if this needs to be here - I think value head is left out of the lora
         )
         vllm_config = None
 
     ppo = LLMPPO(
         actor_network=actor if not from_name else None,
         model_name=pretrained_model_name_or_path if from_name else None,
-        lr_actor=lr_actor_eff,
+        lr_actor=lr_actor,
+        lr_critic=lr_critic if lr_critic is not None else 10 * lr_actor,
         pad_token_id=vocab_size - 1,
         pad_token="<pad>",
         device="cuda" if torch.cuda.is_available() else "cpu",
@@ -260,7 +262,7 @@ def generate_ppo(
         cosine_lr_schedule_config=(
             None
             if accelerator is not None
-            else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+            else (CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05) if use_scheduler else None)
         ),
         accelerator=accelerator,
         use_vllm=use_vllm,
@@ -278,17 +280,31 @@ def ppo_factory():
     return generate_ppo
 
 
-@spawn_new_process_for_each_test
-@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
+@spawn_new_process_for_each_test #FIXME add back in when tests run
+@pytest.mark.parametrize("config", [
+    deepspeed_config_stage_2,
+    None
+])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("use_vllm", [True, False])
+@pytest.mark.parametrize("use_vllm", [
+    True, 
+    False
+])
 @pytest.mark.parametrize("pretrained_model_name_or_path", ["facebook/opt-125m"])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-@pytest.mark.parametrize("batch_size", [8])
-def test_ppo_learns(
+@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("use_memory_efficient_params", [
+    True, 
+    False
+])
+@pytest.mark.parametrize("sleep_mode", [
+    True, 
+    False
+])
+def test_ppo_llm_learns_vllm(
     deepspeed_env,
     ppo_factory,
     accelerator_factory,
@@ -302,6 +318,8 @@ def test_ppo_learns(
     input_size,
     max_tokens,
     batch_size,
+    use_memory_efficient_params,
+    sleep_mode,
 ):
     ppo = ppo_factory(
         accelerator_factory=accelerator_factory,
@@ -315,7 +333,13 @@ def test_ppo_learns(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         lr_actor=0.01,
+        use_memory_efficient_params=use_memory_efficient_params,
+        sleep_mode=sleep_mode,
     )
+    with torch.no_grad():
+        # Fill value head bias with 1.0 to make update more obvious
+        ppo.actor.v_head.summary.bias.fill_(1.0)
+
     completions = [
         torch.randint(
             0,
@@ -330,8 +354,9 @@ def test_ppo_learns(
         for _ in range(batch_size)
     ]
     rewards = torch.tensor(
-        [1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0], dtype=torch.float32
+        [10000, -10, 100, -0.0000001], dtype=torch.float32
     ).unsqueeze(1)
+
 
     # DeepSpeed uses first step in cycle to allocate the fp32 master weights and synchronize them with your bf16 params.
     ppo.learn((completions, action_masks, rewards))
@@ -340,13 +365,9 @@ def test_ppo_learns(
         name: param.clone().detach() for name, param in ppo.actor.named_parameters()
     }
 
-    for name, param in ppo.actor.named_parameters():
-        if param.requires_grad:
-            print(name)
-
-    mean_loss, mean_kl, *_ = ppo.learn((completions, action_masks, rewards))
-    assert isinstance(mean_loss, float)
-    assert isinstance(mean_kl, float)
+    metrics = ppo.learn((completions, action_masks, rewards))
+    assert isinstance(metrics["mean_loss"], float)
+    assert isinstance(metrics["mean_kl"], float)
 
     # Reference adapter must be frozen.
     for param_name, param in ppo.actor.named_parameters():
@@ -355,24 +376,27 @@ def test_ppo_learns(
                 f"{param_name} should not change but did"
             )
 
-    vhead_changed = any(
-        not torch.allclose(param, pre_learn_actor_state_dict[pname])
-        for pname, param in ppo.actor.named_parameters()
-        if ("v_head" in pname or "summary" in pname) and "reference" not in pname
-    )
-    assert vhead_changed, "No v_head parameters were updated after learn()"
+        # Value head should be updated
+        if "v_head.summary" in param_name:
+            assert not torch.equal(param, pre_learn_actor_state_dict[param_name]), (
+                f"{param_name} should change but did not"
+            )
 
-    actor_lora_changed = any(
-        not torch.allclose(param, pre_learn_actor_state_dict[pname])
-        for pname, param in ppo.actor.named_parameters()
-        if "actor" in pname and "lora" in pname
-    )
-    assert actor_lora_changed, "No actor LoRA parameters were updated after learn()"
+        # Actor LoRA should be updated
+        if "actor" in param_name and "lora" in param_name:
+            assert not torch.equal(param, pre_learn_actor_state_dict[param_name]), (
+                f"{param_name} should change but did not"
+            )
+
+        # Critic LoRA should be updated
+        if "critic" in param_name and "lora" in param_name:
+            assert not torch.equal(param, pre_learn_actor_state_dict[param_name]), (
+                f"{param_name} should change but did not"
+            )
 
     ppo.clean_up()
 
 
-@spawn_new_process_for_each_test
 def test_ppo_init_memory_efficient_vllm_calls_wake_and_move(
     deepspeed_env,
     ppo_factory,
@@ -405,7 +429,6 @@ def test_ppo_init_memory_efficient_vllm_calls_wake_and_move(
         ppo.clean_up()
 
 
-@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("vocab_size", [1000])

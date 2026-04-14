@@ -43,7 +43,7 @@ def setup_deepspeed_env():
         "RANK": "0",
         "LOCAL_RANK": "0",
         "WORLD_SIZE": "1",
-        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        # "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True", # NOTE commented out so vllm tests can run with sleep mode
         "CUDA_VISIBLE_DEVICES": "0",
     }
     for key, value in env_vars.items():
@@ -83,7 +83,6 @@ def cleanup_after_test(test_name):
     if "vllm" in test_name:
         from vllm.distributed import cleanup_dist_env_and_memory
         from vllm.distributed.parallel_state import destroy_model_parallel
-
         destroy_model_parallel()
         cleanup_dist_env_and_memory()
         for attr in dir(ds_groups):
@@ -200,10 +199,8 @@ def main():
     wait_for_gpu_memory()
 
     with fresh_cache():
-        try:
-            test_func(**kwargs)
-        finally:
-            cleanup_after_test(args.test)
+        # NOTE try: finally with cleanup_after_test(args.test) removed to avoid vllm errors for now
+        test_func(**kwargs)
 
 
 if __name__ == "__main__":

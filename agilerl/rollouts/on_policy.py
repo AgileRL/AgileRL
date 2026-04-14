@@ -10,7 +10,7 @@ from agilerl.algorithms import GRPO, LLMPPO, PPO, LLMReinforce
 from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType, MultiTurnEnvType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
-from agilerl.wrappers.gem_wrappers import SyncGemVecEnv
+from agilerl.wrappers.multiturn_wrappers import SyncMultiTurnVecEnv
 
 SupportedOnPolicy = PPO
 SupportedOnPolicyLLM = LLMPPO | LLMReinforce | GRPO
@@ -379,11 +379,10 @@ def collect_rollouts_llm_old(
 
 def collect_rollouts_llm(
     agent: SupportedOnPolicyLLM,
-    env: SyncGemVecEnv,
+    env: SyncMultiTurnVecEnv,
     n_steps: int,
     batch_size: int,
     group_seed: int,
-    group_size: int,
     **kwargs,
 ) -> tuple[
     list[torch.Tensor],
@@ -405,14 +404,10 @@ def collect_rollouts_llm(
     :type batch_size: int
     :param group_seed: Seed for the group of environments.
     :type group_seed: int
-    :param group_size: Number of grouped samples per batch entry (kept for API
-        compatibility with callers).
-    :type group_size: int
     :return: Episode tensors, masks, turn ids, rewards, counted batch steps,
         and updated group seed.
     :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int]
     """
-    del group_size
 
     prompts = env.reset(
         seed=group_seed,
@@ -420,7 +415,6 @@ def collect_rollouts_llm(
 
     for _turn_idx in range(n_steps):
         if prompts is None:
-            print("breaking...")
             break
         if isinstance(agent, GRPO):
             completion_ids, _ = agent.get_action(

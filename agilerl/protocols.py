@@ -471,22 +471,43 @@ class PeftModelProtocol(Protocol):
     ) -> "PeftModelProtocol": ...
 
 
-# class MultiTurnEpisodeEnv(Protocol):
-#     """Protocol for wrapped GEM envs used by ``SyncGemVecEnv``."""
+@runtime_checkable
+class MultiTurnEnv(Protocol):
+    """Protocol for GEM-style multi-turn environments and AgileRL wrappers.
 
-#     def reset(self, seed: int | None = None) -> tuple[ReasoningPrompts, dict[str, Any]]:
-#         ...
+    Covers both:
+    - raw GEM envs / ``FormatRewardWrapper``: text obs + text actions
+    - ``TokenObservationWrapper``: dict obs + token-id tensor actions
+    """
 
-#     def step(
-#         self,
-#         full_completion_ids: torch.Tensor,
-#     ) -> tuple[ReasoningPrompts, float, bool, bool, dict[str, Any]]:
-#         ...
+    max_turns: int
 
-#     def get_episode_data(
-#         self,
-#     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-#         ...
+    def reset(
+        self, seed: int | None = None
+    ) -> tuple[str | dict[str, Any], dict[str, Any]]: ...
+    def step(
+        self, action: str | torch.Tensor, **kwargs: Any
+    ) -> tuple[str | dict[str, Any], float, bool, bool, dict[str, Any]]: ...
+    def close(self) -> None: ...
 
-#     def close(self) -> None:
-#         ...
+
+@runtime_checkable
+class MultiTurnEpisodeEnv(Protocol):
+    """Protocol for tokenized multi-turn episode wrappers.
+
+    Matches ``TokenObservationWrapper`` and similar rollout wrappers used by
+    synchronized vectorized collection.
+    """
+
+    max_turns: int
+
+    def reset(
+        self, seed: int | None = None
+    ) -> tuple[dict[str, Any], dict[str, Any]]: ...
+    def step(
+        self, full_completion_ids: torch.Tensor
+    ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]: ...
+    def get_episode_data(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def close(self) -> None: ...

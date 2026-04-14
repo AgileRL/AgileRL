@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+import json
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -15,9 +17,7 @@ from gem.tools.base_tool import BaseTool
 from agilerl.typing import ReasoningPrompts
 from agilerl.utils.algo_utils import stack_and_pad_experiences
 from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
-
-if TYPE_CHECKING:
-    from gem.core import Env as GemEnv
+from agilerl.protocols import MultiTurnEnv
 
 
 class TokenObservationWrapper:
@@ -57,7 +57,7 @@ class TokenObservationWrapper:
 
     def __init__(
         self,
-        env: GemEnv,
+        env: MultiTurnEnv,
         tokenizer: Any,
         max_turns: int,
         pad_id: int | None = None,
@@ -175,7 +175,7 @@ class TokenObservationWrapper:
         :param seed: Optional RNG seed forwarded to the underlying env ``reset`` so
             parallel GRPO rollouts can share the same stochastic initial state.
         :type seed: int | None
-        :return: ``(observation, info)`` with ``info`` from the underlying GEM env.
+        :return: ``(observation, info)`` with ``info`` from the underlying multi-turn env.
         :rtype: tuple[dict[str, Any], dict[str, Any]]
         """
         if seed is not None:
@@ -556,7 +556,7 @@ class SearchTool(BaseTool):
 
 
 class FormatRewardWrapper:
-    """Wraps a GEM environment to give a small bonus for producing <answer> tags.
+    """Wraps a multi-turn environment to give a small bonus for producing <answer> tags.
 
     Without this, the model gets zero reward when it answers without using
     the correct format, making it impossible to learn the format through RL
@@ -584,31 +584,11 @@ class FormatRewardWrapper:
         return self._env.reset(**kwargs)
 
 
-# FIXME this cant go here
-class MultiTurnEpisodeEnv(Protocol):
-    """Protocol for wrapped multi-turn envs used by rollout vectorization."""
-
-    def reset(
-        self, seed: int | None = None
-    ) -> tuple[ReasoningPrompts, dict[str, Any]]: ...
-
-    def step(
-        self,
-        full_completion_ids: torch.Tensor,
-    ) -> tuple[ReasoningPrompts, float, bool, bool, dict[str, Any]]: ...
-
-    def get_episode_data(
-        self,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
-
-    def close(self) -> None: ...
-
-
 @dataclass
 class Trajectory:
     """State for one environment rollout within a synchronized vector batch."""
 
-    env: MultiTurnEpisodeEnv
+    env: MultiTurnEnv
     batch_idx: int
     group_idx: int
     prompt: ReasoningPrompts
@@ -624,6 +604,12 @@ class TrajectoryBuffer:
 
     def __init__(self, batch_size: int, group_size: int):
         """Initialize an empty trajectory buffer."""
+        if batch_size <= 0:
+            msg = f"batch_size must be > 0, got {batch_size}."
+            raise ValueError(msg)
+        if group_size <= 0:
+            msg = f"group_size must be > 0, got {group_size}."
+            raise ValueError(msg)
         self.batch_size = batch_size
         self.group_size = group_size
         self.trajectories: list[Trajectory] = []
@@ -684,16 +670,22 @@ class TrajectoryBuffer:
         """Iterate over stored trajectories."""
         return iter(self.trajectories)
 
-    def reset_trajectory(self, seed: int, env_idx: int) -> None:
-        """Reset all trajectories.
+    def reset_trajectory(self, seed: int | None, env_idx: int) -> None:
+        """Reset one trajectory in place.
 
         :param seed: Seed for the environment.
-        :type seed: int
+        :type seed: int | None
         :param env_idx: Index of the environment to reset.
         :type env_idx: int
         :return: None
         :rtype: None
         """
+        if env_idx < 0 or env_idx >= len(self.trajectories):
+            msg = (
+                "env_idx out of bounds for trajectory buffer: "
+                f"{env_idx} not in [0, {len(self.trajectories) - 1}]"
+            )
+            raise IndexError(msg)
         prompt_dict, _ = self.trajectories[env_idx].env.reset(seed=seed)
         self.trajectories[env_idx].prompt = prompt_dict
         self.trajectories[env_idx].done = False
@@ -708,6 +700,9 @@ class TrajectoryBuffer:
         :return: Batched prompt tensors compatible with ``agent.get_action``.
         :rtype: ReasoningPrompts
         """
+        if len(trajectories) == 0:
+            msg = "Cannot stack prompts from an empty trajectory list."
+            raise ValueError(msg)
         prompt_batch = [trajectory.prompt for trajectory in trajectories]
         stacked = cast("ReasoningPrompts", {})
         tensor_keys = (
@@ -719,12 +714,23 @@ class TrajectoryBuffer:
         )
         for key in tensor_keys:
             values = [prompt.get(key) for prompt in prompt_batch]
-            if any(v is None for v in values):
+            if all(v is None for v in values):
                 continue
+            if any(v is None for v in values):
+                msg = (
+                    f"Inconsistent prompt field '{key}' across active trajectories; "
+                    "field must be present for all trajectories or none."
+                )
+                raise ValueError(msg)
             (stacked_tensor,) = stack_and_pad_experiences(values, padding_values=[0])
             if "attention_mask" in key:
                 stacked_tensor = stacked_tensor.long()
             stacked[key] = stacked_tensor
+
+        for required_key in ("input_ids", "attention_mask"):
+            if required_key not in stacked:
+                msg = f"Missing required prompt field '{required_key}'."
+                raise ValueError(msg)
 
         initial_prompt_lengths = [
             prompt.get("initial_prompt_len") for prompt in prompt_batch
@@ -744,17 +750,23 @@ class TrajectoryBuffer:
         return len(self.trajectories)
 
 
-class SyncGemVecEnv:
+class SyncMultiTurnVecEnv:
     """Synchronous multi-turn vector environment for LLM rollouts."""
 
     def __init__(
         self,
-        env_factory: Callable[..., MultiTurnEpisodeEnv],
+        env_factory: Callable[..., MultiTurnEnv],
         batch_size: int,
         group_size: int,
         env_config: dict[str, Any] | None = None,
     ):
         """Create ``batch_size * group_size`` independent environments."""
+        if batch_size <= 0:
+            msg = f"batch_size must be > 0, got {batch_size}."
+            raise ValueError(msg)
+        if group_size <= 0:
+            msg = f"group_size must be > 0, got {group_size}."
+            raise ValueError(msg)
         if env_config is None:
             env_config = {}
         self.env_factory = env_factory
@@ -792,7 +804,6 @@ class SyncGemVecEnv:
                     )
                 else:
                     self.trajectories.reset_trajectory(env_idx=env_idx, seed=batch_seed)
-
         return self.trajectories.get_prompts()
 
     def step(self, completion_ids: list[torch.Tensor]) -> ReasoningPrompts | None:
@@ -814,12 +825,17 @@ class SyncGemVecEnv:
             traj.done = bool(terminated or truncated)
             if not traj.done:
                 traj.prompt = next_prompt
-
         return self.trajectories.get_prompts()
 
     def close(self) -> None:
         """Close all underlying environments."""
-        for env in self.envs:
+        seen: set[int] = set()
+        for traj in self.trajectories:
+            env = traj.env
+            env_id = id(env)
+            if env_id in seen:
+                continue
+            seen.add(env_id)
             if hasattr(env, "close"):
                 env.close()
 

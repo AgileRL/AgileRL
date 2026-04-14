@@ -29,7 +29,7 @@ from agilerl.utils.llm_utils import (
     prepare_prompt_hf_generate,
     stitch_completion_after_windowed_hf_generate,
 )
-from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
+from agilerl.protocols import MultiTurnEnv
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
@@ -235,7 +235,7 @@ class REINFORCE(LLMAlgorithm):
         self.max_model_len = (
             max_model_len if max_model_len is not None else max_output_tokens
         )
-        self.hf_generate_chunk_size = (
+        self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )
         self.generation_config = GenerationConfig(
@@ -250,9 +250,6 @@ class REINFORCE(LLMAlgorithm):
             top_k=top_k,
             min_p=min_p,
         )
-
-        self.use_vllm = use_vllm
-        self.vllm_config = vllm_config
         if self.use_vllm:
             self._configure_vllm()
         self._initialize_actors(actor_network, not clone)
@@ -260,16 +257,6 @@ class REINFORCE(LLMAlgorithm):
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
-
-        if self.use_vllm and self.use_memory_efficient_params:
-            unwrapped_model = (
-                self.accelerator.unwrap_model(self.actor)
-                if self.accelerator is not None
-                else self.actor
-            )
-            move_params_to_cpu(unwrapped_model)
-            self._maybe_wake_vllm()
-            self._move_model_to_vllm()
 
     def get_action(
         self,
@@ -335,11 +322,7 @@ class REINFORCE(LLMAlgorithm):
                             completion_mask = completion_mask[:, 1:]
                             completion_masks.append(completion_mask)
             else:
-                if not self.use_memory_efficient_params:
-                    if self.vllm_config.sleep_mode:
-                        torch.cuda.empty_cache()
-                        self._maybe_wake_vllm()
-                    self._move_model_to_vllm()
+                self._prepare_vllm_for_generation()
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
                     prompt_batch,
                     1,
@@ -347,8 +330,6 @@ class REINFORCE(LLMAlgorithm):
                     if training
                     else 0.01,  # Almost deterministic for evaluation
                 )
-                if self.vllm_config.sleep_mode and not self.use_memory_efficient_params:
-                    self._maybe_sleep_vllm(level=2)
 
         return completion_ids, completion_masks
 
@@ -371,6 +352,8 @@ class REINFORCE(LLMAlgorithm):
             ``mean_entropy``, averaged over all minibatch updates.
         :rtype: dict[str, float]
         """
+        self._prepare_vllm_for_training()
+
         with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards = stack_and_pad_experiences(
                 *experiences,
@@ -503,7 +486,7 @@ class REINFORCE(LLMAlgorithm):
 
     def test(
         self,
-        env: ReasoningGym | TokenObservationWrapper,
+        env: ReasoningGym | MultiTurnEnv,
         loop: int = 1,
     ) -> torch.Tensor:
         """Return fitness (test) score tensor of llm on test sub-set.
@@ -511,8 +494,8 @@ class REINFORCE(LLMAlgorithm):
         Matches :meth:`agilerl.algorithms.ppo_llm.PPO.test` env handling.
 
         :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
-            :class:`~agilerl.wrappers.gem_wrappers.TokenObservationWrapper`.
-        :type env: ReasoningGym | TokenObservationWrapper
+            :class:`~agilerl.wrappers.multiturn_wrappers.TokenObservationWrapper`.
+        :type env: ReasoningGym | MultiTurnEnv
         :param loop: Number of outer test iterations (dataloader passes or episodes).
         :type loop: int
         :return: Concatenated per-step rewards from the test loop.
@@ -529,7 +512,7 @@ class REINFORCE(LLMAlgorithm):
                     prompts = next_prompts
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
-            elif isinstance(env, TokenObservationWrapper):
+            elif isinstance(env, MultiTurnEnv):
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
                     prompt_dict, _info = env.reset()
@@ -557,7 +540,7 @@ class REINFORCE(LLMAlgorithm):
             else:
                 msg = (
                     "env must be a ReasoningGym (or subclass) or "
-                    f"TokenObservationWrapper; got {type(env).__name__}"
+                    f"MultiTurnEnv; got {type(env).__name__}"
                 )
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor.float()).item()

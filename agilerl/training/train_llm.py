@@ -22,7 +22,7 @@ from agilerl.utils.utils import (
     save_llm_checkpoint,
     tournament_selection_and_mutation,
 )
-from agilerl.wrappers.gem_wrappers import SyncGemVecEnv
+from agilerl.wrappers.multiturn_wrappers import SyncMultiTurnVecEnv
 
 InitDictType = dict[str, Any] | None
 
@@ -909,18 +909,11 @@ def finetune_llm_multiturn(
     group_seed = np.random.randint(0, 1000000)
     i = 0
     group_size = getattr(pop[0], "group_size", 1)
-    rollout_env = SyncGemVecEnv(env_factory, batch_size, group_size, env_config)
+    rollout_env = SyncLLMVecEnv(env_factory, batch_size, group_size, env_config)
     while total_steps < max_steps:
         agent_metrics_dict = {}
         iteration_steps = 0
         for agent_idx, agent in enumerate(pop):
-            agent.set_reference_policy(i + 1)
-
-            completion_ids_list: list[torch.Tensor] = []
-            action_masks_list: list[torch.Tensor] = []
-            all_turn_ids: list[torch.Tensor] = []
-            all_rewards: list[torch.Tensor] = []
-            effective_group_size = getattr(agent, "group_size", 1)
 
             (
                 completion_ids_list,
@@ -948,17 +941,12 @@ def finetune_llm_multiturn(
                 all_turn_ids,
                 padding_values=[-1],
             )
-            # FIXME deleted for debugging for now
-            # (rewards_2d,) = stack_and_pad_experiences(
-            #     normalized_rewards,
-            #     padding_values=[0.0],
-            # )
-            print("len normalized rewards: ", len(normalized_rewards))
+            (rewards_2d,) = stack_and_pad_experiences(
+                normalized_rewards,
+                padding_values=[0.0],
+            )
             rewards_2d = torch.cat(normalized_rewards, dim=0)
             rewards_2d = rewards_2d.float()
-
-            print("Rewards 2D: ", rewards_2d.shape)
-
             completion_lengths = np.mean([x.shape[1] for x in completion_ids_list])
             episode_scores = (
                 rewards_2d.sum(dim=1) if rewards_2d.dim() > 1 else rewards_2d

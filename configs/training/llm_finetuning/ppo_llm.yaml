@@ -14,25 +14,25 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: LLMPPO
-    BATCH_SIZE: 16
+    BATCH_SIZE: 32
     BETA: 0.01                # KL penalty — keeps policy close to reference
     LR_ACTOR: 0.000005        # 5e-6 — good for LoRA on 0.5B instruct model
-    LR_CRITIC: 0.00001       # 1e-5 — value head learns faster
+    LR_CRITIC: 0.00005        # 1e-5 — value head learns faster
     CLIP_COEF: 0.2
     MAX_GRAD_NORM: 1.0
     UPDATE_EPOCHS: 2
-    MAX_OUTPUT_TOKENS: 64
-    TEMPERATURE: 0.9          # Higher temp for better exploration in sparse reward setting
+    TEMPERATURE: 0.7          # Higher temp for better exploration in sparse reward setting
     MAX_MODEL_LEN: 1024
+    MAX_OUTPUT_TOKENS: 64
     TOURN_SIZE: 2
     GAMMA: 0.99               # Higher discount for multi-turn credit assignment
     VF_COEF: 0.5              # Stronger value loss to train critic faster
     GAE_LAMBDA: 0.95
+    MICRO_BATCH_SIZE_PER_GPU: 32
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
     USE_VLLM: true
-    MICRO_BATCH_SIZE_PER_GPU: 16
     LORA_R: 16
     LORA_ALPHA: 64
     LORA_DROPOUT: 0.05

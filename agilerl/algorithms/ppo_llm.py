@@ -31,11 +31,10 @@ from agilerl.utils.llm_utils import (
     prepare_prompt_hf_generate,
     stitch_completion_after_windowed_hf_generate,
 )
-from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
+from agilerl.protocols import MultiTurnEnv
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
-
 
 class PPO(LLMAlgorithm):
     """Turn-level PPO for LLM finetuning with actor/reference adapters.
@@ -105,9 +104,9 @@ class PPO(LLMAlgorithm):
             seed=seed,
             pad_token_id=pad_token_id,
             pad_token=pad_token,
-            # Keep the standard PyTorch PPO path for now because value-head
-            # training requires explicit hidden-state/value computation.
             use_value_head=True,
+            use_vllm=use_vllm,
+            vllm_config=vllm_config,
             use_liger_loss=False,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
@@ -169,7 +168,7 @@ class PPO(LLMAlgorithm):
         self.max_model_len = (
             max_model_len if max_model_len is not None else max_output_tokens
         )
-        self.hf_generate_chunk_size = (
+        self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )
         self.generation_config = GenerationConfig(
@@ -186,9 +185,6 @@ class PPO(LLMAlgorithm):
         )
 
         self.lr_critic = lr_critic if lr_critic is not None else lr_actor
-
-        self.use_vllm = use_vllm
-        self.vllm_config = vllm_config
         if self.use_vllm:
             self._configure_vllm()
         self._initialize_actors(actor_network, not clone)
@@ -197,17 +193,6 @@ class PPO(LLMAlgorithm):
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
-
-        # We call get_action before learn so we need to put the model to CPU and wake it up
-        if self.use_vllm and self.use_memory_efficient_params:
-            unwrapped_model = (
-                self.accelerator.unwrap_model(self.actor)
-                if self.accelerator is not None
-                else self.actor
-            )
-            move_params_to_cpu(unwrapped_model)
-            self._maybe_wake_vllm()
-            self._move_model_to_vllm()
 
     def get_action(
         self,
@@ -273,11 +258,8 @@ class PPO(LLMAlgorithm):
                             completion_mask = completion_mask[:, 1:]
                             completion_masks.append(completion_mask)
             else:
-                if not self.use_memory_efficient_params:
-                    if self.vllm_config.sleep_mode:
-                        torch.cuda.empty_cache()
-                        self._maybe_wake_vllm()
-                    self._move_model_to_vllm()
+                
+                self._prepare_vllm_for_generation()
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
                     prompt_batch,
                     1,
@@ -285,8 +267,6 @@ class PPO(LLMAlgorithm):
                     if training
                     else 0.01,  # Almost deterministic for evaluation
                 )
-                if self.vllm_config.sleep_mode and not self.use_memory_efficient_params:
-                    self._maybe_sleep_vllm(level=2)
 
         return completion_ids, completion_masks
 
@@ -307,11 +287,9 @@ class PPO(LLMAlgorithm):
         :return: ``(mean_loss, mean_kl, mean_pg_loss, mean_vf_loss, mean_entropy)``.
         :rtype: tuple[float, float, float, float, float]
         """
-        with self.memory_efficient_params_context():
-            rewards_in = experiences[2]
-            print("Rewards in: ", rewards_in)
-            print("Rewards in shape: ", rewards_in.shape)
+        self._prepare_vllm_for_training()
 
+        with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards = stack_and_pad_experiences(
                 *experiences,
                 padding_values=[self.pad_token_id, False, None],
@@ -321,9 +299,6 @@ class PPO(LLMAlgorithm):
             action_mask_bool = action_masks.bool()
             num_samples = completion_ids.shape[0]
 
-            torch.set_printoptions(threshold=torch.inf)
-            print("Completion ids: ", completion_ids)
-            assert False
 
             if turn_ids is None:
                 turn_ids = torch.where(
@@ -337,9 +312,6 @@ class PPO(LLMAlgorithm):
                 rewards_2d = rewards.to(self.device).float()
                 if rewards_2d.dim() == 1:
                     rewards_2d = rewards_2d.unsqueeze(-1)
-
-            print("Rewards 2d: ", rewards_2d)
-            print("Rewards 2d shape: ", rewards_2d.shape)
 
             del rewards
 
@@ -367,17 +339,9 @@ class PPO(LLMAlgorithm):
                 )
                 old_values = torch.masked_fill(old_values, ~action_mask_bool, 0.0)
 
-                torch.set_printoptions(threshold=torch.inf)
-                print("turn ids", turn_ids)
-                # print("aciton masks", action_masks)
                 token_rewards = self._compute_token_rewards(
                     action_masks, rewards_2d, turn_ids
                 )
-
-                print("Token rewards: ", token_rewards)
-                print("Token rewards shape: ", token_rewards.shape)
-
-                assert False
 
                 old_log_probs = torch.masked_fill(old_log_probs, ~action_mask_bool, 1.0)
                 reference_log_probs = torch.masked_fill(
@@ -486,7 +450,7 @@ class PPO(LLMAlgorithm):
 
                     vf_loss = (turn_ret - turn_pred).pow(2)
                     clipped_turn_values = turn_old + torch.clamp(
-                        turn_pred - turn_old, -self.clip_coef, self.clip_coef
+                        turn_pred - turn_old, - self.clip_coef, self.clip_coef
                     )
                     clipped_vf_loss = (turn_ret - clipped_turn_values).pow(2)
                     vf_loss = (
@@ -516,7 +480,7 @@ class PPO(LLMAlgorithm):
 
     def test(
         self,
-        env: ReasoningGym | TokenObservationWrapper,
+        env: ReasoningGym | MultiTurnEnv,
         loop: int = 1,
     ) -> torch.Tensor:
         """Return fitness (test) score tensor of llm on test sub-set.
@@ -526,18 +490,9 @@ class PPO(LLMAlgorithm):
         the next batch plus rewards. ``loop`` iterations advance the test
         dataloader that many times.
 
-        :class:`~agilerl.wrappers.gem_wrappers.TokenObservationWrapper`:
-        ``reset`` returns ``(observation_dict, info)``; each ``step`` takes the
-        full completion tensor. ``loop`` is the number of **episodes**: each
-        episode calls ``reset`` once, then steps until ``terminated`` or
-        ``truncated``. The returned tensor concatenates per-turn rewards from
-        every episode.
-
-        Any other env must follow the ``ReasoningGym`` batching contract above.
-
         :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
-            :class:`~agilerl.wrappers.gem_wrappers.TokenObservationWrapper`.
-        :type env: ReasoningGym | TokenObservationWrapper
+            :class:`~agilerl.wrappers.multiturn_wrappers.TokenObservationWrapper`.
+        :type env: ReasoningGym | MultiTurnEnv
         :param loop: Number of outer test iterations (dataloader passes or episodes).
         :type loop: int
         :return: Concatenated per-step rewards from the test loop.
@@ -554,7 +509,7 @@ class PPO(LLMAlgorithm):
                     prompts = next_prompts
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
-            elif isinstance(env, TokenObservationWrapper):
+            elif isinstance(env, MultiTurnEnv):
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
                     prompt_dict, _info = env.reset()
@@ -582,7 +537,7 @@ class PPO(LLMAlgorithm):
             else:
                 msg = (
                     "env must be a ReasoningGym (or subclass) or "
-                    f"TokenObservationWrapper; got {type(env).__name__}"
+                    f"MultiTurnEnv; got {type(env).__name__}"
                 )
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor.float()).item()

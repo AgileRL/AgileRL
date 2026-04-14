@@ -273,7 +273,7 @@ class GRPO(LLMAlgorithm):
         self.max_model_len = (
             max_model_len if max_model_len is not None else max_output_tokens
         )
-        self.hf_generate_chunk_size = (
+        self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )
         self.generation_config = GenerationConfig(
@@ -289,8 +289,6 @@ class GRPO(LLMAlgorithm):
             min_p=min_p,
         )
 
-        self.use_vllm = use_vllm
-        self.vllm_config = vllm_config
         if self.use_vllm:
             self._configure_vllm()
         self._initialize_actors(actor_network, not clone)
@@ -298,17 +296,6 @@ class GRPO(LLMAlgorithm):
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
-
-        # We call get_action before learn so we need to put the model to CPU and wake it up
-        if self.use_vllm and self.use_memory_efficient_params:
-            unwrapped_model = (
-                self.accelerator.unwrap_model(self.actor)
-                if self.accelerator is not None
-                else self.actor
-            )
-            move_params_to_cpu(unwrapped_model)
-            self._maybe_wake_vllm()
-            self._move_model_to_vllm()
 
     def get_action(
         self,
@@ -397,11 +384,7 @@ class GRPO(LLMAlgorithm):
                             completion_mask = completion_mask[:, 1:]
                             completion_masks.append(completion_mask)
             else:
-                if not self.use_memory_efficient_params:
-                    if self.vllm_config.sleep_mode:
-                        torch.cuda.empty_cache()
-                        self._maybe_wake_vllm()
-                    self._move_model_to_vllm()
+                self._prepare_vllm_for_generation()
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
                     prompt_batch,
                     group_size,
@@ -409,8 +392,6 @@ class GRPO(LLMAlgorithm):
                     if training
                     else 0.01,  # Almost deterministic for evaluation
                 )
-                if self.vllm_config.sleep_mode and not self.use_memory_efficient_params:
-                    self._maybe_sleep_vllm(level=2)
 
         return completion_ids, completion_masks
 
@@ -425,6 +406,8 @@ class GRPO(LLMAlgorithm):
         :return: Dict with keys ``mean_loss`` and ``mean_kl``, averaged over the update.
         :rtype: dict[str, float]
         """
+        self._prepare_vllm_for_training()
+
         with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards = stack_and_pad_experiences(
                 *experiences,

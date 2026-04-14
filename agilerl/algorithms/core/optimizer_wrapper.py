@@ -90,7 +90,7 @@ def init_llm_optimizer(
             for n, p in network.named_parameters()
             if (
                 ("critic" in n.lower() and "lora" in n.lower() and p.requires_grad)
-                or ("v_head.summary" in n.lower() and p.requires_grad)
+                or ("v_head.summary" in n.lower() and p.requires_grad) 
             )
         ]
         params.append(
