@@ -184,10 +184,10 @@ Below are model responses to the same set of prompts across five training config
 and **SFT → DPO + NLL** (SFT warm-start then DPO with NLL loss).
 Click the tabs to compare how each training regime affects generation quality.
 
-The base model frequently degenerates into repetitive loops, a common failure mode of small
-pre-trained LLMs on open-ended prompts.  SFT produces coherent, conversational responses but
-tends to be overly enthusiastic.  DPO from base is more factual but can still loop on tricky
-prompts.  Adding the NLL loss term (DPO + NLL) produces the most balanced outputs, and the
+As you can see, the base model frequently degenerates into repetitive loops, a common failure mode of small
+pre-trained LLMs on open-ended prompts. SFT produces coherent, conversational responses.
+DPO is an improvement on the base model but can still repeat itself.
+Adding the NLL loss term (DPO + NLL) produces the most balanced outputs, and the
 full SFT → DPO + NLL pipeline combines the conversational fluency of SFT with DPO's preference
 alignment.
 
