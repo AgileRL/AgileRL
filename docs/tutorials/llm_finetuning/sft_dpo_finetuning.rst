@@ -173,14 +173,6 @@ genuinely becoming more likely to produce the preferred output.
    **With NLL loss** -- the chosen reward stays stable while the rejected reward decreases,
    yielding a healthy margin without the divergence seen above.
 
-These plots can be reproduced from any training run's ``metrics.csv`` using the plotting script (AgileRL palette via :mod:`agilerl.utils.plot_style`; Inter is loaded from the user font cache, typically ``~/.cache/agilerl/fonts/inter``, and downloaded on first use)::
-
-    python demos/plot_llm_metrics.py outputs/SFT/metrics.csv -o docs/tutorials/llm_finetuning/images --algo SFT
-    python demos/plot_llm_metrics.py outputs/DPO/metrics.csv -o docs/tutorials/llm_finetuning/images --algo DPO
-    python demos/plot_llm_metrics.py outputs/DPO_NLL/metrics.csv -o docs/tutorials/llm_finetuning/images --algo DPO --nll
-    python demos/plot_llm_metrics.py "outputs/SFT+DPO/metrics.csv" -o docs/tutorials/llm_finetuning/images --algo "SFT → DPO + NLL" --basename sft_to_dpo_plus_nll
-
-
 Training with this model and dataset proceeds at about 2 steps/sec for both SFT and DPO on an Apple M4 Max 36GB laptop or an Nvidia L4 GPU, so completes in about 90 minutes.
 
 
