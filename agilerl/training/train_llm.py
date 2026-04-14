@@ -6,10 +6,10 @@ from typing import Any, Literal
 
 import numpy as np
 import torch.distributed as dist
+import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
-import wandb
 from agilerl.algorithms import DPO, GRPO
 from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
