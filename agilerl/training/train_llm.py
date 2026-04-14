@@ -5,41 +5,25 @@ from collections.abc import Callable
 from typing import Any, Literal
 
 import numpy as np
-import torch
 import torch.distributed as dist
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DPO, GRPO
 from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import PopulationType
 from agilerl.utils.utils import (
-    aggregate_metrics_across_gpus,
     init_wandb,
+    safe_aggregate_metrics,
     save_llm_checkpoint,
     tournament_selection_and_mutation,
 )
 from agilerl.wrappers.llm_envs import ReasoningGym, SFTGym
 
 InitDictType = dict[str, Any] | None
-
-
-def safe_aggregate_metrics(
-    accelerator: Accelerator | None,
-    metrics: torch.Tensor | np.ndarray | float,
-) -> float:
-    if accelerator is None:
-        if isinstance(metrics, (torch.Tensor, np.ndarray)):
-            return float(
-                np.mean(metrics)
-                if isinstance(metrics, np.ndarray)
-                else metrics.float().mean().item()
-            )
-        return float(metrics)
-    return aggregate_metrics_across_gpus(accelerator, metrics)
 
 
 def _is_main_process(accelerator: Accelerator | None) -> bool:

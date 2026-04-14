@@ -10,12 +10,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -1076,6 +1076,21 @@ def aggregate_metrics_across_gpus(
     """
     all_metrics = gather_tensor(metric_tensor, accelerator)
     return all_metrics.mean().item()
+
+
+def safe_aggregate_metrics(
+    accelerator: Accelerator | None,
+    metrics: torch.Tensor | np.ndarray | float,
+) -> float:
+    if accelerator is None:
+        if isinstance(metrics, (torch.Tensor, np.ndarray)):
+            return float(
+                np.mean(metrics)
+                if isinstance(metrics, np.ndarray)
+                else metrics.float().mean().item()
+            )
+        return float(metrics)
+    return aggregate_metrics_across_gpus(accelerator, metrics)
 
 
 def save_llm_checkpoint(
