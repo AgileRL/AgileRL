@@ -17,7 +17,7 @@ from agilerl.typing import SupportedActionSpace, SupportedObservationSpace
 if HAS_LLM_DEPENDENCIES:
     from peft import LoraConfig
 else:
-    LoraConfig = None
+    LoraConfig = Any
 
 if TYPE_CHECKING:
     import torch
