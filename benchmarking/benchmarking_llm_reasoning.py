@@ -164,7 +164,7 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
-    with open("configs/training/llm_finetuning/reinforce_llm.yaml") as file:
+    with open("configs/training/llm_finetuning/ppo_llm.yaml") as file:
         config = yaml.safe_load(file)
     init_hp = config["INIT_HP"]
     mut_p = config["MUTATION_PARAMS"]

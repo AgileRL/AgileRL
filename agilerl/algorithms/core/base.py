@@ -2,7 +2,6 @@ import copy
 import gc
 import inspect
 import os
-import re
 import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
@@ -111,13 +110,13 @@ if HAS_LLM_DEPENDENCIES:
         set_fused_adapter_routing,
     )
     from agilerl.utils.llm_utils import (
+        align_deepspeed_lr,
         create_model_from_name_or_path,
         gather_if_zero3,
+        get_model_name_or_path,
         move_params_to_cpu,
         move_params_to_gpu,
         stitch_completion_after_windowed_vllm_generate,
-        get_model_name_or_path,
-        align_deepspeed_lr,
     )
 
 __all__ = ["EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
@@ -1968,6 +1967,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         'reduce-overhead', or 'max-autotune'), defaults to None.
     :type torch_compiler: str | None, optional
     """
+
     _separate_reference_adapter_deprecation_emitted = False
 
     def __init__(
@@ -2052,7 +2052,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.calc_position_embeddings = calc_position_embeddings
         self.pad_token_id = pad_token_id
         self.pad_token = pad_token
-        self.pretrained_model_name_or_path = model_name if model_name is not None else get_model_name_or_path(actor_network)
+        self.pretrained_model_name_or_path = (
+            model_name
+            if model_name is not None
+            else get_model_name_or_path(actor_network)
+        )
         self.model_config = model_config
         self._configure_batch_size_per_process(
             batch_size,
@@ -2450,11 +2454,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param work_dir: Shared clone workspace directory.
         :type work_dir: str
         """
-        if (
-            self.accelerator is None
-            or self.zero_stage is None
-            or self.zero_stage < 2
-        ):
+        if self.accelerator is None or self.zero_stage is None or self.zero_stage < 2:
             return
 
         self.accelerator.wait_for_everyone()
@@ -2496,9 +2496,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             inner_sd = None
             if self.zero_stage is None or self.zero_stage < 2:
                 inner_sd = clone_tensors_for_torch_save(inner_peft.state_dict())
-            cloned_inner = clone_llm(
-                inner_peft, self.zero_stage, state_dict=inner_sd
-            )
+            cloned_inner = clone_llm(inner_peft, self.zero_stage, state_dict=inner_sd)
             cloned_model = type(actor)(cloned_inner)
             cloned_model.v_head.load_state_dict(actor.v_head.state_dict())
             cloned_model.is_peft_model = True
@@ -2761,7 +2759,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: type[torch.optim.Optimizer] | type[DummyOptimizer]
         """
         if (
-            self.accelerator is not None 
+            self.accelerator is not None
             and self.accelerator.state.deepspeed_plugin is not None
             and self.accelerator.state.deepspeed_plugin.deepspeed_config.get(
                 "optimizer",
@@ -3412,16 +3410,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Per-prompt completion token tensors and matching action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
+
         def _trajectory_input_ids(prompt: dict[str, Any]) -> torch.Tensor:
             return cast(
                 "torch.Tensor",
                 prompt.get("trajectory_input_ids", prompt["input_ids"]),
             )
 
-        def _prompt_text_for_vllm(prompt: dict[str, Any]) -> str:
-            if "trajectory_text" in prompt:
-                return str(prompt["trajectory_text"])
-            return str(prompt.get("text", ""))
+        def _token_prompt_for_vllm(prompt: dict[str, Any]) -> dict[str, list[int]]:
+            ids = _trajectory_input_ids(prompt)
+            return {"prompt_token_ids": ids.squeeze(0).tolist()}
 
         def _stitch_prefix(prompt: dict[str, Any], ref: torch.Tensor) -> torch.Tensor:
             st = prompt.get("stitch_prefix_ids")
@@ -3444,11 +3442,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         stitch_prefixes = [
             _stitch_prefix(p, prompts_ids[i]) for i, p in enumerate(group_prompts)
         ]
-        prompts_text = [_prompt_text_for_vllm(p) for p in group_prompts]
-        prompts_text = [
-            re.sub(rf"^({re.escape(str(self.pad_token))})+", "", text)
-            for text in prompts_text
-        ]
+        token_prompts = [_token_prompt_for_vllm(p) for p in group_prompts]
         max_token_cap = (
             self.max_output_tokens
             if self.max_output_tokens is not None
@@ -3457,6 +3451,61 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         max_output_tokens = [
             _vllm_max_new_tokens(int(prompt_id.shape[1])) for prompt_id in prompts_ids
         ]
+
+        if self.vllm_config.tensor_parallel_size > 1:
+            orig_size = len(token_prompts)
+
+            gathered_prompts_ids = [
+                None for _ in range(self.vllm_config.tensor_parallel_size)
+            ]
+            gathered_token_prompts = [
+                None for _ in range(self.vllm_config.tensor_parallel_size)
+            ]
+            gathered_stitch_prefixes = [
+                None for _ in range(self.vllm_config.tensor_parallel_size)
+            ]
+            gathered_max_output_tokens = [
+                None for _ in range(self.vllm_config.tensor_parallel_size)
+            ]
+
+            torch.distributed.all_gather_object(
+                gathered_prompts_ids,
+                prompts_ids,
+                group=self.tp_group,
+            )
+            torch.distributed.all_gather_object(
+                gathered_token_prompts,
+                token_prompts,
+                group=self.tp_group,
+            )
+            torch.distributed.all_gather_object(
+                gathered_stitch_prefixes,
+                stitch_prefixes,
+                group=self.tp_group,
+            )
+            torch.distributed.all_gather_object(
+                gathered_max_output_tokens,
+                max_output_tokens,
+                group=self.tp_group,
+            )
+
+            all_prompts_ids = [
+                prompt_id for sublist in gathered_prompts_ids for prompt_id in sublist
+            ]
+            all_token_prompts = [
+                prompt for sublist in gathered_token_prompts for prompt in sublist
+            ]
+            all_stitch_prefixes = [
+                sp for sublist in gathered_stitch_prefixes for sp in sublist
+            ]
+            all_max_output_tokens = [
+                max_out for sublist in gathered_max_output_tokens for max_out in sublist
+            ]
+        else:
+            all_token_prompts = token_prompts
+            all_prompts_ids = prompts_ids
+            all_stitch_prefixes = stitch_prefixes
+            all_max_output_tokens = max_output_tokens
 
         generation_kwargs = {
             "n": 1,  # vLLM on each GPU generates only 1 in colocate mode
@@ -3475,59 +3524,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             generation_kwargs["stop"] = self.vllm_config.stop_sequences
         sampling_params = [
             SamplingParams(**generation_kwargs, max_tokens=max_output_token)
-            for max_output_token in max_output_tokens
+            for max_output_token in all_max_output_tokens
         ]
-
-        if self.vllm_config.tensor_parallel_size > 1:
-            orig_size = len(prompts_text)
-
-            gathered_prompts_ids = [
-                None for _ in range(self.vllm_config.tensor_parallel_size)
-            ]
-            gathered_prompts_text = [
-                None for _ in range(self.vllm_config.tensor_parallel_size)
-            ]
-            gathered_stitch_prefixes = [
-                None for _ in range(self.vllm_config.tensor_parallel_size)
-            ]
-
-            torch.distributed.all_gather_object(
-                gathered_prompts_ids,
-                prompts_ids,
-                group=self.tp_group,
-            )
-            torch.distributed.all_gather_object(
-                gathered_prompts_text,
-                prompts_text,
-                group=self.tp_group,
-            )
-            torch.distributed.all_gather_object(
-                gathered_stitch_prefixes,
-                stitch_prefixes,
-                group=self.tp_group,
-            )
-
-            all_prompts_ids = [
-                prompt_id for sublist in gathered_prompts_ids for prompt_id in sublist
-            ]
-            all_prompts_text = [
-                prompt_text
-                for sublist in gathered_prompts_text
-                for prompt_text in sublist
-            ]
-            all_stitch_prefixes = [
-                sp for sublist in gathered_stitch_prefixes for sp in sublist
-            ]
-        else:
-            all_prompts_text = prompts_text
-            all_prompts_ids = prompts_ids
-            all_stitch_prefixes = stitch_prefixes
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
         all_outputs = self.llm.generate(
-            all_prompts_text,
+            all_token_prompts,
             sampling_params=sampling_params,
             use_tqdm=False,
         )
@@ -3651,7 +3655,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         ds_plugin = self.accelerator.state.deepspeed_plugin
         if ds_plugin is None:
-            err_msg = """DeepSpeed plugin is not initialized. If using an accelerator, 
+            err_msg = """DeepSpeed plugin is not initialized. If using an accelerator,
             ensure to launch your training script with `accelerate launch --num_processes <your_script.py>`."""
             raise ValueError(err_msg)
         ds_config = ds_plugin.deepspeed_config
@@ -3678,10 +3682,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     msg,
                 )
 
-            gradient_accumulation_steps = ds_config.get("gradient_accumulation_steps", 1)
+            gradient_accumulation_steps = ds_config.get(
+                "gradient_accumulation_steps", 1
+            )
             self.micro_batch_size_per_gpu = (
-                self.batch_size_per_process
-                // gradient_accumulation_steps
+                self.batch_size_per_process // gradient_accumulation_steps
             )
 
             prev_micro = ds_config.get("train_micro_batch_size_per_gpu")
@@ -3693,9 +3698,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     f"// gradient_accumulation_steps={gradient_accumulation_steps}).",
                     stacklevel=2,
                 )
-            ds_config["train_micro_batch_size_per_gpu"] = (
-                self.micro_batch_size_per_gpu
-            )
+            ds_config["train_micro_batch_size_per_gpu"] = self.micro_batch_size_per_gpu
             return
 
         self.micro_batch_size_per_gpu = int(micro_batch_size_per_gpu)

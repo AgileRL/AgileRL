@@ -440,11 +440,8 @@ def test_llmppo_get_action_vllm_training_temperature(
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         )
     obs = {
-        "input_ids": torch.randint(
-            0, vocab_size, (1, input_size), device=ppo.device
-        ),
+        "input_ids": torch.randint(0, vocab_size, (1, input_size), device=ppo.device),
         "attention_mask": torch.ones(1, input_size, device=ppo.device),
-        "text": "hello",
     }
     ppo.get_action(obs, training=True)
     ppo.get_action(obs, training=False)
@@ -593,7 +590,6 @@ def test_get_action_accepts_single_prompt_dict():
     obs = {
         "input_ids": torch.randint(0, 100, (1, 10)),
         "attention_mask": torch.ones(1, 10, dtype=torch.long),
-        "text": "x",
     }
     ids, masks = ppo.get_action(obs, training=True)
     assert len(ids) == 1 and len(masks) == 1
@@ -605,7 +601,6 @@ def test_get_action_hf_stitch_completion_path():
     obs = {
         "input_ids": torch.randint(0, 100, (1, 4)),
         "attention_mask": torch.ones(1, 4, dtype=torch.long),
-        "text": "x",
         "stitch_prefix_ids": stitch,
         "initial_prompt_len": 2,
     }
@@ -618,7 +613,6 @@ def test_get_action_hf_stopiteration_uses_device_string():
     obs = {
         "input_ids": torch.randint(0, 100, (1, 10)),
         "attention_mask": torch.ones(1, 10, dtype=torch.long),
-        "text": "x",
     }
     unwrapped = ppo._get_unwrapped_actor()
     with patch.object(unwrapped, "parameters", return_value=iter(())):
@@ -632,9 +626,7 @@ def test_learn_multi_turn_explicit_turn_ids():
     inp, mtok = 10, 8
     seq_len = inp + mtok
     b = 1
-    completions = [
-        torch.randint(0, vocab, (1, seq_len)) for _ in range(b)
-    ]
+    completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(b)]
     action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(b)]
     turn_ids = torch.tensor(
         [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
@@ -678,10 +670,13 @@ def test_get_values_disables_gradient_checkpointing_under_deepspeed():
     mock_acc.unwrap_model = lambda m: m
     ppo.accelerator = mock_acc
     unwrapped = ppo._get_unwrapped_actor()
-    with patch.object(unwrapped, "gradient_checkpointing_disable") as dis, patch.object(
-        unwrapped,
-        "gradient_checkpointing_enable",
-    ) as en:
+    with (
+        patch.object(unwrapped, "gradient_checkpointing_disable") as dis,
+        patch.object(
+            unwrapped,
+            "gradient_checkpointing_enable",
+        ) as en,
+    ):
         ppo._get_values(
             torch.randint(0, 99, (1, 12)),
             batch_size=1,
@@ -700,16 +695,12 @@ def _minimal_reasoning_gym(device: str, vocab_size: int, input_size: int, bs: in
     env.eval_mode = eval_mode
 
     def reset(reset_dataloaders=False):
-        return [
-            {
-                "input_ids": torch.randint(
-                    0, vocab_size, (1, input_size), device=device
-                ),
-                "attention_mask": torch.ones(1, input_size, device=device),
-                "text": "prompt",
-            }
-            for _ in range(bs)
-        ]
+        return {
+            "input_ids": torch.randint(0, vocab_size, (bs, input_size), device=device),
+            "attention_mask": torch.ones(bs, input_size, device=device),
+            "question": [f"q_{i}" for i in range(bs)],
+            "answer": [f"a_{i}" for i in range(bs)],
+        }
 
     def step(completion_ids):
         r = torch.ones(bs, device=device)
@@ -731,6 +722,7 @@ def test_test_method_unknown_env_typeerror():
     ppo = _cpu_llmppo()
     with pytest.raises(TypeError, match="env must be a ReasoningGym"):
         ppo.test(object(), loop=1)
+
 
 def test_learn_with_turn_ids_and_1d_reward_vector():
     """When ``turn_ids`` is set and rewards stack to a 1-D tensor, unsqueeze to [B, 1]."""

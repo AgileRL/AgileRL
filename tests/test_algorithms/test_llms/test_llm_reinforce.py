@@ -433,7 +433,6 @@ def test_llmreinforce_get_action_vllm_training_temperature(
     obs = {
         "input_ids": torch.randint(0, vocab_size, (1, input_size), device=rf.device),
         "attention_mask": torch.ones(1, input_size, device=rf.device),
-        "text": "hello",
     }
     rf.get_action(obs, training=True)
     rf.get_action(obs, training=False)
@@ -604,7 +603,6 @@ def test_get_action_accepts_single_prompt_dict():
     obs = {
         "input_ids": torch.randint(0, 100, (1, 10)),
         "attention_mask": torch.ones(1, 10, dtype=torch.long),
-        "text": "x",
     }
     ids, masks = rf.get_action(obs, training=True)
     assert len(ids) == 1 and len(masks) == 1
@@ -616,7 +614,6 @@ def test_get_action_hf_stitch_completion_path():
     obs = {
         "input_ids": torch.randint(0, 100, (1, 4)),
         "attention_mask": torch.ones(1, 4, dtype=torch.long),
-        "text": "x",
         "stitch_prefix_ids": stitch,
         "initial_prompt_len": 2,
     }
@@ -629,7 +626,6 @@ def test_get_action_hf_stopiteration_uses_device_string():
     obs = {
         "input_ids": torch.randint(0, 100, (1, 10)),
         "attention_mask": torch.ones(1, 10, dtype=torch.long),
-        "text": "x",
     }
     unwrapped = rf._get_unwrapped_actor()
     with patch.object(unwrapped, "parameters", return_value=iter(())):
@@ -664,16 +660,12 @@ def _minimal_reasoning_gym(device: str, vocab_size: int, input_size: int, bs: in
     env.eval_mode = eval_mode
 
     def reset(reset_dataloaders=False):
-        return [
-            {
-                "input_ids": torch.randint(
-                    0, vocab_size, (1, input_size), device=device
-                ),
-                "attention_mask": torch.ones(1, input_size, device=device),
-                "text": "prompt",
-            }
-            for _ in range(bs)
-        ]
+        return {
+            "input_ids": torch.randint(0, vocab_size, (bs, input_size), device=device),
+            "attention_mask": torch.ones(bs, input_size, device=device),
+            "question": [f"q_{i}" for i in range(bs)],
+            "answer": [f"a_{i}" for i in range(bs)],
+        }
 
     def step(completion_ids):
         r = torch.ones(bs, device=device)

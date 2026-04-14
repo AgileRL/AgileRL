@@ -11,7 +11,6 @@ from datasets import Dataset as Datasets
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
-from transformers.tokenization_utils_base import BatchEncoding
 
 from agilerl.utils.algo_utils import DummyOptimizer
 from agilerl.utils.llm_utils import (
@@ -164,7 +163,8 @@ def test_reasoning_gym_init(
     assert list(next(env.train_dataloader_iter).keys()) == [
         "question",
         "answer",
-        "tokenized_prompts",
+        "input_ids",
+        "attention_mask",
     ]
     assert env.dataloader == env.train_dataloader_iter
     assert not env.reset_called
@@ -174,12 +174,10 @@ def test_reasoning_gym_init(
 
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("eval_mode", [True, False])
-@pytest.mark.parametrize("return_raw_completions", [True, False])
 def test_reasoning_gym_step(
     reasoning_dataset,
     num_samples,
     eval_mode,
-    return_raw_completions,
 ):
     train_dataset, test_dataset = reasoning_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -191,38 +189,31 @@ def test_reasoning_gym_step(
         reward_fn=dummy_reward_fn,
         conversation_template=DUMMY_CONVERSATION_TEMPLATE,
         data_batch_size_per_gpu=data_batch_size,
-        return_raw_completions=return_raw_completions,
     )
     env.evaluation_mode = eval_mode
     env.reset()
     completions = [torch.randint(0, 1000, (10, 356)) for _ in range(data_batch_size)]
     tokenized_prompts, rewards = env.step(completions)
-    assert isinstance(tokenized_prompts, list)
+    assert isinstance(tokenized_prompts, dict)
     assert isinstance(rewards, torch.Tensor)
-
-    for prompts in tokenized_prompts:
-        assert sorted(prompts.keys()) == ["attention_mask", "input_ids", "text"]
-        for key, val in prompts.items():
-            match key:
-                case "attention_mask":
-                    assert isinstance(val, torch.Tensor)
-                case "input_ids":
-                    assert isinstance(val, torch.Tensor)
-                case "text":
-                    if return_raw_completions:
-                        assert isinstance(val, str)
-                    else:
-                        assert val is None
+    assert set(tokenized_prompts.keys()) == {
+        "input_ids",
+        "attention_mask",
+        "question",
+        "answer",
+    }
+    assert isinstance(tokenized_prompts["input_ids"], torch.Tensor)
+    assert isinstance(tokenized_prompts["attention_mask"], torch.Tensor)
+    assert isinstance(tokenized_prompts["question"], list)
+    assert isinstance(tokenized_prompts["answer"], list)
 
 
 @pytest.mark.parametrize("num_samples", [200])
 @pytest.mark.parametrize("reset_dataloaders", [True, False])
-@pytest.mark.parametrize("return_raw_completions", [True, False])
 def test_reasoning_gym_reset(
     reasoning_dataset,
     num_samples,
     reset_dataloaders,
-    return_raw_completions,
 ):
     train_dataset, test_dataset = reasoning_dataset
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
@@ -234,24 +225,19 @@ def test_reasoning_gym_reset(
         reward_fn=dummy_reward_fn,
         conversation_template=DUMMY_CONVERSATION_TEMPLATE,
         data_batch_size_per_gpu=data_batch_size,
-        return_raw_completions=return_raw_completions,
     )
     tokenized_prompts = env.reset(reset_dataloaders)
-    assert isinstance(tokenized_prompts, list)
-
-    for prompts in tokenized_prompts:
-        assert sorted(prompts.keys()) == ["attention_mask", "input_ids", "text"]
-        for key, val in prompts.items():
-            match key:
-                case "attention_mask":
-                    assert isinstance(val, torch.Tensor)
-                case "input_ids":
-                    assert isinstance(val, torch.Tensor)
-                case "text":
-                    if return_raw_completions:
-                        assert isinstance(val, str)
-                    else:
-                        assert val is None
+    assert isinstance(tokenized_prompts, dict)
+    assert set(tokenized_prompts.keys()) == {
+        "input_ids",
+        "attention_mask",
+        "question",
+        "answer",
+    }
+    assert isinstance(tokenized_prompts["input_ids"], torch.Tensor)
+    assert isinstance(tokenized_prompts["attention_mask"], torch.Tensor)
+    assert isinstance(tokenized_prompts["question"], list)
+    assert isinstance(tokenized_prompts["answer"], list)
 
 
 @pytest.mark.parametrize("num_samples", [200])
@@ -282,14 +268,8 @@ def test_reasoning_gym_reset_dataloaders(
         first_data_point_reset.keys(),
         strict=False,
     ):
-        if key1 == "tokenized_prompts":
-            for item1, item2 in zip(
-                first_data_point["tokenized_prompts"],
-                first_data_point_reset["tokenized_prompts"],
-                strict=False,
-            ):
-                for key3, key4 in zip(item1.keys(), item2.keys(), strict=False):
-                    assert torch.equal(item1[key3], item2[key4])
+        if key1 in {"input_ids", "attention_mask"}:
+            assert torch.equal(first_data_point[key1], first_data_point_reset[key1])
         else:
             assert first_data_point[key1] == first_data_point_reset[key1]
 
@@ -366,20 +346,14 @@ def test_create_chat_collate_fn(reasoning_dataset, num_samples):
     assert isinstance(result, dict)
     assert "question" in result
     assert "answer" in result
-    assert "tokenized_prompts" in result
+    assert "input_ids" in result
+    assert "attention_mask" in result
 
     # Verify the content
     assert result["question"] == ["What is 2+2?", "What is 3+3?"]
     assert result["answer"] == ["4", "6"]
-    assert len(result["tokenized_prompts"]) == 2
-
-    # Verify each tokenized prompt
-    for prompt in result["tokenized_prompts"]:
-        assert isinstance(prompt, BatchEncoding)
-        assert "input_ids" in prompt
-        assert "attention_mask" in prompt
-        assert isinstance(prompt["input_ids"], torch.Tensor)
-        assert isinstance(prompt["attention_mask"], torch.Tensor)
+    assert result["input_ids"].shape[0] == 2
+    assert result["attention_mask"].shape[0] == 2
 
 
 @pytest.mark.parametrize("num_samples", [20])

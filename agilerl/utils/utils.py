@@ -758,9 +758,7 @@ def create_population(
                 actor_network=act,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
-                use_kl_advantage_shaping=INIT_HP.get(
-                    "USE_KL_ADVANTAGE_SHAPING", False
-                ),
+                use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
                 adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
                 importance_sampling_level=INIT_HP.get(
                     "IMPORTANCE_SAMPLING_LEVEL", "token"
@@ -877,14 +875,14 @@ def create_population(
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
                 gamma=INIT_HP.get("GAMMA", 1.0),
                 gae_lambda=INIT_HP.get("GAE_LAMBDA", 1.0),
-                lr_actor=INIT_HP.get("LR_ACTOR", INIT_HP.get("LR", 5e-7)),
+                lr_actor=INIT_HP.get("LR_ACTOR", INIT_HP.get("LR", 5e-6)),
                 lr_critic=INIT_HP.get("LR_CRITIC"),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 temperature=INIT_HP.get("TEMPERATURE", 1.0),
                 max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
                 min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
-                max_model_len=INIT_HP.get("MAX_MODEL_LEN"),
+                max_model_len=INIT_HP.get("MAX_MODEL_LEN", 1024),
                 use_memory_efficient_params=INIT_HP.get(
                     "USE_MEMORY_EFFICIENT_PARAMS", True
                 ),

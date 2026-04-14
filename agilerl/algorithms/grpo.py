@@ -1,5 +1,5 @@
-from typing import Any
 import warnings
+from typing import Any
 
 import numpy as np
 import torch
@@ -24,6 +24,7 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.llm_utils import (
     ReasoningGym,
     move_params_to_cpu,
+    normalize_reasoning_prompt_batch,
     prepare_prompt_hf_generate,
     stitch_completion_after_windowed_hf_generate,
 )
@@ -135,6 +136,7 @@ class GRPO(LLMAlgorithm):
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int | None = 1024,
+        hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfigProtocol | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
@@ -271,6 +273,9 @@ class GRPO(LLMAlgorithm):
         self.max_model_len = (
             max_model_len if max_model_len is not None else max_output_tokens
         )
+        self.hf_generate_chunk_size = (
+            1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
+        )
         self.generation_config = GenerationConfig(
             do_sample=True,
             temperature=temperature,
@@ -324,7 +329,7 @@ class GRPO(LLMAlgorithm):
         :return: Completion token IDs and per-sequence action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
-        prompt_batch = [obs] if isinstance(obs, dict) else obs
+        prompt_batch = normalize_reasoning_prompt_batch(obs)
         group_size = self.group_size if training and repeat_prompts else 1
         with self.select_adapter("actor"):
             self.actor.eval()
@@ -338,47 +343,59 @@ class GRPO(LLMAlgorithm):
                     completion_ids = []
                     completion_masks = []
 
-                    for prompt_dict in prompt_batch:
-                        prompt = prepare_prompt_hf_generate(prompt_dict, actor_device)
-                        if training and group_size > 1:
-                            prompt["input_ids"] = prompt["input_ids"].repeat(
-                                group_size,
-                                1,
+                    for start in range(
+                        0,
+                        len(prompt_batch),
+                        self.hf_generate_chunk_size,
+                    ):
+                        chunk = prompt_batch[
+                            start : start + self.hf_generate_chunk_size
+                        ]
+                        for prompt_dict in chunk:
+                            prompt = prepare_prompt_hf_generate(
+                                prompt_dict, actor_device
                             )
-                            prompt["attention_mask"] = prompt["attention_mask"].repeat(
-                                group_size,
-                                1,
+                            if training and group_size > 1:
+                                prompt["input_ids"] = prompt["input_ids"].repeat(
+                                    group_size,
+                                    1,
+                                )
+                                prompt["attention_mask"] = prompt[
+                                    "attention_mask"
+                                ].repeat(
+                                    group_size,
+                                    1,
+                                )
+                            stitch_ids = prompt.pop("stitch_prefix_ids", None)
+                            if (
+                                stitch_ids is not None
+                                and training
+                                and group_size > 1
+                                and stitch_ids.shape[0] == 1
+                            ):
+                                stitch_ids = stitch_ids.repeat(group_size, 1)
+                            initial_prompt_len = prompt.pop("initial_prompt_len", None)
+                            completion_id = self.actor.generate(
+                                **prompt,
+                                generation_config=self.generation_config,
                             )
-                        stitch_ids = prompt.pop("stitch_prefix_ids", None)
-                        if (
-                            stitch_ids is not None
-                            and training
-                            and group_size > 1
-                            and stitch_ids.shape[0] == 1
-                        ):
-                            stitch_ids = stitch_ids.repeat(group_size, 1)
-                        initial_prompt_len = prompt.pop("initial_prompt_len", None)
-                        completion_id = self.actor.generate(
-                            **prompt,
-                            generation_config=self.generation_config,
-                        )
-                        completion_id, full_prompt_len = (
-                            stitch_completion_after_windowed_hf_generate(
+                            completion_id, full_prompt_len = (
+                                stitch_completion_after_windowed_hf_generate(
+                                    completion_id,
+                                    stitch_ids,
+                                    initial_prompt_len,
+                                )
+                            )
+                            completion_ids.append(completion_id)
+                            completion_mask = torch.zeros_like(
                                 completion_id,
-                                stitch_ids,
-                                initial_prompt_len,
+                                dtype=torch.bool,
+                                device=completion_id.device,
                             )
-                        )
-                        completion_ids.append(completion_id)
-                        completion_mask = torch.zeros_like(
-                            completion_id,
-                            dtype=torch.bool,
-                            device=completion_id.device,
-                        )
-                        completion_mask[:, full_prompt_len:] = True
-                        completion_mask[completion_id == self.pad_token_id] = False
-                        completion_mask = completion_mask[:, 1:]
-                        completion_masks.append(completion_mask)
+                            completion_mask[:, full_prompt_len:] = True
+                            completion_mask[completion_id == self.pad_token_id] = False
+                            completion_mask = completion_mask[:, 1:]
+                            completion_masks.append(completion_mask)
             else:
                 if not self.use_memory_efficient_params:
                     if self.vllm_config.sleep_mode:
@@ -418,7 +435,7 @@ class GRPO(LLMAlgorithm):
             completion_ids = completion_ids.to(self.device)
             # GRPO expects one scalar reward per trajectory. If callers pass
             # per-turn rewards [batch, max_turns], collapse to episode returns.
-            if rewards.dim() > 1:
+            if rewards.dim() > 1 and rewards.shape[0] == completion_ids.shape[0]:
                 rewards = rewards.sum(dim=1)
             rewards = rewards.flatten()
             if rewards.shape[0] != completion_ids.shape[0]:
@@ -447,9 +464,9 @@ class GRPO(LLMAlgorithm):
                 advantages = advantages.squeeze(-1)
                 if active_adv_mask is not None and active_adv_mask.any():
                     active_advantages = advantages[active_adv_mask]
-                    whitened_active = (
-                        active_advantages - active_advantages.mean()
-                    ) / (active_advantages.std(unbiased=False) + 1e-8)
+                    whitened_active = (active_advantages - active_advantages.mean()) / (
+                        active_advantages.std(unbiased=False) + 1e-8
+                    )
                     advantages[active_adv_mask] = whitened_active
                 else:
                     advantages = (advantages - advantages.mean()) / (
@@ -521,7 +538,9 @@ class GRPO(LLMAlgorithm):
                     learn_metrics["mean_loss"] += loss.item()
                     learn_metrics["mean_kl"] += kl.item()
                     updates += 1
-        return {metric: value / max(updates, 1) for metric, value in learn_metrics.items()}
+        return {
+            metric: value / max(updates, 1) for metric, value in learn_metrics.items()
+        }
 
     def test(
         self,
@@ -593,7 +612,6 @@ class GRPO(LLMAlgorithm):
             - 1
         )
 
-    
     def _grpo_loss(
         self,
         batch_size: int,
@@ -697,9 +715,9 @@ class GRPO(LLMAlgorithm):
         log_probs_ratio = torch.exp(token_log_ratio)
         if self.importance_sampling_level != "token":
             mask_f = mask.float()
-            seq_log_ratio = (token_log_ratio * mask_f).sum(dim=-1, keepdim=True) / mask_f.sum(
+            seq_log_ratio = (token_log_ratio * mask_f).sum(
                 dim=-1, keepdim=True
-            ).clamp(min=1.0)
+            ) / mask_f.sum(dim=-1, keepdim=True).clamp(min=1.0)
             seq_log_probs_ratio = torch.exp(seq_log_ratio)
             if self.importance_sampling_level == "sequence":
                 log_probs_ratio = seq_log_probs_ratio

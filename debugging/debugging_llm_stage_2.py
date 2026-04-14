@@ -12,6 +12,9 @@ if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
 import torch
+from config_load import load_debug_config
+from llm_debug_utils import lora_config_from_dict
+from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 from agilerl.algorithms import GRPO, LLMPPO, LLMReinforce
 from agilerl.training import train_llm
@@ -20,10 +23,6 @@ from agilerl.utils.llm_utils import create_llm_accelerator, masked_whiten
 from agilerl.utils.probe_envs_llm import MultiInputConditionalEnv
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
-
-from config_load import load_debug_config
-from llm_debug_utils import lora_config_from_dict
-from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 TARGET_TOKEN_IDS = (1, 2, 3)
 
@@ -44,8 +43,8 @@ def evaluate_accuracy(
 
     total = 0
     correct = 0
-    class_total = {t: 0 for t in TARGET_TOKEN_IDS}
-    class_correct = {t: 0 for t in TARGET_TOKEN_IDS}
+    class_total = dict.fromkeys(TARGET_TOKEN_IDS, 0)
+    class_correct = dict.fromkeys(TARGET_TOKEN_IDS, 0)
     eval_rng = Random(12345)
 
     try:
@@ -180,7 +179,9 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         accelerator=accelerator,
         tokenizer=tokenizer,
         model_name=None,
-        actor_network=build_tiny_actor_network(use_value_head=(init_hp["ALGO"] == "LLMPPO")),
+        actor_network=build_tiny_actor_network(
+            use_value_head=(init_hp["ALGO"] == "LLMPPO")
+        ),
         lora_config=lora_config_from_dict(dbg["lora"]),
     )
     agent = pop[0]
@@ -190,9 +191,7 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
             enable_reinforce_style_advantages(agent)
             print(f"[seed={seed}] test_policy_only=True (REINFORCE-style advantages)")
         else:
-            print(
-                f"[seed={seed}] test_policy_only ignored for algo={init_hp['ALGO']}"
-            )
+            print(f"[seed={seed}] test_policy_only ignored for algo={init_hp['ALGO']}")
     else:
         print(f"[seed={seed}] test_policy_only=False (GAE)")
 
@@ -204,15 +203,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     print(f"[seed={seed}] pre per-class sampled: {pre_class}")
     print(f"[seed={seed}] pre per-class greedy: {pre_class_g}")
 
-    env = TokenObservationWrapper(
-        MultiInputConditionalEnv(seed=seed),
-        tokenizer,
-        1,
-        tokenizer.pad_token_id,
-        apply_chat_template=False,
-        max_model_len=max_ctx,
-        max_output_tokens=max_new,
-    )
     def env_factory() -> TokenObservationWrapper:
         return TokenObservationWrapper(
             MultiInputConditionalEnv(seed=seed),
@@ -223,6 +213,7 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
             max_model_len=max_ctx,
             max_output_tokens=max_new,
         )
+
     eval_fn = lambda a: evaluate_accuracy(a, tokenizer, eval_eps, greedy=True)[0]
 
     original_save = train_llm.save_llm_checkpoint
@@ -230,7 +221,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     try:
         finetune_llm_multiturn(
             pop=[agent],
-            env=env,
             max_turns=1,
             init_hp=init_hp,
             max_steps=int(dbg["max_sample_steps"]),

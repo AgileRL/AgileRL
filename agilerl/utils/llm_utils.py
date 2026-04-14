@@ -82,21 +82,61 @@ def max_prompt_tokens_for_sliding_window(
 ) -> int:
     """Upper bound on prompt tokens so at least one completion token can be generated.
 
-    Matches the headroom logic used by vLLM colocate generation: reserve
-    ``min(max_output_cap, max_model_len)`` with at least one token reserved for
-    generation when room exists.
+    Reserve generation headroom while keeping prompt budget as large as possible.
+    When ``max_output_tokens`` is provided, reserve up to that many tokens
+    (capped by ``max_model_len``). When it is ``None``, reserve exactly one
+    token so generation remains possible without collapsing prompt budget.
 
     :param max_model_len: Engine context length (prompt + completion ceiling).
     :type max_model_len: int
-    :param max_output_tokens: Configured completion cap; if ``None``, uses
-        ``max_model_len`` as the cap when computing headroom.
+    :param max_output_tokens: Configured completion cap; if ``None``, reserve
+        one token of generation headroom.
     :type max_output_tokens: int | None
     :return: Largest allowed prompt length under that headroom (may be 0).
     :rtype: int
     """
-    cap = max_output_tokens if max_output_tokens is not None else max_model_len
-    gen_reserve = max(1, min(cap, max_model_len))
+    gen_reserve = (
+        max(1, min(max_output_tokens, max_model_len))
+        if max_output_tokens is not None
+        else 1
+    )
     return max(0, max_model_len - gen_reserve)
+
+
+def normalize_reasoning_prompt_batch(
+    prompts: ReasoningPrompts | list[ReasoningPrompts],
+) -> list[ReasoningPrompts]:
+    """Normalize reasoning prompts into a list-of-dicts per sample.
+
+    Supports both legacy list-of-dicts and stacked dict formats where tensor/list
+    values are batched on dimension 0.
+    """
+    if isinstance(prompts, list):
+        return prompts
+
+    input_ids = prompts["input_ids"]
+    if not isinstance(input_ids, torch.Tensor) or input_ids.dim() == 1:
+        return [prompts]
+
+    batch_size = int(input_ids.shape[0])
+    if batch_size == 0:
+        return []
+
+    per_sample: list[ReasoningPrompts] = []
+    for i in range(batch_size):
+        sample: ReasoningPrompts = {}
+        for key, value in prompts.items():
+            if isinstance(value, torch.Tensor):
+                if value.dim() > 0 and value.shape[0] == batch_size:
+                    sample[key] = value[i : i + 1] if value.dim() >= 2 else value[i]
+                else:
+                    sample[key] = value
+            elif isinstance(value, list) and len(value) == batch_size:
+                sample[key] = value[i]
+            else:
+                sample[key] = value
+        per_sample.append(sample)
+    return per_sample
 
 
 class HuggingFaceGym(gym.Env, ABC):
@@ -189,14 +229,14 @@ class HuggingFaceGym(gym.Env, ABC):
     def reset(
         self,
         reset_dataloaders: bool = False,
-    ) -> tuple[list[ReasoningPrompts], dict[str, Any]]:
+    ) -> ReasoningPrompts:
         """Reset the environment and get the next batch of tokenized prompts."""
 
     @abstractmethod
     def step(
         self,
         completions: torch.Tensor,
-    ) -> tuple[list[ReasoningPrompts], torch.Tensor]:
+    ) -> tuple[ReasoningPrompts, torch.Tensor]:
         """Take a step in a HuggingFaceGym environment, calculate rewards from completions generated from previous prompt and provide new batch
         of prompts.
         """
@@ -350,7 +390,7 @@ class ReasoningGym(HuggingFaceGym):
     def step(
         self,
         completions: torch.Tensor,
-    ) -> tuple[list[ReasoningPrompts], torch.Tensor]:
+    ) -> tuple[ReasoningPrompts, torch.Tensor]:
         """Take a step in the ReasoningGym environment, calculate rewards from completions generated from previous prompt and provide new batch
         of prompts.
 
@@ -368,7 +408,7 @@ class ReasoningGym(HuggingFaceGym):
     def reset(
         self,
         reset_dataloaders: bool = False,
-    ) -> tuple[list[ReasoningPrompts], dict[str, Any]]:
+    ) -> ReasoningPrompts:
         """Reset the environment and get the next batch of tokenized prompts.
 
         :param reset_dataloaders: Whether to reset the dataloaders, defaults to False
@@ -402,12 +442,15 @@ class ReasoningGym(HuggingFaceGym):
         """
         # This is for a batch of completions (prompt_batch x group_size), List of tensors of length batch size, each tensor is a group of answers
         total_rewards = []
-        for idx, (group_completion, answer, question) in enumerate(
+        prompt_token_len = int(self.last_tokenized_prompts["input_ids"].shape[1])
+        for _idx, (group_completion, answer, question) in enumerate(
             zip(completions, self.answers, self.questions, strict=False),
         ):
+            if group_completion.dim() == 1:
+                group_completion = group_completion.unsqueeze(0)
             completion_to_decode = group_completion[
                 :,
-                self.last_tokenized_prompts[idx]["input_ids"].shape[1] :,
+                prompt_token_len:,
             ]
 
             # Vectorize this in the future
@@ -422,37 +465,28 @@ class ReasoningGym(HuggingFaceGym):
             total_rewards.append(rewards)
         return torch.tensor(total_rewards)
 
-    def _get_next_batch(self) -> list[ReasoningPrompts]:
+    def _get_next_batch(self) -> ReasoningPrompts:
         """Get the next batch of tokenized prompts."""
-        try:
-            batch = next(self.dataloader)
-            self.questions = batch["question"]
-            self.answers = batch["answer"]
-
-            returned_prompts = [
-                {
-                    "input_ids": returned_prompt["input_ids"],
-                    "attention_mask": returned_prompt["attention_mask"],
-                    "text": (
-                        self.tokenizer.batch_decode(
-                            returned_prompt["input_ids"],
-                            skip_special_tokens=False,  # Needs to be False here as we need to provide context about user roles to the model
-                            clean_up_tokenization_spaces=False,
-                        )[0]
-                    ),
+        while True:
+            try:
+                batch = next(self.dataloader)
+                self.questions = batch["question"]
+                self.answers = batch["answer"]
+                return {
+                    "input_ids": batch["input_ids"],
+                    "attention_mask": batch["attention_mask"],
+                    "question": self.questions,
+                    "answer": self.answers,
                 }
-                for returned_prompt in batch["tokenized_prompts"]
-            ]
-        except StopIteration:
-            if not self.evaluation_mode:
-                self.num_epochs += 1
+            except StopIteration:
+                if not self.evaluation_mode:
+                    self.num_epochs += 1
 
-            self._reset_dataloaders(
-                reset_train=not self.evaluation_mode,
-                reset_test=self.evaluation_mode,
-            )
-            return self._get_next_batch()
-        return returned_prompts
+                self._reset_dataloaders(
+                    reset_train=not self.evaluation_mode,
+                    reset_test=self.evaluation_mode,
+                )
+                continue
 
     def create_collate_fn(
         self,
@@ -470,16 +504,38 @@ class ReasoningGym(HuggingFaceGym):
             questions = [item["question"] for item in batch]
             answers = [item["answer"] for item in batch]
 
-            # Apply chat template to all samples
-            tokenized_prompts = [
-                apply_chat_template(self.conversation_template, q, a, tokenizer)
-                for q, a in zip(questions, answers, strict=False)
-            ]
+            rendered_prompts = []
+            for question, answer in zip(questions, answers, strict=False):
+                formatted_conversation = [
+                    {
+                        "role": msg["role"],
+                        "content": msg["content"].format(
+                            question=question,
+                            answer=answer,
+                        ),
+                    }
+                    for msg in self.conversation_template
+                ]
+                rendered_prompts.append(
+                    tokenizer.apply_chat_template(
+                        formatted_conversation,
+                        tokenize=False,
+                        continue_final_message=True,
+                    )
+                )
+            tokenized_prompts = tokenizer(
+                rendered_prompts,
+                return_tensors="pt",
+                padding=True,
+                padding_side="left",
+                return_attention_mask=True,
+            )
 
             return {
                 "question": questions,
                 "answer": answers,
-                "tokenized_prompts": tokenized_prompts,  # Keep individual tokenized prompts
+                "input_ids": tokenized_prompts["input_ids"],
+                "attention_mask": tokenized_prompts["attention_mask"],
             }
 
         return collate_fn
@@ -559,17 +615,17 @@ class PreferenceGym(HuggingFaceGym):
         return self._get_next_batch()
 
     def _get_next_batch(self) -> PreferencePrompts:
-        try:
-            batch = next(self.dataloader)
-        except StopIteration:
-            if not self.evaluation_mode:
-                self.num_epochs += 1
-            self._reset_dataloaders(
-                reset_train=not self.evaluation_mode,
-                reset_test=self.evaluation_mode,
-            )
-            return self._get_next_batch()
-        return batch
+        while True:
+            try:
+                return next(self.dataloader)
+            except StopIteration:
+                if not self.evaluation_mode:
+                    self.num_epochs += 1
+                self._reset_dataloaders(
+                    reset_train=not self.evaluation_mode,
+                    reset_test=self.evaluation_mode,
+                )
+                continue
 
     def create_collate_fn(
         self,
@@ -600,27 +656,27 @@ class PreferenceGym(HuggingFaceGym):
             )
             prompt_lengths = [len(ids) for ids in prompt_encodings["input_ids"]]
 
-            # Tokenize without padding
-            chosen_enc = tokenizer(
-                prompts,
-                chosen,
+            paired_prompts = prompts + prompts
+            paired_responses = chosen + rejected
+            paired_enc = tokenizer(
+                paired_prompts,
+                paired_responses,
                 max_length=self.max_context_length,
                 truncation=True,
                 padding=False,
             )
-            rejected_enc = tokenizer(
-                prompts,
-                rejected,
-                max_length=self.max_context_length,
-                truncation=True,
-                padding=False,
-            )
+            split_idx = len(prompts)
+            chosen_enc = {
+                "input_ids": paired_enc["input_ids"][:split_idx],
+                "attention_mask": paired_enc["attention_mask"][:split_idx],
+            }
+            rejected_enc = {
+                "input_ids": paired_enc["input_ids"][split_idx:],
+                "attention_mask": paired_enc["attention_mask"][split_idx:],
+            }
 
             # Compute the joint max length across both
-            max_len = max(
-                *(len(ids) for ids in chosen_enc["input_ids"]),
-                *(len(ids) for ids in rejected_enc["input_ids"]),
-            )
+            max_len = max(len(ids) for ids in paired_enc["input_ids"])
 
             max_len = (
                 min(max_len, self.max_context_length)
@@ -821,12 +877,12 @@ def compute_token_rewards(
     :return: ``[batch, seq_len]`` per-token rewards; 0 for non-action positions.
     :rtype: torch.Tensor
     """
-    valid = turn_ids >= 0                         # [B, seq_len]
-    safe_turn_ids = turn_ids.clamp(min=0)         # map -1 → 0 to keep gather in-bounds
+    valid = turn_ids >= 0  # [B, seq_len]
+    safe_turn_ids = turn_ids.clamp(min=0)  # map -1 → 0 to keep gather in-bounds
     return torch.gather(rewards, 1, safe_turn_ids) * valid.float()
 
 
-# FIXME maybe we can remove?
+# FIXME maybe we can remove?
 def compute_advantages_token_broadcast_vectorised(
     turn_level_values: torch.Tensor,
     turn_ids: torch.Tensor,
@@ -1143,26 +1199,22 @@ def prepare_prompt_hf_generate(
     :return: The prepared prompt dictionary.
     :rtype: dict[str, torch.Tensor | int]
     """
-    # Prompt dict shouldn't contain text or model_text but remove anyway
-    prompt_dict.pop("text", None)
-    prompt_dict.pop("trajectory_text", None)
+    input_ids = prompt_dict.get("trajectory_input_ids", prompt_dict["input_ids"])
+    attention_mask = prompt_dict.get(
+        "trajectory_attention_mask",
+        prompt_dict["attention_mask"],
+    )
+    stitched = prompt_dict.get("stitch_prefix_ids")
+    initial_prompt_len = prompt_dict.get("initial_prompt_len")
+    if isinstance(initial_prompt_len, torch.Tensor) and initial_prompt_len.numel() == 1:
+        initial_prompt_len = int(initial_prompt_len.item())
 
-    prompt_dict["stitch_prefix_ids"] = prompt_dict.pop("stitch_prefix_ids", None)
-    prompt_dict["initial_prompt_len"] = prompt_dict.pop("initial_prompt_len", None)
-
-    if "trajectory_input_ids" in prompt_dict:
-        prompt_dict["input_ids"] = prompt_dict.pop("trajectory_input_ids").to(device)
-    else:
-        prompt_dict["input_ids"] = prompt_dict["input_ids"].to(device)
-
-    if "trajectory_attention_mask" in prompt_dict:
-        prompt_dict["attention_mask"] = prompt_dict.pop("trajectory_attention_mask").to(
-            device
-        )
-    else:
-        prompt_dict["attention_mask"] = prompt_dict["attention_mask"].to(device)
-
-    return prompt_dict
+    return {
+        "input_ids": input_ids.to(device),
+        "attention_mask": attention_mask.to(device),
+        "stitch_prefix_ids": stitched,
+        "initial_prompt_len": initial_prompt_len,
+    }
 
 
 def get_model_name_or_path(model: PreTrainedModel) -> str:
@@ -1173,7 +1225,6 @@ def get_model_name_or_path(model: PreTrainedModel) -> str:
     :return: The name or path of the model.
     :rtype: str
     """
-
     if hasattr(model, "name_or_path"):
         return model.name_or_path
 
@@ -1182,19 +1233,14 @@ def get_model_name_or_path(model: PreTrainedModel) -> str:
     ):
         return model.pretrained_model.name_or_path
 
-    if hasattr(model, "base_model") and hasattr(
-        model.base_model, "name_or_path"
-    ):
+    if hasattr(model, "base_model") and hasattr(model.base_model, "name_or_path"):
         return model.base_model.name_or_path
 
-    if hasattr(model, "base_model") and hasattr(
-        model.base_model, "pretrained_model"
-    ):
+    if hasattr(model, "base_model") and hasattr(model.base_model, "pretrained_model"):
         return model.base_model.pretrained_model.name_or_path
-        
+
     msg = "Model name or path not found."
     raise ValueError(msg)
-
 
 
 def align_deepspeed_lr(lr: float, accelerator: Accelerator) -> float:
@@ -1208,14 +1254,18 @@ def align_deepspeed_lr(lr: float, accelerator: Accelerator) -> float:
     :rtype: float
     """
     if accelerator is not None:
-        optim_lr = accelerator.state.deepspeed_plugin.deepspeed_config.get(
-            "optimizer", {}
-        ).get("params", {}).get("lr", None)
+        optim_lr = (
+            accelerator.state.deepspeed_plugin.deepspeed_config.get("optimizer", {})
+            .get("params", {})
+            .get("lr", None)
+        )
         if optim_lr is not None and optim_lr != lr:
             warnings.warn(
                 "DeepSpeed learning rate is set to {optim_lr} but the argument 'lr' is set to {lr}."
                 "Overwriting deepspeed learning rate with the argument 'lr'.",
                 stacklevel=2,
             )
-            accelerator.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"]["lr"] = lr
+            accelerator.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
+                "lr"
+            ] = lr
     return lr

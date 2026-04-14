@@ -24,10 +24,10 @@ from agilerl.utils.llm_utils import (
     ReasoningGym,
     masked_mean,
     move_params_to_cpu,
+    normalize_reasoning_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
     stitch_completion_after_windowed_hf_generate,
-    compute_token_rewards,
 )
 from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 
@@ -151,6 +151,7 @@ class REINFORCE(LLMAlgorithm):
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
         max_model_len: int | None = 1024,
+        hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfigProtocol | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
@@ -234,6 +235,9 @@ class REINFORCE(LLMAlgorithm):
         self.max_model_len = (
             max_model_len if max_model_len is not None else max_output_tokens
         )
+        self.hf_generate_chunk_size = (
+            1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
+        )
         self.generation_config = GenerationConfig(
             do_sample=True,
             temperature=temperature,
@@ -281,7 +285,7 @@ class REINFORCE(LLMAlgorithm):
         :return: Per-prompt completion token IDs and masks over generated positions.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
-        prompt_batch = [obs] if isinstance(obs, dict) else obs
+        prompt_batch = normalize_reasoning_prompt_batch(obs)
 
         with self.select_adapter("actor"):
             self.actor.eval()
@@ -295,31 +299,41 @@ class REINFORCE(LLMAlgorithm):
                     completion_ids = []
                     completion_masks = []
 
-                    for prompt_dict in prompt_batch:
-                        prompt = prepare_prompt_hf_generate(prompt_dict, actor_device)
-                        stitch_ids = prompt.pop("stitch_prefix_ids", None)
-                        initial_prompt_len = prompt.pop("initial_prompt_len", None)
-                        completion_id = self.actor.generate(
-                            **prompt,
-                            generation_config=self.generation_config,
-                        )
-                        completion_id, full_prompt_len = (
-                            stitch_completion_after_windowed_hf_generate(
-                                completion_id,
-                                stitch_ids,
-                                initial_prompt_len,
+                    for start in range(
+                        0,
+                        len(prompt_batch),
+                        self.hf_generate_chunk_size,
+                    ):
+                        chunk = prompt_batch[
+                            start : start + self.hf_generate_chunk_size
+                        ]
+                        for prompt_dict in chunk:
+                            prompt = prepare_prompt_hf_generate(
+                                prompt_dict, actor_device
                             )
-                        )
-                        completion_ids.append(completion_id)
-                        completion_mask = torch.zeros_like(
-                            completion_id,
-                            dtype=torch.bool,
-                            device=completion_id.device,
-                        )
-                        completion_mask[:, full_prompt_len:] = True
-                        completion_mask[completion_id == self.pad_token_id] = False
-                        completion_mask = completion_mask[:, 1:]
-                        completion_masks.append(completion_mask)
+                            stitch_ids = prompt.pop("stitch_prefix_ids", None)
+                            initial_prompt_len = prompt.pop("initial_prompt_len", None)
+                            completion_id = self.actor.generate(
+                                **prompt,
+                                generation_config=self.generation_config,
+                            )
+                            completion_id, full_prompt_len = (
+                                stitch_completion_after_windowed_hf_generate(
+                                    completion_id,
+                                    stitch_ids,
+                                    initial_prompt_len,
+                                )
+                            )
+                            completion_ids.append(completion_id)
+                            completion_mask = torch.zeros_like(
+                                completion_id,
+                                dtype=torch.bool,
+                                device=completion_id.device,
+                            )
+                            completion_mask[:, full_prompt_len:] = True
+                            completion_mask[completion_id == self.pad_token_id] = False
+                            completion_mask = completion_mask[:, 1:]
+                            completion_masks.append(completion_mask)
             else:
                 if not self.use_memory_efficient_params:
                     if self.vllm_config.sleep_mode:
@@ -327,7 +341,7 @@ class REINFORCE(LLMAlgorithm):
                         self._maybe_wake_vllm()
                     self._move_model_to_vllm()
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
-                    obs,
+                    prompt_batch,
                     1,
                     temperature=self.temperature
                     if training
@@ -475,13 +489,17 @@ class REINFORCE(LLMAlgorithm):
 
                     self._backward_pass(pg_loss)
 
-                    learn_metrics["mean_kl"] += masked_mean(kl, batch_action_mask).item()
+                    learn_metrics["mean_kl"] += masked_mean(
+                        kl, batch_action_mask
+                    ).item()
                     learn_metrics["mean_entropy"] += masked_entropy.item()
                     learn_metrics["mean_pg_loss"] += pg_loss.item()
                     learn_metrics["mean_loss"] += pg_loss.item()
                     updates += 1
 
-        return {metric: value / max(updates, 1) for metric, value in learn_metrics.items()}
+        return {
+            metric: value / max(updates, 1) for metric, value in learn_metrics.items()
+        }
 
     def test(
         self,
@@ -635,4 +653,3 @@ class REINFORCE(LLMAlgorithm):
             mask_t = (turn_ids == t).float()
             token_rewards += mask_t * rewards[:, t : t + 1]
         return token_rewards
-

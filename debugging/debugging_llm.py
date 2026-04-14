@@ -10,6 +10,9 @@ if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
 import torch
+from config_load import load_debug_config
+from llm_debug_utils import lora_config_from_dict
+from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 from agilerl.algorithms import GRPO, LLMPPO, LLMReinforce
 from agilerl.training import train_llm
@@ -18,10 +21,6 @@ from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.probe_envs_llm import ConstantTargetEnv
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
-
-from config_load import load_debug_config
-from llm_debug_utils import lora_config_from_dict
-from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 
 def evaluate_hit_rate(
@@ -91,7 +90,9 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
             f"(pad={tokenizer.pad_token_id}, eos={tokenizer.eos_token_id})."
         )
 
-    actor_network = build_tiny_actor_network(use_value_head=(init_hp["ALGO"] == "LLMPPO"))
+    actor_network = build_tiny_actor_network(
+        use_value_head=(init_hp["ALGO"] == "LLMPPO")
+    )
     init_hp.setdefault("ALGO", "LLMPPO")
     init_hp.setdefault("USE_VLLM", False)
     init_hp.setdefault("MAX_MODEL_LEN", max_ctx)
@@ -113,24 +114,13 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     )
     agent = pop[0]
 
-    pre_rate = evaluate_hit_rate(
-        agent, tokenizer, target_token, eval_eps, greedy=False
-    )
+    pre_rate = evaluate_hit_rate(agent, tokenizer, target_token, eval_eps, greedy=False)
     pre_g = evaluate_hit_rate(agent, tokenizer, target_token, eval_eps, greedy=True)
     print(
         f"[seed={seed}] pre-train token-{target_token} hit rate "
         f"(sampled/greedy): {pre_rate:.3f}/{pre_g:.3f}"
     )
 
-    env = TokenObservationWrapper(
-        ConstantTargetEnv(target_digit=target_token),
-        tokenizer,
-        1,
-        tokenizer.pad_token_id,
-        apply_chat_template=False,
-        max_model_len=max_ctx,
-        max_output_tokens=max_new,
-    )
     def env_factory() -> TokenObservationWrapper:
         return TokenObservationWrapper(
             ConstantTargetEnv(target_digit=target_token),
@@ -141,6 +131,7 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
             max_model_len=max_ctx,
             max_output_tokens=max_new,
         )
+
     eval_fn = lambda a: evaluate_hit_rate(a, tokenizer, target_token, eval_eps, True)
 
     original_save = train_llm.save_llm_checkpoint
@@ -148,7 +139,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     try:
         finetune_llm_multiturn(
             pop=[agent],
-            env=env,
             max_turns=1,
             init_hp=init_hp,
             max_steps=int(dbg["max_sample_steps"]),
@@ -166,9 +156,7 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     post_rate = evaluate_hit_rate(
         agent, tokenizer, target_token, eval_eps, greedy=False
     )
-    post_g = evaluate_hit_rate(
-        agent, tokenizer, target_token, eval_eps, greedy=True
-    )
+    post_g = evaluate_hit_rate(agent, tokenizer, target_token, eval_eps, greedy=True)
     print(
         f"[seed={seed}] post-train token-{target_token} hit rate "
         f"(sampled/greedy): {post_rate:.3f}/{post_g:.3f}"

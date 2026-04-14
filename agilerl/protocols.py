@@ -469,3 +469,24 @@ class PeftModelProtocol(Protocol):
         adapter_path: str,
         **kwargs: Any,
     ) -> "PeftModelProtocol": ...
+
+
+# class MultiTurnEpisodeEnv(Protocol):
+#     """Protocol for wrapped GEM envs used by ``SyncGemVecEnv``."""
+
+#     def reset(self, seed: int | None = None) -> tuple[ReasoningPrompts, dict[str, Any]]:
+#         ...
+
+#     def step(
+#         self,
+#         full_completion_ids: torch.Tensor,
+#     ) -> tuple[ReasoningPrompts, float, bool, bool, dict[str, Any]]:
+#         ...
+
+#     def get_episode_data(
+#         self,
+#     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+#         ...
+
+#     def close(self) -> None:
+#         ...

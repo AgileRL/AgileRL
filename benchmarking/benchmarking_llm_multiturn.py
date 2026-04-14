@@ -26,8 +26,6 @@ from agilerl.wrappers.gem_wrappers import (
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 ENV_NAME = "game:GuessTheNumber-v0-easy"
-MAX_CONTEXT_LENGTH = 1024
-MAX_OUTPUT_TOKENS = 64
 USE_TINY_DEBUG_MODEL = False
 USE_VLLM = not USE_TINY_DEBUG_MODEL
 PRELOAD_MODEL = True
@@ -90,8 +88,9 @@ def main(init_hp, mut_p):
     #     max_tool_uses=2,
     # )
     max_turns = base_env.max_turns
+
     # fmt_env = FormatRewardWrapper(tool_env)
-    def _make_wrapped_env():
+    def env_factory():
         env = gem.make(ENV_NAME)
         return TokenObservationWrapper(
             env,
@@ -99,26 +98,11 @@ def main(init_hp, mut_p):
             max_turns,
             tokenizer.pad_token_id,
             apply_chat_template=apply_chat_template,
-            max_model_len=None if USE_TINY_DEBUG_MODEL else MAX_CONTEXT_LENGTH,
-            max_output_tokens=None if USE_TINY_DEBUG_MODEL else MAX_OUTPUT_TOKENS,
+            max_model_len=init_hp.get("MAX_MODEL_LEN", None),
+            max_output_tokens=init_hp.get("MAX_OUTPUT_TOKENS", None),
         )
 
-    env = _make_wrapped_env()
     accelerator = create_llm_accelerator() if not USE_TINY_DEBUG_MODEL else None
-
-    init_hp["MAX_MODEL_LEN"] = MAX_CONTEXT_LENGTH
-    init_hp["MAX_OUTPUT_TOKENS"] = MAX_OUTPUT_TOKENS
-    init_hp["USE_VLLM"] = USE_VLLM
-    init_hp.setdefault("MICRO_BATCH_SIZE_PER_GPU", 1)
-    init_hp.setdefault("USE_SEPARATE_REFERENCE_ADAPTER", True)
-    init_hp.setdefault("GRADIENT_CHECKPOINTING", True)
-    init_hp.setdefault("LORA_R", 16)
-    init_hp.setdefault("LORA_ALPHA", 64)
-    init_hp.setdefault("LORA_DROPOUT", 0.0)
-    init_hp.setdefault("TARGET_MODULES", target_modules)
-    assert tokenizer.pad_token_id != tokenizer.eos_token_id, (
-        "Pad token and eos token are the same"
-    )
 
     vllm_config = (
         VLLMConfig(
@@ -145,7 +129,6 @@ def main(init_hp, mut_p):
 
     finetune_llm_multiturn(
         pop=[agent],
-        env=env,
         max_turns=max_turns,
         init_hp=init_hp,
         wb=True,
@@ -158,7 +141,7 @@ def main(init_hp, mut_p):
         max_reward=1.0,
         verbose=True,
         accelerator=accelerator,
-        env_factory=_make_wrapped_env,
+        env_factory=env_factory,
     )
     if accelerator is not None:
         accelerator.end_training()
@@ -169,7 +152,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/training/llm_finetuning/grpo.yaml",
+        default="configs/training/llm_finetuning/ppo_llm.yaml",
         help="Path to the YAML config file",
     )
     args = parser.parse_args()

@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import os
 import re
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import requests
 import torch
 from gem.tools.base_tool import BaseTool
 
+from agilerl.typing import ReasoningPrompts
+from agilerl.utils.algo_utils import stack_and_pad_experiences
 from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
 
 if TYPE_CHECKING:
@@ -213,7 +217,8 @@ class TokenObservationWrapper:
         :rtype: tuple[dict[str, Any], float, bool, bool, dict[str, Any]]
         """
         prompt_len = self.full_ids.shape[1]
-        self.full_ids = full_completion_ids.to(self.full_ids.device)
+        # Keep rollout state detached from any model computation graph.
+        self.full_ids = full_completion_ids.detach().to(self.full_ids.device)
         gen_end = self.full_ids.shape[1]
         self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
         self._gen_texts.append(gen_text)
@@ -577,3 +582,275 @@ class FormatRewardWrapper:
 
     def reset(self, **kwargs):
         return self._env.reset(**kwargs)
+
+
+# FIXME this cant go here
+class MultiTurnEpisodeEnv(Protocol):
+    """Protocol for wrapped multi-turn envs used by rollout vectorization."""
+
+    def reset(
+        self, seed: int | None = None
+    ) -> tuple[ReasoningPrompts, dict[str, Any]]: ...
+
+    def step(
+        self,
+        full_completion_ids: torch.Tensor,
+    ) -> tuple[ReasoningPrompts, float, bool, bool, dict[str, Any]]: ...
+
+    def get_episode_data(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
+
+    def close(self) -> None: ...
+
+
+@dataclass
+class Trajectory:
+    """State for one environment rollout within a synchronized vector batch."""
+
+    env: MultiTurnEpisodeEnv
+    batch_idx: int
+    group_idx: int
+    prompt: ReasoningPrompts
+    done: bool
+
+
+class TrajectoryBuffer:
+    """Container for synchronized rollout trajectories.
+
+    Keeps trajectory ordering by ``(batch_idx, group_idx)`` when preparing
+    model prompts so generated completions can be mapped back deterministically.
+    """
+
+    def __init__(self, batch_size: int, group_size: int):
+        """Initialize an empty trajectory buffer."""
+        self.batch_size = batch_size
+        self.group_size = group_size
+        self.trajectories: list[Trajectory] = []
+
+    @property
+    def is_initialized(self) -> bool:
+        """Return ``True`` when the trajectory buffer is initialized."""
+        return len(self.trajectories) == (self.batch_size * self.group_size)
+
+    def add_trajectory(self, trajectory: Trajectory) -> None:
+        """Append a trajectory to the buffer."""
+        self.trajectories.append(trajectory)
+
+    def clear(self) -> None:
+        """Remove all stored trajectories."""
+        self.trajectories.clear()
+
+    def has_active(self) -> bool:
+        """Return ``True`` when at least one trajectory is still active."""
+        return any(not trajectory.done for trajectory in self.trajectories)
+
+    def get_prompts(self) -> ReasoningPrompts | None:
+        """Return stacked prompts for active trajectories.
+
+        :return: Stacked prompt tensors for active trajectories, or ``None`` if
+            all trajectories are complete.
+        :rtype: ReasoningPrompts | None
+        """
+        active_trajectories = self.get_active_trajectories(sorted_by_index=True)
+        if len(active_trajectories) == 0:
+            return None
+        return TrajectoryBuffer._stack_active_prompts(active_trajectories)
+
+    def get_active_trajectories(
+        self,
+        *,
+        sorted_by_index: bool = False,
+    ) -> list[Trajectory]:
+        """Get active (non-terminal) trajectories.
+
+        :param sorted_by_index: If ``True``, sort by ``(batch_idx, group_idx)``.
+        :type sorted_by_index: bool
+        :return: Active trajectories.
+        :rtype: list[Trajectory]
+        """
+        trajectories = [
+            trajectory for trajectory in self.trajectories if not trajectory.done
+        ]
+        if sorted_by_index:
+            trajectories.sort(key=lambda t: (t.batch_idx, t.group_idx))
+        return trajectories
+
+    def sort(self, key: Callable[[Trajectory], Any]) -> None:
+        """Sort trajectories in place."""
+        self.trajectories.sort(key=key)
+
+    def __iter__(self) -> Iterator[Trajectory]:
+        """Iterate over stored trajectories."""
+        return iter(self.trajectories)
+
+    def reset_trajectory(self, seed: int, env_idx: int) -> None:
+        """Reset all trajectories.
+
+        :param seed: Seed for the environment.
+        :type seed: int
+        :param env_idx: Index of the environment to reset.
+        :type env_idx: int
+        :return: None
+        :rtype: None
+        """
+        prompt_dict, _ = self.trajectories[env_idx].env.reset(seed=seed)
+        self.trajectories[env_idx].prompt = prompt_dict
+        self.trajectories[env_idx].done = False
+
+    @staticmethod
+    def _stack_active_prompts(trajectories: list[Trajectory]) -> ReasoningPrompts:
+        """Stack prompt fields across active trajectories.
+
+        :param trajectories: Active trajectories in the same order as the model
+            input batch.
+        :type trajectories: list[Trajectory]
+        :return: Batched prompt tensors compatible with ``agent.get_action``.
+        :rtype: ReasoningPrompts
+        """
+        prompt_batch = [trajectory.prompt for trajectory in trajectories]
+        stacked = cast("ReasoningPrompts", {})
+        tensor_keys = (
+            "input_ids",
+            "attention_mask",
+            "trajectory_input_ids",
+            "trajectory_attention_mask",
+            "stitch_prefix_ids",
+        )
+        for key in tensor_keys:
+            values = [prompt.get(key) for prompt in prompt_batch]
+            if any(v is None for v in values):
+                continue
+            (stacked_tensor,) = stack_and_pad_experiences(values, padding_values=[0])
+            if "attention_mask" in key:
+                stacked_tensor = stacked_tensor.long()
+            stacked[key] = stacked_tensor
+
+        initial_prompt_lengths = [
+            prompt.get("initial_prompt_len") for prompt in prompt_batch
+        ]
+        if all(v is not None for v in initial_prompt_lengths):
+            stacked["initial_prompt_len"] = torch.tensor(
+                initial_prompt_lengths,
+                dtype=torch.long,
+            )
+
+        return stacked
+
+    def __getitem__(self, index: int) -> Trajectory:
+        return self.trajectories[index]
+
+    def __len__(self) -> int:
+        return len(self.trajectories)
+
+
+class SyncGemVecEnv:
+    """Synchronous multi-turn vector environment for LLM rollouts."""
+
+    def __init__(
+        self,
+        env_factory: Callable[..., MultiTurnEpisodeEnv],
+        batch_size: int,
+        group_size: int,
+        env_config: dict[str, Any] | None = None,
+    ):
+        """Create ``batch_size * group_size`` independent environments."""
+        if env_config is None:
+            env_config = {}
+        self.env_factory = env_factory
+        self.env_config = env_config
+        self.num_envs = batch_size * group_size
+        self.batch_size = batch_size
+        self.group_size = group_size
+        self.trajectories = TrajectoryBuffer(batch_size, group_size)
+
+    def reset(
+        self,
+        seed: int | None = None,
+    ) -> ReasoningPrompts | None:
+        """Reset all environments and initialize trajectories.
+
+        Seeds are shared within each batch group (same seed for all members in
+        a group), and incremented per batch index.
+        """
+        seed_base = seed
+        for batch_idx in range(self.batch_size):
+            batch_seed = None if seed_base is None else seed_base + batch_idx
+            for group_idx in range(self.group_size):
+                env_idx = batch_idx * self.group_size + group_idx
+                if not self.trajectories.is_initialized:
+                    env_i = self.env_factory(**self.env_config)
+                    prompt_dict, _ = env_i.reset(seed=batch_seed)
+                    self.trajectories.add_trajectory(
+                        Trajectory(
+                            env=env_i,
+                            batch_idx=batch_idx,
+                            group_idx=group_idx,
+                            prompt=prompt_dict,
+                            done=False,
+                        )
+                    )
+                else:
+                    self.trajectories.reset_trajectory(env_idx=env_idx, seed=batch_seed)
+
+        return self.trajectories.get_prompts()
+
+    def step(self, completion_ids: list[torch.Tensor]) -> ReasoningPrompts | None:
+        """Step each active trajectory with its corresponding completion."""
+        active = self.trajectories.get_active_trajectories(sorted_by_index=True)
+        if len(completion_ids) != len(active):
+            msg = (
+                "Number of completions does not match number of active trajectories: "
+                f"{len(completion_ids)} != {len(active)}"
+            )
+            raise RuntimeError(msg)
+        for traj, completion in zip(active, completion_ids, strict=False):
+            full_completion = completion
+            if full_completion.dim() == 1:
+                full_completion = full_completion.unsqueeze(0)
+            next_prompt, _reward, terminated, truncated, _info = traj.env.step(
+                full_completion,
+            )
+            traj.done = bool(terminated or truncated)
+            if not traj.done:
+                traj.prompt = next_prompt
+
+        return self.trajectories.get_prompts()
+
+    def close(self) -> None:
+        """Close all underlying environments."""
+        for env in self.envs:
+            if hasattr(env, "close"):
+                env.close()
+
+    def get_trajectories(
+        self,
+    ) -> tuple[
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[torch.Tensor],
+        int,
+    ]:
+        """Collect complete episode tensors from all trajectories."""
+        completion_ids_list: list[torch.Tensor] = []
+        action_masks_list: list[torch.Tensor] = []
+        all_turn_ids: list[torch.Tensor] = []
+        all_rewards: list[torch.Tensor] = []
+        batch_steps = 0
+        self.trajectories.sort(key=lambda t: (t.batch_idx, t.group_idx))
+        for traj in self.trajectories:
+            ep_ids, action_mask, turn_ids, turn_rewards_t = traj.env.get_episode_data()
+            completion_ids_list.append(ep_ids)
+            action_masks_list.append(action_mask)
+            all_turn_ids.append(turn_ids)
+            all_rewards.append(turn_rewards_t)
+            batch_steps += len(getattr(traj.env, "turn_boundaries", []))
+
+        return (
+            completion_ids_list,
+            action_masks_list,
+            all_turn_ids,
+            all_rewards,
+            batch_steps,
+        )

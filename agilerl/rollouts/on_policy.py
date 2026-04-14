@@ -1,17 +1,20 @@
 """Functions for collecting rollouts for on-policy algorithms."""
 
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import torch
 from gymnasium import spaces
 
-from agilerl.algorithms import PPO, LLMPPO, LLMReinforce, GRPO
+from agilerl.algorithms import GRPO, LLMPPO, PPO, LLMReinforce
 from agilerl.networks import StochasticActor
-from agilerl.typing import GymEnvType
+from agilerl.typing import GymEnvType, MultiTurnEnvType
+from agilerl.utils.algo_utils import stack_and_pad_experiences
+from agilerl.wrappers.gem_wrappers import SyncGemVecEnv
 
 SupportedOnPolicy = PPO
 SupportedOnPolicyLLM = LLMPPO | LLMReinforce | GRPO
+
 
 def _collect_rollouts(
     agent: SupportedOnPolicy,
@@ -235,10 +238,44 @@ def collect_rollouts_recurrent(
     """
     return _collect_rollouts(agent, env, n_steps, recurrent=True, **kwargs)
 
-def collect_rollouts_llm(
+
+def _stack_active_prompts(prompt_batch: list[dict[str, Any]]) -> dict[str, Any]:
+    stacked: dict[str, Any] = {}
+    tensor_keys = (
+        "input_ids",
+        "attention_mask",
+        "trajectory_input_ids",
+        "trajectory_attention_mask",
+        "stitch_prefix_ids",
+    )
+    for key in tensor_keys:
+        values = [prompt.get(key) for prompt in prompt_batch]
+        if any(v is None for v in values):
+            continue
+        (stacked_tensor,) = stack_and_pad_experiences(values, padding_values=[0])
+        if "attention_mask" in key:
+            stacked_tensor = stacked_tensor.long()
+        stacked[key] = stacked_tensor
+
+    initial_prompt_lengths = [
+        prompt.get("initial_prompt_len") for prompt in prompt_batch
+    ]
+    if all(v is not None for v in initial_prompt_lengths):
+        stacked["initial_prompt_len"] = torch.tensor(
+            initial_prompt_lengths,
+            dtype=torch.long,
+        )
+
+    return stacked
+
+
+def collect_rollouts_llm_old(
     agent: SupportedOnPolicyLLM,
-    env: GymEnvType,
-    n_steps: int | None = None,
+    env: MultiTurnEnvType,
+    n_steps: int,
+    batch_size: int,
+    group_seed: int,
+    group_size: int,
     **kwargs,
 ) -> tuple[
     list[torch.Tensor],
@@ -252,51 +289,25 @@ def collect_rollouts_llm(
 
     :param agent: The agent to collect rollouts for.
     :type agent: SupportedOnPolicyLLM
-    :param env: The environment to collect rollouts from.
-    :type env: GymEnvType
-    :param n_steps: Number of outer batch episodes to collect.
+    :param n_steps: Number of steps (max turns) for the agent to take.
     :type n_steps: int | None
-    :param kwargs: Extra rollout controls (``max_turns``, ``group_size``,
-        ``group_seed``, ``total_steps``, ``env_factory``).
-    :type kwargs: dict[str, Any]
-
+    :param batch_size: Number of environments to collect rollouts from.
+    :type batch_size: int
+    :param group_seed: Seed for the group of environments.
+    :type group_seed: int
     :return: Episode tensors, masks, turn ids, rewards, counted batch steps,
         and updated group seed.
     :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int]
     """
-    batch_size = n_steps
-    if batch_size is None:
-        msg = "collect_rollouts_llm requires n_steps (batch size) to be provided."
-        raise ValueError(msg)
-
-    max_turns = kwargs.get("max_turns")
-    group_size = kwargs.get("group_size", getattr(agent, "group_size", 1))
-    group_seed = kwargs.get("group_seed")
-    env_factory: Callable[[], GymEnvType] | None = kwargs.get("env_factory")
-
-    if max_turns is None:
-        msg = "collect_rollouts_llm requires max_turns in kwargs."
-        raise ValueError(msg)
-    if group_seed is None:
-        msg = "collect_rollouts_llm requires group_seed in kwargs."
-        raise ValueError(msg)
-
-    if group_size > 1 and env_factory is None:
-        msg = (
-            "collect_rollouts_llm requires env_factory when group_size > 1 so each "
-            "trajectory can have an independent environment state."
-        )
-        raise ValueError(msg)
-
-    def _new_env() -> GymEnvType:
-        return env if env_factory is None else env_factory()
-
     trajectories: list[dict[str, Any]] = []
     seed_base = group_seed
-    for group_idx in range(batch_size):
-        seed = seed_base + group_idx
-        for member_idx in range(group_size):
-            env_i = _new_env()
+
+    # Reset the synchronous environments
+    for batch_idx in range(batch_size):
+        seed = seed_base + batch_idx
+        for group_idx in range(group_size):
+            env_idx = batch_idx * group_size + group_idx
+            env_i = env[env_idx]
             prompt_dict, _info = env_i.reset(seed=seed)
             sw_ml = getattr(env_i, "_sw_max_model_len", None)
             if sw_ml is not None:
@@ -306,20 +317,20 @@ def collect_rollouts_llm(
                 )
             trajectories.append(
                 {
+                    "batch_idx": batch_idx,
                     "group_idx": group_idx,
-                    "member_idx": member_idx,
                     "env": env_i,
                     "prompt": prompt_dict,
                     "done": False,
                 },
             )
 
-    for _turn_idx in range(max_turns):
+    for _turn_idx in range(n_steps):
         active = [traj for traj in trajectories if not traj["done"]]
         if not active:
             break
-        active.sort(key=lambda t: (t["group_idx"], t["member_idx"]))
-        prompts = [traj["prompt"] for traj in active]
+        active.sort(key=lambda t: (t["batch_idx"], t["group_idx"]))
+        prompts = _stack_active_prompts([traj["prompt"] for traj in active])
         if isinstance(agent, GRPO):
             completion_ids, _ = agent.get_action(
                 prompts,
@@ -345,7 +356,7 @@ def collect_rollouts_llm(
     all_turn_ids: list[torch.Tensor] = []
     all_rewards: list[torch.Tensor] = []
     batch_steps = 0
-    trajectories.sort(key=lambda t: (t["group_idx"], t["member_idx"]))
+    trajectories.sort(key=lambda t: (t["batch_idx"], t["group_idx"]))
     for traj in trajectories:
         ep_ids, action_mask, turn_ids, turn_rewards_t = traj["env"].get_episode_data()
         completion_ids_list.append(ep_ids)
@@ -354,6 +365,76 @@ def collect_rollouts_llm(
         all_rewards.append(turn_rewards_t)
         batch_steps += len(getattr(traj["env"], "turn_boundaries", []))
 
+    group_seed = group_seed + batch_size
+
+    return (
+        completion_ids_list,
+        action_masks_list,
+        all_turn_ids,
+        all_rewards,
+        batch_steps,
+        group_seed,
+    )
+
+
+def collect_rollouts_llm(
+    agent: SupportedOnPolicyLLM,
+    env: SyncGemVecEnv,
+    n_steps: int,
+    batch_size: int,
+    group_seed: int,
+    group_size: int,
+    **kwargs,
+) -> tuple[
+    list[torch.Tensor],
+    list[torch.Tensor],
+    list[torch.Tensor],
+    list[torch.Tensor],
+    int,
+    int,
+]:
+    """Collect multi-turn rollouts for LLM on-policy algorithms.
+
+    :param agent: The agent to collect rollouts for.
+    :type agent: SupportedOnPolicyLLM
+    :param env: Synchronous vectorized multi-turn GEM environment.
+    :type env: SyncGemVecEnv
+    :param n_steps: Number of steps (max turns) for the agent to take.
+    :type n_steps: int
+    :param batch_size: Number of environments to collect rollouts from.
+    :type batch_size: int
+    :param group_seed: Seed for the group of environments.
+    :type group_seed: int
+    :param group_size: Number of grouped samples per batch entry (kept for API
+        compatibility with callers).
+    :type group_size: int
+    :return: Episode tensors, masks, turn ids, rewards, counted batch steps,
+        and updated group seed.
+    :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int]
+    """
+    del group_size
+
+    prompts = env.reset(
+        seed=group_seed,
+    )
+
+    for _turn_idx in range(n_steps):
+        if prompts is None:
+            print("breaking...")
+            break
+        if isinstance(agent, GRPO):
+            completion_ids, _ = agent.get_action(
+                prompts,
+                training=True,
+                repeat_prompts=False,
+            )
+        else:
+            completion_ids, _ = agent.get_action(prompts, training=True)
+        prompts = env.step(completion_ids)
+
+    completion_ids_list, action_masks_list, all_turn_ids, all_rewards, batch_steps = (
+        env.get_trajectories()
+    )
     group_seed = group_seed + batch_size
 
     return (

@@ -12,6 +12,10 @@ if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
 import torch
+from config_load import load_debug_config
+from llm_debug_utils import lora_config_from_dict
+from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
+from transformers import AutoTokenizer
 
 from agilerl.algorithms import GRPO, LLMPPO, LLMReinforce
 from agilerl.training import train_llm
@@ -22,19 +26,15 @@ from agilerl.utils.probe_envs_llm import GridNavigationEnv
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 
-from config_load import load_debug_config
-from llm_debug_utils import lora_config_from_dict
-from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
-from transformers import AutoTokenizer
 
-
-def _prompt_dict_from_encoded(tokenizer: Any, prompt_encoded: dict[str, torch.Tensor]) -> dict[str, Any]:
+def _prompt_dict_from_encoded(
+    tokenizer: Any, prompt_encoded: dict[str, torch.Tensor]
+) -> dict[str, Any]:
+    del tokenizer
     input_ids = prompt_encoded["input_ids"]
-    prompt_text = tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=False)
     return {
         "input_ids": input_ids,
         "attention_mask": prompt_encoded["attention_mask"],
-        "text": prompt_text,
     }
 
 
@@ -163,7 +163,9 @@ def detailed_eval(
                     actions: list[str] = []
                     success = False
                     for _ in range(max_turns):
-                        prompt_dict = _prompt_dict_from_encoded(tokenizer, prompt_encoded)
+                        prompt_dict = _prompt_dict_from_encoded(
+                            tokenizer, prompt_encoded
+                        )
                         prompt_len = prompt_dict["input_ids"].shape[1]
                         completion_ids, _ = agent.get_action(
                             [prompt_dict],
@@ -274,9 +276,7 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
             init_hp["VLLM_CONFIG"]["sleep_mode"] = True
 
     vllm_cfg = (
-        VLLMConfig(**init_hp["VLLM_CONFIG"])
-        if init_hp.get("USE_VLLM", False)
-        else None
+        VLLMConfig(**init_hp["VLLM_CONFIG"]) if init_hp.get("USE_VLLM", False) else None
     )
 
     pop = create_population(
@@ -310,20 +310,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         print("\nPre-training detailed eval:")
         detailed_eval(agent, tokenizer, grid_size, max_turns)
 
-        env = TokenObservationWrapper(
-            GridNavigationEnv(
-                grid_size=grid_size,
-                max_turns=max_turns,
-                seed=rng.randint(0, 2**31),
-            ),
-            tokenizer,
-            max_turns,
-            tokenizer.pad_token_id,
-            apply_chat_template=False,
-            max_model_len=max_ctx,
-            max_output_tokens=max_new,
-        )
-
         def env_factory() -> TokenObservationWrapper:
             return TokenObservationWrapper(
                 GridNavigationEnv(
@@ -348,7 +334,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         try:
             finetune_llm_multiturn(
                 pop=[agent],
-                env=env,
                 max_turns=max_turns,
                 init_hp=init_hp,
                 max_steps=int(dbg["max_sample_steps"]),
@@ -412,4 +397,4 @@ def main(cfg: dict) -> None:
 
 
 if __name__ == "__main__":
-    main(load_debug_config("grpo_grid_navigation.yaml"))
+    main(load_debug_config("ppo_grid_navigation.yaml"))

@@ -13,6 +13,10 @@ if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
 import torch
+from config_load import load_debug_config
+from llm_debug_utils import lora_config_from_dict
+from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
+from transformers import AutoTokenizer
 
 from agilerl.algorithms import GRPO, LLMPPO, LLMReinforce
 from agilerl.training import train_llm
@@ -23,13 +27,10 @@ from agilerl.utils.probe_envs_llm import GridNavigationEnv
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 
-from config_load import load_debug_config
-from llm_debug_utils import lora_config_from_dict
-from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
-from transformers import AutoTokenizer
 
-
-def _prompt_dict_from_encoded(tokenizer: Any, prompt_encoded: dict[str, torch.Tensor]) -> dict[str, Any]:
+def _prompt_dict_from_encoded(
+    tokenizer: Any, prompt_encoded: dict[str, torch.Tensor]
+) -> dict[str, Any]:
     input_ids = prompt_encoded["input_ids"]
     prompt_text = tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=False)
     return {
@@ -53,6 +54,7 @@ def evaluate_accuracy(
     greedy: bool = False,
 ) -> float:
     if _uses_async_vllm(agent):
+
         async def _run_async_eval() -> float:
             original_temp = agent.generation_config.temperature
             original_top_k = agent.generation_config.top_k
@@ -83,7 +85,9 @@ def evaluate_accuracy(
                             return_attention_mask=True,
                         )
                         for _turn_idx in range(max_turns):
-                            prompt_dict = _prompt_dict_from_encoded(tokenizer, prompt_encoded)
+                            prompt_dict = _prompt_dict_from_encoded(
+                                tokenizer, prompt_encoded
+                            )
                             prompt_len = prompt_dict["input_ids"].shape[1]
                             completion_ids, _ = agent.get_action(
                                 [prompt_dict],
@@ -95,8 +99,10 @@ def evaluate_accuracy(
                                 gen_tokens.tolist(),
                                 skip_special_tokens=True,
                             )
-                            _next_obs, reward, terminated, truncated, _step_info = env.step(
-                                gen_text,
+                            _next_obs, reward, terminated, truncated, _step_info = (
+                                env.step(
+                                    gen_text,
+                                )
                             )
                             if terminated or truncated:
                                 total += 1
@@ -202,6 +208,7 @@ def detailed_eval(
     max_turns: int,
 ) -> float:
     if _uses_async_vllm(agent):
+
         async def _run_async_detailed() -> float:
             orig_temp = agent.generation_config.temperature
             orig_top_k = agent.generation_config.top_k
@@ -218,7 +225,9 @@ def detailed_eval(
                         for target in range(grid_size):
                             if start == target:
                                 continue
-                            env = GridNavigationEnv(grid_size=grid_size, max_turns=max_turns, seed=0)
+                            env = GridNavigationEnv(
+                                grid_size=grid_size, max_turns=max_turns, seed=0
+                            )
                             env.position = start
                             env.target = target
                             env.turn = 0
@@ -233,7 +242,9 @@ def detailed_eval(
                             actions: list[str] = []
                             success = False
                             for _ in range(max_turns):
-                                prompt_dict = _prompt_dict_from_encoded(tokenizer, prompt_encoded)
+                                prompt_dict = _prompt_dict_from_encoded(
+                                    tokenizer, prompt_encoded
+                                )
                                 prompt_len = prompt_dict["input_ids"].shape[1]
                                 completion_ids, _ = agent.get_action(
                                     [prompt_dict],
@@ -245,9 +256,15 @@ def detailed_eval(
                                     gen_tokens.tolist(),
                                     skip_special_tokens=True,
                                 )
-                                raw_tok = gen_tokens[0].item() if len(gen_tokens) > 0 else -1
-                                actions.append(action_names.get(gen_text, f"?{raw_tok}"))
-                                next_obs, reward, terminated, truncated, _ = env.step(gen_text)
+                                raw_tok = (
+                                    gen_tokens[0].item() if len(gen_tokens) > 0 else -1
+                                )
+                                actions.append(
+                                    action_names.get(gen_text, f"?{raw_tok}")
+                                )
+                                next_obs, reward, terminated, truncated, _ = env.step(
+                                    gen_text
+                                )
                                 if terminated or truncated:
                                     success = reward > 0
                                     break
@@ -256,7 +273,9 @@ def detailed_eval(
                                     dtype=torch.long,
                                     device=full_ids.device,
                                 )
-                                new_prompt_ids = torch.cat([full_ids, feedback_ids], dim=1)
+                                new_prompt_ids = torch.cat(
+                                    [full_ids, feedback_ids], dim=1
+                                )
                                 prompt_encoded = {
                                     "input_ids": new_prompt_ids,
                                     "attention_mask": torch.ones_like(new_prompt_ids),
@@ -323,7 +342,9 @@ def detailed_eval(
                     actions: list[str] = []
                     success = False
                     for _ in range(max_turns):
-                        prompt_dict = _prompt_dict_from_encoded(tokenizer, prompt_encoded)
+                        prompt_dict = _prompt_dict_from_encoded(
+                            tokenizer, prompt_encoded
+                        )
                         prompt_len = prompt_dict["input_ids"].shape[1]
                         completion_ids, _ = agent.get_action(
                             [prompt_dict],
@@ -435,9 +456,7 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
             init_hp["VLLM_CONFIG"]["sleep_mode"] = True
 
     vllm_cfg = (
-        VLLMConfig(**init_hp["VLLM_CONFIG"])
-        if init_hp.get("USE_VLLM", False)
-        else None
+        VLLMConfig(**init_hp["VLLM_CONFIG"]) if init_hp.get("USE_VLLM", False) else None
     )
 
     pop = create_population(
@@ -471,20 +490,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         print("\nPre-training detailed eval:")
         detailed_eval(agent, tokenizer, grid_size, max_turns)
 
-        env = TokenObservationWrapper(
-            GridNavigationEnv(
-                grid_size=grid_size,
-                max_turns=max_turns,
-                seed=rng.randint(0, 2**31),
-            ),
-            tokenizer,
-            max_turns,
-            tokenizer.pad_token_id,
-            apply_chat_template=False,
-            max_model_len=max_ctx,
-            max_output_tokens=max_new,
-        )
-
         def env_factory() -> TokenObservationWrapper:
             return TokenObservationWrapper(
                 GridNavigationEnv(
@@ -509,7 +514,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         try:
             finetune_llm_multiturn(
                 pop=[agent],
-                env=env,
                 max_turns=max_turns,
                 init_hp=init_hp,
                 max_steps=int(dbg["max_sample_steps"]),

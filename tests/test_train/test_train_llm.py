@@ -5,6 +5,7 @@ import torch
 from accelerate import Accelerator
 
 from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMReinforce
+from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.training.train_llm import (
     finetune_llm_multiturn,
     finetune_llm_preference,
@@ -46,8 +47,13 @@ def _make_multiturn_mock_agent(*, spec=LLMPPO):
         mock_agent.group_size = 1
     else:
         mock_agent.algo = getattr(spec, "__name__", "MOCK")
+
     def _mock_get_action(obs, training=True, **kwargs):
-        batch = 1 if isinstance(obs, dict) else len(obs)
+        if isinstance(obs, dict):
+            input_ids = obs.get("input_ids")
+            batch = int(input_ids.shape[0]) if hasattr(input_ids, "shape") else 1
+        else:
+            batch = len(obs)
         return ([torch.ones(1, 5, dtype=torch.long) for _ in range(batch)], None)
 
     mock_agent.get_action.side_effect = _mock_get_action
@@ -920,7 +926,7 @@ def test_finetune_llm_multiturn_basic_training_loop(agent_spec, use_accelerator)
         mock_agg.return_value = 0.5
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=mock_env,
+            env_factory=lambda: mock_env,
             max_turns=max_turns,
             init_hp={"BATCH_SIZE": batch_size, "ALGO": mock_agent.algo},
             max_steps=max_steps,
@@ -938,7 +944,10 @@ def test_finetune_llm_multiturn_basic_training_loop(agent_spec, use_accelerator)
     assert mock_agent.test.call_count == 0
     n_metrics = 4 if agent_spec is GRPO else 7
     assert mock_agg.call_count == num_outer * n_metrics
-    mock_agent.learn.assert_called_with(ANY, turn_ids=ANY)
+    if agent_spec is GRPO:
+        mock_agent.learn.assert_called_with(ANY)
+    else:
+        mock_agent.learn.assert_called_with(ANY, turn_ids=ANY)
     assert mock_save.call_count == 1
 
 
@@ -951,7 +960,6 @@ def test_finetune_llm_multiturn_grpo_requires_batch_multiple_of_group_size():
     with pytest.raises(ValueError, match="divisible by"):
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=mock_env,
             max_turns=1,
             env_factory=_make_multiturn_env_factory(turn_boundaries_len=3),
             init_hp={"BATCH_SIZE": 3, "ALGO": "GRPO"},
@@ -984,7 +992,7 @@ def test_finetune_llm_multiturn_with_wandb_and_checkpoints(use_accelerator):
 
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=mock_env,
+            env_factory=lambda: mock_env,
             max_turns=2,
             init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
             max_steps=18,
@@ -1026,7 +1034,7 @@ def test_finetune_llm_multiturn_evolvable_training_loop(use_accelerator):
 
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=mock_env,
+            env_factory=lambda: mock_env,
             max_turns=2,
             init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
             max_steps=9,
@@ -1052,7 +1060,7 @@ def test_finetune_llm_multiturn_value_error_when_evo_steps_missing_with_tourname
     with pytest.raises(ValueError, match="'evo_steps' must be set"):
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=MagicMock(),
+            env_factory=MagicMock,
             max_turns=1,
             init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
             max_steps=1,
@@ -1068,7 +1076,7 @@ def test_finetune_llm_multiturn_warns_when_evo_steps_without_tournament():
     with pytest.warns(UserWarning, match="evo_steps"):
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=MagicMock(),
+            env_factory=MagicMock,
             max_turns=1,
             init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
             max_steps=0,
@@ -1091,7 +1099,7 @@ def test_finetune_llm_multiturn_value_error_if_algo_not_supported():
     ):
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=MagicMock(),
+            env_factory=MagicMock,
             max_turns=1,
             init_hp={"BATCH_SIZE": 1, "ALGO": "DPO"},
             max_steps=0,
@@ -1115,7 +1123,7 @@ def test_finetune_llm_multiturn_eval_fn_interval():
         mock_agg.return_value = 0.5
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=mock_env,
+            env_factory=lambda: mock_env,
             max_turns=2,
             init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
             max_steps=9,
@@ -1145,7 +1153,7 @@ def test_finetune_llm_multiturn_max_reward_adds_accuracy_metric():
         mock_agg.return_value = 0.5
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=mock_env,
+            env_factory=lambda: mock_env,
             max_turns=2,
             init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
             max_steps=9,
@@ -1178,7 +1186,7 @@ def test_finetune_llm_multiturn_init_hp_none_uses_agent_fields():
         mock_agg.return_value = 0.5
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=mock_env,
+            env_factory=lambda: mock_env,
             max_turns=2,
             init_hp=None,
             max_steps=0,
@@ -1221,7 +1229,7 @@ def test_finetune_llm_multiturn_sliding_window_max_model_len_assert_passes():
         mock_agg.return_value = 0.5
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=mock_env,
+            env_factory=lambda: mock_env,
             max_turns=2,
             init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
             max_steps=3,
@@ -1250,7 +1258,7 @@ def test_finetune_llm_multiturn_breaks_turn_loop_when_terminated():
         mock_agg.return_value = 0.5
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=mock_env,
+            env_factory=lambda: mock_env,
             max_turns=max_turns,
             init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
             max_steps=3,
@@ -1285,7 +1293,7 @@ def test_finetune_llm_multiturn_wandb_accuracy_and_eval_scores_with_verbose_bann
         mock_agg.return_value = 0.5
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=mock_env,
+            env_factory=lambda: mock_env,
             max_turns=2,
             init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO", "env_name": "gem_test"},
             max_steps=9,
@@ -1335,7 +1343,7 @@ def test_finetune_llm_multiturn_accelerator_syncs_after_eval_fn():
         mock_agg.return_value = 0.5
         finetune_llm_multiturn(
             pop=[mock_agent],
-            env=mock_env,
+            env_factory=lambda: mock_env,
             max_turns=2,
             init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
             max_steps=3,
@@ -1346,3 +1354,33 @@ def test_finetune_llm_multiturn_accelerator_syncs_after_eval_fn():
         )
 
     assert acc.wait_for_everyone.call_count >= 1
+
+
+def test_collect_rollouts_llm_breaks_when_vector_env_has_no_active_prompts():
+    mock_agent = _make_multiturn_mock_agent()
+    prompt = {
+        "input_ids": torch.ones(1, 3, dtype=torch.long),
+        "attention_mask": torch.ones(1, 3, dtype=torch.long),
+    }
+    mock_env = MagicMock(spec=["reset", "step", "get_trajectories"])
+    mock_env.reset.return_value = prompt
+    mock_env.step.return_value = None
+    mock_env.get_trajectories.return_value = (
+        [torch.ones(1, 8, dtype=torch.long)],
+        [torch.ones(1, 7, dtype=torch.bool)],
+        [torch.zeros(1, 7, dtype=torch.long)],
+        [torch.ones(2, dtype=torch.float32)],
+        1,
+    )
+
+    _ = collect_rollouts_llm(
+        agent=mock_agent,
+        env=mock_env,
+        n_steps=5,
+        batch_size=1,
+        group_seed=123,
+        group_size=1,
+    )
+
+    assert mock_agent.get_action.call_count == 1
+    assert mock_env.step.call_count == 1

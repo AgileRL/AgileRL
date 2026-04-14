@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
-from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
+from agilerl.wrappers.gem_wrappers import SyncGemVecEnv, TokenObservationWrapper
 
 
 class _StubTokenizer:
@@ -56,6 +57,7 @@ def test_max_prompt_tokens_for_sliding_window() -> None:
 
     assert max_prompt_tokens_for_sliding_window(8192, 1024) == 8192 - 1024
     assert max_prompt_tokens_for_sliding_window(100, 50) == 50
+    assert max_prompt_tokens_for_sliding_window(100, None) == 99
 
 
 def test_middle_stitch_tensor_layout_matches_vllm_colocate() -> None:
@@ -143,3 +145,82 @@ def test_policy_observation_merges_sliding_window_when_max_model_len_set() -> No
     assert "model_input_ids" in obs
     assert "model_text" in obs
     assert obs["input_ids"].shape[1] == 4
+
+
+class _SyncStubEnv:
+    def __init__(self, sw_max_model_len: int | None = None) -> None:
+        self._sw_max_model_len = sw_max_model_len
+        self.turn_boundaries: list[int] = []
+        self.reset_calls: list[int | None] = []
+
+    def reset(self, seed: int | None = None):
+        self.reset_calls.append(seed)
+        return (
+            {
+                "input_ids": torch.ones(1, 3, dtype=torch.long),
+                "attention_mask": torch.ones(1, 3, dtype=torch.long),
+            },
+            {},
+        )
+
+    def step(self, full_completion: torch.Tensor):
+        del full_completion
+        self.turn_boundaries.append(1)
+        return ({}, 1.0, True, False, {})
+
+    def close(self) -> None:
+        pass
+
+    def get_episode_data(self):
+        return (
+            torch.ones(1, 4, dtype=torch.long),
+            torch.ones(1, 3, dtype=torch.bool),
+            torch.zeros(1, 3, dtype=torch.long),
+            torch.ones(2, dtype=torch.float32),
+        )
+
+
+def test_sync_gem_vec_env_reset_seeds_per_batch_group() -> None:
+    vec_env = SyncGemVecEnv(
+        env_factory=lambda: _SyncStubEnv(),
+        batch_size=2,
+        group_size=2,
+    )
+    _ = vec_env.reset(seed=10)
+    seen = [env.reset_calls[-1] for env in vec_env.envs]
+    assert seen == [10, 10, 11, 11]
+
+
+def test_sync_gem_vec_env_reset_with_none_seed() -> None:
+    vec_env = SyncGemVecEnv(
+        env_factory=lambda: _SyncStubEnv(),
+        batch_size=2,
+        group_size=2,
+    )
+    _ = vec_env.reset(seed=None)
+    seen = [env.reset_calls[-1] for env in vec_env.envs]
+    assert seen == [None, None, None, None]
+
+
+def test_sync_gem_vec_env_step_raises_when_completion_count_mismatches_active() -> None:
+    vec_env = SyncGemVecEnv(
+        env_factory=lambda: _SyncStubEnv(),
+        batch_size=1,
+        group_size=2,
+    )
+    _ = vec_env.reset(seed=0)
+    with pytest.raises(
+        RuntimeError,
+        match="Number of completions does not match number of active trajectories",
+    ):
+        vec_env.step([torch.ones(1, 5, dtype=torch.long)])
+
+
+def test_sync_gem_vec_env_reset_checks_expected_max_model_len() -> None:
+    vec_env = SyncGemVecEnv(
+        env_factory=lambda: _SyncStubEnv(sw_max_model_len=1024),
+        batch_size=1,
+        group_size=1,
+    )
+    with pytest.raises(AssertionError, match="env max_model_len"):
+        _ = vec_env.reset(seed=0, expected_max_model_len=2048)

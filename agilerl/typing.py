@@ -13,6 +13,7 @@ import gymnasium as gym
 import numpy as np
 import torch
 from accelerate.optimizer import AcceleratedOptimizer
+from gem.core import Env as GemEnv
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
 from tensordict import TensorDict
@@ -35,15 +36,14 @@ class IsDataclass(Protocol):
     __dataclass_fields__: ClassVar[dict[str, Any]]
 
 
-# TODO ideally adjust the ReasoningGym to match the PreferencePrompts type (e.g the lists/btaching happens for the values of the
-# keys, not just returning a list of 'ReasoningPrompts')
 class ReasoningPrompts(TypedDict):
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
-    text: str | None
+    question: str | list[str] | None
+    answer: str | list[str] | None
     trajectory_input_ids: torch.Tensor | None
     trajectory_attention_mask: torch.Tensor | None
-    initial_prompt_len: int | None
+    initial_prompt_len: int | list[int] | torch.Tensor | None
     stitch_prefix_ids: torch.Tensor | None
 
 
@@ -96,6 +96,7 @@ NetConfigType = dict[str, dict[str, Any] | Any]
 KernelSizeType = int | tuple[int, ...]
 GymSpaceType = SupportedObsSpaces | list[SupportedObsSpaces]
 GymEnvType = str | gym.Env | gym.vector.VectorEnv | gym.vector.AsyncVectorEnv
+MultiTurnEnvType = GemEnv | list[GemEnv]
 PzEnvType = str | ParallelEnv
 LLMObsType = list[ReasoningPrompts] | ReasoningPrompts
 
