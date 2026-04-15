@@ -460,7 +460,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
     where agents don't return observations with the same frequency).
 
     .. warning::
-        This is currently only supported for on-policy multi-agent algorithms such as IPPO.
+        This currently supports IPPO, MADDPG, and MATD3.
 
     :param agent: MultiAgentRLAlgorithm instance to be wrapped.
     :type agent: MultiAgentRLAlgorithm
@@ -469,8 +469,8 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
     def __init__(self, agent: MultiAgentRLAlgorithm) -> None:
         super().__init__(agent)
 
-        assert self.agent.algo == "IPPO", (
-            "AsyncAgentsWrapper is currently only supported for IPPO."
+        assert self.agent.algo in {"IPPO", "MADDPG", "MATD3"}, (
+            "AsyncAgentsWrapper is currently only supported for IPPO, MADDPG, and MATD3."
         )
 
     def extract_inactive_agents(
@@ -537,14 +537,20 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
         return inactive_agents, obs
 
-    def stack_experiences(self, experience: ExperiencesType) -> ExperiencesType:
+    def stack_experiences(self, experiences: ExperiencesType) -> ExperiencesType:
         """Stacks the experiences.
 
         :param experiences: Experiences from the environment
         :type experiences: ExperiencesType
         """
+        if isinstance(experiences, tuple):
+            return tuple(self.stack_experiences(exp) for exp in experiences)
+
+        if not isinstance(experiences, dict):
+            return experiences
+
         stacked_experience = {}
-        for agent_id, inp in experience.items():
+        for agent_id, inp in experiences.items():
             if isinstance(inp, list):
                 stacked_exp = (
                     stack_experiences(inp, to_torch=False)[0] if len(inp) > 0 else None
@@ -556,43 +562,159 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
         return stacked_experience
 
+    def _insert_placeholder_actions(
+        self,
+        action_dict: dict[str, np.ndarray],
+        inactive_agents: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        """Insert placeholder actions for inactive agents back into action dict."""
+        for agent_id, inactive_array in inactive_agents.items():
+            if agent_id not in action_dict:
+                continue
+
+            agent_action = action_dict[agent_id]
+            if agent_action is None:
+                continue
+
+            if len(agent_action.shape) == 1:
+                placeholder_shape = ()
+            else:
+                placeholder_shape = agent_action.shape[1:]
+
+            if np.issubdtype(agent_action.dtype, np.integer):
+                placeholder = np.zeros(placeholder_shape, dtype=agent_action.dtype)
+            else:
+                placeholder = np.full(placeholder_shape, np.nan, dtype=agent_action.dtype)
+
+            action_dict[agent_id] = np.insert(
+                agent_action,
+                inactive_array,
+                placeholder,
+                axis=0,
+            )
+
+        return action_dict
+
+    def _align_async_off_policy_experiences(
+        self,
+        experiences: ExperiencesType,
+    ) -> ExperiencesType:
+        """Align async off-policy experiences for MADDPG/MATD3.
+
+        Expected format:
+            (states, actions, rewards, next_states, dones)
+        """
+        states, actions, rewards, next_states, dones = experiences
+
+        all_agent_ids = (
+            set(states.keys())
+            | set(actions.keys())
+            | set(rewards.keys())
+            | set(next_states.keys())
+            | set(dones.keys())
+        )
+
+        aligned_states = {}
+        aligned_actions = {}
+        aligned_rewards = {}
+        aligned_next_states = {}
+        aligned_dones = {}
+
+        for agent_id in all_agent_ids:
+            agent_states = states.get(agent_id)
+            agent_actions = actions.get(agent_id)
+            agent_rewards = rewards.get(agent_id)
+            agent_next_states = next_states.get(agent_id)
+            agent_dones = dones.get(agent_id)
+
+            if (
+                agent_states is None
+                or agent_actions is None
+                or agent_rewards is None
+                or agent_dones is None
+            ):
+                continue
+
+            # If next_states is missing or all NaN, infer it from the state sequence.
+            missing_next_state = (
+                agent_next_states is None
+                or (
+                    isinstance(agent_next_states, np.ndarray)
+                    and np.isnan(agent_next_states).all()
+                )
+            )
+
+            if missing_next_state:
+                if len(agent_states) <= 1:
+                    continue
+
+                aligned_states[agent_id] = agent_states[:-1]
+                aligned_actions[agent_id] = agent_actions[:-1]
+                aligned_rewards[agent_id] = agent_rewards[:-1]
+                aligned_dones[agent_id] = agent_dones[:-1]
+                aligned_next_states[agent_id] = agent_states[1:]
+            else:
+                # If lengths differ, trim all fields to the shortest length.
+                min_len = min(
+                    len(agent_states),
+                    len(agent_actions),
+                    len(agent_rewards),
+                    len(agent_next_states),
+                    len(agent_dones),
+                )
+                if min_len == 0:
+                    continue
+
+                aligned_states[agent_id] = agent_states[:min_len]
+                aligned_actions[agent_id] = agent_actions[:min_len]
+                aligned_rewards[agent_id] = agent_rewards[:min_len]
+                aligned_next_states[agent_id] = agent_next_states[:min_len]
+                aligned_dones[agent_id] = agent_dones[:min_len]
+
+        return (
+            aligned_states,
+            aligned_actions,
+            aligned_rewards,
+            aligned_next_states,
+            aligned_dones,
+        )
+
     def get_action(
         self,
         obs: ObservationType,
         *args: Any,
         **kwargs: Any,
     ) -> ActionReturnType:
-        """Return the action from the agent. Since the environments may not return observations for all agents
-        at the same time, we need to extract the inactive agents from the observation and fill in placeholder
-        values for their actions.
-
-        :param obs: Observation from the environment
-        :type obs: ObservationType
-
-        :return: Action from the agent
-        :rtype: Any
-        """
+        """Returns the next action to take in the environment."""
         inactive_agents, obs = self.extract_inactive_agents(obs)
-        action_return: ActionReturnType = self.wrapped_get_action(obs, *args, **kwargs)
+        action_return = self.wrapped_get_action(obs, *args, **kwargs)
 
-        # Need to fill in placeholder np.nan for inactive agents
+        # Off-policy MARL: MADDPG / MATD3 return (env_actions, raw_actions)
+        if self.agent.algo in {"MADDPG", "MATD3"}:
+            if not isinstance(action_return, tuple) or len(action_return) < 2:
+                return action_return
+
+            env_action_dict = dict(action_return[0])
+            raw_action_dict = dict(action_return[1])
+
+            env_action_dict = self._insert_placeholder_actions(
+                env_action_dict,
+                inactive_agents,
+            )
+            raw_action_dict = self._insert_placeholder_actions(
+                raw_action_dict,
+                inactive_agents,
+            )
+
+            return (env_action_dict, raw_action_dict, *action_return[2:])
+
+        # Existing on-policy path (IPPO)
         action_dict = (
             action_return[0] if isinstance(action_return, tuple) else action_return
         )
-        for agent_id, inactive_array in inactive_agents.items():
-            placeholder = (
-                int(np.nan)
-                if np.issubdtype(action_dict[agent_id].dtype, np.integer)
-                else np.nan
-            )
+        action_dict = dict(action_dict)
 
-            # Insert placeholder values for inactive agents
-            action_dict[agent_id] = np.insert(
-                action_dict[agent_id],
-                inactive_array,
-                placeholder,
-                axis=0,
-            )
+        action_dict = self._insert_placeholder_actions(action_dict, inactive_agents)
 
         if isinstance(action_return, tuple):
             action_return = (action_dict, *action_return[1:])
@@ -602,18 +724,15 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         return action_return
 
     def learn(self, experiences: ExperiencesType, *args: Any, **kwargs: Any) -> Any:
-        """Learns from the collected experiences.
+        """Learns from the collected experiences."""
 
-        :param experiences: Experiences from the environment
-        :type experiences: ExperiencesType
-        :param args: Additional positional arguments
-        :type args: Any
-        :param kwargs: Additional keyword arguments
-        :type kwargs: Any
+        # Off-policy branch for MADDPG / MATD3
+        if self.agent.algo in {"MADDPG", "MATD3"}:
+            experiences = self.stack_experiences(experiences)
+            experiences = self._align_async_off_policy_experiences(experiences)
+            return self.wrapped_learn(experiences, *args, **kwargs)
 
-        :return: Learning information
-        :rtype: Any
-        """
+        # Existing IPPO branch
         states, actions, log_probs, rewards, dones, values, next_state, next_done = map(
             self.stack_experiences,
             experiences,
