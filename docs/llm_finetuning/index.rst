@@ -1,7 +1,7 @@
 .. _llm_finetuning:
 
-LLM Finetuning
-==============
+LLM Fine-Tuning
+===============
 
 Reinforcement learning (RL) has emerged as a powerful technique for improving reasoning capabilities in Large Language Models.
 Reinforcement learning has been used in LLM post-training for several years now, initially through techniques like RLHF (Reinforcement Learning from Human Feedback)
@@ -19,8 +19,8 @@ develop *agency* and can be described as **agents**.
      - **Tutorials**
    * - :ref:`GRPO<grpo>`
      - :ref:`LLM reasoning with GRPO<grpo_tutorial>`
-   * - :ref:`DPO<dpo>`
-     - --
+   * - :ref:`SFT<sft>` and :ref:`DPO<dpo>`
+     - :ref:`LLM fine-tuning with SFT and DPO<sft_dpo_finetuning>`
 
 .. _rl_for_reasoning:
 .. _rlhf:
@@ -50,7 +50,7 @@ The agent receives no explicit instructions on which specific reasoning techniqu
 tend to produce correct answers. This allows the emergence of sophisticated reasoning patterns that weren't necessarily anticipated
 by the model's creators, similar to how `AlphaGo <https://deepmind.google/research/projects/alphago/>`_ discovered novel chess strategies through self-play.
 
-This example demonstrates how to use the GRPO algorithm to finetune a LLM on a reasoning task.
+This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a reasoning task.
 
 .. collapse:: Example
 

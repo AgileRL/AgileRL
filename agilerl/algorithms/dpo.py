@@ -1,26 +1,91 @@
+from __future__ import annotations
+
 import gc
-import warnings
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from accelerate import Accelerator
 
-try:
-    from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOFunction
+from agilerl import HAS_LIGER_KERNEL
 
-    HAS_LIGER_KERNEL = True
-except ImportError:
-    LigerFusedLinearDPOFunction = None
-    HAS_LIGER_KERNEL = False
+if TYPE_CHECKING:
+    from accelerate import Accelerator
+    from peft import LoraConfig
+
+    from agilerl.wrappers.llm_envs import PreferenceGym
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.protocols import LoraConfigProtocol, PreTrainedModelProtocol
+from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import get_experiences_samples
-from agilerl.utils.llm_utils import PreferenceGym
+
+if HAS_LIGER_KERNEL or TYPE_CHECKING:
+    from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOFunction
+    from liger_kernel.chunked_loss.fused_linear_preference import (
+        LigerFusedLinearPreferenceBase,
+    )
+
+    class _LigerDPOWithAlpha(LigerFusedLinearPreferenceBase):
+        """Thin wrapper that exposes ``alpha`` for NLL scaling.
+
+        ``LigerFusedLinearDPOFunction`` passes ``compute_nll_loss`` as a bool
+        but never forwards ``alpha`` to the base class (which defaults to 1.0).
+        This subclass reuses the DPO preference loss and adds ``alpha`` so the
+        fused kernel correctly scales the NLL component.
+        """
+
+        preference_loss_fn = staticmethod(
+            LigerFusedLinearDPOFunction.preference_loss_fn
+        )
+
+        @classmethod
+        def forward(
+            cls,
+            ctx,
+            _input,
+            weight,
+            target,
+            bias=None,
+            ref_input=None,
+            ref_weight=None,
+            ref_bias=None,
+            ignore_index=-100,
+            beta=0.1,
+            alpha=1.0,
+            compute_nll_loss=True,
+            compiled=True,
+            use_ref_model=True,
+            average_log_prob=False,
+            chunk_size=1,
+            loss_type="sigmoid",
+        ):
+            return LigerFusedLinearPreferenceBase.forward(
+                cls=cls,
+                ctx=ctx,
+                _input=_input,
+                weight=weight,
+                target=target,
+                bias=bias,
+                ignore_index=ignore_index,
+                alpha=alpha,
+                beta=beta,
+                compute_nll_loss=compute_nll_loss,
+                compiled=compiled,
+                use_ref_model=use_ref_model,
+                ref_input=ref_input,
+                ref_weight=ref_weight,
+                ref_bias=ref_bias,
+                average_log_prob=average_log_prob,
+                chunk_size=chunk_size,
+                loss_type=loss_type,
+            )
+
+        @staticmethod
+        def backward(ctx, *grad_output):
+            grads = LigerFusedLinearPreferenceBase.backward(ctx, grad_output)[:4]
+            return (*grads, *(None,) * 12)
 
 
 class DPO(LLMAlgorithm):
@@ -43,8 +108,11 @@ class DPO(LLMAlgorithm):
     :type batch_size: int, optional
     :param lr: Learning rate, defaults to 0.000005
     :type lr: float, optional
-    :param beta: Beta parameter for DPO, defaults to 0.001
+    :param beta: DPO beta parameter, defaults to 0.1
     :type beta: float, optional
+    :param nll_alpha: Weight for the NLL loss on chosen responses (DPO + NLL), defaults to 1.0.
+        Set to 0 to disable the NLL term entirely.
+    :type nll_alpha: float, optional
     :param max_grad_norm: Maximum gradient norm, defaults to 0.1
     :type max_grad_norm: float, optional
     :param update_epochs: Number of update epochs, defaults to 1
@@ -58,7 +126,7 @@ class DPO(LLMAlgorithm):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param lora_config: Config for LoRA, defaults to None
-    :type lora_config: LoraConfigProtocol, optional
+    :type lora_config: LoraConfig, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
@@ -88,14 +156,15 @@ class DPO(LLMAlgorithm):
         index: int = 0,
         batch_size: int = 16,
         lr: float = 0.000005,
-        beta: float = 0.001,
+        beta: float = 0.1,
+        nll_alpha: float = 1.0,
         max_grad_norm: float = 0.1,
         update_epochs: int = 1,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         reduce_memory_peak: bool = False,
         device: str = "cpu",
-        lora_config: LoraConfigProtocol | None = None,
+        lora_config: LoraConfig | None = None,
         accelerator: Accelerator | None = None,
         wrap: bool = True,
         clone: bool = False,
@@ -104,18 +173,16 @@ class DPO(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         use_liger_loss: bool = False,
     ) -> None:
-        if use_liger_loss and not HAS_LIGER_KERNEL:
-            warnings.warn(
-                "use_liger_loss=True requested, but `liger-kernel` is not available on this platform/environment. "
-                "Falling back to standard loss.",
-                stacklevel=2,
-            )
-            use_liger_loss = False
-
         resolved_device = (
             f"cuda:{accelerator.process_index}"
             if accelerator is not None
-            else ("cuda" if torch.cuda.is_available() else "cpu")
+            else (
+                "cuda"
+                if torch.cuda.is_available()
+                else "mps"
+                if torch.backends.mps.is_available()
+                else "cpu"
+            )
         )
         super().__init__(
             index=index,
@@ -144,12 +211,12 @@ class DPO(LLMAlgorithm):
             gradient_checkpointing=gradient_checkpointing,
         )
         self.beta = beta
+        self.nll_alpha = nll_alpha
         self.temperature = (
             1  # Temperature for logits calculation, DPO does not use temperature
         )
         self.use_vllm = False  # DPO does not use VLLM
         self.update_epochs = update_epochs
-        self.use_liger_loss = use_liger_loss
 
         self._initialize_actors(actor_network, not clone)
         # Register network groups for mutations
@@ -193,11 +260,19 @@ class DPO(LLMAlgorithm):
         """
         gc.collect()
         torch.cuda.empty_cache()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
         # The following tensors are size [batch_size, max_length]
-        chosen_input_ids: torch.Tensor = experiences["chosen_input_ids"]
-        rejected_input_ids: torch.Tensor = experiences["rejected_input_ids"]
-        chosen_attention_mask: torch.Tensor = experiences["chosen_attention_mask"]
-        rejected_attention_mask: torch.Tensor = experiences["rejected_attention_mask"]
+        chosen_input_ids: torch.Tensor = experiences["chosen_input_ids"].to(self.device)
+        rejected_input_ids: torch.Tensor = experiences["rejected_input_ids"].to(
+            self.device
+        )
+        chosen_attention_mask: torch.Tensor = experiences["chosen_attention_mask"].to(
+            self.device
+        )
+        rejected_attention_mask: torch.Tensor = experiences[
+            "rejected_attention_mask"
+        ].to(self.device)
         # Check first that all tensors have the same max length before calculating the masks
         assert (
             chosen_input_ids.shape[1]
@@ -207,7 +282,8 @@ class DPO(LLMAlgorithm):
         ), "All tensors must have the same max length"
         max_length = chosen_input_ids.shape[1]
         prompt_lengths: list[int] = experiences["prompt_lengths"]
-        prompt_masks = LLMAlgorithm.create_prompt_masks(
+        # Build the response mask on CPU (same device as dataloader tensors).
+        prompt_masks = LLMAlgorithm._create_prompt_masks(
             prompt_lengths,
             max_length=max_length,
         ).to(self.device)
@@ -216,7 +292,10 @@ class DPO(LLMAlgorithm):
         chosen_mask = (prompt_masks * chosen_attention_mask)[:, 1:]
         rejected_mask = (prompt_masks * rejected_attention_mask)[:, 1:]
         num_samples = chosen_input_ids.shape[0]
-        batch_size = min(num_samples, self.micro_batch_size_per_gpu)
+        batch_size = min(
+            num_samples,
+            getattr(self, "micro_batch_size_per_gpu", self.batch_size_per_process),
+        )
         batch_idxs = np.arange(num_samples)
         mean_loss, mean_chosen_reward, mean_rejected_reward = 0.0, 0.0, 0.0
         ref_rejected_log_probs, ref_chosen_log_probs = None, None
@@ -399,9 +478,12 @@ class DPO(LLMAlgorithm):
                 rejected_log_probs,
                 ref_rejected_log_probs,
             )
+        loss = -F.logsigmoid(self.beta * (chosen_ratio - rejected_ratio)).mean()
+        if self.nll_alpha > 0:
+            loss = loss - self.nll_alpha * chosen_log_probs.sum() / chosen_mask.sum()
 
         return (
-            -F.logsigmoid(self.beta * (chosen_ratio - rejected_ratio)).mean(),
+            loss,
             implicit_chosen_reward,
             implicit_rejected_reward,
         )
@@ -432,7 +514,7 @@ class DPO(LLMAlgorithm):
         :return: Loss, chosen rewards, rejected rewards.
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
-        if LigerFusedLinearDPOFunction is None:
+        if not HAS_LIGER_KERNEL:
             msg = (
                 "Liger DPO loss was requested but `liger-kernel` is not available. "
                 "Set use_liger_loss=False."
@@ -503,7 +585,7 @@ class DPO(LLMAlgorithm):
         policy_hidden = policy_hidden[:, :-1, :].contiguous()
         ref_hidden = ref_hidden[:, :-1, :].contiguous()
 
-        loss, aux = LigerFusedLinearDPOFunction.apply(
+        loss, aux = _LigerDPOWithAlpha.apply(
             policy_hidden,
             lm_head_weight,
             stacked_target,
@@ -513,7 +595,8 @@ class DPO(LLMAlgorithm):
             lm_head_bias,  # ref_bias (same weight → same bias)
             -100,  # ignore_index
             self.beta,
-            False,  # compute_nll_loss
+            self.nll_alpha,  # alpha — scales NLL in the fused kernel
+            self.nll_alpha > 0,  # compute_nll_loss
             True,  # compiled
             True,  # use_ref_model
             False,  # average_log_prob (sum, matching _dpo_loss)

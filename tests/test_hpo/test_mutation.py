@@ -9,9 +9,12 @@ from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from accelerate.utils import DeepSpeedPlugin
 from gymnasium import spaces
-from peft import LoraConfig
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+
+if HAS_LLM_DEPENDENCIES:
+    from peft import LoraConfig
 from agilerl.hpo.mutation import (
     MutationError,
     Mutations,
@@ -1853,6 +1856,7 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
             assert old.index == individual.index
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 @pytest.mark.parametrize(
     "use_accelerator, use_deepspeed_optimizer",
     [
@@ -2029,6 +2033,7 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
         AcceleratorState._reset_state(True)
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 @pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])
 @pytest.mark.parametrize("algo", ["GRPO", "DPO"])
 def test_mutations_warns_on_llm_algorithm(

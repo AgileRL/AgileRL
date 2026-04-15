@@ -46,19 +46,19 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 8192
 
 NET_CONFIG:
-    latent_dim: 64
+    latent_dim: 64                    # Latent representation dimension
     encoder_config:
-        latent_dim: 64
+        latent_dim: 64                # Per-input encoder output dimension
         mlp_config:
-            hidden_size: [64]
-            activation: Tanh
-            min_mlp_nodes: 64
-            max_mlp_nodes: 500
+            hidden_size: [64]         # MLP hidden layer sizes per input
+            activation: Tanh          # Activation function
+            min_mlp_nodes: 64         # Min MLP nodes for architecture mutation
+            max_mlp_nodes: 500        # Max MLP nodes for architecture mutation
 
     head_config:
-        hidden_size: [8]
-        activation: Tanh
-        min_hidden_layers: 1
-        max_hidden_layers: 3
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
+        hidden_size: [8]              # Head hidden layer sizes
+        activation: Tanh              # Activation function
+        min_hidden_layers: 1          # Min hidden layers for architecture mutation
+        max_hidden_layers: 3          # Max hidden layers for architecture mutation
+        min_mlp_nodes: 64             # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 500            # Max MLP nodes for architecture mutation

@@ -46,7 +46,7 @@ Dependencies
     from transformers import AutoTokenizer
     from agilerl.algorithms import GRPO
     from agilerl.training.train_llm import finetune_llm_reasoning
-    from agilerl.utils.llm_utils import ReasoningGym
+    from agilerl.wrappers.llm_envs import ReasoningGym
 
 
 Defining our base model and dataset
@@ -89,7 +89,7 @@ become very good at taking actions to solve tasks - to develop *agency*. Since w
 with reinforcement learning, it becomes an agent through this process.
 
 We must create a reinforcement learning environment in which our agent can explore possible
-solutions and learn to optimise rewards. AgileRL provides a :class:`ReasoningGym <agilerl.utils.llm_utils.ReasoningGym>`
+solutions and learn to optimise rewards. AgileRL provides a :class:`ReasoningGym <agilerl.wrappers.llm_envs.ReasoningGym>`
 class that wraps a Hugging Face dataset and converts it into a reinforcement learning, gymnasium-style environment.
 
 So, how does the environment know how to reward an agent for its outputs? Well, we must define a *reward_function*
@@ -213,7 +213,7 @@ To allow our model to become an agent and learn through reinforcement learning, 
 :class:`GRPO <agilerl.algorithms.GRPO>` class. This class follows the same structure as the other
 reinforcement learning algorithms in the AgileRL library.
 
-An important part of training aN LLM to display reasoning bahevaiour is distributed training. They are
+An important part of training an LLM to display reasoning behaviour is distributed training. They are
 called *Large* Language Models for a reason, and unless you are a very lucky individual, you may not
 have enough capacity on your individual computer to train even a 'small' LLM. If you want to train a
 larger, more powerful model, then this becomes even more infeasible. Instead, we can leverage distributed
@@ -386,10 +386,10 @@ function and is an example of how we might choose to train our agent to exhibit 
                 ):
                     if agent.accelerator is not None:
                         unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
-                        agent.save_checkpoint(checkpoint_path, weights_only=True)
+                        agent.save_checkpoint(checkpoint_path, lora_only=True)
                         print(f"Saved checkpoint {save_path}")
                     else:
-                        agent.save_checkpoint(checkpoint_path, weights_only=True)
+                        agent.save_checkpoint(checkpoint_path, lora_only=True)
 
 
 Loading a Trained Agent for Inference

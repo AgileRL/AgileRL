@@ -1,7 +1,7 @@
 ---
 # Define initial hyperparameters
 INIT_HP:
-    ENV_NAME: LunarLander-v3   # Gym environment name
+    ENV_NAME: LunarLander-v3   # Box2D env — requires: pip install agilerl[box2d] (+ system pkg 'swig')
     ALGO: Rainbow DQN          # Algorithm
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
@@ -52,18 +52,18 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 10
 
 NET_CONFIG:
-    latent_dim: 64
+    latent_dim: 64                    # Latent representation dimension
 
     encoder_config:
-        hidden_size: [128]
-        activation: ReLU
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
+        hidden_size: [128]            # Encoder hidden layer sizes
+        activation: ReLU              # Activation function
+        min_mlp_nodes: 64             # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 500            # Max MLP nodes for architecture mutation
 
     head_config:
-        hidden_size: [128]
-        activation: ReLU
-        min_hidden_layers: 1
-        max_hidden_layers: 3
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
+        hidden_size: [128]            # Head hidden layer sizes
+        activation: ReLU              # Activation function
+        min_hidden_layers: 1          # Min hidden layers for architecture mutation
+        max_hidden_layers: 3          # Max hidden layers for architecture mutation
+        min_mlp_nodes: 64             # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 500            # Max MLP nodes for architecture mutation

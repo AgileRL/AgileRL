@@ -19,7 +19,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_reasoning
-from agilerl.utils.llm_utils import ReasoningGym
+from agilerl.wrappers.llm_envs import ReasoningGym
 from agilerl.utils.utils import create_population
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -121,7 +121,7 @@ def main(init_hp, mut_p):
     ]
 
     # Convert the HuggingFace dataset into a Gymnasium environment
-    accelerator = Accelerator()
+    accelerator = None  # Accelerator()
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -134,10 +134,14 @@ def main(init_hp, mut_p):
         return_raw_completions=USE_VLLM,
     )
 
-    # Add the zero stage to the initialization hyperparameters
-    init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
-        "zero_optimization"
-    ]["stage"]
+    init_hp["ZERO_STAGE"] = 0
+    if (
+        accelerator is not None
+        and getattr(accelerator.state, "deepspeed_plugin", None) is not None
+    ):
+        init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
+            "zero_optimization"
+        ]["stage"]
     init_hp["MAX_MODEL_LEN"] = MAX_CONTEXT_LENGTH
 
     hp_config = HyperparameterConfig(
@@ -153,13 +157,7 @@ def main(init_hp, mut_p):
     # Define the algorithm kwargs
     algo_kwargs = {
         "model_name": MODEL_PATH,
-        "lora_config": LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-            lora_dropout=0.05,
-            bias="none",
-        ),
+        "lora_config": LoraConfig(**init_hp["LORA"]),
         "use_vllm": USE_VLLM,
         "pad_token_id": tokenizer.pad_token_id,
         "pad_token": tokenizer.pad_token,
@@ -209,7 +207,8 @@ def main(init_hp, mut_p):
         accelerator=accelerator,
         verbose=True,
     )
-    accelerator.end_training()
+    if accelerator is not None:
+        accelerator.end_training()
 
 
 if __name__ == "__main__":

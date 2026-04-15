@@ -1,7 +1,7 @@
 [project]
 name = "agilerl"
 
-version = "2.6.1"
+version = "2.6.1.dev0"
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
@@ -40,6 +40,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+box2d = [
+    "swig~=4.4.1; sys_platform != 'win32'",
+    "gymnasium[box2d]~=1.0.0; sys_platform != 'win32'",
+]
 llm = [
     "datasets==4.4.1",
     "deepspeed~=0.17.1; sys_platform != 'win32'",
@@ -50,6 +54,8 @@ llm = [
     "vllm==0.11.0; sys_platform == 'darwin'",
 ]
 all = [
+    "swig~=4.4.1; sys_platform != 'win32'",
+    "gymnasium[box2d]~=1.0.0; sys_platform != 'win32'",
     "datasets==4.4.1",
     "deepspeed~=0.17.1; sys_platform != 'win32'",
     "liger-kernel==0.7.0; sys_platform == 'linux'",
@@ -76,6 +82,10 @@ docs = [
 
 [tool.pytest.ini_options]
 # Deterministic ordering for tests; useful for pytest-xdist.
+addopts = [
+    "--durations=0",
+    "--durations-min=1.0",
+]
 env = [
     "PYTHONHASHSEED=0",
     "VLLM_USE_FLASHINFER_SAMPLER=0",
@@ -112,6 +122,20 @@ exclude_lines = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv]
+# box2d has a bug where it doesn't declare swig as a build dependency.
+# This workaround tells uv to build box2d-py using the project environment directly
+# (not an isolated one), where it can see system PATH and find swig, which is already installed as a dependency
+# (no-build-isolation packages are built after the others).
+#
+# DeepSpeed can be built with env vars to specify compiler flags
+# e.g. DS_BUILD_FUSED_ADAM=1 is essential on L4 GPU
+# to pre-build the fused Adam kernel and prevent timeout during tests.
+no-build-isolation-package = [
+    "box2d-py",
+    "deepspeed"
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["agilerl"]

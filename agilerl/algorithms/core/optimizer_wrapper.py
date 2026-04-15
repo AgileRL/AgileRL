@@ -1,24 +1,26 @@
+from __future__ import annotations
+
 import inspect
-from typing import Any, Union
+from typing import TYPE_CHECKING, Any, Union
 
 from torch import nn
-from torch.optim import Optimizer
 
 from agilerl import HAS_LLM_DEPENDENCIES
+
+if TYPE_CHECKING:
+    from torch.optim import Optimizer
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol, OptimizerLikeClass
 from agilerl.typing import OptimizerType, StateDict
 
 if HAS_LLM_DEPENDENCIES:
     from peft import PeftModel
-
-    PeftModelType = PeftModel
 else:
-    PeftModelType = "PeftModel"
+    PeftModel = "PeftModel"
 
 ModuleList = list[EvolvableModule]
 _Optimizer = type[OptimizerType] | dict[str, type[OptimizerType]] | OptimizerLikeClass
-_Module = Union[EvolvableModule, ModuleDict, ModuleList, PeftModelType]
+_Module = Union[EvolvableModule, ModuleDict, ModuleList, PeftModel]
 
 
 def init_from_multiple(
@@ -95,7 +97,8 @@ class OptimizerWrapper:
 
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs if optimizer_kwargs is not None else {}
-        self.lr = lr
+        # Config sources (YAML, CLI) may pass lr as str; torch.optim requires a real float.
+        self.lr = float(lr)
 
         if isinstance(networks, nn.Module):
             self.networks = [networks]
