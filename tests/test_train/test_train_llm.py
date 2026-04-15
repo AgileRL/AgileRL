@@ -47,7 +47,7 @@ def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
     # Mock other dependencies
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
         mock_agg.return_value = 0.5
@@ -112,7 +112,7 @@ def test_finetune_llm_reasoning_with_wandb_and_checkpoints(use_accelerator):
         patch("agilerl.training.train_llm.trange") as mock_trange,
         patch("agilerl.training.train_llm.init_wandb") as mock_init_wandb,
         patch("agilerl.training.train_llm.wandb") as mock_wandb,
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
     ):
         # Configure mocks
@@ -179,7 +179,7 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
     # Mock other dependencies
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch(
             "agilerl.training.train_llm.tournament_selection_and_mutation"
@@ -289,7 +289,7 @@ def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps():
     # Mock other dependencies
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch(
             "agilerl.training.train_llm.tournament_selection_and_mutation"
@@ -349,7 +349,7 @@ def test_finetune_llm_reasoning_max_steps_set_from_num_epochs():
         patch("agilerl.training.train_llm.trange"),
         patch("agilerl.training.train_llm.init_wandb"),
         patch("agilerl.training.train_llm.wandb"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
     ):
         mock_agg.return_value = 0.5
@@ -403,7 +403,7 @@ def test_finetune_llm_reasoning_break_on_num_epochs():
         patch("agilerl.training.train_llm.trange"),
         patch("agilerl.training.train_llm.init_wandb"),
         patch("agilerl.training.train_llm.wandb"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
         mock_env.num_epochs = 2
@@ -457,7 +457,7 @@ def test_finetune_llm_preference_basic_training_loop(use_accelerator):
     # Mock other dependencies
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
         mock_agg.return_value = 0.5
@@ -521,7 +521,7 @@ def test_finetune_llm_preference_with_wandb_and_checkpoints(use_accelerator):
         patch("agilerl.training.train_llm.trange") as mock_trange,
         patch("agilerl.training.train_llm.init_wandb") as mock_init_wandb,
         patch("agilerl.training.train_llm.wandb") as mock_wandb,
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
     ):
         # Configure mocks
@@ -595,7 +595,7 @@ def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
     # Mock other dependencies
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch(
             "agilerl.training.train_llm.tournament_selection_and_mutation"
@@ -661,7 +661,7 @@ def test_finetune_llm_preference_warning_num_epochs_and_max_steps():
     # Mock other dependencies
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch(
             "agilerl.training.train_llm.tournament_selection_and_mutation"
@@ -728,7 +728,7 @@ def test_finetune_llm_preference_break_on_num_epochs():
         patch("agilerl.training.train_llm.trange"),
         patch("agilerl.training.train_llm.init_wandb"),
         patch("agilerl.training.train_llm.wandb"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
         mock_env.num_epochs = 2
@@ -807,7 +807,7 @@ def test_finetune_llm_sft_basic_training_loop(use_accelerator):
 
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_safe_agg,
+        patch("agilerl.utils.utils.safe_aggregate_metrics") as mock_safe_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
         mock_safe_agg.side_effect = lambda acc, val: (
@@ -854,7 +854,7 @@ def test_finetune_llm_sft_with_wandb_and_checkpoints(use_accelerator):
         patch("agilerl.training.train_llm.trange") as mock_trange,
         patch("agilerl.training.train_llm.init_wandb") as mock_init_wandb,
         patch("agilerl.training.train_llm.wandb") as mock_wandb,
-        patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_safe_agg,
+        patch("agilerl.utils.utils.safe_aggregate_metrics") as mock_safe_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
     ):
         mock_pbar = Mock()
@@ -907,7 +907,7 @@ def test_finetune_llm_sft_evolvable_training_loop(use_accelerator):
 
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_safe_agg,
+        patch("agilerl.utils.utils.safe_aggregate_metrics") as mock_safe_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch(
             "agilerl.training.train_llm.tournament_selection_and_mutation"
@@ -955,7 +955,7 @@ def test_finetune_llm_sft_warning_num_epochs_and_max_steps():
 
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_safe_agg,
+        patch("agilerl.utils.utils.safe_aggregate_metrics") as mock_safe_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
         mock_safe_agg.side_effect = lambda acc, val: (
@@ -1003,7 +1003,7 @@ def test_finetune_llm_sft_break_on_num_epochs():
         patch("agilerl.training.train_llm.trange"),
         patch("agilerl.training.train_llm.init_wandb"),
         patch("agilerl.training.train_llm.wandb"),
-        patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_safe_agg,
+        patch("agilerl.utils.utils.safe_aggregate_metrics") as mock_safe_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
         mock_env.num_epochs = 2
@@ -1380,7 +1380,7 @@ def test_finetune_llm_sft_csv_logging_without_wandb(tmp_path, capsys):
 
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_safe_agg,
+        patch("agilerl.utils.utils.safe_aggregate_metrics") as mock_safe_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch("agilerl.training.train_llm.wandb") as mock_wandb,
     ):
@@ -1425,7 +1425,7 @@ def test_finetune_llm_sft_aggregate_skips_eval_fitness_when_never_evaluates(tmp_
 
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_safe_agg,
+        patch("agilerl.utils.utils.safe_aggregate_metrics") as mock_safe_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch("agilerl.training.train_llm.wandb") as mock_wandb,
     ):
