@@ -584,7 +584,9 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
             if np.issubdtype(agent_action.dtype, np.integer):
                 placeholder = np.zeros(placeholder_shape, dtype=agent_action.dtype)
             else:
-                placeholder = np.full(placeholder_shape, np.nan, dtype=agent_action.dtype)
+                placeholder = np.full(
+                    placeholder_shape, np.nan, dtype=agent_action.dtype
+                )
 
             action_dict[agent_id] = np.insert(
                 agent_action,
@@ -636,12 +638,9 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
                 continue
 
             # If next_states is missing or all NaN, infer it from the state sequence.
-            missing_next_state = (
-                agent_next_states is None
-                or (
-                    isinstance(agent_next_states, np.ndarray)
-                    and np.isnan(agent_next_states).all()
-                )
+            missing_next_state = agent_next_states is None or (
+                isinstance(agent_next_states, np.ndarray)
+                and np.isnan(agent_next_states).all()
             )
 
             if missing_next_state:
@@ -725,7 +724,6 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
     def learn(self, experiences: ExperiencesType, *args: Any, **kwargs: Any) -> Any:
         """Learns from the collected experiences."""
-
         # Off-policy branch for MADDPG / MATD3
         if self.agent.algo in {"MADDPG", "MATD3"}:
             experiences = self.stack_experiences(experiences)
