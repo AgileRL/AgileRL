@@ -1264,3 +1264,78 @@ def test_async_learn_missing_next_state(ma_vector_space, ma_discrete_space):
     )
     loss_info = wrapper.learn(experiences)
     assert isinstance(loss_info, dict)
+
+
+def test_async_wrapper_allows_maddpg(ma_vector_space):
+    from gymnasium import spaces as gym_spaces
+    from agilerl.algorithms import MADDPG
+
+    agent_ids = ["agent_0", "agent_1"]
+    action_spaces = [
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+    ]
+
+    agent = MADDPG(
+        observation_spaces=ma_vector_space[:2],
+        action_spaces=action_spaces,
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+
+    wrapper = AsyncAgentsWrapper(agent)
+    assert wrapper.agent.algo == "MADDPG"
+
+
+def test_async_wrapper_allows_matd3(ma_vector_space):
+    from gymnasium import spaces as gym_spaces
+    from agilerl.algorithms import MATD3
+
+    agent_ids = ["agent_0", "agent_1"]
+    action_spaces = [
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+    ]
+
+    agent = MATD3(
+        observation_spaces=ma_vector_space[:2],
+        action_spaces=action_spaces,
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+
+    wrapper = AsyncAgentsWrapper(agent)
+    assert wrapper.agent.algo == "MATD3"
+
+
+def test_async_get_action_with_inactive_off_policy_agents(ma_vector_space):
+    from gymnasium import spaces as gym_spaces
+    from agilerl.algorithms import MADDPG
+
+    agent_ids = ["agent_0", "agent_1"]
+    action_spaces = [
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+    ]
+
+    agent = MADDPG(
+        observation_spaces=ma_vector_space[:2],
+        action_spaces=action_spaces,
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+    wrapper = AsyncAgentsWrapper(agent)
+
+    obs = {
+        "agent_0": np.array([[1.0] * 6, [np.nan] * 6], dtype=np.float32),
+        "agent_1": np.array([[1.0] * 6, [1.0] * 6], dtype=np.float32),
+    }
+
+    env_action_dict, raw_action_dict = wrapper.get_action(obs)
+
+    assert "agent_0" in env_action_dict
+    assert "agent_0" in raw_action_dict
+    assert env_action_dict["agent_0"].shape[0] == 2
+    assert raw_action_dict["agent_0"].shape[0] == 2
+    assert "agent_1" in env_action_dict
+    assert "agent_1" in raw_action_dict
