@@ -1087,7 +1087,7 @@ def test_finetune_llm_reasoning_csv_logging_without_wandb(tmp_path):
 
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch("agilerl.training.train_llm.wandb") as mock_wandb,
     ):
@@ -1139,7 +1139,7 @@ def test_finetune_llm_reasoning_wandb_and_csv_both(tmp_path):
         patch("agilerl.training.train_llm.trange"),
         patch("agilerl.training.train_llm.init_wandb"),
         patch("agilerl.training.train_llm.wandb") as mock_wandb,
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
     ):
         mock_agg.return_value = 0.5
@@ -1186,7 +1186,7 @@ def test_finetune_llm_reasoning_aggregate_skips_eval_when_never_evaluates(tmp_pa
 
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch("agilerl.training.train_llm.wandb") as mock_wandb,
     ):
@@ -1233,7 +1233,7 @@ def test_finetune_llm_reasoning_max_reward_none_skips_accuracy_in_aggregate(tmp_
 
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch("agilerl.training.train_llm.wandb") as mock_wandb,
     ):
@@ -1285,7 +1285,7 @@ def test_finetune_llm_preference_csv_logging_without_wandb(tmp_path, capsys):
 
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch("agilerl.training.train_llm.wandb") as mock_wandb,
     ):
@@ -1341,7 +1341,7 @@ def test_finetune_llm_preference_aggregate_skips_eval_when_never_evaluates(
 
     with (
         patch("agilerl.training.train_llm.trange"),
-        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.utils.utils.aggregate_metrics_across_gpus") as mock_agg,
         patch("agilerl.training.train_llm.save_llm_checkpoint"),
         patch("agilerl.training.train_llm.wandb") as mock_wandb,
     ):
