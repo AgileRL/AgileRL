@@ -20,6 +20,8 @@ from agilerl.utils.llm_utils import (
     create_llm_accelerator,
     gather_if_zero3,
     get_state_dict,
+    stitch_completion_after_windowed_hf_generate,
+    stitch_completion_after_windowed_vllm_generate,
 )
 
 pytestmark = pytest.mark.llm
@@ -30,6 +32,129 @@ DUMMY_CONVERSATION_TEMPLATE = [
         "content": "question: {question}\nanswer: {answer}",
     },
 ]
+
+
+def test_stitch_completion_after_windowed_hf_generate_no_stitch_passthrough():
+    completion_id = torch.tensor([[11, 12, 13, 14]], dtype=torch.long)
+    out, full_prompt_len = stitch_completion_after_windowed_hf_generate(
+        completion_id=completion_id,
+        stitch=None,
+        initial_len=2,
+    )
+    assert torch.equal(out, completion_id)
+    assert full_prompt_len == 2
+
+
+def test_stitch_completion_after_windowed_hf_generate_basic_stitch_insertion():
+    completion_id = torch.tensor([[1, 2, 7, 8]], dtype=torch.long)
+    stitch = torch.tensor([[3, 4, 5, 6]], dtype=torch.long)
+    out, full_prompt_len = stitch_completion_after_windowed_hf_generate(
+        completion_id=completion_id,
+        stitch=stitch,
+        initial_len=2,
+    )
+    expected = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=torch.long)
+    assert torch.equal(out, expected)
+    assert full_prompt_len == 6
+
+
+def test_stitch_completion_after_windowed_hf_generate_output_stays_on_completion_device():
+    completion_id = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+    stitch = torch.tensor([[9, 10]], dtype=torch.long)
+    out, _ = stitch_completion_after_windowed_hf_generate(
+        completion_id=completion_id,
+        stitch=stitch,
+        initial_len=2,
+    )
+    assert out.device == completion_id.device
+
+
+def test_stitch_completion_after_windowed_hf_generate_empty_stitch_tensor_keeps_sequence():
+    completion_id = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+    stitch = torch.empty((1, 0), dtype=torch.long)
+    out, full_prompt_len = stitch_completion_after_windowed_hf_generate(
+        completion_id=completion_id,
+        stitch=stitch,
+        initial_len=2,
+    )
+    assert torch.equal(out, completion_id)
+    assert full_prompt_len == 2
+
+
+def test_stitch_completion_after_windowed_vllm_generate_rejects_group_size_not_one():
+    with pytest.raises(ValueError, match="only implemented for group_size=1"):
+        stitch_completion_after_windowed_vllm_generate(
+            completion_ids=[torch.tensor([[1, 2, 3]], dtype=torch.long)],
+            stitch_prefixes=[torch.tensor([[9]], dtype=torch.long)],
+            group_prompts=[{"initial_prompt_len": 1}],
+            group_size=2,
+            prompts=[{"input_ids": torch.tensor([[1, 2]], dtype=torch.long)}],
+        )
+
+
+def test_stitch_completion_after_windowed_vllm_generate_selective_stitching_per_prompt():
+    completion_ids = [
+        torch.tensor([[1, 2, 7]], dtype=torch.long),
+        torch.tensor([[4, 5, 6]], dtype=torch.long),
+    ]
+    stitch_prefixes = [
+        torch.tensor([[9, 10]], dtype=torch.long),
+        torch.empty((1, 0), dtype=torch.long),
+    ]
+    group_prompts = [{"initial_prompt_len": 2}, {"initial_prompt_len": 1}]
+    prompts = [{}, {}]
+    out = stitch_completion_after_windowed_vllm_generate(
+        completion_ids=completion_ids,
+        stitch_prefixes=stitch_prefixes,
+        group_prompts=group_prompts,
+        group_size=1,
+        prompts=prompts,
+    )
+    assert torch.equal(out[0], torch.tensor([[1, 2, 9, 10, 7]], dtype=torch.long))
+    assert torch.equal(out[1], completion_ids[1])
+
+
+def test_stitch_completion_after_windowed_vllm_generate_inserts_at_initial_prompt_len():
+    completion_ids = [torch.tensor([[10, 11, 12, 13]], dtype=torch.long)]
+    stitch_prefixes = [torch.tensor([[99, 98]], dtype=torch.long)]
+    group_prompts = [{"initial_prompt_len": 1}]
+    out = stitch_completion_after_windowed_vllm_generate(
+        completion_ids=completion_ids,
+        stitch_prefixes=stitch_prefixes,
+        group_prompts=group_prompts,
+        group_size=1,
+        prompts=[{}],
+    )
+    assert torch.equal(out[0], torch.tensor([[10, 99, 98, 11, 12, 13]]))
+
+
+def test_stitch_completion_after_windowed_vllm_generate_broadcasts_single_stitch_row_across_group_rows():
+    completion_ids = [torch.tensor([[1, 2, 7], [3, 4, 8]], dtype=torch.long)]
+    stitch_prefixes = [torch.tensor([[9, 10]], dtype=torch.long)]
+    group_prompts = [{"initial_prompt_len": 2}]
+    out = stitch_completion_after_windowed_vllm_generate(
+        completion_ids=completion_ids,
+        stitch_prefixes=stitch_prefixes,
+        group_prompts=group_prompts,
+        group_size=1,
+        prompts=[{}],
+    )
+    expected = torch.tensor([[1, 2, 9, 10, 7], [3, 4, 9, 10, 8]], dtype=torch.long)
+    assert torch.equal(out[0], expected)
+
+
+def test_stitch_completion_after_windowed_vllm_generate_raises_when_initial_prompt_len_missing_with_non_empty_stitch():
+    with pytest.raises(
+        ValueError,
+        match="initial_prompt_len required when stitch_prefix_ids is non-empty",
+    ):
+        stitch_completion_after_windowed_vllm_generate(
+            completion_ids=[torch.tensor([[1, 2, 3]], dtype=torch.long)],
+            stitch_prefixes=[torch.tensor([[9]], dtype=torch.long)],
+            group_prompts=[{}],
+            group_size=1,
+            prompts=[{}],
+        )
 
 
 class DummyTokenizer:
@@ -916,175 +1041,186 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
 # ---------------------------------------------------------------------------
 
 
-class TestAutoZeroStage:
-    """Tests for the _auto_zero_stage heuristic."""
-
-    def test_none_model_size_returns_1(self):
-        assert _auto_zero_stage(4, None) == 1
-
-    def test_small_model_returns_1(self):
-        """Model using < 60% of per-GPU VRAM → ZeRO-1."""
-        with patch("torch.cuda.get_device_properties") as mock_props:
-            mock_props.return_value.total_mem = 24 * (1024**3)  # 24 GB
-            assert _auto_zero_stage(2, 10.0) == 1  # 10/24 ≈ 0.42
-
-    def test_medium_model_returns_2(self):
-        """Model using 60-90% of per-GPU VRAM → ZeRO-2."""
-        with patch("torch.cuda.get_device_properties") as mock_props:
-            mock_props.return_value.total_mem = 24 * (1024**3)  # 24 GB
-            assert _auto_zero_stage(2, 17.0) == 2  # 17/24 ≈ 0.71
-
-    def test_large_model_returns_3(self):
-        """Model exceeding 90% of per-GPU VRAM → ZeRO-3."""
-        with patch("torch.cuda.get_device_properties") as mock_props:
-            mock_props.return_value.total_mem = 24 * (1024**3)  # 24 GB
-            assert _auto_zero_stage(2, 23.0) == 3  # 23/24 ≈ 0.96
-
-    def test_device_properties_exception_returns_1(self):
-        """Fallback to ZeRO-1 when get_device_properties raises."""
-        with patch(
-            "torch.cuda.get_device_properties", side_effect=RuntimeError("no CUDA")
-        ):
-            assert _auto_zero_stage(2, 14.0) == 1
+def test_auto_zero_stage_none_model_size_returns_1():
+    assert _auto_zero_stage(4, None) == 1
 
 
-class TestCreateLlmAccelerator:
-    """Tests for the create_llm_accelerator factory."""
+def test_auto_zero_stage_small_model_returns_1():
+    """Model using < 60% of per-GPU VRAM -> ZeRO-1."""
+    with patch("torch.cuda.get_device_properties") as mock_props:
+        mock_props.return_value.total_mem = 24 * (1024**3)  # 24 GB
+        assert _auto_zero_stage(2, 10.0) == 1  # 10/24 ~= 0.42
 
-    def test_no_gpus_returns_none(self):
-        with patch("torch.cuda.device_count", return_value=0):
-            result = create_llm_accelerator()
-        assert result is None
 
-    def test_single_gpu_returns_plain_accelerator(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=1):
-            result = create_llm_accelerator()
-        assert isinstance(result, Accelerator)
-        assert not hasattr(result.state, "deepspeed_plugin") or (
-            result.state.deepspeed_plugin is None
+def test_auto_zero_stage_medium_model_returns_2():
+    """Model using 60-90% of per-GPU VRAM -> ZeRO-2."""
+    with patch("torch.cuda.get_device_properties") as mock_props:
+        mock_props.return_value.total_mem = 24 * (1024**3)  # 24 GB
+        assert _auto_zero_stage(2, 17.0) == 2  # 17/24 ~= 0.71
+
+
+def test_auto_zero_stage_large_model_returns_3():
+    """Model exceeding 90% of per-GPU VRAM -> ZeRO-3."""
+    with patch("torch.cuda.get_device_properties") as mock_props:
+        mock_props.return_value.total_mem = 24 * (1024**3)  # 24 GB
+        assert _auto_zero_stage(2, 23.0) == 3  # 23/24 ~= 0.96
+
+
+def test_auto_zero_stage_device_properties_exception_returns_1():
+    """Fallback to ZeRO-1 when get_device_properties raises."""
+    with patch(
+        "torch.cuda.get_device_properties", side_effect=RuntimeError("no CUDA")
+    ):
+        assert _auto_zero_stage(2, 14.0) == 1
+
+
+def test_create_llm_accelerator_no_gpus_returns_none():
+    with patch("torch.cuda.device_count", return_value=0):
+        result = create_llm_accelerator()
+    assert result is None
+
+
+def test_create_llm_accelerator_single_gpu_returns_plain_accelerator():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=1):
+        result = create_llm_accelerator()
+    assert isinstance(result, Accelerator)
+    assert not hasattr(result.state, "deepspeed_plugin") or (
+        result.state.deepspeed_plugin is None
+    )
+
+
+def test_create_llm_accelerator_single_gpu_explicit_zero_stage_uses_deepspeed():
+    """Explicit zero_stage on 1 GPU should honor the override."""
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=1):
+        result = create_llm_accelerator(zero_stage=2)
+    assert isinstance(result, Accelerator)
+    assert result.state.deepspeed_plugin is not None
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert ds_cfg["zero_optimization"]["stage"] == 2
+
+
+def test_create_llm_accelerator_multi_gpu_default_zero_1():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=4):
+        result = create_llm_accelerator()
+    assert isinstance(result, Accelerator)
+    assert result.state.deepspeed_plugin is not None
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert ds_cfg["zero_optimization"]["stage"] == 1
+
+
+def test_create_llm_accelerator_multi_gpu_with_model_size_picks_stage():
+    AcceleratorState._reset_state(True)
+    with (
+        patch("torch.cuda.device_count", return_value=4),
+        patch("torch.cuda.get_device_properties") as mock_props,
+    ):
+        mock_props.return_value.total_mem = 24 * (1024**3)
+        result = create_llm_accelerator(model_size_gb=17.0)
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert ds_cfg["zero_optimization"]["stage"] == 2  # 17/24 ~= 0.71
+
+
+def test_create_llm_accelerator_explicit_zero_stage_overrides_auto():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=4):
+        result = create_llm_accelerator(zero_stage=3)
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert ds_cfg["zero_optimization"]["stage"] == 3
+
+
+def test_create_llm_accelerator_offload_optimizer():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=2):
+        result = create_llm_accelerator(offload_optimizer=True)
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert ds_cfg["zero_optimization"]["offload_optimizer"] == {"device": "cpu"}
+
+
+def test_create_llm_accelerator_no_offload_by_default():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=2):
+        result = create_llm_accelerator()
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert "offload_optimizer" not in ds_cfg["zero_optimization"]
+
+
+def test_create_llm_accelerator_stage_3_sets_gather_flag():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=2):
+        result = create_llm_accelerator(zero_stage=3)
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert ds_cfg["zero_optimization"]["stage3_gather_16bit_weights_on_model_save"] is True
+
+
+def test_create_llm_accelerator_stage_1_no_gather_flag():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=2):
+        result = create_llm_accelerator(zero_stage=1)
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert (
+        "stage3_gather_16bit_weights_on_model_save"
+        not in ds_cfg["zero_optimization"]
+    )
+
+
+def test_create_llm_accelerator_overlap_comm_enabled_for_stage_2():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=2):
+        result = create_llm_accelerator(zero_stage=2)
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert ds_cfg["zero_optimization"]["overlap_comm"] is True
+
+
+def test_create_llm_accelerator_overlap_comm_disabled_for_stage_1():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=2):
+        result = create_llm_accelerator(zero_stage=1)
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert ds_cfg["zero_optimization"]["overlap_comm"] is False
+
+
+def test_create_llm_accelerator_custom_micro_batch_and_grad_accum():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=2):
+        result = create_llm_accelerator(
+            micro_batch_size=4, gradient_accumulation_steps=8
         )
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert ds_cfg["train_micro_batch_size_per_gpu"] == 4
+    assert ds_cfg["gradient_accumulation_steps"] == 8
 
-    def test_single_gpu_explicit_zero_stage_uses_deepspeed(self):
-        """Explicit zero_stage on 1 GPU should honour the override."""
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=1):
-            result = create_llm_accelerator(zero_stage=2)
-        assert isinstance(result, Accelerator)
-        assert result.state.deepspeed_plugin is not None
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert ds_cfg["zero_optimization"]["stage"] == 2
 
-    def test_multi_gpu_default_zero_1(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=4):
-            result = create_llm_accelerator()
-        assert isinstance(result, Accelerator)
-        assert result.state.deepspeed_plugin is not None
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert ds_cfg["zero_optimization"]["stage"] == 1
+def test_create_llm_accelerator_custom_gradient_clipping():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=2):
+        result = create_llm_accelerator(gradient_clipping=0.5)
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert ds_cfg["gradient_clipping"] == 0.5
 
-    def test_multi_gpu_with_model_size_picks_stage(self):
-        AcceleratorState._reset_state(True)
-        with (
-            patch("torch.cuda.device_count", return_value=4),
-            patch("torch.cuda.get_device_properties") as mock_props,
-        ):
-            mock_props.return_value.total_mem = 24 * (1024**3)
-            result = create_llm_accelerator(model_size_gb=17.0)
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert ds_cfg["zero_optimization"]["stage"] == 2  # 17/24 ≈ 0.71
 
-    def test_explicit_zero_stage_overrides_auto(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=4):
-            result = create_llm_accelerator(zero_stage=3)
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert ds_cfg["zero_optimization"]["stage"] == 3
+def test_create_llm_accelerator_fp16_mixed_precision():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=2):
+        result = create_llm_accelerator(mixed_precision="fp16")
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert ds_cfg["fp16"]["enabled"] is True
+    assert ds_cfg["bf16"]["enabled"] is False
 
-    def test_offload_optimizer(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=2):
-            result = create_llm_accelerator(offload_optimizer=True)
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert ds_cfg["zero_optimization"]["offload_optimizer"] == {"device": "cpu"}
 
-    def test_no_offload_by_default(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=2):
-            result = create_llm_accelerator()
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert "offload_optimizer" not in ds_cfg["zero_optimization"]
+def test_create_llm_accelerator_bf16_mixed_precision():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=2):
+        result = create_llm_accelerator(mixed_precision="bf16")
+    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
+    assert ds_cfg["bf16"]["enabled"] is True
+    assert ds_cfg["fp16"]["enabled"] is False
 
-    def test_stage_3_sets_gather_flag(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=2):
-            result = create_llm_accelerator(zero_stage=3)
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert (
-            ds_cfg["zero_optimization"]["stage3_gather_16bit_weights_on_model_save"]
-            is True
-        )
 
-    def test_stage_1_no_gather_flag(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=2):
-            result = create_llm_accelerator(zero_stage=1)
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert (
-            "stage3_gather_16bit_weights_on_model_save"
-            not in ds_cfg["zero_optimization"]
-        )
-
-    def test_overlap_comm_enabled_for_stage_2(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=2):
-            result = create_llm_accelerator(zero_stage=2)
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert ds_cfg["zero_optimization"]["overlap_comm"] is True
-
-    def test_overlap_comm_disabled_for_stage_1(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=2):
-            result = create_llm_accelerator(zero_stage=1)
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert ds_cfg["zero_optimization"]["overlap_comm"] is False
-
-    def test_custom_micro_batch_and_grad_accum(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=2):
-            result = create_llm_accelerator(
-                micro_batch_size=4, gradient_accumulation_steps=8
-            )
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert ds_cfg["train_micro_batch_size_per_gpu"] == 4
-        assert ds_cfg["gradient_accumulation_steps"] == 8
-
-    def test_custom_gradient_clipping(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=2):
-            result = create_llm_accelerator(gradient_clipping=0.5)
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert ds_cfg["gradient_clipping"] == 0.5
-
-    def test_fp16_mixed_precision(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=2):
-            result = create_llm_accelerator(mixed_precision="fp16")
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert ds_cfg["fp16"]["enabled"] is True
-        assert ds_cfg["bf16"]["enabled"] is False
-
-    def test_bf16_mixed_precision(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=2):
-            result = create_llm_accelerator(mixed_precision="bf16")
-        ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-        assert ds_cfg["bf16"]["enabled"] is True
-        assert ds_cfg["fp16"]["enabled"] is False
-
-    def test_single_gpu_mixed_precision_passthrough(self):
-        AcceleratorState._reset_state(True)
-        with patch("torch.cuda.device_count", return_value=1):
-            result = create_llm_accelerator(mixed_precision="fp16")
-        assert isinstance(result, Accelerator)
+def test_create_llm_accelerator_single_gpu_mixed_precision_passthrough():
+    AcceleratorState._reset_state(True)
+    with patch("torch.cuda.device_count", return_value=1):
+        result = create_llm_accelerator(mixed_precision="fp16")
+    assert isinstance(result, Accelerator)

@@ -160,6 +160,40 @@ def get_physical_device_indices(devices: list[int]) -> list[int]:
     return [index_mapping[i] for i in devices if i in index_mapping]
 
 
+def assert_vllm_get_action_contract(
+    completion_ids: list[torch.Tensor],
+    action_masks: list[torch.Tensor],
+    batch_size: int,
+    prompt_len: int,
+    pad_token_id: int,
+) -> None:
+    """Assert stable shape/mask invariants for vLLM get_action outputs.
+
+    :param completion_ids: Generated completion tensors, one per prompt.
+    :type completion_ids: list[torch.Tensor]
+    :param action_masks: Action masks aligned to completion tensors.
+    :type action_masks: list[torch.Tensor]
+    :param batch_size: Expected number of prompt entries.
+    :type batch_size: int
+    :param prompt_len: Expected prompt token length before generation.
+    :type prompt_len: int
+    :param pad_token_id: Pad token id used for mask checks.
+    :type pad_token_id: int
+    :return: None
+    :rtype: None
+    """
+    assert len(completion_ids) == batch_size
+    assert len(action_masks) == batch_size
+    for completion_id, action_mask in zip(completion_ids, action_masks, strict=True):
+        assert completion_id.dim() == 2
+        assert action_mask.dim() == 2
+        assert completion_id.shape[1] > prompt_len
+        assert action_mask.shape[1] == completion_id.shape[1] - 1
+        assert action_mask.dtype == torch.bool
+        pad_positions = completion_id[:, 1:] == pad_token_id
+        assert not action_mask[pad_positions].any()
+
+
 def force_gpu_memory_release() -> None:
     """
     Aggressively release GPU memory using all available methods.

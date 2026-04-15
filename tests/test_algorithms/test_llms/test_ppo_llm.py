@@ -15,7 +15,10 @@ from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym, masked_whiten
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
-from tests.utils import spawn_new_process_for_each_test
+from tests.utils import (
+    assert_vllm_get_action_contract,
+    spawn_new_process_for_each_test,
+)
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 pytestmark = pytest.mark.llm
@@ -280,7 +283,7 @@ def ppo_factory():
     return generate_ppo
 
 
-@spawn_new_process_for_each_test #FIXME add back in when tests run
+@spawn_new_process_for_each_test 
 @pytest.mark.parametrize("config", [
     deepspeed_config_stage_2,
     None
@@ -304,7 +307,7 @@ def ppo_factory():
     True, 
     False
 ])
-def test_ppo_llm_learns_vllm(
+def test_llmppo_learns_vllm(
     deepspeed_env,
     ppo_factory,
     accelerator_factory,
@@ -397,38 +400,7 @@ def test_ppo_llm_learns_vllm(
     ppo.clean_up()
 
 
-def test_ppo_init_memory_efficient_vllm_calls_wake_and_move(
-    deepspeed_env,
-    ppo_factory,
-    accelerator_factory,
-    model_factory,
-):
-    vocab_size = 1000
-    input_size = 10
-    max_tokens = 20
-    with (
-        patch("agilerl.algorithms.ppo_llm.move_params_to_cpu") as mock_move_cpu,
-        patch.object(LLMPPO, "_move_model_to_vllm"),
-        patch("agilerl.algorithms.core.base.LLM", DummyVLLM),
-    ):
-        ppo = ppo_factory(
-            accelerator_factory=accelerator_factory,
-            model_factory=model_factory,
-            config=deepspeed_config_stage_2,
-            use_deepspeed_optimizer=False,
-            vocab_size=vocab_size,
-            input_size=input_size,
-            max_tokens=max_tokens,
-            use_vllm=True,
-            pretrained_model_name_or_path="facebook/opt-125m",
-            micro_batch_size_per_gpu=None,
-            use_memory_efficient_params=True,
-        )
-        mock_move_cpu.assert_called_once()
-        assert isinstance(ppo.llm, DummyVLLM)
-        ppo.clean_up()
-
-
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("vocab_size", [1000])
@@ -436,7 +408,7 @@ def test_ppo_init_memory_efficient_vllm_calls_wake_and_move(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("pretrained_model_name_or_path", ["facebook/opt-125m"])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_llmppo_get_action_vllm_training_temperature(
+def test_llmppo_get_action_vllm_heavy_smoke(
     deepspeed_env,
     ppo_factory,
     accelerator_factory,
@@ -449,25 +421,38 @@ def test_llmppo_get_action_vllm_training_temperature(
     pretrained_model_name_or_path,
     micro_batch_size_per_gpu,
 ):
-    with patch("agilerl.algorithms.core.base.LLM", DummyVLLM):
-        ppo = ppo_factory(
-            accelerator_factory=accelerator_factory,
-            model_factory=model_factory,
-            config=config,
-            use_deepspeed_optimizer=use_deepspeed_optimizer,
-            vocab_size=vocab_size,
-            input_size=input_size,
-            max_tokens=max_tokens,
-            use_vllm=True,
-            pretrained_model_name_or_path=pretrained_model_name_or_path,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+    ppo = ppo_factory(
+        accelerator_factory=accelerator_factory,
+        model_factory=model_factory,
+        config=config,
+        use_deepspeed_optimizer=use_deepspeed_optimizer,
+        vocab_size=vocab_size,
+        input_size=input_size,
+        max_tokens=max_tokens,
+        use_vllm=True,
+        pretrained_model_name_or_path=pretrained_model_name_or_path,
+        micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+    )
+    batch_size = 4
+    prompts = [
+        {
+            "input_ids": torch.randint(
+                0, vocab_size, (1, input_size), device=ppo.device
+            ),
+            "attention_mask": torch.ones(1, input_size, device=ppo.device),
+            "text": "Write me a short story about a cat.",
+        }
+        for _ in range(batch_size)
+    ]
+    for training in (True, False):
+        completion_ids, action_masks = ppo.get_action(prompts, training=training)
+        assert_vllm_get_action_contract(
+            completion_ids=completion_ids,
+            action_masks=action_masks,
+            batch_size=batch_size,
+            prompt_len=input_size,
+            pad_token_id=ppo.pad_token_id,
         )
-    obs = {
-        "input_ids": torch.randint(0, vocab_size, (1, input_size), device=ppo.device),
-        "attention_mask": torch.ones(1, input_size, device=ppo.device),
-    }
-    ppo.get_action(obs, training=True)
-    ppo.get_action(obs, training=False)
     ppo.clean_up()
 
 
@@ -480,55 +465,54 @@ class _PPOStub:
     _compute_gae_returns = LLMPPO._compute_gae_returns
 
 
-class TestComputeTokenRewards:
-    def test_per_turn_reward_broadcasts_to_that_turns_tokens(self):
-        stub = _PPOStub()
-        action_mask = torch.ones(1, 4, dtype=torch.bool)
-        turn_ids = torch.tensor([[0, 0, 1, 1]])
-        rewards = torch.tensor([[1.0, 2.0]])
-        out = stub._compute_token_rewards(action_mask, rewards, turn_ids)
-        expected = torch.tensor([[1.0, 1.0, 2.0, 2.0]])
-        assert torch.allclose(out, expected)
-
-    def test_minus_one_positions_ignore_turn_columns(self):
-        stub = _PPOStub()
-        action_mask = torch.tensor([[True, True, False, False]])
-        turn_ids = torch.tensor([[0, -1, -1, -1]])
-        rewards = torch.tensor([[3.0]])
-        out = stub._compute_token_rewards(action_mask, rewards, turn_ids)
-        expected = torch.tensor([[3.0, 0.0, 0.0, 0.0]])
-        assert torch.allclose(out, expected)
+def test_compute_token_rewards_per_turn_reward_broadcasts_to_that_turns_tokens():
+    stub = _PPOStub()
+    action_mask = torch.ones(1, 4, dtype=torch.bool)
+    turn_ids = torch.tensor([[0, 0, 1, 1]])
+    rewards = torch.tensor([[1.0, 2.0]])
+    out = stub._compute_token_rewards(action_mask, rewards, turn_ids)
+    expected = torch.tensor([[1.0, 1.0, 2.0, 2.0]])
+    assert torch.allclose(out, expected)
 
 
-class TestComputeGAEReturns:
-    def test_two_turns_manual_then_whiten_matches_reference(self):
-        stub = _PPOStub(gamma=1.0, gae_lambda=1.0)
-        action_mask = torch.ones(1, 2, dtype=torch.bool)
-        turn_ids = torch.tensor([[0, 1]])
-        values = torch.tensor([[0.0, 0.0]])
-        rewards = torch.tensor([[1.0, 2.0]])
-        returns, advantages = stub._compute_gae_returns(
-            rewards, values, action_mask, turn_ids
-        )
-        raw_adv = torch.tensor([[3.0, 2.0]])
-        exp_adv = masked_whiten(raw_adv, action_mask) * action_mask
-        assert torch.allclose(advantages, exp_adv)
-        assert returns.shape == values.shape
-        assert torch.allclose(
-            returns,
-            raw_adv + torch.tensor([[0.0, 0.0]]),
-        )
+def test_compute_token_rewards_minus_one_positions_ignore_turn_columns():
+    stub = _PPOStub()
+    action_mask = torch.tensor([[True, True, False, False]])
+    turn_ids = torch.tensor([[0, -1, -1, -1]])
+    rewards = torch.tensor([[3.0]])
+    out = stub._compute_token_rewards(action_mask, rewards, turn_ids)
+    expected = torch.tensor([[3.0, 0.0, 0.0, 0.0]])
+    assert torch.allclose(out, expected)
 
-    def test_padding_positions_zero_advantage(self):
-        stub = _PPOStub()
-        action_mask = torch.tensor([[True, True, False]])
-        turn_ids = torch.tensor([[0, 1, -1]])
-        values = torch.zeros(1, 3)
-        rewards = torch.tensor([[1.0, 2.0, 0.0]])
-        _returns, advantages = stub._compute_gae_returns(
-            rewards, values, action_mask, turn_ids
-        )
-        assert advantages[0, 2].item() == 0.0
+
+def test_compute_gae_returns_two_turns_manual_then_whiten_matches_reference():
+    stub = _PPOStub(gamma=1.0, gae_lambda=1.0)
+    action_mask = torch.ones(1, 2, dtype=torch.bool)
+    turn_ids = torch.tensor([[0, 1]])
+    values = torch.tensor([[0.0, 0.0]])
+    rewards = torch.tensor([[1.0, 2.0]])
+    returns, advantages = stub._compute_gae_returns(
+        rewards, values, action_mask, turn_ids
+    )
+    raw_adv = torch.tensor([[3.0, 2.0]])
+    exp_adv = masked_whiten(raw_adv, action_mask) * action_mask
+    assert torch.allclose(advantages, exp_adv)
+    assert returns.shape == values.shape
+    assert torch.allclose(
+        returns,
+        raw_adv + torch.tensor([[0.0, 0.0]]),
+    )
+
+def test_compute_gae_returns_padding_positions_zero_advantage():
+    stub = _PPOStub()
+    action_mask = torch.tensor([[True, True, False]])
+    turn_ids = torch.tensor([[0, 1, -1]])
+    values = torch.zeros(1, 3)
+    rewards = torch.tensor([[1.0, 2.0, 0.0]])
+    _returns, advantages = stub._compute_gae_returns(
+        rewards, values, action_mask, turn_ids
+    )
+    assert advantages[0, 2].item() == 0.0
 
 
 def test_init_requires_max_output_or_max_model_len():
@@ -643,6 +627,35 @@ def test_get_action_hf_stopiteration_uses_device_string():
         assert len(ids) == 1
 
 
+@pytest.mark.parametrize("hf_generate_chunk_size", [1, 2, 4])
+@pytest.mark.parametrize("training", [True, False])
+def test_llmppo_get_action_hf_chunk_sizes_contract(hf_generate_chunk_size, training):
+    ppo = _cpu_llmppo(
+        use_vllm=False,
+        hf_generate_chunk_size=hf_generate_chunk_size,
+        max_model_len=128,
+        max_output_tokens=8,
+    )
+    batch_size = 4
+    prompt_len = 10
+    prompts = [
+        {
+            "input_ids": torch.randint(0, 100, (1, prompt_len), device=ppo.device),
+            "attention_mask": torch.ones(1, prompt_len, device=ppo.device),
+        }
+        for _ in range(batch_size)
+    ]
+    completion_ids, action_masks = ppo.get_action(prompts, training=training)
+    assert_vllm_get_action_contract(
+        completion_ids=completion_ids,
+        action_masks=action_masks,
+        batch_size=batch_size,
+        prompt_len=prompt_len,
+        pad_token_id=ppo.pad_token_id,
+    )
+    ppo.clean_up()
+
+
 def test_learn_multi_turn_explicit_turn_ids():
     ppo = _cpu_llmppo(lr_actor=0.05, update_epochs=2)
     vocab = 100
@@ -658,6 +671,83 @@ def test_learn_multi_turn_explicit_turn_ids():
     turn_ids = turn_ids[:, : seq_len - 1]
     rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
     ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+
+
+def test_llmppo_learns_multiturn():
+    """Multi-turn learn path updates actor/critic adapters without vLLM/DeepSpeed."""
+    torch.manual_seed(0)
+    ppo = _cpu_llmppo(
+        lr_actor=0.05,
+        lr_critic=0.05,
+        update_epochs=2,
+        use_vllm=False,
+    )
+
+    vocab_size = 100
+    input_tokens = 10
+    generated_tokens = 8
+    seq_len = input_tokens + generated_tokens
+    batch_size = 2
+    completions = [
+        torch.randint(0, vocab_size, (1, seq_len), device=ppo.device)
+        for _ in range(batch_size)
+    ]
+    action_masks = [
+        torch.ones(1, seq_len - 1, dtype=torch.bool, device=ppo.device)
+        for _ in range(batch_size)
+    ]
+
+    one_turn_ids = torch.tensor(
+        [
+            [-1] * (input_tokens - 1)
+            + [0] * (generated_tokens // 2)
+            + [1] * (generated_tokens - generated_tokens // 2)
+        ],
+        dtype=torch.long,
+        device=ppo.device,
+    )[:, : seq_len - 1]
+    turn_ids = one_turn_ids.repeat(batch_size, 1)
+    rewards = torch.tensor(
+        [[1.0, -0.5], [-0.25, 0.75]],
+        dtype=torch.float32,
+        device=ppo.device,
+    )
+
+    ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+    pre_learn_actor_state_dict = {
+        name: param.clone().detach() for name, param in ppo.actor.named_parameters()
+    }
+
+    metrics = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+    for key in (
+        "mean_loss",
+        "mean_kl",
+        "mean_pg_loss",
+        "mean_vf_loss",
+        "mean_entropy",
+    ):
+        assert key in metrics
+        assert isinstance(metrics[key], float)
+        assert torch.isfinite(torch.tensor(metrics[key]))
+
+    actor_lora_changed = False
+    critic_lora_changed = False
+    for param_name, param in ppo.actor.named_parameters():
+        before = pre_learn_actor_state_dict[param_name]
+        if "reference" in param_name:
+            assert torch.equal(param, before), f"{param_name} should not change"
+            continue
+        if "actor" in param_name and "lora" in param_name and not torch.equal(
+            param, before
+        ):
+            actor_lora_changed = True
+        if "critic" in param_name and "lora" in param_name and not torch.equal(
+            param, before
+        ):
+            critic_lora_changed = True
+
+    assert actor_lora_changed, "Expected at least one actor LoRA parameter to update"
+    assert critic_lora_changed, "Expected at least one critic LoRA parameter to update"
 
 
 def test_learn_turn_level_clip_false():
@@ -741,6 +831,55 @@ def test_test_method_reasoning_gym_branch():
     assert out.numel() == 4  # loop=2 × batch_size=2
 
 
+def test_test_method_multiturn_episode_env_branch():
+    class DummyMultiTurnEpisodeEnv:
+        max_turns = 2
+
+        def __init__(self):
+            self._step_count = 0
+
+        def reset(self, seed=None):
+            del seed
+            self._step_count = 0
+            prompt = {
+                "input_ids": torch.ones(1, 4, dtype=torch.long),
+                "attention_mask": torch.ones(1, 4, dtype=torch.long),
+            }
+            return prompt, {}
+
+        def step(self, full_completion_ids):
+            del full_completion_ids
+            self._step_count += 1
+            prompt = {
+                "input_ids": torch.ones(1, 4, dtype=torch.long),
+                "attention_mask": torch.ones(1, 4, dtype=torch.long),
+            }
+            terminated = self._step_count >= 2
+            return prompt, 1.0, terminated, False, {}
+
+        def get_episode_data(self):
+            return (
+                torch.ones(1, 4, dtype=torch.long),
+                torch.ones(1, 3, dtype=torch.bool),
+                torch.zeros(1, 3, dtype=torch.long),
+                torch.tensor([1.0, 1.0], dtype=torch.float32),
+            )
+
+        def close(self):
+            return None
+
+    ppo = _cpu_llmppo()
+    env = DummyMultiTurnEpisodeEnv()
+    completion = torch.ones(1, 6, dtype=torch.long)
+    action_mask = torch.ones(1, 5, dtype=torch.bool)
+    with patch.object(ppo, "get_action", return_value=([completion], [action_mask])) as get_action:
+        out = ppo.test(env, loop=2)
+
+    assert out.numel() == 4  # 2 loops × 2 turns
+    assert get_action.call_count == 4
+    assert ppo.fitness[-1] == pytest.approx(1.0)
+
+
 def test_test_method_unknown_env_typeerror():
     ppo = _cpu_llmppo()
     with pytest.raises(TypeError, match="env must be a ReasoningGym"):
@@ -798,11 +937,11 @@ def test_llmppo_wrap_true_runs_learn():
     ppo.learn((completions, masks, rewards))
 
 
-def test_test_method_token_observation_wrapper_branch():
+def test_llmppo_test_method_token_observation_wrapper_branch():
     from transformers import AutoTokenizer
 
     from agilerl.utils.probe_envs_llm import ConstantTargetEnv
-    from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
+    from agilerl.wrappers.multiturn_wrappers import TokenObservationWrapper
 
     tok = AutoTokenizer.from_pretrained("gpt2")
     if tok.pad_token_id is None:

@@ -200,7 +200,10 @@ def main():
 
     with fresh_cache():
         # NOTE try: finally with cleanup_after_test(args.test) removed to avoid vllm errors for now
-        test_func(**kwargs)
+        try:
+            test_func(**kwargs)
+        finally:
+            cleanup_after_test(args.test)
 
 
 if __name__ == "__main__":

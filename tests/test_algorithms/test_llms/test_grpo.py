@@ -33,7 +33,11 @@ from agilerl.algorithms.core.base import (
 )
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
-from tests.utils import spawn_new_process_for_each_test
+from tests.utils import (
+    assert_vllm_get_action_contract,
+    spawn_new_process_for_each_test,
+)
+from agilerl.utils.llm_utils import ReasoningGym
 
 pytestmark = pytest.mark.llm
 
@@ -172,7 +176,7 @@ class DummyMLPPreTrainedModel(PreTrainedModel):
         return
 
 
-class DummyReasoningEnv:
+class DummyReasoningEnv(ReasoningGym):
     def __init__(self, vocab_size, input_size, data_batch_size, device):
         self.vocab_size = vocab_size
         self.input_size = input_size
@@ -224,6 +228,9 @@ class DummyReasoningEnv:
             yield
         finally:
             pass
+    
+    def close(self):
+        pass
 
 
 class DummyVLLM:
@@ -712,18 +719,24 @@ def test_get_action_grpo_including_vllm(
         for _ in range(data_batch_size)
     ]
 
-    completion_ids, _ = grpo.get_action(states, training)
+    completion_ids, action_masks = grpo.get_action(states, training)
     group_size = 1 if not training else group_size
     for ids in completion_ids:
         assert ids.shape[0] == group_size, f"ids.shape[0] is {ids.shape[0]} but should be {group_size}"
         assert ids.shape[1] <= max_tokens + input_size, f"ids.shape[1] is {ids.shape[1]} but should be {max_tokens + input_size}"
+    assert_vllm_get_action_contract(
+        completion_ids=completion_ids,
+        action_masks=action_masks,
+        batch_size=data_batch_size,
+        prompt_len=input_size,
+        pad_token_id=grpo.pad_token_id,
+    )
     if grpo.accelerator is None:
         assert not grpo.actor.training
     grpo.clean_up()
     del grpo
 
 
-@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -792,16 +805,29 @@ def test_get_action_grpo_vllm_sleep_mode(
         micro_batch_size_per_gpu,
         sleep_mode,
     )
+    assert grpo.use_vllm is True
     with (
-        patch.object(grpo, "_move_model_to_vllm") as mock_move_model_to_vllm,
+        patch.object(
+            grpo,
+            "_prepare_vllm_for_generation",
+            wraps=grpo._prepare_vllm_for_generation,
+        ) as mock_prepare_vllm_for_generation,
         patch.object(
             grpo,
             "_generate_with_vllm_colocate",
-            return_value=[torch.ones(1, 10), torch.ones(1, 10)],
+            return_value=(
+                [torch.ones(1, 10, dtype=torch.long)],
+                [torch.ones(1, 9, dtype=torch.bool)],
+            ),
         ) as mock_generate_with_vllm_colocate,
     ):
-        grpo.get_action(torch.ones(1, 10), training)
-        mock_move_model_to_vllm.assert_called()
+        prompt_dict = {
+            "input_ids": torch.randint(0, vocab_size, (1, 10)),
+            "attention_mask": torch.randint(0, 2, (1, 10)),
+            "text": "Write me a short story about a cat.",
+        }
+        grpo.get_action([prompt_dict] * data_batch_size, training)
+        mock_prepare_vllm_for_generation.assert_called()
         mock_generate_with_vllm_colocate.assert_called()
     mock_instance.sleep.assert_called()
     mock_instance.wake_up.assert_called()
@@ -927,7 +953,7 @@ def test_init_grpo_with_accelerator(
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     assert grpo.batch_size_per_process == 16
     assert grpo.beta == 0.001
-    assert grpo.lr == 1e-4 if use_deepspeed_optimizer else 1e-5, grpo.lr == 1e-4
+    assert grpo.lr == 1e-5
     assert grpo.clip_coef == 0.2
     assert grpo.max_grad_norm == 0.1
     assert grpo.update_epochs == 1
@@ -1758,6 +1784,208 @@ def test_get_action_grpo_vllm_multiple_gpus(
             assert ids.shape[1] <= max_tokens + input_size
         if grpo.accelerator is None:
             assert not grpo.actor.training
+    grpo.clean_up()
+
+
+def _build_grpo_for_colocate_tests(
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+    tensor_parallel_size: int = 1,
+):
+    grpo = grpo_factory(
+        accelerator_factory,
+        model_factory,
+        None,
+        False,
+        100,
+        10,
+        8,
+        2,
+        False,
+        False,
+        None,
+        None,
+    )
+    grpo.vllm_config = VLLMConfig(
+        gpu_memory_utilization=0.2,
+        max_num_seqs=1,
+        tensor_parallel_size=tensor_parallel_size,
+    )
+    grpo.llm = MagicMock()
+    grpo.tp_group = "tp-group"
+    grpo.device = "cpu"
+    return grpo
+
+
+def test_generate_with_vllm_colocate_basic_contract(
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+):
+    grpo = _build_grpo_for_colocate_tests(grpo_factory, accelerator_factory, model_factory)
+    prompts = [
+        {
+            "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+        },
+        {
+            "input_ids": torch.tensor([[4, 5, 6]], dtype=torch.long),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+        },
+    ]
+    grpo.llm.generate.return_value = [
+        SimpleNamespace(outputs=[SimpleNamespace(token_ids=[7, 8])]),
+        SimpleNamespace(outputs=[SimpleNamespace(token_ids=[9])]),
+        SimpleNamespace(outputs=[SimpleNamespace(token_ids=[10])]),
+        SimpleNamespace(outputs=[SimpleNamespace(token_ids=[11, 12])]),
+    ]
+    completion_ids, action_masks = grpo._generate_with_vllm_colocate(
+        prompts=prompts,
+        group_size=2,
+        temperature=0.7,
+    )
+    assert_vllm_get_action_contract(
+        completion_ids=completion_ids,
+        action_masks=action_masks,
+        batch_size=2,
+        prompt_len=3,
+        pad_token_id=grpo.pad_token_id,
+    )
+    grpo.clean_up()
+
+
+def test_generate_with_vllm_colocate_respects_training_kwargs(
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+):
+    grpo = _build_grpo_for_colocate_tests(grpo_factory, accelerator_factory, model_factory)
+    grpo.max_model_len = 8
+    grpo.max_output_tokens = 4
+    prompts = [
+        {
+            "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+        }
+    ]
+    grpo.llm.generate.return_value = [
+        SimpleNamespace(outputs=[SimpleNamespace(token_ids=[4, 5])]),
+    ]
+    with patch(
+        "agilerl.algorithms.core.base.SamplingParams",
+        side_effect=lambda **kwargs: kwargs,
+    ) as mock_sampling_params:
+        grpo._generate_with_vllm_colocate(
+            prompts=prompts,
+            group_size=1,
+            temperature=0.33,
+        )
+    kwargs = mock_sampling_params.call_args.kwargs
+    assert kwargs["n"] == 1
+    assert kwargs["temperature"] == 0.33
+    assert kwargs["max_tokens"] == 4
+    assert kwargs["top_p"] == grpo.top_p
+    assert kwargs["top_k"] == grpo.top_k
+    grpo.clean_up()
+
+
+def test_generate_with_vllm_colocate_raises_when_prompt_exceeds_model_len(
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+):
+    grpo = _build_grpo_for_colocate_tests(grpo_factory, accelerator_factory, model_factory)
+    grpo.max_model_len = 4
+    prompts = [
+        {
+            "input_ids": torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.long),
+            "attention_mask": torch.ones(1, 5, dtype=torch.long),
+        }
+    ]
+    with pytest.raises(ValueError, match="greater than the model length"):
+        grpo._generate_with_vllm_colocate(
+            prompts=prompts,
+            group_size=1,
+            temperature=0.7,
+        )
+    grpo.clean_up()
+
+
+def test_generate_with_vllm_colocate_tp_gather_and_slice(
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+):
+    grpo = _build_grpo_for_colocate_tests(
+        grpo_factory, accelerator_factory, model_factory, tensor_parallel_size=2
+    )
+    prompts = [
+        {
+            "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+        }
+    ]
+    grpo.llm.generate.return_value = [
+        SimpleNamespace(outputs=[SimpleNamespace(token_ids=[7])]),
+        SimpleNamespace(outputs=[SimpleNamespace(token_ids=[8])]),
+    ]
+
+    def fake_all_gather(dest, obj, group):
+        del group
+        for idx in range(len(dest)):
+            dest[idx] = obj
+
+    with (
+        patch.object(torch.distributed, "all_gather_object", side_effect=fake_all_gather),
+        patch.object(torch.distributed, "get_rank", return_value=1),
+    ):
+        completion_ids, action_masks = grpo._generate_with_vllm_colocate(
+            prompts=prompts,
+            group_size=1,
+            temperature=0.7,
+        )
+    assert completion_ids[0].shape[0] == 1
+    assert completion_ids[0][0, -1].item() == 8
+    assert action_masks[0].shape[1] == completion_ids[0].shape[1] - 1
+    grpo.clean_up()
+
+
+def test_generate_with_vllm_colocate_stitch_path(
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+):
+    grpo = _build_grpo_for_colocate_tests(grpo_factory, accelerator_factory, model_factory)
+    prompts = [
+        {
+            "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+            "stitch_prefix_ids": torch.tensor([[9]], dtype=torch.long),
+            "initial_prompt_len": 2,
+        }
+    ]
+    grpo.llm.generate.return_value = [
+        SimpleNamespace(outputs=[SimpleNamespace(token_ids=[4, 5])]),
+    ]
+    with patch(
+        "agilerl.algorithms.core.base.stitch_completion_after_windowed_vllm_generate",
+        side_effect=lambda completion_ids, *_args, **_kwargs: completion_ids,
+    ) as mock_stitch:
+        grpo._generate_with_vllm_colocate(
+            prompts=prompts,
+            group_size=1,
+            temperature=0.7,
+        )
+    mock_stitch.assert_called_once()
+    args, _kwargs = mock_stitch.call_args
+    completion_ids_arg, stitch_prefixes_arg, group_prompts_arg, group_size_arg, prompts_arg = (
+        args
+    )
+    assert len(completion_ids_arg) == len(prompts)
+    assert len(stitch_prefixes_arg) == len(group_prompts_arg)
+    assert group_size_arg == 1
+    assert len(prompts_arg) == len(prompts)
     grpo.clean_up()
 
 
@@ -2875,6 +3103,75 @@ def test_grpo_test(
     env = DummyReasoningEnv(vocab_size, input_size, batch_size, device=grpo.device)
     fitnesses = grpo.test(env)
     assert isinstance(fitnesses, torch.Tensor)
+    grpo.clean_up()
+
+
+def test_grpo_test_method_multiturn_episode_env_branch(
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+):
+    class DummyMultiTurnEpisodeEnv:
+        max_turns = 2
+
+        def __init__(self):
+            self._step_count = 0
+
+        def reset(self, seed=None):
+            del seed
+            self._step_count = 0
+            prompt = {
+                "input_ids": torch.ones(1, 4, dtype=torch.long),
+                "attention_mask": torch.ones(1, 4, dtype=torch.long),
+            }
+            return prompt, {}
+
+        def step(self, full_completion_ids):
+            del full_completion_ids
+            self._step_count += 1
+            prompt = {
+                "input_ids": torch.ones(1, 4, dtype=torch.long),
+                "attention_mask": torch.ones(1, 4, dtype=torch.long),
+            }
+            terminated = self._step_count >= 2
+            return prompt, 1.0, terminated, False, {}
+
+        def get_episode_data(self):
+            return (
+                torch.ones(1, 4, dtype=torch.long),
+                torch.ones(1, 3, dtype=torch.bool),
+                torch.zeros(1, 3, dtype=torch.long),
+                torch.tensor([1.0, 1.0], dtype=torch.float32),
+            )
+
+        def close(self):
+            return None
+
+    grpo = grpo_factory(
+        accelerator_factory,
+        model_factory,
+        None,
+        False,
+        100,
+        10,
+        8,
+        2,
+        False,
+        False,
+        None,
+        None,
+    )
+    env = DummyMultiTurnEpisodeEnv()
+    completion = torch.ones(1, 6, dtype=torch.long)
+    action_mask = torch.ones(1, 5, dtype=torch.bool)
+    with patch.object(
+        grpo, "get_action", return_value=([completion], [action_mask])
+    ) as get_action:
+        out = grpo.test(env, loop=2)
+
+    assert out.numel() == 4  # 2 loops × 2 turns
+    assert get_action.call_count == 4
+    assert grpo.fitness[-1] == pytest.approx(1.0)
     grpo.clean_up()
 
 

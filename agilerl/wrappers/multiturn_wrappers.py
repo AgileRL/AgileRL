@@ -399,6 +399,11 @@ class TokenObservationWrapper:
             torch.tensor(turn_rewards, dtype=torch.float),
         )
 
+    def close(self) -> None:
+        """Close the wrapped environment when supported."""
+        if hasattr(self._env, "close"):
+            self._env.close()
+
     def get_debug_info(self) -> dict[str, Any]:
         """Return a dict of human-readable debug information for the episode."""
         if self.full_ids is None:

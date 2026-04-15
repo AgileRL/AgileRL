@@ -1,4 +1,5 @@
 import warnings
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
@@ -11,6 +12,7 @@ from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import (
     LoraConfigProtocol,
+    MultiTurnEpisodeEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
@@ -176,6 +178,8 @@ class GRPO(LLMAlgorithm):
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            use_vllm=use_vllm,
+            vllm_config=vllm_config,
             model_name=model_name,
             actor_network=actor_network,
             model_config=model_config,
@@ -527,27 +531,58 @@ class GRPO(LLMAlgorithm):
 
     def test(
         self,
-        env: ReasoningGym,
+        env: ReasoningGym | MultiTurnEpisodeEnv,
         loop: int = 1,
     ) -> torch.Tensor:
         """Return fitness (test) score tensor of llm on test sub-set.
 
-        :param env: Dataset-style environment with ``reset``, ``step``, and ``eval_mode``.
-        :type env: ReasoningGym
+        :param env: Dataset-style ``ReasoningGym`` environment or tokenized
+            multi-turn episode environment.
+        :type env: ReasoningGym | MultiTurnEpisodeEnv
         :param loop: Number of outer test iterations over ``reset`` / ``step``.
         :type loop: int
         :return: Concatenated reward tensor from the test loop.
         :rtype: torch.Tensor
         """
-        with env.eval_mode(), torch.no_grad():
-            prompts = env.reset()
-            rewards = []
-            for _ in range(loop):
-                completion_ids, _ = self.get_action(prompts, training=False)
-                next_prompts, reward = env.step(completion_ids)
-                prompts = next_prompts
-                rewards.append(reward)
-        reward_tensor = torch.cat(rewards)
+        eval_context = getattr(env, "eval_mode", nullcontext)
+        with eval_context(), torch.no_grad():
+            if isinstance(env, ReasoningGym):
+                prompts = env.reset()
+                rewards = []
+                for _ in range(loop):
+                    completion_ids, _ = self.get_action(prompts, training=False)
+                    next_prompts, reward = env.step(completion_ids)
+                    prompts = next_prompts
+                    rewards.append(reward)
+                reward_tensor = torch.cat(rewards)
+            elif isinstance(env, MultiTurnEpisodeEnv):
+                all_rewards: list[torch.Tensor] = []
+                for _ in range(loop):
+                    prompt_dict, _info = env.reset()
+                    terminated, truncated = False, False
+                    while not terminated and not truncated:
+                        completion_ids, _ = self.get_action(
+                            [prompt_dict],
+                            training=False,
+                        )
+                        full = completion_ids[0]
+                        prompt_dict, reward, terminated, truncated, _step_info = env.step(
+                            full,
+                        )
+                        all_rewards.append(
+                            torch.tensor(
+                                [float(reward)],
+                                dtype=torch.float32,
+                                device=full.device,
+                            )
+                        )
+                reward_tensor = torch.cat(all_rewards)
+            else:
+                msg = (
+                    "env must be a ReasoningGym (or subclass) or "
+                    f"MultiTurnEpisodeEnv; got {type(env).__name__}"
+                )
+                raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor).item()
         self.fitness.append(mean_fit)
         return reward_tensor

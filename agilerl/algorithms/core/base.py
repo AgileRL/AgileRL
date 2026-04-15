@@ -3585,7 +3585,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         completion_masks = []
 
         for i, completion_id in enumerate(completion_ids):
-            completion_mask = torch.zeros_like(completion_id, device=self.device)
+            completion_mask = torch.zeros_like(
+                completion_id,
+                dtype=torch.bool,
+                device=self.device,
+            )
             completion_mask[:, num_input_tokens[i] :] = True
             completion_mask[completion_id == self.pad_token_id] = False
             completion_mask = completion_mask[:, 1:]

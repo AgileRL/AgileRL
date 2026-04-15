@@ -1174,14 +1174,13 @@ def stitch_completion_after_windowed_vllm_generate(
         if stitch_i.shape[1] == 0:
             stitched.append(completion_i)
             continue
-        initial_prompt_len_i = int(
-            group_prompts[group_size * i].get("initial_prompt_len")
-        )
-        if initial_prompt_len_i is None:
+        initial_prompt_len_raw = group_prompts[group_size * i].get("initial_prompt_len")
+        if initial_prompt_len_raw is None:
             msg = "initial_prompt_len required when stitch_prefix_ids is non-empty"
             raise ValueError(
                 msg,
             )
+        initial_prompt_len_i = int(initial_prompt_len_raw)
         group_size_i = completion_i.shape[0]
         stitch_group_i = stitch_i.expand(group_size_i, -1)
         stitched.append(
