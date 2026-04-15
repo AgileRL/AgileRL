@@ -991,8 +991,15 @@ def create_llm_accelerator(
         return None
 
     if num_gpus == 1 and zero_stage is None:
-        logger.info("Single GPU detected — using plain Accelerator (no DeepSpeed).")
-        return Accelerator()
+        accelerator = Accelerator()
+        if accelerator.state.deepspeed_plugin is None:
+            warnings.warn(
+                "No DeepSpeed plugin found in Accelerator state, defaulting to plain Accelerator."
+                "Please create a deepspeed plugin using `accelerate config` and following the instructions."
+                "Then launch the script using `accelerate launch <script.py>`."
+            )
+            del accelerator
+        return None
 
     stage = (
         zero_stage

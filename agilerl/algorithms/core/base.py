@@ -2133,7 +2133,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 and self.zero_stage > 2
                 and self.accelerator.is_main_process
             ):
-                warnings.warn( 
+                warnings.warn(
                     "DeepSpeed ZeRO Stage 3 is nascent and may not work as expected, proceed with caution when using this feature.",
                     stacklevel=2,
                 )
@@ -2150,9 +2150,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.accelerator is not None
             and getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
         )
-        self._vllm_awake = (
-            self.use_vllm and not self.vllm_config.sleep_mode
-        )
+        self._vllm_awake = self.use_vllm and not self.vllm_config.sleep_mode
         self._vllm_moved = False
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
@@ -2228,7 +2226,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             return
 
         selected_adapters = self._get_selected_adapter_names()
-        model_ref = self.accelerator.unwrap_model(self.actor)
+        model_ref = self._get_unwrapped_actor()
         with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
             model_ref.save_pretrained(
                 save_directory=path,
@@ -2392,7 +2390,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 else type(self.actor.optimizer)
             )
             if self.gradient_checkpointing:
-                self.accelerator.unwrap_model(self.actor).gradient_checkpointing_enable(
+                self._get_unwrapped_actor().gradient_checkpointing_enable(
                     gradient_checkpointing_kwargs={"use_reentrant": False},
                 )
         else:
@@ -2517,20 +2515,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Cloned actor network suitable for clone instantiation.
         :rtype: PreTrainedModelProtocol
         """
-        actor = (
-            self.accelerator.unwrap_model(self.actor)
-            if self.accelerator is not None
-            else self.actor
-        )
+        actor = self._get_unwrapped_actor()
 
         if self.use_value_head:
-            inner_peft = actor.pretrained_model
+            value_head_model = actor
+            inner_peft = value_head_model.pretrained_model
             inner_sd = None
             if self.zero_stage is None or self.zero_stage < 2:
                 inner_sd = clone_tensors_for_torch_save(inner_peft.state_dict())
             cloned_inner = clone_llm(inner_peft, self.zero_stage, state_dict=inner_sd)
-            cloned_model = type(actor)(cloned_inner)
-            cloned_model.v_head.load_state_dict(actor.v_head.state_dict())
+            cloned_model = type(value_head_model)(cloned_inner)
+            cloned_model.v_head.load_state_dict(value_head_model.v_head.state_dict())
             cloned_model.is_peft_model = True
             return cloned_model
 
@@ -2705,11 +2700,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     source_adapter="actor", target_adapter="reference"
                 )
             else:
-                unwrapped = (
-                    self.accelerator.unwrap_model(self.actor)
-                    if self.accelerator is not None
-                    else self.actor
-                )
+                unwrapped = self._get_unwrapped_actor()
                 if self.use_value_head:
                     merged = unwrapped.pretrained_model.merge_and_unload()
                     unwrapped.pretrained_model = get_peft_model(
@@ -2999,11 +2990,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             yield
             return
-        unwrapped_model = (
-            self.accelerator.unwrap_model(self.actor)
-            if self.accelerator is not None
-            else self.actor
-        )
+        unwrapped_model = self._get_unwrapped_actor()
         move_params_to_gpu(unwrapped_model, self.device)
         yield
         move_params_to_cpu(unwrapped_model)
@@ -3368,9 +3355,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             return
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
-            model_ref = self.accelerator.unwrap_model(self.actor)
-        else:
-            model_ref = self.actor
+        model_ref = self._get_unwrapped_actor()
         peft_ref = model_ref.pretrained_model if self.use_value_head else model_ref
         self.use_adapter("actor")
         with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
@@ -3397,7 +3382,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             peft_ref.unmerge_adapter()
         self.llm.reset_prefix_cache()
         self._vllm_moved = True
-
 
     def _generate_with_vllm_colocate(
         self, prompts: list[dict[str, Any]], group_size: int, temperature: float | None
@@ -3767,9 +3751,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: None
         :rtype: None
         """
-        unwrapped = self.accelerator.unwrap_model(self.actor)
-        if hasattr(unwrapped, "module"):
-            unwrapped = unwrapped.module
+        unwrapped = self._get_unwrapped_actor()
         peft_model = unwrapped.pretrained_model if self.use_value_head else unwrapped
 
         adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
@@ -3863,13 +3845,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 stacklevel=2,
             )
             self.vllm_config = VLLMConfig()
-        num_processes = self.accelerator.num_processes if self.accelerator is not None else 1
-        process_index = self.accelerator.process_index if self.accelerator is not None else 0
-        local_process_index = self.accelerator.local_process_index if self.accelerator is not None else 0
-        if (
-            num_processes % self.vllm_config.tensor_parallel_size
-            != 0
-        ):
+        num_processes = (
+            self.accelerator.num_processes if self.accelerator is not None else 1
+        )
+        process_index = (
+            self.accelerator.process_index if self.accelerator is not None else 0
+        )
+        local_process_index = (
+            self.accelerator.local_process_index if self.accelerator is not None else 0
+        )
+        if num_processes % self.vllm_config.tensor_parallel_size != 0:
             msg = f"Tensor parallel size {self.vllm_config.tensor_parallel_size} must be a multiple of the number of processes {num_processes}."
             raise ValueError(
                 msg,
@@ -3887,8 +3872,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         ),
                     )
                     for i in range(
-                        num_processes
-                        // self.vllm_config.tensor_parallel_size,
+                        num_processes // self.vllm_config.tensor_parallel_size,
                     )
                 ],
             )
@@ -3907,8 +3891,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             "max_num_seqs": self.vllm_config.max_num_seqs,
             "max_model_len": self.max_model_len,
             "distributed_executor_backend": "external_launcher",
-            "seed": process_index
-            // self.vllm_config.tensor_parallel_size,
+            "seed": process_index // self.vllm_config.tensor_parallel_size,
             "max_num_batched_tokens": self.vllm_config.max_num_seqs
             * self.max_model_len,
             "model_impl": "vllm",
@@ -3971,13 +3954,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         raise AttributeError(err_msg)
 
     def _get_unwrapped_actor(self) -> Any:
-        if self.accelerator is not None:
-            return self.accelerator.unwrap_model(self.actor)
-        return self.actor
+        """Return actor unwrapped from Accelerate and DummyEvolvable layers."""
+        actor = (
+            self.accelerator.unwrap_model(self.actor)
+            if self.accelerator is not None
+            else self.actor
+        )
+        while isinstance(actor, DummyEvolvable):
+            actor = actor.module
+        return actor
 
     def _prepare_vllm_for_training(self) -> None:
         """Prepare vLLM for learning."""
-        if self._vllm_awake and (self.accelerator is None or self.accelerator.is_main_process):
+        if self._vllm_awake and (
+            self.accelerator is None or self.accelerator.is_main_process
+        ):
             torch.cuda.empty_cache()
             self.llm.sleep(level=2)
             self._vllm_awake = False
@@ -3985,17 +3976,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.use_vllm:
             self._vllm_moved = False
 
-
     def _prepare_vllm_for_generation(self) -> None:
-        if not self._vllm_awake and (self.accelerator is None or self.accelerator.is_main_process):
+        if not self._vllm_awake and (
+            self.accelerator is None or self.accelerator.is_main_process
+        ):
             torch.cuda.empty_cache()
             self.llm.wake_up()
             self._vllm_awake = True
         if self.use_memory_efficient_params:
-            unwrapped_model = (
-                self.accelerator.unwrap_model(self.actor)
-                if self.accelerator is not None
-                else self.actor
-            )
+            unwrapped_model = self._get_unwrapped_actor()
             move_params_to_cpu(unwrapped_model)
         self._move_model_to_vllm()

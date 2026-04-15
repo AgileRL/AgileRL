@@ -11,6 +11,7 @@ from agilerl.algorithms.core.fused_lora import clear_fused_adapter_routing
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import (
     LoraConfigProtocol,
+    MultiTurnEpisodeEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
@@ -25,16 +26,15 @@ from agilerl.utils.llm_utils import (
     ReasoningGym,
     masked_mean,
     masked_whiten,
-    move_params_to_cpu,
     normalize_reasoning_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
     stitch_completion_after_windowed_hf_generate,
 )
-from agilerl.protocols import MultiTurnEnv
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
+
 
 class PPO(LLMAlgorithm):
     """Turn-level PPO for LLM finetuning with actor/reference adapters.
@@ -258,7 +258,6 @@ class PPO(LLMAlgorithm):
                             completion_mask = completion_mask[:, 1:]
                             completion_masks.append(completion_mask)
             else:
-                
                 self._prepare_vllm_for_generation()
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
                     prompt_batch,
@@ -298,7 +297,6 @@ class PPO(LLMAlgorithm):
             action_masks = action_masks.to(self.device)
             action_mask_bool = action_masks.bool()
             num_samples = completion_ids.shape[0]
-
 
             if turn_ids is None:
                 turn_ids = torch.where(
@@ -450,7 +448,7 @@ class PPO(LLMAlgorithm):
 
                     vf_loss = (turn_ret - turn_pred).pow(2)
                     clipped_turn_values = turn_old + torch.clamp(
-                        turn_pred - turn_old, - self.clip_coef, self.clip_coef
+                        turn_pred - turn_old, -self.clip_coef, self.clip_coef
                     )
                     clipped_vf_loss = (turn_ret - clipped_turn_values).pow(2)
                     vf_loss = (
@@ -480,7 +478,7 @@ class PPO(LLMAlgorithm):
 
     def test(
         self,
-        env: ReasoningGym | MultiTurnEnv,
+        env: ReasoningGym | MultiTurnEpisodeEnv,
         loop: int = 1,
     ) -> torch.Tensor:
         """Return fitness (test) score tensor of llm on test sub-set.
@@ -492,7 +490,7 @@ class PPO(LLMAlgorithm):
 
         :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
             :class:`~agilerl.wrappers.multiturn_wrappers.TokenObservationWrapper`.
-        :type env: ReasoningGym | MultiTurnEnv
+        :type env: ReasoningGym | MultiTurnEpisodeEnv
         :param loop: Number of outer test iterations (dataloader passes or episodes).
         :type loop: int
         :return: Concatenated per-step rewards from the test loop.
@@ -509,7 +507,7 @@ class PPO(LLMAlgorithm):
                     prompts = next_prompts
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEnv):
+            elif isinstance(env, MultiTurnEpisodeEnv):
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
                     prompt_dict, _info = env.reset()
@@ -537,7 +535,7 @@ class PPO(LLMAlgorithm):
             else:
                 msg = (
                     "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEnv; got {type(env).__name__}"
+                    f"MultiTurnEpisodeEnv; got {type(env).__name__}"
                 )
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor.float()).item()

@@ -20,7 +20,10 @@ def _make_multiturn_mock_env(*, turn_boundaries_len: int = 3):
     mock_env = MagicMock(
         spec=["reset", "step", "get_episode_data", "turn_boundaries"],
     )
-    prompt_dict: dict = {}
+    prompt_dict: dict = {
+        "input_ids": torch.ones(1, 4, dtype=torch.long),
+        "attention_mask": torch.ones(1, 4, dtype=torch.long),
+    }
     mock_env.reset.return_value = (prompt_dict, {})
     mock_env.step.return_value = (prompt_dict, 0.0, False, False, {})
     mock_env.turn_boundaries = list(range(turn_boundaries_len))
@@ -895,10 +898,271 @@ def test_finetune_llm_reasoning_llmppo_learn_unpack_and_wandb_ppo_metrics():
 
     mock_agent.learn.assert_called()
     last_log = mock_wandb.log.call_args_list[-1][0][0]
-    assert "Train/Mean population PG loss" in last_log
-    assert "Train/Mean population critic loss" in last_log
-    assert "Train/Mean population entropy" in last_log
-    assert "Train/Mean population accuracy" in last_log
+    assert "Train/Mean Population PG Loss" in last_log
+    assert "Train/Mean Population Critic Loss" in last_log
+    assert "Train/Mean Population Entropy" in last_log
+    assert "Train/Mean Population Accuracy" in last_log
+
+
+@pytest.mark.parametrize(
+    ("finetune_fn", "agent_spec"),
+    [(finetune_llm_reasoning, GRPO), (finetune_llm_preference, DPO)],
+)
+def test_finetune_llm_env_and_env_fn_mutually_exclusive(finetune_fn, agent_spec):
+    agent = MagicMock(spec=agent_spec)
+    agent.algo = "GRPO" if agent_spec is GRPO else "DPO"
+    agent.batch_size_per_process = 1
+    agent.batch_size = 1
+    agent.steps = [0]
+    agent.scores = [0.0]
+    agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+    agent.fitness = [0.0]
+
+    env = MagicMock()
+    env.__len__.return_value = 1
+    env.name = "mock_env"
+    env.data_batch_size_per_gpu = 1
+    env.num_epochs = 0
+    env.reset.return_value = "prompts"
+    env.step.return_value = "prompts"
+
+    with pytest.raises(ValueError, match="Provide exactly one of 'env' or 'env_fn'"):
+        finetune_fn(
+            pop=[agent],
+            env=env,
+            env_fn=lambda: env,
+            max_steps=0,
+            verbose=False,
+            accelerator=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "finetune_fn", [finetune_llm_reasoning, finetune_llm_preference]
+)
+def test_finetune_llm_requires_env_or_env_fn(finetune_fn):
+    with pytest.raises(ValueError, match="Either 'env' or 'env_fn' must be provided"):
+        finetune_fn(
+            pop=[MagicMock()],
+            env=None,
+            env_fn=None,
+            max_steps=0,
+            verbose=False,
+            accelerator=None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("finetune_fn", "agent_spec"),
+    [(finetune_llm_reasoning, GRPO), (finetune_llm_preference, DPO)],
+)
+def test_finetune_llm_warns_on_shared_env_with_population(finetune_fn, agent_spec):
+    agents = []
+    for algo_name in ("a0", "a1"):
+        agent = MagicMock(spec=agent_spec)
+        agent.algo = "GRPO" if agent_spec is GRPO else "DPO"
+        agent.batch_size_per_process = 1
+        agent.batch_size = 1
+        agent.steps = [0]
+        agent.scores = [0.0]
+        agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+        agent.fitness = [0.0]
+        agent.index = algo_name
+        agents.append(agent)
+
+    env = MagicMock()
+    env.__len__.return_value = 1
+    env.name = "mock_env"
+    env.data_batch_size_per_gpu = 1
+    env.num_epochs = 0
+    env.reset.return_value = "prompts"
+    env.step.return_value = "prompts"
+
+    with pytest.warns(UserWarning, match="fairness bias"):
+        finetune_fn(
+            pop=agents,
+            env=env,
+            max_steps=0,
+            verbose=False,
+            accelerator=None,
+        )
+
+
+def test_finetune_llm_reasoning_env_fn_uses_distinct_env_instances():
+    agent_a = MagicMock(spec=GRPO)
+    agent_a.algo = "GRPO"
+    agent_a.fitness = [0.0]
+    agent_a.get_action.return_value = ([torch.ones(1, 4)], Mock())
+    agent_a.learn.return_value = (0.5, 0.2)
+    agent_a.batch_size_per_process = 1
+    agent_a.batch_size = 1
+    agent_a.steps = [0]
+    agent_a.scores = [0.0]
+    agent_a.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+
+    agent_b = MagicMock(spec=GRPO)
+    agent_b.algo = "GRPO"
+    agent_b.fitness = [0.0]
+    agent_b.get_action.return_value = ([torch.ones(1, 4)], Mock())
+    agent_b.learn.return_value = (0.5, 0.2)
+    agent_b.batch_size_per_process = 1
+    agent_b.batch_size = 1
+    agent_b.steps = [0]
+    agent_b.scores = [0.0]
+    agent_b.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+
+    env_a = MagicMock()
+    env_a.__len__.return_value = 1
+    env_a.name = "env_a"
+    env_a.data_batch_size_per_gpu = 1
+    env_a.num_epochs = 0
+    env_a.reset.return_value = "prompts_a"
+    env_a.step.return_value = ("next_a", torch.tensor([1.0]))
+
+    env_b = MagicMock()
+    env_b.__len__.return_value = 1
+    env_b.name = "env_b"
+    env_b.data_batch_size_per_gpu = 1
+    env_b.num_epochs = 0
+    env_b.reset.return_value = "prompts_b"
+    env_b.step.return_value = ("next_b", torch.tensor([2.0]))
+
+    env_fn = MagicMock(side_effect=[env_a, env_b])
+
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch(
+            "agilerl.training.train_llm.aggregate_metrics_across_gpus", return_value=0.5
+        ),
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+    ):
+        finetune_llm_reasoning(
+            pop=[agent_a, agent_b],
+            env_fn=env_fn,
+            max_steps=2,
+            evaluation_interval=100,
+            verbose=False,
+            accelerator=None,
+        )
+
+    assert env_fn.call_count == 2
+    assert env_a.step.call_count == 1
+    assert env_b.step.call_count == 1
+    assert agent_a.get_action.call_args.args[0] == "prompts_a"
+    assert agent_b.get_action.call_args.args[0] == "prompts_b"
+
+
+def test_finetune_llm_preference_env_fn_uses_distinct_env_instances():
+    agent_a = MagicMock(spec=DPO)
+    agent_a.algo = "DPO"
+    agent_a.fitness = [0.0]
+    agent_a.learn.return_value = (0.5, 0.2, 0.1)
+    agent_a.batch_size_per_process = 1
+    agent_a.batch_size = 1
+    agent_a.steps = [0]
+    agent_a.scores = [0.0]
+    agent_a.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+
+    agent_b = MagicMock(spec=DPO)
+    agent_b.algo = "DPO"
+    agent_b.fitness = [0.0]
+    agent_b.learn.return_value = (0.5, 0.2, 0.1)
+    agent_b.batch_size_per_process = 1
+    agent_b.batch_size = 1
+    agent_b.steps = [0]
+    agent_b.scores = [0.0]
+    agent_b.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+
+    env_a = MagicMock()
+    env_a.__len__.return_value = 1
+    env_a.name = "env_a"
+    env_a.data_batch_size_per_gpu = 1
+    env_a.num_epochs = 0
+    env_a.reset.return_value = {"prompt": ["a"]}
+    env_a.step.return_value = {"prompt": ["a_next"]}
+
+    env_b = MagicMock()
+    env_b.__len__.return_value = 1
+    env_b.name = "env_b"
+    env_b.data_batch_size_per_gpu = 1
+    env_b.num_epochs = 0
+    env_b.reset.return_value = {"prompt": ["b"]}
+    env_b.step.return_value = {"prompt": ["b_next"]}
+
+    env_fn = MagicMock(side_effect=[env_a, env_b])
+
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch(
+            "agilerl.training.train_llm.aggregate_metrics_across_gpus", return_value=0.5
+        ),
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+    ):
+        finetune_llm_preference(
+            pop=[agent_a, agent_b],
+            env_fn=env_fn,
+            max_steps=2,
+            evaluation_interval=100,
+            verbose=False,
+            accelerator=None,
+        )
+
+    assert env_fn.call_count == 2
+    assert env_a.step.call_count == 1
+    assert env_b.step.call_count == 1
+    assert agent_a.learn.call_args.args[0] == {"prompt": ["a"]}
+    assert agent_b.learn.call_args.args[0] == {"prompt": ["b"]}
+
+
+@pytest.mark.parametrize(
+    "finetune_fn", [finetune_llm_reasoning, finetune_llm_preference]
+)
+def test_finetune_llm_checkpoint_triggering_non_divisible_steps(finetune_fn):
+    if finetune_fn is finetune_llm_reasoning:
+        agent = MagicMock(spec=GRPO)
+        agent.algo = "GRPO"
+        agent.get_action.return_value = ([torch.ones(1, 4)], Mock())
+        agent.learn.return_value = (0.5, 0.2)
+        env = MagicMock()
+        env.reset.return_value = "prompts"
+        env.step.return_value = ("next", torch.tensor([1.0]))
+    else:
+        agent = MagicMock(spec=DPO)
+        agent.algo = "DPO"
+        agent.learn.return_value = (0.5, 0.2, 0.1)
+        env = MagicMock()
+        env.reset.return_value = {"prompt": ["x"]}
+        env.step.return_value = {"prompt": ["y"]}
+
+    agent.fitness = [0.0]
+    agent.batch_size_per_process = 1
+    agent.batch_size = 1
+    agent.steps = [0]
+    agent.scores = [0.0]
+    agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+    env.__len__.return_value = 10
+    env.name = "mock_env"
+    env.data_batch_size_per_gpu = 1
+    env.num_epochs = 0
+
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch(
+            "agilerl.training.train_llm.aggregate_metrics_across_gpus", return_value=0.5
+        ),
+        patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+    ):
+        finetune_fn(
+            pop=[agent],
+            env=env,
+            max_steps=5,
+            checkpoint_steps=2,
+            evaluation_interval=100,
+            verbose=False,
+            accelerator=None,
+        )
+
+    assert mock_save.call_count == 3
 
 
 # --- finetune_llm_multiturn ---
@@ -1206,7 +1470,10 @@ def test_finetune_llm_multiturn_sliding_window_max_model_len_assert_passes():
     mock_agent = _make_multiturn_mock_agent()
     mock_agent.max_model_len = 1024
     mock_env = MagicMock()
-    prompt: dict = {}
+    prompt: dict = {
+        "input_ids": torch.ones(1, 4, dtype=torch.long),
+        "attention_mask": torch.ones(1, 4, dtype=torch.long),
+    }
     L, T = 8, 2
     mock_env.reset.return_value = (prompt, {})
     mock_env.step.return_value = (prompt, 0.0, False, False, {})
@@ -1243,7 +1510,10 @@ def test_finetune_llm_multiturn_breaks_turn_loop_when_terminated():
     """Covers early exit from the max_turns loop when env.step sets terminated."""
     mock_agent = _make_multiturn_mock_agent()
     mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
-    prompt: dict = {}
+    prompt: dict = {
+        "input_ids": torch.ones(1, 4, dtype=torch.long),
+        "attention_mask": torch.ones(1, 4, dtype=torch.long),
+    }
     mock_env.reset.return_value = (prompt, {})
     mock_env.step.return_value = (prompt, 1.0, True, False, {})
     max_turns = 5
@@ -1308,7 +1578,7 @@ def test_finetune_llm_multiturn_wandb_accuracy_and_eval_scores_with_verbose_bann
 
     assert mock_pbar.write.call_count >= 2
     eval_logged = any(
-        "Eval/Best score" in c.args[0] for c in mock_wandb.log.call_args_list
+        "Eval/Best Score" in c.args[0] for c in mock_wandb.log.call_args_list
     )
     assert eval_logged
     hpo_logged = any(
@@ -1316,7 +1586,7 @@ def test_finetune_llm_multiturn_wandb_accuracy_and_eval_scores_with_verbose_bann
     )
     assert hpo_logged
     acc_logged = any(
-        "Train/Best accuracy" in c.args[0] for c in mock_wandb.log.call_args_list
+        "Train/Best Accuracy" in c.args[0] for c in mock_wandb.log.call_args_list
     )
     assert acc_logged
 
