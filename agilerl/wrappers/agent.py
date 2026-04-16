@@ -684,7 +684,18 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         *args: Any,
         **kwargs: Any,
     ) -> ActionReturnType:
-        """Returns the next action to take in the environment."""
+        """Return the action from the agent.
+
+        Since the environments may not return observations for all agents at the
+        same time, we extract inactive agents from the observation and fill in
+        placeholder values for their actions.
+
+        :param obs: Observation from the environment
+        :type obs: ObservationType
+        
+        :return: Action from the agent
+        :rtype: Any
+        """
         inactive_agents, obs = self.extract_inactive_agents(obs)
         action_return = self.wrapped_get_action(obs, *args, **kwargs)
 
@@ -723,7 +734,18 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         return action_return
 
     def learn(self, experiences: ExperiencesType, *args: Any, **kwargs: Any) -> Any:
-        """Learns from the collected experiences."""
+        """Learns from the collected experiences.
+
+        :param experiences: Experiences from the environment
+        :type experiences: ExperiencesType
+        :param args: Additional positional arguments
+        :type args: Any
+        :param kwargs: Additional keyword arguments
+        :type kwargs: Any
+
+        :return: Learning information
+        :rtype: Any
+        """
         # Off-policy branch for MADDPG / MATD3
         if self.agent.algo in {"MADDPG", "MATD3"}:
             experiences = self.stack_experiences(experiences)
