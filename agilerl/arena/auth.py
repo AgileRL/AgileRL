@@ -146,13 +146,10 @@ class ArenaOAuth2:
         )
         interval = device_resp.get("interval", 5)
 
-        logger.info(
-            "\n  Opening browser for authentication...\n    %s\n",
-            verification_uri,
-        )
+        logger.info("Opening browser for authentication... %s", verification_uri)
         if not webbrowser.open(verification_uri):
             logger.warning(
-                "  Could not open browser automatically. Please visit the URL above."
+                "Could not open browser automatically. Please visit the URL above."
             )
 
         deadline = time.monotonic() + timeout

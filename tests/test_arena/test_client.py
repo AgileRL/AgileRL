@@ -10,13 +10,23 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import httpx
 import pytest
 
-from agilerl.arena.client import ArenaClient, _TokenStore
+from agilerl.arena.client import ArenaClient, _TokenStore, prepare_env_upload
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
     ArenaValidationError,
 )
-from agilerl.models import ArenaCluster, ArenaResource, JobStatus, TrainingManifest
+from agilerl.arena.stream import NDJsonStream, StreamEvent
+
+
+def _mock_ndjson_stream(result: dict | None = None) -> MagicMock:
+    """Create a mock NDJsonStream with a preset collect() result."""
+    mock = MagicMock(spec=NDJsonStream)
+    mock.collect.return_value = result or {}
+    mock.result = result
+    mock.__enter__ = MagicMock(return_value=mock)
+    mock.__exit__ = MagicMock(return_value=False)
+    return mock
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +207,24 @@ class TestIsAuthenticated:
 
 
 # ---------------------------------------------------------------------------
+# set_stream_handler
+# ---------------------------------------------------------------------------
+class TestSetStreamHandler:
+    def test_default_handler_is_none(self, api_key_client):
+        assert api_key_client._stream_handler is None
+
+    def test_set_handler(self, api_key_client):
+        handler = MagicMock()
+        api_key_client.set_stream_handler(handler)
+        assert api_key_client._stream_handler is handler
+
+    def test_clear_handler(self, api_key_client):
+        api_key_client.set_stream_handler(lambda event: None)
+        api_key_client.set_stream_handler(None)
+        assert api_key_client._stream_handler is None
+
+
+# ---------------------------------------------------------------------------
 # _auth_headers
 # ---------------------------------------------------------------------------
 class TestAuthHeaders:
@@ -324,150 +352,209 @@ class TestRequest:
 
 
 # ---------------------------------------------------------------------------
-# _check_validation_result
-# ---------------------------------------------------------------------------
-class TestCheckValidationResult:
-    def test_no_errors_passes(self):
-        ArenaClient._check_validation_result({"errors": None})
-        ArenaClient._check_validation_result({"errors": []})
-        ArenaClient._check_validation_result({})
-
-    def test_errors_raises_validation_error(self):
-        with pytest.raises(ArenaValidationError):
-            ArenaClient._check_validation_result({"errors": [{"msg": "bad field"}]})
-
-
-# ---------------------------------------------------------------------------
 # Environment methods
 # ---------------------------------------------------------------------------
-class TestRegisterEnvironment:
-    def test_posts_with_archive(self, api_key_client, tmp_path):
-        src = tmp_path / "env_src"
-        src.mkdir()
-        (src / "main.py").write_text("print('hello')")
-
-        api_key_client._request = MagicMock(return_value={"status": "ok"})
-        result = api_key_client._register_environment("TestEnv", source=src)
-
-        assert result == {"status": "ok"}
-        call_args = api_key_client._request.call_args
-        assert call_args[0] == ("POST", "api/custom-gym-env-impls/create")
-        assert "files" in call_args[1]
-        assert "data" in call_args[1]
-        assert call_args[1]["data"]["name"] == "TestEnv"
-
-    def test_missing_source_raises(self, api_key_client):
-        with pytest.raises(FileNotFoundError, match="not found"):
-            api_key_client._register_environment("TestEnv", source="/nonexistent/path")
-
-
-class TestValidate:
-    def test_returns_resp_without_operation_id(self, api_key_client):
-        api_key_client._request = MagicMock(
-            return_value={"valid": True, "errors": None}
-        )
-        result = api_key_client._validate("CartPole-v1")
-        assert result["valid"] is True
-
-    def test_streams_logs_when_operation_id_present(self, api_key_client):
-        api_key_client._request = MagicMock(
-            return_value={"operation_id": "op123", "errors": None}
-        )
-        api_key_client.stream_logs = MagicMock(return_value={"result": "done"})
-
-        result = api_key_client._validate("CartPole-v1")
-        api_key_client.stream_logs.assert_called_once_with("op123")
-        assert result == {"result": "done"}
-
-
 class TestEnvironmentListMethods:
     def test_list_environments(self, api_key_client):
-        api_key_client._request = MagicMock(return_value=None)
-        api_key_client.list_environments()
-        api_key_client._request.assert_called_once_with(
-            "GET", "api/v1/custom-gym-env-impls/list"
-        )
-
-    def test_list_entrypoints(self, api_key_client):
         api_key_client._request = MagicMock(
-            return_value={"entrypoints": ["main:MyEnv", "alt:AltEnv"]}
+            return_value={"ok": True, "data": {"MyEnv": {"v1": {"validated": True}}}}
         )
-        result = api_key_client.list_entrypoints("MyEnv", version="v2")
-        assert result == ["main:MyEnv", "alt:AltEnv"]
+        result = api_key_client.list_environments()
+        api_key_client._request.assert_called_once_with(
+            "GET", "/api/cli/v1/environments"
+        )
+        assert "MyEnv" in result
 
-    def test_is_registered_environment(self, api_key_client):
-        api_key_client._request = MagicMock(return_value={"is_registered": True})
-        assert api_key_client.is_registered_environment("CartPole-v1") is True
+    def test_environment_exists(self, api_key_client):
+        api_key_client._request = MagicMock(
+            return_value={"ok": True, "data": {"exists": True}}
+        )
+        assert api_key_client.environment_exists("CartPole-v1", "v1") is True
+
+    def test_list_environment_entrypoints(self, api_key_client):
+        api_key_client._request = MagicMock(
+            return_value={"ok": True, "data": ["main:MyEnv", "alt:AltEnv"]}
+        )
+        result = api_key_client.list_environment_entrypoints("MyEnv", version="v2")
+        assert result == ["main:MyEnv", "alt:AltEnv"]
 
 
 class TestValidateEnvironment:
-    def test_source_not_registered_calls_register(self, api_key_client, tmp_path):
-        src = tmp_path / "env"
-        src.mkdir()
-        (src / "env.py").write_text("pass")
-
-        api_key_client.is_registered_environment = MagicMock(return_value=False)
-        api_key_client._register_environment = MagicMock(
-            return_value={"registered": True}
+    def test_no_source_collects_by_default(self, api_key_client):
+        mock_stream = _mock_ndjson_stream({"valid": True})
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        result = api_key_client.validate_environment(name="MyEnv", version="v1")
+        api_key_client._open_stream.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/environments/validate",
+            json={"name": "MyEnv", "version": "v1", "do_rollouts": True},
+            timeout=api_key_client._upload_timeout,
         )
-        result = api_key_client.validate_environment("MyEnv", source=src)
-        api_key_client._register_environment.assert_called_once()
-        assert result == {"registered": True}
+        mock_stream.collect.assert_called_once()
+        assert result == {"valid": True}
 
-    def test_source_already_registered_validates(self, api_key_client, tmp_path):
-        src = tmp_path / "env"
-        src.mkdir()
-        (src / "env.py").write_text("pass")
+    def test_no_source_stream_true_returns_ndjson(self, api_key_client):
+        mock_stream = _mock_ndjson_stream({"valid": True})
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        result = api_key_client.validate_environment(
+            name="MyEnv",
+            version="v1",
+            stream=True,
+        )
+        assert result is mock_stream
 
-        api_key_client.is_registered_environment = MagicMock(return_value=True)
-        api_key_client._validate = MagicMock(return_value={"valid": True})
-        result = api_key_client.validate_environment("MyEnv", source=src)
-        api_key_client._validate.assert_called_once()
+    def test_source_file_calls_create_and_validate(self, api_key_client, tmp_path):
+        archive = tmp_path / "env.tar.gz"
+        archive.write_bytes(b"fake")
+        cfg = tmp_path / "env_config.yaml"
+        cfg.write_text("key: val")
+        reqs = tmp_path / "requirements.txt"
+        reqs.write_text("numpy")
 
-    def test_no_source_validates_directly(self, api_key_client):
-        api_key_client._validate = MagicMock(return_value={"valid": True})
-        result = api_key_client.validate_environment("MyEnv")
-        api_key_client._validate.assert_called_once()
+        mock_stream = _mock_ndjson_stream({"status": "ok"})
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        result = api_key_client.validate_environment(
+            name="MyEnv",
+            version="v1",
+            source=archive,
+            env_config=cfg,
+            requirements=reqs,
+        )
+        call_args = api_key_client._open_stream.call_args
+        assert call_args[0] == ("POST", "/api/cli/v1/environments/create-and-validate")
+        assert "files" in call_args[1]
+        assert "data" in call_args[1]
+        assert call_args[1]["data"]["name"] == "MyEnv"
+        mock_stream.collect.assert_called_once()
+        assert result == {"status": "ok"}
+
+    def test_source_directory_calls_create_and_validate(self, api_key_client, tmp_path):
+        env_dir = tmp_path / "my_env"
+        env_dir.mkdir()
+        (env_dir / "env.py").write_text("class MyEnv: pass")
+        cfg = tmp_path / "env_config.yaml"
+        cfg.write_text("key: val")
+        reqs = tmp_path / "requirements.txt"
+        reqs.write_text("numpy")
+
+        mock_stream = _mock_ndjson_stream({"status": "ok"})
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        result = api_key_client.validate_environment(
+            name="MyEnv",
+            version="v1",
+            source=env_dir,
+            env_config=cfg,
+            requirements=reqs,
+        )
+        call_args = api_key_client._open_stream.call_args
+        assert call_args[0] == ("POST", "/api/cli/v1/environments/create-and-validate")
+        file_tuple = call_args[1]["files"]["file"]
+        assert file_tuple[0] == "my_env.tar.gz"
+        assert isinstance(file_tuple[1], bytes)
+        mock_stream.collect.assert_called_once()
+        assert result == {"status": "ok"}
+
+    def test_source_bytes_calls_create_and_validate(self, api_key_client, tmp_path):
+        cfg = tmp_path / "env_config.yaml"
+        cfg.write_text("key: val")
+        reqs = tmp_path / "requirements.txt"
+        reqs.write_text("numpy")
+
+        mock_stream = _mock_ndjson_stream({"status": "ok"})
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        result = api_key_client.validate_environment(
+            name="MyEnv",
+            version="v1",
+            source=b"raw-archive-bytes",
+            env_config=cfg,
+            requirements=reqs,
+        )
+        call_args = api_key_client._open_stream.call_args
+        file_tuple = call_args[1]["files"]["file"]
+        assert file_tuple[0] == "environment.tar.gz"
+        assert file_tuple[1] == b"raw-archive-bytes"
+        mock_stream.collect.assert_called_once()
+        assert result == {"status": "ok"}
+
+    def test_source_without_config_sends_empty_defaults(self, api_key_client, tmp_path):
+        archive = tmp_path / "env.tar.gz"
+        archive.write_bytes(b"fake")
+
+        mock_stream = _mock_ndjson_stream({"status": "ok"})
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.validate_environment(name="MyEnv", source=archive)
+        call_args = api_key_client._open_stream.call_args
+        files = call_args[1]["files"]
+        assert files["env_config"] == ("env_config.yaml", b"", "application/x-yaml")
+        assert files["requirements"] == ("requirements.txt", b"", "text/plain")
+
+    def test_source_missing_path_raises(self, api_key_client):
+        with pytest.raises(FileNotFoundError, match="not found"):
+            api_key_client.validate_environment(
+                name="MyEnv",
+                source="/nonexistent/path.tar.gz",
+                env_config="/nonexistent/config.yaml",
+                requirements="/nonexistent/reqs.txt",
+            )
+
+
+# ---------------------------------------------------------------------------
+# prepare_env_upload
+# ---------------------------------------------------------------------------
+
+
+class TestPrepareEnvUpload:
+    def test_directory_is_compressed(self, tmp_path):
+        env_dir = tmp_path / "my_env"
+        env_dir.mkdir()
+        (env_dir / "main.py").write_text("print('hello')")
+        (env_dir / "utils.py").write_text("x = 1")
+
+        name, data = prepare_env_upload(env_dir)
+        assert name == "my_env.tar.gz"
+        assert isinstance(data, bytes) and len(data) > 0
+
+        import tarfile, io
+
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            members = sorted(tar.getnames())
+        assert members == ["main.py", "utils.py"]
+
+    def test_directory_recurses_subdirs(self, tmp_path):
+        env_dir = tmp_path / "env"
+        (env_dir / "sub").mkdir(parents=True)
+        (env_dir / "a.py").write_text("a")
+        (env_dir / "sub" / "b.py").write_text("b")
+
+        name, data = prepare_env_upload(env_dir)
+        import tarfile, io
+
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            members = sorted(tar.getnames())
+        assert members == ["a.py", "sub/b.py"]
+
+    def test_file_is_read_as_is(self, tmp_path):
+        archive = tmp_path / "env.tar.gz"
+        archive.write_bytes(b"fake-archive-content")
+
+        name, data = prepare_env_upload(archive)
+        assert name == "env.tar.gz"
+        assert data == b"fake-archive-content"
+
+    def test_bytes_passthrough(self):
+        raw = b"raw-bytes"
+        name, data = prepare_env_upload(raw)
+        assert name == "environment.tar.gz"
+        assert data is raw
+
+    def test_missing_path_raises(self):
+        with pytest.raises(FileNotFoundError, match="not found"):
+            prepare_env_upload("/does/not/exist.tar.gz")
 
 
 # ---------------------------------------------------------------------------
 # Job methods
 # ---------------------------------------------------------------------------
-class TestSubmitJob:
-    def test_submits_manifest(self, api_key_client):
-        manifest = MagicMock(spec=TrainingManifest)
-        manifest.model_dump.return_value = {"algorithm": {}, "training": {}}
-
-        api_key_client._request = MagicMock(
-            return_value={"job_id": "j1", "status": "pending"}
-        )
-        result = api_key_client.submit_job(manifest)
-
-        api_key_client._request.assert_called_once_with(
-            "POST",
-            "api/v1/jobs/submit",
-            json={"algorithm": {}, "training": {}},
-        )
-        assert result["job_id"] == "j1"
-
-    def test_submits_with_cluster(self, api_key_client):
-        manifest = MagicMock(spec=TrainingManifest)
-        manifest.model_dump.return_value = {"algorithm": {}}
-        cluster = ArenaCluster(resource=ArenaResource.MEDIUM_ACCELERATED, num_nodes=1)
-
-        api_key_client._request = MagicMock(return_value={"job_id": "j2"})
-        api_key_client.submit_job(manifest, cluster=cluster)
-
-        call_kwargs = api_key_client._request.call_args[1]
-        assert "cluster" in call_kwargs["json"]
-
-
-class TestGetJobStatus:
-    def test_returns_job_status_enum(self, api_key_client):
-        api_key_client._request = MagicMock(return_value="running")
-        status = api_key_client.get_job_status("j1")
-        assert status == JobStatus.RUNNING
-        assert isinstance(status, JobStatus)
 
 
 class TestStopJob:
@@ -480,49 +567,6 @@ class TestStopJob:
 
 
 # ---------------------------------------------------------------------------
-# Streaming
-# ---------------------------------------------------------------------------
-class TestIterEvents:
-    def test_returns_event_stream(self, api_key_client):
-        stream = api_key_client.iter_events("op123", max_retries=3)
-        from agilerl.arena.logs import EventStream
-
-        assert isinstance(stream, EventStream)
-
-
-class TestStreamLogs:
-    def test_renders_events_and_returns_result(self, api_key_client):
-        from agilerl.arena.logs import LogEvent
-
-        events = [
-            LogEvent(
-                id="1",
-                type="log",
-                level="INFO",
-                message="Starting",
-                timestamp="2024-01-01T00:00:00",
-            ),
-            LogEvent(
-                id="2",
-                type="complete",
-                level="INFO",
-                message="Done",
-                timestamp="2024-01-01T00:01:00",
-                metadata={"result": {"fitness": 0.95}},
-            ),
-        ]
-
-        with patch.object(api_key_client, "iter_events") as mock_iter:
-            mock_stream = MagicMock()
-            mock_stream.__enter__ = MagicMock(return_value=iter(events))
-            mock_stream.__exit__ = MagicMock(return_value=False)
-            mock_iter.return_value = mock_stream
-
-            result = api_key_client.stream_logs("op123")
-
-        assert result == {"fitness": 0.95}
-
-
 # ---------------------------------------------------------------------------
 # Context manager and repr
 # ---------------------------------------------------------------------------
@@ -607,114 +651,94 @@ class TestTryRestoreSession:
 
 
 class TestValidateEnvironmentParams:
-    def test_forwards_rollouts_and_max_steps(self, api_key_client):
-        api_key_client._validate = MagicMock(return_value={"valid": True})
-        api_key_client.validate_environment(
-            "MyEnv",
-            rollouts=True,
-            max_steps=500,
-        )
-        call_kwargs = api_key_client._validate.call_args[1]
-        assert call_kwargs["rollouts"] == "true"
-        assert call_kwargs["max_steps"] == "500"
-
     def test_forwards_version_and_entrypoint(self, api_key_client):
-        api_key_client._validate = MagicMock(return_value={"valid": True})
+        mock_stream = _mock_ndjson_stream()
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
         api_key_client.validate_environment(
-            "MyEnv",
+            name="MyEnv",
             version="v2",
             entrypoint="my_env:make",
         )
-        call_kwargs = api_key_client._validate.call_args[1]
-        assert call_kwargs["version"] == "v2"
-        assert call_kwargs["entrypoint"] == "my_env:make"
+        call_kwargs = api_key_client._open_stream.call_args[1]
+        payload = call_kwargs["json"]
+        assert payload["version"] == "v2"
+        assert payload["entrypoint"] == "my_env:make"
 
-    def test_register_forwards_multi_agent_and_description(
-        self, api_key_client, tmp_path
-    ):
-        src = tmp_path / "env"
-        src.mkdir()
-        (src / "env.py").write_text("pass")
+    def test_create_forwards_multi_agent(self, api_key_client, tmp_path):
+        archive = tmp_path / "env.tar.gz"
+        archive.write_bytes(b"fake")
+        cfg = tmp_path / "env_config.yaml"
+        cfg.write_text("key: val")
+        reqs = tmp_path / "requirements.txt"
+        reqs.write_text("numpy")
 
-        api_key_client.is_registered_environment = MagicMock(return_value=False)
-        api_key_client._register_environment = MagicMock(
-            return_value={"registered": True}
-        )
+        mock_stream = _mock_ndjson_stream()
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
         api_key_client.validate_environment(
-            "MyEnv",
-            source=src,
+            name="MyEnv",
+            source=archive,
+            env_config=cfg,
+            requirements=reqs,
             multi_agent=True,
-            description="A test env",
         )
-        call_kwargs = api_key_client._register_environment.call_args[1]
-        assert call_kwargs["multi_agent"] is True
-        assert call_kwargs["description"] == "A test env"
+        call_kwargs = api_key_client._open_stream.call_args[1]
+        assert call_kwargs["data"]["multi_agent"] == "true"
+
+    def test_create_forwards_description(self, api_key_client, tmp_path):
+        archive = tmp_path / "env.tar.gz"
+        archive.write_bytes(b"fake")
+        cfg = tmp_path / "env_config.yaml"
+        cfg.write_text("key: val")
+        reqs = tmp_path / "requirements.txt"
+        reqs.write_text("numpy")
+
+        mock_stream = _mock_ndjson_stream()
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.validate_environment(
+            name="MyEnv",
+            source=archive,
+            env_config=cfg,
+            requirements=reqs,
+            description="A test environment",
+        )
+        call_kwargs = api_key_client._open_stream.call_args[1]
+        assert call_kwargs["data"]["description"] == "A test environment"
+
+    def test_create_omits_description_when_none(self, api_key_client, tmp_path):
+        archive = tmp_path / "env.tar.gz"
+        archive.write_bytes(b"fake")
+        cfg = tmp_path / "env_config.yaml"
+        cfg.write_text("key: val")
+        reqs = tmp_path / "requirements.txt"
+        reqs.write_text("numpy")
+
+        mock_stream = _mock_ndjson_stream()
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.validate_environment(
+            name="MyEnv",
+            source=archive,
+            env_config=cfg,
+            requirements=reqs,
+        )
+        call_kwargs = api_key_client._open_stream.call_args[1]
+        assert "description" not in call_kwargs["data"]
 
 
-class TestCliV1EnvironmentAndExperimentEndpoints:
-    def test_list_custom_environments_uses_cli_v1(self, api_key_client):
-        api_key_client._request = MagicMock(
-            return_value={"ok": True, "data": {"MyEnv": {"v1": {"validated": True}}}}
-        )
-        result = api_key_client.list_custom_environments()
-        api_key_client._request.assert_called_once_with(
-            "GET", "/api/cli/v1/environments"
-        )
-        assert "MyEnv" in result
-
-    def test_custom_environment_exists_unwraps_standard_payload(self, api_key_client):
-        api_key_client._request = MagicMock(
-            return_value={"ok": True, "data": {"exists": True}}
-        )
-        exists = api_key_client.custom_environment_exists("MyEnv", "v1")
-        assert exists is True
-        api_key_client._request.assert_called_once_with(
-            "GET",
-            "/api/cli/v1/environments/exists",
-            params={"name": "MyEnv", "version": "v1"},
-        )
-
-    def test_list_custom_environment_entrypoints_unwraps_standard_payload(
-        self, api_key_client
-    ):
-        api_key_client._request = MagicMock(
-            return_value={"ok": True, "data": ["main:Env", "alt:Env"]}
-        )
-        entrypoints = api_key_client.list_custom_environment_entrypoints("MyEnv", "v1")
-        assert entrypoints == ["main:Env", "alt:Env"]
-        api_key_client._request.assert_called_once_with(
-            "GET",
-            "/api/cli/v1/environments/entrypoints",
-            params={"name": "MyEnv", "version": "v1"},
-        )
-
-    def test_validate_custom_environment_uses_cli_v1_path(self, api_key_client):
-        api_key_client._request = MagicMock(return_value={"ok": True})
-        api_key_client.validate_custom_environment(
-            name="MyEnv", version="v1", stream=False
-        )
-        api_key_client._request.assert_called_once_with(
-            "POST",
-            "/api/cli/v1/environments/validate",
-            json={"name": "MyEnv", "version": "v1", "do_rollouts": True},
-        )
-
-    def test_profile_custom_environment_uses_cli_v1_path(self, api_key_client):
-        api_key_client._request = MagicMock(return_value={"ok": True})
-        api_key_client.profile_custom_environment(
-            name="MyEnv", version="v1", multi_agent=False, stream=False
-        )
-        api_key_client._request.assert_called_once_with(
+class TestCliV1EndpointPaths:
+    def test_profile_environment_uses_cli_v1_path(self, api_key_client):
+        mock_stream = _mock_ndjson_stream()
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.profile_environment(name="MyEnv", version="v1")
+        api_key_client._open_stream.assert_called_once_with(
             "POST",
             "/api/cli/v1/environments/profile",
-            json={"name": "MyEnv", "version": "v1", "multi_agent": False},
+            json={"name": "MyEnv", "version": "v1"},
+            timeout=api_key_client._upload_timeout,
         )
 
-    def test_delete_custom_environment_uses_cli_v1_path_and_unwraps(
-        self, api_key_client
-    ):
+    def test_delete_environment_uses_cli_v1_path_and_unwraps(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"ok": True, "data": None})
-        result = api_key_client.delete_custom_environment(name="MyEnv", version="v1")
+        result = api_key_client.delete_environment(name="MyEnv", version="v1")
         assert result is None
         api_key_client._request.assert_called_once_with(
             "DELETE",
@@ -723,16 +747,16 @@ class TestCliV1EnvironmentAndExperimentEndpoints:
         )
 
     def test_submit_experiment_job_uses_cli_v1_path(self, api_key_client):
-        api_key_client._request = MagicMock(return_value={"ok": True})
+        mock_stream = _mock_ndjson_stream()
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
         api_key_client.submit_experiment_job(
             manifest={"algorithm": {}},
-            custom_gym_env_impl_id=1,
-            stream=False,
+            resource_id=1,
         )
-        api_key_client._request.assert_called_once_with(
+        api_key_client._open_stream.assert_called_once_with(
             "POST",
             "/api/cli/v1/experiments/jobs/submit",
-            json={"manifest": {"algorithm": {}}, "custom_gym_env_impl_id": 1},
+            json={"manifest": {"algorithm": {}}, "resource_id": 1},
             timeout=api_key_client._upload_timeout,
         )
 

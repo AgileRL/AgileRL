@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 from agilerl.arena.client import ArenaClient
-
-OutputFormat = Literal["json", "text"]
 
 
 @dataclass(slots=True)
@@ -17,7 +14,6 @@ class CommandConfig:
     client_id: str | None
     request_timeout: int
     upload_timeout: int
-    output: OutputFormat
 
 
 def build_client(config: CommandConfig) -> ArenaClient:

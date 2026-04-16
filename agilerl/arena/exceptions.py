@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from typing import Any
+
 
 class ArenaError(Exception):
     """Base exception for all Arena client errors."""
@@ -9,35 +12,135 @@ class ArenaAuthError(ArenaError):
     """Raised when authentication fails or credentials are missing/expired."""
 
 
-class ArenaAPIError(ArenaError):
-    """Raised when the Arena API returns a non-2xx response.
-
-    :param status_code: HTTP status code from the API response.
-    :type status_code: int
-    :param detail: Human-readable error description from the server.
-    :type detail: str
-    """
-
-    def __init__(self, status_code: int, detail: str) -> None:
-        self.status_code = status_code
-        self.detail = detail
-        super().__init__(f"Arena API error {status_code}: {detail}")
-
-
 class ArenaTimeoutError(ArenaAuthError):
     """Raised when the device-flow login times out waiting for user authorization."""
 
 
-class ArenaValidationError(ArenaError):
-    """Raised when server-side environment validation fails.
+_MESSAGE_KEYS = ("description", "message", "detail", "error")
+_SKIP_KEYS = frozenset((*_MESSAGE_KEYS, "error_code", "status", "status_code"))
 
-    :param errors: Structured validation errors returned by the server.
-    :type errors: list[dict]
+
+class ArenaAPIError(ArenaError):
+    """Raised when the Arena API returns a non-2xx response.
+
+    :param detail: Human-readable error description.
+    :param status_code: HTTP status code from the API response.
+    :param extras: Supplementary context from the error body.
     """
 
-    def __init__(self, errors: list[dict]) -> None:
-        self.errors = errors
-        summary = "; ".join(e.get("msg", str(e)) for e in errors[:5])
-        if len(errors) > 5:
-            summary += f" ... and {len(errors) - 5} more"
-        super().__init__(f"Environment validation failed: {summary}")
+    _label = "API error"
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        status_code: int = 0,
+        extras: dict[str, Any] | None = None,
+    ) -> None:
+        self.detail = detail
+        self.status_code = status_code
+        self.extras = extras or {}
+        super().__init__(self._format())
+
+    def _format(self) -> str:
+        parts = [self.detail]
+        for key, value in self.extras.items():
+            label = key.replace("_", " ").capitalize()
+            if isinstance(value, list):
+                parts.append(f"{label}: {', '.join(str(v) for v in value)}")
+            else:
+                parts.append(f"{label}: {value}")
+        msg = "\n".join(parts)
+        if self.status_code:
+            return f"{self._label} ({self.status_code}): {msg}"
+        return f"{self._label}: {msg}"
+
+    @classmethod
+    def from_response_body(
+        cls,
+        raw: str,
+        *,
+        status_code: int = 0,
+    ) -> ArenaAPIError:
+        """Build an instance from a raw HTTP response body string.
+
+        Handles plain text, JSON, broken JSON (embedded newlines), nested
+        JSON-in-string envelopes, and NDJSON error lines.
+        """
+        if not raw:
+            return cls("No error details", status_code=status_code)
+
+        body = _parse_body(raw)
+        if body is None:
+            return cls(raw[:500], status_code=status_code)
+
+        primary = ""
+        for key in _MESSAGE_KEYS:
+            value = body.get(key)
+            if value and isinstance(value, str):
+                primary = value
+                break
+
+        extras = {k: v for k, v in body.items() if k not in _SKIP_KEYS and v}
+        return cls(
+            detail=primary or raw[:500],
+            status_code=status_code,
+            extras=extras,
+        )
+
+
+class ArenaValidationError(ArenaAPIError):
+    """Raised when server-side environment validation fails."""
+
+    _label = "ValidationError"
+
+
+def _parse_body(raw: str) -> dict[str, Any] | None:
+    """Best-effort parse of an API error body into a dict.
+
+    Handles:
+    * Valid JSON
+    * JSON with embedded newlines in string values (invalid but common)
+    * NDJSON bodies (picks the line containing ``"error"``)
+    * Nested JSON-in-string envelopes (one level)
+    """
+    body: dict[str, Any] | None = None
+
+    for attempt in (raw, raw.replace("\n", " ")):
+        try:
+            parsed = json.loads(attempt)
+            if isinstance(parsed, dict):
+                body = parsed
+                break
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    if body is None:
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(parsed, dict) and "error" in parsed:
+                body = parsed
+                break
+
+    if body is None:
+        return None
+
+    # Unpack one level of nested JSON-in-string envelopes.
+    for key in _MESSAGE_KEYS:
+        value = body.get(key)
+        if not value or not isinstance(value, str):
+            continue
+        try:
+            inner = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(inner, dict) and any(k in inner for k in _MESSAGE_KEYS):
+            return inner
+
+    return body

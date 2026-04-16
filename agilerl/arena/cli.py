@@ -1,21 +1,68 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import logging
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import click
+from rich.logging import RichHandler
 
-from agilerl.arena.config import CommandConfig, OutputFormat, build_client
+from agilerl.arena.client import ArenaClient
+from agilerl.arena.config import CommandConfig, build_client
 from agilerl.arena.output import (
     StreamTableRenderer,
     build_stream_handler,
-    emit,
     emit_csv_preview,
+    emit_result,
     handle_error,
 )
 from agilerl.arena.payloads import load_json_payload, resolve_metrics_output_path
+
+logging.basicConfig(
+    format="%(message)s",
+    level=logging.INFO,
+    handlers=[RichHandler(show_time=False, show_path=False, markup=True)],
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+@contextmanager
+def arena_client(
+    config: CommandConfig,
+) -> Generator[ArenaClient, None, None]:
+    """Build an :class:`ArenaClient`, handle errors, and guarantee cleanup."""
+    client = build_client(config)
+    try:
+        yield client
+    except Exception as exc:
+        handle_error(exc)
+    finally:
+        client.close()
+
+
+@contextmanager
+def streaming_client(
+    config: CommandConfig,
+) -> Generator[tuple[ArenaClient, StreamTableRenderer], None, None]:
+    """Like :func:`arena_client` but also wires up a streaming event handler.
+
+    Yields ``(client, renderer)``.  Callers should call ``renderer.close()``
+    before emitting the final result so the live table is stopped first.
+    """
+    client = build_client(config)
+    handler, renderer = build_stream_handler()
+    client.set_stream_handler(handler)
+    try:
+        yield client, renderer
+    except Exception as exc:
+        handle_error(exc)
+    finally:
+        renderer.close()
+        client.set_stream_handler(None)
+        client.close()
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -46,13 +93,6 @@ from agilerl.arena.payloads import load_json_payload, resolve_metrics_output_pat
     show_default=True,
     help="Timeout in seconds for file upload requests.",
 )
-@click.option(
-    "--output",
-    type=click.Choice(["json", "text"]),
-    default="text",
-    show_default=True,
-    help="Output format. Use text for rich tables; json for scripting.",
-)
 @click.pass_context
 def main(
     ctx: click.Context,
@@ -63,9 +103,8 @@ def main(
     client_id: str | None,
     request_timeout: int,
     upload_timeout: int,
-    output: OutputFormat,
 ) -> None:
-    """CLI for interacting with AgileRL Arena."""
+    """Arena CLI - Interact with the Arena RLOps platform directly from the command-line."""
     ctx.obj = CommandConfig(
         api_key=api_key,
         base_url=base_url,
@@ -74,7 +113,6 @@ def main(
         client_id=client_id,
         request_timeout=request_timeout,
         upload_timeout=upload_timeout,
-        output=output,
     )
 
 
@@ -92,14 +130,8 @@ def login(
     timeout: int,
 ) -> None:
     """Authenticate with Arena."""
-    client = build_client(config)
-    try:
+    with arena_client(config) as client:
         client.login(timeout=timeout)
-        click.echo("Login successful.")
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        client.close()
 
 
 @main.command()
@@ -108,19 +140,13 @@ def logout(
     config: CommandConfig,
 ) -> None:
     """Log out and clear persisted credentials."""
-    client = build_client(config)
-    try:
+    with arena_client(config) as client:
         client.logout()
-        click.echo("Logout successful.")
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        client.close()
 
 
 @main.group("user")
 def user_group() -> None:
-    """User/account commands."""
+    """Retrieve user / account information."""
 
 
 @user_group.command("profile")
@@ -129,13 +155,10 @@ def user_profile(
     config: CommandConfig,
 ) -> None:
     """Get current authenticated user profile."""
-    client = build_client(config)
-    try:
-        emit(client.get_current_user(), config.output)
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        client.close()
+    with arena_client(config) as client:
+        user = client.get_current_user()
+        click.echo(f"User: {user.get('first_name', '')} {user.get('last_name', '')}")
+        click.echo(f"Email: {user.get('email', '')}")
 
 
 @user_group.command("credits")
@@ -144,18 +167,13 @@ def user_credits(
     config: CommandConfig,
 ) -> None:
     """Get remaining account credits."""
-    client = build_client(config)
-    try:
-        emit(client.get_user_credits(), config.output)
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        client.close()
+    with arena_client(config) as client:
+        emit_result(client.get_user_credits())
 
 
 @main.group("environments")
 def environments() -> None:
-    """Manage custom gym environments."""
+    """Manage your custom Gym / PettingZoo environments in Arena."""
 
 
 @environments.command("list")
@@ -163,14 +181,9 @@ def environments() -> None:
 def env_list(
     config: CommandConfig,
 ) -> None:
-    """List all available environments with validated/profiled metadata."""
-    client = build_client(config)
-    try:
-        emit(client.list_custom_environments(), config.output)
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        client.close()
+    """List all available environments in Arena, and whether they have been validated and profiled."""
+    with arena_client(config) as client:
+        emit_result(client.list_environments())
 
 
 @environments.command("exists")
@@ -182,15 +195,10 @@ def env_exists(
     name: str,
     version: str,
 ) -> None:
-    """Check if an environment version exists."""
-    client = build_client(config)
-    try:
-        exists = client.custom_environment_exists(name=name, version=version)
-        emit({"name": name, "version": version, "exists": exists}, config.output)
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        client.close()
+    """Check if an environment version exists in Arena."""
+    with arena_client(config) as client:
+        exists = client.environment_exists(name=name, version=version)
+        emit_result({"name": name, "version": version, "exists": exists})
 
 
 @environments.command("list-entrypoints")
@@ -203,189 +211,106 @@ def env_entrypoints(
     version: str,
 ) -> None:
     """List available entrypoints for an existing environment version."""
-    client = build_client(config)
-    try:
-        emit(
-            client.list_custom_environment_entrypoints(name=name, version=version),
-            config.output,
-        )
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        client.close()
+    with arena_client(config) as client:
+        emit_result(client.list_environment_entrypoints(name=name, version=version))
 
 
-@environments.command("create-and-validate")
-@click.option("--name", default=None, help="Environment name. Random UUID if omitted.")
-@click.option("--version", default="ident", show_default=True)
+@environments.command("validate")
+@click.argument("name", required=False, default=None, type=str)
+@click.option("--name", "name_opt", default=None, hidden=True)
+@click.option("--version", default="latest", show_default=True)
 @click.option(
-    "--file-path",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    required=True,
-    help="Path to environment tar.gz archive.",
+    "--source",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to environment source directory or .tar.gz archive.",
 )
 @click.option(
-    "--env-config-path",
+    "--env-config",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    required=True,
+    default=None,
     help="Path to env_config.yaml file.",
 )
 @click.option(
-    "--requirements-path",
+    "--requirements",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    required=True,
+    default=None,
     help="Path to requirements.txt file.",
 )
 @click.option(
     "--entrypoint",
     default=None,
-    help="Optional entrypoint. If omitted and multiple exist, backend returns options.",
+    help="Optional entrypoint override. Useful when multiple entrypoints exist.",
+)
+@click.option(
+    "--description",
+    default=None,
+    help="Optional description of the environment.",
 )
 @click.option("--multi-agent/--single-agent", default=False, show_default=True)
 @click.option("--do-rollouts/--no-do-rollouts", default=True, show_default=True)
-@click.option("--stream/--no-stream", default=True, show_default=True)
-@click.pass_obj
-def env_create_and_validate(
-    config: CommandConfig,
-    name: str | None,
-    version: str,
-    file_path: Path,
-    env_config_path: Path,
-    requirements_path: Path,
-    entrypoint: str | None,
-    multi_agent: bool,
-    do_rollouts: bool,
-    stream: bool,
-) -> None:
-    """Upload and automatically validate a custom environment."""
-    client = build_client(config)
-    env_name = name or str(uuid4())
-    stream_renderer: StreamTableRenderer | None = None
-    try:
-        on_chunk: Callable[[str], None] | None = None
-        if stream:
-            on_chunk, stream_renderer = build_stream_handler(config.output)
-        result = client.create_and_validate_custom_environment(
-            name=env_name,
-            version=version,
-            file_path=file_path,
-            env_config_path=env_config_path,
-            requirements_path=requirements_path,
-            entrypoint=entrypoint,
-            multi_agent=multi_agent,
-            do_rollouts=do_rollouts,
-            stream=stream,
-            on_chunk=on_chunk,
-        )
-        if stream and stream_renderer is not None:
-            result = stream_renderer.finalize_result(result)
-        elif stream:
-            click.echo()
-        if result is not None:
-            emit(result, config.output)
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        if stream_renderer is not None:
-            stream_renderer.close()
-        client.close()
-
-
-@environments.command("validate")
-@click.argument("name")
-@click.option("--version", default="latest", show_default=True)
-@click.option(
-    "--entrypoint",
-    default=None,
-    help="Optional entrypoint override. Useful when multiple entrypoints exist.",
-)
-@click.option("--do-rollouts/--no-do-rollouts", default=True, show_default=True)
-@click.option("--stream/--no-stream", default=True, show_default=True)
 @click.pass_obj
 def env_validate(
     config: CommandConfig,
-    name: str,
+    name: str | None,
+    name_opt: str | None,
     version: str,
+    source: Path | None,
+    env_config: Path | None,
+    requirements: Path | None,
     entrypoint: str | None,
+    description: str | None,
+    multi_agent: bool,
     do_rollouts: bool,
-    stream: bool,
 ) -> None:
-    """Validate an already-created environment version."""
-    client = build_client(config)
-    stream_renderer: StreamTableRenderer | None = None
-    try:
-        on_chunk: Callable[[str], None] | None = None
-        if stream:
-            on_chunk, stream_renderer = build_stream_handler(config.output)
-        result = client.validate_custom_environment(
-            name=name,
+    """Validate an environment on Arena.
+
+    Pass 'name' to validate an already-registered environment.  Pass --source
+    to upload and validate in one step.  When using --source without a positional
+    'name', the source directory/file name is used by default.
+    """
+    env_name = name or name_opt or (source.stem if source else None)
+    if env_name is None:
+        msg = "Provide an environment name or use --source to upload and validate."
+        raise click.UsageError(msg)
+
+    with streaming_client(config) as (client, renderer):
+        stream_resp = client.validate_environment(
+            name=env_name,
             version=version,
+            source=source,
+            env_config=env_config,
+            requirements=requirements,
             entrypoint=entrypoint,
+            description=description,
+            multi_agent=multi_agent,
             do_rollouts=do_rollouts,
-            stream=stream,
-            on_chunk=on_chunk,
+            stream=True,
         )
-        if stream and stream_renderer is not None:
-            result = stream_renderer.finalize_result(result)
-        elif stream:
-            click.echo()
-        if result is not None:
-            emit(result, config.output)
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        if stream_renderer is not None:
-            stream_renderer.close()
-        client.close()
+        stream_resp.collect()
+        renderer.close()
 
 
 @environments.command("profile")
 @click.argument("name")
 @click.option("--version", default="latest", show_default=True)
-@click.option(
-    "--entrypoint",
-    "custom_env_path",
-    default=None,
-    help="Entrypoint/custom env path to profile. Defaults to saved entrypoint.",
-)
-@click.option("--multi-agent/--single-agent", default=False, show_default=True)
-@click.option("--stream/--no-stream", default=True, show_default=True)
 @click.pass_obj
 def env_profile(
     config: CommandConfig,
     name: str,
     version: str,
-    custom_env_path: str | None,
-    multi_agent: bool,
-    stream: bool,
 ) -> None:
-    """Profile a validated environment (returns cpu_per_env and ram_per_env)."""
-    client = build_client(config)
-    stream_renderer: StreamTableRenderer | None = None
-    try:
-        on_chunk: Callable[[str], None] | None = None
-        if stream:
-            on_chunk, stream_renderer = build_stream_handler(config.output)
-        result = client.profile_custom_environment(
+    """Profile a validated environment in Arena and get its resource requirements."""
+    with streaming_client(config) as (client, renderer):
+        stream_resp = client.profile_environment(
             name=name,
             version=version,
-            custom_env_path=custom_env_path,
-            multi_agent=multi_agent,
-            stream=stream,
-            on_chunk=on_chunk,
+            stream=True,
         )
-        if stream and stream_renderer is not None:
-            result = stream_renderer.finalize_result(result)
-        elif stream:
-            click.echo()
-        if result is not None:
-            emit(result, config.output)
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        if stream_renderer is not None:
-            stream_renderer.close()
-        client.close()
+        result = stream_resp.collect()
+        renderer.close()
+        if result:
+            emit_result(result)
 
 
 @environments.command("delete")
@@ -411,17 +336,12 @@ def env_delete(
         click.echo("Aborted.")
         return
 
-    client = build_client(config)
-    try:
-        result = client.delete_custom_environment(name=name, version=version)
+    with arena_client(config) as client:
+        result = client.delete_environment(name=name, version=version)
         if result in ("", None):
-            emit({"deleted": True, "name": name, "version": version}, config.output)
+            emit_result({"deleted": True, "name": name, "version": version})
             return
-        emit(result, config.output)
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        client.close()
+        emit_result(result)
 
 
 @main.group("jobs")
@@ -431,27 +351,10 @@ def jobs() -> None:
 
 @jobs.command("submit")
 @click.option(
-    "--custom-gym-env-impl-id",
+    "--resource-id",
     type=int,
     default=None,
-    help="Custom gym environment implementation ID.",
-)
-@click.option(
-    "--experiment-id",
-    type=int,
-    default=None,
-    help="Existing experiment ID to submit.",
-)
-@click.option(
-    "--gym-env-id",
-    type=int,
-    default=None,
-    help="Gym environment ID to submit against.",
-)
-@click.option(
-    "--experiment-name",
-    default=None,
-    help="Optional experiment name for newly created jobs.",
+    help="Arena cluster type to submit the experiment to.",
 )
 @click.option(
     "--manifest-json",
@@ -464,17 +367,12 @@ def jobs() -> None:
     default=None,
     help="Path to JSON file containing manifest payload.",
 )
-@click.option("--stream/--no-stream", default=True, show_default=True)
 @click.pass_obj
 def experiments_submit(
     config: CommandConfig,
-    custom_gym_env_impl_id: int | None,
-    experiment_id: int | None,
-    gym_env_id: int | None,
-    experiment_name: str | None,
+    resource_id: int | None,
     manifest_json: str | None,
     manifest_file: str | None,
-    stream: bool,
 ) -> None:
     """Submit a training job from run spec and/or existing experiment IDs."""
     manifest: dict[str, Any] | None = None
@@ -486,33 +384,16 @@ def experiments_submit(
             file_option_name="--manifest-file",
         )
 
-    client = build_client(config)
-    stream_renderer: StreamTableRenderer | None = None
-    try:
-        on_chunk: Callable[[str], None] | None = None
-        if stream:
-            on_chunk, stream_renderer = build_stream_handler(config.output)
-        result = client.submit_experiment_job(
+    with streaming_client(config) as (client, renderer):
+        stream_resp = client.submit_experiment_job(
             manifest=manifest,
-            custom_gym_env_impl_id=custom_gym_env_impl_id,
-            experiment_id=experiment_id,
-            gym_env_id=gym_env_id,
-            experiment_name=experiment_name,
-            stream=stream,
-            on_chunk=on_chunk,
+            resource_id=resource_id,
+            stream=True,
         )
-        if stream and stream_renderer is not None:
-            result = stream_renderer.finalize_result(result)
-        elif stream:
-            click.echo()
-        if result is not None:
-            emit(result, config.output)
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        if stream_renderer is not None:
-            stream_renderer.close()
-        client.close()
+        result = stream_resp.collect()
+        renderer.close()
+        if result:
+            emit_result(result)
 
 
 @jobs.command("status")
@@ -520,13 +401,8 @@ def experiments_submit(
 @click.pass_obj
 def jobs_status(config: CommandConfig, experiment_id: int) -> None:
     """Get status/details for an experiment by ID."""
-    client = build_client(config)
-    try:
-        emit(client.get_experiment_status(experiment_id), config.output)
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        client.close()
+    with arena_client(config) as client:
+        emit_result(client.get_experiment_status(experiment_id))
 
 
 @jobs.command("validate-runspec")
@@ -550,14 +426,8 @@ def jobs_validate_runspec(
         json_option_name="--runspec-json",
         file_option_name="--runspec-file",
     )
-    client = build_client(config)
-    try:
-        result = client.validate_job_run_spec(run_spec)
-        emit(result, config.output)
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        client.close()
+    with arena_client(config) as client:
+        emit_result(client.validate_job_run_spec(run_spec))
 
 
 @jobs.command("get-metrics")
@@ -591,8 +461,7 @@ def jobs_get_metrics(
     preview_rows: int,
 ) -> None:
     """Download metrics data for an experiment as CSV (or zip)."""
-    client = build_client(config)
-    try:
+    with arena_client(config) as client:
         payload, content_type, disposition = client.download_experiment_metrics(
             experiment_id=experiment_id, metrics=list(metrics)
         )
@@ -604,22 +473,13 @@ def jobs_get_metrics(
             output_file=output_file,
         )
         target_path.write_bytes(payload)
-        emit(
+        emit_result(
             {
                 "saved": str(target_path),
                 "bytes": len(payload),
                 "content_type": content_type or "unknown",
             },
-            config.output,
         )
 
-        if (
-            config.output == "text"
-            and preview_rows > 0
-            and (content_type or "").startswith("text/csv")
-        ):
+        if preview_rows > 0 and (content_type or "").startswith("text/csv"):
             emit_csv_preview(payload, max_rows=preview_rows)
-    except Exception as exc:
-        handle_error(exc, config.output)
-    finally:
-        client.close()

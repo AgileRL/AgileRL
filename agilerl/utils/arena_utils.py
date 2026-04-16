@@ -74,6 +74,7 @@ def prepare_env_upload(
     :type description: str | None
     :returns: Bytes of the prepared environment.
     """
+    source = Path(os.fspath(source)).resolve()
     config_bytes = resolve_env_config(config)
     requirements_bytes = resolve_env_requirements(requirements)
 
