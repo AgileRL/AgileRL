@@ -692,7 +692,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
         :param obs: Observation from the environment
         :type obs: ObservationType
-        
+
         :return: Action from the agent
         :rtype: Any
         """
