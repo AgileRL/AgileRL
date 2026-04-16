@@ -25,7 +25,6 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.llm_utils import (
     ReasoningGym,
-    move_params_to_cpu,
     normalize_reasoning_prompt_batch,
     prepare_prompt_hf_generate,
     stitch_completion_after_windowed_hf_generate,
@@ -566,8 +565,10 @@ class GRPO(LLMAlgorithm):
                             training=False,
                         )
                         full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _step_info = env.step(
-                            full,
+                        prompt_dict, reward, terminated, truncated, _step_info = (
+                            env.step(
+                                full,
+                            )
                         )
                         all_rewards.append(
                             torch.tensor(
@@ -600,7 +601,16 @@ class GRPO(LLMAlgorithm):
         :type eps: float, optional
         :return: Tensor of group relative advantages.
         :rtype: torch.Tensor
+        :raises ValueError: If the number of elements in ``rewards`` is not
+            divisible by ``group_size``.
         """
+        numel = rewards.numel()
+        if numel % self.group_size != 0:
+            msg = (
+                f"Rewards must have a total element count divisible by "
+                f"group_size ({self.group_size}); got {numel} elements."
+            )
+            raise ValueError(msg)
         rewards = rewards.view(-1, self.group_size)
         if self.adv_norm == "mean_only":
             advantage = rewards - rewards.mean(dim=1, keepdim=True)

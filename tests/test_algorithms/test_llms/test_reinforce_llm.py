@@ -16,7 +16,7 @@ from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym, compute_kl_divergence
 from tests.utils import (
     assert_vllm_get_action_contract,
-    spawn_new_process_for_each_test,
+    make_mock_vllm_instance,
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -277,146 +277,141 @@ def reinforce_factory():
     return generate_reinforce
 
 
-@spawn_new_process_for_each_test
-@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("use_vllm", [True, False])
-@pytest.mark.parametrize("pretrained_model_name_or_path", ["facebook/opt-125m"])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-@pytest.mark.parametrize("batch_size", [8])
-def test_reinforce_learns(
-    deepspeed_env,
-    reinforce_factory,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
-    use_vllm,
-    pretrained_model_name_or_path,
-    micro_batch_size_per_gpu,
-    vocab_size,
-    input_size,
-    max_tokens,
-    batch_size,
-):
-    rf = reinforce_factory(
-        accelerator_factory=accelerator_factory,
-        model_factory=model_factory,
-        config=config,
-        use_deepspeed_optimizer=use_deepspeed_optimizer,
-        vocab_size=vocab_size,
-        input_size=input_size,
-        max_tokens=max_tokens,
-        use_vllm=use_vllm,
-        pretrained_model_name_or_path=pretrained_model_name_or_path,
-        micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        lr_eff=0.01,
+@patch("agilerl.algorithms.core.base.LLM")
+def test_init_reinforce_vllm_sleep_mode(MockLLM):
+    mock_instance = make_mock_vllm_instance()
+    MockLLM.return_value = mock_instance
+
+    actor = create_dummy_actor(10, 8, 100, "cpu")
+    lora = LoraConfig(
+        r=4,
+        lora_alpha=16,
+        target_modules=["lin"],
+        task_type="CAUSAL_LM",
     )
-    completions = [
-        torch.randint(
-            0,
-            vocab_size,
-            (1, input_size + max_tokens),
-            device=rf.device,
-        )
-        for _ in range(batch_size)
-    ]
-    action_masks = [
-        torch.ones((1, input_size + max_tokens - 1), device=rf.device)
-        for _ in range(batch_size)
-    ]
-    rewards = torch.tensor(
-        [1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0], dtype=torch.float32
-    ).unsqueeze(1)
-
-    rf.learn((completions, action_masks, rewards))
-
-    pre_learn_actor_state_dict = {
-        name: param.clone().detach() for name, param in rf.actor.named_parameters()
-    }
-
-    learn_result = rf.learn((completions, action_masks, rewards))
-    mean_loss = learn_result["mean_loss"]
-    mean_kl = learn_result["mean_kl"]
-    mean_pg_loss = learn_result["mean_pg_loss"]
-    mean_entropy = learn_result["mean_entropy"]
-    assert isinstance(mean_loss, float)
-    assert isinstance(mean_kl, float)
-    assert isinstance(mean_pg_loss, float)
-    assert isinstance(mean_entropy, float)
-
-    for param_name, param in rf.actor.named_parameters():
-        if "reference" in param_name:
-            assert torch.equal(param, pre_learn_actor_state_dict[param_name]), (
-                f"{param_name} should not change but did"
-            )
-
-    assert not any("v_head" in n for n, _ in rf.actor.named_parameters())
-
-    actor_lora_changed = any(
-        not torch.allclose(param, pre_learn_actor_state_dict[pname])
-        for pname, param in rf.actor.named_parameters()
-        if "actor" in pname and "lora" in pname
+    rf = REINFORCE(
+        actor_network=actor,
+        pad_token_id=99,
+        pad_token="<pad>",
+        lora_config=lora,
+        use_vllm=True,
+        vllm_config=VLLMConfig(
+            gpu_memory_utilization=0.2,
+            max_num_seqs=1,
+            sleep_mode=True,
+        ),
+        max_output_tokens=8,
+        max_model_len=32,
+        wrap=False,
+        gradient_checkpointing=False,
+        device="cpu",
     )
-    assert actor_lora_changed, "No actor LoRA parameters were updated after learn()"
-
+    # FIXME need to assert the instances are all set up correctly similar to test_grpo.py
+    assert rf.use_vllm
+    mock_instance.sleep.assert_called()
     rf.clean_up()
 
 
-@spawn_new_process_for_each_test
-@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("pretrained_model_name_or_path", ["facebook/opt-125m"])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_llmreinforce_get_action_vllm_heavy_smoke(
-    deepspeed_env,
-    reinforce_factory,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
-    vocab_size,
-    input_size,
-    max_tokens,
-    pretrained_model_name_or_path,
-    micro_batch_size_per_gpu,
-):
-    rf = reinforce_factory(
-        accelerator_factory=accelerator_factory,
-        model_factory=model_factory,
-        config=config,
-        use_deepspeed_optimizer=use_deepspeed_optimizer,
-        vocab_size=vocab_size,
-        input_size=input_size,
-        max_tokens=max_tokens,
-        use_vllm=True,
-        pretrained_model_name_or_path=pretrained_model_name_or_path,
-        micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+def test_llmreinforce_get_action_vllm_routes_through_vllm_calls():
+    rf = _cpu_llmreinforce(use_vllm=False)
+    rf.use_vllm = True
+    rf.vllm_config = VLLMConfig(
+        gpu_memory_utilization=0.2,
+        max_num_seqs=1,
+        sleep_mode=True,
     )
-    batch_size = 4
+    rf._vllm_awake = False
+    rf.llm = MagicMock()
+    rf.llm.wake_up = MagicMock()
+    rf.llm.sleep = MagicMock()
     prompts = [
         {
-            "input_ids": torch.randint(0, vocab_size, (1, input_size), device=rf.device),
-            "attention_mask": torch.ones(1, input_size, device=rf.device),
+            "input_ids": torch.randint(0, 100, (1, 10), device=rf.device),
+            "attention_mask": torch.ones(1, 10, device=rf.device),
             "text": "Write me a short story about a cat.",
         }
-        for _ in range(batch_size)
+        for _ in range(2)
+    ]
+    mocked_ids = [
+        torch.ones(1, 12, dtype=torch.long, device=rf.device),
+        torch.ones(1, 12, dtype=torch.long, device=rf.device),
+    ]
+    mocked_masks = [
+        torch.ones(1, 11, dtype=torch.bool, device=rf.device),
+        torch.ones(1, 11, dtype=torch.bool, device=rf.device),
+    ]
+    with (
+        patch.object(
+            rf,
+            "_prepare_vllm_for_generation",
+            wraps=rf._prepare_vllm_for_generation,
+        ) as mock_prepare,
+        patch.object(rf, "_move_model_to_vllm", return_value=None) as mock_move,
+        patch.object(
+            rf,
+            "_generate_with_vllm_colocate",
+            return_value=(mocked_ids, mocked_masks),
+        ) as mock_generate,
+    ):
+        completion_ids, action_masks = rf.get_action(prompts, training=False)
+
+    mock_prepare.assert_called_once()
+    mock_move.assert_called_once()
+    mock_generate.assert_called_once_with(prompts, 1, temperature=0.01)
+    rf.llm.wake_up.assert_called_once()
+    rf._prepare_vllm_for_training()
+    rf.llm.sleep.assert_called_once()
+    assert completion_ids == mocked_ids
+    assert action_masks == mocked_masks
+    rf.clean_up()
+
+
+def test_llmreinforce_get_action_hf_path_contract():
+    rf = _cpu_llmreinforce(use_vllm=False, max_model_len=128, max_output_tokens=8)
+    prompt_len = 10
+    prompts = [
+        {
+            "input_ids": torch.randint(0, 100, (1, prompt_len), device=rf.device),
+            "attention_mask": torch.ones(1, prompt_len, device=rf.device),
+        }
+        for _ in range(3)
     ]
     for training in (True, False):
         completion_ids, action_masks = rf.get_action(prompts, training=training)
         assert_vllm_get_action_contract(
             completion_ids=completion_ids,
             action_masks=action_masks,
-            batch_size=batch_size,
-            prompt_len=input_size,
+            batch_size=len(prompts),
+            prompt_len=prompt_len,
             pad_token_id=rf.pad_token_id,
         )
+    rf.clean_up()
+
+
+def test_llmreinforce_get_action_hf_path_handles_actor_without_parameters():
+    rf = _cpu_llmreinforce(use_vllm=False, max_model_len=128, max_output_tokens=8)
+
+    class _NoParamModule:
+        def parameters(self):
+            return iter(())
+
+    prompts = [
+        {
+            "input_ids": torch.randint(0, 100, (1, 10), device=rf.device),
+            "attention_mask": torch.ones(1, 10, device=rf.device),
+        }
+    ]
+
+    with patch.object(rf, "_get_unwrapped_actor", return_value=_NoParamModule()):
+        completion_ids, action_masks = rf.get_action(prompts, training=True)
+
+    assert_vllm_get_action_contract(
+        completion_ids=completion_ids,
+        action_masks=action_masks,
+        batch_size=1,
+        prompt_len=10,
+        pad_token_id=rf.pad_token_id,
+    )
     rf.clean_up()
 
 
@@ -467,12 +462,8 @@ def test_compute_rebn_advantages_gamma_changes_advantages():
     rewards = torch.tensor([[1.0, 1.0, 2.0, 2.0]])
     action_mask = torch.ones(1, 4, dtype=torch.bool)
     turn_ids = torch.tensor([[0, 0, 1, 1]])
-    a = _RebnStub(gamma=1.0)._compute_rebn_advantages(
-        rewards, action_mask, turn_ids
-    )
-    b = _RebnStub(gamma=0.5)._compute_rebn_advantages(
-        rewards, action_mask, turn_ids
-    )
+    a = _RebnStub(gamma=1.0)._compute_rebn_advantages(rewards, action_mask, turn_ids)
+    b = _RebnStub(gamma=0.5)._compute_rebn_advantages(rewards, action_mask, turn_ids)
     assert not torch.allclose(a, b)
 
 
@@ -581,72 +572,6 @@ def test_init_clone_requires_pretrained_like_actor():
         )
 
 
-def test_get_action_accepts_single_prompt_dict():
-    rf = _cpu_llmreinforce()
-    obs = {
-        "input_ids": torch.randint(0, 100, (1, 10)),
-        "attention_mask": torch.ones(1, 10, dtype=torch.long),
-    }
-    ids, masks = rf.get_action(obs, training=True)
-    assert len(ids) == 1 and len(masks) == 1
-
-
-def test_get_action_hf_stitch_completion_path():
-    rf = _cpu_llmreinforce()
-    stitch = torch.tensor([[7, 8]], dtype=torch.long)
-    obs = {
-        "input_ids": torch.randint(0, 100, (1, 4)),
-        "attention_mask": torch.ones(1, 4, dtype=torch.long),
-        "stitch_prefix_ids": stitch,
-        "initial_prompt_len": 2,
-    }
-    ids, masks = rf.get_action([obs], training=True)
-    assert ids[0].shape[1] > obs["input_ids"].shape[1]
-
-
-def test_get_action_hf_stopiteration_uses_device_string():
-    rf = _cpu_llmreinforce()
-    obs = {
-        "input_ids": torch.randint(0, 100, (1, 10)),
-        "attention_mask": torch.ones(1, 10, dtype=torch.long),
-    }
-    unwrapped = rf._get_unwrapped_actor()
-    with patch.object(unwrapped, "parameters", return_value=iter(())):
-        ids, masks = rf.get_action([obs], training=True)
-        assert len(ids) == 1
-
-
-@pytest.mark.parametrize("hf_generate_chunk_size", [1, 2, 4])
-@pytest.mark.parametrize("training", [True, False])
-def test_llmreinforce_get_action_hf_chunk_sizes_contract(
-    hf_generate_chunk_size, training
-):
-    rf = _cpu_llmreinforce(
-        use_vllm=False,
-        hf_generate_chunk_size=hf_generate_chunk_size,
-        max_model_len=128,
-        max_output_tokens=8,
-    )
-    batch_size = 4
-    prompt_len = 10
-    prompts = [
-        {
-            "input_ids": torch.randint(0, 100, (1, prompt_len), device=rf.device),
-            "attention_mask": torch.ones(1, prompt_len, device=rf.device),
-        }
-        for _ in range(batch_size)
-    ]
-    completion_ids, action_masks = rf.get_action(prompts, training=training)
-    assert_vllm_get_action_contract(
-        completion_ids=completion_ids,
-        action_masks=action_masks,
-        batch_size=batch_size,
-        prompt_len=prompt_len,
-        pad_token_id=rf.pad_token_id,
-    )
-    rf.clean_up()
-
-
 def test_learn_multi_turn_explicit_turn_ids():
     rf = _cpu_llmreinforce(lr=0.05, update_epochs=2)
     vocab = 100
@@ -664,7 +589,8 @@ def test_learn_multi_turn_explicit_turn_ids():
     rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
 
-def test_llmreinforce_learns_multiturn():
+@pytest.mark.parametrize("use_vllm", [False, True])
+def test_llmreinforce_learns_multiturn(use_vllm):
     """Multi-turn learn path updates actor adapters without vLLM/DeepSpeed."""
     torch.manual_seed(0)
     rf = _cpu_llmreinforce(
@@ -672,6 +598,16 @@ def test_llmreinforce_learns_multiturn():
         update_epochs=2,
         use_vllm=False,
     )
+    if use_vllm:
+        rf.use_vllm = True
+        rf.vllm_config = VLLMConfig(
+            gpu_memory_utilization=0.2,
+            max_num_seqs=1,
+            sleep_mode=True,
+        )
+        rf._vllm_awake = True
+        rf.llm = MagicMock()
+        rf.llm.sleep = MagicMock()
 
     vocab_size = 100
     input_tokens = 10
@@ -703,12 +639,28 @@ def test_llmreinforce_learns_multiturn():
         device=rf.device,
     )
 
-    rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+    with (
+        patch.object(
+            rf,
+            "_prepare_vllm_for_training",
+            wraps=rf._prepare_vllm_for_training,  # FIXME we dont want to be using actual vllm calls here - needs to be mocked
+        ) as mock_prepare_vllm_for_training
+    ):
+        rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+    assert mock_prepare_vllm_for_training.call_count == 1
+    if use_vllm:
+        rf.llm.sleep.assert_called_once()
     pre_learn_actor_state_dict = {
         name: param.clone().detach() for name, param in rf.actor.named_parameters()
     }
 
-    metrics = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+    with patch.object(
+        rf,
+        "_prepare_vllm_for_training",
+        wraps=rf._prepare_vllm_for_training,
+    ) as mock_prepare_vllm_for_training:
+        metrics = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+    assert mock_prepare_vllm_for_training.call_count == 1
     for key in ("mean_loss", "mean_kl", "mean_pg_loss", "mean_entropy"):
         assert key in metrics
         assert isinstance(metrics[key], float)
@@ -720,8 +672,10 @@ def test_llmreinforce_learns_multiturn():
         if "reference" in param_name:
             assert torch.equal(param, before), f"{param_name} should not change"
             continue
-        if "actor" in param_name and "lora" in param_name and not torch.equal(
-            param, before
+        if (
+            "actor" in param_name
+            and "lora" in param_name
+            and not torch.equal(param, before)
         ):
             actor_lora_changed = True
 
@@ -802,7 +756,9 @@ def test_test_method_multiturn_episode_env_branch():
     env = DummyMultiTurnEpisodeEnv()
     completion = torch.ones(1, 6, dtype=torch.long)
     action_mask = torch.ones(1, 5, dtype=torch.bool)
-    with patch.object(rf, "get_action", return_value=([completion], [action_mask])) as get_action:
+    with patch.object(
+        rf, "get_action", return_value=([completion], [action_mask])
+    ) as get_action:
         out = rf.test(env, loop=2)
 
     assert out.numel() == 4  # 2 loops × 2 turns

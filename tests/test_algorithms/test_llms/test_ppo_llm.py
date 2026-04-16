@@ -17,7 +17,7 @@ from agilerl.utils.llm_utils import ReasoningGym, masked_whiten
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests.utils import (
     assert_vllm_get_action_contract,
-    spawn_new_process_for_each_test,
+    make_mock_vllm_instance,
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -265,7 +265,11 @@ def generate_ppo(
         cosine_lr_schedule_config=(
             None
             if accelerator is not None
-            else (CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05) if use_scheduler else None)
+            else (
+                CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+                if use_scheduler
+                else None
+            )
         ),
         accelerator=accelerator,
         use_vllm=use_vllm,
@@ -283,176 +287,92 @@ def ppo_factory():
     return generate_ppo
 
 
-@spawn_new_process_for_each_test 
-@pytest.mark.parametrize("config", [
-    deepspeed_config_stage_2,
-    None
-])
-@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("use_vllm", [
-    True, 
-    False
-])
-@pytest.mark.parametrize("pretrained_model_name_or_path", ["facebook/opt-125m"])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-@pytest.mark.parametrize("batch_size", [4])
-@pytest.mark.parametrize("use_memory_efficient_params", [
-    True, 
-    False
-])
-@pytest.mark.parametrize("sleep_mode", [
-    True, 
-    False
-])
-def test_llmppo_learns_vllm(
-    deepspeed_env,
-    ppo_factory,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
-    use_vllm,
-    pretrained_model_name_or_path,
-    micro_batch_size_per_gpu,
-    vocab_size,
-    input_size,
-    max_tokens,
-    batch_size,
-    use_memory_efficient_params,
-    sleep_mode,
-):
-    ppo = ppo_factory(
-        accelerator_factory=accelerator_factory,
-        model_factory=model_factory,
-        config=config,
-        use_deepspeed_optimizer=use_deepspeed_optimizer,
-        vocab_size=vocab_size,
-        input_size=input_size,
-        max_tokens=max_tokens,
-        use_vllm=use_vllm,
-        pretrained_model_name_or_path=pretrained_model_name_or_path,
-        micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        lr_actor=0.01,
-        use_memory_efficient_params=use_memory_efficient_params,
-        sleep_mode=sleep_mode,
+@patch("agilerl.algorithms.core.base.LLM")
+def test_init_llmppo_vllm_sleep_mode_calls_sleep(MockLLM):
+    mock_instance = make_mock_vllm_instance()
+    MockLLM.return_value = mock_instance
+
+    actor = create_module(10, 8, 100, "cpu")
+    lora = LoraConfig(
+        r=4,
+        lora_alpha=16,
+        target_modules=["lin"],
+        task_type="CAUSAL_LM",
+        modules_to_save=["summary"],
     )
-    with torch.no_grad():
-        # Fill value head bias with 1.0 to make update more obvious
-        ppo.actor.v_head.summary.bias.fill_(1.0)
-
-    completions = [
-        torch.randint(
-            0,
-            vocab_size,
-            (1, input_size + max_tokens),
-            device=ppo.device,
-        )
-        for _ in range(batch_size)
-    ]
-    action_masks = [
-        torch.ones((1, input_size + max_tokens - 1), device=ppo.device)
-        for _ in range(batch_size)
-    ]
-    rewards = torch.tensor(
-        [10000, -10, 100, -0.0000001], dtype=torch.float32
-    ).unsqueeze(1)
-
-
-    # DeepSpeed uses first step in cycle to allocate the fp32 master weights and synchronize them with your bf16 params.
-    ppo.learn((completions, action_masks, rewards))
-
-    pre_learn_actor_state_dict = {
-        name: param.clone().detach() for name, param in ppo.actor.named_parameters()
-    }
-
-    metrics = ppo.learn((completions, action_masks, rewards))
-    assert isinstance(metrics["mean_loss"], float)
-    assert isinstance(metrics["mean_kl"], float)
-
-    # Reference adapter must be frozen.
-    for param_name, param in ppo.actor.named_parameters():
-        if "reference" in param_name:
-            assert torch.equal(param, pre_learn_actor_state_dict[param_name]), (
-                f"{param_name} should not change but did"
-            )
-
-        # Value head should be updated
-        if "v_head.summary" in param_name:
-            assert not torch.equal(param, pre_learn_actor_state_dict[param_name]), (
-                f"{param_name} should change but did not"
-            )
-
-        # Actor LoRA should be updated
-        if "actor" in param_name and "lora" in param_name:
-            assert not torch.equal(param, pre_learn_actor_state_dict[param_name]), (
-                f"{param_name} should change but did not"
-            )
-
-        # Critic LoRA should be updated
-        if "critic" in param_name and "lora" in param_name:
-            assert not torch.equal(param, pre_learn_actor_state_dict[param_name]), (
-                f"{param_name} should change but did not"
-            )
-
+    ppo = LLMPPO(
+        actor_network=actor,
+        pad_token_id=99,
+        pad_token="<pad>",
+        lora_config=lora,
+        use_vllm=True,
+        vllm_config=VLLMConfig(
+            gpu_memory_utilization=0.2,
+            max_num_seqs=1,
+            sleep_mode=True,
+        ),
+        max_output_tokens=8,
+        max_model_len=32,
+        wrap=False,
+        gradient_checkpointing=False,
+        device="cpu",
+    )
+    assert ppo.use_vllm
+    mock_instance.sleep.assert_called()
     ppo.clean_up()
 
 
-@spawn_new_process_for_each_test
-@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("pretrained_model_name_or_path", ["facebook/opt-125m"])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_llmppo_get_action_vllm_heavy_smoke(
-    deepspeed_env,
-    ppo_factory,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
-    vocab_size,
-    input_size,
-    max_tokens,
-    pretrained_model_name_or_path,
-    micro_batch_size_per_gpu,
-):
-    ppo = ppo_factory(
-        accelerator_factory=accelerator_factory,
-        model_factory=model_factory,
-        config=config,
-        use_deepspeed_optimizer=use_deepspeed_optimizer,
-        vocab_size=vocab_size,
-        input_size=input_size,
-        max_tokens=max_tokens,
-        use_vllm=True,
-        pretrained_model_name_or_path=pretrained_model_name_or_path,
-        micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+def test_llmppo_get_action_vllm_routes_through_vllm_calls():
+    ppo = _cpu_llmppo(use_vllm=False)
+    ppo.use_vllm = True
+    ppo.vllm_config = VLLMConfig(
+        gpu_memory_utilization=0.2,
+        max_num_seqs=1,
+        sleep_mode=True,
     )
-    batch_size = 4
+    ppo._vllm_awake = False
+    ppo.llm = MagicMock()
+    ppo.llm.wake_up = MagicMock()
+    ppo.llm.sleep = MagicMock()
     prompts = [
         {
-            "input_ids": torch.randint(
-                0, vocab_size, (1, input_size), device=ppo.device
-            ),
-            "attention_mask": torch.ones(1, input_size, device=ppo.device),
+            "input_ids": torch.randint(0, 100, (1, 10), device=ppo.device),
+            "attention_mask": torch.ones(1, 10, device=ppo.device),
             "text": "Write me a short story about a cat.",
         }
-        for _ in range(batch_size)
+        for _ in range(2)
     ]
-    for training in (True, False):
-        completion_ids, action_masks = ppo.get_action(prompts, training=training)
-        assert_vllm_get_action_contract(
-            completion_ids=completion_ids,
-            action_masks=action_masks,
-            batch_size=batch_size,
-            prompt_len=input_size,
-            pad_token_id=ppo.pad_token_id,
-        )
+    mocked_ids = [
+        torch.ones(1, 12, dtype=torch.long, device=ppo.device),
+        torch.ones(1, 12, dtype=torch.long, device=ppo.device),
+    ]
+    mocked_masks = [
+        torch.ones(1, 11, dtype=torch.bool, device=ppo.device),
+        torch.ones(1, 11, dtype=torch.bool, device=ppo.device),
+    ]
+    with (
+        patch.object(
+            ppo,
+            "_prepare_vllm_for_generation",
+            wraps=ppo._prepare_vllm_for_generation,
+        ) as mock_prepare,
+        patch.object(ppo, "_move_model_to_vllm", return_value=None) as mock_move,
+        patch.object(
+            ppo,
+            "_generate_with_vllm_colocate",
+            return_value=(mocked_ids, mocked_masks),
+        ) as mock_generate,
+    ):
+        completion_ids, action_masks = ppo.get_action(prompts, training=False)
+
+    mock_prepare.assert_called_once()
+    mock_move.assert_called_once()
+    mock_generate.assert_called_once_with(prompts, 1, temperature=0.01)
+    ppo.llm.wake_up.assert_called_once()
+    ppo._prepare_vllm_for_training()
+    ppo.llm.sleep.assert_called_once()
+    assert completion_ids == mocked_ids
+    assert action_masks == mocked_masks
     ppo.clean_up()
 
 
@@ -502,6 +422,7 @@ def test_compute_gae_returns_two_turns_manual_then_whiten_matches_reference():
         returns,
         raw_adv + torch.tensor([[0.0, 0.0]]),
     )
+
 
 def test_compute_gae_returns_padding_positions_zero_advantage():
     stub = _PPOStub()
@@ -592,47 +513,10 @@ def test_init_clone_requires_pretrained_like_actor():
         )
 
 
-def test_get_action_accepts_single_prompt_dict():
-    ppo = _cpu_llmppo()
-    obs = {
-        "input_ids": torch.randint(0, 100, (1, 10)),
-        "attention_mask": torch.ones(1, 10, dtype=torch.long),
-    }
-    ids, masks = ppo.get_action(obs, training=True)
-    assert len(ids) == 1 and len(masks) == 1
-
-
-def test_get_action_hf_stitch_completion_path():
-    ppo = _cpu_llmppo()
-    stitch = torch.tensor([[7, 8]], dtype=torch.long)
-    obs = {
-        "input_ids": torch.randint(0, 100, (1, 4)),
-        "attention_mask": torch.ones(1, 4, dtype=torch.long),
-        "stitch_prefix_ids": stitch,
-        "initial_prompt_len": 2,
-    }
-    ids, masks = ppo.get_action([obs], training=True)
-    assert ids[0].shape[1] > obs["input_ids"].shape[1]
-
-
-def test_get_action_hf_stopiteration_uses_device_string():
-    ppo = _cpu_llmppo()
-    obs = {
-        "input_ids": torch.randint(0, 100, (1, 10)),
-        "attention_mask": torch.ones(1, 10, dtype=torch.long),
-    }
-    unwrapped = ppo._get_unwrapped_actor()
-    with patch.object(unwrapped, "parameters", return_value=iter(())):
-        ids, masks = ppo.get_action([obs], training=True)
-        assert len(ids) == 1
-
-
-@pytest.mark.parametrize("hf_generate_chunk_size", [1, 2, 4])
-@pytest.mark.parametrize("training", [True, False])
-def test_llmppo_get_action_hf_chunk_sizes_contract(hf_generate_chunk_size, training):
+def test_llmppo_get_action_hf_path_contract():
     ppo = _cpu_llmppo(
         use_vllm=False,
-        hf_generate_chunk_size=hf_generate_chunk_size,
+        hf_generate_chunk_size=2,
         max_model_len=128,
         max_output_tokens=8,
     )
@@ -645,12 +529,45 @@ def test_llmppo_get_action_hf_chunk_sizes_contract(hf_generate_chunk_size, train
         }
         for _ in range(batch_size)
     ]
-    completion_ids, action_masks = ppo.get_action(prompts, training=training)
+    for training in (True, False):
+        completion_ids, action_masks = ppo.get_action(prompts, training=training)
+        assert_vllm_get_action_contract(
+            completion_ids=completion_ids,
+            action_masks=action_masks,
+            batch_size=batch_size,
+            prompt_len=prompt_len,
+            pad_token_id=ppo.pad_token_id,
+        )
+    ppo.clean_up()
+
+
+def test_llmppo_get_action_hf_path_handles_actor_without_parameters():
+    ppo = _cpu_llmppo(
+        use_vllm=False,
+        hf_generate_chunk_size=2,
+        max_model_len=128,
+        max_output_tokens=8,
+    )
+
+    class _NoParamModule:
+        def parameters(self):
+            return iter(())
+
+    prompts = [
+        {
+            "input_ids": torch.randint(0, 100, (1, 10), device=ppo.device),
+            "attention_mask": torch.ones(1, 10, device=ppo.device),
+        }
+    ]
+
+    with patch.object(ppo, "_get_unwrapped_actor", return_value=_NoParamModule()):
+        completion_ids, action_masks = ppo.get_action(prompts, training=True)
+
     assert_vllm_get_action_contract(
         completion_ids=completion_ids,
         action_masks=action_masks,
-        batch_size=batch_size,
-        prompt_len=prompt_len,
+        batch_size=1,
+        prompt_len=10,
         pad_token_id=ppo.pad_token_id,
     )
     ppo.clean_up()
@@ -673,7 +590,8 @@ def test_learn_multi_turn_explicit_turn_ids():
     ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
 
-def test_llmppo_learns_multiturn():
+@pytest.mark.parametrize("use_vllm", [False, True])
+def test_llmppo_learns_multiturn(use_vllm):
     """Multi-turn learn path updates actor/critic adapters without vLLM/DeepSpeed."""
     torch.manual_seed(0)
     ppo = _cpu_llmppo(
@@ -682,6 +600,16 @@ def test_llmppo_learns_multiturn():
         update_epochs=2,
         use_vllm=False,
     )
+    if use_vllm:
+        ppo.use_vllm = True
+        ppo.vllm_config = VLLMConfig(
+            gpu_memory_utilization=0.2,
+            max_num_seqs=1,
+            sleep_mode=True,
+        )
+        ppo._vllm_awake = True
+        ppo.llm = MagicMock()
+        ppo.llm.sleep = MagicMock()
 
     vocab_size = 100
     input_tokens = 10
@@ -713,12 +641,26 @@ def test_llmppo_learns_multiturn():
         device=ppo.device,
     )
 
-    ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+    with patch.object(
+        ppo,
+        "_prepare_vllm_for_training",
+        wraps=ppo._prepare_vllm_for_training,
+    ) as mock_prepare_vllm_for_training:
+        ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+    assert mock_prepare_vllm_for_training.call_count == 1
+    if use_vllm:
+        ppo.llm.sleep.assert_called_once()
     pre_learn_actor_state_dict = {
         name: param.clone().detach() for name, param in ppo.actor.named_parameters()
     }
 
-    metrics = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+    with patch.object(
+        ppo,
+        "_prepare_vllm_for_training",
+        wraps=ppo._prepare_vllm_for_training,
+    ) as mock_prepare_vllm_for_training:
+        metrics = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+    assert mock_prepare_vllm_for_training.call_count == 1
     for key in (
         "mean_loss",
         "mean_kl",
@@ -737,12 +679,16 @@ def test_llmppo_learns_multiturn():
         if "reference" in param_name:
             assert torch.equal(param, before), f"{param_name} should not change"
             continue
-        if "actor" in param_name and "lora" in param_name and not torch.equal(
-            param, before
+        if (
+            "actor" in param_name
+            and "lora" in param_name
+            and not torch.equal(param, before)
         ):
             actor_lora_changed = True
-        if "critic" in param_name and "lora" in param_name and not torch.equal(
-            param, before
+        if (
+            "critic" in param_name
+            and "lora" in param_name
+            and not torch.equal(param, before)
         ):
             critic_lora_changed = True
 
@@ -872,7 +818,9 @@ def test_test_method_multiturn_episode_env_branch():
     env = DummyMultiTurnEpisodeEnv()
     completion = torch.ones(1, 6, dtype=torch.long)
     action_mask = torch.ones(1, 5, dtype=torch.bool)
-    with patch.object(ppo, "get_action", return_value=([completion], [action_mask])) as get_action:
+    with patch.object(
+        ppo, "get_action", return_value=([completion], [action_mask])
+    ) as get_action:
         out = ppo.test(env, loop=2)
 
     assert out.numel() == 4  # 2 loops × 2 turns

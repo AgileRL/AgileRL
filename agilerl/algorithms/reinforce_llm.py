@@ -182,6 +182,8 @@ class REINFORCE(LLMAlgorithm):
             use_memory_efficient_params=use_memory_efficient_params,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            use_vllm=use_vllm,
+            vllm_config=vllm_config,
             model_name=model_name,
             actor_network=actor_network,
             model_config=model_config,

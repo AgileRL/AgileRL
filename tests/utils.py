@@ -10,7 +10,7 @@ import sys
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 from typing_extensions import ParamSpec
@@ -192,6 +192,28 @@ def assert_vllm_get_action_contract(
         assert action_mask.dtype == torch.bool
         pad_positions = completion_id[:, 1:] == pad_token_id
         assert not action_mask[pad_positions].any()
+
+
+def make_mock_vllm_instance(llm_spec: type[Any] | None = None) -> Any:
+    """Create a configured vLLM mock instance for unit tests.
+
+    :param llm_spec: Optional class/type used as the mock spec.
+    :type llm_spec: type[Any] | None
+    :return: Mock instance with common vLLM methods and nested engine attributes.
+    :rtype: Any
+    """
+    from unittest.mock import MagicMock
+
+    mock_instance = MagicMock(spec=llm_spec) if llm_spec is not None else MagicMock()
+    mock_instance.generate = MagicMock(
+        return_value=[MagicMock(outputs=[MagicMock(text="Generated text")])],
+    )
+    mock_instance.sleep = MagicMock()
+    mock_instance.wake_up = MagicMock()
+    mock_instance.shutdown = MagicMock()
+    mock_instance.llm_engine = MagicMock()
+    mock_instance.llm_engine.model_executor = MagicMock()
+    return mock_instance
 
 
 def force_gpu_memory_release() -> None:
