@@ -28,6 +28,8 @@ from _pytest.outcomes import Skipped
 from accelerate.state import AcceleratorState
 from torch._inductor.utils import fresh_cache
 
+from tests.utils import force_gpu_memory_release, wait_for_gpu_memory_to_clear
+
 
 def get_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -75,9 +77,12 @@ def set_seed(seed=42):
 def wait_for_gpu_memory():
     """Wait for GPU memory to clear before running the test."""
     if torch.cuda.is_available() and (num_gpus := torch.cuda.device_count()) > 0:
-        from tests.utils import wait_for_gpu_memory_to_clear
-
-        wait_for_gpu_memory_to_clear(devices=list(range(num_gpus)), threshold_ratio=0.2)
+        if os.environ.get("PYTEST_XDIST_WORKER") is None:
+            wait_for_gpu_memory_to_clear(
+                devices=list(range(num_gpus)), threshold_ratio=0.2
+            )
+        else:
+            force_gpu_memory_release()
 
 
 def cleanup_after_test(test_name):
@@ -86,8 +91,6 @@ def cleanup_after_test(test_name):
         import deepspeed.comm.comm as ds_comm
     except ImportError:
         ds_comm = None
-
-    from tests.utils import force_gpu_memory_release
 
     if "vllm" in test_name and ds_comm is not None:
         import deepspeed.utils.groups as ds_groups
