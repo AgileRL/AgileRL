@@ -26,6 +26,16 @@ if not torch.cuda.is_available():
     os.environ.setdefault("ACCELERATE_USE_CPU", "true")
 
 
+def pytest_collection_modifyitems(items):
+    """Pin all ``@pytest.mark.llm`` tests to a single xdist worker so they
+    never run in parallel with each other (vLLM / DeepSpeed need exclusive
+    GPU access and sequential cleanup)."""
+    group_marker = pytest.mark.xdist_group("llm")
+    for item in items:
+        if item.get_closest_marker("llm"):
+            item.add_marker(group_marker)
+
+
 # Only clear CUDA cache when actually needed
 @pytest.fixture(autouse=True, scope="function")
 def cleanup():
