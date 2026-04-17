@@ -51,12 +51,7 @@ jobs:
 
             - name: Test with pytest
               run: |
-                  uv run pytest --exitfirst --cov=agilerl --durations=0 --durations-min=1.0
-
-            - name: Combine coverage and generate report
-              run: |
-                  uv run coverage combine
-                  uv run coverage xml -o coverage.xml
+                  uv run pytest --exitfirst --cov=agilerl --cov-report=xml --durations=0 --durations-min=1.0
 
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3

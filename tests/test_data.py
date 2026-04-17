@@ -204,6 +204,9 @@ def test_list_rl_dataset_base_class():
         def to_sequence(self, **kwargs):
             return [("test", 1), ("test", None)], True
 
+        def __str__(self):
+            return "LangObs"
+
     lang_obs = LangObs()
     tokenizer = WordleTokenizer()
     token_reward = ConstantTokenReward(1)
@@ -236,6 +239,9 @@ def test_dp_from_obs():
         def to_sequence(self, **kwargs):
             return [("test", None)], True
 
+        def __str__(self):
+            return "LangObs"
+
         def metadata(self):
             return {"test": 1}
 
@@ -251,6 +257,9 @@ def test_dp_from_obs():
     class LangObs(Language_Observation):
         def to_sequence(self, **kwargs):
             return [("test", None)], True
+
+        def __str__(self):
+            return "LangObs"
 
         def metadata(self):
             return {"test": 1}
@@ -272,6 +281,9 @@ def test_iterable_rl_dataset_base_class():
     class LangObs(Language_Observation):
         def to_sequence(self, **kwargs):
             return [("test", 1), ("test", 2), ("test", None)], True
+
+        def __str__(self):
+            return "LangObs"
 
     lang_obs = LangObs()
     tokenizer = WordleTokenizer()
@@ -423,6 +435,9 @@ def test_dp_from_obs_empty_sequence_non_terminal():
     class EmptyLangObs(Language_Observation):
         def to_sequence(self, **kwargs):
             return [], False
+
+        def __str__(self):
+            return "EmptyLangObs"
 
     lang_obs = EmptyLangObs()
     tokenizer = WordleTokenizer()
