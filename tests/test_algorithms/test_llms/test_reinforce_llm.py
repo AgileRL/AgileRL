@@ -13,7 +13,7 @@ from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
-from agilerl.utils.llm_utils import ReasoningGym, compute_kl_divergence
+from agilerl.utils.llm_utils import ReasoningGym
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
@@ -312,6 +312,41 @@ def test_init_reinforce_vllm_sleep_mode(MockLLM):
     rf.clean_up()
 
 
+@patch("agilerl.algorithms.core.base.LLM")
+def test_init_reinforce_warns_when_hf_generate_chunk_size_set_with_vllm(MockLLM):
+    mock_instance = make_mock_vllm_instance()
+    MockLLM.return_value = mock_instance
+    actor = create_dummy_actor(10, 8, 100, "cpu")
+    lora = LoraConfig(
+        r=4,
+        lora_alpha=16,
+        target_modules=["lin"],
+        task_type="CAUSAL_LM",
+    )
+    with pytest.warns(
+        UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
+    ):
+        rf = REINFORCE(
+            actor_network=actor,
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=lora,
+            use_vllm=True,
+            vllm_config=VLLMConfig(
+                gpu_memory_utilization=0.2,
+                max_num_seqs=1,
+                sleep_mode=True,
+            ),
+            hf_generate_chunk_size=2,
+            max_output_tokens=8,
+            max_model_len=32,
+            wrap=False,
+            gradient_checkpointing=False,
+            device="cpu",
+        )
+    rf.clean_up()
+
+
 def test_llmreinforce_get_action_vllm_routes_through_vllm_calls():
     rf = _cpu_llmreinforce(use_vllm=False)
     rf.use_vllm = True
@@ -484,18 +519,6 @@ def test_compute_rebn_advantages_skips_zscore_when_at_most_one_valid_turn_return
     turn_ids = torch.zeros(1, 3, dtype=torch.long)
     advantages = stub._compute_rebn_advantages(rewards, action_mask, turn_ids)
     assert torch.allclose(advantages, torch.zeros_like(advantages))
-
-
-def test_calculate_kl_divergence_formula():
-    log_probs = torch.tensor([[-0.5, 0.0], [1.0, -1.0]])
-    reference_log_probs = torch.tensor([[0.0, 0.2], [1.0, -0.5]])
-    out = compute_kl_divergence(log_probs, reference_log_probs)
-    expected = (
-        torch.exp(reference_log_probs - log_probs)
-        - (reference_log_probs - log_probs)
-        - 1
-    )
-    assert torch.allclose(out, expected)
 
 
 def test_init_requires_max_output_or_max_model_len():

@@ -1,3 +1,4 @@
+import warnings
 from contextlib import nullcontext
 from typing import Any
 
@@ -239,6 +240,12 @@ class REINFORCE(LLMAlgorithm):
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )
+        if self.use_vllm and hf_generate_chunk_size is not None:
+            warnings.warn(
+                "hf_generate_chunk_size is only used for HuggingFace generation "
+                "(use_vllm=False) and will be ignored when use_vllm=True.",
+                stacklevel=2,
+            )
         self.generation_config = GenerationConfig(
             do_sample=True,
             temperature=temperature,

@@ -455,7 +455,9 @@ def test_search_tool_parse_action_and_instruction() -> None:
     assert "<answer>" in tool.instruction_string()
 
 
-def test_search_tool_search_success_and_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_search_tool_search_success_and_failure_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     tool = SearchTool(search_url="http://x", topk=1, timeout=1)
 
     class _Resp:
@@ -483,7 +485,9 @@ def test_search_tool_search_success_and_failure_paths(monkeypatch: pytest.Monkey
         no_url._search("x")
 
 
-def test_search_tool_passages_to_string_and_execute_action(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_search_tool_passages_to_string_and_execute_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     tool = SearchTool(search_url="http://x")
     passages = [
         {"document": {"contents": "Title A\nBody A"}},
@@ -543,8 +547,26 @@ def test_trajectory_buffer_invariants_and_helpers() -> None:
         _ = TrajectoryBuffer(batch_size=1, group_size=0)
 
     env = _SyncStubEnv()
-    t1 = Trajectory(env=env, batch_idx=1, group_idx=0, prompt={"input_ids": torch.ones(1, 1, dtype=torch.long), "attention_mask": torch.ones(1, 1, dtype=torch.long)}, done=False)
-    t2 = Trajectory(env=env, batch_idx=0, group_idx=1, prompt={"input_ids": torch.ones(1, 1, dtype=torch.long), "attention_mask": torch.ones(1, 1, dtype=torch.long)}, done=True)
+    t1 = Trajectory(
+        env=env,
+        batch_idx=1,
+        group_idx=0,
+        prompt={
+            "input_ids": torch.ones(1, 1, dtype=torch.long),
+            "attention_mask": torch.ones(1, 1, dtype=torch.long),
+        },
+        done=False,
+    )
+    t2 = Trajectory(
+        env=env,
+        batch_idx=0,
+        group_idx=1,
+        prompt={
+            "input_ids": torch.ones(1, 1, dtype=torch.long),
+            "attention_mask": torch.ones(1, 1, dtype=torch.long),
+        },
+        done=True,
+    )
     buf = TrajectoryBuffer(batch_size=1, group_size=2)
     buf.add_trajectory(t1)
     buf.add_trajectory(t2)
@@ -557,6 +579,84 @@ def test_trajectory_buffer_invariants_and_helpers() -> None:
     assert [t.batch_idx for t in buf] == [0, 1]
     buf.clear()
     assert len(buf) == 0 and buf.has_active() is False
+
+
+def test_trajectory_buffer_get_active_trajectories_sorting() -> None:
+    env = _SyncStubEnv()
+    t0 = Trajectory(
+        env=env,
+        batch_idx=1,
+        group_idx=0,
+        prompt={
+            "input_ids": torch.ones(1, 1, dtype=torch.long),
+            "attention_mask": torch.ones(1, 1, dtype=torch.long),
+        },
+        done=False,
+    )
+    t1 = Trajectory(
+        env=env,
+        batch_idx=0,
+        group_idx=1,
+        prompt={
+            "input_ids": torch.ones(1, 1, dtype=torch.long),
+            "attention_mask": torch.ones(1, 1, dtype=torch.long),
+        },
+        done=False,
+    )
+    t2 = Trajectory(
+        env=env,
+        batch_idx=0,
+        group_idx=0,
+        prompt={
+            "input_ids": torch.ones(1, 1, dtype=torch.long),
+            "attention_mask": torch.ones(1, 1, dtype=torch.long),
+        },
+        done=True,
+    )
+    buf = TrajectoryBuffer(batch_size=2, group_size=2)
+    buf.add_trajectory(t0)
+    buf.add_trajectory(t1)
+    buf.add_trajectory(t2)
+
+    unsorted_active = buf.get_active_trajectories(sorted_by_index=False)
+    assert unsorted_active == [t0, t1]
+    sorted_active = buf.get_active_trajectories(sorted_by_index=True)
+    assert sorted_active == [t1, t0]
+
+
+def test_trajectory_buffer_get_prompts_returns_none_when_no_active() -> None:
+    env = _SyncStubEnv()
+    done_traj = Trajectory(
+        env=env,
+        batch_idx=0,
+        group_idx=0,
+        prompt={
+            "input_ids": torch.ones(1, 2, dtype=torch.long),
+            "attention_mask": torch.ones(1, 2, dtype=torch.long),
+        },
+        done=True,
+    )
+    active_traj = Trajectory(
+        env=env,
+        batch_idx=0,
+        group_idx=1,
+        prompt={
+            "input_ids": torch.ones(1, 3, dtype=torch.long),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+        },
+        done=False,
+    )
+    buf = TrajectoryBuffer(batch_size=1, group_size=2)
+    buf.add_trajectory(done_traj)
+    buf.add_trajectory(active_traj)
+
+    prompts = buf.get_prompts()
+    assert prompts is not None
+    assert prompts["input_ids"].shape[0] == 1
+    assert prompts["attention_mask"].shape[0] == 1
+
+    active_traj.done = True
+    assert buf.get_prompts() is None
 
 
 def test_trajectory_buffer_stack_prompt_validation() -> None:
@@ -616,7 +716,9 @@ def test_trajectory_buffer_stack_prompt_validation() -> None:
         },
         done=False,
     )
-    with pytest.raises(ValueError, match="Inconsistent prompt field 'trajectory_input_ids'"):
+    with pytest.raises(
+        ValueError, match="Inconsistent prompt field 'trajectory_input_ids'"
+    ):
         TrajectoryBuffer._stack_active_prompts([a, inconsistent])
 
 
@@ -693,7 +795,9 @@ def test_sync_vec_env_step_happy_path_1d_and_2d_and_active_filtering() -> None:
     assert created[1].step_shapes == [(1, 3)]
 
 
-def test_sync_vec_env_get_trajectories_counts_steps_with_and_without_turn_boundaries() -> None:
+def test_sync_vec_env_get_trajectories_counts_steps_with_and_without_turn_boundaries() -> (
+    None
+):
     created = [
         _StepVariantEnv(done_after_step=True, include_turn_boundaries=True),
         _StepVariantEnv(done_after_step=True, include_turn_boundaries=False),

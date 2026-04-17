@@ -1,3 +1,4 @@
+import warnings
 from contextlib import nullcontext
 from typing import Any
 
@@ -42,6 +43,92 @@ class PPO(LLMAlgorithm):
     Each generation sequence (turn) is treated as a single RL action.
     GAE discounts between turns, not between tokens within a turn.
     Single-turn is the special case where all action tokens share turn 0.
+
+    :param pad_token_id: Token id used for sequence padding.
+    :type pad_token_id: int
+    :param pad_token: Padding token string.
+    :type pad_token: str
+    :param model_name: HF model name or local path used when building internally.
+    :type model_name: str | None, optional
+    :param actor_network: Pre-built actor model. If omitted, ``model_name`` is used.
+    :type actor_network: Any | None, optional
+    :param model_config: Extra kwargs passed when constructing a model from ``model_name``.
+    :type model_config: dict[str, Any] | None, optional
+    :param hp_config: Hyperparameter mutation configuration.
+    :type hp_config: HyperparameterConfig | None, optional
+    :param index: Population index used by evolutionary workflows.
+    :type index: int, optional
+    :param batch_size: Batch size used for PPO updates.
+    :type batch_size: int, optional
+    :param beta: KL penalty coefficient against the reference policy.
+    :type beta: float, optional
+    :param vf_coef: Value loss coefficient.
+    :type vf_coef: float, optional
+    :param clip_coef: PPO clipping coefficient.
+    :type clip_coef: float, optional
+    :param gamma: Discount factor across turns.
+    :type gamma: float, optional
+    :param gae_lambda: GAE lambda used for turn-level advantage estimation.
+    :type gae_lambda: float, optional
+    :param lr_actor: Actor learning rate.
+    :type lr_actor: float, optional
+    :param lr_critic: Critic/value-head learning rate. If ``None``, ``lr_actor`` is used.
+    :type lr_critic: float | None, optional
+    :param max_grad_norm: Gradient clipping norm.
+    :type max_grad_norm: float, optional
+    :param update_epochs: Number of PPO epochs per update.
+    :type update_epochs: int, optional
+    :param temperature: Sampling temperature for generation.
+    :type temperature: float, optional
+    :param repetition_penalty: Repetition penalty used during generation.
+    :type repetition_penalty: float, optional
+    :param top_p: Nucleus sampling threshold.
+    :type top_p: float, optional
+    :param top_k: Top-k sampling threshold.
+    :type top_k: int, optional
+    :param min_p: Minimum probability cutoff for sampling.
+    :type min_p: float, optional
+    :param use_separate_reference_adapter: Whether to keep a separate reference adapter.
+    :type use_separate_reference_adapter: bool, optional
+    :param calc_position_embeddings: Whether to compute position embeddings.
+    :type calc_position_embeddings: bool, optional
+    :param micro_batch_size_per_gpu: Optional target micro-batch size per GPU.
+    :type micro_batch_size_per_gpu: int | None, optional
+    :param max_output_tokens: Maximum newly generated tokens per completion.
+    :type max_output_tokens: int | None, optional
+    :param min_output_tokens: Minimum newly generated tokens per completion.
+    :type min_output_tokens: int | None, optional
+    :param max_model_len: Maximum model context length.
+    :type max_model_len: int | None, optional
+    :param hf_generate_chunk_size: Number of prompts per HuggingFace generation chunk.
+        Ignored when ``use_vllm=True``.
+    :type hf_generate_chunk_size: int | None, optional
+    :param lora_config: LoRA configuration.
+    :type lora_config: LoraConfigProtocol | None, optional
+    :param cosine_lr_schedule_config: Cosine LR scheduler configuration.
+    :type cosine_lr_schedule_config: CosineLRScheduleConfig | None, optional
+    :param accelerator: Optional HuggingFace ``Accelerator`` instance.
+    :type accelerator: Accelerator | None, optional
+    :param device: Device string used when no accelerator is provided.
+    :type device: str, optional
+    :param wrap: Whether to wrap models for distributed execution.
+    :type wrap: bool, optional
+    :param clone: Whether this instance is being created as a clone.
+    :type clone: bool, optional
+    :param use_vllm: Whether to route generation through vLLM.
+    :type use_vllm: bool, optional
+    :param use_memory_efficient_params: Enable memory-efficient parameter handling.
+    :type use_memory_efficient_params: bool, optional
+    :param vllm_config: vLLM runtime configuration.
+    :type vllm_config: VLLMConfig | None, optional
+    :param seed: Random seed.
+    :type seed: int, optional
+    :param turn_level_clip: Apply clipping at per-turn ratio level.
+    :type turn_level_clip: bool, optional
+    :param gradient_checkpointing: Enable gradient checkpointing.
+    :type gradient_checkpointing: bool, optional
+    :param torch_compiler: Optional torch compile mode.
+    :type torch_compiler: str | None, optional
     """
 
     def __init__(
@@ -171,6 +258,12 @@ class PPO(LLMAlgorithm):
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )
+        if self.use_vllm and hf_generate_chunk_size is not None:
+            warnings.warn(
+                "hf_generate_chunk_size is only used for HuggingFace generation "
+                "(use_vllm=False) and will be ignored when use_vllm=True.",
+                stacklevel=2,
+            )
         self.generation_config = GenerationConfig(
             do_sample=True,
             temperature=temperature,
@@ -632,69 +725,3 @@ class PPO(LLMAlgorithm):
             mask_t = (turn_ids == t).float()
             token_rewards += mask_t * rewards[:, t : t + 1]
         return token_rewards
-
-    def _get_values(
-        self,
-        ids: torch.Tensor,
-        batch_size: int,
-        eval_mode: bool = False,
-        attention_mask: torch.Tensor | None = None,
-    ):
-        """Compute critic values for each prompt token (excluding the last logits position).
-
-        :param ids: Token IDs ``[batch, seq_len]``.
-        :type ids: torch.Tensor
-        :param batch_size: Micro-batch size for forward passes.
-        :type batch_size: int
-        :param eval_mode: If ``True``, run the critic in eval mode (no dropout).
-        :type eval_mode: bool
-        :param attention_mask: Optional mask matching ``ids``; defaults to non-pad tokens.
-        :type attention_mask: torch.Tensor | None
-        :return: Values aligned to next-token prediction, shape ``[batch, seq_len - 1]``.
-        :rtype: torch.Tensor
-        """
-        with self.select_adapter("critic"):
-            # With DeepSpeed we cannot split backward into separate actor/critic
-            # passes (engine.backward triggers allreduce per call).  Instead we
-            # disable gradient checkpointing for the critic forward so that
-            # activations are stored rather than recomputed during the single
-            # backward pass — avoiding recomputation with the wrong adapter.
-            unwrapped = self._get_unwrapped_actor()
-            disable_gc = self.gradient_checkpointing and (
-                self.accelerator is not None
-                and self.accelerator.state.deepspeed_plugin is not None
-            )
-            if disable_gc:
-                unwrapped.gradient_checkpointing_disable()
-
-            self.actor.train(mode=not eval_mode)
-            num_samples = ids.shape[0]
-            if attention_mask is None:
-                attention_mask = ids != self.pad_token_id
-            if self.calc_position_embeddings:
-                position_ids = attention_mask.long().cumsum(dim=-1) - 1
-                position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
-            values = []
-            for batch in range(0, num_samples, batch_size):
-                end_idx = min((batch + batch_size), num_samples)
-                batch_ids = ids[batch:end_idx, :]
-                batch_attention_mask = attention_mask[batch:end_idx, :]
-                batch_model_kwargs = {
-                    "input_ids": batch_ids,
-                    "attention_mask": batch_attention_mask,
-                    "use_cache": False,
-                }
-                if self.calc_position_embeddings:
-                    batch_position_ids = position_ids[batch:end_idx, :]
-                    batch_model_kwargs |= {"position_ids": batch_position_ids}
-                with self._amp_ctx():
-                    *_, value = self.actor.forward(**batch_model_kwargs)
-
-                values.append(value[:, :-1])
-
-            if disable_gc:
-                unwrapped.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": False},
-                )
-
-            return torch.cat(values, dim=0)

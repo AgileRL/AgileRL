@@ -148,8 +148,30 @@ Bandit Algorithms
 LLM Algorithms
 --------------
 
+.. list-table::
+   :widths: 35 20 45
+   :header-rows: 1
+
+   * - Algorithm
+     - Training Mode
+     - Notes
+   * - :ref:`GRPO <grpo>`
+     - On-policy RL
+     - Group-relative policy optimization for LLMs.
+   * - :ref:`DPO <dpo>`
+     - Preference optimization
+     - Offline preference learning without reward-model RL loop.
+   * - :ref:`LLM PPO <llmppo>`
+     - On-policy RL
+     - PPO-style actor-critic objective for token-level trajectories.
+   * - :ref:`LLM REINFORCE <llmreinforce>`
+     - On-policy RL
+     - REINFORCE-style policy-gradient objective for LLM finetuning.
+
 .. toctree::
    :maxdepth: 1
 
    grpo
    dpo
+   llmppo
+   llmreinforce

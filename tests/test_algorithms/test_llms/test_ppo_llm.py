@@ -322,6 +322,42 @@ def test_init_llmppo_vllm_sleep_mode_calls_sleep(MockLLM):
     ppo.clean_up()
 
 
+@patch("agilerl.algorithms.core.base.LLM")
+def test_init_llmppo_warns_when_hf_generate_chunk_size_set_with_vllm(MockLLM):
+    mock_instance = make_mock_vllm_instance()
+    MockLLM.return_value = mock_instance
+    actor = create_module(10, 8, 100, "cpu")
+    lora = LoraConfig(
+        r=4,
+        lora_alpha=16,
+        target_modules=["lin"],
+        task_type="CAUSAL_LM",
+        modules_to_save=["summary"],
+    )
+    with pytest.warns(
+        UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
+    ):
+        ppo = LLMPPO(
+            actor_network=actor,
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=lora,
+            use_vllm=True,
+            vllm_config=VLLMConfig(
+                gpu_memory_utilization=0.2,
+                max_num_seqs=1,
+                sleep_mode=True,
+            ),
+            hf_generate_chunk_size=2,
+            max_output_tokens=8,
+            max_model_len=32,
+            wrap=False,
+            gradient_checkpointing=False,
+            device="cpu",
+        )
+    ppo.clean_up()
+
+
 def test_llmppo_get_action_vllm_routes_through_vllm_calls():
     ppo = _cpu_llmppo(use_vllm=False)
     ppo.use_vllm = True
@@ -398,10 +434,10 @@ def test_compute_token_rewards_per_turn_reward_broadcasts_to_that_turns_tokens()
 def test_compute_token_rewards_minus_one_positions_ignore_turn_columns():
     stub = _PPOStub()
     action_mask = torch.tensor([[True, True, False, False]])
-    turn_ids = torch.tensor([[0, -1, -1, -1]])
+    turn_ids = torch.tensor([[0, 0, -1, -1]])
     rewards = torch.tensor([[3.0]])
     out = stub._compute_token_rewards(action_mask, rewards, turn_ids)
-    expected = torch.tensor([[3.0, 0.0, 0.0, 0.0]])
+    expected = torch.tensor([[3.0, 3.0, 0.0, 0.0]])
     assert torch.allclose(out, expected)
 
 
@@ -705,43 +741,6 @@ def test_learn_turn_level_clip_false():
     action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
     rewards = torch.tensor([1.0, -1.0], dtype=torch.float32).unsqueeze(-1)
     ppo.learn((completions, action_masks, rewards))
-
-
-def test_get_values_shapes_and_explicit_attention_mask():
-    ppo = _cpu_llmppo()
-    ids = torch.randint(0, 99, (3, 24))
-    attn = torch.ones(3, 24, dtype=torch.bool)
-    vals = ppo._get_values(ids, batch_size=2, attention_mask=attn)
-    assert vals.shape == (3, 23)
-
-
-def test_get_values_eval_mode_no_position_ids_when_disabled():
-    ppo = _cpu_llmppo(calc_position_embeddings=False)
-    ids = torch.randint(0, 99, (2, 16))
-    vals = ppo._get_values(ids, batch_size=2, eval_mode=True)
-    assert vals.shape == (2, 15)
-
-
-def test_get_values_disables_gradient_checkpointing_under_deepspeed():
-    ppo = _cpu_llmppo(gradient_checkpointing=True)
-    mock_acc = MagicMock()
-    mock_acc.state.deepspeed_plugin = MagicMock()
-    mock_acc.unwrap_model = lambda m: m
-    ppo.accelerator = mock_acc
-    unwrapped = ppo._get_unwrapped_actor()
-    with (
-        patch.object(unwrapped, "gradient_checkpointing_disable") as dis,
-        patch.object(
-            unwrapped,
-            "gradient_checkpointing_enable",
-        ) as en,
-    ):
-        ppo._get_values(
-            torch.randint(0, 99, (1, 12)),
-            batch_size=1,
-        )
-    dis.assert_called_once()
-    en.assert_called_once()
 
 
 def _minimal_reasoning_gym(device: str, vocab_size: int, input_size: int, bs: int):

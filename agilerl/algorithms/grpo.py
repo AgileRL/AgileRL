@@ -51,22 +51,30 @@ class GRPO(LLMAlgorithm):
     :type hp_config: HyperparameterConfig, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param batch_size: Mini-batch size for learning, defaults to 64
+    :param batch_size: Mini-batch size for learning, defaults to 16
     :type batch_size: int, optional
     :param beta: Beta coefficient, controls the strength of the KL divergence penalty, defaults to 0.001
     :type beta: float, optional
-    :param lr: Learning rate for optimizer, defaults to 1e-4
+    :param lr: Learning rate for optimizer, defaults to 5e-7
     :type lr: float, optional
     :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
     :type clip_coef: float, optional
     :param max_grad_norm: Maximum norm for gradient clipping, defaults to 0.1
     :type max_grad_norm: float, optional
-    :param update_epochs: Number of policy update epochs, defaults to 4
+    :param update_epochs: Number of policy update epochs, defaults to 1
     :type update_epochs: int, optional
     :param group_size: Group size, defaults to 8
     :type group_size: int, optional
     :param temperature: Temperature, controls randomness of text generation
     :type temperature: float, optional
+    :param repetition_penalty: Repetition penalty used during generation, defaults to 1.0
+    :type repetition_penalty: float, optional
+    :param top_p: Top-p nucleus sampling threshold, defaults to 0.95
+    :type top_p: float, optional
+    :param top_k: Top-k sampling threshold, defaults to 50
+    :type top_k: int, optional
+    :param min_p: Minimum probability cutoff for sampling, defaults to 0.0
+    :type min_p: float, optional
     :param calc_position_embeddings: Flag indicating whether to calculate position embeddings, defaults to True
     :type calc_position_embeddings: bool, optional
     :param micro_batch_size_per_gpu: If specified, gradient_accumulation_steps will be
@@ -79,6 +87,9 @@ class GRPO(LLMAlgorithm):
     :type min_output_tokens: int, optional
     :param max_model_len: Maximum context window length, defaults to 1024
     :type max_model_len: int, optional
+    :param hf_generate_chunk_size: Number of prompts per HuggingFace generation
+        chunk. Ignored when ``use_vllm=True``.
+    :type hf_generate_chunk_size: int | None, optional
     :param lora_config: Config for LoRA, defaults to None
     :type lora_config: LoraConfigProtocol, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
@@ -108,6 +119,28 @@ class GRPO(LLMAlgorithm):
     :param use_liger_loss: Use Liger kernel for memory-efficient loss computation, defaults to False.
         Requires ``liger_kernel`` to be installed; pass ``False`` to fall back to the standard PyTorch path.
     :type use_liger_loss: bool, optional
+    :param use_kl_advantage_shaping: Apply KL-based shaping directly to token
+        advantages before PPO clipping, defaults to False.
+    :type use_kl_advantage_shaping: bool, optional
+    :param adv_norm: Advantage normalization mode. ``"mean_std"`` divides by
+        standard deviation, ``"mean_only"`` only centers, defaults to ``"mean_std"``.
+    :type adv_norm: str, optional
+    :param importance_sampling_level: Importance sampling ratio granularity.
+        One of ``"token"``, ``"sequence"``, or ``"average"``, defaults to ``"token"``.
+    :type importance_sampling_level: str, optional
+    :param whiten_advantages: If ``True``, whiten token-level advantages over
+        valid action positions, defaults to False.
+    :type whiten_advantages: bool, optional
+    :param adv_clip_range: Optional symmetric clamp range applied to
+        advantages before loss computation, defaults to None.
+    :type adv_clip_range: float | None, optional
+    :param filter_zero_adv: If ``True``, drop samples whose absolute
+        advantage is below ``adv_filter_eps``, defaults to False.
+    :type filter_zero_adv: bool, optional
+    :param adv_filter_eps: Threshold used with
+        ``filter_zero_adv``; samples with ``|advantage| <= eps`` are
+        filtered out, defaults to 0.0.
+    :type adv_filter_eps: float, optional
     """
 
     def __init__(
@@ -156,8 +189,8 @@ class GRPO(LLMAlgorithm):
         importance_sampling_level: str = "token",
         whiten_advantages: bool = False,
         adv_clip_range: float | None = None,
-        filter_zero_advantages: bool = False,
-        advantage_filter_eps: float = 0.0,
+        filter_zero_adv: bool = False,
+        adv_filter_eps: float = 0.0,
     ) -> None:
 
         device = (
@@ -241,14 +274,14 @@ class GRPO(LLMAlgorithm):
         if adv_clip_range is not None and adv_clip_range <= 0:
             msg = "adv_clip_range must be > 0 when provided."
             raise ValueError(msg)
-        if advantage_filter_eps < 0:
-            msg = "advantage_filter_eps must be >= 0."
+        if adv_filter_eps < 0:
+            msg = "adv_filter_eps must be >= 0."
             raise ValueError(msg)
         self.importance_sampling_level = importance_sampling_level
         self.whiten_advantages = whiten_advantages
         self.adv_clip_range = adv_clip_range
-        self.filter_zero_advantages = filter_zero_advantages
-        self.advantage_filter_eps = advantage_filter_eps
+        self.filter_zero_adv = filter_zero_adv
+        self.adv_filter_eps = adv_filter_eps
         if use_liger_loss and use_kl_advantage_shaping:
             warnings.warn(
                 "use_kl_advantage_shaping is not supported with use_liger_loss=True; "
@@ -279,6 +312,12 @@ class GRPO(LLMAlgorithm):
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )
+        if self.use_vllm and hf_generate_chunk_size is not None:
+            warnings.warn(
+                "hf_generate_chunk_size is only used for HuggingFace generation "
+                "(use_vllm=False) and will be ignored when use_vllm=True.",
+                stacklevel=2,
+            )
         self.generation_config = GenerationConfig(
             do_sample=True,
             temperature=temperature,
@@ -442,10 +481,8 @@ class GRPO(LLMAlgorithm):
 
             advantages = self._calculate_advantage(rewards).to(self.device)
             active_adv_mask = None
-            if self.filter_zero_advantages:
-                active_adv_mask = (
-                    advantages.squeeze(-1).abs() > self.advantage_filter_eps
-                )
+            if self.filter_zero_adv:
+                active_adv_mask = advantages.squeeze(-1).abs() > self.adv_filter_eps
             if self.whiten_advantages:
                 advantages = advantages.squeeze(-1)
                 if active_adv_mask is not None and active_adv_mask.any():

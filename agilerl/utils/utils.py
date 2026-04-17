@@ -765,8 +765,14 @@ def create_population(
                 ),
                 whiten_advantages=INIT_HP.get("WHITEN_ADVANTAGES", False),
                 adv_clip_range=INIT_HP.get("ADV_CLIP_RANGE"),
-                filter_zero_advantages=INIT_HP.get("FILTER_ZERO_ADVANTAGES", False),
-                advantage_filter_eps=INIT_HP.get("ADVANTAGE_FILTER_EPS", 0.0),
+                filter_zero_adv=INIT_HP.get(
+                    "FILTER_ZERO_ADV",
+                    INIT_HP.get("FILTER_ZERO_ADVANTAGES", False),
+                ),
+                adv_filter_eps=INIT_HP.get(
+                    "ADV_FILTER_EPS",
+                    INIT_HP.get("ADVANTAGE_FILTER_EPS", 0.0),
+                ),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)

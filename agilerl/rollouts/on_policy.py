@@ -8,7 +8,7 @@ from gymnasium import spaces
 
 from agilerl.algorithms import GRPO, LLMPPO, PPO, LLMReinforce
 from agilerl.networks import StochasticActor
-from agilerl.typing import GymEnvType, MultiTurnEnvType
+from agilerl.typing import GymEnvType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
 from agilerl.wrappers.multiturn_wrappers import SyncMultiTurnVecEnv
 
@@ -269,114 +269,6 @@ def _stack_active_prompts(prompt_batch: list[dict[str, Any]]) -> dict[str, Any]:
     return stacked
 
 
-def collect_rollouts_llm_old(
-    agent: SupportedOnPolicyLLM,
-    env: MultiTurnEnvType,
-    n_steps: int,
-    batch_size: int,
-    group_seed: int,
-    group_size: int,
-    **kwargs,
-) -> tuple[
-    list[torch.Tensor],
-    list[torch.Tensor],
-    list[torch.Tensor],
-    list[torch.Tensor],
-    int,
-    int,
-]:
-    """Collect multi-turn rollouts for LLM on-policy algorithms.
-
-    :param agent: The agent to collect rollouts for.
-    :type agent: SupportedOnPolicyLLM
-    :param n_steps: Number of steps (max turns) for the agent to take.
-    :type n_steps: int | None
-    :param batch_size: Number of environments to collect rollouts from.
-    :type batch_size: int
-    :param group_seed: Seed for the group of environments.
-    :type group_seed: int
-    :return: Episode tensors, masks, turn ids, rewards, counted batch steps,
-        and updated group seed.
-    :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int]
-    """
-    trajectories: list[dict[str, Any]] = []
-    seed_base = group_seed
-
-    # Reset the synchronous environments
-    for batch_idx in range(batch_size):
-        seed = seed_base + batch_idx
-        for group_idx in range(group_size):
-            env_idx = batch_idx * group_size + group_idx
-            env_i = env[env_idx]
-            prompt_dict, _info = env_i.reset(seed=seed)
-            sw_ml = getattr(env_i, "_sw_max_model_len", None)
-            if sw_ml is not None:
-                assert sw_ml == agent.max_model_len, (
-                    f"env max_model_len ({sw_ml}) != agent.max_model_len "
-                    f"({agent.max_model_len})"
-                )
-            trajectories.append(
-                {
-                    "batch_idx": batch_idx,
-                    "group_idx": group_idx,
-                    "env": env_i,
-                    "prompt": prompt_dict,
-                    "done": False,
-                },
-            )
-
-    for _turn_idx in range(n_steps):
-        active = [traj for traj in trajectories if not traj["done"]]
-        if not active:
-            break
-        active.sort(key=lambda t: (t["batch_idx"], t["group_idx"]))
-        prompts = _stack_active_prompts([traj["prompt"] for traj in active])
-        if isinstance(agent, GRPO):
-            completion_ids, _ = agent.get_action(
-                prompts,
-                training=True,
-                repeat_prompts=False,
-            )
-        else:
-            completion_ids, _ = agent.get_action(prompts, training=True)
-
-        for traj, completion in zip(active, completion_ids, strict=False):
-            full_completion = completion
-            if full_completion.dim() == 1:
-                full_completion = full_completion.unsqueeze(0)
-            next_prompt, _reward, terminated, truncated, _info = traj["env"].step(
-                full_completion,
-            )
-            traj["done"] = bool(terminated or truncated)
-            if not traj["done"]:
-                traj["prompt"] = next_prompt
-
-    completion_ids_list: list[torch.Tensor] = []
-    action_masks_list: list[torch.Tensor] = []
-    all_turn_ids: list[torch.Tensor] = []
-    all_rewards: list[torch.Tensor] = []
-    batch_steps = 0
-    trajectories.sort(key=lambda t: (t["batch_idx"], t["group_idx"]))
-    for traj in trajectories:
-        ep_ids, action_mask, turn_ids, turn_rewards_t = traj["env"].get_episode_data()
-        completion_ids_list.append(ep_ids)
-        action_masks_list.append(action_mask)
-        all_turn_ids.append(turn_ids)
-        all_rewards.append(turn_rewards_t)
-        batch_steps += len(getattr(traj["env"], "turn_boundaries", []))
-
-    group_seed = group_seed + batch_size
-
-    return (
-        completion_ids_list,
-        action_masks_list,
-        all_turn_ids,
-        all_rewards,
-        batch_steps,
-        group_seed,
-    )
-
-
 def collect_rollouts_llm(
     agent: SupportedOnPolicyLLM,
     env: SyncMultiTurnVecEnv,
@@ -408,7 +300,6 @@ def collect_rollouts_llm(
         and updated group seed.
     :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int]
     """
-
     prompts = env.reset(
         seed=group_seed,
     )

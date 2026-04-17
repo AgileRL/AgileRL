@@ -8,6 +8,11 @@ from torch import nn
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.core.fused_lora import (
+    clear_fused_adapter_routing,
+    patch_lora_for_fused_forward,
+    set_fused_adapter_routing,
+)
 from agilerl.algorithms.core.optimizer_wrapper import init_llm_optimizer
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules import EvolvableModule, ModuleDict
@@ -1024,3 +1029,58 @@ def test_optimizer_wrapper_fallback_peft_type_when_no_llm_dependencies():
     finally:
         # Restore original module to avoid affecting other tests
         sys.modules["agilerl.algorithms.core.optimizer_wrapper"] = original_module
+
+
+class _DummyLoraLayer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_adapter_names = None
+
+    def forward(self, x, adapter_names=None):  # noqa: ANN001
+        self.last_adapter_names = adapter_names
+        return x
+
+
+class _DummyFusedModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lora_a = _DummyLoraLayer()
+        self.linear = nn.Linear(2, 2)
+        self.lora_b = _DummyLoraLayer()
+
+
+def test_patch_lora_for_fused_forward_registers_hooks_and_cache():
+    model = _DummyFusedModel()
+    with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
+        patch_lora_for_fused_forward(model)
+
+    assert hasattr(model, "_fused_lora_layers")
+    assert len(model._fused_lora_layers) == 2
+    for layer in model._fused_lora_layers:
+        assert layer._fused_adapter_routing is None
+        assert len(layer._forward_pre_hooks) >= 1
+
+
+def test_set_and_clear_fused_adapter_routing_update_all_lora_layers():
+    model = _DummyFusedModel()
+    routing = ["actor", "critic"]
+    with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
+        patch_lora_for_fused_forward(model)
+        set_fused_adapter_routing(model, routing)
+        for layer in model._fused_lora_layers:
+            assert layer._fused_adapter_routing == routing
+
+        clear_fused_adapter_routing(model)
+        for layer in model._fused_lora_layers:
+            assert layer._fused_adapter_routing is None
+
+
+def test_fused_lora_hook_injects_adapter_names_into_forward_kwargs():
+    model = _DummyFusedModel()
+    routing = ["actor", "critic"]
+    with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
+        patch_lora_for_fused_forward(model)
+        set_fused_adapter_routing(model, routing)
+        _ = model.lora_a(torch.ones(1, 2))
+
+    assert model.lora_a.last_adapter_names == routing

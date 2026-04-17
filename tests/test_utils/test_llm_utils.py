@@ -1,7 +1,7 @@
 import sys
 from contextlib import contextmanager
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -17,9 +17,17 @@ from agilerl.utils.llm_utils import (
     PreferenceGym,
     ReasoningGym,
     _auto_zero_stage,
+    align_deepspeed_lr,
     create_llm_accelerator,
+    get_model_name_or_path,
     gather_if_zero3,
     get_state_dict,
+    masked_mean,
+    masked_var,
+    move_params_to_cpu,
+    move_params_to_gpu,
+    normalize_reasoning_prompt_batch,
+    pool_by_turns,
     stitch_completion_after_windowed_hf_generate,
     stitch_completion_after_windowed_vllm_generate,
 )
@@ -537,7 +545,7 @@ def test_dummy_optimizer_init():
     """Test DummyOptimizer initialization."""
     params = [torch.tensor([1.0, 2.0, 3.0])]
     lr = 0.001
-    optimizer = DummyOptimizer(params, lr)
+    optimizer = DummyOptimizer(params, lr=lr)
     assert optimizer is not None
 
 
@@ -545,7 +553,7 @@ def test_dummy_optimizer_step():
     """Test DummyOptimizer step method raises RuntimeError."""
     params = [torch.tensor([1.0, 2.0, 3.0])]
     lr = 0.001
-    optimizer = DummyOptimizer(params, lr)
+    optimizer = DummyOptimizer(params, lr=lr)
 
     with pytest.raises(RuntimeError) as exc_info:
         optimizer.step()
@@ -561,7 +569,7 @@ def test_dummy_optimizer_zero_grad():
     """Test DummyOptimizer zero_grad method raises RuntimeError."""
     params = [torch.tensor([1.0, 2.0, 3.0])]
     lr = 0.001
-    optimizer = DummyOptimizer(params, lr)
+    optimizer = DummyOptimizer(params, lr=lr)
 
     with pytest.raises(RuntimeError) as exc_info:
         optimizer.zero_grad()
@@ -577,7 +585,7 @@ def test_dummy_optimizer_state_dict():
     """Test DummyOptimizer state_dict method raises RuntimeError."""
     params = [torch.tensor([1.0, 2.0, 3.0])]
     lr = 0.001
-    optimizer = DummyOptimizer(params, lr)
+    optimizer = DummyOptimizer(params, lr=lr)
 
     with pytest.raises(RuntimeError) as exc_info:
         optimizer.state_dict()
@@ -593,7 +601,7 @@ def test_dummy_optimizer_load_state_dict():
     """Test DummyOptimizer load_state_dict method raises RuntimeError."""
     params = [torch.tensor([1.0, 2.0, 3.0])]
     lr = 0.001
-    optimizer = DummyOptimizer(params, lr)
+    optimizer = DummyOptimizer(params, lr=lr)
 
     with pytest.raises(RuntimeError) as exc_info:
         optimizer.load_state_dict({})
@@ -1068,9 +1076,7 @@ def test_auto_zero_stage_large_model_returns_3():
 
 def test_auto_zero_stage_device_properties_exception_returns_1():
     """Fallback to ZeRO-1 when get_device_properties raises."""
-    with patch(
-        "torch.cuda.get_device_properties", side_effect=RuntimeError("no CUDA")
-    ):
+    with patch("torch.cuda.get_device_properties", side_effect=RuntimeError("no CUDA")):
         assert _auto_zero_stage(2, 14.0) == 1
 
 
@@ -1080,147 +1086,133 @@ def test_create_llm_accelerator_no_gpus_returns_none():
     assert result is None
 
 
-def test_create_llm_accelerator_single_gpu_returns_plain_accelerator():
+def test_create_llm_accelerator_uses_explicit_plugin_when_provided():
     AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=1):
-        result = create_llm_accelerator()
-    assert isinstance(result, Accelerator)
-    assert not hasattr(result.state, "deepspeed_plugin") or (
-        result.state.deepspeed_plugin is None
-    )
-
-
-def test_create_llm_accelerator_single_gpu_explicit_zero_stage_uses_deepspeed():
-    """Explicit zero_stage on 1 GPU should honor the override."""
-    AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=1):
-        result = create_llm_accelerator(zero_stage=2)
-    assert isinstance(result, Accelerator)
-    assert result.state.deepspeed_plugin is not None
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert ds_cfg["zero_optimization"]["stage"] == 2
-
-
-def test_create_llm_accelerator_multi_gpu_default_zero_1():
-    AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=4):
-        result = create_llm_accelerator()
-    assert isinstance(result, Accelerator)
-    assert result.state.deepspeed_plugin is not None
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert ds_cfg["zero_optimization"]["stage"] == 1
-
-
-def test_create_llm_accelerator_multi_gpu_with_model_size_picks_stage():
-    AcceleratorState._reset_state(True)
+    explicit_plugin = MagicMock(name="explicit_plugin")
+    expected_accelerator = MagicMock(spec=Accelerator)
+    mock_ctor = MagicMock(return_value=expected_accelerator)
     with (
-        patch("torch.cuda.device_count", return_value=4),
-        patch("torch.cuda.get_device_properties") as mock_props,
+        patch("torch.cuda.device_count", return_value=1),
+        patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
     ):
-        mock_props.return_value.total_mem = 24 * (1024**3)
-        result = create_llm_accelerator(model_size_gb=17.0)
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert ds_cfg["zero_optimization"]["stage"] == 2  # 17/24 ~= 0.71
+        result = create_llm_accelerator(deepspeed_plugin=explicit_plugin)
+    assert result is expected_accelerator
+    mock_ctor.assert_called_once_with(deepspeed_plugin=explicit_plugin)
 
 
-def test_create_llm_accelerator_explicit_zero_stage_overrides_auto():
+def test_create_llm_accelerator_uses_launch_configured_plugin_when_available():
     AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=4):
-        result = create_llm_accelerator(zero_stage=3)
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert ds_cfg["zero_optimization"]["stage"] == 3
-
-
-def test_create_llm_accelerator_offload_optimizer():
-    AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=2):
-        result = create_llm_accelerator(offload_optimizer=True)
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert ds_cfg["zero_optimization"]["offload_optimizer"] == {"device": "cpu"}
-
-
-def test_create_llm_accelerator_no_offload_by_default():
-    AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=2):
+    launch_plugin = object()
+    launch_accelerator = MagicMock(spec=Accelerator)
+    launch_accelerator.state = MagicMock()
+    launch_accelerator.state.deepspeed_plugin = launch_plugin
+    mock_ctor = MagicMock(return_value=launch_accelerator)
+    with (
+        patch("torch.cuda.device_count", return_value=1),
+        patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
+    ):
         result = create_llm_accelerator()
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert "offload_optimizer" not in ds_cfg["zero_optimization"]
+    assert result is launch_accelerator
+    mock_ctor.assert_called_once_with()
 
 
-def test_create_llm_accelerator_stage_3_sets_gather_flag():
+def test_create_llm_accelerator_raises_without_explicit_or_launch_plugin():
     AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=2):
-        result = create_llm_accelerator(zero_stage=3)
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert ds_cfg["zero_optimization"]["stage3_gather_16bit_weights_on_model_save"] is True
+    launch_accelerator = MagicMock(spec=Accelerator)
+    launch_accelerator.state = MagicMock()
+    launch_accelerator.state.deepspeed_plugin = None
+    mock_ctor = MagicMock(return_value=launch_accelerator)
+    with (
+        patch("torch.cuda.device_count", return_value=1),
+        patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
+        pytest.raises(RuntimeError, match="DeepSpeed is required"),
+    ):
+        create_llm_accelerator()
 
 
-def test_create_llm_accelerator_stage_1_no_gather_flag():
-    AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=2):
-        result = create_llm_accelerator(zero_stage=1)
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert (
-        "stage3_gather_16bit_weights_on_model_save"
-        not in ds_cfg["zero_optimization"]
-    )
+def test_normalize_reasoning_prompt_batch_stacked_dict_to_per_sample_list():
+    prompts = {
+        "input_ids": torch.tensor([[1, 2], [3, 4]], dtype=torch.long),
+        "attention_mask": torch.ones(2, 2, dtype=torch.long),
+        "question": ["q0", "q1"],
+        "meta": {"constant": True},
+    }
+    out = normalize_reasoning_prompt_batch(prompts)
+    assert isinstance(out, list)
+    assert len(out) == 2
+    assert torch.equal(out[0]["input_ids"], torch.tensor([[1, 2]], dtype=torch.long))
+    assert out[1]["question"] == "q1"
+    assert out[0]["meta"] == {"constant": True}
 
 
-def test_create_llm_accelerator_overlap_comm_enabled_for_stage_2():
-    AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=2):
-        result = create_llm_accelerator(zero_stage=2)
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert ds_cfg["zero_optimization"]["overlap_comm"] is True
+def test_masked_stats_and_pool_by_turns_helpers():
+    values = torch.tensor([[1.0, 3.0, 5.0, 7.0]])
+    mask = torch.tensor([[1.0, 1.0, 0.0, 0.0]])
+    assert masked_mean(values, mask) == pytest.approx(2.0)
+    assert masked_var(values, mask, unbiased=False) == pytest.approx(1.0)
+
+    token_values = torch.tensor([[1.0, 3.0, 5.0, 7.0]])
+    turn_ids = torch.tensor([[0, 0, 1, -1]])
+    pooled = pool_by_turns(token_values, turn_ids, num_turns=2, reduction="mean")
+    assert pooled.shape == (1, 2)
+    assert pooled[0, 0].item() == pytest.approx(2.0)
+    assert pooled[0, 1].item() == pytest.approx(5.0)
 
 
-def test_create_llm_accelerator_overlap_comm_disabled_for_stage_1():
-    AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=2):
-        result = create_llm_accelerator(zero_stage=1)
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert ds_cfg["zero_optimization"]["overlap_comm"] is False
+def test_move_params_helpers_call_model_move_and_cuda_sync():
+    model_gpu = MagicMock()
+    gpu_param = MagicMock()
+    gpu_param.device = torch.device("cpu")
+    model_gpu.parameters.return_value = iter([gpu_param])
+    with patch("torch.cuda.synchronize") as sync:
+        move_params_to_gpu(model_gpu, torch.device("cuda:0"))
+    model_gpu.to.assert_called_once_with(torch.device("cuda:0"), non_blocking=True)
+    sync.assert_called_once()
+
+    model_cpu = MagicMock()
+    cpu_param = MagicMock()
+    cpu_param.device = torch.device("cuda:0")
+    model_cpu.parameters.return_value = iter([cpu_param])
+    with (
+        patch("torch.cuda.synchronize") as sync,
+        patch("torch.cuda.empty_cache") as empty_cache,
+    ):
+        move_params_to_cpu(model_cpu)
+    model_cpu.to.assert_called_once_with("cpu", non_blocking=True)
+    sync.assert_called_once()
+    empty_cache.assert_called_once()
 
 
-def test_create_llm_accelerator_custom_micro_batch_and_grad_accum():
-    AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=2):
-        result = create_llm_accelerator(
-            micro_batch_size=4, gradient_accumulation_steps=8
-        )
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert ds_cfg["train_micro_batch_size_per_gpu"] == 4
-    assert ds_cfg["gradient_accumulation_steps"] == 8
+def test_get_model_name_or_path_and_align_deepspeed_lr_helpers():
+    class _DirectModel:
+        name_or_path = "direct_name"
 
+    model = _DirectModel()
+    assert get_model_name_or_path(model) == "direct_name"
 
-def test_create_llm_accelerator_custom_gradient_clipping():
-    AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=2):
-        result = create_llm_accelerator(gradient_clipping=0.5)
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert ds_cfg["gradient_clipping"] == 0.5
+    class _Inner:
+        name_or_path = "inner_name"
 
+    class _Nested:
+        pretrained_model = _Inner()
 
-def test_create_llm_accelerator_fp16_mixed_precision():
-    AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=2):
-        result = create_llm_accelerator(mixed_precision="fp16")
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert ds_cfg["fp16"]["enabled"] is True
-    assert ds_cfg["bf16"]["enabled"] is False
+    nested = _Nested()
+    assert get_model_name_or_path(nested) == "inner_name"
 
+    class _Missing:
+        pass
 
-def test_create_llm_accelerator_bf16_mixed_precision():
-    AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=2):
-        result = create_llm_accelerator(mixed_precision="bf16")
-    ds_cfg = result.state.deepspeed_plugin.deepspeed_config
-    assert ds_cfg["bf16"]["enabled"] is True
-    assert ds_cfg["fp16"]["enabled"] is False
+    missing = _Missing()
+    with pytest.raises(ValueError, match="Model name or path not found"):
+        get_model_name_or_path(missing)
 
-
-def test_create_llm_accelerator_single_gpu_mixed_precision_passthrough():
-    AcceleratorState._reset_state(True)
-    with patch("torch.cuda.device_count", return_value=1):
-        result = create_llm_accelerator(mixed_precision="fp16")
-    assert isinstance(result, Accelerator)
+    accelerator = MagicMock()
+    accelerator.state.deepspeed_plugin.deepspeed_config = {
+        "optimizer": {"params": {"lr": 1e-3}}
+    }
+    with pytest.warns(UserWarning, match="DeepSpeed learning rate is set to"):
+        out = align_deepspeed_lr(2e-3, accelerator)
+    assert out == pytest.approx(2e-3)
+    assert accelerator.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
+        "lr"
+    ] == pytest.approx(2e-3)

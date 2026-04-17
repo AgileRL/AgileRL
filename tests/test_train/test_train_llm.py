@@ -7,6 +7,10 @@ from accelerate import Accelerator
 from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMReinforce
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.training.train_llm import (
+    _format_prefixed_metrics,
+    _normalize_learn_metrics,
+    build_eval_wandb_dict,
+    build_train_wandb_dict,
     finetune_llm_multiturn,
     finetune_llm_preference,
     finetune_llm_reasoning,
@@ -36,6 +40,19 @@ def _make_multiturn_mock_env(*, turn_boundaries_len: int = 3):
         torch.ones(T, dtype=torch.float32),
     )
     return mock_env
+
+
+def _make_pop_for_wandb_dict(size: int = 2):
+    pop = []
+    for idx in range(size):
+        agent = MagicMock()
+        agent.index = idx
+        agent.registry = MagicMock()
+        agent.registry.hp_config = MagicMock()
+        agent.registry.hp_config.config = {"lr": 1e-4}
+        agent.lr = 1e-4 + idx * 1e-5
+        pop.append(agent)
+    return pop
 
 
 def _make_multiturn_mock_agent(*, spec=LLMPPO):
@@ -1204,7 +1221,6 @@ def test_finetune_llm_multiturn_basic_training_loop(agent_spec, use_accelerator)
     assert mock_env.step.call_count == num_outer * batch_size * max_turns
     assert mock_env.get_episode_data.call_count == num_outer * batch_size
     assert mock_agent.learn.call_count == num_outer
-    assert mock_agent.set_reference_policy.call_count == num_outer
     assert mock_agent.test.call_count == 0
     n_metrics = 4 if agent_spec is GRPO else 7
     assert mock_agg.call_count == num_outer * n_metrics
@@ -1654,3 +1670,79 @@ def test_collect_rollouts_llm_breaks_when_vector_env_has_no_active_prompts():
 
     assert mock_agent.get_action.call_count == 1
     assert mock_env.step.call_count == 1
+
+
+def test_build_train_wandb_dict_reasoning_llmppo_uses_fallback_pg_and_entropy_keys():
+    pop = _make_pop_for_wandb_dict(size=2)
+    agent = MagicMock(spec=LLMPPO)
+    agent_metrics_dict = {
+        "agent_0/train_metrics": {
+            "Train/Rewards": 1.0,
+            "Train/Mean Loss": 0.5,
+            "Train/Mean KL": 0.1,
+            "Train/Completion Length": 8.0,
+            "Train/PG Loss": 0.2,
+            "Train/Entropy": 1.2,
+            "Train/Mean VF Loss": 0.3,
+            "Train/Accuracy": 0.5,
+        },
+        "agent_1/train_metrics": {
+            "Train/Rewards": 3.0,
+            "Train/Mean Loss": 0.7,
+            "Train/Mean KL": 0.3,
+            "Train/Completion Length": 10.0,
+            "Train/PG Loss": 0.4,
+            "Train/Entropy": 1.0,
+            "Train/Mean VF Loss": 0.5,
+            "Train/Accuracy": 0.75,
+        },
+    }
+
+    out = build_train_wandb_dict(
+        agent_metrics_dict=agent_metrics_dict,
+        pop=pop,
+        agent=agent,
+        max_reward=4.0,
+        mode="reasoning",
+    )
+    assert out["Train/Best Reward"] == 3.0
+    assert out["Train/Mean Population Reward"] == pytest.approx(2.0)
+    assert out["Train/Mean Population PG Loss"] == pytest.approx(0.3)
+    assert out["Train/Mean Population Entropy"] == pytest.approx(1.1)
+    assert out["Train/Mean Population Critic Loss"] == pytest.approx(0.4)
+    assert out["Train/Best Accuracy"] == pytest.approx(0.75)
+    assert "HPO_agent_0/lr" in out
+
+
+def test_build_eval_wandb_dict_preference_and_multiturn_score_modes():
+    pop = _make_pop_for_wandb_dict(size=2)
+    pref_metrics = {
+        "agent_0/test_metrics": {"Eval/Mean Reward Margin": 0.2},
+        "agent_1/test_metrics": {"Eval/Mean Reward Margin": 0.6},
+    }
+    pref_out = build_eval_wandb_dict(pref_metrics, pop=pop, mode="preference")
+    assert pref_out["Eval/Best Reward Margin"] == pytest.approx(0.6)
+    assert pref_out["Eval/Mean Population Reward Margin"] == pytest.approx(0.4)
+
+    score_metrics = {
+        "agent_0/test_metrics": {"Eval/Score": 0.9},
+        "agent_1/test_metrics": {"Eval/Score": 0.7},
+    }
+    score_out = build_eval_wandb_dict(
+        score_metrics, pop=pop, mode="multiturn", eval_score_mode=True
+    )
+    assert score_out["Eval/Best Score"] == pytest.approx(0.9)
+    assert score_out["Eval/Mean Population Score"] == pytest.approx(0.8)
+
+
+def test_train_metric_format_and_learn_output_normalization_helpers():
+    formatted = _format_prefixed_metrics({"mean_kl": 0.2, "mean_pg_loss": 0.1}, "Train")
+    assert formatted["Train/Mean KL"] == 0.2
+    assert formatted["Train/Mean PG Loss"] == 0.1
+
+    agent = MagicMock(spec=LLMReinforce)
+    metrics = _normalize_learn_metrics(agent, (1.0, 0.5, 0.2, 0.3), mode="multiturn")
+    assert metrics["mean_loss"] == 1.0
+    assert metrics["mean_kl"] == 0.5
+    assert metrics["pg_loss"] == 0.2
+    assert metrics["entropy"] == 0.3

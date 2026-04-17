@@ -535,6 +535,36 @@ def test_init_grpo_vllm_sleep_mode_calls_sleep(MockLLM, model_factory):
     grpo.clean_up()
 
 
+@patch("agilerl.algorithms.core.base.LLM")
+def test_init_grpo_warns_when_hf_generate_chunk_size_set_with_vllm(
+    MockLLM, model_factory
+):
+    mock_instance = make_mock_vllm_instance(vllm.LLM)
+    MockLLM.return_value = mock_instance
+    with pytest.warns(
+        UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
+    ):
+        grpo = GRPO(
+            actor_network=model_factory("facebook/opt-125m"),
+            pad_token_id=999,
+            pad_token="<pad>",
+            group_size=2,
+            use_vllm=True,
+            vllm_config=VLLMConfig(
+                gpu_memory_utilization=0.05,
+                max_num_seqs=1,
+                sleep_mode=True,
+            ),
+            hf_generate_chunk_size=2,
+            max_output_tokens=8,
+            max_model_len=32,
+            wrap=False,
+            gradient_checkpointing=False,
+            device="cpu",
+        )
+    grpo.clean_up()
+
+
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -1030,8 +1060,8 @@ def test_init_grpo_max_model_len_and_max_output_tokens_none_error(
             "adv_clip_range must be > 0 when provided.",
         ),
         (
-            {"advantage_filter_eps": -1e-6},
-            "advantage_filter_eps must be >= 0.",
+            {"adv_filter_eps": -1e-6},
+            "adv_filter_eps must be >= 0.",
         ),
     ],
 )
@@ -2028,10 +2058,10 @@ def test_learn_raises_when_batch_not_divisible_by_group_size():
 def test_learn_filter_whiten_clip_branch_path_with_active_subset():
     grpo = _make_cpu_grpo_for_branch_tests(
         group_size=2,
-        filter_zero_advantages=True,
+        filter_zero_adv=True,
         whiten_advantages=True,
         adv_clip_range=0.1,
-        advantage_filter_eps=0.05,
+        adv_filter_eps=0.05,
     )
     completion_ids, action_masks = _build_branch_experiences(batch_size=4)
     rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
@@ -2066,8 +2096,8 @@ def test_learn_filter_whiten_clip_branch_path_with_active_subset():
 def test_learn_warns_and_returns_zeros_when_all_filtered():
     grpo = _make_cpu_grpo_for_branch_tests(
         group_size=2,
-        filter_zero_advantages=True,
-        advantage_filter_eps=0.5,
+        filter_zero_adv=True,
+        adv_filter_eps=0.5,
         whiten_advantages=True,
     )
     completion_ids, action_masks = _build_branch_experiences(batch_size=4)

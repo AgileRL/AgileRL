@@ -43,8 +43,11 @@ from agilerl.utils.utils import (
     save_llm_checkpoint,
     tournament_selection_and_mutation,
 )
+from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.wrappers.learning import Skill
-from tests.test_algorithms.test_llms.test_grpo import create_module as create_dummy_lm_for_reinforce
+from tests.test_algorithms.test_llms.test_grpo import (
+    create_module as create_dummy_lm_for_reinforce,
+)
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -272,6 +275,129 @@ def test_create_population_llm_policy_gradient_algorithms(
             assert isinstance(agent, expected_type)
             assert agent.accelerator is None
             assert agent.batch_size == init_hp["BATCH_SIZE"]
+
+
+@pytest.mark.skipif(
+    not HAS_LLM_DEPENDENCIES,
+    reason="agilerl[llm] not installed",
+)
+def test_create_population_llmppo_uses_clone_and_generation_defaults(vector_space):
+    init_hp = {
+        "BATCH_SIZE": 2,
+        "LR": 7e-5,
+        "BETA": 0.01,
+        "MAX_GRAD_NORM": 0.5,
+        "UPDATE_EPOCHS": 1,
+        "MAX_MODEL_LEN": 96,
+        "MAX_OUTPUT_TOKENS": 12,
+        "USE_VLLM": True,
+        "GRADIENT_CHECKPOINTING": False,
+        "COSINE_lR_SCHEDULER": {"num_epochs": 10, "warmup_proportion": 0.1},
+    }
+    actor = MagicMock(name="actor_network")
+    actor.state_dict.return_value = {"w": torch.tensor([1.0])}
+    cloned_actor = MagicMock(name="cloned_actor")
+    vllm_cfg = object()
+    a0 = MagicMock(name="ppo_agent_0")
+    a1 = MagicMock(name="ppo_agent_1")
+
+    with (
+        patch("agilerl.utils.utils.clone_llm", return_value=cloned_actor) as mock_clone,
+        patch("agilerl.utils.utils.LLMPPO", side_effect=[a0, a1]) as mock_llmppo,
+    ):
+        population = create_population(
+            algo="LLMPPO",
+            observation_space=vector_space,
+            action_space=copy.deepcopy(vector_space),
+            net_config=None,
+            INIT_HP=init_hp,
+            hp_config=None,
+            population_size=2,
+            device="cpu",
+            accelerator=None,
+            actor_network=actor,
+            vllm_config=vllm_cfg,
+            algo_kwargs={"pad_token_id": 999, "pad_token": "<pad>"},
+        )
+
+    assert population == [a0, a1]
+    mock_clone.assert_called_once()
+    first_kw = mock_llmppo.call_args_list[0].kwargs
+    second_kw = mock_llmppo.call_args_list[1].kwargs
+    assert first_kw["actor_network"] is actor
+    assert second_kw["actor_network"] is cloned_actor
+    assert first_kw["use_vllm"] is True
+    assert first_kw["vllm_config"] is vllm_cfg
+    assert first_kw["lr_actor"] == init_hp["LR"]
+    assert first_kw["cosine_lr_schedule_config"] is not None
+    assert isinstance(first_kw["cosine_lr_schedule_config"], CosineLRScheduleConfig)
+
+
+@pytest.mark.skipif(
+    not HAS_LLM_DEPENDENCIES,
+    reason="agilerl[llm] not installed",
+)
+def test_create_population_llmreinforce_normalized_name_and_kwargs_overrides(
+    vector_space,
+):
+    init_hp = {
+        "BATCH_SIZE": 3,
+        "LR": 5e-6,
+        "BETA": 0.02,
+        "MAX_GRAD_NORM": 0.7,
+        "UPDATE_EPOCHS": 2,
+        "MAX_MODEL_LEN": 80,
+        "USE_VLLM": False,
+        "GRADIENT_CHECKPOINTING": False,
+        "COSINE_lR_SCHEDULER": {"num_epochs": 8, "warmup_proportion": 0.2},
+    }
+    actor = MagicMock(name="actor_network")
+    actor.state_dict.return_value = {"w": torch.tensor([2.0])}
+    cloned_actor = MagicMock(name="cloned_actor")
+    pop0 = MagicMock(name="reinforce_agent_0")
+    pop1 = MagicMock(name="reinforce_agent_1")
+    global_vllm_cfg = object()
+    local_vllm_cfg = object()
+
+    with (
+        patch("agilerl.utils.utils.clone_llm", return_value=cloned_actor) as mock_clone,
+        patch(
+            "agilerl.utils.utils.LLMReinforce",
+            side_effect=[pop0, pop1],
+        ) as mock_reinforce,
+    ):
+        population = create_population(
+            algo="llmreinforce",
+            observation_space=vector_space,
+            action_space=copy.deepcopy(vector_space),
+            net_config=None,
+            INIT_HP=init_hp,
+            hp_config=None,
+            population_size=2,
+            device="cpu",
+            accelerator=None,
+            actor_network=actor,
+            vllm_config=global_vllm_cfg,
+            torch_compiler="inductor",
+            algo_kwargs={
+                "pad_token_id": 999,
+                "pad_token": "<pad>",
+                "use_vllm": True,
+                "vllm_config": local_vllm_cfg,
+            },
+        )
+
+    assert population == [pop0, pop1]
+    mock_clone.assert_called_once()
+    first_kw = mock_reinforce.call_args_list[0].kwargs
+    second_kw = mock_reinforce.call_args_list[1].kwargs
+    assert first_kw["actor_network"] is actor
+    assert second_kw["actor_network"] is cloned_actor
+    assert first_kw["use_vllm"] is True
+    assert first_kw["vllm_config"] is local_vllm_cfg
+    assert first_kw["torch_compiler"] == "inductor"
+    assert first_kw["lr"] == init_hp["LR"]
+    assert isinstance(first_kw["cosine_lr_schedule_config"], CosineLRScheduleConfig)
 
 
 # The function returns a list of episode rewards from the first episode in each parallel environment.
