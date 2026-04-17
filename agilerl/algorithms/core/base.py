@@ -1772,6 +1772,15 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         """
         return agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
 
+    def get_network_id(self, agent_id: str) -> str:
+        """Get the network ID for an agent, considering parameter sharing groups.
+
+        :param agent_id: The agent ID
+        :type agent_id: str
+        :return: The actor/critic network ID
+        """
+        return self.get_group_id(agent_id) if self.has_grouped_agents() else agent_id
+
     def assemble_shared_inputs(self, experience: ExperiencesType) -> ExperiencesType:
         """Preprocesses inputs by constructing dictionaries by shared agents.
 

@@ -1,6 +1,6 @@
 import copy
 import warnings
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from dataclasses import asdict
 from typing import Any
 
@@ -26,9 +26,11 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
+    concatenate_tensors,
     concatenate_spaces,
     format_shared_critic_encoder,
     get_deepest_head_config,
+    get_vect_dim,
     key_in_nested_dict,
     make_safe_deepcopies,
     obs_channels_to_first,
@@ -211,29 +213,30 @@ class MADDPG(MultiAgentRLAlgorithm):
         }
 
         if actor_networks is not None and critic_networks is not None:
+            network_ids = list(self.observation_space.keys())
             if isinstance(actor_networks, list):
                 assert len(actor_networks) == len(
-                    self.agent_ids,
+                    self.observation_space,
                 ), (
-                    "actor_networks must be a list of the same length as the number of agents"
+                    "actor_networks must be a list of the same length as the number of homogeneous agents"
                 )
                 actor_networks = ModuleDict(
                     {
-                        self.agent_ids[i]: actor_networks[i]
-                        for i in range(len(self.agent_ids))
+                        network_ids[idx]: actor_networks[idx]
+                        for idx in range(len(network_ids))
                     },
                 )
             if isinstance(critic_networks, list):
                 assert len(critic_networks) == len(
-                    self.agent_ids,
+                    self.observation_space,
                 ), (
-                    "critic_networks must be a list of the same length as the number of agents"
+                    "critic_networks must be a list of the same length as the number of homogeneous agents"
                 )
 
                 critic_networks = ModuleDict(
                     {
-                        self.agent_ids[i]: critic_networks[i]
-                        for i in range(len(self.agent_ids))
+                        network_ids[idx]: critic_networks[idx]
+                        for idx in range(len(network_ids))
                     },
                 )
 
@@ -257,6 +260,22 @@ class MADDPG(MultiAgentRLAlgorithm):
                 raise TypeError(
                     msg,
                 )
+
+            assert len(actor_networks) == self.n_unique_agents, (
+                f"Length of actor_networks ({len(actor_networks)}) does not match number of unique "
+                f"agents defined in environment ({self.n_unique_agents}: {list(self.observation_space.keys())})"
+            )
+            assert len(critic_networks) == self.n_unique_agents, (
+                f"Length of critic_networks ({len(critic_networks)}) does not match number of unique "
+                f"agents defined in environment ({self.n_unique_agents}: {list(self.observation_space.keys())})"
+            )
+            assert set(actor_networks.keys()) == set(network_ids), (
+                "actor_networks keys must match grouped agent IDs in observation_space."
+            )
+            assert set(critic_networks.keys()) == set(network_ids), (
+                "critic_networks keys must match grouped agent IDs in observation_space."
+            )
+
             self.actors, self.critics = make_safe_deepcopies(
                 actor_networks,
                 critic_networks,
@@ -268,11 +287,12 @@ class MADDPG(MultiAgentRLAlgorithm):
         else:
             agent_configs, encoder_configs = self.build_net_config(
                 net_config,
+                flatten=False,
                 return_encoders=True,
             )
 
             # Iterate over actor configs and modify accordingly
-            for agent_id in self.agent_ids:
+            for agent_id in self.observation_space:
                 agent_config = agent_configs[agent_id]
                 head_config = agent_config.get("head_config", None)
 
@@ -288,23 +308,26 @@ class MADDPG(MultiAgentRLAlgorithm):
             latent_dim = max(
                 [
                     agent_configs[agent_id].get("latent_dim", 32)
-                    for agent_id in self.agent_ids
+                    for agent_id in self.observation_space
                 ],
             )
             min_latent_dim = min(
                 [
                     agent_configs[agent_id].get("min_latent_dim", 8)
-                    for agent_id in self.agent_ids
+                    for agent_id in self.observation_space
                 ],
             )
             max_latent_dim = max(
                 [
                     agent_configs[agent_id].get("max_latent_dim", 1024)
-                    for agent_id in self.agent_ids
+                    for agent_id in self.observation_space
                 ],
             )
             critic_encoder_config = format_shared_critic_encoder(encoder_configs)
-            critic_head_config = get_deepest_head_config(agent_configs, self.agent_ids)
+            critic_head_config = get_deepest_head_config(
+                agent_configs,
+                list(self.observation_space.keys()),
+            )
             critic_net_config = {
                 "encoder_config": critic_encoder_config,
                 "head_config": critic_head_config,
@@ -315,8 +338,8 @@ class MADDPG(MultiAgentRLAlgorithm):
 
             def create_actor(agent_id: str) -> DeterministicActor:
                 actor: DeterministicActor = DeterministicActor(
-                    self.possible_observation_spaces[agent_id],
-                    self.possible_action_spaces[agent_id],
+                    self.observation_space[agent_id],
+                    self.action_space[agent_id],
                     device=self.device,
                     **copy.deepcopy(agent_configs[agent_id]),
                 )
@@ -337,20 +360,26 @@ class MADDPG(MultiAgentRLAlgorithm):
                 )
 
             self.actors = ModuleDict(
-                {agent_id: create_actor(agent_id) for agent_id in self.agent_ids},
+                {
+                    agent_id: create_actor(agent_id)
+                    for agent_id in self.observation_space
+                },
             )
             self.critics = ModuleDict(
-                {agent_id: create_critic() for agent_id in self.agent_ids},
+                {agent_id: create_critic() for agent_id in self.observation_space},
             )
             self.actor_targets = ModuleDict(
-                {agent_id: create_actor(agent_id) for agent_id in self.agent_ids},
+                {
+                    agent_id: create_actor(agent_id)
+                    for agent_id in self.observation_space
+                },
             )
             self.critic_targets = ModuleDict(
-                {agent_id: create_critic() for agent_id in self.agent_ids},
+                {agent_id: create_critic() for agent_id in self.observation_space},
             )
 
         # Initialise target network parameters
-        for agent_id in self.agent_ids:
+        for agent_id in self.observation_space:
             self.actor_targets[agent_id].load_state_dict(
                 self.actors[agent_id].state_dict(),
             )
@@ -449,21 +478,42 @@ class MADDPG(MultiAgentRLAlgorithm):
         ), "AgileRL requires action masks to be defined in the information dictionary."
 
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
+        vect_dim = get_vect_dim(obs, self.possible_observation_spaces)
+        unique_agents_ids = list(obs.keys())
 
         # Preprocess observations
         preprocessed_states = self.preprocess_observation(obs)
+        grouped_agents = defaultdict(list)
+        for agent_id in unique_agents_ids:
+            group_id = self.get_network_id(agent_id)
+            grouped_agents[group_id].append(agent_id)
 
-        action_dict: dict[str, torch.Tensor] = {}
-        for agent_id, agent_obs in preprocessed_states.items():
-            actor = self.actors[agent_id]
+        grouped_actions: dict[str, np.ndarray] = {}
+        for group_id, group_agent_ids in grouped_agents.items():
+            actor = self.actors[group_id]
             actor.eval()
+            grouped_obs = concatenate_tensors(
+                [preprocessed_states[agent_id] for agent_id in group_agent_ids],
+            )
             if self.accelerator is not None:
                 with actor.no_sync(), torch.no_grad():
-                    actions = actor(agent_obs)
+                    actions = actor(grouped_obs)
             else:
                 with torch.no_grad():
-                    actions = actor(agent_obs)
+                    actions = actor(grouped_obs)
+            grouped_actions[group_id] = actions.cpu().numpy()
 
+        action_dict = {
+            agent_id: torch.as_tensor(action, device=self.device)
+            for agent_id, action in self.disassemble_grouped_outputs(
+                grouped_actions,
+                vect_dim,
+                grouped_agents,
+            ).items()
+        }
+
+        for agent_id, actions in action_dict.items():
+            actor = self.actors[self.get_network_id(agent_id)]
             actor.train()
             if self.training:
                 if isinstance(self.possible_action_spaces[agent_id], spaces.Discrete):
@@ -478,17 +528,19 @@ class MADDPG(MultiAgentRLAlgorithm):
                     torch.as_tensor(max_output, device=actions.device),
                 )
 
-            action_dict[agent_id] = actions.cpu()
+            action_dict[agent_id] = actions.detach().cpu()
 
         # Process actions for environment
         processed_action_dict: ArrayDict = OrderedDict()
         for agent_id in action_dict:
             space = self.possible_action_spaces[agent_id]
+            network_id = self.get_network_id(agent_id)
+            actor = self.actors[network_id]
             if isinstance(space, spaces.Discrete):
                 action = action_dict[agent_id].numpy()
                 mask = (
                     1 - np.array(action_masks[agent_id])
-                    if action_masks[agent_id] is not None
+                    if action_masks.get(agent_id) is not None
                     else None
                 )
                 action: np.ndarray = np.ma.array(action, mask=mask)
@@ -569,7 +621,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             for idx in indices:
                 self.current_noise[agent_id][idx, :] = 0
 
-    def learn(self, experiences: ExperiencesType) -> dict[str, torch.Tensor]:
+    def learn(self, experiences: ExperiencesType) -> dict[str, tuple[float, float]]:
         """Update agent network parameters from the gathered experiences.
 
         :param experience: Tuple of dictionaries containing batched states, actions,
@@ -601,17 +653,21 @@ class MADDPG(MultiAgentRLAlgorithm):
         # Get next actions
         with torch.no_grad():
             next_actions = [
-                self.actor_targets[agent_id](next_states[agent_id])
+                self.actor_targets[self.get_network_id(agent_id)](next_states[agent_id])
                 for agent_id in self.agent_ids
             ]
 
         # Stack actions for critic
-        stacked_actions = torch.cat(list(actions.values()), dim=1)
+        stacked_actions = torch.cat(
+            [actions[agent_id] for agent_id in self.agent_ids],
+            dim=1,
+        )
         stacked_next_actions = torch.cat(next_actions, dim=1)
 
-        loss_dict = {}
+        loss_dict: dict[str, tuple[float, float]] = {}
+        grouped_losses: dict[str, list[tuple[float, float]]] = defaultdict(list)
         for agent_id in self.agent_ids:
-            loss_dict[f"{agent_id}"] = self._learn_individual(
+            losses = self._learn_individual(
                 agent_id,
                 stacked_actions,
                 stacked_next_actions,
@@ -621,8 +677,21 @@ class MADDPG(MultiAgentRLAlgorithm):
                 rewards,
                 dones,
             )
+            if self.has_grouped_agents():
+                grouped_losses[self.get_group_id(agent_id)].append(losses)
+            else:
+                loss_dict[agent_id] = losses
 
-        for agent_id in self.agent_ids:
+        if self.has_grouped_agents():
+            for group_id, group_loss in grouped_losses.items():
+                actor_losses = [loss[0] for loss in group_loss]
+                critic_losses = [loss[1] for loss in group_loss]
+                loss_dict[group_id] = (
+                    float(np.mean(actor_losses)),
+                    float(np.mean(critic_losses)),
+                )
+
+        for agent_id in self.observation_space:
             self.soft_update(self.actors[agent_id], self.actor_targets[agent_id])
             self.soft_update(self.critics[agent_id], self.critic_targets[agent_id])
 
@@ -661,11 +730,13 @@ class MADDPG(MultiAgentRLAlgorithm):
         :return: Tuple containing actor loss and critic loss
         :rtype: tuple[float, float]
         """
-        actor = self.actors[agent_id]
-        critic = self.critics[agent_id]
-        critic_target = self.critic_targets[agent_id]
-        actor_optimizer = self.actor_optimizers[agent_id]
-        critic_optimizer = self.critic_optimizers[agent_id]
+        network_id = self.get_network_id(agent_id)
+
+        actor = self.actors[network_id]
+        critic = self.critics[network_id]
+        critic_target = self.critic_targets[network_id]
+        actor_optimizer = self.actor_optimizers[network_id]
+        critic_optimizer = self.critic_optimizers[network_id]
 
         if self.accelerator is not None:
             with critic.no_sync():
@@ -722,7 +793,10 @@ class MADDPG(MultiAgentRLAlgorithm):
         detached_actions[agent_id] = action
 
         # update actor and targets
-        stacked_detached_actions = torch.cat(list(detached_actions.values()), dim=1)
+        stacked_detached_actions = torch.cat(
+            [detached_actions[agent_key] for agent_key in self.agent_ids],
+            dim=1,
+        )
         if self.accelerator is not None:
             with critic.no_sync():
                 actor_loss = -critic(states, stacked_detached_actions).mean()
