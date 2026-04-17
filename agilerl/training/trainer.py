@@ -704,4 +704,34 @@ class ArenaTrainer(Trainer):
         :rtype: dict[str, Any]
         """
         manifest = self.to_manifest()
-        return self._client.submit_job(manifest, stream=stream)
+        return self._client.submit_training_job(manifest, stream=stream)
+
+    def resume_from_checkpoint(self, job_id: str, max_steps: int) -> None:
+        """Resume a training job from a checkpoint.
+
+        :param job_id: The ID of the training job to resume from.
+        :type job_id: str
+        :param max_steps: The maximum number of steps to train for.
+        :type max_steps: int
+        """
+        return self._client.resume_training_job(job_id, max_steps)
+
+    def list_experiments(self, project: str) -> list[dict[str, Any]]:
+        """List all experiments in the project.
+
+        :param project: The name of the project to list experiments for.
+        :type project: str
+        :returns: A list of experiments.
+        :rtype: list[dict[str, Any]]
+        """
+        return self._client.list_experiments(project)
+
+    def list_checkpoints(self, job_id: str) -> list[dict[str, Any]]:
+        """List all checkpoints for a training job.
+
+        :param job_id: The ID of the training job to list checkpoints for.
+        :type job_id: str
+        :returns: A list of checkpoints.
+        :rtype: list[dict[str, Any]]
+        """
+        return self._client.list_checkpoints(job_id)

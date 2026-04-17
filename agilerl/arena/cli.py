@@ -171,12 +171,12 @@ def user_credits(
         emit_result(client.get_user_credits())
 
 
-@main.group("environments")
-def environments() -> None:
+@main.group("env")
+def env() -> None:
     """Manage your custom Gym / PettingZoo environments in Arena."""
 
 
-@environments.command("list")
+@env.command("list")
 @click.pass_obj
 def env_list(
     config: CommandConfig,
@@ -186,7 +186,7 @@ def env_list(
         emit_result(client.list_environments())
 
 
-@environments.command("exists")
+@env.command("exists")
 @click.argument("name")
 @click.option("--version", default="latest", show_default=True)
 @click.pass_obj
@@ -201,7 +201,7 @@ def env_exists(
         emit_result({"name": name, "version": version, "exists": exists})
 
 
-@environments.command("list-entrypoints")
+@env.command("list-entrypoints")
 @click.argument("name")
 @click.option("--version", default="latest", show_default=True)
 @click.pass_obj
@@ -215,7 +215,7 @@ def env_entrypoints(
         emit_result(client.list_environment_entrypoints(name=name, version=version))
 
 
-@environments.command("validate")
+@env.command("validate")
 @click.argument("name", required=False, default=None, type=str)
 @click.option("--name", "name_opt", default=None, hidden=True)
 @click.option("--version", default="latest", show_default=True)
@@ -291,7 +291,7 @@ def env_validate(
         renderer.close()
 
 
-@environments.command("profile")
+@env.command("profile")
 @click.argument("name")
 @click.option("--version", default="latest", show_default=True)
 @click.pass_obj
@@ -313,7 +313,7 @@ def env_profile(
             emit_result(result)
 
 
-@environments.command("delete")
+@env.command("delete")
 @click.argument("name")
 @click.option("--version", default="latest", show_default=True)
 @click.option(
@@ -354,7 +354,7 @@ def jobs() -> None:
     "--resource-id",
     type=int,
     default=None,
-    help="Arena cluster type to submit the experiment to.",
+    help="Arena cluster type to submit the training job to.",
 )
 @click.option(
     "--manifest-json",
@@ -368,13 +368,13 @@ def jobs() -> None:
     help="Path to JSON file containing manifest payload.",
 )
 @click.pass_obj
-def experiments_submit(
+def jobs_submit(
     config: CommandConfig,
     resource_id: int | None,
     manifest_json: str | None,
     manifest_file: str | None,
 ) -> None:
-    """Submit a training job from run spec and/or existing experiment IDs."""
+    """Submit a training job from manifest and/or existing training job IDs."""
     manifest: dict[str, Any] | None = None
     if manifest_json is not None or manifest_file is not None:
         manifest = load_json_payload(
@@ -385,7 +385,7 @@ def experiments_submit(
         )
 
     with streaming_client(config) as (client, renderer):
-        stream_resp = client.submit_experiment_job(
+        stream_resp = client.submit_training_job(
             manifest=manifest,
             resource_id=resource_id,
             stream=True,
@@ -396,38 +396,29 @@ def experiments_submit(
             emit_result(result)
 
 
-@jobs.command("status")
-@click.argument("experiment_id", type=int)
-@click.pass_obj
-def jobs_status(config: CommandConfig, experiment_id: int) -> None:
-    """Get status/details for an experiment by ID."""
-    with arena_client(config) as client:
-        emit_result(client.get_experiment_status(experiment_id))
-
-
-@jobs.command("validate-runspec")
-@click.option("--runspec-json", default=None, help="Raw JSON runspec payload string.")
+@jobs.command("validate-manifest")
+@click.option("--manifest-json", default=None, help="Raw JSON manifest payload string.")
 @click.option(
-    "--runspec-file",
+    "--manifest-file",
     type=click.Path(exists=True, dir_okay=False),
     default=None,
-    help="Path to JSON file containing runspec payload.",
+    help="Path to JSON file containing manifest payload.",
 )
 @click.pass_obj
-def jobs_validate_runspec(
+def jobs_validate_manifest(
     config: CommandConfig,
-    runspec_json: str | None,
-    runspec_file: str | None,
+    manifest_json: str | None,
+    manifest_file: str | None,
 ) -> None:
-    """Validate whether a run spec is structurally valid for training."""
-    run_spec = load_json_payload(
-        runspec_json,
-        runspec_file,
-        json_option_name="--runspec-json",
-        file_option_name="--runspec-file",
+    """Validate whether a manifest is structurally valid for training."""
+    manifest = load_json_payload(
+        manifest_json,
+        manifest_file,
+        json_option_name="--manifest-json",
+        file_option_name="--manifest-file",
     )
     with arena_client(config) as client:
-        emit_result(client.validate_job_run_spec(run_spec))
+        emit_result(client.validate_manifest(manifest))
 
 
 @jobs.command("get-metrics")
@@ -483,3 +474,56 @@ def jobs_get_metrics(
 
         if preview_rows > 0 and (content_type or "").startswith("text/csv"):
             emit_csv_preview(payload, max_rows=preview_rows)
+
+
+@main.group("projects")
+def projects() -> None:
+    """Manage your projects in Arena."""
+
+
+@projects.command("list")
+@click.pass_obj
+def projects_list(config: CommandConfig) -> None:
+    """List all projects in Arena."""
+    with arena_client(config) as client:
+        emit_result(client.list_projects())
+    """Submit, validate, and inspect training jobs."""
+
+
+@projects.command("create")
+@click.argument("name")
+@click.option("--description", default=None, help="Description of the project.")
+@click.option("--llm-based/--simulation-based", default=False, show_default=True)
+@click.pass_obj
+def projects_create(
+    config: CommandConfig,
+    name: str,
+    description: str | None,
+    llm_based: bool,
+) -> None:
+    """Create a new project in Arena.
+
+    :param name: The name of the project.
+    :type name: str
+    :param description: The description of the project.
+    :type description: str | None
+    :param llm_based: Whether the project is LLM-based.
+    :type llm_based: bool
+    :returns: A dictionary containing the created project.
+    :rtype: dict[str, Any]
+    """
+    with arena_client(config) as client:
+        emit_result(
+            client.create_project(
+                name=name, description=description, llm_based=llm_based
+            )
+        )
+
+
+@projects.command("delete")
+@click.argument("name", type=str)
+@click.pass_obj
+def projects_delete(config: CommandConfig, project_id: int) -> None:
+    """Delete a project in Arena."""
+    with arena_client(config) as client:
+        emit_result(client.delete_project(project_id=project_id))

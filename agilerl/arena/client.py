@@ -252,10 +252,13 @@ class ArenaClient:
             return [str(ep) for ep in resp]
         return []
 
+    # TODO: Check with Rob
+    # Getting an ambiguous entrypoint error when validating an already registered environment.
+    # We should by default use the entrypoint the env was registered with
     def validate_environment(
         self,
         *,
-        name: str,
+        name: str | None = None,
         version: str = "latest",
         source: str | os.PathLike[str] | bytes | None = None,
         env_config: str | os.PathLike[str] | None = None,
@@ -277,17 +280,31 @@ class ArenaClient:
         :class:`~agilerl.arena.stream.NDJsonStream` instead.
 
         :param name: Environment name.
+        :type name: str | None
         :param version: Environment version.
+        :type version: str
         :param source: Environment source — a directory path (compressed
             automatically), a ``.tar.gz`` file path, or raw ``bytes``.
+        :type source: str | os.PathLike[str] | bytes | None
         :param env_config: Path to the ``env_config.yaml`` file.
+        :type env_config: str | os.PathLike[str] | None
         :param requirements: Path to ``requirements.txt``.
+        :type requirements: str | os.PathLike[str] | None
         :param entrypoint: Optional entrypoint override.
+        :type entrypoint: str | None
         :param description: Optional human-readable description of the environment.
+        :type description: str | None
         :param multi_agent: Whether the environment is multi-agent.
+        :type multi_agent: bool
         :param do_rollouts: Whether to run rollout profiling.
+        :type do_rollouts: bool
         :param stream: If ``True``, return the raw :class:`NDJsonStream`.
+        :type stream: bool
         """
+        if name is None and source is None:
+            msg = "To validate an environment on Arena, either the name of an already registered environment or the source of a custom environment must be provided."
+            raise ValueError(msg)
+
         if source is not None:
             stream_resp = self._create_and_validate(
                 name=name,
@@ -360,14 +377,20 @@ class ArenaClient:
     ### Training Jobs ###
     # -------------------------------------------------------------------------
 
-    def submit_experiment_job(
+    # TODO: Backend needs to return useful logs
+    # e.g. Submitting job with ID <job_id> to Arena
+    #      Job <job_id> submitted successfully
+    #      Job <job_id> is PENDING
+    #      View training progress at <url>
+    def submit_training_job(
         self,
         *,
         manifest: dict[str, Any],
         resource_id: int | None = None,
+        num_nodes: int | None = None,
         stream: bool = False,
     ) -> dict[str, Any] | NDJsonStream:
-        """Submit an experiment job.
+        """Submit a training job.
 
         :param manifest: The fully validated training manifest.
         :param resource_id: The Arena cluster type to submit the experiment to.
@@ -385,27 +408,56 @@ class ArenaClient:
         )
         return stream_resp if stream else stream_resp.collect()
 
-    def get_experiment_status(self, experiment_id: int) -> dict[str, Any]:
-        """Get status/details for an experiment."""
-        resp = self._request("GET", f"/api/experiments/{experiment_id}")
-        return (
-            resp
-            if isinstance(resp, dict)
-            else {"experiment_id": experiment_id, "status": resp}
+    # TODO: Check with Rob
+    # Should be a rich table showing [experiment name, job_id, env, algo, last_modified, status]
+    def list_experiments(self, project: str) -> list[dict[str, Any]]:
+        """List all experiments in a project.
+
+        :param project: The name of the project.
+        :type project: str
+        :returns: A list of experiments.
+        :rtype: list[dict[str, Any]]
+        """
+        return self._request(
+            "GET", "/api/cli/v1/experiments/list", params={"project": project}
         )
 
-    def validate_job_run_spec(self, run_spec: dict[str, Any]) -> dict[str, Any]:
-        """Validate a runspec payload against backend schema/rules."""
-        result = self._unwrap_cli_data(
-            self._request(
-                "POST", "/api/cli/v1/experiments/validate-run-spec", json=run_spec
-            )
+    # TODO: Check with Rob
+    # Is the only extra arg we should allow 'max_steps' here?
+    def resume_training_job(self, job_id: str, max_steps: int) -> dict[str, Any]:
+        """Resume a training job.
+
+        :param job_id: The ID of the training job to resume.
+        :type job_id: str
+        :param max_steps: The maximum number of steps to train for.
+        :type max_steps: int
+        :returns: A dictionary containing the resume result.
+        :rtype: dict[str, Any]
+        """
+        return self._request(
+            "POST",
+            "/api/cli/v1/experiments/jobs/resume",
+            json={"job_id": job_id, "max_steps": max_steps},
         )
-        if result in ("", None):
-            return {"valid": True}
-        return (
-            result if isinstance(result, dict) else {"valid": True, "response": result}
+
+    # TODO: Check with Rob
+    # Should be a rich table sorted by evaluation score descending showing
+    # [steps, training_score, evaluation_score, size_mb]
+    def list_checkpoints(self, job_id: str) -> list[dict[str, Any]]:
+        """List all checkpoints for a training job.
+
+        :param job_id: The ID of the training job to list checkpoints for.
+        :type job_id: str
+        :returns: A list of checkpoints.
+        :rtype: list[dict[str, Any]]
+        """
+        return self._request(
+            "GET", "/api/cli/v1/experiments/jobs/checkpoints", params={"job_id": job_id}
         )
+
+    def list_resources(self) -> list[dict[str, Any]]:
+        """List all resources available to the authenticated user."""
+        return self._request("GET", "/api/cli/v1/resources/list")
 
     def download_experiment_metrics(
         self, experiment_id: int, metrics: list[str]
@@ -425,12 +477,62 @@ class ArenaClient:
             json={"metrics": metrics},
         )
 
+    # TODO: Check with Rob if tested
     def stop_job(self, job_id: str) -> None:
         """Request stopping of a running job.
 
         :param job_id: Identifier returned by :meth:`submit_job`.
         """
         return self._request("POST", "api/v1/jobs/stop", params={"job_id": job_id})
+
+    # -------------------------------------------------------------------------
+    ### Projects ###
+    # -------------------------------------------------------------------------
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        """List all projects in Arena."""
+        # TODO: Modify endpoint
+        return self._request("GET", "/api/projects")
+
+    def create_project(
+        self, name: str, description: str | None, llm_based: bool
+    ) -> dict[str, Any]:
+        """Create a new project in Arena."""
+        # TODO: Modify endpoint
+        return self._request(
+            "POST",
+            "/api/projects/create",
+            json={"name": name, "description": description, "llm_based": llm_based},
+        )
+
+    def delete_project(self, name: str) -> None:
+        """Delete a project in Arena."""
+        # TODO: Modify endpoint
+        return self._request("DELETE", "/api/projects/delete", json={"name": name})
+
+    # -------------------------------------------------------------------------
+    ### Inference ###
+    # -------------------------------------------------------------------------
+
+    # TODO: Check with Rob
+    # My idea is that users train an agent, and when they come back they might want to check
+    # the experiments they have trained on Arena
+    # 1. list_experiments -> check job_id
+    # 2. list_checkpoints <job_id> -> check checkpoint_id
+    # 3. deploy_agent <job_id> <checkpoint>
+    def deploy_agent(self, job_id: str, checkpoint: str = "best") -> None:
+        """Deploy an agent to Arena.
+
+        :param job_id: The ID of the training job to deploy an agent from.
+        :type job_id: str
+        :param checkpoint: The checkpoint to deploy.
+        :type checkpoint: str
+        """
+        return self._request(
+            "POST",
+            "/api/cli/v1/inference/deploy",
+            json={"job_id": job_id, "checkpoint": checkpoint},
+        )
 
     def close(self) -> None:
         """Close the underlying HTTP connection pool."""
@@ -459,7 +561,7 @@ class ArenaClient:
         multi_agent: bool,
         do_rollouts: bool,
     ) -> NDJsonStream:
-        """Upload, create, and validate an environment in one step."""
+        """Upload, create, and validate an environment."""
         # Resolve the environment source into bytes for upload
         archive_name, archive_bytes = prepare_env_upload(source)
 
