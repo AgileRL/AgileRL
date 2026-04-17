@@ -1,7 +1,9 @@
 import copy
 import gc
+import inspect
 import re
 import tempfile
+import warnings
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,7 +29,7 @@ from transformers.generation.configuration_utils import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 from vllm import LLM
 
-from agilerl.algorithms import GRPO
+from agilerl.algorithms import CISPO, GRPO, GSPO
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
@@ -413,6 +415,54 @@ def _make_cpu_grpo_for_branch_tests(**kwargs):
     }
     defaults.update(kwargs)
     return GRPO(**defaults)
+
+
+def test_init_cispo_sets_fixed_loss_type_and_hides_loss_type_arg():
+    actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
+    cispo = CISPO(
+        actor_network=actor,
+        pad_token_id=63,
+        pad_token="<pad>",
+        batch_size=4,
+        group_size=2,
+        max_output_tokens=4,
+        max_model_len=12,
+        wrap=False,
+        gradient_checkpointing=False,
+        accelerator=None,
+        device="cpu",
+    )
+    assert cispo.loss_type == "cispo"
+    class_sig = str(inspect.signature(CISPO))
+    init_sig = str(inspect.signature(CISPO.__init__))
+    assert "loss_type" not in class_sig
+    assert "loss_type" not in init_sig
+    assert "self" not in class_sig
+    assert isinstance(cispo, GRPO)
+
+
+def test_init_gspo_sets_fixed_loss_type_and_hides_loss_type_arg():
+    actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
+    gspo = GSPO(
+        actor_network=actor,
+        pad_token_id=63,
+        pad_token="<pad>",
+        batch_size=4,
+        group_size=2,
+        max_output_tokens=4,
+        max_model_len=12,
+        wrap=False,
+        gradient_checkpointing=False,
+        accelerator=None,
+        device="cpu",
+    )
+    assert gspo.loss_type == "gspo"
+    class_sig = str(inspect.signature(GSPO))
+    init_sig = str(inspect.signature(GSPO.__init__))
+    assert "loss_type" not in class_sig
+    assert "loss_type" not in init_sig
+    assert "self" not in class_sig
+    assert isinstance(gspo, GRPO)
 
 
 def test_get_action_grpo_hf_path_contract(
@@ -1052,8 +1102,8 @@ def test_init_grpo_max_model_len_and_max_output_tokens_none_error(
             "Invalid adv_norm 'bad_norm'. Expected one of ['mean_std', 'mean_only'].",
         ),
         (
-            {"importance_sampling_level": "bad_level"},
-            "Invalid importance_sampling_level 'bad_level'. Expected one of ['token', 'sequence', 'average'].",
+            {"loss_type": "bad_level"},
+            "Invalid loss_type 'bad_level'. Expected one of ['grpo', 'gspo', 'cispo'].",
         ),
         (
             {"adv_clip_range": 0.0},
@@ -1083,16 +1133,33 @@ def test_init_grpo_liger_warns_and_disables_unsupported_kl_shaping():
     grpo.clean_up()
 
 
-def test_init_grpo_liger_warns_and_falls_back_to_token_importance_sampling():
+def test_init_grpo_liger_warns_and_falls_back_to_standard_path_for_non_grpo_loss():
     with pytest.warns(
         UserWarning,
-        match="importance_sampling_level!='token' is not supported with use_liger_loss=True",
+        match="use_liger_loss=True is only supported for loss_type='grpo'",
     ):
         grpo = _make_cpu_grpo_for_branch_tests(
             use_liger_loss=True,
-            importance_sampling_level="sequence",
+            loss_type="gspo",
         )
-    assert grpo.importance_sampling_level == "token"
+    assert grpo.use_liger_loss is False
+    grpo.clean_up()
+
+
+def test_init_grpo_cispo_warns_when_beta_nonzero():
+    with pytest.warns(UserWarning, match="CISPO is typically used with beta=0"):
+        grpo = _make_cpu_grpo_for_branch_tests(loss_type="cispo", beta=0.1)
+    grpo.clean_up()
+
+
+@pytest.mark.parametrize("loss_type", ["grpo", "gspo"])
+def test_init_grpo_non_cispo_nonzero_beta_no_warning(loss_type):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        grpo = _make_cpu_grpo_for_branch_tests(loss_type=loss_type, beta=0.1)
+    assert not any(
+        "CISPO is typically used with beta=0" in str(w.message) for w in caught
+    )
     grpo.clean_up()
 
 
@@ -1771,26 +1838,30 @@ def test_calculate_kl_divergence(
 class _GrpoLossStub:
     def __init__(
         self,
-        clip_coef: float,
+        clip_coef_min: float,
+        clip_coef_max: float,
         beta: float,
         use_kl_advantage_shaping: bool,
-        importance_sampling_level: str,
     ) -> None:
-        self.clip_coef = clip_coef
+        self.clip_coef_min = clip_coef_min
+        self.clip_coef_max = clip_coef_max
         self.beta = beta
         self.use_kl_advantage_shaping = use_kl_advantage_shaping
-        self.importance_sampling_level = importance_sampling_level
 
     _calculate_kl_divergence = GRPO._calculate_kl_divergence
+    _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
+    _reduce_masked_loss = GRPO._reduce_masked_loss
     _grpo_loss_standard = GRPO._grpo_loss_standard
+    _gspo_loss = GRPO._gspo_loss
+    _cispo_loss = GRPO._cispo_loss
 
 
-def test_grpo_loss_standard_kl_advantage_shaping_and_sequence_is_paths():
+def test_grpo_loss_standard_kl_advantage_shaping_path():
     stub = _GrpoLossStub(
-        clip_coef=0.2,
+        clip_coef_min=0.8,
+        clip_coef_max=1.2,
         beta=0.05,
         use_kl_advantage_shaping=True,
-        importance_sampling_level="sequence",
     )
     mask = torch.tensor([[True, True, False], [True, True, True]])
     log_probs = torch.tensor([[0.2, 0.3, 0.0], [0.4, 0.1, -0.2]], dtype=torch.float32)
@@ -1808,19 +1879,19 @@ def test_grpo_loss_standard_kl_advantage_shaping_and_sequence_is_paths():
     assert torch.isfinite(kl)
 
 
-def test_grpo_loss_standard_average_importance_sampling_path():
+def test_gspo_loss_path():
     stub = _GrpoLossStub(
-        clip_coef=0.2,
+        clip_coef_min=0.8,
+        clip_coef_max=1.2,
         beta=0.05,
         use_kl_advantage_shaping=False,
-        importance_sampling_level="average",
     )
     mask = torch.tensor([[True, True, True], [True, False, True]])
     log_probs = torch.tensor([[0.1, 0.2, 0.0], [0.3, 0.0, -0.1]], dtype=torch.float32)
     old_log_probs = log_probs - 0.2
     reference_log_probs = log_probs + 0.03
     advantages = torch.tensor([[0.75], [0.25]], dtype=torch.float32)
-    loss, kl = stub._grpo_loss_standard(
+    loss, kl = stub._gspo_loss(
         mask,
         log_probs,
         old_log_probs,
@@ -1829,6 +1900,56 @@ def test_grpo_loss_standard_average_importance_sampling_path():
     )
     assert torch.isfinite(loss)
     assert torch.isfinite(kl)
+
+
+def test_cispo_loss_path():
+    stub = _GrpoLossStub(
+        clip_coef_min=0.8,
+        clip_coef_max=1.2,
+        beta=0.05,
+        use_kl_advantage_shaping=False,
+    )
+    mask = torch.tensor([[True, True, True], [True, False, True]])
+    log_probs = torch.tensor([[0.1, 0.2, 0.0], [0.3, 0.0, -0.1]], dtype=torch.float32)
+    old_log_probs = log_probs - 0.2
+    reference_log_probs = log_probs + 0.03
+    advantages = torch.tensor([[0.75], [0.25]], dtype=torch.float32)
+    loss, kl = stub._cispo_loss(
+        mask,
+        log_probs,
+        old_log_probs,
+        reference_log_probs,
+        advantages,
+    )
+    assert torch.isfinite(loss)
+    assert torch.isfinite(kl)
+
+
+def test_cispo_loss_clamps_importance_ratio_on_both_sides():
+    stub = _GrpoLossStub(
+        clip_coef_min=0.8,
+        clip_coef_max=1.2,
+        beta=0.0,
+        use_kl_advantage_shaping=False,
+    )
+    mask = torch.tensor([[True, True]])
+    log_probs = torch.tensor([[-1.0, 1.0]], dtype=torch.float32)
+    old_log_probs = torch.zeros_like(log_probs)
+    reference_log_probs = log_probs.clone()
+    advantages = torch.tensor([[1.0]], dtype=torch.float32)
+
+    loss, kl = stub._cispo_loss(
+        mask,
+        log_probs,
+        old_log_probs,
+        reference_log_probs,
+        advantages,
+    )
+
+    # exp([-1, 1]) -> [0.367..., 2.718...] then clamp to [0.8, 1.2].
+    expected_loss = torch.tensor(-0.2, dtype=torch.float32)
+    assert torch.allclose(loss, expected_loss, atol=1e-6)
+    assert torch.allclose(kl, torch.tensor(0.0, dtype=torch.float32), atol=1e-6)
 
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -1887,7 +2008,7 @@ def test_grpo_loss(
     mask = torch.ones_like(log_probs)
     mask[:, -3:] = 0
     mask = mask.to(torch.bool)
-    loss, kl = grpo._grpo_loss(
+    loss, kl = grpo._loss(
         batch_size=10,
         minibatch_idxs=torch.arange(10, device=grpo.device),
         completion_ids=torch.randint(
@@ -2077,7 +2198,7 @@ def test_learn_filter_whiten_clip_branch_path_with_active_subset():
         patch.object(grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward),
         patch.object(
             grpo,
-            "_grpo_loss",
+            "_loss",
             return_value=(
                 torch.tensor(1.0, dtype=torch.float32),
                 torch.tensor(0.1, dtype=torch.float32),
@@ -2168,9 +2289,7 @@ def test_learn_empty_minibatch_branch_continues_without_grpo_step():
             return_value=EmptySlicingBatchIndices(),
         ),
         patch.object(grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward),
-        patch.object(
-            grpo, "_grpo_loss", side_effect=AssertionError("should not be called")
-        ),
+        patch.object(grpo, "_loss", side_effect=AssertionError("should not be called")),
     ):
         metrics = grpo.learn((completion_ids, action_masks, rewards))
     assert metrics == {"mean_loss": 0.0, "mean_kl": 0.0}
@@ -2353,7 +2472,7 @@ def test_grpo_value_error_with_nan_loss(
         return torch.tensor(float("nan")), torch.tensor(1.0)
 
     with (
-        patch.object(grpo, "_grpo_loss", side_effect=mock_grpo_loss),
+        patch.object(grpo, "_loss", side_effect=mock_grpo_loss),
         pytest.raises(ValueError) as value_error,
     ):
         grpo.learn((completions, action_masks, rewards))

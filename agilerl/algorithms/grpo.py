@@ -1,6 +1,7 @@
 import warnings
+from collections.abc import Callable
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -57,8 +58,10 @@ class GRPO(LLMAlgorithm):
     :type beta: float, optional
     :param lr: Learning rate for optimizer, defaults to 5e-7
     :type lr: float, optional
-    :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
-    :type clip_coef: float, optional
+    :param clip_coef: Surrogate clipping coefficient as either a symmetric scalar
+        (mapped to ``[1-clip_coef, 1+clip_coef]``) or an explicit ratio tuple
+        ``(clip_coef_min, clip_coef_max)``.
+    :type clip_coef: float | tuple[float, float], optional
     :param max_grad_norm: Maximum norm for gradient clipping, defaults to 0.1
     :type max_grad_norm: float, optional
     :param update_epochs: Number of policy update epochs, defaults to 1
@@ -125,9 +128,9 @@ class GRPO(LLMAlgorithm):
     :param adv_norm: Advantage normalization mode. ``"mean_std"`` divides by
         standard deviation, ``"mean_only"`` only centers, defaults to ``"mean_std"``.
     :type adv_norm: str, optional
-    :param importance_sampling_level: Importance sampling ratio granularity.
-        One of ``"token"``, ``"sequence"``, or ``"average"``, defaults to ``"token"``.
-    :type importance_sampling_level: str, optional
+    :param loss_type: PPO-style loss variant to optimize. One of ``"grpo"``,
+        ``"gspo"``, or ``"cispo"``, defaults to ``"grpo"``.
+    :type loss_type: Literal["grpo", "gspo", "cispo"], optional
     :param whiten_advantages: If ``True``, whiten token-level advantages over
         valid action positions, defaults to False.
     :type whiten_advantages: bool, optional
@@ -155,7 +158,7 @@ class GRPO(LLMAlgorithm):
         batch_size: int = 16,
         beta: float = 0.001,
         lr: float = 5e-7,
-        clip_coef: float = 0.2,
+        clip_coef: float | tuple[float, float] = 0.2,
         max_grad_norm: float = 0.1,
         update_epochs: int = 1,
         group_size: int = 8,
@@ -186,7 +189,7 @@ class GRPO(LLMAlgorithm):
         use_liger_loss: bool = False,
         use_kl_advantage_shaping: bool = False,
         adv_norm: str = "mean_std",
-        importance_sampling_level: str = "token",
+        loss_type: Literal["grpo", "gspo", "cispo"] = "grpo",
         whiten_advantages: bool = False,
         adv_clip_range: float | None = None,
         filter_zero_adv: bool = False,
@@ -229,13 +232,25 @@ class GRPO(LLMAlgorithm):
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
         assert lr > 0, "Learning rate must be greater than zero."
-        assert isinstance(
-            clip_coef,
-            (float, int),
-        ), "Clipping coefficient must be a float."
-        assert clip_coef >= 0, (
-            "Clipping coefficient must be greater than or equal to zero."
-        )
+        if isinstance(clip_coef, (tuple, list)):
+            if len(clip_coef) != 2:
+                msg = "clip_coef tuple must contain exactly two values."
+                raise ValueError(msg)
+            clip_coef_min = float(clip_coef[0])
+            clip_coef_max = float(clip_coef[1])
+            # if clip_coef_min >= clip_coef_max:
+            #     msg = "clip_coef tuple must satisfy clip_coef_min < clip_coef_max."
+            #     raise ValueError(msg)
+        elif isinstance(clip_coef, (float, int)):
+            clip_coef = float(clip_coef)
+            if clip_coef < 0:
+                msg = "clip_coef must be greater than or equal to zero."
+                raise ValueError(msg)
+            clip_coef_min = 1 - clip_coef
+            clip_coef_max = 1 + clip_coef
+        else:
+            msg = "clip_coef must be a float or a tuple or list of two floats."
+            raise TypeError(msg)
         assert isinstance(
             update_epochs,
             int,
@@ -250,6 +265,8 @@ class GRPO(LLMAlgorithm):
             ), "Actor network must be a PeftModelProtocol or PreTrainedModelProtocol"
         self.use_liger_loss = use_liger_loss
         self.clip_coef = clip_coef
+        self.clip_coef_min = clip_coef_min
+        self.clip_coef_max = clip_coef_max
         self.update_epochs = update_epochs
         self.group_size = group_size
         self.beta = beta
@@ -265,10 +282,10 @@ class GRPO(LLMAlgorithm):
             )
             raise ValueError(msg)
         self.adv_norm = adv_norm
-        if importance_sampling_level not in {"token", "sequence", "average"}:
+        if loss_type not in {"grpo", "gspo", "cispo"}:
             msg = (
-                f"Invalid importance_sampling_level '{importance_sampling_level}'. "
-                "Expected one of ['token', 'sequence', 'average']."
+                f"Invalid loss_type '{loss_type}'. "
+                "Expected one of ['grpo', 'gspo', 'cispo']."
             )
             raise ValueError(msg)
         if adv_clip_range is not None and adv_clip_range <= 0:
@@ -277,26 +294,33 @@ class GRPO(LLMAlgorithm):
         if adv_filter_eps < 0:
             msg = "adv_filter_eps must be >= 0."
             raise ValueError(msg)
-        self.importance_sampling_level = importance_sampling_level
+        self.loss_type = loss_type
         self.whiten_advantages = whiten_advantages
         self.adv_clip_range = adv_clip_range
         self.filter_zero_adv = filter_zero_adv
         self.adv_filter_eps = adv_filter_eps
-        if use_liger_loss and use_kl_advantage_shaping:
+        if self.loss_type == "cispo" and self.beta != 0:
+            warnings.warn(
+                "CISPO is typically used with beta=0; nonzero beta adds KL "
+                "regularization to the objective.",
+                stacklevel=2,
+            )
+        if self.use_liger_loss and self.loss_type != "grpo":
+            warnings.warn(
+                "use_liger_loss=True is only supported for loss_type='grpo'; "
+                "falling back to standard PyTorch loss.",
+                stacklevel=2,
+            )
+            self.use_liger_loss = False
+        if self.use_liger_loss and use_kl_advantage_shaping:
             warnings.warn(
                 "use_kl_advantage_shaping is not supported with use_liger_loss=True; "
                 "disabling KL advantage shaping.",
                 stacklevel=2,
             )
             use_kl_advantage_shaping = False
-        if use_liger_loss and self.importance_sampling_level != "token":
-            warnings.warn(
-                "importance_sampling_level!='token' is not supported with "
-                "use_liger_loss=True; falling back to 'token'.",
-                stacklevel=2,
-            )
-            self.importance_sampling_level = "token"
         self.use_kl_advantage_shaping = use_kl_advantage_shaping
+        self._loss_fn = self._resolve_standard_loss_fn()
         if max_output_tokens is None and max_model_len is None:
             msg = "Either max_output_tokens or max_model_len must be specified"
             raise ValueError(
@@ -545,7 +569,7 @@ class GRPO(LLMAlgorithm):
                     ]
                     if len(minibatch_idxs) == 0:
                         continue
-                    loss, kl = self._grpo_loss(
+                    loss, kl = self._loss(
                         batch_size,
                         minibatch_idxs,
                         completion_ids,
@@ -677,7 +701,51 @@ class GRPO(LLMAlgorithm):
             - 1
         )
 
-    def _grpo_loss(
+    def _resolve_standard_loss_fn(
+        self,
+    ) -> Callable[
+        [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        tuple[torch.Tensor, torch.Tensor],
+    ]:
+        """Resolve the active standard (non-Liger) loss function."""
+        if self.loss_type == "grpo":
+            return self._grpo_loss_standard
+        if self.loss_type == "gspo":
+            return self._gspo_loss
+        return self._cispo_loss
+
+    def _apply_kl_advantage_shaping(
+        self,
+        advantages: torch.Tensor,
+        kl: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply ART-style zero-mean KL shaping to token advantages."""
+        if not self.use_kl_advantage_shaping:
+            return advantages
+        mask_f = mask.float()
+        masked_kl = kl * mask_f
+        avg_kl = masked_kl.sum(dim=-1, keepdim=True) / mask_f.sum(
+            dim=-1,
+            keepdim=True,
+        ).clamp(min=1.0)
+        return advantages + self.beta * (avg_kl - masked_kl)
+
+    def _reduce_masked_loss(
+        self,
+        loss: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Reduce per-token losses to a per-sequence mean over valid action tokens."""
+        denominator = mask.sum(dim=-1)
+        denominator = torch.where(
+            denominator > 0,
+            denominator,
+            torch.ones_like(denominator),
+        )
+        return (loss * mask).sum(dim=-1) / denominator
+
+    def _loss(
         self,
         batch_size: int,
         minibatch_idxs: np.ndarray,
@@ -687,8 +755,7 @@ class GRPO(LLMAlgorithm):
         old_log_probs: torch.Tensor,
         reference_log_probs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Sample a minibatch and compute the GRPO loss, dispatching to the
-        Liger or standard implementation based on ``self.use_liger_loss``.
+        """Sample a minibatch and compute the active objective loss.
 
         :param batch_size: Micro-batch size used for log-prob computation.
         :type batch_size: int
@@ -735,7 +802,7 @@ class GRPO(LLMAlgorithm):
             use_reference=False,
             eval_mode=False,
         )
-        return self._grpo_loss_standard(
+        return self._loss_fn(
             batch_action_mask,
             batch_log_probs,
             batch_old_log_probs,
@@ -767,49 +834,82 @@ class GRPO(LLMAlgorithm):
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
-        if self.use_kl_advantage_shaping:
-            mask_f = mask.float()
-            masked_kl = kl * mask_f
-            avg_kl = masked_kl.sum(dim=-1, keepdim=True) / mask_f.sum(
-                dim=-1, keepdim=True
-            ).clamp(min=1.0)
-            # ART-style zero-mean KL shaping of token advantages:
-            # lower-then-average KL gets boosted, higher KL gets damped.
-            advantages = advantages + self.beta * (avg_kl - masked_kl)
+        advantages = self._apply_kl_advantage_shaping(advantages, kl, mask)
         token_log_ratio = log_probs - old_log_probs
         log_probs_ratio = torch.exp(token_log_ratio)
-        if self.importance_sampling_level != "token":
-            mask_f = mask.float()
-            seq_log_ratio = (token_log_ratio * mask_f).sum(
-                dim=-1, keepdim=True
-            ) / mask_f.sum(dim=-1, keepdim=True).clamp(min=1.0)
-            seq_log_probs_ratio = torch.exp(seq_log_ratio)
-            if self.importance_sampling_level == "sequence":
-                log_probs_ratio = seq_log_probs_ratio
-            else:  # average
-                log_probs_ratio = 0.5 * (log_probs_ratio + seq_log_probs_ratio)
         clipped_log_probs_ratio = log_probs_ratio.clamp(
-            1 - self.clip_coef,
-            1 + self.clip_coef,
+            self.clip_coef_min,
+            self.clip_coef_max,
         )
         surrogate = log_probs_ratio * advantages
         clipped_surrogate = clipped_log_probs_ratio * advantages
         loss = -torch.min(surrogate, clipped_surrogate)
         if not self.use_kl_advantage_shaping:
             loss = loss + self.beta * kl
-        denominator = mask.sum(dim=-1)
-        denominator = torch.where(
-            denominator > 0,
-            denominator,
-            torch.ones_like(denominator),
-        )
-        loss = (loss * mask).sum(dim=-1) / denominator
+        loss = self._reduce_masked_loss(loss, mask)
         log_probs_ratio, clipped_log_probs_ratio, surrogate, clipped_surrogate = (
             None,
             None,
             None,
             None,
         )
+        return loss.mean(), kl.mean()
+
+    def _gspo_loss(
+        self,
+        mask: torch.Tensor,
+        log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        reference_log_probs: torch.Tensor,
+        advantages: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Calculate GSPO-like sequence-ratio clipped loss using standard PyTorch."""
+        kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
+        advantages = self._apply_kl_advantage_shaping(advantages, kl, mask)
+
+        token_log_ratio = log_probs - old_log_probs
+        mask_f = mask.float()
+        seq_log_ratio = (token_log_ratio * mask_f).sum(
+            dim=-1, keepdim=True
+        ) / mask_f.sum(
+            dim=-1,
+            keepdim=True,
+        ).clamp(min=1.0)
+        log_probs_ratio = torch.exp(seq_log_ratio)
+        clipped_log_probs_ratio = log_probs_ratio.clamp(
+            self.clip_coef_min,
+            self.clip_coef_max,
+        )
+        surrogate = log_probs_ratio * advantages
+        clipped_surrogate = clipped_log_probs_ratio * advantages
+        loss = -torch.min(surrogate, clipped_surrogate)
+        if not self.use_kl_advantage_shaping:
+            loss = loss + self.beta * kl
+        loss = self._reduce_masked_loss(loss, mask)
+        return loss.mean(), kl.mean()
+
+    def _cispo_loss(
+        self,
+        mask: torch.Tensor,
+        log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        reference_log_probs: torch.Tensor,
+        advantages: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Calculate CISPO-style clamped-ratio weighted log-prob objective."""
+        kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
+        advantages = self._apply_kl_advantage_shaping(advantages, kl, mask)
+
+        log_ratio = log_probs - old_log_probs
+        importance_weights = torch.exp(log_ratio)
+        clamped_ratio = importance_weights.clamp(
+            min=self.clip_coef_min,
+            max=self.clip_coef_max,
+        ).detach()
+        loss = -(clamped_ratio * advantages * log_probs)
+        if not self.use_kl_advantage_shaping:
+            loss = loss + self.beta * kl
+        loss = self._reduce_masked_loss(loss, mask)
         return loss.mean(), kl.mean()
 
     def _grpo_loss_liger(
@@ -904,8 +1004,8 @@ class GRPO(LLMAlgorithm):
             None,
             None,
             self.beta,
-            self.clip_coef,
-            self.clip_coef,
+            1.0 - self.clip_coef_min,
+            self.clip_coef_max - 1.0,
             "grpo",
             self.max_output_tokens,
             "token",  # Sequence for gspo when we implement it

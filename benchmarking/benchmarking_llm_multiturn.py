@@ -18,7 +18,7 @@ from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.utils import create_population
-from agilerl.wrappers.gem_wrappers import (
+from agilerl.wrappers.multiturn_wrappers import (
     FormatRewardWrapper,
     SearchTool,
     TokenObservationWrapper,
@@ -152,7 +152,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/training/llm_finetuning/ppo_llm.yaml",
+        default="configs/training/llm_finetuning/grpo.yaml",
         help="Path to the YAML config file",
     )
     args = parser.parse_args()

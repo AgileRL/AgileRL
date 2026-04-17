@@ -25,8 +25,10 @@ INIT_HP:
     MAX_MODEL_LEN: 1024  # Maximum context length for the model
     MAX_OUTPUT_TOKENS: 64
     COSINE_lR_SCHEDULER:
-    TOURN_SIZE: 2
+    USE_KL_ADVANTAGE_SHAPING: true
     ADV_NORM: mean_only
+    LOSS_TYPE: gspo
+    TOURN_SIZE: 2
     USE_MEMORY_EFFICIENT_PARAMS: true
     ELITISM: true
     POP_SIZE: 1

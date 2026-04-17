@@ -760,9 +760,7 @@ def create_population(
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
                 use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
                 adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
-                importance_sampling_level=INIT_HP.get(
-                    "IMPORTANCE_SAMPLING_LEVEL", "token"
-                ),
+                loss_type=INIT_HP.get("LOSS_TYPE", "grpo"),
                 whiten_advantages=INIT_HP.get("WHITEN_ADVANTAGES", False),
                 adv_clip_range=INIT_HP.get("ADV_CLIP_RANGE"),
                 filter_zero_adv=INIT_HP.get(

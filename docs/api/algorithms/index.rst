@@ -158,6 +158,12 @@ LLM Algorithms
    * - :ref:`GRPO <grpo>`
      - On-policy RL
      - Group-relative policy optimization for LLMs.
+   * - :ref:`CISPO <cispo>`
+     - On-policy RL
+     - GRPO specialization with fixed CISPO loss objective.
+   * - :ref:`GSPO <gspo>`
+     - On-policy RL
+     - GRPO specialization with fixed GSPO sequence-level objective.
    * - :ref:`DPO <dpo>`
      - Preference optimization
      - Offline preference learning without reward-model RL loop.
@@ -172,6 +178,8 @@ LLM Algorithms
    :maxdepth: 1
 
    grpo
+   cispo
+   gspo
    dpo
    llmppo
    llmreinforce
