@@ -6,12 +6,14 @@ on:
         branches: [main, nightly]
         paths:
             - agilerl/**
+            - tests/**
             - .github/workflows/**
             - pyproject.toml
     pull_request:
         branches: [main, nightly]
         paths:
             - agilerl/**
+            - tests/**
             - .github/workflows/**
             - pyproject.toml
 
