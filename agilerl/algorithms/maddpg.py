@@ -26,8 +26,8 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
-    concatenate_tensors,
     concatenate_spaces,
+    concatenate_tensors,
     format_shared_critic_encoder,
     get_deepest_head_config,
     get_vect_dim,

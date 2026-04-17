@@ -25,8 +25,8 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
-    concatenate_tensors,
     concatenate_spaces,
+    concatenate_tensors,
     format_shared_critic_encoder,
     get_deepest_head_config,
     get_vect_dim,
@@ -757,12 +757,12 @@ class MATD3(MultiAgentRLAlgorithm):
             for group_id, group_loss in grouped_losses.items():
                 actor_losses = [loss[0] for loss in group_loss if loss[0] is not None]
                 critic_losses = [loss[1] for loss in group_loss]
-                mean_actor_loss = (
-                    float(np.mean(actor_losses)) if actor_losses else None
-                )
+                mean_actor_loss = float(np.mean(actor_losses)) if actor_losses else None
                 loss_dict[group_id] = (mean_actor_loss, float(np.mean(critic_losses)))
 
-        if all(counter % self.policy_freq == 0 for counter in self.learn_counter.values()):
+        if all(
+            counter % self.policy_freq == 0 for counter in self.learn_counter.values()
+        ):
             for agent_id in self.observation_space:
                 self.soft_update(self.actors[agent_id], self.actor_targets[agent_id])
                 self.soft_update(
