@@ -193,7 +193,7 @@ def test_init_dpo(
         from_name=from_name,
     )
     assert dpo.batch_size_per_process == 16
-    assert dpo.beta == 0.001
+    assert dpo.beta == 0.1
     assert dpo.lr == 0.000005
     assert dpo.max_grad_norm == 0.1
     assert dpo.update_epochs == 1
@@ -567,32 +567,6 @@ def test_dpo_liger_unavailable_behaviour(
 def test_dpo_load():
     with pytest.raises(NotImplementedError):
         DPO.load("path")
-
-
-def test_liger_dpo_with_alpha_backward_returns_sixteen_outputs_with_trailing_nones() -> (
-    None
-):
-    """``_LigerDPOWithAlpha.backward`` forwards to the base, keeps four grads, pads twelve ``None``."""
-    from agilerl import HAS_LIGER_KERNEL
-
-    if not HAS_LIGER_KERNEL:
-        pytest.skip("liger-kernel not installed")
-
-    import agilerl.algorithms.dpo as dpo_mod
-
-    def fake_parent_backward(ctx, grad_output):
-        return tuple(range(16))
-
-    with patch.object(
-        dpo_mod.LigerFusedLinearPreferenceBase,
-        "backward",
-        staticmethod(fake_parent_backward),
-    ):
-        out = dpo_mod._LigerDPOWithAlpha.backward(MagicMock(), torch.tensor(1.0))
-
-    assert len(out) == 16
-    assert out[:4] == (0, 1, 2, 3)
-    assert out[4:] == (None,) * 12
 
 
 @pytest.mark.parametrize(

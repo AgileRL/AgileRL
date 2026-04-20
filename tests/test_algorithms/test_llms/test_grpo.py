@@ -1,6 +1,7 @@
 import copy
 import gc
 import inspect
+import os
 import re
 import tempfile
 import warnings
@@ -961,43 +962,24 @@ def test_init_grpo_vllm_tp_value_error(
         )
 
 
-@spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("use_vllm", [True])
-@pytest.mark.parametrize(
-    "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
-)
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize("use_separate_reference_adapter", [True])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_vllm_invalid_attention_backend_value_error(
     deepspeed_env,
     accelerator_factory,
     model_factory,
-    vocab_size,
-    input_size,
-    max_tokens,
-    group_size,
-    use_separate_reference_adapter,
-    use_vllm,
-    pretrained_model_name_or_path,
     use_deepspeed_optimizer,
     config,
-    reduce_memory_peak,
-    micro_batch_size_per_gpu,
 ):
+    pretrained_model_name_or_path = "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"
+    vocab_size = 1000
+    max_tokens = 20
+    group_size = 5
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with (
         patch.dict(os.environ, {"VLLM_ATTENTION_BACKEND": "TORCH_SDPA"}, clear=False),
-        patch.object(
-            vllm.LLM,
-            "__init__",
+        patch(
+            "agilerl.algorithms.core.base.LLM",
             side_effect=ValueError("Backend TORCH_SDPA must be registered before use."),
         ),
         pytest.raises(
@@ -1016,16 +998,14 @@ def test_init_grpo_vllm_invalid_attention_backend_value_error(
                 if accelerator is not None
                 else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
             ),
-            use_vllm=use_vllm,
+            use_vllm=True,
             vllm_config=VLLMConfig(
                 gpu_memory_utilization=0.05,
                 max_num_seqs=1,
             ),
             accelerator=accelerator,
-            use_separate_reference_adapter=use_separate_reference_adapter,
+            use_separate_reference_adapter=True,
             max_output_tokens=max_tokens,
-            reduce_memory_peak=reduce_memory_peak,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         )
 
 

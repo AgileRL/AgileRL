@@ -1146,3 +1146,29 @@ def test_gather_if_zero3_stage_not_three_noop():
     """ZeRO stages other than 3 should be a no-op context manager."""
     with gather_if_zero3(1, []):
         assert True
+
+
+def test_liger_dpo_with_alpha_backward_returns_sixteen_outputs_with_trailing_nones() -> (
+    None
+):
+    """``_LigerDPOWithAlpha.backward`` forwards to the base, keeps four grads, pads twelve ``None``."""
+    from agilerl import HAS_LIGER_KERNEL
+
+    if not HAS_LIGER_KERNEL:
+        pytest.skip("liger-kernel not installed")
+
+    import agilerl.utils.llm_utils as llm_utils_mod
+
+    def fake_parent_backward(ctx, grad_output):
+        return tuple(range(16))
+
+    with patch.object(
+        llm_utils_mod.LigerFusedLinearPreferenceBase,
+        "backward",
+        staticmethod(fake_parent_backward),
+    ):
+        out = llm_utils_mod._LigerDPOWithAlpha.backward(MagicMock(), torch.tensor(1.0))
+
+    assert len(out) == 16
+    assert out[:4] == (0, 1, 2, 3)
+    assert out[4:] == (None,) * 12
