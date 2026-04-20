@@ -2146,6 +2146,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.lora_config = lora_config
         self.use_vllm = use_vllm
         self.vllm_config = vllm_config
+        self.max_grad_norm = max_grad_norm
         self.use_memory_efficient_params = use_memory_efficient_params
         self.memory_efficient_params_context = (
             self._memory_efficient_params

@@ -6,16 +6,16 @@ from typing import Any
 
 import numpy as np
 import torch
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DPO, GRPO, LLMPPO, SFT, LLMReinforce
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.protocols import MultiTurnEnv
 from agilerl.rollouts.on_policy import collect_rollouts_llm
-from agilerl.typing import MultiTurnEnvType, PopulationType
+from agilerl.typing import PopulationType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
 from agilerl.utils.utils import (
     _distributed_world_size,
@@ -1153,7 +1153,7 @@ def finetune_llm_preference(
 def finetune_llm_multiturn(
     pop: PopulationType,
     max_turns: int,
-    env_factory: Callable[[], MultiTurnEnvType],
+    env_factory: Callable[[], MultiTurnEnv],
     env_config: dict[str, Any] | None = None,
     init_hp: dict[str, Any] | None = None,
     max_steps: int = 32768,

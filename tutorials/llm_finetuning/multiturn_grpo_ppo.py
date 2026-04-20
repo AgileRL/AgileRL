@@ -19,7 +19,7 @@ from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.utils import create_population
-from agilerl.wrappers.multiturn_wrappers import TokenObservationWrapper
+from agilerl.wrappers.llm_envs import TokenObservationWrapper
 
 if not HAS_LLM_DEPENDENCIES:
     msg = (
