@@ -1,9 +1,9 @@
 .. _dpo:
 
 Direct Preference Optimization (DPO)
-================================
+====================================
 
-`DPO <https://arxiv.org/pdf/2305.18290>`_ (Direct Preference Optimization) is an elegant simplification of :ref:`RLHF<_rlhf>` (Reinforcement Learning from Human Feedback)
+`DPO <https://arxiv.org/pdf/2305.18290>`__ (Direct Preference Optimization) is an elegant simplification of :ref:`RLHF<rlhf>` (Reinforcement Learning from Human Feedback)
 that makes preference learning more computationally efficient, especially for large language models.
 
 The two key innovations are:
@@ -21,7 +21,7 @@ Example
 .. code-block:: python
 
   from agilerl.algorithms import DPO
-  from agilerl.utils.llm_utils import PreferenceGym
+  from agilerl.wrappers.llm_envs import PreferenceGym
   from accelerate import Accelerator
   from datasets import load_dataset
   from peft import get_peft_model

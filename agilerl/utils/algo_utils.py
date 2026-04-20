@@ -347,6 +347,26 @@ def get_num_actions(space: spaces.Space) -> int:
     raise NotImplementedError(msg)
 
 
+def get_action_mask_size(space: spaces.Space) -> int:
+    """Return the size of the action mask for a given action space.
+
+    Action masks are only applicable to discrete action spaces. For continuous
+    (Box) spaces, returns 0.
+
+    :param space: Action space
+    :type space: spaces.Space
+    :return: Size of the action mask, or 0 if masking is not applicable
+    :rtype: int
+    """
+    if isinstance(space, spaces.Discrete):
+        return space.n
+    if isinstance(space, spaces.MultiDiscrete):
+        return int(sum(space.nvec))
+    if isinstance(space, spaces.MultiBinary):
+        return space.n
+    return 0
+
+
 def make_safe_deepcopies(
     *args: EvolvableModuleProtocol | list[EvolvableModuleProtocol],
 ) -> list[EvolvableModuleProtocol]:
@@ -687,7 +707,7 @@ def concatenate_spaces(space_list: list[SupportedObsSpaces]) -> spaces.Space:
         nvec = np.concatenate([space.nvec for space in space_list], axis=0)
         return spaces.MultiDiscrete(nvec)
 
-    msg = f"Unsupported space types: { {type(space) for space in spaces} }"
+    msg = f"Unsupported space types: { {type(space) for space in space_list} }"
     raise TypeError(
         msg,
     )
@@ -773,7 +793,7 @@ def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> 
         )
         return (
             observation.shape[0]
-            if len(observation.shape) > observation_space.shape
+            if len(observation.shape) > len(observation_space.shape)
             else 1
         )
     observation = (
@@ -1687,6 +1707,23 @@ def is_peft_model(model: nn.Module) -> bool:
     return isinstance(model, PeftModel)
 
 
+def _rename_peft_primary_adapter_keys_in_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    *,
+    old_adapter: str,
+    new_adapter: str,
+) -> dict[str, torch.Tensor]:
+    """Rewrite state-dict keys when the primary PEFT adapter is renamed (e.g. to ``actor``)."""
+    if old_adapter == new_adapter:
+        return state_dict
+    out: dict[str, torch.Tensor] = {}
+    for k, v in state_dict.items():
+        nk = k.replace(f".{old_adapter}.", f".{new_adapter}.")
+        nk = nk.replace(f"lora_{old_adapter}", f"lora_{new_adapter}")
+        out[nk] = v
+    return out
+
+
 def clone_llm(
     original_model: PreTrainedModelType | DummyEvolvable,
     zero_stage: int,
@@ -1716,7 +1753,7 @@ def clone_llm(
         model_config = original_model.config
         base_model = original_model.model
         model = type(base_model)(model_config)
-        # Get all adapter names
+        adapter_names: list[str] = []
 
         if hasattr(original_model, "peft_config"):
             adapter_names = list(original_model.peft_config.keys())
@@ -1726,10 +1763,10 @@ def clone_llm(
                     "Multiple adapters detected. Only the first adapter will be used for RL finetuning.",
                     stacklevel=2,
                 )
-            # Add first adapter using get_peft_model
+            # AgileRL standardizes on adapter name "actor" for the primary adapter.
             first_adapter = adapter_names[0]
             first_config = original_model.peft_config[first_adapter]
-            model = get_peft_model(model, first_config, adapter_name=first_adapter)
+            model = get_peft_model(model, first_config, adapter_name="actor")
 
             # Add remaining adapters using add_adapter
             for adapter_name in adapter_names[1:]:
@@ -1738,7 +1775,14 @@ def clone_llm(
             model.disable_adapter()
 
         if state_dict is not None:
-            model.load_state_dict(state_dict, strict=False)
+            sd = state_dict
+            if adapter_names and adapter_names[0] != "actor":
+                sd = _rename_peft_primary_adapter_keys_in_state_dict(
+                    sd,
+                    old_adapter=adapter_names[0],
+                    new_adapter="actor",
+                )
+            model.load_state_dict(sd, strict=False)
     return model
 
 

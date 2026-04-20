@@ -59,10 +59,8 @@ if __name__ == "__main__":
         device=device,
     )
 
-    field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        memory_size=10000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
+        max_size=10000,  # Max replay buffer size
         device=device,
     )
 
@@ -89,15 +87,13 @@ if __name__ == "__main__":
     )
 
     mutations = Mutations(
-        algo="CQN",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.2,  # New layer mutation
         parameters=0.2,  # Network parameters mutation
         activation=0,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
-        mutation_sd=0.1,  # Mutation strength  # Network architecture
+        mutation_sd=0.1,  # Mutation strength
         rand_seed=1,  # Random seed
         device=device,
     )
@@ -115,7 +111,7 @@ if __name__ == "__main__":
     pbar = default_progress_bar(max_steps)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         for agent in pop:  # Loop through population
-            for _idx_step in range(evo_steps):
+            for _ in range(evo_steps):
                 experiences = memory.sample(agent.batch_size)  # Sample replay buffer
                 agent.learn(experiences)  # Learn according to agent's RL algorithm
             total_steps += evo_steps
@@ -140,7 +136,7 @@ if __name__ == "__main__":
         )
 
         # Tournament selection and population mutation
-        elite, pop = tournament.select(pop)
+        _, pop = tournament.select(pop)
         pop = mutations.mutation(pop)
 
         # Update step counter

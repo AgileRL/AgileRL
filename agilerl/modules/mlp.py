@@ -273,7 +273,7 @@ class EvolvableMLP(EvolvableModule):
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
 
         if numb_new_nodes is None:
-            numb_new_nodes = self.rng.choice([16, 32, 64])
+            numb_new_nodes = int(self.rng.choice([16, 32, 64]))
 
         # HARD LIMIT
         if self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes:
@@ -303,7 +303,7 @@ class EvolvableMLP(EvolvableModule):
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
 
         if numb_new_nodes is None:
-            numb_new_nodes = self.rng.choice([16, 32, 64])
+            numb_new_nodes = int(self.rng.choice([16, 32, 64]))
 
         # HARD LIMIT
         if self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes:

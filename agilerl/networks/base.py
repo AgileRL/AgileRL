@@ -23,7 +23,6 @@ from agilerl.typing import (
     DeviceType,
     NetConfigType,
 )
-from agilerl.utils.algo_utils import get_hidden_states_shape_from_model
 from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
@@ -232,10 +231,13 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
         if encoder_cls is not None:
             if isinstance(encoder_cls, str):
-                self.encoder_cls = self._encoder_aliases[encoder_cls]
-            elif not issubclass(encoder_cls, EvolvableModule):
+                encoder_cls = self._encoder_aliases[encoder_cls]
+
+            if not issubclass(encoder_cls, EvolvableModule):
                 msg = "Encoder class must be a subclass of EvolvableModule."
                 raise TypeError(msg)
+
+            self.encoder_cls = encoder_cls
 
             # Check if encoder config contains `num_outputs` as input argument, in which
             # case we can enable latent space mutations. Otherwise, we disable them.
@@ -345,7 +347,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
         return self.head_net(latent, *args, **kwargs)
 
-    def build_network_head(self, *args: Any, **kwargs: Any) -> None:
+    def build_network_head(
+        self, net_config: NetConfigType | None = None, **kwargs: Any
+    ) -> None:
         """Build the head of the network."""
         msg = (
             "Method build_network_head must be implemented in EvolvableNetwork objects."
@@ -422,6 +426,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             ):
                 self.cached_hidden_state = {}
                 self.cached_hidden_state_batch_size = batch_size
+                from agilerl.utils.algo_utils import get_hidden_states_shape_from_model
+
                 for name, shape in get_hidden_states_shape_from_model(
                     self.encoder,
                 ).items():
@@ -459,7 +465,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :rtype: dict[str, Any]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = self.rng.choice([8, 16, 32])
+            numb_new_nodes = int(self.rng.choice([8, 16, 32]))
 
         if self.latent_dim + numb_new_nodes < self.max_latent_dim:
             self.latent_dim += numb_new_nodes
@@ -477,7 +483,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :rtype: dict[str, Any]
         """
         if numb_new_nodes is None:
-            numb_new_nodes = self.rng.choice([8, 16, 32])
+            numb_new_nodes = int(self.rng.choice([8, 16, 32]))
 
         if self.latent_dim - numb_new_nodes > self.min_latent_dim:
             self.latent_dim -= numb_new_nodes

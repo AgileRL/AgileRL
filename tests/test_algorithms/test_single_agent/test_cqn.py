@@ -11,7 +11,11 @@ from torch import nn, optim
 from agilerl.algorithms.cqn import CQN
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from tests.helper_functions import assert_not_equal_state_dict, assert_state_dicts_equal
+from tests.helper_functions import (
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
+    get_experiences_batch,
+)
 
 
 class DummyCQN(CQN):
@@ -95,8 +99,9 @@ def simple_cnn():
         ("multidiscrete_space", EvolvableMLP),
     ],
 )
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
-def test_initialize_cqn(observation_space, encoder_cls, accelerator, request):
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+def test_initialize_cqn(observation_space, encoder_cls, accelerator_flag, request):
+    accelerator = Accelerator() if accelerator_flag else None
     action_space = spaces.Discrete(2)
     observation_space = request.getfixturevalue(observation_space)
     cqn = CQN(observation_space, action_space, accelerator=accelerator)
@@ -282,21 +287,24 @@ def test_returns_expected_action_mask(vector_space):
 
 
 # learns from experiences and updates network parameters
-def test_learns_from_experiences(vector_space):
+@pytest.mark.parametrize(
+    "observation_space",
+    ["vector_space", "image_space", "dict_space", "multidiscrete_space"],
+)
+def test_learns_from_experiences(observation_space, request):
+    observation_space = request.getfixturevalue(observation_space)
     action_space = spaces.Discrete(2)
     batch_size = 64
 
-    # Create an instance of the cqn class
-    cqn = CQN(vector_space, action_space, batch_size=batch_size)
-
-    # Create a batch of experiences
-    states = torch.randn(batch_size, vector_space.shape[0])
-    actions = torch.randint(0, action_space.n, (batch_size, 1))
-    rewards = torch.randn((batch_size, 1))
-    next_states = torch.randn(batch_size, vector_space.shape[0])
-    dones = torch.randint(0, 2, (batch_size, 1))
-
-    experiences = [states, actions, rewards, next_states, dones]
+    cqn = CQN(observation_space, action_space, batch_size=batch_size)
+    td = get_experiences_batch(observation_space, action_space, batch_size, cqn.device)
+    experiences = (
+        td["obs"],
+        td["action"],
+        td["reward"],
+        td["next_obs"],
+        td["done"],
+    )
 
     # Copy state dict before learning - should be different to after updating weights
     actor = cqn.actor
@@ -411,6 +419,27 @@ def test_soft_update(vector_space):
             strict=False,
         )
     )
+    cqn.clean_up()
+
+
+def test_learn_with_accelerator_moves_tensors(vector_space):
+    action_space = spaces.Discrete(2)
+    batch_size = 64
+    accelerator = Accelerator()
+    cqn = CQN(
+        vector_space,
+        action_space,
+        batch_size=batch_size,
+        accelerator=accelerator,
+    )
+    states = torch.randn(batch_size, vector_space.shape[0])
+    actions = torch.randint(0, action_space.n, (batch_size, 1))
+    rewards = torch.randn((batch_size, 1))
+    next_states = torch.randn(batch_size, vector_space.shape[0])
+    dones = torch.randint(0, 2, (batch_size, 1))
+    experiences = (states, actions, rewards, next_states, dones)
+    loss = cqn.learn(experiences)
+    assert isinstance(loss, float)
     cqn.clean_up()
 
 

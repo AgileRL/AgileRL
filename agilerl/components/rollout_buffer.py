@@ -246,6 +246,7 @@ class RolloutBuffer:
             dict[str, ArrayOrTensor] | None
         ) = None,  # Not used if only initial hidden states are stored
         episode_start: bool | np.ndarray | None = None,
+        action_mask: ArrayOrTensor | None = None,
     ) -> None:
         """Add a new batch of observations and associated data from vectorized environments to the buffer.
 
@@ -269,6 +270,8 @@ class RolloutBuffer:
         :type next_hidden_state: dict[str, ArrayOrTensor] | None
         :param episode_start: Episode start flag batch (shape: (num_envs,)), defaults to None
         :type episode_start: bool | np.ndarray | None
+        :param action_mask: Action mask batch (shape: (num_envs, mask_size)), 1=legal 0=illegal, defaults to None
+        :type action_mask: ArrayOrTensor | None
         """
         if self.pos == self.capacity:
             if self.wrap_at_capacity:
@@ -358,6 +361,22 @@ class RolloutBuffer:
                 dtype=torch.bool,
                 device="cpu",
             )
+
+        # Action Masks (lazily allocated on first use to avoid wasting memory
+        # for discrete action spaces that don't use masking)
+        if action_mask is not None:
+            action_mask_tensor = torch.as_tensor(
+                action_mask, dtype=torch.bool, device="cpu"
+            ).reshape(self.num_envs, -1)
+
+            if "action_masks" not in self.buffer.keys():
+                mask_size = action_mask_tensor.shape[-1]
+                self.buffer["action_masks"] = torch.ones(
+                    (self.capacity, self.num_envs, mask_size),
+                    dtype=torch.bool,
+                )
+
+            current_step_data["action_masks"] = action_mask_tensor
 
         # Hidden States (assuming they are dictionaries of tensors)
         if self.recurrent and hidden_state is not None:
@@ -755,10 +774,11 @@ class RolloutBuffer:
 
         self.unpadded_slices = unpadded_slices
 
+        keys_to_pad = ["observations", "actions", "hidden_states"]
+        if "action_masks" in valid_buffer_data_view.keys():
+            keys_to_pad.append("action_masks")
         valid_data_to_pad: TensorDictBase = valid_buffer_data_view.select(
-            "observations",
-            "actions",
-            "hidden_states",
+            *keys_to_pad,
         ).clone()
 
         valid_data_to_pad["pad_mask"] = torch.ones(
@@ -880,13 +900,16 @@ class RolloutBuffer:
                 self.unpadded_slices[idx].tolist() for idx in minibatch_seq_indices
             ]
             unpadded_indices = [
-                item for sublist in unpadded_indices for item in sublist
+                int(item) for sublist in unpadded_indices for item in sublist
             ]
+            unpadded_indices_tensor = torch.as_tensor(
+                unpadded_indices, device=indices.device
+            )
 
             padded: TensorDict = self.padded_data[padded_indices]
             if self.recurrent and padded.get("initial_hidden_states", None) is not None:
                 batch_hidden_states = {}
-                initial_hidden_states: TensorDict = padded.get_non_tensor(
+                initial_hidden_states: dict[str, Any] = padded.get_non_tensor(
                     "initial_hidden_states",
                 )
                 for key, value in initial_hidden_states.items():
@@ -894,7 +917,7 @@ class RolloutBuffer:
 
                 padded.set_non_tensor("initial_hidden_states", batch_hidden_states)
 
-            unpadded = self.unpadded_data[unpadded_indices]
+            unpadded = self.unpadded_data[unpadded_indices_tensor]
             start = end
             yield padded, unpadded
 

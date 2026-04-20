@@ -888,7 +888,7 @@ def test_llmppo_test_method_token_observation_wrapper_branch():
     from transformers import AutoTokenizer
 
     from agilerl.utils.probe_envs_llm import ConstantTargetEnv
-    from agilerl.wrappers.multiturn_wrappers import TokenObservationWrapper
+    from agilerl.wrappers.llm_envs import TokenObservationWrapper
 
     tok = AutoTokenizer.from_pretrained("gpt2")
     if tok.pad_token_id is None:

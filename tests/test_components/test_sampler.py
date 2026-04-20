@@ -10,7 +10,9 @@ from agilerl.components.replay_buffer import (
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
-from agilerl.components.sampler import Sampler
+import agilerl.components.sampler as sampler_module
+
+Sampler = sampler_module.Sampler
 
 
 # Initialize Sampler with default parameters
@@ -418,8 +420,6 @@ def test_sampler_warns_for_invalid_per_memory(monkeypatch):
     class TogglePrioritized(metaclass=ToggleMeta):
         pass
 
-    import agilerl.components.sampler as sampler_module
-
     monkeypatch.setattr(sampler_module, "PrioritizedReplayBuffer", TogglePrioritized)
     with pytest.warns(
         UserWarning,
@@ -438,8 +438,6 @@ def test_sampler_warns_for_invalid_nstep_memory(monkeypatch):
 
     class ToggleMultiStep(metaclass=ToggleMeta):
         pass
-
-    import agilerl.components.sampler as sampler_module
 
     monkeypatch.setattr(
         sampler_module, "PrioritizedReplayBuffer", type("Never", (), {})

@@ -34,5 +34,5 @@ available datasets it is as simple as changing the ``id`` parameter used by ``fe
 We can convert these labelled datasets into a bandit learning environment easily by using the ``agilerl.wrappers.learning.BanditEnv`` class.
 
 
-.. literalinclude:: ../../../tutorials/Bandits/agilerl_neural_ucb.py
+.. literalinclude:: ../../../tutorials/bandits/neural_ucb.py
     :language: python

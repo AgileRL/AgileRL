@@ -9,7 +9,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_reasoning
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.utils.llm_utils import ReasoningGym
+from agilerl.wrappers.llm_envs import ReasoningGym
 from agilerl.utils.utils import create_population
 
 if HAS_LLM_DEPENDENCIES:

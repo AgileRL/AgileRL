@@ -4,8 +4,6 @@ import multiprocessing as mp
 import os
 import signal
 import time
-from multiprocessing import Process
-from multiprocessing.sharedctypes import SynchronizedArray
 from unittest.mock import patch
 
 import gymnasium as gym
@@ -322,11 +320,6 @@ def actions_to_list_helper(actions):
     return passed_actions_list
 
 
-# @pytest.fixture
-# def pz_experience_spec():
-#     return PettingZooExperienceSpec(8)
-
-
 @pytest.fixture(autouse=True)
 def clean_process_fixture():
     """Fixture to ensure processes are cleaned up between tests"""
@@ -350,7 +343,7 @@ def test_create_async_pz_vector_env(env_fns):
     assert env.observation_space
     assert env.num_envs == 8
     for val in env._obs_buffer.values():
-        assert isinstance(val, SynchronizedArray)
+        assert isinstance(val, mp.sharedctypes.SynchronizedArray)
     assert isinstance(env.observations, Observations)
     assert env.processes
     env.reset()
@@ -593,6 +586,13 @@ def raise_error_step(self, action):
     )
 
 
+def raising_worker_env_constructor():
+    if mp.current_process().name != "MainProcess":
+        msg = "Error creating env"
+        raise RuntimeError(msg)
+    return GenericTestEnv()
+
+
 def test_async_vector_subenv_error():
     env_list = [
         lambda: GenericTestEnv(
@@ -606,6 +606,19 @@ def test_async_vector_subenv_error():
         envs.reset(seed=[1, 0])
 
     envs.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[raising_worker_env_constructor for _ in range(2)]],
+)
+def test_async_vector_subenv_init_error(env_fns):
+    envs = AsyncPettingZooVecEnv(env_fns)
+
+    with pytest.raises(RuntimeError, match="Error creating env"):
+        envs.reset()
+
+    envs.close(terminate=True)
     env_list = [
         lambda: GenericTestEnv(
             reset_func=raise_error_reset,
@@ -630,7 +643,7 @@ def test_reset_async_exception(env_fns):
     env._state = AsyncState.WAITING_RESET
     with pytest.raises(AlreadyPendingCallError):
         env.reset_async()
-    env.__del__()
+    env.close(terminate=True)
 
 
 @pytest.mark.parametrize(
@@ -643,7 +656,7 @@ def test_reset_wait_exception(env_fns):
         env.reset_async()
         env._state = AsyncState.DEFAULT
         env.reset_wait()
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -655,7 +668,7 @@ def test_step_async_exception(env_fns):
     env._state = AsyncState.WAITING_RESET
     with pytest.raises(AlreadyPendingCallError):
         env.step_async(actions=None)
-    env.__del__()
+    env.close(terminate=True)
 
 
 @pytest.mark.parametrize(
@@ -667,7 +680,7 @@ def test_step_wait_exception(env_fns):
     env._state = AsyncState.DEFAULT
     with pytest.raises(NoAsyncCallError):
         env.step_wait()
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -679,7 +692,7 @@ def test_call_async_exception(env_fns):
     env._state = AsyncState.WAITING_CALL
     with pytest.raises(AlreadyPendingCallError):
         env.call_async("test")
-    env.__del__()
+    env.close(terminate=True)
 
 
 @pytest.mark.parametrize(
@@ -691,7 +704,7 @@ def test_call_wait_exception(env_fns):
     env._state = AsyncState.DEFAULT
     with pytest.raises(NoAsyncCallError):
         env.call_wait()
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -702,7 +715,7 @@ def test_call_exception_worker(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
     with pytest.raises(ValueError):
         env.call("reset")
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -713,7 +726,7 @@ def test_set_attr_val_error(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
     with pytest.raises(ValueError):
         env.set_attr("test", values=[1, 2, 3])
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -725,7 +738,7 @@ def test_set_attr_exception(env_fns):
     env._state = AsyncState.WAITING_CALL
     with pytest.raises(AlreadyPendingCallError):
         env.set_attr("test", values=[1, 2])
-    env.__del__()
+    env.close(terminate=True)
 
 
 @pytest.mark.parametrize(
@@ -767,7 +780,29 @@ def test_poll_pipe_envs(env_fns):
     env.parent_pipes[0] = None
     result = env._poll_pipe_envs(timeout=1)
     assert not result
-    env.__del__()
+    env.close()
+
+
+@pytest.mark.parametrize(
+    "env_fns",
+    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+)
+def test_poll_pipe_envs_ready(env_fns):
+    env = AsyncPettingZooVecEnv(env_fns)
+    original_pipes = env.parent_pipes
+
+    class ReadyPipe:
+        closed = False
+
+        def poll(self, _timeout):
+            return True
+
+    env.parent_pipes = [ReadyPipe() for _ in original_pipes]
+    try:
+        assert env._poll_pipe_envs(timeout=1.0)
+    finally:
+        env.parent_pipes = original_pipes
+        env.close()
 
 
 @pytest.mark.parametrize(
@@ -779,7 +814,7 @@ def test_assert_is_running(env_fns):
     env.closed = True
     with pytest.raises(ClosedEnvironmentError):
         env._assert_is_running()
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -793,7 +828,7 @@ def test_step_wait_timeout_async_pz_vector_env(env_fns):
         env.parent_pipes[0] = None
         env.step_wait(timeout=1)
         env.close()
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -807,7 +842,7 @@ def test_call_wait_timeout_async_pz_vector_env(env_fns):
         env.parent_pipes[0] = None
         env.call_wait(timeout=1)
         env.close()
-    env.__del__()
+    env.close()
 
 
 @pytest.mark.parametrize(
@@ -836,6 +871,20 @@ def test_get_placeholder_value(transition_name):
         )
         assert isinstance(output, np.ndarray)
     env.close()
+
+
+def test_get_placeholder_value_observation_without_spaces():
+    output = get_placeholder_value(
+        agent="speaker_0",
+        transition_name="observation",
+        obs_spaces=None,
+    )
+    assert output is None
+
+
+def test_get_placeholder_value_unknown_transition():
+    output = get_placeholder_value(agent="speaker_0", transition_name="unknown")
+    assert output is None
 
 
 def test_add_info_dictionaries():
@@ -916,7 +965,7 @@ def test_worker_reset():
     vec_env = AsyncPettingZooVecEnv(env_fns)
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
-    p = Process(
+    p = mp.Process(
         target=_async_worker,
         args=(
             0,
@@ -956,7 +1005,7 @@ def test_worker_step_simple():
     vec_env.close()
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
-    p = Process(
+    p = mp.Process(
         target=_async_worker,
         args=(
             0,
@@ -1018,7 +1067,7 @@ def test_worker_step_autoreset():
     vec_env.close()
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
-    p = Process(
+    p = mp.Process(
         target=_async_worker,
         args=(
             0,
@@ -1060,7 +1109,7 @@ def test_worker_runtime_error():
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
     try:
-        p = Process(
+        p = mp.Process(
             target=_async_worker,
             args=(
                 0,
@@ -1243,25 +1292,55 @@ dummy_observation_spaces = {"agent_0": gym.spaces.Box(0, 1, (4,))}
 
 
 # Test for pz_vec_env.py
-def test_vec_env_reset():
+def test_vec_env_reset_not_implemented():
     vec_env = PettingZooVecEnv(
         3,
         dummy_observation_spaces,
         dummy_action_spaces,
         ["agent_0"],
     )
-    vec_env.reset()
+    with pytest.raises(NotImplementedError, match="Subclasses must implement reset"):
+        vec_env.reset()
 
 
-def test_vec_env_step():
+def test_vec_env_step_not_implemented():
     vec_env = PettingZooVecEnv(
         3,
         dummy_observation_spaces,
         dummy_action_spaces,
         ["agent_0"],
     )
-    vec_env.step_async([])
-    vec_env.step_wait()
+    with pytest.raises(
+        NotImplementedError, match="Subclasses must implement step_async"
+    ):
+        vec_env.step_async([])
+    with pytest.raises(
+        NotImplementedError, match="Subclasses must implement step_wait"
+    ):
+        vec_env.step_wait()
+
+
+def test_vec_env_step_skips_nan_actions():
+    class DummyStepVecEnv(PettingZooVecEnv):
+        def __init__(self):
+            super().__init__(
+                3,
+                dummy_observation_spaces,
+                dummy_action_spaces,
+                ["agent_0"],
+            )
+            self.passed_actions = None
+
+        def step_async(self, actions):
+            self.passed_actions = actions
+
+        def step_wait(self):
+            return {}, {}, {}, {}, {}
+
+    vec_env = DummyStepVecEnv()
+    actions = {"agent_0": np.array([np.nan, 1.0, np.nan], dtype=np.float32)}
+    vec_env.step(actions)
+    assert vec_env.passed_actions == [{}, {"agent_0": 1}, {}]
 
 
 def test_vec_env_render():
@@ -1316,7 +1395,7 @@ def test_delete_async_pz_vec_env():
     for process in env.processes:
         assert process.is_alive()
     processes = env.processes
-    env.__del__()
+    env.close()
     for p in processes:
         assert not p.is_alive()
 

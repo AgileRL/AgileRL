@@ -132,7 +132,6 @@ def main(init_hp, mut_p):
         if use_vllm
         else None
     )
-
     pop = create_population(
         algo=init_hp["ALGO"],
         net_config=None,
@@ -160,7 +159,8 @@ def main(init_hp, mut_p):
         accelerator=accelerator,
         verbose=True,
     )
-    accelerator.end_training()
+    if accelerator is not None:
+        accelerator.end_training()
 
 
 if __name__ == "__main__":

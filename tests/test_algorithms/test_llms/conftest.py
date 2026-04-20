@@ -1,15 +1,14 @@
 import gc
 import random
+from importlib import import_module
+from importlib.util import find_spec
 
-import deepspeed.comm.comm as ds_comm
-import deepspeed.utils.groups as ds_groups
 import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from accelerate.utils import DeepSpeedPlugin
-from peft import LoraConfig, get_peft_model
 from torch._inductor.utils import fresh_cache
 from transformers import AutoModelForCausalLM
 
@@ -38,7 +37,13 @@ def cleanup_after_test(request):
 
     yield
 
-    if "vllm" in request.node.name:
+    if (
+        "vllm" in request.node.name
+        and destroy_model_parallel is not None
+        and cleanup_dist_env_and_memory is not None
+        and ds_groups is not None
+        and ds_comm is not None
+    ):
         # vLLM-specific cleanup
         destroy_model_parallel()
         cleanup_dist_env_and_memory()
@@ -57,13 +62,19 @@ def set_seed():
     """Set random seeds for reproducibility."""
     SEED = 42
     torch.manual_seed(SEED)
-    torch.cuda.manual_seed(SEED)
-    torch.cuda.manual_seed_all(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(SEED)
+        torch.cuda.manual_seed_all(SEED)
     np.random.seed(SEED)
     random.seed(SEED)
 
 
 def generate_accelerator(use_deepspeed_optimizer, config):
+    if config is not None and not torch.cuda.is_available():
+        pytest.skip("DeepSpeed-configured LLM tests require CUDA support.")
+    if config is not None and find_spec("deepspeed") is None:
+        pytest.skip("DeepSpeed-configured LLM tests require deepspeed.")
+
     gc.collect()
     torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
@@ -90,6 +101,11 @@ def accelerator_factory():
 
 
 def generate_model(pretrained_model_name_or_path, add_value_head=False):
+    pytest.importorskip("peft", reason="LLM tests require peft.")
+    pytest.importorskip("transformers", reason="LLM tests require transformers.")
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM
+
     peft_config = LoraConfig(
         task_type="CAUSAL_LM",
         r=16,
@@ -116,7 +132,11 @@ def generate_model(pretrained_model_name_or_path, add_value_head=False):
         return model
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        torch_dtype=torch.bfloat16,
+        dtype=(
+            torch.bfloat16
+            if (torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+            else torch.float32
+        ),
         attn_implementation="sdpa",
     )
     model.gradient_checkpointing_enable()

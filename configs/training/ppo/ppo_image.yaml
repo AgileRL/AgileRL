@@ -39,7 +39,8 @@ MUTATION_PARAMS:
     RL_HP_MUT: 0.2                         # Learning HP mutation
     MUT_SD: 0.1                            # Mutation strength
     RAND_SEED: 42                          # Random seed
-    MIN_LR: 0.0001                         # Define max and min limits for mutating RL hyperparams
+    # Define max and min limits for mutating RL hyperparams
+    MIN_LR: 0.0001
     MAX_LR: 0.01
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
@@ -51,35 +52,35 @@ MUTATION_PARAMS:
     MAX_UPDATE_EPOCHS: 10
 
 NET_CONFIG:
-    latent_dim: 256
-    min_latent_dim: 128
-    max_latent_dim: 512
+    latent_dim: 256                   # Latent representation dimension
+    min_latent_dim: 128               # Min latent dim for architecture mutation
+    max_latent_dim: 512               # Max latent dim for architecture mutation
     encoder_config:
-        min_channel_size: 32
-        max_channel_size: 256
-        activation: ReLU
-        layer_norm: false
-        init_layers: true
-        channel_size:
+        min_channel_size: 32          # Min CNN channels for architecture mutation
+        max_channel_size: 256         # Max CNN channels for architecture mutation
+        activation: ReLU              # Activation function
+        layer_norm: false             # Apply layer normalization
+        init_layers: true             # Use custom weight initialization
+        channel_size:                 # CNN channel sizes per layer
             - 32
             - 64
             - 128
-        kernel_size:
+        kernel_size:                  # CNN kernel sizes per layer
             - 8
             - 4
             - 3
-        stride_size:
+        stride_size:                  # CNN stride sizes per layer
             - 4
             - 2
             - 1
     head_config:
-        min_hidden_layers: 1
-        max_hidden_layers: 3
-        min_mlp_nodes: 128
-        max_mlp_nodes: 512
-        hidden_size:
+        min_hidden_layers: 1          # Min hidden layers for architecture mutation
+        max_hidden_layers: 3          # Max hidden layers for architecture mutation
+        min_mlp_nodes: 128            # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 512            # Max MLP nodes for architecture mutation
+        hidden_size:                  # Head hidden layer sizes
             - 256
-        activation: ReLU
-        output_activation:
-        layer_norm: false
-        init_layers: true
+        activation: ReLU              # Activation function
+        output_activation:            # Output activation (null = linear)
+        layer_norm: false             # Apply layer normalization
+        init_layers: true             # Use custom weight initialization

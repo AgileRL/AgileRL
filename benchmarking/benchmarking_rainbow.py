@@ -12,6 +12,7 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import RainbowQNetwork
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import (
+    _check_box2d_available,
     create_population,
     make_vect_envs,
     observation_space_channels_to_first,
@@ -30,6 +31,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     # device = torch.device("cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
+
+    _check_box2d_available(INIT_HP["ENV_NAME"])
 
     env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
 

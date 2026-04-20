@@ -33,7 +33,7 @@ AgileRL currently supports processing the following observation spaces:
      - ✅
 
 Single-Agent Algorithms
-----------------------
+-----------------------
 
 Action Spaces
 ~~~~~~~~~~~~~
@@ -94,11 +94,9 @@ Action Spaces
    ilql
    ppo
    td3
-   grpo
-   dpo
 
 Multi-Agent Algorithms
----------------------
+----------------------
 
 Action Spaces
 ~~~~~~~~~~~~~
@@ -137,7 +135,7 @@ Action Spaces
    matd3
 
 Bandit Algorithms
-----------------
+-----------------
 
 .. toctree::
    :maxdepth: 1

@@ -155,8 +155,6 @@ class MATD3(MultiAgentRLAlgorithm):
         assert lr_actor > 0, "Actor learning rate must be greater than zero."
         assert isinstance(lr_critic, float), "Critic learning rate must be a float."
         assert lr_critic > 0, "Critic learning rate must be greater than zero."
-        assert isinstance(learn_step, int), "Learn step rate must be an integer."
-        assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(gamma, float), "Gamma must be a float."
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
@@ -488,6 +486,8 @@ class MATD3(MultiAgentRLAlgorithm):
         self,
         obs: dict[str, ObservationType],
         infos: InfosDict | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[ArrayDict, ArrayDict]:
         """Return the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
@@ -540,7 +540,8 @@ class MATD3(MultiAgentRLAlgorithm):
 
         # Process actions for environment
         processed_action_dict: ArrayDict = OrderedDict()
-        for agent_id, action_space in self.possible_action_spaces.items():
+        for agent_id in action_dict:
+            action_space = self.possible_action_spaces[agent_id]
             if isinstance(action_space, spaces.Discrete):
                 action = action_dict[agent_id].numpy()
                 mask = (
@@ -577,7 +578,7 @@ class MATD3(MultiAgentRLAlgorithm):
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
             action_dict = apply_env_defined_actions(
-                self.agent_ids,
+                list(action_dict.keys()),
                 processed_action_dict,
                 env_defined_actions,
                 agent_masks,

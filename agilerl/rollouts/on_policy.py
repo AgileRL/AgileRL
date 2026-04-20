@@ -10,7 +10,7 @@ from agilerl.algorithms import GRPO, LLMPPO, PPO, LLMReinforce
 from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
-from agilerl.wrappers.multiturn_wrappers import SyncMultiTurnVecEnv
+from agilerl.wrappers.llm_envs import SyncMultiTurnVecEnv
 
 SupportedOnPolicy = PPO
 SupportedOnPolicyLLM = LLMPPO | LLMReinforce | GRPO
@@ -129,6 +129,7 @@ def _collect_rollouts(
         value_np = np.atleast_1d(value)
         log_prob_np = np.atleast_1d(log_prob)
 
+        current_action_mask = info.get("action_mask", None)
         agent.rollout_buffer.add(
             obs=obs,
             action=action,
@@ -138,6 +139,7 @@ def _collect_rollouts(
             log_prob=log_prob_np,
             next_obs=next_obs,
             hidden_state=current_hidden_state_for_buffer,
+            action_mask=current_action_mask,
         )
 
         scores += reward_np

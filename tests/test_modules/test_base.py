@@ -850,6 +850,49 @@ def test_clone_nested_mutation_methods_and_wrapper_change_activation():
     assert wrapper.wrapped.changed == ("ReLU", True)
 
 
+def test_module_dict_activation_single_value():
+    class A(EvolvableModule):
+        @mutation(MutationType.NODE)
+        def mut(self):
+            return {}
+
+        def __init__(self, device="cpu", activation="ReLU"):
+            super().__init__(device)
+            self._activation = activation
+
+        @property
+        def activation(self):
+            return self._activation
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+    m1 = A(device="cpu", activation="ReLU")
+    m2 = A(device="cpu", activation="ReLU")
+    md = ModuleDict({"m1": m1, "m2": m2})
+    assert md.activation == "ReLU"
+
+
+def test_module_dict_filter_mutation_methods():
+    class A(EvolvableModule):
+        @mutation(MutationType.NODE)
+        def mut_a(self):
+            return {}
+
+        def forward(self, x):
+            return x
+
+        def recreate_network(self):
+            pass
+
+    md = ModuleDict({"a": A(device="cpu")})
+    md.filter_mutation_methods("mut")
+    assert md["a"]._node_mutation_methods == []
+
+
 def test_module_dict_additional_branches():
     class A(EvolvableModule):
         @mutation(MutationType.NODE)

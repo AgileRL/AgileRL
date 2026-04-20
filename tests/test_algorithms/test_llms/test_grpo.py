@@ -13,6 +13,9 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import numpy as np
 import pytest
 import torch
+
+pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
+pytest.importorskip("vllm", reason="LLM tests require vllm.")
 import vllm
 from accelerate import Accelerator
 from accelerate.scheduler import AcceleratedScheduler
@@ -47,7 +50,7 @@ pytestmark = pytest.mark.llm
 
 deepspeed_base_config = {
     "bf16": {
-        "enabled": True,
+        "enabled": torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
     },
     "auto_cast": True,
     "gradient_clipping": 0.5,
@@ -147,7 +150,7 @@ class DummyMLPPreTrainedModel(PreTrainedModel):
         input_ids: torch.Tensor | None = None,
         *args,
         **kwargs,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> DummyForwardOutput:
         input_ids = input_ids.to(self.datatype)
         output = self.linear_2(self.linear_1(input_ids)).reshape(
             input_ids.shape[0],
@@ -259,16 +262,7 @@ class DummyVLLM:
         # Create dummy outputs that match VLLM's expected format
         all_outputs = []
 
-        for _i in range(num_prompts):
-            # Create a dummy output object with the expected structure
-            class DummyOutput:
-                def __init__(self, token_ids):
-                    self.token_ids = token_ids
-
-            class DummyRequestOutput:
-                def __init__(self, outputs):
-                    self.outputs = outputs
-
+        for _ in range(num_prompts):
             # Generate random token IDs for testing
             # Using a reasonable range for token IDs (0-1000 for testing)
             import random
@@ -304,6 +298,14 @@ def create_module(input_size, max_tokens, vocab_size, device):
     )
 
 
+def _patch_mps_learn_hooks(monkeypatch: pytest.MonkeyPatch, module: str) -> MagicMock:
+    """Make ``learn`` think MPS is available and record ``torch.mps.empty_cache`` calls."""
+    mock_empty = MagicMock()
+    monkeypatch.setattr(f"{module}.torch.backends.mps.is_available", lambda: True)
+    monkeypatch.setattr(f"{module}.torch.mps.empty_cache", mock_empty)
+    return mock_empty
+
+
 def generate_grpo(
     accelerator_factory,
     model_factory,
@@ -321,6 +323,9 @@ def generate_grpo(
     from_name=False,
     use_liger_loss=False,
 ):
+    if config is not None and not torch.cuda.is_available():
+        pytest.skip("DeepSpeed-configured LLM tests require CUDA support.")
+
     gc.collect()
     torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
@@ -504,6 +509,7 @@ def test_get_action_grpo_hf_path_contract(
             prompt_len=input_size,
             pad_token_id=grpo.pad_token_id,
         )
+
     grpo.clean_up()
 
 
@@ -700,7 +706,6 @@ def test_get_action_grpo_vllm_sleep_mode(
     mock_instance.sleep.assert_called()
     mock_instance.wake_up.assert_called()
     grpo.clean_up()
-    del grpo
 
 
 @pytest.mark.parametrize(
@@ -953,6 +958,74 @@ def test_init_grpo_vllm_tp_value_error(
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
             max_output_tokens=max_tokens,
+        )
+
+
+@spawn_new_process_for_each_test
+@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
+@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+@pytest.mark.parametrize("use_vllm", [True])
+@pytest.mark.parametrize(
+    "pretrained_model_name_or_path",
+    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+)
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize("use_separate_reference_adapter", [True])
+@pytest.mark.parametrize("reduce_memory_peak", [True])
+@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+def test_init_grpo_vllm_invalid_attention_backend_value_error(
+    deepspeed_env,
+    accelerator_factory,
+    model_factory,
+    vocab_size,
+    input_size,
+    max_tokens,
+    group_size,
+    use_separate_reference_adapter,
+    use_vllm,
+    pretrained_model_name_or_path,
+    use_deepspeed_optimizer,
+    config,
+    reduce_memory_peak,
+    micro_batch_size_per_gpu,
+):
+    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+    with (
+        patch.dict(os.environ, {"VLLM_ATTENTION_BACKEND": "TORCH_SDPA"}, clear=False),
+        patch.object(
+            vllm.LLM,
+            "__init__",
+            side_effect=ValueError("Backend TORCH_SDPA must be registered before use."),
+        ),
+        pytest.raises(
+            ValueError,
+            match=r"unsupported VLLM_ATTENTION_BACKEND='TORCH_SDPA'",
+        ),
+    ):
+        GRPO(
+            actor_network=model_factory(pretrained_model_name_or_path),
+            pad_token_id=vocab_size - 1,
+            pad_token="<pad>",
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            group_size=group_size,
+            cosine_lr_schedule_config=(
+                None
+                if accelerator is not None
+                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+            ),
+            use_vllm=use_vllm,
+            vllm_config=VLLMConfig(
+                gpu_memory_utilization=0.05,
+                max_num_seqs=1,
+            ),
+            accelerator=accelerator,
+            use_separate_reference_adapter=use_separate_reference_adapter,
+            max_output_tokens=max_tokens,
+            reduce_memory_peak=reduce_memory_peak,
+            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         )
 
 
@@ -1278,7 +1351,13 @@ def test_init_grpo_with_no_accelerator(
     assert isinstance(grpo.cosine_lr_schedule_config, CosineLRScheduleConfig), type(
         grpo.cosine_lr_schedule_config,
     )
-    assert grpo.device == "cuda"
+    assert grpo.device == (
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
     assert grpo.index == 0
     assert grpo.scores == []
     assert grpo.fitness == []
@@ -2499,7 +2578,7 @@ def test_grpo_load():
     [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
 )
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-@pytest.mark.parametrize("weights_only", [False, True])
+@pytest.mark.parametrize("lora_only", [False, True])
 def test_grpo_save_load_checkpoint(
     deepspeed_env,
     grpo_factory,
@@ -2516,7 +2595,7 @@ def test_grpo_save_load_checkpoint(
     pretrained_model_name_or_path,
     tmpdir,
     micro_batch_size_per_gpu,
-    weights_only,
+    lora_only,
 ):
     grpo = grpo_factory(
         accelerator_factory,
@@ -2534,7 +2613,7 @@ def test_grpo_save_load_checkpoint(
     )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with tempfile.TemporaryDirectory() as tmpdir:
-        grpo.save_checkpoint(tmpdir, weights_only=weights_only)
+        grpo.save_checkpoint(tmpdir, lora_only=lora_only)
         new_grpo = GRPO(
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
@@ -3022,7 +3101,7 @@ def test_grpo_test(
     )
     env = DummyReasoningEnv(vocab_size, input_size, batch_size, device=grpo.device)
     fitnesses = grpo.test(env)
-    assert isinstance(fitnesses, torch.Tensor)
+    assert isinstance(fitnesses, np.ndarray)
     grpo.clean_up()
 
 
@@ -3130,8 +3209,8 @@ def test_clone_llm_peft(vocab_size, input_size, max_tokens):
         task_type="CAUSAL_LM",
     )
 
-    # Create PEFT model
-    peft_model = get_peft_model(base_model, peft_config)
+    # Create PEFT model (AgileRL requires the primary adapter to be named "actor")
+    peft_model = get_peft_model(base_model, peft_config, adapter_name="actor")
 
     # Clone the PEFT model
     cloned_model = clone_llm(peft_model, 0, peft_model.state_dict())
@@ -3217,7 +3296,6 @@ def test_grpo_clean_up(
     assert grpo.actor is None
     assert grpo.optimizer is None
     assert grpo.lr_scheduler is None
-    del grpo
 
 
 @pytest.mark.parametrize("config", [None])
@@ -3390,7 +3468,7 @@ def test_init_grpo_lora_config_warning(
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with pytest.warns(
         UserWarning,
-        match=r"No LoRA config provided. AgileRL can only be used to finetune adapters at present. Using default LoRA configuration for RL finetuning.",
+        match=r"No LoRA config provided\.\s+AgileRL can only be used to finetune adapters at present\.\s+Using default LoRA configuration for RL finetuning:",
     ):
         gc.collect()
         vocab_size = 1000
@@ -3644,7 +3722,7 @@ def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
     pretrained_model_name_or_path,
     micro_batch_size_per_gpu,
 ):
-    grpo = grpo_factory(
+    grpo_factory(
         accelerator_factory,
         model_factory,
         config,
@@ -3797,6 +3875,73 @@ def test_grpo_no_llm_dependencies(grpo_factory, model_factory, accelerator_facto
     AcceleratorState._reset_state(True)
 
 
+@pytest.mark.parametrize("assertion_mode", ["warns_and_fallback", "private_guard"])
+def test_grpo_liger_unavailable_behaviour(
+    monkeypatch,
+    grpo_factory,
+    model_factory,
+    accelerator_factory,
+    assertion_mode,
+):
+    monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False)
+    monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", False)
+    if assertion_mode == "warns_and_fallback":
+        with pytest.warns(
+            UserWarning,
+            match=r"use_liger_loss=True requested.*Falling back to standard loss\.",
+        ):
+            grpo = grpo_factory(
+                accelerator_factory=accelerator_factory,
+                model_factory=model_factory,
+                config=None,
+                use_deepspeed_optimizer=False,
+                vocab_size=30,
+                input_size=5,
+                max_tokens=10,
+                use_separate_reference_adapter=False,
+                pretrained_model_name_or_path=None,
+                reduce_memory_peak=False,
+                micro_batch_size_per_gpu=None,
+                from_name=False,
+                group_size=2,
+                use_vllm=False,
+                use_liger_loss=True,
+            )
+        assert grpo.use_liger_loss is False
+    else:
+        grpo = grpo_factory(
+            accelerator_factory=accelerator_factory,
+            model_factory=model_factory,
+            config=None,
+            use_deepspeed_optimizer=False,
+            vocab_size=30,
+            input_size=5,
+            max_tokens=10,
+            use_separate_reference_adapter=False,
+            pretrained_model_name_or_path=None,
+            reduce_memory_peak=False,
+            micro_batch_size_per_gpu=None,
+            from_name=False,
+            group_size=2,
+            use_vllm=False,
+            use_liger_loss=False,
+        )
+        with pytest.raises(
+            ImportError,
+            match=r"Liger GRPO loss was requested but `liger-kernel` is not available\. Set use_liger_loss=False\.",
+        ):
+            grpo._grpo_loss_liger(
+                batch_ids=torch.ones((1, 2), dtype=torch.long),
+                action_mask=torch.ones((1, 1), dtype=torch.bool),
+                advantages=torch.ones((1,), dtype=torch.float32),
+                old_log_probs=torch.zeros((1, 1), dtype=torch.float32),
+                reference_log_probs=torch.zeros((1, 1), dtype=torch.float32),
+            )
+
+    grpo.clean_up()
+    AcceleratorState._reset_state(True)
+
+
 def test_sync_deepspeed_returns_early_when_accelerator_is_none():
     """Test that the method returns early when accelerator is None."""
     mock_algorithm = MagicMock(spec=LLMAlgorithm)
@@ -3942,3 +4087,142 @@ def test_sync_deepspeed_updates_actor_optimizer_clip_grad():
 
     # Verify that optimizer clip_grad was updated
     assert mock_optimizer.clip_grad == 1.0
+
+
+def test_grpo_learn_raises_when_loss_not_finite(
+    deepspeed_env,
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+):
+    grpo = grpo_factory(
+        accelerator_factory,
+        model_factory,
+        config=None,
+        use_deepspeed_optimizer=False,
+        vocab_size=30,
+        input_size=5,
+        max_tokens=10,
+        group_size=2,
+        use_separate_reference_adapter=False,
+        use_vllm=False,
+        pretrained_model_name_or_path=None,
+        reduce_memory_peak=False,
+        micro_batch_size_per_gpu=None,
+        from_name=False,
+    )
+
+    completions = [
+        torch.randint(0, 30, (2, 15), device=grpo.device),
+    ]
+    action_masks = [torch.ones((2, 14), device=grpo.device, dtype=torch.bool)]
+    rewards = torch.stack([torch.rand(2, dtype=torch.float32)], dim=0)
+
+    with (
+        patch.object(
+            grpo,
+            "_grpo_loss",
+            return_value=(
+                torch.tensor(float("nan"), device=grpo.device),
+                torch.tensor(0.0, device=grpo.device),
+            ),
+        ),
+        pytest.raises(ValueError, match="Loss is not finite"),
+    ):
+        grpo.learn((completions, action_masks, rewards))
+    grpo.clean_up()
+
+
+def test_grpo_learn_restores_gradient_checkpointing_after_base_disable(
+    deepspeed_env,
+    grpo_factory,
+    accelerator_factory,
+    model_factory,
+):
+    grpo = grpo_factory(
+        accelerator_factory,
+        model_factory,
+        config=None,
+        use_deepspeed_optimizer=False,
+        vocab_size=30,
+        input_size=5,
+        max_tokens=10,
+        group_size=2,
+        use_separate_reference_adapter=False,
+        use_vllm=False,
+        pretrained_model_name_or_path=None,
+        reduce_memory_peak=False,
+        micro_batch_size_per_gpu=None,
+        from_name=False,
+    )
+    for name, param in grpo.actor.named_parameters():
+        if ("lora_A" in name or "lora_B" in name) and param is not None:
+            param.data.normal_(mean=0, std=0.01)
+
+    base_lm = MagicMock()
+    base_lm.is_gradient_checkpointing = True
+    base_lm.gradient_checkpointing_disable = MagicMock()
+    base_lm.gradient_checkpointing_enable = MagicMock()
+
+    completions = [
+        torch.randint(0, 30, (2, 15), device=grpo.device),
+    ]
+    action_masks = [torch.ones((2, 14), device=grpo.device, dtype=torch.bool)]
+    rewards = torch.stack([torch.rand(2, dtype=torch.float32)], dim=0)
+
+    with patch.object(
+        grpo,
+        "_get_base_lm_for_gradient_checkpointing",
+        return_value=base_lm,
+    ):
+        grpo.learn((completions, action_masks, rewards))
+
+    base_lm.gradient_checkpointing_disable.assert_called_once()
+    base_lm.gradient_checkpointing_enable.assert_called_once()
+    grpo.clean_up()
+
+
+def test_grpo_learn_calls_mps_empty_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    accelerator_factory,
+    model_factory,
+) -> None:
+    """Patch MPS on CI so ``torch.mps.empty_cache()`` in ``learn()`` is exercised."""
+    empty = _patch_mps_learn_hooks(monkeypatch, "agilerl.algorithms.grpo")
+    grpo = generate_grpo(
+        accelerator_factory,
+        model_factory,
+        config=None,
+        use_deepspeed_optimizer=False,
+        vocab_size=30,
+        input_size=5,
+        max_tokens=10,
+        group_size=2,
+        use_separate_reference_adapter=False,
+        use_vllm=False,
+        pretrained_model_name_or_path=None,
+        reduce_memory_peak=False,
+        micro_batch_size_per_gpu=None,
+        from_name=False,
+    )
+    for name, param in grpo.actor.named_parameters():
+        if ("lora_A" in name or "lora_B" in name) and param is not None:
+            param.data.normal_(mean=0, std=0.01)
+
+    completions = [
+        torch.randint(
+            0,
+            30,
+            (2, 5 + 10),
+            device=grpo.device,
+        ),
+    ]
+    action_masks = [
+        torch.ones((2, 5 + 10 - 1), device=grpo.device, dtype=torch.bool),
+    ]
+    rewards = torch.stack([torch.rand(2, dtype=torch.float32) for _ in range(1)], dim=0)
+
+    grpo.learn((completions, action_masks, rewards))
+    empty.assert_called()
+    grpo.clean_up()
+    AcceleratorState._reset_state(True)

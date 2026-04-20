@@ -6,6 +6,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_offline import train_offline
 from agilerl.utils.utils import (
+    _check_box2d_available,
     create_population,
     make_vect_envs,
     observation_space_channels_to_first,
@@ -26,6 +27,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     if accelerator.is_main_process:
         print("============ AgileRL Distributed ============")
     accelerator.wait_for_everyone()
+
+    _check_box2d_available(INIT_HP["ENV_NAME"])
 
     env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
 
@@ -51,10 +54,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         activation=MUTATION_PARAMS["ACT_MUT"],
         rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
-        min_lr=MUTATION_PARAMS["MIN_LR"],
-        max_lr=MUTATION_PARAMS["MAX_LR"],
-        min_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-        max_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         accelerator=accelerator,
     )

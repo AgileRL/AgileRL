@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from agilerl.wrappers.multiturn_wrappers import (
+from agilerl.wrappers.llm_envs import (
     FormatRewardWrapper,
     SearchTool,
     SyncMultiTurnVecEnv,
@@ -468,7 +468,7 @@ def test_search_tool_search_success_and_failure_paths(
         del url, params, timeout
         return _Resp()
 
-    monkeypatch.setattr("agilerl.wrappers.multiturn_wrappers.requests.get", _ok_get)
+    monkeypatch.setattr("agilerl.wrappers.llm_envs.requests.get", _ok_get)
     out = tool._search("hello")
     assert "first" in out and "second" not in out
 
@@ -476,7 +476,7 @@ def test_search_tool_search_success_and_failure_paths(
         del url, params, timeout
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("agilerl.wrappers.multiturn_wrappers.requests.get", _fail_get)
+    monkeypatch.setattr("agilerl.wrappers.llm_envs.requests.get", _fail_get)
     assert "[SearchTool Error:" in tool._search("hello")
 
     no_url = SearchTool(search_url=None)

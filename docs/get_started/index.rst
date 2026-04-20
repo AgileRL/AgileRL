@@ -438,3 +438,8 @@ It requires the ``agent`` have methods ``get_action()`` and ``learn()``.
           mutation=mutations,                        # Mutations object
           wb=INIT_HP['WANDB'],                       # Weights and Biases tracking
       )
+
+.. toctree::
+   :hidden:
+
+   agilerl2changes

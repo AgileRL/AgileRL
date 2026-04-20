@@ -3,7 +3,7 @@
 Multi-Agent Deep Deterministic Policy Gradient (MADDPG)
 =======================================================
 
-`MADDPG <https://arxiv.org/pdf/1706.02275.pdf>`_ (Multi-Agent Deep Deterministic Policy Gradients) extends the single-agent DDPG
+`MADDPG <https://arxiv.org/pdf/1706.02275.pdf>`__ (Multi-Agent Deep Deterministic Policy Gradients) extends the single-agent DDPG
 algorithm to enable cooperative or competitive training of multiple agents in complex environments, enhancing the
 stability and convergence of the learning process through decentralized actor and centralized critic architectures.
 

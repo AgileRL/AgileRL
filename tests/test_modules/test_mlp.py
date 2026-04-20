@@ -8,9 +8,6 @@ from agilerl.modules.custom_components import NoisyLinear
 from agilerl.modules.mlp import EvolvableMLP
 from tests.helper_functions import assert_state_dicts_equal
 
-######### Define fixtures #########
-# Device fixture moved to conftest.py
-
 
 def test_noisy_linear(device):
     noisy_linear = NoisyLinear(2, 10).to(device)

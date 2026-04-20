@@ -632,7 +632,6 @@ class EvolvableCNN(EvolvableModule):
 
             # Determine kernel size for the new layer
             # Kernel size k_new: 2 <= k_new <= l_in_for_new_layer
-
             k_new = self.rng.integers(2, l_in_for_new_layer + 1)
             self.mut_kernel_size.add_layer(k_new)  # Provisional: add kernel
 
@@ -726,7 +725,7 @@ class EvolvableCNN(EvolvableModule):
 
         # Randomly choose number of channels to add
         if numb_new_channels is None:
-            numb_new_channels = self.rng.choice([8, 16, 32])
+            numb_new_channels = int(self.rng.choice([8, 16, 32]))
 
         # HARD LIMIT
         if self.channel_size[hidden_layer] + numb_new_channels <= self.max_channel_size:
@@ -755,7 +754,7 @@ class EvolvableCNN(EvolvableModule):
             hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
 
         if numb_new_channels is None:
-            numb_new_channels = self.rng.choice([8, 16, 32])
+            numb_new_channels = int(self.rng.choice([8, 16, 32]))
 
         # HARD LIMIT
         if self.channel_size[hidden_layer] - numb_new_channels >= self.min_channel_size:

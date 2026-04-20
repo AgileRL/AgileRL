@@ -110,8 +110,8 @@ class MemoryGameEnv(gym.Env):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# Toggle this to True for RNN (LSTM), False for MLP
-recurrent = True  # <--- CHANGE THIS TO ENABLE/DISABLE RECURRENT
+# Toggle this to True for RNN (LSTM), False for MLP.
+recurrent = os.getenv("AGILERL_RECURRENT", "1") == "1"
 
 # --- Create Environment and Population ---
 n_symbols = 5
@@ -165,7 +165,6 @@ def make_env():
 
 
 env = gym.vector.SyncVectorEnv([make_env() for _ in range(num_envs)])
-single_test_env = gym.vector.SyncVectorEnv([make_env()])
 
 observation_space = env.single_observation_space
 action_space = env.single_action_space
@@ -210,7 +209,7 @@ profiler.stop()
 # =====================================================================
 # PROFILING A COMPLETE TRAINING LOOP
 # =====================================================================
-use_profiler = True  # Set to True to enable flamegraph profiling for the full loop
+use_profiler = os.getenv("AGILERL_USE_PROFILER", "1") == "1"
 
 max_steps = 10_000_000 // num_envs  # Reduced for profiling
 total_steps = 0
@@ -219,6 +218,8 @@ start_time = time.time()
 if use_profiler:
     full_profiler = pyinstrument.Profiler()
     full_profiler.start()
+else:
+    full_profiler = None
 
 print("\n--- Running Training Loop ---")
 pbar = trange(max_steps * num_envs, unit="step")
@@ -262,6 +263,7 @@ print(f"Achieved mean reward of: {mean_reward}")
 # ADDITIONAL PROFILING WITH PYTORCH PROFILER
 # =====================================================================
 print("\n--- Profiling with PyTorch Profiler ---")
+prof_env = gym.vector.SyncVectorEnv([make_env() for _ in range(num_envs)])
 with (
     profile(
         activities=[ProfilerActivity.CPU],
@@ -270,8 +272,9 @@ with (
     ) as prof,
     record_function("training_step"),
 ):
-    collect_rollouts_recurrent(agent, env)
+    collect_rollouts_recurrent(agent, prof_env)
     agent.learn()
 
 prof.export_chrome_trace("pytorch_trace.json")
 print("PyTorch profiler trace saved to pytorch_trace.json")
+prof_env.close()

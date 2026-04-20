@@ -1,19 +1,30 @@
+from __future__ import annotations
+
+import gc
 import warnings
 from collections.abc import Callable
 from contextlib import nullcontext
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import torch
-from accelerate import Accelerator
-from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
+from transformers import GenerationConfig
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
+
+if TYPE_CHECKING:
+    from accelerate import Accelerator
+    from peft import LoraConfig
+
+    from agilerl.wrappers.llm_envs import ReasoningGym
+
+if HAS_LIGER_KERNEL or TYPE_CHECKING:
+    from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
+
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import (
-    LoraConfigProtocol,
-    MultiTurnEpisodeEnv,
+    MultiTurnEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
@@ -94,7 +105,7 @@ class GRPO(LLMAlgorithm):
         chunk. Ignored when ``use_vllm=True``.
     :type hf_generate_chunk_size: int | None, optional
     :param lora_config: Config for LoRA, defaults to None
-    :type lora_config: LoraConfigProtocol, optional
+    :type lora_config: LoraConfig, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
     :type cosine_lr_schedule_config: CosineLRScheduleConfig, optional
     :param use_memory_efficient_params: Use memory efficient params.
@@ -174,7 +185,7 @@ class GRPO(LLMAlgorithm):
         min_output_tokens: int | None = None,
         max_model_len: int | None = 1024,
         hf_generate_chunk_size: int | None = None,
-        lora_config: LoraConfigProtocol | None = None,
+        lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
         device: str = "cpu",
@@ -195,9 +206,16 @@ class GRPO(LLMAlgorithm):
         filter_zero_adv: bool = False,
         adv_filter_eps: float = 0.0,
     ) -> None:
-
-        device = (
-            f"cuda:{accelerator.process_index}" if accelerator is not None else device
+        resolved_device = (
+            f"cuda:{accelerator.process_index}"
+            if accelerator is not None
+            else (
+                "cuda"
+                if torch.cuda.is_available()
+                else "mps"
+                if torch.backends.mps.is_available()
+                else "cpu"
+            )
         )
         super().__init__(
             index=index,
@@ -222,7 +240,7 @@ class GRPO(LLMAlgorithm):
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             wrap=wrap,
             hp_config=hp_config,
-            device=device,
+            device=resolved_device,
             accelerator=accelerator,
             name="GRPO",
             gradient_checkpointing=gradient_checkpointing,
@@ -263,7 +281,6 @@ class GRPO(LLMAlgorithm):
                 actor_network,
                 (PeftModelProtocol, PreTrainedModelProtocol),
             ), "Actor network must be a PeftModelProtocol or PreTrainedModelProtocol"
-        self.use_liger_loss = use_liger_loss
         self.clip_coef = clip_coef
         self.clip_coef_min = clip_coef_min
         self.clip_coef_max = clip_coef_max
@@ -368,6 +385,8 @@ class GRPO(LLMAlgorithm):
         obs: LLMObsType,
         training: bool = True,
         repeat_prompts: bool = True,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Return generated completions for each prompt (GRPO groups when training).
 
@@ -472,6 +491,11 @@ class GRPO(LLMAlgorithm):
         :return: Dict with keys ``mean_loss`` and ``mean_kl``, averaged over the update.
         :rtype: dict[str, float]
         """
+        gc.collect()
+        torch.cuda.empty_cache()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+
         self._prepare_vllm_for_training()
 
         with self.memory_efficient_params_context():
@@ -591,14 +615,16 @@ class GRPO(LLMAlgorithm):
 
     def test(
         self,
-        env: ReasoningGym | MultiTurnEpisodeEnv,
+        env: ReasoningGym | MultiTurnEnv,
         loop: int = 1,
-    ) -> torch.Tensor:
-        """Return fitness (test) score tensor of llm on test sub-set.
+        *args: Any,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Return fitness (test) score of llm on test sub-set.
 
         :param env: Dataset-style ``ReasoningGym`` environment or tokenized
             multi-turn episode environment.
-        :type env: ReasoningGym | MultiTurnEpisodeEnv
+        :type env: ReasoningGym | MultiTurnEnv
         :param loop: Number of outer test iterations over ``reset`` / ``step``.
         :type loop: int
         :return: Concatenated reward tensor from the test loop.
@@ -615,7 +641,7 @@ class GRPO(LLMAlgorithm):
                     prompts = next_prompts
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEpisodeEnv):
+            elif isinstance(env, MultiTurnEnv):
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
                     prompt_dict, _info = env.reset()
@@ -642,12 +668,12 @@ class GRPO(LLMAlgorithm):
             else:
                 msg = (
                     "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEpisodeEnv; got {type(env).__name__}"
+                    f"MultiTurnEnv; got {type(env).__name__}"
                 )
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor).item()
         self.fitness.append(mean_fit)
-        return reward_tensor
+        return np.array(mean_fit)
 
     def _calculate_advantage(
         self,
@@ -935,6 +961,13 @@ class GRPO(LLMAlgorithm):
         :return: Mean loss and mean KL divergence.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
+        if not HAS_LIGER_KERNEL:
+            msg = (
+                "Liger GRPO loss was requested but `liger-kernel` is not available. "
+                "Set use_liger_loss=False."
+            )
+            raise ImportError(msg)
+
         batch_ids = batch_ids.to(self.device)
         mask = action_mask.to(self.device).contiguous()  # (B, seq_len-1)
         adv = advantages.squeeze(-1).to(self.device).contiguous()  # (B,)

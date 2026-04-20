@@ -558,7 +558,7 @@ def test_initialize_matd3_with_cnn_networks(
     assert isinstance(matd3.criterion, nn.MSELoss)
 
 
-@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
     "observation_spaces, encoder_cls",
@@ -573,11 +573,12 @@ def test_initialize_matd3_with_evo_networks(
     encoder_cls,
     device,
     compile_mode,
-    accelerator,
+    accelerator_flag,
     request,
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    accelerator = Accelerator(device_placement=False) if accelerator_flag else None
     observation_space = spaces.Dict(
         {agent_id: observation_spaces[idx] for idx, agent_id in enumerate(agent_ids)},
     )
@@ -868,7 +869,7 @@ def test_matd3_get_action(
         for idx, env_action in enumerate(list(processed_action.values())):
             for action in env_action:
                 assert action <= action_spaces[idx].n - 1
-    matd3 = None
+    matd3.clean_up()
 
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
@@ -1043,8 +1044,6 @@ def test_matd3_get_action_agent_masking_batched(
 
     # Get the action
     actions, _ = matd3.get_action(obs=state, infos=info)
-
-    print("Agent 0 action shape", actions["agent_0"].shape)
 
     if discrete_actions:
         assert np.array_equal(actions["agent_0"], np.array([1] * batched_shape[0])), (
@@ -1480,6 +1479,8 @@ def test_matd3_algorithm_test_loop(
     else:
         assert isinstance(mean_score, np.ndarray)
         assert len(mean_score) == 3
+    env.close()
+    matd3.clean_up()
 
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])

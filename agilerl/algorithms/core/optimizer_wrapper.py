@@ -1,25 +1,26 @@
+from __future__ import annotations
+
 import inspect
-from typing import Any, Union
+from typing import TYPE_CHECKING, Any, Union
 
 from torch import nn
-from torch.optim import Optimizer
 
 from agilerl import HAS_LLM_DEPENDENCIES
+
+if TYPE_CHECKING:
+    from torch.optim import Optimizer
 from agilerl.modules import EvolvableModule, ModuleDict
-from agilerl.protocols import EvolvableAlgorithmProtocol
+from agilerl.protocols import EvolvableAlgorithmProtocol, OptimizerLikeClass
 from agilerl.typing import LrNameType, OptimizerType, StateDict
-from agilerl.utils.algo_utils import DummyOptimizer
 
 if HAS_LLM_DEPENDENCIES:
     from peft import PeftModel
-
-    PeftModelType = PeftModel
 else:
-    PeftModelType = "PeftModel"
+    PeftModel = "PeftModel"
 
 ModuleList = list[EvolvableModule]
-_Optimizer = type[OptimizerType] | dict[str, type[OptimizerType]] | type[DummyOptimizer]
-_Module = Union[EvolvableModule, ModuleDict, ModuleList, PeftModelType]
+_Optimizer = type[OptimizerType] | dict[str, type[OptimizerType]] | OptimizerLikeClass
+_Module = Union[EvolvableModule, ModuleDict, ModuleList, PeftModel]
 
 
 def init_from_multiple(
@@ -90,7 +91,7 @@ def init_llm_optimizer(
             for n, p in network.named_parameters()
             if (
                 ("critic" in n.lower() and "lora" in n.lower() and p.requires_grad)
-                or ("v_head.summary" in n.lower() and p.requires_grad) 
+                or ("v_head.summary" in n.lower() and p.requires_grad)
             )
         ]
         params.append(

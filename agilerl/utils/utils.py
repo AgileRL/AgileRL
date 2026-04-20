@@ -20,9 +20,7 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
     DDPG,
-    DPO,
     DQN,
-    GRPO,
     IPPO,
     LLMPPO,
     MADDPG,
@@ -41,10 +39,39 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
-from agilerl.utils.llm_utils import get_state_dict
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
+if HAS_LLM_DEPENDENCIES:
+    from agilerl.algorithms import CISPO, DPO, GRPO, GSPO, SFT
+    from agilerl.utils.llm_utils import get_state_dict
+
 SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
+
+_BOX2D_ENV_PREFIXES = (
+    "LunarLander",
+    "LunarLanderContinuous",
+    "BipedalWalker",
+    "BipedalWalkerHardcore",
+    "CarRacing",
+)
+
+
+def _check_box2d_available(env_name: str) -> None:
+    """Raise a helpful error if a Box2D environment is requested but box2d-py is missing."""
+    if not any(env_name.startswith(prefix) for prefix in _BOX2D_ENV_PREFIXES):
+        return
+    try:
+        import Box2D  # noqa: F401
+    except ImportError:
+        msg = (
+            f"Environment '{env_name}' requires the Box2D physics engine.\n"
+            "Install it with:  pip install agilerl[box2d]  (or  uv sync --extra box2d)\n"
+            "Note: building box2d-py requires the system package 'swig'.\n"
+            "  Ubuntu/Debian: sudo apt-get install swig\n"
+            "  macOS:         brew install swig\n"
+            "Alternatively, use a non-Box2D environment such as 'CartPole-v1'."
+        )
+        raise ImportError(msg) from None
 
 
 def _normalize_llm_algo_name(algo: str) -> str | None:
@@ -169,6 +196,9 @@ def make_vect_envs(
     if env_name is None and make_env is None:
         msg = "Either env_name or make_env must be provided"
         raise ValueError(msg)
+
+    if env_name is not None:
+        _check_box2d_available(env_name)
 
     vectorize = (
         gym.vector.AsyncVectorEnv if should_async_vector else gym.vector.SyncVectorEnv
@@ -383,6 +413,8 @@ def create_population(
     :rtype: list[EvolvableAlgorithm]
     :param algo_kwargs: Additional keyword arguments for the algorithm
     :type algo_kwargs: dict, optional
+    :return: Population of agents
+    :rtype: list[EvolvableAlgorithm]
     """
     if algo_kwargs is None:
         algo_kwargs = {}
@@ -693,9 +725,9 @@ def create_population(
             )
             population.append(agent)
 
-    elif algo == "GRPO":
+    elif algo in ("GRPO", "CISPO", "GSPO"):
         if not HAS_LLM_DEPENDENCIES:
-            msg = "GRPO requires optional LLM dependencies (install agilerl[llm])."
+            msg = "GRPO/CISPO/GSPO require optional LLM dependencies (install agilerl[llm])."
             raise ImportError(msg)
 
         kwargs = _prepare_llm_algo_kwargs(
@@ -774,7 +806,66 @@ def create_population(
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
-            agent = GRPO(**kw)
+            algo_cls = {"GRPO": GRPO, "CISPO": CISPO, "GSPO": GSPO}[algo]
+            if algo in ("CISPO", "GSPO"):
+                kw.pop("loss_type", None)
+            agent = algo_cls(**kw)
+            population.append(agent)
+    elif algo == "SFT":
+        if not HAS_LLM_DEPENDENCIES:
+            msg = "SFT requires optional LLM dependencies (install agilerl[llm])."
+            raise ImportError(msg)
+
+        kwargs = _prepare_llm_algo_kwargs(
+            algo_kwargs,
+            tokenizer=tokenizer,
+            model_name=model_name,
+            lora_config=lora_config,
+            vllm_config=vllm_config,
+            INIT_HP=INIT_HP,
+            with_generation_defaults=False,
+        )
+        _validate_llm_kwargs(kwargs, actor_network=actor_network)
+        kwargs.pop("use_vllm", None)
+        kwargs.pop("vllm_config", None)
+
+        for idx in range(population_size):
+            act = (
+                (
+                    clone_llm(
+                        actor_network,
+                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
+                        state_dict=(
+                            actor_network.state_dict()
+                            if accelerator is None
+                            else get_state_dict(actor_network)
+                        ),
+                    )
+                    if idx != 0
+                    else actor_network
+                )
+                if actor_network is not None
+                else None
+            )
+            kw = dict(kwargs)
+            kw.update(
+                hp_config=hp_config,
+                index=idx,
+                batch_size=INIT_HP.get("BATCH_SIZE", 16),
+                lr=INIT_HP.get("LR", 5e-5),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
+                calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
+                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
+                accelerator=accelerator,
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
+                actor_network=act,
+                seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+            )
+            if torch_compiler is not None:
+                kw.setdefault("torch_compiler", torch_compiler)
+            agent = SFT(**kw)
             population.append(agent)
     elif algo == "DPO":
         if not HAS_LLM_DEPENDENCIES:
@@ -970,7 +1061,6 @@ def create_population(
                 kw.setdefault("torch_compiler", torch_compiler)
             agent = LLMReinforce(**kw)
             population.append(agent)
-
     return population
 
 
@@ -1073,6 +1163,7 @@ def tournament_selection_and_mutation(
             save_llm_checkpoint(elite, elite_path)
         return population
 
+    elite = None
     if accelerator is not None:
         # Save temporary models for accelerator processes
         accel_temp_models_path = f"models/{env_name}"
@@ -1105,7 +1196,7 @@ def tournament_selection_and_mutation(
         elite, population = tournament.select(population)
         population = mutation.mutation(population)
 
-    if save_elite:
+    if save_elite and elite is not None:
         elite_save_path = (
             elite_path.split(".pt")[0]
             if elite_path is not None
@@ -1344,30 +1435,58 @@ def aggregate_metrics_across_gpus(
     return all_metrics.mean().item()
 
 
+def safe_aggregate_metrics(
+    accelerator: Accelerator | None,
+    metrics: torch.Tensor | np.ndarray | float,
+) -> float:
+    if accelerator is None:
+        if isinstance(metrics, (torch.Tensor, np.ndarray)):
+            return float(
+                np.mean(metrics)
+                if isinstance(metrics, np.ndarray)
+                else metrics.float().mean().item()
+            )
+        return float(metrics)
+    return aggregate_metrics_across_gpus(accelerator, metrics)
+
+
 def save_llm_checkpoint(
     agent: LLMAlgorithm,
     checkpoint_path: str | None,
-    weights_only: bool = False,
+    lora_only: bool = True,
 ) -> None:
     """Checkpoint the LLM.
 
+    When ``lora_only=True`` (the default) the LoRA adapters are saved via HuggingFace
+    ``save_pretrained``, producing a directory that can be reloaded with::
+
+        from peft import PeftModel
+        from transformers import AutoModelForCausalLM
+
+        base_model = AutoModelForCausalLM.from_pretrained("<base-model-name>")
+        model = PeftModel.from_pretrained(base_model, "<checkpoint_path>/actor/")
+
+    When ``lora_only=False`` a full AgileRL checkpoint is saved (includes optimizer state
+    and all hyperparameters), which is larger but allows resuming training via
+    ``agent.load_checkpoint(path)``.
+
     :param agent: Agent
     :type agent: LLMAlgorithm
-    :param checkpoint_path: Checkpoint path
+    :param checkpoint_path: Checkpoint path — used as-is (no algo sub-directory is appended).
+        Defaults to ``"./saved_checkpoints"`` when ``None``.
     :type checkpoint_path: str
-    :param weights_only: If True, only save the weights of the model, defaults to False
-    :type weights_only: bool, optional
+    :param lora_only: Save only LoRA adapter weights (HuggingFace format), defaults to True
+    :type lora_only: bool, optional
     """
     assert agent.actor is not None, "Actor is not initialized"
-    base_path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
-    path = base_path + f"/{agent.algo}"
+    path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
     Path(path).mkdir(parents=True, exist_ok=True)
     if agent.accelerator is not None:
         agent.accelerator.wait_for_everyone()
-        agent.save_checkpoint(path, weights_only=weights_only)
+        agent.save_checkpoint(path, lora_only=lora_only)
         agent.accelerator.wait_for_everyone()
     else:
-        agent.save_checkpoint(path, weights_only=weights_only)
+        agent.save_checkpoint(path, lora_only=lora_only)
 
 
 def consolidate_mutations(population: list[LLMAlgorithm]) -> None:

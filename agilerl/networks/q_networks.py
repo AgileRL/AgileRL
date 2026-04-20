@@ -89,7 +89,7 @@ class QNetwork(EvolvableNetwork):
             raise ValueError(msg)
 
         if head_config is None:
-            head_config = asdict(MlpNetConfig(hidden_size=[16], output_activation=None))
+            head_config = asdict(MlpNetConfig(hidden_size=[32], output_activation=None))
         else:
             head_config["output_activation"] = None
 

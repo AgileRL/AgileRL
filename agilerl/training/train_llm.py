@@ -1,3 +1,5 @@
+import csv
+import os
 import warnings
 from collections.abc import Callable
 from typing import Any
@@ -8,23 +10,33 @@ from accelerate import Accelerator
 from tqdm import trange
 
 import wandb
-from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMReinforce
+from agilerl.algorithms import DPO, GRPO, LLMPPO, SFT, LLMReinforce
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.protocols import MultiTurnEnv
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.typing import MultiTurnEnvType, PopulationType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
-from agilerl.utils.llm_utils import ReasoningGym
 from agilerl.utils.utils import (
     _distributed_world_size,
     aggregate_metrics_across_gpus,
     init_wandb,
+    safe_aggregate_metrics,
     save_llm_checkpoint,
     tournament_selection_and_mutation,
 )
-from agilerl.wrappers.multiturn_wrappers import SyncMultiTurnVecEnv
+from agilerl.wrappers.llm_envs import (
+    HuggingFaceGym,
+    ReasoningGym,
+    SFTGym,
+    SyncMultiTurnVecEnv,
+)
 
 InitDictType = dict[str, Any] | None
+
+
+def _is_main_process(accelerator: Accelerator | None) -> bool:
+    return accelerator is None or accelerator.is_main_process
 
 
 def _validate_llm_evolution_args(
@@ -70,6 +82,10 @@ def _init_llm_wandb(
     wandb_api_key: str | None,
     accelerator: Accelerator | None,
     additional_fields: dict[str, Any] | None = None,
+    *,
+    wandb_project: str = "AgileRL",
+    wandb_entity: str | None = None,
+    wandb_run_name: str | None = None,
 ) -> None:
     """Initialize W&B run metadata for the current LLM finetuning session."""
     if not wb or (accelerator is not None and not accelerator.is_main_process):
@@ -80,11 +96,23 @@ def _init_llm_wandb(
     init_hp["model_name"] = pop[0].pretrained_model_name_or_path
     if additional_fields is not None:
         init_hp.update(additional_fields)
+
+    addl_args: dict[str, Any] | None = None
+    if wandb_entity is not None or wandb_run_name is not None:
+        addl_args = {}
+        if wandb_entity is not None:
+            addl_args["entity"] = wandb_entity
+        if wandb_run_name is not None:
+            addl_args["name"] = wandb_run_name
+
     init_wandb(
         algo=init_hp["ALGO"],
         env_name=env_name,
         wandb_api_key=wandb_api_key,
         init_hyperparams=init_hp,
+        accelerator=accelerator,
+        project=wandb_project,
+        addl_args=addl_args,
     )
 
 
@@ -181,12 +209,29 @@ def _normalize_learn_metrics(
 def build_train_wandb_dict(
     agent_metrics_dict: dict[str, dict[str, Any]],
     pop: PopulationType,
-    agent: GRPO | LLMPPO | LLMReinforce | DPO,
+    agent: GRPO | LLMPPO | LLMReinforce | DPO | SFT,
     max_reward: float | None = None,
     mode: str = "reasoning",
 ) -> dict[str, Any]:
     """Aggregate train metrics into a W&B-ready dictionary."""
     wandb_dict: dict[str, Any] = {}
+    if mode == "sft":
+        loss_values = _collect_metric_values(
+            agent_metrics_dict, pop, "train_metrics", "Train/Loss"
+        )
+        ppl_values = _collect_metric_values(
+            agent_metrics_dict, pop, "train_metrics", "Train/Perplexity"
+        )
+        if loss_values:
+            wandb_dict |= {
+                "Train/Best Loss": np.min(loss_values),
+                "Train/Mean Population Loss": np.mean(loss_values),
+            }
+        if ppl_values:
+            wandb_dict["Train/Mean Population Perplexity"] = np.mean(ppl_values)
+        wandb_dict |= _collect_hpo_wandb_fields(pop)
+        return wandb_dict
+
     if mode == "preference":
         reward_margin = _collect_metric_values(
             agent_metrics_dict, pop, "train_metrics", "Train/Mean Reward Margin"
@@ -276,6 +321,20 @@ def build_eval_wandb_dict(
 ) -> dict[str, Any]:
     """Aggregate evaluation metrics into a W&B-ready dictionary."""
     eval_dict: dict[str, Any] = {}
+    if mode == "sft":
+        fitness_vals = _collect_metric_values(
+            agent_metrics_dict,
+            pop,
+            "test_metrics",
+            "Eval/Negative loss (fitness)",
+        )
+        if fitness_vals:
+            eval_dict |= {
+                "Eval/Best Fitness": np.max(fitness_vals),
+                "Eval/Mean Population Fitness": np.mean(fitness_vals),
+            }
+        return eval_dict
+
     if mode == "preference":
         reward_margin = _collect_metric_values(
             agent_metrics_dict, pop, "test_metrics", "Eval/Mean Reward Margin"
@@ -320,19 +379,19 @@ def build_eval_wandb_dict(
 
 def _resolve_training_envs(
     pop: PopulationType,
-    env: ReasoningGym | None,
-    env_fn: Callable[[], ReasoningGym] | None,
-) -> tuple[list[ReasoningGym], bool]:
+    env: HuggingFaceGym | MultiTurnEnv | None,
+    env_fn: Callable[[], HuggingFaceGym] | None,
+) -> tuple[list[HuggingFaceGym], bool]:
     """Resolve shared or per-agent training environments.
 
     :param pop: Population of agents being trained.
     :type pop: PopulationType
     :param env: Shared environment instance.
-    :type env: ReasoningGym | None
+    :type env: HuggingFaceGym | None
     :param env_fn: Factory for creating one environment per agent.
-    :type env_fn: Callable[[], ReasoningGym] | None
+    :type env_fn: Callable[[], HuggingFaceGym | MultiTurnEnv] | None
     :return: Environment list (aligned with population) and whether env_fn mode is active.
-    :rtype: tuple[list[ReasoningGym], bool]
+    :rtype: tuple[list[HuggingFaceGym], bool]
     """
     if env is not None and env_fn is not None:
         msg = "Provide exactly one of 'env' or 'env_fn', not both."
@@ -353,7 +412,7 @@ def _resolve_training_envs(
     return [env], False
 
 
-def _num_epochs_reached(envs: list[ReasoningGym], num_epochs: int | None) -> bool:
+def _num_epochs_reached(envs: list[HuggingFaceGym], num_epochs: int | None) -> bool:
     """Check whether all active environments have reached the epoch budget."""
     if num_epochs is None:
         return False
@@ -361,6 +420,107 @@ def _num_epochs_reached(envs: list[ReasoningGym], num_epochs: int | None) -> boo
     if not all(isinstance(epoch_count, int) for epoch_count in epoch_counts):
         return False
     return all(epoch_count >= num_epochs for epoch_count in epoch_counts)
+
+
+def _save_elite_checkpoint(
+    pop: PopulationType,
+    save_elite: bool | None,
+    elite_path: str | None,
+    accelerator: Accelerator | None,
+) -> None:
+    if save_elite and elite_path is not None:
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        if _is_main_process(accelerator):
+            elite = max(
+                pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf")
+            )
+            save_llm_checkpoint(elite, elite_path)
+
+
+def _finish_training(
+    accelerator: Accelerator | None,
+    pbar: Any | None,
+    use_wandb: bool,
+    csv_file: Any | None = None,
+    elite_path: str | None = None,
+) -> None:
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    if _is_main_process(accelerator):
+        if pbar is not None:
+            pbar.close()
+        if use_wandb:
+            wandb.finish()
+    if csv_file is not None:
+        csv_file.close()
+        if elite_path is not None:
+            print(
+                f"Training metrics saved to {os.path.join(elite_path, 'metrics.csv')}"
+            )
+
+
+def _open_csv_log(
+    elite_path: str | None,
+    fieldnames: list[str],
+    accelerator: Accelerator | None,
+) -> tuple[Any, Any]:
+    if elite_path is None or not _is_main_process(accelerator):
+        return None, None
+    os.makedirs(elite_path, exist_ok=True)
+    csv_path = os.path.join(elite_path, "metrics.csv")
+    csv_file = open(csv_path, "w", newline="")
+    writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    csv_file.flush()
+    return csv_file, writer
+
+
+def _log_csv_row(
+    writer: Any,
+    csv_file: Any,
+    row_dict: dict[str, Any],
+    accelerator: Accelerator | None,
+) -> None:
+    if not _is_main_process(accelerator):
+        return
+    if writer is not None:
+        writer.writerow(row_dict)
+        csv_file.flush()
+
+
+class _CsvAggregateLogger:
+    """Open ``metrics.csv`` on first aggregate row; columns from first row's keys."""
+
+    __slots__ = ("accelerator", "csv_file", "elite_path", "log_csv", "writer")
+
+    def __init__(
+        self,
+        elite_path: str | None,
+        log_csv: bool,
+        accelerator: Accelerator | None,
+    ) -> None:
+        self.elite_path = elite_path
+        self.log_csv = log_csv
+        self.accelerator = accelerator
+        self.csv_file = None
+        self.writer = None
+
+    def maybe_write(self, row_dict: dict[str, Any]) -> None:
+        if (
+            not self.log_csv
+            or self.elite_path is None
+            or not row_dict
+            or not _is_main_process(self.accelerator)
+        ):
+            return
+        if self.writer is None:
+            self.csv_file, self.writer = _open_csv_log(
+                self.elite_path,
+                list(row_dict.keys()),
+                self.accelerator,
+            )
+        _log_csv_row(self.writer, self.csv_file, row_dict, self.accelerator)
 
 
 def finetune_llm_reasoning(
@@ -376,13 +536,17 @@ def finetune_llm_reasoning(
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
+    wandb_project: str = "AgileRL",
+    wandb_entity: str | None = None,
+    wandb_run_name: str | None = None,
     evaluation_interval: int = 10,
     max_reward: int | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-) -> None:
+    log_csv: bool = False,
+) -> PopulationType:
     """Finetunes a population of GRPO/LLMPPO/LLMReinforce agents on a ReasoningGym environment.
 
     :param pop: Population of GRPO/LLMPPO/LLMReinforce agents to finetune
@@ -457,9 +621,12 @@ def finetune_llm_reasoning(
         wb=wb,
         wandb_api_key=wandb_api_key,
         accelerator=accelerator,
+        wandb_project=wandb_project,
+        wandb_entity=wandb_entity,
+        wandb_run_name=wandb_run_name,
     )
 
-    if accelerator is None or accelerator.is_main_process:
+    if _is_main_process(accelerator):
         print("\nTraining...")
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
@@ -471,6 +638,7 @@ def finetune_llm_reasoning(
 
     steps_per_population_iteration = effective_data_batch_size * len(pop)
     training_steps = -(max_steps // -steps_per_population_iteration)
+    pbar = None
     if accelerator is None or accelerator.is_main_process:
         pbar = trange(
             max_steps,
@@ -480,6 +648,10 @@ def finetune_llm_reasoning(
             dynamic_ncols=True,
         )
 
+    csv_logger = _CsvAggregateLogger(elite_path, log_csv, accelerator)
+
+    agg_metrics = []
+    agg_test_metrics = None
     total_steps = 0
     displayed_steps = 0
     next_checkpoint_step = checkpoint_steps
@@ -534,6 +706,7 @@ def finetune_llm_reasoning(
                 prompts_by_agent[agent_idx] = next_prompts
             else:
                 prompts = next_prompts
+
             agent.steps[-1] += effective_data_batch_size
             total_steps += effective_data_batch_size
             agg_test_metrics = None
@@ -576,6 +749,7 @@ def finetune_llm_reasoning(
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
+
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
@@ -607,7 +781,8 @@ def finetune_llm_reasoning(
             if checkpoint_due:
                 save_llm_checkpoint(agent, elite_path)
 
-        if wb and (accelerator is None or accelerator.is_main_process):
+        wandb_dict: dict[str, Any] = {}
+        if wb or log_csv:
             wandb_dict = build_train_wandb_dict(
                 agent_metrics_dict=agent_metrics_dict,
                 pop=pop,
@@ -622,16 +797,14 @@ def finetune_llm_reasoning(
                     max_reward=max_reward,
                     mode="reasoning",
                 )
+        if wb and (accelerator is None or accelerator.is_main_process):
             wandb.log(wandb_dict)
+        csv_logger.maybe_write(wandb_dict)
 
         if _num_epochs_reached(envs, num_epochs) or total_steps >= max_steps:
             break
 
-    if (
-        verbose
-        and total_steps > evaluation_interval
-        and (accelerator is None or accelerator.is_main_process)
-    ):
+    if verbose and _is_main_process(accelerator):
         fitness_calculated = len(agent.fitness) > 0
         fitness = (
             [str(round(agent.fitness[-1], 2)) for agent in pop]
@@ -665,12 +838,15 @@ def finetune_llm_reasoning(
             f"Mutations:\t\t{muts}",
         )
 
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    if accelerator is None or accelerator.is_main_process:
-        pbar.close()
-        if wb:
-            wandb.finish()
+    _save_elite_checkpoint(pop, save_elite, elite_path, accelerator)
+    _finish_training(
+        accelerator,
+        pbar,
+        wb,
+        csv_logger.csv_file,
+        elite_path if csv_logger.csv_file is not None else None,
+    )
+    return pop
 
 
 def finetune_llm_preference(
@@ -686,12 +862,16 @@ def finetune_llm_preference(
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
+    wandb_project: str = "AgileRL",
+    wandb_entity: str | None = None,
+    wandb_run_name: str | None = None,
     evaluation_interval: int = 10,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-) -> None:
+    log_csv: bool = False,
+) -> PopulationType:
     """Finetune a population of DPO agents on pairwise preference data.
 
     Runs iterative preference updates, optional periodic evaluation, and optional
@@ -748,14 +928,15 @@ def finetune_llm_preference(
             "The algorithm must be DPO for preference-based reinforcement learning."
             f"Got {type(pop[0])} instead."
         )
-        raise ValueError(
-            msg,
-        )
-
-    if init_hp is None:
-        init_hp = {}
-        init_hp["BATCH_SIZE_PER_GPU"] = pop[0].batch_size_per_process
-        init_hp["ALGO"] = pop[0].algo
+        raise ValueError(msg)
+    init_hp = (
+        {
+            "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
+            "ALGO": pop[0].algo,
+        }
+        if init_hp is None
+        else init_hp
+    )
 
     data_increment = _distributed_world_size(accelerator)
     effective_data_batch_size = data_increment * envs[0].data_batch_size_per_gpu
@@ -768,6 +949,9 @@ def finetune_llm_preference(
         wb=wb,
         wandb_api_key=wandb_api_key,
         accelerator=accelerator,
+        wandb_project=wandb_project,
+        wandb_entity=wandb_entity,
+        wandb_run_name=wandb_run_name,
     )
 
     if accelerator is None or accelerator.is_main_process:
@@ -782,6 +966,7 @@ def finetune_llm_preference(
 
     steps_per_population_iteration = effective_data_batch_size * len(pop)
     training_steps = -(max_steps // -steps_per_population_iteration)
+    pbar = None
     if accelerator is None or accelerator.is_main_process:
         pbar = trange(
             max_steps,
@@ -791,6 +976,10 @@ def finetune_llm_preference(
             dynamic_ncols=True,
         )
 
+    csv_logger = _CsvAggregateLogger(elite_path, log_csv, accelerator)
+
+    agg_metrics = []
+    agg_test_metrics = None
     total_steps = 0
     displayed_steps = 0
     next_checkpoint_step = checkpoint_steps
@@ -829,6 +1018,7 @@ def finetune_llm_preference(
                 prompts_by_agent[agent_idx] = next_prompts
             else:
                 prompts = next_prompts
+
             agent.steps[-1] += effective_data_batch_size
             total_steps += effective_data_batch_size
             agg_test_metrics = None
@@ -848,6 +1038,7 @@ def finetune_llm_preference(
                 metrics_dict = _format_prefixed_metrics(agg_metrics, "Train")
                 metrics_dict["global_step"] = total_steps
                 metrics_dict["Train/Mean Reward Margin"] = mean_reward_margin
+
                 agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
                 if agg_test_metrics is not None:
                     test_metrics_dict = _format_prefixed_metrics(
@@ -895,7 +1086,8 @@ def finetune_llm_preference(
             if checkpoint_due:
                 save_llm_checkpoint(agent, elite_path)
 
-        if wb and (accelerator is None or accelerator.is_main_process):
+        wandb_dict: dict[str, Any] = {}
+        if wb or log_csv:
             wandb_dict = build_train_wandb_dict(
                 agent_metrics_dict=agent_metrics_dict,
                 pop=pop,
@@ -908,14 +1100,12 @@ def finetune_llm_preference(
                     pop=pop,
                     mode="preference",
                 )
+        if wb and (accelerator is None or accelerator.is_main_process):
             wandb.log(wandb_dict)
+        csv_logger.maybe_write(wandb_dict)
         if _num_epochs_reached(envs, num_epochs) or total_steps >= max_steps:
             break
-    if (
-        verbose
-        and total_steps > evaluation_interval
-        and (accelerator is None or accelerator.is_main_process)
-    ):
+    if verbose and _is_main_process(accelerator):
         fitness_calculated = len(agent.fitness) > 0
         fitness = (
             [str(round(agent.fitness[-1], 2)) for agent in pop]
@@ -941,7 +1131,7 @@ def finetune_llm_preference(
             f"{centered_text}\n"
             f"{border}\n"
             f"Fitness:\t\t{fitness}\n"
-            f"Score:\t\t{mean_reward_margin}\n"
+            f"Score:\t\t{agg_metrics['rewards']}\n"
             f"5 fitness avgs:\t{avg_fitness}\n"
             f"10 score avgs:\t{avg_score}\n"
             f"Agents:\t\t{agents}\n"
@@ -949,12 +1139,15 @@ def finetune_llm_preference(
             f"Mutations:\t\t{muts}",
         )
 
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    if accelerator is None or accelerator.is_main_process:
-        pbar.close()
-        if wb:
-            wandb.finish()
+    _save_elite_checkpoint(pop, save_elite, elite_path, accelerator)
+    _finish_training(
+        accelerator,
+        pbar,
+        wb,
+        csv_logger.csv_file,
+        elite_path if csv_logger.csv_file is not None else None,
+    )
+    return pop
 
 
 def finetune_llm_multiturn(
@@ -972,11 +1165,15 @@ def finetune_llm_multiturn(
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
+    wandb_project: str = "AgileRL",
+    wandb_entity: str | None = None,
+    wandb_run_name: str | None = None,
     eval_fn: Callable[[LLMPPO | LLMReinforce], float] | None = None,
     evaluation_interval: int = 50,
     max_reward: float | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
+    log_csv: bool = False,
 ) -> PopulationType:
     """Finetune a population of LLMPPO agents on a multi-turn GEM environment.
 
@@ -1082,12 +1279,16 @@ def finetune_llm_multiturn(
         wandb_api_key=wandb_api_key,
         accelerator=accelerator,
         additional_fields={"max_turns": max_turns, "batch_size": batch_size},
+        wandb_project=wandb_project,
+        wandb_entity=wandb_entity,
+        wandb_run_name=wandb_run_name,
     )
 
     if accelerator is None or accelerator.is_main_process:
         print("\nTraining...")
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
+    pbar = None
     if accelerator is None or accelerator.is_main_process:
         pbar = trange(
             max_steps,
@@ -1096,6 +1297,8 @@ def finetune_llm_multiturn(
             ascii=True,
             dynamic_ncols=True,
         )
+
+    csv_logger = _CsvAggregateLogger(elite_path, log_csv, accelerator)
 
     total_steps = 0
     agg_metrics: dict[str, Any] = {}
@@ -1269,7 +1472,8 @@ def finetune_llm_multiturn(
         ):
             save_llm_checkpoint(agent, elite_path)
 
-        if wb and (accelerator is None or accelerator.is_main_process):
+        wandb_dict: dict[str, Any] = {}
+        if wb or log_csv:
             wandb_dict = build_train_wandb_dict(
                 agent_metrics_dict=agent_metrics_dict,
                 pop=pop,
@@ -1285,15 +1489,13 @@ def finetune_llm_multiturn(
             )
             wandb_dict |= eval_wandb_dict
 
+        if wb and (accelerator is None or accelerator.is_main_process):
             wandb.log(wandb_dict)
+        csv_logger.maybe_write(wandb_dict)
 
         i += 1
 
-    if (
-        verbose
-        and total_steps > evaluation_interval
-        and (accelerator is None or accelerator.is_main_process)
-    ):
+    if verbose and (accelerator is None or accelerator.is_main_process):
         fitness_calculated = len(agent.fitness) > 0
         fitness = (
             [str(round(agent.fitness[-1], 2)) for agent in pop]
@@ -1327,11 +1529,295 @@ def finetune_llm_multiturn(
             f"Mutations:\t\t{muts}",
         )
 
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    if accelerator is None or accelerator.is_main_process:
-        pbar.close()
-        if wb:
-            wandb.finish()
+    _save_elite_checkpoint(pop, save_elite, elite_path, accelerator)
+    _finish_training(
+        accelerator,
+        pbar,
+        wb,
+        csv_logger.csv_file,
+        elite_path if csv_logger.csv_file is not None else None,
+    )
 
+    return pop
+
+
+def finetune_llm_sft(
+    pop: PopulationType,
+    env: SFTGym | None = None,
+    env_fn: Callable[[], SFTGym] | None = None,
+    init_hp: dict[str, Any] | None = None,
+    save_elite: bool | None = None,
+    elite_path: str | None = None,
+    wb: bool = False,
+    evo_steps: int | None = None,
+    checkpoint_steps: int | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    wandb_api_key: str | None = None,
+    wandb_project: str = "AgileRL",
+    wandb_entity: str | None = None,
+    wandb_run_name: str | None = None,
+    evaluation_interval: int = 10,
+    verbose: bool = True,
+    accelerator: Accelerator | None = None,
+    max_steps: int | None = None,
+    num_epochs: int | None = None,
+    log_csv: bool = False,
+) -> PopulationType:
+    """Finetune a population of SFT agents on (prompt, response) pairs.
+
+    Each training step draws a batch from the environment and minimises the
+    cross-entropy loss over the *response* tokens only (prompt and padding
+    positions are masked with ``ignore_index=-100``).
+
+    :param pop: Population of SFT agents.
+    :param env: Shared :class:`~agilerl.wrappers.llm_envs.SFTGym` instance.
+    :param env_fn: Optional factory returning one ``SFTGym`` per agent.
+    :param init_hp: Hyperparameter dict forwarded to wandb, defaults to None.
+    :param save_elite: Save best agent to disk, defaults to None.
+    :param elite_path: Directory for checkpoints, defaults to None.
+    :param wb: Weights & Biases logging, defaults to False.
+    :param evo_steps: Steps between HPO evolution rounds, defaults to None.
+    :param checkpoint_steps: Steps between non-HPO saves, defaults to None.
+    :param tournament: Tournament selection object, defaults to None.
+    :param mutation: Mutation object, defaults to None.
+    :param wandb_api_key: W&B API key, defaults to None.
+    :param evaluation_interval: Steps between eval passes, defaults to 10.
+    :param verbose: Print summary at end, defaults to True.
+    :param accelerator: Distributed training handle, defaults to None.
+    :param max_steps: Total samples to process (one epoch if None), defaults to None.
+    :param num_epochs: Dataset passes; takes precedence over max_steps when set.
+    :param log_csv: If True and ``elite_path`` is set, log aggregate metrics to CSV.
+    """
+    _validate_llm_evolution_args(evo_steps, tournament, mutation)
+    envs, uses_env_fn = _resolve_training_envs(pop=pop, env=env, env_fn=env_fn)
+    env_name = envs[0].name
+
+    if num_epochs is not None and max_steps is not None:
+        warnings.warn(
+            "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'.",
+            stacklevel=2,
+        )
+
+    _validate_llm_mutation_probs(mutation)
+
+    if not isinstance(pop[0], SFT):
+        msg = (
+            "The algorithm must be SFT for supervised fine-tuning. "
+            f"Got {type(pop[0])} instead."
+        )
+        raise ValueError(msg)
+
+    init_hp = (
+        {
+            "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
+            "ALGO": pop[0].algo,
+        }
+        if init_hp is None
+        else init_hp
+    )
+
+    data_increment = _distributed_world_size(accelerator)
+    effective_data_batch_size = data_increment * envs[0].data_batch_size_per_gpu
+
+    _init_llm_wandb(
+        init_hp=init_hp,
+        pop=pop,
+        env_name=env_name,
+        effective_data_batch_size=effective_data_batch_size,
+        wb=wb,
+        wandb_api_key=wandb_api_key,
+        accelerator=accelerator,
+        wandb_project=wandb_project,
+        wandb_entity=wandb_entity,
+        wandb_run_name=wandb_run_name,
+    )
+
+    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
+    if max_steps is None and num_epochs is None:
+        max_steps = len(envs[0])
+
+    elif max_steps is None and num_epochs is not None:
+        max_steps = num_epochs * len(envs[0])
+
+    steps_per_population_iteration = effective_data_batch_size * len(pop)
+    training_steps = -(max_steps // -steps_per_population_iteration)
+    pbar = None
+    if accelerator is None or accelerator.is_main_process:
+        pbar = trange(
+            max_steps,
+            unit="step",
+            bar_format=bar_format,
+            ascii=True,
+            dynamic_ncols=True,
+        )
+
+    csv_logger = _CsvAggregateLogger(elite_path, log_csv, accelerator)
+
+    total_steps = 0
+    displayed_steps = 0
+    next_checkpoint_step = checkpoint_steps
+    max_steps_checkpoint_saved = False
+
+    if uses_env_fn:
+        prompts_by_agent = [
+            training_env.reset(reset_dataloaders=True) for training_env in envs
+        ]
+    else:
+        prompts = envs[0].reset(reset_dataloaders=True)
+
+    for i in range(training_steps):
+        agent_metrics_dict = {}
+        for agent_idx, agent in enumerate(pop):
+            if total_steps >= max_steps:
+                break
+
+            training_env = envs[agent_idx] if uses_env_fn else envs[0]
+            current_prompts = prompts_by_agent[agent_idx] if uses_env_fn else prompts
+
+            loss, perplexity = agent.learn(current_prompts)
+            next_prompts = training_env.step()
+            agg_metrics = [
+                safe_aggregate_metrics(accelerator, loss),
+                safe_aggregate_metrics(accelerator, perplexity),
+            ]
+            if uses_env_fn:
+                prompts_by_agent[agent_idx] = next_prompts
+            else:
+                prompts = next_prompts
+
+            agent.steps[-1] += effective_data_batch_size
+            total_steps += effective_data_batch_size
+            agg_test_metrics = None
+
+            if (i + 1) % evaluation_interval == 0:
+                test_score = agent.test(training_env)
+                agg_test_metrics = [safe_aggregate_metrics(accelerator, test_score)]
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+
+            if _is_main_process(accelerator):
+                per_agent_train = {
+                    "global_step": total_steps,
+                    "Train/Loss": agg_metrics[0],
+                    "Train/Perplexity": agg_metrics[1],
+                }
+                agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = per_agent_train
+                if agg_test_metrics is not None:
+                    agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = {
+                        "Eval/Negative loss (fitness)": agg_test_metrics[0],
+                    }
+                increment = min(
+                    effective_data_batch_size,
+                    max_steps - displayed_steps,
+                )
+                if increment > 0:
+                    pbar.update(increment)
+                    displayed_steps += increment
+                pbar.set_postfix(
+                    loss=f"{agg_metrics[0]:.4f}",
+                    ppl=f"{agg_metrics[1]:.2f}",
+                    **(
+                        {"eval_loss": f"{-agg_test_metrics[0]:.4f}"}
+                        if agg_test_metrics is not None
+                        else {}
+                    ),
+                )
+                agent.scores.append(-agg_metrics[0])
+
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+
+        if tournament and mutation is not None:
+            if (i + 1) % evo_steps == 0:
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+                pop = tournament_selection_and_mutation(
+                    population=pop,
+                    tournament=tournament,
+                    mutation=mutation,
+                    env_name=env_name,
+                    accelerator=accelerator,
+                    language_model=True,
+                    elite_path=elite_path,
+                    save_elite=save_elite,
+                )
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+        else:
+            checkpoint_due = False
+            if checkpoint_steps is not None:
+                while (
+                    next_checkpoint_step is not None
+                    and total_steps >= next_checkpoint_step
+                ):
+                    checkpoint_due = True
+                    next_checkpoint_step += checkpoint_steps
+            if total_steps >= max_steps and not max_steps_checkpoint_saved:
+                checkpoint_due = True
+                max_steps_checkpoint_saved = True
+            if checkpoint_due:
+                save_llm_checkpoint(agent, elite_path)
+
+        wandb_dict: dict[str, Any] = {}
+        if agent_metrics_dict and (wb or log_csv):
+            wandb_dict = build_train_wandb_dict(
+                agent_metrics_dict=agent_metrics_dict,
+                pop=pop,
+                agent=pop[0],
+                mode="sft",
+            )
+            wandb_dict |= build_eval_wandb_dict(
+                agent_metrics_dict=agent_metrics_dict,
+                pop=pop,
+                mode="sft",
+            )
+        if wandb_dict and wb and _is_main_process(accelerator):
+            wandb.log(wandb_dict)
+        csv_logger.maybe_write(wandb_dict)
+
+        if _num_epochs_reached(envs, num_epochs) or total_steps >= max_steps:
+            break
+
+    if verbose and _is_main_process(accelerator):
+        agent = pop[0]
+        scores = agent.scores
+        fitness = agent.fitness
+
+        banner_text = f"Training complete — {total_steps} steps"
+        banner_width = max(len(banner_text) + 4, 40)
+        border = "=" * banner_width
+        lines = [border, banner_text.center(banner_width), border]
+
+        if scores:
+            losses = [-s for s in scores]
+            lines += [
+                f"  Train loss  — initial: {losses[0]:.4f}  "
+                f"final: {losses[-1]:.4f}  "
+                f"best: {min(losses):.4f}  "
+                f"mean: {np.mean(losses):.4f}",
+            ]
+        if fitness:
+            eval_losses = [-f for f in fitness]
+            lines += [
+                f"  Eval  loss  — final: {eval_losses[-1]:.4f}  "
+                f"best: {min(eval_losses):.4f}",
+            ]
+        if evo_steps is not None:
+            muts = [a.mut for a in pop]
+            agents = [a.index for a in pop]
+            lines += [
+                f"  Agents: {agents}  Mutations: {muts}",
+            ]
+
+        pbar.write("\n".join(lines))
+
+    _save_elite_checkpoint(pop, save_elite, elite_path, accelerator)
+    _finish_training(
+        accelerator,
+        pbar,
+        wb,
+        csv_logger.csv_file,
+        elite_path if csv_logger.csv_file is not None else None,
+    )
     return pop

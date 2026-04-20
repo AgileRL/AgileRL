@@ -1,6 +1,5 @@
 [project]
 name = "agilerl"
-
 version = "2.7.0.dev1"
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
@@ -18,7 +17,6 @@ dependencies = [
     "google-cloud-storage~=2.5.0",
     "h5py~=3.15.0",
     "hydra-core~=1.3.2",
-    "liger-kernel==0.7.0",
     "matplotlib~=3.9.4,<3.10",
     "minari[all]==0.5.2",
     "numpy>=2.0.0,<3.0",
@@ -33,34 +31,44 @@ dependencies = [
     "redis~=4.4.4",
     "SuperSuit~=3.9.0",
     "termcolor~=1.1.0",
-    "torch==2.9.0",
+    "torch==2.9.0; sys_platform != 'darwin'",
+    "torch==2.8.0; sys_platform == 'darwin'",
     "tensordict~=0.8",
     "tqdm>=4.66.4",
     "wandb~=0.18.0",
 ]
 
 [project.optional-dependencies]
+box2d = [
+    "swig~=4.4.1; sys_platform != 'win32'",
+    "gymnasium[box2d]~=1.0.0; sys_platform != 'win32'",
+]
 llm = [
     "datasets==4.4.1",
-    "deepspeed~=0.17.1",
-    "gem-llm>=0.1.0",
+    "deepspeed~=0.17.1; sys_platform != 'win32'",
+    "liger-kernel==0.7.0; sys_platform == 'linux'",
     "peft~=0.18.0",
     "transformers~=4.57.1",
-    "vllm==0.13.0",
+    "vllm==0.13.0; sys_platform == 'linux'",
+    "vllm==0.11.0; sys_platform == 'darwin'",
 ]
 all = [
+    "swig~=4.4.1; sys_platform != 'win32'",
+    "gymnasium[box2d]~=1.0.0; sys_platform != 'win32'",
     "datasets==4.4.1",
-    "deepspeed~=0.17.1",
-    "gem-llm>=0.1.0",
+    "deepspeed~=0.17.1; sys_platform != 'win32'",
+    "liger-kernel==0.7.0; sys_platform == 'linux'",
     "peft~=0.18.0",
     "transformers~=4.57.1",
-    "vllm==0.13.0",
+    "vllm==0.13.0; sys_platform == 'linux'",
+    "vllm==0.11.0; sys_platform == 'darwin'",
 ]
 
 [dependency-groups]
 dev = [
     "pytest~=9.0.2",
     "pytest-cov~=7.0.0",
+    "pytest-env~=1.2.0",
     "nvidia-ml-py>=12.0.0",  # For GPU memory monitoring in tests
 ]
 docs = [
@@ -73,7 +81,29 @@ docs = [
 
 [tool.pytest.ini_options]
 # Deterministic ordering for tests; useful for pytest-xdist.
-env = ["PYTHONHASHSEED=0", "VLLM_ATTENTION_BACKEND=XFORMERS", "VLLM_USE_FLASHINFER_SAMPLER=0"]
+addopts = [
+    "--durations=0",
+    "--durations-min=1.0",
+]
+env = [
+    "PYTHONHASHSEED=0",
+    "VLLM_USE_FLASHINFER_SAMPLER=0",
+    "PYTORCH_ENABLE_MPS_FALLBACK=1",
+]
+filterwarnings = [
+    # MakeEvolvable deprecation (use EvolvableModule/EvolvableNetwork instead)
+    "ignore::DeprecationWarning:agilerl.wrappers.make_evolvable",
+    # HPO: activation mutations not supported for some algorithms
+    "ignore:Activation mutations are not supported for .*:UserWarning:agilerl.hpo.mutation",
+    # Pygame/setuptools warnings
+    "ignore:pkg_resources is deprecated",
+    "ignore:Deprecated call to `pkg_resources.*",
+    # Matplotlib/pyparsing deprecation warnings in test environment
+    "ignore::pyparsing.exceptions.PyparsingDeprecationWarning",
+]
+markers = [
+    "llm: LLM-related tests (exclude with -m 'not llm')",
+]
 
 [tool.coverage.run]
 parallel = true
@@ -88,22 +118,23 @@ exclude_lines = [
     "if TYPE_CHECKING:",
 ]
 
-filterwarnings = [
-    # MakeEvolvable deprecation (use EvolvableModule/EvolvableNetwork instead)
-    "ignore::DeprecationWarning:agilerl.wrappers.make_evolvable",
-    # HPO: activation mutations not supported for some algorithms
-    "ignore:Activation mutations are not supported for .*:UserWarning:agilerl.hpo.mutation",
-    # Pygame warnings
-    "ignore:pkg_resources is deprecated",
-    "ignore:Deprecated call to `pkg_resources.*"
-]
-markers = [
-    "llm: LLM-related tests (exclude with -m 'not llm')",
-]
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv]
+# box2d has a bug where it doesn't declare swig as a build dependency.
+# This workaround tells uv to build box2d-py using the project environment directly
+# (not an isolated one), where it can see system PATH and find swig, which is already installed as a dependency
+# (no-build-isolation packages are built after the others).
+#
+# DeepSpeed can be built with env vars to specify compiler flags
+# e.g. DS_BUILD_FUSED_ADAM=1 is essential on L4 GPU
+# to pre-build the fused Adam kernel and prevent timeout during tests.
+no-build-isolation-package = [
+    "box2d-py",
+    "deepspeed"
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["agilerl"]

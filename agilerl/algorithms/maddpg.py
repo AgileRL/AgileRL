@@ -429,6 +429,8 @@ class MADDPG(MultiAgentRLAlgorithm):
         self,
         obs: dict[str, ObservationType],
         infos: InfosDict | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[ArrayDict, ArrayDict]:
         """Return the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
@@ -480,7 +482,8 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         # Process actions for environment
         processed_action_dict: ArrayDict = OrderedDict()
-        for agent_id, space in self.possible_action_spaces.items():
+        for agent_id in action_dict:
+            space = self.possible_action_spaces[agent_id]
             if isinstance(space, spaces.Discrete):
                 action = action_dict[agent_id].numpy()
                 mask = (
@@ -517,7 +520,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
             action_dict = apply_env_defined_actions(
-                self.agent_ids,
+                list(action_dict.keys()),
                 processed_action_dict,
                 env_defined_actions,
                 agent_masks,

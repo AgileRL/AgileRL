@@ -1,18 +1,28 @@
+from __future__ import annotations
+
 import gc
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from accelerate import Accelerator
-from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOFunction
+
+from agilerl import HAS_LIGER_KERNEL
+
+if TYPE_CHECKING:
+    from accelerate import Accelerator
+    from peft import LoraConfig
+
+    from agilerl.wrappers.llm_envs import PreferenceGym
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.protocols import LoraConfigProtocol, PreTrainedModelProtocol
+from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import get_experiences_samples
-from agilerl.utils.llm_utils import PreferenceGym
+
+if HAS_LIGER_KERNEL:
+    from agilerl.utils.llm_utils import _LigerDPOWithAlpha
 
 
 class DPO(LLMAlgorithm):
@@ -36,8 +46,11 @@ class DPO(LLMAlgorithm):
     :type batch_size: int, optional
     :param lr: Learning rate, defaults to 0.000005
     :type lr: float, optional
-    :param beta: Beta parameter for DPO, defaults to 0.001
+    :param beta: DPO beta parameter, defaults to 0.1
     :type beta: float, optional
+    :param nll_alpha: Weight for the NLL loss on chosen responses (DPO + NLL), defaults to 1.0.
+        Set to 0 to disable the NLL term entirely.
+    :type nll_alpha: float, optional
     :param max_grad_norm: Maximum gradient norm, defaults to 0.1
     :type max_grad_norm: float, optional
     :param update_epochs: Number of update epochs, defaults to 1
@@ -49,7 +62,7 @@ class DPO(LLMAlgorithm):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param lora_config: Config for LoRA, defaults to None
-    :type lora_config: LoraConfigProtocol, optional
+    :type lora_config: LoraConfig, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
@@ -81,13 +94,14 @@ class DPO(LLMAlgorithm):
         index: int = 0,
         batch_size: int = 16,
         lr: float = 0.000005,
-        beta: float = 0.001,
+        beta: float = 0.1,
+        nll_alpha: float = 1.0,
         max_grad_norm: float = 0.1,
         update_epochs: int = 1,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
         device: str = "cpu",
-        lora_config: LoraConfigProtocol | None = None,
+        lora_config: LoraConfig | None = None,
         accelerator: Accelerator | None = None,
         wrap: bool = True,
         clone: bool = False,
@@ -97,8 +111,16 @@ class DPO(LLMAlgorithm):
         torch_compiler: str | None = None,
         use_liger_loss: bool = False,
     ) -> None:
-        device = (
-            f"cuda:{accelerator.process_index}" if accelerator is not None else device
+        resolved_device = (
+            f"cuda:{accelerator.process_index}"
+            if accelerator is not None
+            else (
+                "cuda"
+                if torch.cuda.is_available()
+                else "mps"
+                if torch.backends.mps.is_available()
+                else "cpu"
+            )
         )
         super().__init__(
             index=index,
@@ -120,19 +142,19 @@ class DPO(LLMAlgorithm):
             cosine_lr_schedule_config=None,
             hp_config=hp_config,
             wrap=wrap,
-            device=device,
+            device=resolved_device,
             accelerator=accelerator,
             name="DPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
         )
         self.beta = beta
+        self.nll_alpha = nll_alpha
         self.temperature = (
             1  # Temperature for logits calculation, DPO does not use temperature
         )
         self.use_vllm = False  # DPO does not use VLLM
         self.update_epochs = update_epochs
-        self.use_liger_loss = use_liger_loss
 
         self._initialize_actors(actor_network, not clone)
         # Register network groups for mutations
@@ -143,14 +165,15 @@ class DPO(LLMAlgorithm):
     def get_action(
         self,
         obs: LLMObsType,
-        training: bool = True,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Return the action of the agent.
 
         :param obs: The observation of the agent
         :type obs: LLMObsType
-        :param training: Whether the agent is training or not
-        :type training: bool
+        :param args: Additional arguments (unused; for base contract compatibility)
+        :param kwargs: Additional keyword arguments (e.g. training; unused)
         :return: The action of the agent
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
@@ -175,11 +198,19 @@ class DPO(LLMAlgorithm):
         """
         gc.collect()
         torch.cuda.empty_cache()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
         # The following tensors are size [batch_size, max_length]
-        chosen_input_ids: torch.Tensor = experiences["chosen_input_ids"]
-        rejected_input_ids: torch.Tensor = experiences["rejected_input_ids"]
-        chosen_attention_mask: torch.Tensor = experiences["chosen_attention_mask"]
-        rejected_attention_mask: torch.Tensor = experiences["rejected_attention_mask"]
+        chosen_input_ids: torch.Tensor = experiences["chosen_input_ids"].to(self.device)
+        rejected_input_ids: torch.Tensor = experiences["rejected_input_ids"].to(
+            self.device
+        )
+        chosen_attention_mask: torch.Tensor = experiences["chosen_attention_mask"].to(
+            self.device
+        )
+        rejected_attention_mask: torch.Tensor = experiences[
+            "rejected_attention_mask"
+        ].to(self.device)
         # Check first that all tensors have the same max length before calculating the masks
         assert (
             chosen_input_ids.shape[1]
@@ -189,7 +220,8 @@ class DPO(LLMAlgorithm):
         ), "All tensors must have the same max length"
         max_length = chosen_input_ids.shape[1]
         prompt_lengths: list[int] = experiences["prompt_lengths"]
-        prompt_masks = LLMAlgorithm.create_prompt_masks(
+        # Build the response mask on CPU (same device as dataloader tensors).
+        prompt_masks = LLMAlgorithm._create_prompt_masks(
             prompt_lengths,
             max_length=max_length,
         ).to(self.device)
@@ -198,7 +230,10 @@ class DPO(LLMAlgorithm):
         chosen_mask = (prompt_masks * chosen_attention_mask)[:, 1:]
         rejected_mask = (prompt_masks * rejected_attention_mask)[:, 1:]
         num_samples = chosen_input_ids.shape[0]
-        batch_size = min(num_samples, self.micro_batch_size_per_gpu)
+        batch_size = min(
+            num_samples,
+            getattr(self, "micro_batch_size_per_gpu", self.batch_size_per_process),
+        )
         batch_idxs = np.arange(num_samples)
         learn_metrics = {
             "mean_loss": 0.0,
@@ -387,17 +422,12 @@ class DPO(LLMAlgorithm):
                 rejected_log_probs,
                 ref_rejected_log_probs,
             )
-
-        # Clean up intermediate tensors to free up memory
-        chosen_log_probs = None
-        rejected_log_probs = None
-        ref_chosen_log_probs = None
-        ref_rejected_log_probs = None
-        chosen_mask = None
-        rejected_mask = None
+        loss = -F.logsigmoid(self.beta * (chosen_ratio - rejected_ratio)).mean()
+        if self.nll_alpha > 0:
+            loss = loss - self.nll_alpha * chosen_log_probs.sum() / chosen_mask.sum()
 
         return (
-            -F.logsigmoid(self.beta * (chosen_ratio - rejected_ratio)).mean(),
+            loss,
             implicit_chosen_reward,
             implicit_rejected_reward,
         )
@@ -428,6 +458,13 @@ class DPO(LLMAlgorithm):
         :return: Loss, chosen rewards, rejected rewards.
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
+        if not HAS_LIGER_KERNEL:
+            msg = (
+                "Liger DPO loss was requested but `liger-kernel` is not available. "
+                "Set use_liger_loss=False."
+            )
+            raise ImportError(msg)
+
         lm_head = self._get_lm_head()
         lm_head_weight = lm_head.weight  # (vocab_size, hidden_size)
         lm_head_bias = lm_head.bias
@@ -470,7 +507,6 @@ class DPO(LLMAlgorithm):
         ref_hidden = torch.cat(
             [ref_chosen_hidden, ref_rejected_hidden], dim=0
         )  # (2B, seq_len, H)
-        ref_chosen_hidden = ref_rejected_hidden = None  # free immediately
 
         # Policy hidden states — with gradient, two separate forward passes (B each)
         with self.select_adapter("actor"):
@@ -484,7 +520,6 @@ class DPO(LLMAlgorithm):
         policy_hidden = torch.cat(
             [policy_chosen_hidden, policy_rejected_hidden], dim=0
         )  # (2B, seq_len, H)
-        policy_chosen_hidden = policy_rejected_hidden = None  # free immediately
 
         # Build shifted targets; mask prompt/padding tokens with -100
         def _make_target(ids, mask):
@@ -502,7 +537,7 @@ class DPO(LLMAlgorithm):
         policy_hidden = policy_hidden[:, :-1, :].contiguous()
         ref_hidden = ref_hidden[:, :-1, :].contiguous()
 
-        loss, aux = LigerFusedLinearDPOFunction.apply(
+        loss, aux = _LigerDPOWithAlpha.apply(
             policy_hidden,
             lm_head_weight,
             stacked_target,
@@ -512,7 +547,8 @@ class DPO(LLMAlgorithm):
             lm_head_bias,  # ref_bias (same weight → same bias)
             -100,  # ignore_index
             self.beta,
-            False,  # compute_nll_loss
+            self.nll_alpha,  # alpha — scales NLL in the fused kernel
+            self.nll_alpha > 0,  # compute_nll_loss
             True,  # compiled
             True,  # use_ref_model
             False,  # average_log_prob (sum, matching _dpo_loss)
@@ -530,28 +566,34 @@ class DPO(LLMAlgorithm):
         self,
         log_probs: torch.Tensor,
         ref_log_probs: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute the implicit reward ``beta * (log pi - log pi_ref)`` per sequence.
+    ) -> torch.Tensor:
+        """Calculate the preference reward for the chosen and rejected completions.
 
         :param log_probs: Summed log-probabilities under the policy (1-D per batch row).
         :type log_probs: torch.Tensor
         :param ref_log_probs: Summed log-probabilities under the reference policy.
         :type ref_log_probs: torch.Tensor
-        :return: Implicit reward tensor (same shape as ``log_probs``).
+        :return: Implicit reward (beta * (log_probs - ref_log_probs))
         :rtype: torch.Tensor
         """
         implicit_reward = log_probs - ref_log_probs
         return self.beta * implicit_reward
 
-    def test(self, env: PreferenceGym, loop: int = 1) -> torch.Tensor:
-        """Return the fitness (test) score tensor of the agent.
+    def test(
+        self,
+        env: PreferenceGym,
+        loop: int = 1,
+        *args: Any,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Return the fitness (test) score of the agent.
 
-        :param env: Preference dataset environment with ``reset``, ``step``, and ``eval_mode``.
-        :type env: PreferenceGym
-        :param loop: Number of evaluation passes over the test split.
-        :type loop: int
-        :return: Scalar margin tensor from the final iteration (see implementation).
-        :rtype: torch.Tensor
+        :param env: The environment to be tested in
+        :type env: PreferenceGym environment
+        :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 1
+        :type loop: int, optional
+        :return: Mean test score (numpy array)
+        :rtype: np.ndarray
         """
         with env.eval_mode(), torch.no_grad():
             prompts = env.reset()
@@ -561,7 +603,8 @@ class DPO(LLMAlgorithm):
                 chosen_reward = learn_result["mean_chosen_reward"]
                 rejected_reward = learn_result["mean_rejected_reward"]
                 reward_margin = chosen_reward - rejected_reward
-                rewards.append(reward_margin)
+                rewards.append(np.asarray(reward_margin).item())
                 prompts = env.step()
-        self.fitness.append(reward_margin)
-        return reward_margin
+            mean_fit = float(np.mean(rewards))
+        self.fitness.append(mean_fit)
+        return np.array(mean_fit)

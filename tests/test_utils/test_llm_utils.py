@@ -1,17 +1,19 @@
-import sys
 from contextlib import contextmanager
+
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from accelerate import Accelerator
-from accelerate.state import AcceleratorState
+
+pytest.importorskip("datasets", reason="LLM dependencies not installed")
+
 from datasets import Dataset as Datasets
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
-
+from accelerate.state import AcceleratorState
+from accelerate import Accelerator
+from torch.utils.data import DataLoader
 from agilerl.utils.algo_utils import DummyOptimizer
 from agilerl.utils.llm_utils import (
     PreferenceGym,
@@ -30,6 +32,10 @@ from agilerl.utils.llm_utils import (
     pool_by_turns,
     stitch_completion_after_windowed_hf_generate,
     stitch_completion_after_windowed_vllm_generate,
+    compare_responses,
+    gather_if_zero3,
+    get_state_dict,
+    sample_eval_prompts,
 )
 
 pytestmark = pytest.mark.llm
@@ -632,286 +638,6 @@ def test_gather_if_zero3(zero_stage):
         assert mock_gathered_parameters.call_count == (zero_stage == 3)
 
 
-@pytest.mark.parametrize("use_accelerator", [True, False])
-@pytest.mark.parametrize("num_samples", [20])
-def test_preference_gym_init(
-    preference_dataset,
-    accelerator_factory,
-    use_accelerator,
-    num_samples,
-):
-    train_dataset, test_dataset = preference_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
-    data_batch_size = 8
-    env = PreferenceGym(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        data_batch_size_per_gpu=data_batch_size,
-        accelerator=accelerator_factory(use_accelerator),
-    )
-    assert env.name == "dummy_dataset"
-    assert hasattr(env, "tokenizer")
-    assert isinstance(env.train_dataloader, DataLoader)
-    assert isinstance(env.test_dataloader, DataLoader)
-    print("KEYS", next(env.train_dataloader_iter).keys())
-    assert list(next(env.train_dataloader_iter).keys()) == [
-        "prompt",
-        "prompt_lengths",
-        "chosen",
-        "rejected",
-        "chosen_input_ids",
-        "chosen_attention_mask",
-        "rejected_input_ids",
-        "rejected_attention_mask",
-    ]
-    assert env.dataloader == env.train_dataloader_iter
-    assert not env.reset_called
-    assert not env.evaluation_mode
-    assert env.data_batch_size_per_gpu == data_batch_size
-
-
-@pytest.mark.parametrize("use_accelerator", [True, False])
-@pytest.mark.parametrize("num_samples", [20])
-def test_preference_gym_step(
-    preference_dataset,
-    accelerator_factory,
-    use_accelerator,
-    num_samples,
-):
-    train_dataset, test_dataset = preference_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
-    data_batch_size = 8
-    env = PreferenceGym(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        data_batch_size_per_gpu=data_batch_size,
-        accelerator=accelerator_factory(use_accelerator),
-    )
-    prompts = env.step()
-    assert isinstance(prompts, dict)
-    assert set(prompts.keys()) == {
-        "prompt",
-        "prompt_lengths",
-        "chosen",
-        "rejected",
-        "chosen_input_ids",
-        "chosen_attention_mask",
-        "rejected_input_ids",
-        "rejected_attention_mask",
-    }
-    assert len(prompts["prompt"]) == data_batch_size
-    assert len(prompts["prompt_lengths"]) == data_batch_size
-    assert len(prompts["chosen"]) == data_batch_size
-    assert len(prompts["rejected"]) == data_batch_size
-    assert len(prompts["chosen_input_ids"]) == data_batch_size
-    assert len(prompts["chosen_attention_mask"]) == data_batch_size
-    assert len(prompts["rejected_input_ids"]) == data_batch_size
-    assert len(prompts["rejected_attention_mask"]) == data_batch_size
-    assert isinstance(prompts["prompt"], list)
-    assert isinstance(prompts["prompt"][0], str)
-    assert isinstance(prompts["prompt_lengths"][0], int)
-    assert isinstance(prompts["prompt_lengths"], list)
-    assert isinstance(prompts["chosen"], list)
-    assert isinstance(prompts["rejected"], list)
-    assert isinstance(prompts["chosen_input_ids"], torch.Tensor)
-    assert isinstance(prompts["chosen_attention_mask"], torch.Tensor)
-    assert isinstance(prompts["rejected_input_ids"], torch.Tensor)
-    assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
-    assert not env.reset_called
-
-
-@pytest.mark.parametrize("use_accelerator", [True, False])
-@pytest.mark.parametrize("num_samples", [20])
-def test_preference_gym_reset(
-    preference_dataset,
-    accelerator_factory,
-    use_accelerator,
-    num_samples,
-):
-    train_dataset, test_dataset = preference_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
-    data_batch_size = 8
-    env = PreferenceGym(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        data_batch_size_per_gpu=data_batch_size,
-        accelerator=accelerator_factory(use_accelerator),
-    )
-    prompts = env.reset()
-    assert isinstance(prompts, dict)
-    assert set(prompts.keys()) == {
-        "prompt",
-        "prompt_lengths",
-        "chosen",
-        "rejected",
-        "chosen_input_ids",
-        "chosen_attention_mask",
-        "rejected_input_ids",
-        "rejected_attention_mask",
-    }
-    assert len(prompts["prompt"]) == data_batch_size
-    assert len(prompts["prompt_lengths"]) == data_batch_size
-    assert len(prompts["chosen"]) == data_batch_size
-    assert len(prompts["rejected"]) == data_batch_size
-    assert len(prompts["chosen_input_ids"]) == data_batch_size
-    assert len(prompts["chosen_attention_mask"]) == data_batch_size
-    assert len(prompts["rejected_input_ids"]) == data_batch_size
-    assert len(prompts["rejected_attention_mask"]) == data_batch_size
-    assert isinstance(prompts["prompt"], list)
-    assert isinstance(prompts["prompt"][0], str)
-    assert isinstance(prompts["prompt_lengths"][0], int)
-    assert isinstance(prompts["prompt_lengths"], list)
-    assert isinstance(prompts["chosen"], list)
-    assert isinstance(prompts["rejected"], list)
-    assert isinstance(prompts["chosen_input_ids"], torch.Tensor)
-    assert isinstance(prompts["chosen_attention_mask"], torch.Tensor)
-    assert isinstance(prompts["rejected_input_ids"], torch.Tensor)
-    assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
-    assert env.reset_called
-
-
-@pytest.mark.parametrize("use_accelerator", [True, False])
-@pytest.mark.parametrize("num_samples", [20])
-def test_preference_gym_reset_reset_dataloaders_warning(
-    preference_dataset,
-    accelerator_factory,
-    use_accelerator,
-    num_samples,
-):
-    train_dataset, test_dataset = preference_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
-    data_batch_size = 1
-    env = PreferenceGym(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        data_batch_size_per_gpu=data_batch_size,
-        accelerator=accelerator_factory(use_accelerator),
-    )
-    env.reset()
-    env.step()
-    env.step()
-    with pytest.warns(
-        UserWarning,
-        match=r"env\.reset\(\) called with reset_dataloaders=True, this will reset the dataloaders to the beginning of the dataset, proceed with caution\.",
-    ):
-        prompts = env.reset(reset_dataloaders=True)
-    assert len(prompts["prompt"]) == data_batch_size
-    assert isinstance(prompts, dict)
-    assert set(prompts.keys()) == {
-        "prompt",
-        "prompt_lengths",
-        "chosen",
-        "rejected",
-        "chosen_input_ids",
-        "chosen_attention_mask",
-        "rejected_input_ids",
-        "rejected_attention_mask",
-    }
-    assert len(prompts["prompt"]) == data_batch_size
-    assert len(prompts["prompt_lengths"]) == data_batch_size
-    assert len(prompts["chosen"]) == data_batch_size
-    assert len(prompts["rejected"]) == data_batch_size
-    assert len(prompts["chosen_input_ids"]) == data_batch_size
-    assert len(prompts["chosen_attention_mask"]) == data_batch_size
-    assert len(prompts["rejected_input_ids"]) == data_batch_size
-    assert len(prompts["rejected_attention_mask"]) == data_batch_size
-    assert isinstance(prompts["prompt"], list)
-    assert isinstance(prompts["prompt"][0], str)
-    assert isinstance(prompts["prompt_lengths"][0], int)
-    assert isinstance(prompts["prompt_lengths"], list)
-    assert isinstance(prompts["chosen"], list)
-    assert isinstance(prompts["rejected"], list)
-    assert isinstance(prompts["chosen_input_ids"], torch.Tensor)
-    assert isinstance(prompts["chosen_attention_mask"], torch.Tensor)
-    assert isinstance(prompts["rejected_input_ids"], torch.Tensor)
-    assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
-    assert env.reset_called
-
-
-@pytest.mark.parametrize("use_accelerator", [True, False])
-@pytest.mark.parametrize("num_samples", [20])
-def test_preference_gym_reset_reset_called_warning(
-    preference_dataset,
-    accelerator_factory,
-    use_accelerator,
-    num_samples,
-):
-    train_dataset, test_dataset = preference_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
-    data_batch_size = 1
-    env = PreferenceGym(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        data_batch_size_per_gpu=data_batch_size,
-        accelerator=accelerator_factory(use_accelerator),
-    )
-    with pytest.warns(
-        UserWarning,
-        match=r"env\.reset\(\) called more than once sequentially, it should typically follow with env\.step\(\)\.",
-    ):
-        env.reset_called = True
-        prompts = env.reset()
-    assert len(prompts["prompt"]) == data_batch_size
-    assert isinstance(prompts, dict)
-    assert set(prompts.keys()) == {
-        "prompt",
-        "prompt_lengths",
-        "chosen",
-        "rejected",
-        "chosen_input_ids",
-        "chosen_attention_mask",
-        "rejected_input_ids",
-        "rejected_attention_mask",
-    }
-    assert len(prompts["prompt"]) == data_batch_size
-    assert len(prompts["prompt_lengths"]) == data_batch_size
-    assert len(prompts["chosen"]) == data_batch_size
-    assert len(prompts["rejected"]) == data_batch_size
-    assert len(prompts["chosen_input_ids"]) == data_batch_size
-    assert len(prompts["chosen_attention_mask"]) == data_batch_size
-    assert len(prompts["rejected_input_ids"]) == data_batch_size
-    assert len(prompts["rejected_attention_mask"]) == data_batch_size
-    assert isinstance(prompts["prompt"], list)
-    assert isinstance(prompts["prompt"][0], str)
-    assert isinstance(prompts["prompt_lengths"][0], int)
-    assert isinstance(prompts["prompt_lengths"], list)
-    assert isinstance(prompts["chosen"], list)
-    assert isinstance(prompts["rejected"], list)
-    assert isinstance(prompts["chosen_input_ids"], torch.Tensor)
-    assert isinstance(prompts["chosen_attention_mask"], torch.Tensor)
-    assert isinstance(prompts["rejected_input_ids"], torch.Tensor)
-    assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
-    assert env.reset_called
-
-
-@pytest.mark.parametrize("num_samples", [20])
-@pytest.mark.parametrize("use_accelerator", [True, False])
-def test_preference_gym_reset_num_epochs(
-    preference_dataset,
-    num_samples,
-    accelerator_factory,
-    use_accelerator,
-):
-    train_dataset, test_dataset = preference_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
-    data_batch_size = 1
-    env = PreferenceGym(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        data_batch_size_per_gpu=data_batch_size,
-        accelerator=accelerator_factory(use_accelerator),
-    )
-    while env.num_epochs == 0:
-        env.step()
-    assert env.num_epochs == 1
-
-
 def test_get_state_dict():
     model = nn.Linear(10, 10)
     state_dict = get_state_dict(model)
@@ -921,35 +647,233 @@ def test_get_state_dict():
         assert isinstance(value, torch.Tensor)
 
 
-def test_preference_gym_max_context_length_error():
-    train_dataset = Datasets.from_dict(
+def _make_tokenizer(vocab_size: int = 100, prompt_len: int = 3) -> MagicMock:
+    """Return a mock tokenizer compatible with compare_responses."""
+    tokenizer = MagicMock()
+    tokenizer.pad_token_id = 0
+    tokenizer.eos_token_id = 1
+    # tokenizer(text, return_tensors="pt") → encoding with .to(device)
+    encoding = MagicMock()
+    encoding.__getitem__ = lambda self, key: (
+        torch.zeros(1, prompt_len, dtype=torch.long)
+        if key == "input_ids"
+        else torch.ones(1, prompt_len, dtype=torch.long)
+    )
+    encoding.to.return_value = {
+        "input_ids": torch.zeros(1, prompt_len, dtype=torch.long),
+        "attention_mask": torch.ones(1, prompt_len, dtype=torch.long),
+    }
+    tokenizer.return_value = encoding
+    tokenizer.decode.return_value = "decoded response"
+    return tokenizer
+
+
+def _make_agent(has_adapter: bool, device: str = "cpu") -> MagicMock:
+    """Return a mock agent with actor and device attributes."""
+    agent = MagicMock()
+    agent.device = device
+    model = MagicMock()
+    model.generate.return_value = torch.zeros(1, 5, dtype=torch.long)
+    if has_adapter:
+        # disable_adapter() must work as a context manager
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=None)
+        cm.__exit__ = MagicMock(return_value=False)
+        model.disable_adapter = MagicMock(return_value=cm)
+    else:
+        del model.disable_adapter  # hasattr() returns False
+    agent.actor = model
+    return agent
+
+
+def test_compare_responses_no_adapter_with_reference(capsys):
+    """Without an adapter only the model response section is printed; reference is shown."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("What is 2+2?", "It is 4.", "It is 5.")]
+
+    compare_responses(agent, tokenizer, samples)
+
+    captured = capsys.readouterr().out
+    assert "PROMPT" in captured
+    assert "DATASET RESPONSE (CHOSEN)" in captured
+    assert "DATASET RESPONSE (REJECTED)" in captured
+    assert "MODEL RESPONSE" in captured
+    assert "BASE MODEL" not in captured
+    assert "FINE-TUNED MODEL" not in captured
+    # generate called exactly once (no base model pass)
+    assert agent.actor.generate.call_count == 1
+
+
+def test_compare_responses_no_adapter_no_reference(capsys):
+    """When reference is None the DATASET RESPONSE section is skipped."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("What is 2+2?", None, None)]
+
+    compare_responses(agent, tokenizer, samples)
+
+    captured = capsys.readouterr().out
+    assert "PROMPT" in captured
+    assert "DATASET RESPONSE" not in captured
+    assert "MODEL RESPONSE" in captured
+
+
+def test_compare_responses_with_adapter_shows_base_and_finetuned(capsys):
+    """With an adapter both BASE MODEL and FINE-TUNED MODEL sections are printed."""
+    agent = _make_agent(has_adapter=True)
+    tokenizer = _make_tokenizer()
+    samples = [
+        (
+            "Tell me a joke.",
+            "Why did the chicken cross the road?",
+            "To get to the bar.",
+        ),
+    ]
+
+    compare_responses(agent, tokenizer, samples)
+
+    captured = capsys.readouterr().out
+    assert "DATASET RESPONSE (REJECTED)" in captured
+    assert "BASE MODEL" in captured
+    assert "FINE-TUNED MODEL" in captured
+    assert "MODEL RESPONSE" not in captured
+    # generate called twice: once inside disable_adapter, once without
+    assert agent.actor.generate.call_count == 2
+    agent.actor.disable_adapter.assert_called_once()
+
+
+def test_compare_responses_multiple_samples_enter_continues(capsys):
+    """Pressing Enter (empty string) advances to the next sample."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [
+        ("Q1", "A1", None),
+        ("Q2", "A2", "rejected for Q2"),
+        ("Q3", "A3", None),
+    ]
+
+    with patch("builtins.input", return_value=""):
+        compare_responses(agent, tokenizer, samples)
+
+    captured = capsys.readouterr().out
+    assert "DATASET RESPONSE (REJECTED)" in captured
+    # Navigation prompt appears between samples (not after the last one)
+    assert captured.count("[Enter] next sample") == len(samples) - 1
+    # All three samples were generated
+    assert agent.actor.generate.call_count == len(samples)
+
+
+def test_compare_responses_quit_early(capsys):
+    """Pressing 'q' stops processing remaining samples."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("Q1", "A1", None), ("Q2", "A2", None), ("Q3", "A3", None)]
+
+    with patch("builtins.input", return_value="q"):
+        compare_responses(agent, tokenizer, samples)
+
+    # Only the first sample's generation runs; loop exits before Q2 and Q3
+    assert agent.actor.generate.call_count == 1
+
+
+def test_compare_responses_eof_breaks_loop(capsys):
+    """An EOFError from input() (non-interactive environment) stops the loop gracefully."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("Q1", "A1", None), ("Q2", "A2", None)]
+
+    with patch("builtins.input", side_effect=EOFError):
+        compare_responses(agent, tokenizer, samples)
+
+    # Only the first sample is generated; EOFError prevents further iteration
+    assert agent.actor.generate.call_count == 1
+
+
+def test_compare_responses_single_sample_no_input_prompt(capsys):
+    """With a single sample the navigation prompt and input() are never shown/called."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("Only prompt", "Only response", None)]
+
+    with patch("builtins.input") as mock_input:
+        compare_responses(agent, tokenizer, samples)
+
+    mock_input.assert_not_called()
+
+
+@pytest.mark.parametrize("do_sample,temperature", [(False, 1.0), (True, 0.7)])
+def test_compare_responses_generation_kwargs_forwarded(do_sample, temperature):
+    """do_sample and temperature are forwarded to model.generate."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("prompt", None, None)]
+
+    compare_responses(
+        agent,
+        tokenizer,
+        samples,
+        max_new_tokens=50,
+        temperature=temperature,
+        do_sample=do_sample,
+    )
+
+    _, call_kwargs = agent.actor.generate.call_args
+    assert call_kwargs["max_new_tokens"] == 50
+    assert call_kwargs["temperature"] == temperature
+    assert call_kwargs["do_sample"] == do_sample
+
+
+def test_compare_responses_skip_special_tokens_forwarded():
+    """skip_special_tokens is forwarded to tokenizer.decode."""
+    agent = _make_agent(has_adapter=False)
+    tokenizer = _make_tokenizer()
+    samples = [("prompt", None, None)]
+
+    compare_responses(agent, tokenizer, samples, skip_special_tokens=False)
+
+    _, decode_kwargs = tokenizer.decode.call_args
+    assert decode_kwargs["skip_special_tokens"] is False
+
+
+def test_sample_eval_prompts_sft_style_response_column():
+    """Covers SFTGym-style envs that expose ``response_column``."""
+    from types import SimpleNamespace
+
+    ds = Datasets.from_dict(
+        {"prompt": ["p0", "p1"], "response": ["r0", "r1"]},
+    )
+    env = SimpleNamespace(
+        response_column="response",
+        test_dataloader=SimpleNamespace(dataset=ds),
+    )
+    rows = sample_eval_prompts(env, n=2, seed=0)
+    assert len(rows) == 2
+    assert {rows[0][0], rows[1][0]} == {"p0", "p1"}
+    assert all(r[2] is None for r in rows)
+
+
+def test_sample_eval_prompts_preference_style_chosen_rejected():
+    """Covers PreferenceGym-style datasets with ``chosen`` / ``rejected`` columns."""
+    from types import SimpleNamespace
+
+    ds = Datasets.from_dict(
         {
-            "prompt": ["This is a prompt that is longer than the max context length."],
-            "chosen": ["This is an answer."],
-            "rejected": ["This is an answer."],
+            "prompt": ["p0", "p1"],
+            "chosen": ["c0", "c1"],
+            "rejected": ["x0", "x1"],
         },
     )
-    test_dataset = Datasets.from_dict(
-        {
-            "prompt": ["This is a normal length prompt"],
-            "chosen": ["This is an answer."],
-            "rejected": ["This is an answer."],
-        },
-    )
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
-    data_batch_size = 8
-    with pytest.raises(
-        ValueError,
-        match="No samples left in the train dataset after filtering by the max context length constraint, use a larger max context length.",
-    ):
-        PreferenceGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            data_batch_size_per_gpu=data_batch_size,
-            max_context_length=5,
-            min_completion_length=1,
-        )
+    env = SimpleNamespace(test_dataloader=SimpleNamespace(dataset=ds))
+    rows = sample_eval_prompts(env, n=2, seed=0)
+    assert len(rows) == 2
+    prompts = {r[0] for r in rows}
+    assert prompts == {"p0", "p1"}
+    for p, c, r in rows:
+        if p == "p0":
+            assert (c, r) == ("c0", "x0")
+        else:
+            assert (c, r) == ("c1", "x1")
 
 
 def test_preference_gym_max_context_length_warning():
@@ -1216,3 +1140,9 @@ def test_get_model_name_or_path_and_align_deepspeed_lr_helpers():
     assert accelerator.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
         "lr"
     ] == pytest.approx(2e-3)
+
+
+def test_gather_if_zero3_stage_not_three_noop():
+    """ZeRO stages other than 3 should be a no-op context manager."""
+    with gather_if_zero3(1, []):
+        assert True

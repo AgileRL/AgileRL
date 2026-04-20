@@ -3,7 +3,7 @@
 Group Relative Policy Optimization (GRPO)
 =========================================
 
-`GRPO <https://arxiv.org/pdf/2402.03300>`_ (Group Relative Policy Optimization) is an elegant simplification of :ref:`PPO<_ppo>` (Proximal Policy Optimization)
+`GRPO <https://arxiv.org/pdf/2402.03300>`__ (Group Relative Policy Optimization) is an elegant simplification of :ref:`PPO<ppo>` (Proximal Policy Optimization)
 that makes reinforcement learning more computationally efficient, especially for large language models.
 
 The two key innovations are:
@@ -24,7 +24,7 @@ For more details on how to set up GRPO and use it for training, check out the :r
 .. code-block:: python
 
   from agilerl.algorithms import GRPO
-  from agilerl.utils.llm_utils import ReasoningGym
+  from agilerl.wrappers.llm_envs import ReasoningGym
 
   model = AutoModelForCausalLM.from_pretrained(
       "Qwen/Qwen2.5-3B",

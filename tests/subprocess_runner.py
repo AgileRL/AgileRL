@@ -24,6 +24,7 @@ import traceback
 
 import numpy as np
 import torch
+from _pytest.outcomes import Skipped
 from accelerate.state import AcceleratorState
 from torch._inductor.utils import fresh_cache
 
@@ -43,7 +44,6 @@ def setup_deepspeed_env():
         "RANK": "0",
         "LOCAL_RANK": "0",
         "WORLD_SIZE": "1",
-        # "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True", # NOTE commented out so vllm tests can run with sleep mode
         "CUDA_VISIBLE_DEVICES": "0",
     }
     for key, value in env_vars.items():
@@ -53,14 +53,20 @@ def setup_deepspeed_env():
 def setup_test_env_vars():
     """Set pytest ini env vars that would normally be set by pytest."""
     os.environ.setdefault("PYTHONHASHSEED", "0")
+    # Let vLLM select a compatible backend for the installed version/platform.
+    os.environ.pop("VLLM_ATTENTION_BACKEND", None)
     os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    if not torch.cuda.is_available():
+        os.environ.setdefault("ACCELERATE_USE_CPU", "true")
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 
 def set_seed(seed=42):
     """Set random seeds for reproducibility."""
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
 
@@ -75,14 +81,18 @@ def wait_for_gpu_memory():
 
 def cleanup_after_test(test_name):
     """Run cleanup after the test, replicating conftest autouse fixtures."""
-    import deepspeed.comm.comm as ds_comm
-    import deepspeed.utils.groups as ds_groups
+    try:
+        import deepspeed.comm.comm as ds_comm
+    except ImportError:
+        ds_comm = None
 
     from tests.utils import force_gpu_memory_release
 
-    if "vllm" in test_name:
+    if "vllm" in test_name and ds_comm is not None:
+        import deepspeed.utils.groups as ds_groups
         from vllm.distributed import cleanup_dist_env_and_memory
         from vllm.distributed.parallel_state import destroy_model_parallel
+
         destroy_model_parallel()
         cleanup_dist_env_and_memory()
         for attr in dir(ds_groups):
@@ -209,6 +219,8 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except Skipped:
+        sys.exit(0)
     except Exception:
         traceback.print_exc()
         sys.exit(1)
