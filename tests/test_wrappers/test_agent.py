@@ -871,6 +871,150 @@ def test_ippo_custom_training_with_async_env(
     assert all(agent_id in test_observations for agent_id in test_actions)
 
 
+@pytest.mark.parametrize("num_envs", [1, 2])
+def test_maddpg_custom_training_with_async_env(
+    device,
+    ma_vector_space,
+    num_envs,
+):
+    from gymnasium import spaces as gym_spaces
+    from agilerl.algorithms import MADDPG
+
+    vectorized = num_envs > 1
+    observation_spaces = ma_vector_space
+    action_spaces = [
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+        for _ in range(3)
+    ]
+
+    if vectorized:
+        env = make_multi_agent_vect_envs(
+            DummyMultiEnvAsync,
+            num_envs=num_envs,
+            observation_spaces=observation_spaces,
+            action_spaces=action_spaces,
+        )
+    else:
+        env = DummyMultiEnvAsync(observation_spaces, action_spaces)
+
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+
+    agent = MADDPG(
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
+        agent_ids=agent_ids,
+        device=device,
+        batch_size=64,
+    )
+    async_agent = AsyncAgentsWrapper(agent)
+
+    observations, infos = env.reset()
+
+    states = {agent_id: [] for agent_id in agent_ids}
+    actions = {agent_id: [] for agent_id in agent_ids}
+    rewards = {agent_id: [] for agent_id in agent_ids}
+    dones = {agent_id: [] for agent_id in agent_ids}
+    next_states = {}
+
+    done = {
+        agent_id: np.zeros((num_envs,), dtype=np.int8)
+        if vectorized
+        else np.array([0], dtype=np.int8)
+        for agent_id in agent_ids
+    }
+
+    max_steps = 40
+    for _ in range(max_steps):
+        env_action_dict, raw_action_dict = async_agent.get_action(observations)
+
+        next_observations, reward_dict, terminated, truncated, next_infos = env.step(
+            env_action_dict
+        )
+
+        for agent_id in observations:
+            obs_batch = np.asarray(observations[agent_id])
+            if obs_batch.ndim == 1:
+                obs_batch = obs_batch[np.newaxis, ...]
+
+            action_batch = np.asarray(raw_action_dict[agent_id])
+            if action_batch.ndim == 1:
+                action_batch = action_batch[np.newaxis, ...]
+
+            reward_batch = np.asarray(reward_dict[agent_id])
+            reward_batch = np.atleast_1d(reward_batch).reshape(-1, 1)
+
+            done_batch = np.asarray(done[agent_id])
+            done_batch = np.atleast_1d(done_batch).reshape(-1, 1)
+
+            batch_size = min(
+                obs_batch.shape[0],
+                action_batch.shape[0],
+                reward_batch.shape[0],
+                done_batch.shape[0],
+            )
+
+            for idx in range(batch_size):
+                states[agent_id].append(obs_batch[idx])
+                actions[agent_id].append(
+                    torch.as_tensor(action_batch[idx], dtype=torch.float32)
+                )
+                rewards[agent_id].append(
+                    torch.as_tensor(reward_batch[idx], dtype=torch.float32)
+                )
+                dones[agent_id].append(
+                    torch.as_tensor(done_batch[idx], dtype=torch.float32)
+                )
+
+        next_dones = {}
+        for agent_id in terminated:
+            term = terminated[agent_id]
+            trunc = truncated[agent_id]
+
+            if vectorized:
+                mask = ~(np.isnan(term) | np.isnan(trunc))
+                result = np.full_like(mask, np.nan, dtype=float)
+                result[mask] = np.logical_or(term[mask], trunc[mask])
+                next_dones[agent_id] = result
+            else:
+                next_dones[agent_id] = np.array([np.logical_or(term, trunc)]).astype(
+                    np.int8
+                )
+
+        observations = next_observations
+        done = next_dones
+        infos = next_infos
+
+        if next_dones:
+            for agent_dones in zip(*next_dones.values(), strict=False):
+                if all(agent_dones):
+                    if not vectorized:
+                        observations, infos = env.reset()
+                    done = {
+                        agent_id: np.zeros((num_envs,), dtype=np.int8)
+                        if vectorized
+                        else np.array([0], dtype=np.int8)
+                        for agent_id in agent_ids
+                    }
+
+    min_len = min(len(states[agent_id]) for agent_id in agent_ids)
+    states = {agent_id: states[agent_id][:min_len] for agent_id in agent_ids}
+    actions = {agent_id: actions[agent_id][:min_len] for agent_id in agent_ids}
+    rewards = {agent_id: rewards[agent_id][:min_len] for agent_id in agent_ids}
+    dones = {agent_id: dones[agent_id][:min_len] for agent_id in agent_ids}
+
+    experiences = (
+        states,
+        actions,
+        rewards,
+        next_states,
+        dones,
+    )
+
+    assert any(len(v) > 0 for v in states.values())
+    loss_info = async_agent.learn(experiences)
+    assert loss_info is not None
+
+
 def test_agent_wrapper_base_get_action_learn(vector_space):
     from agilerl.wrappers.agent import AgentWrapper
 
@@ -1264,3 +1408,78 @@ def test_async_learn_missing_next_state(ma_vector_space, ma_discrete_space):
     )
     loss_info = wrapper.learn(experiences)
     assert isinstance(loss_info, dict)
+
+
+def test_async_wrapper_allows_maddpg(ma_vector_space):
+    from gymnasium import spaces as gym_spaces
+    from agilerl.algorithms import MADDPG
+
+    agent_ids = ["agent_0", "agent_1"]
+    action_spaces = [
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+    ]
+
+    agent = MADDPG(
+        observation_spaces=ma_vector_space[:2],
+        action_spaces=action_spaces,
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+
+    wrapper = AsyncAgentsWrapper(agent)
+    assert wrapper.agent.algo == "MADDPG"
+
+
+def test_async_wrapper_allows_matd3(ma_vector_space):
+    from gymnasium import spaces as gym_spaces
+    from agilerl.algorithms import MATD3
+
+    agent_ids = ["agent_0", "agent_1"]
+    action_spaces = [
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+    ]
+
+    agent = MATD3(
+        observation_spaces=ma_vector_space[:2],
+        action_spaces=action_spaces,
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+
+    wrapper = AsyncAgentsWrapper(agent)
+    assert wrapper.agent.algo == "MATD3"
+
+
+def test_async_get_action_with_inactive_off_policy_agents(ma_vector_space):
+    from gymnasium import spaces as gym_spaces
+    from agilerl.algorithms import MADDPG
+
+    agent_ids = ["agent_0", "agent_1"]
+    action_spaces = [
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+    ]
+
+    agent = MADDPG(
+        observation_spaces=ma_vector_space[:2],
+        action_spaces=action_spaces,
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+    wrapper = AsyncAgentsWrapper(agent)
+
+    obs = {
+        "agent_0": np.array([[1.0] * 6, [np.nan] * 6], dtype=np.float32),
+        "agent_1": np.array([[1.0] * 6, [1.0] * 6], dtype=np.float32),
+    }
+
+    env_action_dict, raw_action_dict = wrapper.get_action(obs)
+
+    assert "agent_0" in env_action_dict
+    assert "agent_0" in raw_action_dict
+    assert env_action_dict["agent_0"].shape[0] == 2
+    assert raw_action_dict["agent_0"].shape[0] == 2
+    assert "agent_1" in env_action_dict
+    assert "agent_1" in raw_action_dict
