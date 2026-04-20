@@ -9,7 +9,7 @@ import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from importlib.metadata import version
@@ -4275,6 +4275,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 ck > lv
                 for ck, lv in zip(ckpt_t.shape, live_t.shape, strict=False)
             ):
+                # Checkpoint rank > live rank shouldn't happen with max() merge, but
+                # fall back to a straight load so PEFT raises a clear error.
                 padded[key] = ckpt_t
                 continue
             canvas = live_t.detach().clone()
