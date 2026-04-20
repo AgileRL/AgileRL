@@ -9,7 +9,7 @@ import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from importlib.metadata import version
@@ -94,7 +94,6 @@ from agilerl.utils.evolvable_networks import (
     get_default_encoder_config,
     is_image_space,
     is_vector_space,
-    tuple_to_dict_obs,
 )
 
 if TYPE_CHECKING:
@@ -2297,7 +2296,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type load_optimizer: bool
         """
         checkpoint = self._load_attribute_checkpoint(path)
-        self._load_model_checkpoint(path, keep_existing_reference=keep_existing_reference)
+        self._load_model_checkpoint(
+            path, keep_existing_reference=keep_existing_reference
+        )
         self._restore_checkpoint_attributes(checkpoint)
         if self.accelerator is not None:
             self.device = self.accelerator.device
@@ -4271,10 +4272,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if live_t is None or tuple(live_t.shape) == tuple(ckpt_t.shape):
                 padded[key] = ckpt_t
                 continue
-            if any(
-                ck > lv
-                for ck, lv in zip(ckpt_t.shape, live_t.shape, strict=False)
-            ):
+            if any(ck > lv for ck, lv in zip(ckpt_t.shape, live_t.shape, strict=False)):
                 # Checkpoint rank > live rank shouldn't happen with max() merge, but
                 # fall back to a straight load so PEFT raises a clear error.
                 padded[key] = ckpt_t
@@ -4340,9 +4338,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         optim_path = Path(path) / "optimizer.pt"
         if not optim_path.is_file():
             return
-        state = torch.load(
-            str(optim_path), weights_only=False, map_location="cpu"
-        )
+        state = torch.load(str(optim_path), weights_only=False, map_location="cpu")
         inner = self.optimizer.optimizer
         if not isinstance(inner, DummyOptimizer) and state.get("optimizer") is not None:
             inner.load_state_dict(state["optimizer"])
