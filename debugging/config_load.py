@@ -10,6 +10,13 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def load_debug_config(filename: str) -> dict:
+    """Load a YAML config from ``configs/debugging/`` relative to the repo root.
+
+    :param filename: The name of the config file to load.
+    :type filename: str
+    :return: The config.
+    :rtype: dict
+    """
     path = _REPO_ROOT / "configs" / "debugging" / filename
-    with open(path, encoding="utf-8") as f:
+    with Path.open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)

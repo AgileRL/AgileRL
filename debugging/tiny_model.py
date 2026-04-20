@@ -12,7 +12,7 @@ TINY_MAX_OUTPUT_TOKENS = 64
 
 
 class TinyDigitTokenizer:
-    """Digits 0–4 plus PAD (5) and EOS (6)."""
+    """Digits 0–4 plus PAD (5) and EOS (6)."""  # noqa: RUF002
 
     NUM_DIGITS = 5
 
@@ -20,9 +20,9 @@ class TinyDigitTokenizer:
         self.vocab = {str(i): i for i in range(self.NUM_DIGITS)}
         self.inv_vocab = {i: str(i) for i in range(self.NUM_DIGITS)}
         self.pad_token_id = 5
-        self.pad_token = "<PAD>"
+        self.pad_token = "<PAD>"  # noqa: S105
         self.eos_token_id = TINY_TARGET_TOKEN_ID
-        self.eos_token = "<EOS>"
+        self.eos_token = "<EOS>"  # noqa: S105
         self.vocab_size = TINY_VOCAB_SIZE
 
     def apply_chat_template(
@@ -31,11 +31,33 @@ class TinyDigitTokenizer:
         tokenize: bool = False,
         continue_final_message: bool = True,
     ):
+        """Apply a chat template to a conversation.
+
+        :param conversation_template: The conversation template.
+        :type conversation_template: list[dict[str, str]]
+        :param tokenize: Whether to tokenize the conversation.
+        :type tokenize: bool
+        :param continue_final_message: Whether to continue the final message.
+        :type continue_final_message: bool
+        :return: The encoded conversation.
+        :rtype: list[int]
+        """
         del continue_final_message
         text = "".join(message["content"] for message in conversation_template)
         return self.encode(text) if tokenize else text
 
     def encode(self, text: str, *args, **kwargs) -> list[int]:
+        """Encode a text into a list of token IDs.
+
+        :param text: The text to encode.
+        :type text: str
+        :param args: Additional arguments.
+        :type args: Any
+        :param kwargs: Additional keyword arguments.
+        :type kwargs: Any
+        :return: The encoded token IDs.
+        :rtype: list[int]
+        """
         del args, kwargs
         encoded = [self.vocab[ch] for ch in text if ch in self.vocab]
         return encoded or [self.pad_token_id]
@@ -46,16 +68,27 @@ class TinyDigitTokenizer:
         skip_special_tokens: bool = False,
         clean_up_tokenization_spaces: bool = False,
     ) -> str:
+        """Decode a list of token IDs.
+
+        :param token_ids: The list of token IDs to decode.
+        :type token_ids: list[int] | torch.Tensor
+        :param skip_special_tokens: Whether to skip special tokens.
+        :type skip_special_tokens: bool
+        :param clean_up_tokenization_spaces: Whether to clean up tokenization spaces.
+        :type clean_up_tokenization_spaces: bool
+        :return: The decoded text.
+        :rtype: str
+        """
         del clean_up_tokenization_spaces
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.tolist()
         special = {self.pad_token_id, self.eos_token_id}
         decoded = []
         for idx in token_ids:
-            idx = int(idx)
-            if skip_special_tokens and idx in special:
+            int_idx = int(idx)
+            if skip_special_tokens and int_idx in special:
                 continue
-            decoded.append(self.inv_vocab.get(idx, ""))
+            decoded.append(self.inv_vocab.get(int_idx, ""))
         return "".join(decoded)
 
     def batch_decode(
@@ -64,6 +97,17 @@ class TinyDigitTokenizer:
         skip_special_tokens: bool = False,
         clean_up_tokenization_spaces: bool = False,
     ) -> list[str]:
+        """Decode a batch of token IDs.
+
+        :param token_batch: The batch of token IDs to decode.
+        :type token_batch: list[list[int]] | torch.Tensor
+        :param skip_special_tokens: Whether to skip special tokens.
+        :type skip_special_tokens: bool
+        :param clean_up_tokenization_spaces: Whether to clean up tokenization spaces.
+        :type clean_up_tokenization_spaces: bool
+        :return: The decoded texts.
+        :rtype: list[str]
+        """
         if isinstance(token_batch, torch.Tensor):
             token_batch = token_batch.tolist()
         return [
@@ -85,9 +129,29 @@ class TinyDigitTokenizer:
         *args,
         **kwargs,
     ) -> dict[str, torch.Tensor]:
+        """Tokenize a list of texts.
+
+        :param texts: The texts to tokenize.
+        :type texts: list[str]
+        :param return_tensors: The type of tensors to return.
+        :type return_tensors: str
+        :param padding: Whether to pad the texts.
+        :type padding: bool | str
+        :param padding_side: The side to pad the texts.
+        :type padding_side: str
+        :param return_attention_mask: Whether to return the attention mask.
+        :type return_attention_mask: bool
+        :param args: Additional arguments.
+        :type args: Any
+        :param kwargs: Additional keyword arguments.
+        :type kwargs: Any
+        :return: The tokenized texts.
+        :rtype: dict[str, torch.Tensor]
+        """
         del args, kwargs
         if return_tensors != "pt":
-            raise ValueError("TinyDigitTokenizer only supports return_tensors='pt'.")
+            error_msg = "TinyDigitTokenizer only supports return_tensors='pt'."
+            raise ValueError(error_msg)
         encoded = [self.encode(text) for text in texts]
         max_len = max(len(ids) for ids in encoded) if padding else None
 
@@ -145,6 +209,13 @@ def _make_tiny_generation_config() -> GenerationConfig:
 
 
 def build_tiny_actor_network(use_value_head: bool = False) -> GPT2LMHeadModel:
+    """Build a tiny actor network for debugging.
+
+    :param use_value_head: Whether to use a value head.
+    :type use_value_head: bool
+    :return: The actor network.
+    :rtype: GPT2LMHeadModel
+    """
     base_model = GPT2LMHeadModel(_make_tiny_config())
     generation_config = _make_tiny_generation_config()
     base_model.generation_config = generation_config
