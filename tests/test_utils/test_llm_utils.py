@@ -190,7 +190,7 @@ class Info:
         self.dataset_name = name
 
 
-class DummyReasoningDataset(Dataset):
+class DummyReasoningDataset(Datasets):
     def __init__(self, num_samples):
         # Create dummy questions and answers
         self.questions = [f"This is question {i}?" for i in range(num_samples)]
@@ -205,7 +205,7 @@ class DummyReasoningDataset(Dataset):
         return {"question": self.questions[index], "answer": self.answers[index]}
 
 
-class DummyPreferenceDataset(Dataset):
+class DummyPreferenceDataset(Datasets):
     def __init__(self, num_samples):
         self.prompt = [f"This is prompt {i}." for i in range(num_samples)]
         self.chosen = [f"This is chosen {i}." for i in range(num_samples)]
