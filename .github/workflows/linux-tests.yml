@@ -72,12 +72,14 @@ jobs:
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
 
             - name: Run non-LLM tests (parallel)
-              run: |
-                  uv run pytest -m "not llm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
+              run: uv run pytest -m "not llm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
+              env:
+                  COVERAGE_FILE: .coverage.parallel
 
             - name: Run LLM tests (sequential, exclusive GPU)
-              run: |
-                  uv run pytest -n0 -m "llm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
+              run: uv run pytest -n0 -m "llm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
+              env:
+                  COVERAGE_FILE: .coverage.llm
 
             - name: Combine coverage and generate report
               run: |
