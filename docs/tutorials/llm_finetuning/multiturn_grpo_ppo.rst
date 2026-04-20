@@ -7,7 +7,7 @@ In this tutorial, we train three LLM reinforcement learning agents on the same m
 ``LLMPPO``, ``LLMReinforce``, and ``GRPO``. The environment, model, tokenizer, and training loop are kept fixed so you can
 compare algorithm behavior directly.
 
-The task is ``game:GuessTheNumber-v0-easy``, where the agent has to guess a number and gets iterative feedback over multiple turns, 
+The task is ``game:GuessTheNumber-v0-easy``, where the agent has to guess a number and gets iterative feedback over multiple turns,
 with the goal of converging to the correct answer. The task is simple but useful for illustrating how LLMs can be fine tuned for
 multi-turn agentic tasks.
 

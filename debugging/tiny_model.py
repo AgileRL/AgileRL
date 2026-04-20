@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import torch
-from transformers import GPT2Config, GPT2LMHeadModel, GenerationConfig
+from transformers import GenerationConfig, GPT2Config, GPT2LMHeadModel
 
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
@@ -38,7 +38,7 @@ class TinyDigitTokenizer:
     def encode(self, text: str, *args, **kwargs) -> list[int]:
         del args, kwargs
         encoded = [self.vocab[ch] for ch in text if ch in self.vocab]
-        return encoded if encoded else [self.pad_token_id]
+        return encoded or [self.pad_token_id]
 
     def decode(
         self,
@@ -151,9 +151,8 @@ def build_tiny_actor_network(use_value_head: bool = False) -> GPT2LMHeadModel:
     base_model.name_or_path = "tiny-debug-transformer"
     if use_value_head:
         actor_network = AutoModelForCausalLMWithValueHead.from_pretrained(
-            base_model, **{"summary_dropout_prob": 0.0}
+            base_model, summary_dropout_prob=0.0
         )
         actor_network.generation_config = generation_config
         return actor_network
     return base_model
-

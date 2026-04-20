@@ -13,6 +13,7 @@ if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
 import torch
+from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 from config_load import load_debug_config
 from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
@@ -25,7 +26,6 @@ from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.probe_envs_llm import GridNavigationEnv
 from agilerl.utils.utils import create_population
-from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 
 
 def _prompt_dict_from_encoded(

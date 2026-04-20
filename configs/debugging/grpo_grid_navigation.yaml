@@ -1,25 +1,26 @@
+---
 INIT_HP:
-  ALGO: GRPO
-  BATCH_SIZE: 32
-  GROUP_SIZE: 8
-  BETA: 0.0
-  LR: 0.001
-  CLIP_COEF: 0.2
-  MAX_GRAD_NORM: 1.0
-  TEMPERATURE: 0.5
-  UPDATE_EPOCHS: 2
+    ALGO: GRPO
+    BATCH_SIZE: 32
+    GROUP_SIZE: 8
+    BETA: 0.0
+    LR: 0.001
+    CLIP_COEF: 0.2
+    MAX_GRAD_NORM: 1.0
+    TEMPERATURE: 0.5
+    UPDATE_EPOCHS: 2
 
 DEBUG:
-  eval_episodes: 128
-  grid_size: 4
-  max_turns: 5
-  max_context_length: 128
-  max_output_tokens: 1
-  max_sample_steps: 32768
-  evaluation_interval: 50
-  seeds: [0]
-  suppress_tokens: [0, 4, 5, 6]
-  lora:
-    r: 8
-    lora_alpha: 32
-    target_modules: [c_attn, c_proj, c_fc]
+    eval_episodes: 128
+    grid_size: 4
+    max_turns: 5
+    max_context_length: 128
+    max_output_tokens: 1
+    max_sample_steps: 32768
+    evaluation_interval: 50
+    seeds: [0]
+    suppress_tokens: [0, 4, 5, 6]
+    lora:
+        r: 8
+        lora_alpha: 32
+        target_modules: [c_attn, c_proj, c_fc]

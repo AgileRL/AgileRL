@@ -28,6 +28,7 @@ from agilerl import HAS_LLM_DEPENDENCIES
 if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
+from agilerl.wrappers.multiturn_wrappers import TokenObservationWrapper
 from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
@@ -41,7 +42,6 @@ from agilerl.training.train_llm import (
 )
 from agilerl.utils.probe_envs_llm import ConditionalTargetEnv
 from agilerl.utils.utils import create_population
-from agilerl.wrappers.multiturn_wrappers import TokenObservationWrapper
 
 
 @dataclass
