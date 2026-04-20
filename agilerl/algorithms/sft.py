@@ -140,7 +140,7 @@ class SFT(LLMAlgorithm):
             pad_token=pad_token,
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
-            use_separate_reference_adapter=False,
+            adapter_names=("actor",),
             model_name=model_name,
             actor_network=actor_network,
             model_config=model_config,

@@ -118,8 +118,6 @@ class GRPO(LLMAlgorithm):
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
     :type clone: bool, optional
-    :param use_separate_reference_adapter: Flag to indicate if the reference policy should have a separate adapter, defaults to False
-    :type use_separate_reference_adapter: bool, optional
     :param use_vllm: Flag to indicate if the model should use vllm for generation, defaults to False
     :type use_vllm: bool, optional
     :param vllm_config: Config for VLLM generation, defaults to None
@@ -191,7 +189,6 @@ class GRPO(LLMAlgorithm):
         device: str = "cpu",
         wrap: bool = True,
         clone: bool = False,
-        use_separate_reference_adapter: bool = False,
         use_vllm: bool = False,
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
@@ -231,7 +228,7 @@ class GRPO(LLMAlgorithm):
             use_memory_efficient_params=use_memory_efficient_params,
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
-            use_separate_reference_adapter=use_separate_reference_adapter,
+            adapter_names=("actor", "reference"),
             use_vllm=use_vllm,
             vllm_config=vllm_config,
             model_name=model_name,

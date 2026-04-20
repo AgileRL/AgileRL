@@ -77,7 +77,6 @@ def generate_dpo(
     vocab_size,
     input_size,
     max_tokens,
-    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     micro_batch_size_per_gpu,
     from_name=False,
@@ -149,7 +148,6 @@ def dpo_factory():
         (deepspeed_config_stage_2, False),
     ],
 )
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -170,7 +168,6 @@ def test_init_dpo(
     model_factory,
     config,
     use_deepspeed_optimizer,
-    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     vocab_size,
     input_size,
@@ -187,7 +184,6 @@ def test_init_dpo(
         vocab_size,
         input_size,
         max_tokens,
-        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
         from_name=from_name,
@@ -227,11 +223,9 @@ def test_init_dpo(
     AcceleratorState._reset_state(True)
 
 
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_dpo_model_name_none_actor_network_none(
-    use_separate_reference_adapter,
     vocab_size,
     micro_batch_size_per_gpu,
 ):
@@ -261,7 +255,6 @@ def test_init_dpo_model_name_none_actor_network_none(
         (deepspeed_config_stage_2, False),
     ],
 )
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -280,7 +273,6 @@ def test_dpo_get_action(
     model_factory,
     config,
     use_deepspeed_optimizer,
-    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     vocab_size,
     input_size,
@@ -296,7 +288,6 @@ def test_dpo_get_action(
         vocab_size,
         input_size,
         max_tokens,
-        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     )
@@ -313,7 +304,6 @@ def test_dpo_get_action(
         (deepspeed_config_stage_2, False),
     ],
 )
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -333,7 +323,6 @@ def test_dpo_learn(
     model_factory,
     config,
     use_deepspeed_optimizer,
-    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     vocab_size,
     input_size,
@@ -350,7 +339,6 @@ def test_dpo_learn(
         vocab_size,
         input_size,
         max_tokens,
-        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
@@ -424,7 +412,6 @@ def test_dpo_learn(
         (deepspeed_config_stage_2, False),
     ],
 )
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -443,7 +430,6 @@ def test_dpo_test(
     model_factory,
     config,
     use_deepspeed_optimizer,
-    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     vocab_size,
     input_size,
@@ -459,7 +445,6 @@ def test_dpo_test(
         vocab_size,
         input_size,
         max_tokens,
-        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     )
@@ -523,7 +508,6 @@ def test_dpo_liger_unavailable_behaviour(
                 vocab_size=30,
                 input_size=5,
                 max_tokens=10,
-                use_separate_reference_adapter=False,
                 pretrained_model_name_or_path=None,
                 micro_batch_size_per_gpu=None,
                 from_name=False,
@@ -539,7 +523,6 @@ def test_dpo_liger_unavailable_behaviour(
             vocab_size=30,
             input_size=5,
             max_tokens=10,
-            use_separate_reference_adapter=False,
             pretrained_model_name_or_path=None,
             micro_batch_size_per_gpu=None,
             from_name=False,
@@ -571,7 +554,6 @@ def test_dpo_load():
     "config, use_deepspeed_optimizer",
     [(None, False)],
 )
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -587,7 +569,6 @@ def test_dpo_clean_up(
     model_factory,
     config,
     use_deepspeed_optimizer,
-    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     vocab_size,
     input_size,
@@ -602,7 +583,6 @@ def test_dpo_clean_up(
         vocab_size,
         input_size,
         max_tokens,
-        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     )
@@ -616,7 +596,6 @@ def test_dpo_clean_up(
     "config, use_deepspeed_optimizer",
     [(None, False)],
 )
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -625,7 +604,6 @@ def test_dpo_clean_up(
     ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
 )
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-@pytest.mark.parametrize("lora_only", [False, True])
 def test_dpo_save_load_checkpoint(
     deepspeed_env,
     dpo_factory,
@@ -633,13 +611,11 @@ def test_dpo_save_load_checkpoint(
     model_factory,
     config,
     use_deepspeed_optimizer,
-    use_separate_reference_adapter,
     vocab_size,
     input_size,
     max_tokens,
     pretrained_model_name_or_path,
     micro_batch_size_per_gpu,
-    lora_only,
 ):
     dpo = dpo_factory(
         accelerator_factory,
@@ -649,20 +625,18 @@ def test_dpo_save_load_checkpoint(
         vocab_size,
         input_size,
         max_tokens,
-        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with tempfile.TemporaryDirectory() as tmpdir:
-        dpo.save_checkpoint(tmpdir, lora_only=lora_only)
+        dpo.save_checkpoint(tmpdir)
         new_dpo = DPO(
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
             pad_token="<pad>",
             device="cuda" if torch.cuda.is_available() else "cpu",
             accelerator=accelerator,
-            use_separate_reference_adapter=use_separate_reference_adapter,
         )
         new_dpo.load_checkpoint(tmpdir)
 
@@ -706,7 +680,6 @@ def test_dpo_save_load_checkpoint(
     "config, use_deepspeed_optimizer",
     [(None, False)],
 )
-@pytest.mark.parametrize("use_separate_reference_adapter", [False])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -722,7 +695,6 @@ def test_dpo_exception_on_recompile(
     model_factory,
     config,
     use_deepspeed_optimizer,
-    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     vocab_size,
     input_size,
@@ -737,7 +709,6 @@ def test_dpo_exception_on_recompile(
         vocab_size,
         input_size,
         max_tokens,
-        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     )
@@ -762,7 +733,6 @@ def test_dpo_no_llm_dependencies(dpo_factory, model_factory, accelerator_factory
             vocab_size=30,
             input_size=5,
             max_tokens=10,
-            use_separate_reference_adapter=False,
             pretrained_model_name_or_path=None,
             micro_batch_size_per_gpu=None,
             from_name=False,
@@ -774,7 +744,6 @@ def test_dpo_no_llm_dependencies(dpo_factory, model_factory, accelerator_factory
     "config, use_deepspeed_optimizer",
     [(None, False)],
 )
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -791,7 +760,6 @@ def test_dpo_get_logprobs(
     model_factory,
     config,
     use_deepspeed_optimizer,
-    use_separate_reference_adapter,
     vocab_size,
     input_size,
     max_tokens,
@@ -807,7 +775,6 @@ def test_dpo_get_logprobs(
         vocab_size,
         input_size,
         max_tokens,
-        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     )
@@ -934,7 +901,6 @@ def test_dpo_set_reference_policy(
     model_factory,
     config,
     use_deepspeed_optimizer,
-    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     vocab_size,
     input_size,
@@ -949,7 +915,6 @@ def test_dpo_set_reference_policy(
         vocab_size,
         input_size,
         max_tokens,
-        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     )

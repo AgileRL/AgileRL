@@ -723,10 +723,7 @@ def test_save_with_accelerator(tmp_path):
     agent.accelerator.wait_for_everyone = Mock()
     agent.algo = "grpo"
     save_llm_checkpoint(agent, str(tmp_path))
-    agent.save_checkpoint.assert_called_once_with(
-        str(tmp_path),
-        lora_only=True,
-    )
+    agent.save_checkpoint.assert_called_once_with(str(tmp_path))
     agent.accelerator.wait_for_everyone.assert_called()
 
 
@@ -737,10 +734,7 @@ def test_save_without_accelerator(tmp_path):
     agent.algo = "grpo"
     agent.accelerator = None
     save_llm_checkpoint(agent, str(tmp_path))
-    agent.save_checkpoint.assert_called_once_with(
-        str(tmp_path),
-        lora_only=True,
-    )
+    agent.save_checkpoint.assert_called_once_with(str(tmp_path))
 
 
 def test_init_wandb_addl_args():
@@ -872,19 +866,7 @@ def test_save_llm_checkpoint_with_path(tmp_path):
     agent.accelerator = None
     path = str(tmp_path / "my_ckpt")
     save_llm_checkpoint(agent, path)
-    agent.save_checkpoint.assert_called_once_with(path, lora_only=True)
-
-
-def test_save_llm_checkpoint_lora_only(tmp_path):
-    agent = Mock()
-    agent.actor = Mock()
-    agent.algo = "grpo"
-    agent.accelerator = None
-    save_llm_checkpoint(agent, str(tmp_path), lora_only=True)
-    agent.save_checkpoint.assert_called_once_with(
-        str(tmp_path),
-        lora_only=True,
-    )
+    agent.save_checkpoint.assert_called_once_with(path)
 
 
 def test_gather_tensor_with_tensor_input():
@@ -1165,7 +1147,6 @@ def test_create_population_dpo_cpu():
             "pad_token_id": 29,
             "pad_token": "<pad>",
             "lora_config": lora_config,
-            "use_separate_reference_adapter": False,
         },
     )
     assert len(pop) == 2

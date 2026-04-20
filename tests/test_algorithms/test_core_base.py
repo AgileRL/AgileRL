@@ -1471,7 +1471,7 @@ def _make_llm_agent(
     max_grad_norm=0.0,
     use_liger_loss=False,
     lora_config=None,
-    use_separate_reference_adapter=False,
+    adapter_names=("actor", "reference"),
     actor_network=None,
     batch_size=4,
     *,
@@ -1501,7 +1501,7 @@ def _make_llm_agent(
             pad_token="<pad>",
             use_liger_loss=use_liger_loss,
             lora_config=lora_config if lora_config is not None else MagicMock(),
-            use_separate_reference_adapter=use_separate_reference_adapter,
+            adapter_names=adapter_names,
             actor_network=actor_network,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             cosine_lr_schedule_config=cosine_lr_schedule_config,
@@ -1784,7 +1784,6 @@ class TestLLMBackwardPass:
         agent.lr_scheduler.step.assert_called_once()
         assert agent.lr == 5e-5
 
-
 class TestLLMMemoryEfficientLogits:
     def test_memory_efficient_logits_computes_log_probs(self):
         logits = torch.randn(2, 5, 10)
@@ -1893,7 +1892,7 @@ class TestLLMConfigureBatchSize:
                     pad_token="<pad>",
                     use_liger_loss=False,
                     lora_config=MagicMock(),
-                    use_separate_reference_adapter=False,
+                    adapter_names=("actor", "reference"),
                     actor_network=_make_mock_peft_actor(),
                     accelerator=acc,
                     device="cpu",
@@ -1970,7 +1969,7 @@ class TestLLMInitWarnings:
                 pad_token="<pad>",
                 use_liger_loss=False,
                 lora_config=None,
-                use_separate_reference_adapter=False,
+                adapter_names=("actor", "reference"),
                 actor_network=_NonPeftActor(),
                 device="cpu",
             )
@@ -2222,7 +2221,9 @@ class TestLLMSetReferencePolicy:
     def test_no_update_when_tracker_equal(self):
         agent = _make_llm_agent()
         agent.reference_update_tracker = 5
-        agent.set_reference_policy(5)
+        with patch.object(LLMAlgorithm, "_copy_adapter_weights") as mock_copy:
+            agent.set_reference_policy(5)
+        mock_copy.assert_not_called()
         assert agent.reference_update_tracker == 5
 
 
@@ -2240,26 +2241,9 @@ class TestLLMGetLogprobs:
 
 
 class TestLLMSaveLoadCheckpoint:
-    def test_save_checkpoint_warns_when_reference_merged_lora_only(self, tmp_path):
-        """Merged reference + LoRA-only save should emit UserWarning (base.py ~2131–2144)."""
-        agent = _make_llm_agent(accelerator=None)
-        agent.use_separate_reference_adapter = False
-        agent.reference_update_tracker = 1
-        with pytest.warns(UserWarning, match="merged into the base model"):
-            with (
-                patch.object(agent.actor, "save_pretrained"),
-                patch(
-                    "agilerl.algorithms.core.base.get_checkpoint_dict",
-                    return_value={},
-                ),
-                patch("agilerl.algorithms.core.base.torch.save"),
-            ):
-                agent.save_checkpoint(str(tmp_path), lora_only=True)
-
-    def test_save_checkpoint_lora_only_with_accelerator(self, tmp_path):
+    def test_save_checkpoint_with_accelerator(self, tmp_path):
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
-        agent.use_separate_reference_adapter = False
         acc.unwrap_model = MagicMock(return_value=agent.actor)
         with (
             patch("agilerl.algorithms.core.base.gather_if_zero3"),
@@ -2272,38 +2256,31 @@ class TestLLMSaveLoadCheckpoint:
             agent.save_checkpoint(str(tmp_path))
         agent.actor.save_pretrained.assert_called_once()
 
-    def test_save_checkpoint_full_with_accelerator(self, tmp_path):
-        acc = _make_mock_accelerator()
-        agent = _make_llm_agent(accelerator=acc)
+    def test_save_checkpoint_without_accelerator(self, tmp_path):
+        agent = _make_llm_agent(accelerator=None)
         with (
-            patch.object(LLMAlgorithm, "_save_distributed_actor") as mock_save,
             patch(
                 "agilerl.algorithms.core.base.get_checkpoint_dict",
                 return_value={"lr": 1e-4},
             ),
             patch("agilerl.algorithms.core.base.torch.save"),
         ):
-            agent.save_checkpoint(str(tmp_path), lora_only=False)
-        mock_save.assert_called_once()
+            agent.save_checkpoint(str(tmp_path))
+        agent.actor.save_pretrained.assert_called_once()
 
-    def test_load_checkpoint_with_accelerator_lora_only(self, tmp_path):
+    def test_load_checkpoint_with_accelerator(self, tmp_path):
         import dill
 
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
-        chkpt = {"_lora_only": True, "lr": 1e-4}
+        chkpt = {"lr": 1e-4}
         torch.save(chkpt, str(tmp_path / "attributes.pt"), pickle_module=dill)
-        with patch.object(LLMAlgorithm, "_update_existing_adapter"):
-            agent.load_checkpoint(str(tmp_path))
-
-    def test_load_checkpoint_with_accelerator_full(self, tmp_path):
-        import dill
-
-        acc = _make_mock_accelerator()
-        agent = _make_llm_agent(accelerator=acc)
-        chkpt = {"_lora_only": False, "lr": 1e-4}
-        torch.save(chkpt, str(tmp_path / "attributes.pt"), pickle_module=dill)
-        with patch.object(LLMAlgorithm, "_load_distributed_actor"):
+        with (
+            patch.object(LLMAlgorithm, "_load_adapter_weights"),
+            patch.object(LLMAlgorithm, "_copy_adapter_weights"),
+            patch.object(LLMAlgorithm, "_load_optimizer_state"),
+            patch.object(LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None),
+        ):
             agent.load_checkpoint(str(tmp_path))
 
     def test_load_checkpoint_without_accelerator(self, tmp_path):
@@ -2311,9 +2288,14 @@ class TestLLMSaveLoadCheckpoint:
 
         agent = _make_llm_agent(accelerator=None)
         agent.accelerator = None
-        chkpt = {"_lora_only": False, "lr": 1e-4}
+        chkpt = {"lr": 1e-4}
         torch.save(chkpt, str(tmp_path / "attributes.pt"), pickle_module=dill)
-        with patch.object(EvolvableAlgorithm, "load_checkpoint"):
+        with (
+            patch.object(LLMAlgorithm, "_load_adapter_weights"),
+            patch.object(LLMAlgorithm, "_copy_adapter_weights"),
+            patch.object(LLMAlgorithm, "_load_optimizer_state"),
+            patch.object(LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None),
+        ):
             agent.load_checkpoint(str(tmp_path))
 
 
@@ -2649,7 +2631,7 @@ class TestLLMInitMissingDeps:
                         pad_token="<pad>",
                         use_liger_loss=False,
                         lora_config=MagicMock(),
-                        use_separate_reference_adapter=False,
+                        adapter_names=("actor", "reference"),
                         actor_network=_make_mock_peft_actor(),
                         device="cpu",
                     )
@@ -2674,7 +2656,7 @@ class TestLLMInitMissingDeps:
                     pad_token="<pad>",
                     use_liger_loss=False,
                     lora_config=MagicMock(),
-                    use_separate_reference_adapter=False,
+                    adapter_names=("actor", "reference"),
                     model_name=None,
                     actor_network=None,
                     device="cpu",
@@ -3018,7 +3000,7 @@ class TestLLMCloneWithoutAccelerator:
     def test_clone_without_accelerator(self):
         agent = _make_llm_agent(accelerator=None, clone=True)
         agent.accelerator = None
-        agent.zero_stage = None
+        agent.zero_stage = -1
         agent.use_vllm = False
         agent.lr_scheduler = MagicMock()
         agent.lr_scheduler.state_dict.return_value = {"step": 0}
@@ -3054,7 +3036,7 @@ class TestLLMCloneWithoutAccelerator:
                     "pad_token": "<pad>",
                     "use_liger_loss": False,
                     "lora_config": MagicMock(),
-                    "use_separate_reference_adapter": False,
+                    "adapter_names": ("actor", "reference"),
                     "actor_network": MagicMock(),
                     "device": "cpu",
                 },
@@ -3074,7 +3056,7 @@ class TestLLMCloneWithAccelerator:
     def test_clone_with_accelerator_no_deepspeed(self):
         acc = _make_mock_accelerator(num_processes=1)
         agent = _make_llm_agent(accelerator=acc)
-        agent.zero_stage = None
+        agent.zero_stage = -1
         agent.use_vllm = False
         agent.lr_scheduler = MagicMock()
         acc.unwrap_model = MagicMock(return_value=agent.actor)
@@ -3110,7 +3092,7 @@ class TestLLMCloneWithAccelerator:
                     "pad_token": "<pad>",
                     "use_liger_loss": False,
                     "lora_config": MagicMock(),
-                    "use_separate_reference_adapter": False,
+                    "adapter_names": ("actor", "reference"),
                     "actor_network": MagicMock(),
                     "device": "cpu",
                 },
@@ -3161,7 +3143,7 @@ class TestLLMCloneWithDeepSpeed:
                     "pad_token": "<pad>",
                     "use_liger_loss": False,
                     "lora_config": MagicMock(),
-                    "use_separate_reference_adapter": False,
+                    "adapter_names": ("actor", "reference"),
                     "actor_network": MagicMock(),
                     "device": "cpu",
                 },
@@ -3182,7 +3164,7 @@ class TestLLMCloneWithVllm:
     def test_clone_preserves_vllm_references(self):
         agent = _make_llm_agent(accelerator=None, clone=True)
         agent.accelerator = None
-        agent.zero_stage = None
+        agent.zero_stage = -1
         agent.use_vllm = True
         agent.llm = MagicMock()
         agent.lr_scheduler = MagicMock()
@@ -3219,7 +3201,7 @@ class TestLLMCloneWithVllm:
                     "pad_token": "<pad>",
                     "use_liger_loss": False,
                     "lora_config": MagicMock(),
-                    "use_separate_reference_adapter": False,
+                    "adapter_names": ("actor", "reference"),
                     "actor_network": MagicMock(),
                     "device": "cpu",
                 },
@@ -3238,7 +3220,6 @@ class TestLLMInitializeActors:
 
     def test_initialize_actors_with_base_model_no_peft(self):
         agent = _make_llm_agent()
-        agent.use_separate_reference_adapter = False
         agent.lora_config = MagicMock()
         peft_actor = _make_mock_peft_actor()
 
@@ -3258,7 +3239,6 @@ class TestLLMInitializeActors:
     def test_initialize_actors_with_none_creates_from_path(self):
         agent = _make_llm_agent()
         agent.pretrained_model_name_or_path = "mock-path"
-        agent.use_separate_reference_adapter = False
         agent.lora_config = MagicMock()
         peft_actor = _make_mock_peft_actor()
         created_model = MagicMock()
@@ -3283,9 +3263,7 @@ class TestLLMInitializeActors:
     def test_initialize_actors_user_peft_warns_and_reinitializes_adapters(self):
         """User PEFT input is warned and replaced with a fresh actor adapter."""
         agent = _make_llm_agent()
-        agent.use_separate_reference_adapter = False
         agent.lora_config = MagicMock()
-
         peft_model = _make_mock_peft_actor()
         dense = MagicMock(spec=[])
         peft_actor = _make_mock_peft_actor()
@@ -3329,7 +3307,6 @@ class TestLLMInitializeActors:
 
     def test_initialize_actors_with_separate_reference_adapter(self):
         agent = _make_llm_agent()
-        agent.use_separate_reference_adapter = True
         agent.lora_config = MagicMock()
         peft_actor = _make_mock_peft_actor()
 
@@ -3350,7 +3327,6 @@ class TestLLMInitializeActors:
 
     def test_initialize_actors_no_add_adapters(self):
         agent = _make_llm_agent()
-        agent.use_separate_reference_adapter = False
         agent.lora_config = MagicMock()
         base_model = _make_mock_peft_actor()
 
@@ -3363,7 +3339,6 @@ class TestLLMInitializeActors:
     def test_initialize_actors_peft_extra_adapter_names_warns_and_reinitializes(self):
         """Stray adapter names on user PEFT input are ignored via reinitialization."""
         agent = _make_llm_agent()
-        agent.use_separate_reference_adapter = False
         agent.lora_config = MagicMock()
 
         peft_in = _make_mock_peft_actor()
@@ -3451,13 +3426,13 @@ class TestLLMInitializeActors:
         assert agent.actor is base_model
 
 
-class TestLLMUpdateExistingAdapter:
-    """_update_existing_adapter overwrites adapter weights in-place."""
+class TestLLMLoadAdapterWeights:
+    """_load_adapter_weights overwrites adapter weights in-place."""
 
-    def test_update_existing_adapter(self, tmp_path):
+    def test_load_adapter_weights(self, tmp_path):
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
-        agent.zero_stage = None
+        agent.zero_stage = -1
 
         model_ref = MagicMock()
         model_ref.parameters.return_value = []
@@ -3737,21 +3712,30 @@ class TestLLMCleanUpCudaPaths:
 
 
 class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:
-    """load_checkpoint updates both reference and actor adapters for LoRA-only checkpoints."""
+    """load_checkpoint loads the actor from disk and copies it onto the reference adapter."""
 
-    def test_load_checkpoint_updates_reference_adapter(self, tmp_path):
+    def test_load_checkpoint_copies_actor_to_reference(self, tmp_path):
         import dill
 
         acc = _make_mock_accelerator()
-        agent = _make_llm_agent(accelerator=acc, use_separate_reference_adapter=True)
+        agent = _make_llm_agent(
+            accelerator=acc, adapter_names=("actor", "reference")
+        )
         chkpt = {"_lora_only": True, "lr": 1e-4}
         torch.save(chkpt, str(tmp_path / "attributes.pt"), pickle_module=dill)
 
-        with patch.object(LLMAlgorithm, "_update_existing_adapter") as mock_update:
+        with (
+            patch.object(LLMAlgorithm, "_load_adapter_weights") as mock_load,
+            patch.object(LLMAlgorithm, "_copy_adapter_weights") as mock_copy,
+            patch.object(LLMAlgorithm, "_load_optimizer_state"),
+            patch.object(
+                LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None
+            ),
+        ):
             agent.load_checkpoint(str(tmp_path))
-        calls = [c.args for c in mock_update.call_args_list]
-        assert (str(tmp_path), "reference") in calls
-        assert (str(tmp_path), "actor") in calls
+        load_calls = [c.args for c in mock_load.call_args_list]
+        assert any(args[:2] == (str(tmp_path), "actor") for args in load_calls)
+        mock_copy.assert_called_with(src="actor", dst="reference")
 
     def test_load_checkpoint_updates_reference_adapter_legacy_weights_only_key(
         self, tmp_path
@@ -3939,7 +3923,7 @@ class TestLLMCloneBroadcastMultiProcess:
     def test_clone_multi_process_broadcasts_temp_dir(self):
         acc = _make_mock_accelerator(num_processes=2)
         agent = _make_llm_agent(accelerator=acc)
-        agent.zero_stage = None
+        agent.zero_stage = -1
         agent.use_vllm = False
         agent.lr_scheduler = MagicMock()
         acc.unwrap_model = MagicMock(return_value=agent.actor)
@@ -3979,7 +3963,7 @@ class TestLLMCloneBroadcastMultiProcess:
                     "pad_token": "<pad>",
                     "use_liger_loss": False,
                     "lora_config": MagicMock(),
-                    "use_separate_reference_adapter": False,
+                    "adapter_names": ("actor", "reference"),
                     "actor_network": MagicMock(),
                     "device": "cpu",
                 },
