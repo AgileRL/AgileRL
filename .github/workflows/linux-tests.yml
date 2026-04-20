@@ -6,10 +6,19 @@ on:
         branches: [main, nightly]
         paths:
             - agilerl/**
+            - tests/**
+            - .github/workflows/**
+            - pyproject.toml
     pull_request:
-        branches: [main, nightly]
         paths:
             - agilerl/**
+            - tests/**
+            - .github/workflows/**
+            - pyproject.toml
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+    cancel-in-progress: true
 
 permissions:
     contents: read
@@ -31,6 +40,8 @@ jobs:
         env:
             UV_CACHE_DIR: /tmp/uv-cache
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
+            HF_HOME: /tmp/hf-cache
+            TORCHINDUCTOR_CACHE_DIR: /tmp/inductor-cache
 
         steps:
             - uses: actions/checkout@v4
@@ -39,15 +50,40 @@ jobs:
                   enable-cache: true
                   python-version: ${{ matrix.python-version }}
 
+            - name: Cache HuggingFace models
+              uses: actions/cache@v4
+              with:
+                  path: /tmp/hf-cache
+                  key: hf-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+                  restore-keys: hf-${{ matrix.python-version }}-
+
+            - name: Cache torch inductor compilations
+              uses: actions/cache@v4
+              with:
+                  path: /tmp/inductor-cache
+                  key: inductor-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+                  restore-keys: inductor-${{ matrix.python-version }}-
+
             - name: Install dependencies
               # swig is needed to build box2d-py from source (no pre-built wheels for py3.10+).
               run: |
                   uv sync --locked --all-groups --extra all
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
 
-            - name: Test with pytest
+            - name: Run non-LLM tests (parallel)
+              run: uv run pytest -m "not llm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
+              env:
+                  COVERAGE_FILE: .coverage.parallel
+
+            - name: Run LLM tests (sequential, exclusive GPU)
+              run: uv run pytest -n0 -m "llm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
+              env:
+                  COVERAGE_FILE: .coverage.llm
+
+            - name: Combine coverage and generate report
               run: |
-                  uv run pytest --exitfirst --cov=agilerl --cov-report=xml --durations=0 --durations-min=1.0
+                  uv run coverage combine
+                  uv run coverage xml -o coverage.xml
 
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3
