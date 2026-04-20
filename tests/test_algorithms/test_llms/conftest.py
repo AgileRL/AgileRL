@@ -1,4 +1,5 @@
 import gc
+import os
 import random
 from importlib import import_module
 from importlib.util import find_spec
@@ -23,17 +24,17 @@ from tests.utils import (
 
 
 @pytest.fixture(autouse=True)
-def use_fresh_cache():
-    """Use a fresh inductor cache for each test."""
-    with fresh_cache():
-        yield
-
-
-@pytest.fixture(autouse=True)
 def cleanup_after_test(request):
-
     if torch.cuda.is_available() and (num_gpus := torch.cuda.device_count()) > 0:
-        wait_for_gpu_memory_to_clear(devices=list(range(num_gpus)), threshold_ratio=0.2)
+        if os.environ.get("PYTEST_XDIST_WORKER") is None:
+            # Sequential run: block until global GPU memory drops below threshold.
+            wait_for_gpu_memory_to_clear(
+                devices=list(range(num_gpus)), threshold_ratio=0.4
+            )
+        else:
+            # xdist: other workers share the GPU so we can't gate on a global
+            # threshold, but still release this worker's leftover memory.
+            force_gpu_memory_release()
 
     yield
 
