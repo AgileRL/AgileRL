@@ -22,11 +22,9 @@ if TYPE_CHECKING or HAS_DEEPSPEED:
 logger = logging.getLogger(__name__)
 
 if HAS_LLM_DEPENDENCIES:
-    import deepspeed
     from datasets import Dataset
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.modeling_utils import PreTrainedModel
-    from transformers.tokenization_utils_base import BatchEncoding
 
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
@@ -34,7 +32,6 @@ if HAS_LLM_DEPENDENCIES:
 else:
     AutoTokenizer = Any
     PreTrainedModel = Any
-    BatchEncoding = Any
     Dataset = Any
     AutoModelForCausalLM = Any  # type: ignore[assignment,misc]
     AutoModelForCausalLMWithValueHead = Any  # type: ignore[assignment,misc]

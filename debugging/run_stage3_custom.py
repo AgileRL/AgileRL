@@ -56,17 +56,20 @@ def main() -> None:
 
     if args.model_name is not None:
         cfg["INIT_HP"]["MODEL_NAME"] = args.model_name
-    if args.lora_target_modules is None and isinstance(args.model_name, str):
-        if "qwen" in args.model_name.lower():
-            args.lora_target_modules = [
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "up_proj",
-                "down_proj",
-                "gate_proj",
-            ]
+    if (
+        args.lora_target_modules is None
+        and isinstance(args.model_name, str)
+        and "qwen" in args.model_name.lower()
+    ):
+        args.lora_target_modules = [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "up_proj",
+            "down_proj",
+            "gate_proj",
+        ]
     if args.lora_target_modules is not None:
         cfg.setdefault("DEBUG", {}).setdefault("lora", {})["target_modules"] = list(
             args.lora_target_modules,
