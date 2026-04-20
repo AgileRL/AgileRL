@@ -72,18 +72,12 @@ jobs:
 
             - name: Run non-LLM tests (parallel)
               run: uv run pytest -m "not llm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
-              env:
-                  COVERAGE_FILE: .coverage.parallel
 
             - name: Run LLM tests (sequential, exclusive GPU)
-              run: uv run pytest -n0 -m "llm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
-              env:
-                  COVERAGE_FILE: .coverage.llm
+              run: uv run pytest -n0 -m "llm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
 
-            - name: Combine coverage and generate report
-              run: |
-                  uv run coverage combine
-                  uv run coverage xml -o coverage.xml
+            - name: Generate coverage report
+              run: uv run coverage xml -o coverage.xml
 
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3
