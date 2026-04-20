@@ -163,6 +163,7 @@ class REINFORCE(LLMAlgorithm):
         seed: int = 42,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
+        reduce_memory_peak: bool = False,
     ) -> None:
 
         device = (
@@ -197,6 +198,7 @@ class REINFORCE(LLMAlgorithm):
             name="LLMReinforce",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
+            reduce_memory_peak=reduce_memory_peak,
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."

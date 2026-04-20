@@ -10,12 +10,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -156,6 +156,8 @@ def _prepare_llm_algo_kwargs(
             "MICRO_BATCH_SIZE_PER_GPU",
             batch_size,
         )  # NOTE we should take a look into deepspeed auto batch-sizing
+    if "reduce_memory_peak" not in merged and "REDUCE_MEMORY_PEAK" in INIT_HP:
+        merged["reduce_memory_peak"] = bool(INIT_HP["REDUCE_MEMORY_PEAK"])
     return merged
 
 
@@ -856,7 +858,6 @@ def create_population(
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
                 accelerator=accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,

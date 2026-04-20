@@ -175,6 +175,7 @@ class PPO(LLMAlgorithm):
         turn_level_clip: bool = True,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
+        reduce_memory_peak: bool = False,
     ) -> None:
 
         device = (
@@ -210,6 +211,7 @@ class PPO(LLMAlgorithm):
             name="LLMPPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
+            reduce_memory_peak=reduce_memory_peak,
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."

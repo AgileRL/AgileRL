@@ -205,6 +205,7 @@ class GRPO(LLMAlgorithm):
         adv_clip_range: float | None = None,
         filter_zero_adv: bool = False,
         adv_filter_eps: float = 0.0,
+        reduce_memory_peak: bool = False,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -245,6 +246,7 @@ class GRPO(LLMAlgorithm):
             name="GRPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
+            reduce_memory_peak=reduce_memory_peak,
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."

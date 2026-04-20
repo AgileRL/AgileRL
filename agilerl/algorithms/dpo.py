@@ -110,6 +110,7 @@ class DPO(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         use_liger_loss: bool = False,
+        reduce_memory_peak: bool = False,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -147,6 +148,7 @@ class DPO(LLMAlgorithm):
             name="DPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
+            reduce_memory_peak=reduce_memory_peak,
         )
         self.beta = beta
         self.nll_alpha = nll_alpha

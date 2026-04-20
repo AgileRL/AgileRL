@@ -1983,6 +1983,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :param torch_compiler: The torch compiler mode to use ('default',
         'reduce-overhead', or 'max-autotune'), defaults to None.
     :type torch_compiler: str | None, optional
+    :param reduce_memory_peak: Deprecated. Previously hinted peak-memory batching;
+        ignored. Configure ``micro_batch_size_per_gpu`` and DeepSpeed instead.
+    :type reduce_memory_peak: bool, optional
     """
 
     _separate_reference_adapter_deprecation_emitted = False
@@ -2019,10 +2022,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         model_config: dict[str, Any] | PretrainedConfigProtocol | None = None,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
+        reduce_memory_peak: bool = False,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
             raise ImportError(msg)
+        if reduce_memory_peak:
+            warnings.warn(
+                "reduce_memory_peak is deprecated and has no effect; configure batch "
+                "size via micro_batch_size_per_gpu and DeepSpeed settings instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         if use_liger_loss and not HAS_LIGER_KERNEL:
             warnings.warn(
                 "use_liger_loss=True requested, but `liger-kernel` is not available on this platform/environment. "

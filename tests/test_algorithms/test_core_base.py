@@ -1465,7 +1465,6 @@ class _StubLLMAlgorithm(LLMAlgorithm):
 def _make_llm_agent(
     accelerator=None,
     clone=True,
-    reduce_memory_peak=False,
     micro_batch_size_per_gpu=None,
     cosine_lr_schedule_config=None,
     max_grad_norm=0.0,
@@ -1473,6 +1472,8 @@ def _make_llm_agent(
     lora_config=None,
     use_separate_reference_adapter=False,
     actor_network=None,
+    *,
+    reduce_memory_peak: bool = False,
 ):
     """Helper to create a _StubLLMAlgorithm with heavily mocked internals."""
     if not HAS_LLM_DEPENDENCIES:
@@ -1492,7 +1493,6 @@ def _make_llm_agent(
             lr=1e-4,
             max_grad_norm=max_grad_norm,
             clone=clone,
-            reduce_memory_peak=reduce_memory_peak,
             calc_position_embeddings=False,
             seed=42,
             pad_token_id=0,
@@ -1505,6 +1505,7 @@ def _make_llm_agent(
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             accelerator=accelerator,
             device="cpu",
+            reduce_memory_peak=reduce_memory_peak,
         )
     agent.actor = actor_network
     agent.optimizer = MagicMock()
@@ -1798,17 +1799,6 @@ class TestLLMConfigureBatchSize:
         agent = _make_llm_agent(clone=True)
         assert agent.batch_size_per_process == 4
 
-    def test_reduce_memory_peak_mode(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
-        agent = _make_llm_agent(accelerator=acc, clone=False, reduce_memory_peak=True)
-        assert agent.batch_size_per_process == 1
-        assert agent.micro_batch_size_per_gpu == 1
-
     def test_raises_when_batch_not_divisible_by_processes(self):
         acc = _make_mock_accelerator(
             ds_config={
@@ -1878,7 +1868,6 @@ class TestLLMConfigureBatchSize:
                     lr=1e-4,
                     max_grad_norm=0.0,
                     clone=False,
-                    reduce_memory_peak=False,
                     calc_position_embeddings=False,
                     seed=42,
                     pad_token_id=0,
@@ -1915,13 +1904,9 @@ class TestLLMInitWarnings:
         )
         assert agent.cosine_lr_schedule_config is None
 
-    def test_reduce_memory_peak_with_micro_batch_raises(self):
-        with pytest.raises(ValueError, match="Cannot specify micro_batch_size_per_gpu"):
-            _make_llm_agent(
-                reduce_memory_peak=True,
-                micro_batch_size_per_gpu=2,
-                clone=False,
-            )
+    def test_reduce_memory_peak_deprecated_warns(self):
+        with pytest.warns(DeprecationWarning, match="reduce_memory_peak is deprecated"):
+            _make_llm_agent(reduce_memory_peak=True)
 
     def test_lr_overwrite_warning_from_deepspeed(self):
         acc = _make_mock_accelerator(
@@ -1952,7 +1937,6 @@ class TestLLMInitWarnings:
                 lr=1e-4,
                 max_grad_norm=0.0,
                 clone=True,
-                reduce_memory_peak=False,
                 calc_position_embeddings=False,
                 seed=42,
                 pad_token_id=0,
@@ -1980,7 +1964,6 @@ class TestLLMInitWarnings:
                 lr=1e-4,
                 max_grad_norm=0.0,
                 clone=True,
-                reduce_memory_peak=False,
                 calc_position_embeddings=False,
                 seed=42,
                 pad_token_id=0,
@@ -2307,23 +2290,11 @@ class TestLLMConfigureBatchSizeNoDeepSpeedPlugin:
         assert agent.batch_size_per_process == 4
         assert agent.micro_batch_size_per_gpu == 3
 
-    def test_reduce_memory_peak_sets_unit_batches(self):
-        acc = self._accelerator_without_deepspeed()
-        agent = _make_llm_agent(
-            accelerator=acc,
-            clone=False,
-            reduce_memory_peak=True,
-            micro_batch_size_per_gpu=None,
-        )
-        assert agent.batch_size_per_process == 1
-        assert agent.micro_batch_size_per_gpu == 1
-
     def test_micro_batch_defaults_to_per_process(self):
         acc = self._accelerator_without_deepspeed()
         agent = _make_llm_agent(
             accelerator=acc,
             clone=False,
-            reduce_memory_peak=False,
             micro_batch_size_per_gpu=None,
         )
         assert agent.batch_size_per_process == 4
@@ -2334,7 +2305,6 @@ class TestLLMConfigureBatchSizeNoDeepSpeedPlugin:
         agent = _make_llm_agent(
             accelerator=acc,
             clone=False,
-            reduce_memory_peak=False,
             micro_batch_size_per_gpu=None,
         )
         assert agent.batch_size_per_process == 2
@@ -2638,7 +2608,6 @@ class TestLLMInitMissingDeps:
                         lr=1e-4,
                         max_grad_norm=0.0,
                         clone=True,
-                        reduce_memory_peak=False,
                         calc_position_embeddings=False,
                         seed=42,
                         pad_token_id=0,
@@ -2664,7 +2633,6 @@ class TestLLMInitMissingDeps:
                     lr=1e-4,
                     max_grad_norm=0.0,
                     clone=True,
-                    reduce_memory_peak=False,
                     calc_position_embeddings=False,
                     seed=42,
                     pad_token_id=0,
@@ -3019,7 +2987,6 @@ class TestLLMCloneWithoutAccelerator:
                     "lr": 1e-4,
                     "max_grad_norm": 0.0,
                     "clone": True,
-                    "reduce_memory_peak": False,
                     "calc_position_embeddings": False,
                     "seed": 42,
                     "pad_token_id": 0,
@@ -3076,7 +3043,6 @@ class TestLLMCloneWithAccelerator:
                     "lr": 1e-4,
                     "max_grad_norm": 0.0,
                     "clone": True,
-                    "reduce_memory_peak": False,
                     "calc_position_embeddings": False,
                     "seed": 42,
                     "pad_token_id": 0,
@@ -3128,7 +3094,6 @@ class TestLLMCloneWithDeepSpeed:
                     "lr": 1e-4,
                     "max_grad_norm": 0.0,
                     "clone": True,
-                    "reduce_memory_peak": False,
                     "calc_position_embeddings": False,
                     "seed": 42,
                     "pad_token_id": 0,
@@ -3187,7 +3152,6 @@ class TestLLMCloneWithVllm:
                     "lr": 1e-4,
                     "max_grad_norm": 0.0,
                     "clone": True,
-                    "reduce_memory_peak": False,
                     "calc_position_embeddings": False,
                     "seed": 42,
                     "pad_token_id": 0,
@@ -3849,7 +3813,6 @@ class TestLLMCloneBroadcastMultiProcess:
                     "lr": 1e-4,
                     "max_grad_norm": 0.0,
                     "clone": True,
-                    "reduce_memory_peak": False,
                     "calc_position_embeddings": False,
                     "seed": 42,
                     "pad_token_id": 0,

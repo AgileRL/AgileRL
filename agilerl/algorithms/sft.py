@@ -68,9 +68,6 @@ class SFT(LLMAlgorithm):
     :param micro_batch_size_per_gpu: Micro-batch size for gradient accumulation.
         When None the full batch is used in a single forward pass.
     :type micro_batch_size_per_gpu: int, optional
-    :param reduce_memory_peak: Enable extra memory-reduction heuristics, defaults
-        to False
-    :type reduce_memory_peak: bool, optional
     :param device: Compute device, defaults to ``"cpu"``
     :type device: str, optional
     :param lora_config: LoRA config; when supplied the base model is wrapped with
@@ -110,7 +107,6 @@ class SFT(LLMAlgorithm):
         update_epochs: int = 1,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
-        reduce_memory_peak: bool = False,
         device: str = "cpu",
         lora_config: LoraConfig | None = None,
         accelerator: Accelerator | None = None,
@@ -119,6 +115,7 @@ class SFT(LLMAlgorithm):
         seed: int = 42,
         gradient_checkpointing: bool = True,
         use_liger_loss: bool = False,
+        reduce_memory_peak: bool = False,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -137,7 +134,6 @@ class SFT(LLMAlgorithm):
             lr=lr,
             max_grad_norm=max_grad_norm,
             clone=clone,
-            reduce_memory_peak=reduce_memory_peak,
             calc_position_embeddings=calc_position_embeddings,
             seed=seed,
             pad_token_id=pad_token_id,
@@ -156,6 +152,7 @@ class SFT(LLMAlgorithm):
             accelerator=accelerator,
             name="SFT",
             gradient_checkpointing=gradient_checkpointing,
+            reduce_memory_peak=reduce_memory_peak,
         )
         self.temperature = 0
         self.use_vllm = False
