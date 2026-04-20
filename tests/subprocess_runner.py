@@ -26,7 +26,6 @@ import numpy as np
 import torch
 from _pytest.outcomes import Skipped
 from accelerate.state import AcceleratorState
-from torch._inductor.utils import fresh_cache
 
 from tests.utils import force_gpu_memory_release, wait_for_gpu_memory_to_clear
 
@@ -79,7 +78,7 @@ def wait_for_gpu_memory():
     if torch.cuda.is_available() and (num_gpus := torch.cuda.device_count()) > 0:
         if os.environ.get("PYTEST_XDIST_WORKER") is None:
             wait_for_gpu_memory_to_clear(
-                devices=list(range(num_gpus)), threshold_ratio=0.2
+                devices=list(range(num_gpus)), threshold_ratio=0.4
             )
         else:
             force_gpu_memory_release()
@@ -208,11 +207,10 @@ def main():
     set_seed()
     wait_for_gpu_memory()
 
-    with fresh_cache():
-        try:
-            test_func(**kwargs)
-        finally:
-            cleanup_after_test(args.test)
+    try:
+        test_func(**kwargs)
+    finally:
+        cleanup_after_test(args.test)
 
 
 if __name__ == "__main__":

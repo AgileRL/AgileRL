@@ -41,6 +41,8 @@ jobs:
         env:
             UV_CACHE_DIR: /tmp/uv-cache
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
+            HF_HOME: /tmp/hf-cache
+            TORCHINDUCTOR_CACHE_DIR: /tmp/inductor-cache
 
         steps:
             - uses: actions/checkout@v4
@@ -48,6 +50,20 @@ jobs:
               with:
                   enable-cache: true
                   python-version: ${{ matrix.python-version }}
+
+            - name: Cache HuggingFace models
+              uses: actions/cache@v4
+              with:
+                  path: /tmp/hf-cache
+                  key: hf-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+                  restore-keys: hf-${{ matrix.python-version }}-
+
+            - name: Cache torch inductor compilations
+              uses: actions/cache@v4
+              with:
+                  path: /tmp/inductor-cache
+                  key: inductor-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+                  restore-keys: inductor-${{ matrix.python-version }}-
 
             - name: Install dependencies
               # swig is needed to build box2d-py from source (no pre-built wheels for py3.10+).
