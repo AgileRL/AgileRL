@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any, cast
 import gymnasium as gym
 import requests
 import torch
-from gem.tools.base_tool import BaseTool
 from torch.utils.data import DataLoader
 
 from agilerl.protocols import MultiTurnEnv
@@ -1247,11 +1246,11 @@ class TokenObservationWrapper:
 TIMEOUT = 5
 
 
-class SearchTool(BaseTool):
+class SearchTool:
     tool_type = "search"
 
     def __init__(self, num_workers=1, search_url=None, topk=3, timeout=TIMEOUT):
-        super().__init__(num_workers)
+        self.num_workers = num_workers
         self.search_url = search_url
         self.topk = topk
         self.timeout = timeout
