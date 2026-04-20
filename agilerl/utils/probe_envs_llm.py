@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from random import Random
 
-from gem.core import Env as GemEnv
-
 __all__ = [
     "ConditionalTargetEnv",
     "ConstantTargetEnv",
@@ -20,7 +18,7 @@ __all__ = [
 ]
 
 
-class ConstantTargetEnv(GemEnv):
+class ConstantTargetEnv:
     """Single-turn probe with a fixed prompt and a fixed correct digit."""
 
     def __init__(
@@ -44,7 +42,7 @@ class ConstantTargetEnv(GemEnv):
         return "", reward, True, False, {}
 
 
-class ConditionalTargetEnv(GemEnv):
+class ConditionalTargetEnv:
     """Single-turn probe: observation is one digit; target is ``(digit % 3) + 1``."""
 
     def __init__(
@@ -70,7 +68,7 @@ class ConditionalTargetEnv(GemEnv):
         return "", reward, True, False, {}
 
 
-class MultiInputConditionalEnv(GemEnv):
+class MultiInputConditionalEnv:
     """Single-turn probe: two-digit prompt; target is ``(sum(digits) % 3) + 1``."""
 
     def __init__(
@@ -98,7 +96,7 @@ class MultiInputConditionalEnv(GemEnv):
         return "", reward, True, False, {}
 
 
-class GridNavigationEnv(GemEnv):
+class GridNavigationEnv:
     """1D grid navigation: move left/right to reach a target position.
 
     The agent sees its starting position and target once (initial obs),
