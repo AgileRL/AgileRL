@@ -2279,7 +2279,9 @@ class TestLLMSaveLoadCheckpoint:
             patch.object(LLMAlgorithm, "_load_adapter_weights"),
             patch.object(LLMAlgorithm, "_copy_adapter_weights"),
             patch.object(LLMAlgorithm, "_load_optimizer_state"),
-            patch.object(LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None),
+            patch.object(
+                LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None
+            ),
         ):
             agent.load_checkpoint(str(tmp_path))
 
@@ -2294,7 +2296,9 @@ class TestLLMSaveLoadCheckpoint:
             patch.object(LLMAlgorithm, "_load_adapter_weights"),
             patch.object(LLMAlgorithm, "_copy_adapter_weights"),
             patch.object(LLMAlgorithm, "_load_optimizer_state"),
-            patch.object(LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None),
+            patch.object(
+                LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None
+            ),
         ):
             agent.load_checkpoint(str(tmp_path))
 
@@ -3718,9 +3722,7 @@ class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:
         import dill
 
         acc = _make_mock_accelerator()
-        agent = _make_llm_agent(
-            accelerator=acc, adapter_names=("actor", "reference")
-        )
+        agent = _make_llm_agent(accelerator=acc, adapter_names=("actor", "reference"))
         chkpt = {"_lora_only": True, "lr": 1e-4}
         torch.save(chkpt, str(tmp_path / "attributes.pt"), pickle_module=dill)
 
