@@ -105,6 +105,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import (
         LoraConfig,
         get_peft_model,
+        get_peft_model_state_dict,
         set_peft_model_state_dict,
     )
     from safetensors.torch import load_file
@@ -2019,7 +2020,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         pad_token: str,
         use_liger_loss: bool,
         lora_config: LoraConfig | None,
-        use_separate_reference_adapter: bool,
+        use_separate_reference_adapter: bool = False,
         lr_critic: float | None = None,
         use_value_head: bool = False,
         use_vllm: bool = False,
