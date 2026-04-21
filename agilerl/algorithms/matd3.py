@@ -545,12 +545,16 @@ class MATD3(MultiAgentRLAlgorithm):
         ), "AgileRL requires action masks to be defined in the information dictionary."
 
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
-        vect_dim = get_vect_dim(obs, self.possible_observation_spaces)
         active_agent_ids = list(obs.keys())
         grouped_agents = defaultdict(list)
+        agent_batch_sizes = {}
         for agent_id in active_agent_ids:
             network_id = self.get_network_id(agent_id)
             grouped_agents[network_id].append(agent_id)
+            agent_batch_sizes[agent_id] = get_vect_dim(
+                obs[agent_id],
+                self.possible_observation_spaces[agent_id],
+            )
 
         # Preprocess and group observations only for currently active groups.
         preprocessed_states = self.preprocess_observation(
@@ -571,14 +575,17 @@ class MATD3(MultiAgentRLAlgorithm):
                     actions = actor(grouped_obs)
             grouped_actions[group_id] = actions.cpu().numpy()
 
-        action_dict = {
-            agent_id: torch.as_tensor(action, device=self.device)
-            for agent_id, action in self.disassemble_grouped_outputs(
-                grouped_actions,
-                vect_dim,
-                grouped_agents,
-            ).items()
-        }
+        action_dict = {}
+        for group_id, actions in grouped_actions.items():
+            start = 0
+            for agent_id in grouped_agents[group_id]:
+                batch_size = agent_batch_sizes[agent_id]
+                end = start + batch_size
+                action_dict[agent_id] = torch.as_tensor(
+                    actions[start:end],
+                    device=self.device,
+                )
+                start = end
 
         for agent_id, actions in action_dict.items():
             actor = self.actors[self.get_network_id(agent_id)]
