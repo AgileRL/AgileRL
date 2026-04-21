@@ -944,6 +944,30 @@ def test_matd3_get_action(
     matd3.clean_up()
 
 
+def test_matd3_get_action_with_partial_group_observations(
+    device,
+    ma_vector_space,
+    ma_discrete_space,
+):
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    state = {
+        "agent_0": np.random.randn(*ma_vector_space[0].shape),
+        "other_agent_0": np.random.randn(*ma_vector_space[2].shape),
+    }
+
+    matd3 = MATD3(
+        ma_vector_space,
+        ma_discrete_space,
+        agent_ids=agent_ids,
+        device=device,
+    )
+    processed_action, raw_action = matd3.get_action(state)
+
+    assert set(processed_action.keys()) == set(state.keys())
+    assert set(raw_action.keys()) == set(state.keys())
+    matd3.clean_up()
+
+
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space", "ma_vector_space"])
 @pytest.mark.parametrize("training", [0, 1])

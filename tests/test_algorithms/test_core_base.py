@@ -2512,6 +2512,23 @@ class TestMultiAgentPreprocessObservation:
         assert "agent_1" in result
         assert isinstance(result["agent_0"], torch.Tensor)
 
+    def test_preprocess_observation_grouped_output(self, vector_space):
+        obs = [vector_space, vector_space]
+        act = [spaces.Discrete(2), spaces.Discrete(2)]
+        agent = DummyMARLAlgorithm(obs, act, agent_ids=["agent_0", "agent_1"], index=0)
+        observation = {
+            "agent_0": np.zeros(4, dtype=np.float32),
+            "agent_1": np.ones(4, dtype=np.float32),
+        }
+
+        result = agent.preprocess_observation(observation, group_ids=["agent"])
+
+        assert "agent" in result
+        assert "agent_0" not in result
+        assert "agent_1" not in result
+        assert isinstance(result["agent"], torch.Tensor)
+        assert result["agent"].shape[0] == 2
+
 
 class TestMultiAgentExtractAgentMasksContinuousNan:
     def test_extract_agent_masks_none_continuous_action(self, vector_space):

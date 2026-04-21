@@ -26,7 +26,6 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
     concatenate_spaces,
-    concatenate_tensors,
     format_shared_critic_encoder,
     get_deepest_head_config,
     get_vect_dim,
@@ -550,22 +549,23 @@ class MATD3(MultiAgentRLAlgorithm):
 
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
         vect_dim = get_vect_dim(obs, self.possible_observation_spaces)
-        unique_agents_ids = list(obs.keys())
-
-        # Preprocess observations
-        preprocessed_states = self.preprocess_observation(obs)
+        active_agent_ids = list(obs.keys())
         grouped_agents = defaultdict(list)
-        for agent_id in unique_agents_ids:
-            group_id = self.get_network_id(agent_id)
-            grouped_agents[group_id].append(agent_id)
+        for agent_id in active_agent_ids:
+            network_id = self.get_network_id(agent_id)
+            grouped_agents[network_id].append(agent_id)
+
+        # Preprocess and group observations only for currently active groups.
+        preprocessed_states = self.preprocess_observation(
+            obs,
+            group_ids=list(grouped_agents.keys()),
+        )
 
         grouped_actions: dict[str, np.ndarray] = {}
-        for group_id, group_agent_ids in grouped_agents.items():
+        for group_id in grouped_agents:
             actor = self.actors[group_id]
             actor.eval()
-            grouped_obs = concatenate_tensors(
-                [preprocessed_states[agent_id] for agent_id in group_agent_ids],
-            )
+            grouped_obs = preprocessed_states[group_id]
             if self.accelerator is not None:
                 with actor.no_sync(), torch.no_grad():
                     actions = actor(grouped_obs)

@@ -923,6 +923,30 @@ def test_maddpg_get_action(
     maddpg.clean_up()
 
 
+def test_maddpg_get_action_with_partial_group_observations(
+    device,
+    ma_vector_space,
+    ma_discrete_space,
+):
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    state = {
+        "agent_0": np.random.randn(*ma_vector_space[0].shape),
+        "other_agent_0": np.random.randn(*ma_vector_space[2].shape),
+    }
+
+    maddpg = MADDPG(
+        ma_vector_space,
+        ma_discrete_space,
+        agent_ids=agent_ids,
+        device=device,
+    )
+    processed_action, raw_action = maddpg.get_action(state)
+
+    assert set(processed_action.keys()) == set(state.keys())
+    assert set(raw_action.keys()) == set(state.keys())
+    maddpg.clean_up()
+
+
 @pytest.mark.parametrize("training", [False, True])
 def test_maddpg_get_action_action_masking_exception(
     training,
