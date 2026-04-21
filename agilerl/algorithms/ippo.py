@@ -430,15 +430,6 @@ class IPPO(MultiAgentRLAlgorithm):
 
         return action_masks
 
-    def preprocess_observation(
-        self,
-        observation: ObservationType,
-        group_ids: list[str] | None = None,
-        *args: Any,
-        **kwargs: Any,
-    ) -> dict[str, TorchObsType]:
-        return super().preprocess_observation(observation, group_ids)
-
     def _get_action_and_values(
         self,
         obs: TorchObsType,

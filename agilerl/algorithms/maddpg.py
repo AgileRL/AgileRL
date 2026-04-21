@@ -453,9 +453,6 @@ class MADDPG(MultiAgentRLAlgorithm):
         action_masks = self.extract_action_masks(infos)
         return action_masks, env_defined_actions, agent_masks
 
-    def get_network_id(self, agent_id: str) -> str:
-        return self.get_group_id(agent_id) if self.has_grouped_agents() else agent_id
-
     def get_action(
         self,
         obs: dict[str, ObservationType],
