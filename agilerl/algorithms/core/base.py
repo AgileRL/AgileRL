@@ -166,6 +166,7 @@ class RegistryMeta(_RegistryMeta, ABCMeta):
 def get_checkpoint_dict(
     agent: SelfEvolvableAlgorithm,
     omit_actor_info: bool = False,
+    omit_optimizer_info: bool = False,
 ) -> dict[str, Any]:
     """Return a dictionary of the agent's attributes to save in a checkpoint.
 
@@ -176,7 +177,9 @@ def get_checkpoint_dict(
     :param omit_actor_info: Whether to remove the 'actor' attribute prior to saving.
         To be used when saving LoRA weights only or when using Deepspeed.
     :type omit_actor_info: bool, optional
-
+    :param omit_optimizer_info: Whether to remove the 'optimizer' attribute prior to saving.
+        To be used when saving LoRA weights only or when using Deepspeed.
+    :type omit_optimizer_info: bool, optional
     :return: A dictionary of the agent's attributes.
     :rtype: dict[str, Any]
     """
@@ -206,7 +209,7 @@ def get_checkpoint_dict(
         if isinstance(evolvable_obj, (OptimizedModule, EvolvableModule)):
             module_chkpt = module_checkpoint_dict(evolvable_obj, attr)
             network_info["modules"].update(module_chkpt)
-        elif isinstance(evolvable_obj, OptimizerWrapper) and not omit_actor_info:
+        elif isinstance(evolvable_obj, OptimizerWrapper) and not omit_optimizer_info:
             optimizer_chkpt = evolvable_obj.checkpoint_dict(attr)
             network_info["optimizers"].update(optimizer_chkpt)
 
@@ -1987,13 +1990,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :param reduce_memory_peak: Deprecated. Previously hinted peak-memory batching;
         ignored. Configure ``micro_batch_size_per_gpu`` and DeepSpeed instead.
     :type reduce_memory_peak: bool, optional
-    :param adapter_names: Names of LoRA adapters managed by this algorithm. ``"actor"`` is
-        required and is always the trained policy. ``"reference"`` is created automatically
-        for reference-policy algorithms (DPO/GRPO). Additional names (e.g. ``"critic"``)
-        are created as freshly-initialised LoRA adapters and can be loaded from a
-        checkpoint. When ``None`` (default) the adapter set is derived from
-        ``use_separate_reference_adapter`` for backward compatibility.
-    :type adapter_names: tuple[str, ...] | None
     """
 
     _separate_reference_adapter_deprecation_emitted = False
@@ -2039,7 +2035,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
-        adapter_names: tuple[str, ...] | None = None,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
@@ -2185,29 +2180,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self._warn_separate_reference_adapter_deprecation()
 
-        # Resolve adapter_names: explicit user-supplied tuple wins; otherwise derive
-        # from the deprecated ``use_separate_reference_adapter`` flag for backward
-        # compatibility. ``actor`` is required in all cases; ``critic`` is appended
-        # automatically when ``use_value_head=True`` so callers don't have to duplicate
-        # the information.
-        if adapter_names is None:
-            adapter_names = (
-                ("actor", "reference") if use_separate_reference_adapter else ("actor",)
-            )
-        adapter_names = tuple(adapter_names)
-        if use_value_head and "critic" not in adapter_names:
-            adapter_names = (*adapter_names, "critic")
-        if "actor" not in adapter_names:
-            msg = f"adapter_names must contain 'actor'; got {adapter_names!r}."
-            raise ValueError(msg)
-        unknown = set(adapter_names) - LLMAlgorithm._allowed_adapters
-        if unknown:
-            msg = (
-                f"Unknown adapter names {sorted(unknown)!r}; allowed names are "
-                f"{sorted(LLMAlgorithm._allowed_adapters)!r}."
-            )
-            raise ValueError(msg)
-        self.adapter_names = adapter_names
+        selected_adapters = ("actor",)
+        if use_separate_reference_adapter:
+            selected_adapters += ("reference",)
+        if use_value_head:
+            selected_adapters += ("critic",)
+        self.selected_adapters = selected_adapters
 
         self.cosine_lr_schedule_config = cosine_lr_schedule_config
         self.use_value_head = use_value_head
@@ -2245,11 +2223,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         LLMAlgorithm._separate_reference_adapter_deprecation_emitted = True
 
-    def save_checkpoint(self, path: str, save_optimizer: bool = True) -> None:
+    def save_checkpoint(
+        self,
+        path: str,
+        lora_only: bool = True,
+        save_optimizer: bool = True,
+        **kwargs: Any,
+    ) -> None:
         """Save LoRA adapter weights and algorithm attributes to a directory.
 
         Adapter weights are saved via ``save_pretrained``; the base model weights are
-        never written to disk. Every adapter listed in :attr:`adapter_names` is saved,
+        never written to disk. Every adapter listed in :attr:`selected_adapters` is saved,
         so the checkpoint is self-contained for SFT \u2192 DPO \u2192 GRPO pipelines.
 
         :param path: Directory to write the checkpoint into.
@@ -2260,13 +2244,69 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             ``<path>/optimizer.pt`` file.
         :type save_optimizer: bool
         """
-        Path(path).mkdir(parents=True, exist_ok=True)
-        self._save_model_checkpoint(path, selected_adapters=self.adapter_names)
-        checkpoint_dict = self._build_attribute_checkpoint()
-        self._save_attribute_checkpoint(path, checkpoint_dict)
+        if "weights_only" in kwargs:
+            warnings.warn(
+                "weights_only is deprecated and will be removed in a future release. Use lora_only instead.",
+                stacklevel=2,
+                category=DeprecationWarning,
+            )
+            lora_only = kwargs["weights_only"]
+        if lora_only and not self.use_separate_reference_adapter:
+            warnings.warn(
+                "lora_only=True requested, but use_separate_reference_adapter is False; base model (reference) weights will not be saved.",
+                stacklevel=2,
+                category=UserWarning,
+            )
 
+        Path(path).mkdir(parents=True, exist_ok=True)
+
+        # omit_actor_info is used to determine whether to save the actor information in the attributes.pt file.
+        # When lora_only is True and/or we are using deepspeed, omit_actor_info is True and the network is not saved in the attributes.pt file.
+        # In the alternate case, omit_actor_info is False and the actor information is saved in the attributes.pt file.
+
+        omit_actor_info = True
+        omit_optimizer_info = True
+        state_dict = {}
         if save_optimizer:
-            self._save_optimizer_state(path)
+            if self.accelerator is not None:
+                # Save deepspeed checkpoint with lora_only=True
+                self._save_distributed_actor(
+                    path, tag="save_checkpoint", lora_only=lora_only
+                )
+            else:
+                omit_optimizer_info = False
+
+        if lora_only:
+            model_ref = self._get_unwrapped_actor()
+            with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
+                model_ref.save_pretrained(
+                    save_directory=path,
+                    selected_adapters=self.selected_adapters,
+                    is_main_process=self.accelerator is None
+                    or self.accelerator.is_main_process,
+                )
+
+        elif not lora_only and not save_optimizer:
+            if self._uses_deepspeed:
+                model_ref = self._get_unwrapped_actor()
+                with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
+                    module_cls = model_ref.__class__
+                    state_dict = {
+                        "actor_cls": module_cls,
+                        "actor_init_dict": None,
+                        "actor_state_dict": model_ref.state_dict(),
+                        "actor_module_dict_cls": None,
+                    }
+            else:
+                omit_actor_info = False
+
+        checkpoint_dict = self._build_attribute_checkpoint(
+            omit_actor_info=omit_actor_info,
+            omit_optimizer_info=omit_optimizer_info,
+            lora_only=lora_only,
+            state_dict=state_dict,
+        )
+        self._save_attribute_checkpoint(path, checkpoint_dict)
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
@@ -2274,7 +2314,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def load_checkpoint(
         self,
         path: str,
-        keep_existing_reference: bool = False,
         load_optimizer: bool = True,
     ) -> None:
         """Load LoRA adapter weights and algorithm attributes from a checkpoint directory.
@@ -2287,67 +2326,71 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         :param path: Directory containing a checkpoint written by :meth:`save_checkpoint`.
         :type path: str
-        :param keep_existing_reference: If ``True`` do not touch the in-memory
-            ``reference`` adapter; otherwise overwrite it with the actor weights being
-            loaded. Defaults to ``False``.
-        :type keep_existing_reference: bool
-        :param load_optimizer: If ``True`` (default) restore optimizer and LR-scheduler
-            state from the checkpoint when present; otherwise leave the freshly-built
-            optimizer unchanged.
+        :param load_optimizer: If ``True`` (default) also load the optimizer and LR
+            scheduler state so training can resume. On DeepSpeed ZeRO \u2265 2 this loads
+            a DeepSpeed checkpoint into ``<path>/deepspeed``; otherwise an
+            ``<path>/optimizer.pt`` file.
         :type load_optimizer: bool
         """
         checkpoint = self._load_attribute_checkpoint(path)
-        self._load_model_checkpoint(
-            path, keep_existing_reference=keep_existing_reference
+        lora_only = checkpoint.pop("_lora_only", False) or checkpoint.pop(
+            "_weights_only", False
         )
-        self._restore_checkpoint_attributes(checkpoint)
-        if self.accelerator is not None:
-            self.device = self.accelerator.device
-        self._rebuild_optimizer_after_load()
-        if load_optimizer:
-            self._load_optimizer_state(path)
+        if self._uses_deepspeed:
+            if load_optimizer:
+                self._load_distributed_actor(path, tag="save_checkpoint")
+            elif lora_only:
+                self._load_model_checkpoint(path)
+            else:
+                model_ref = self._get_unwrapped_actor()
+                with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
+                    model_ref.load_state_dict(
+                        checkpoint["network_info"]["modules"]["actor_state_dict"]
+                    )
+
+            self._restore_checkpoint_attributes(checkpoint)
+
+        else:
+            if (
+                "optimizers" not in checkpoint.get("network_info", {}).keys()
+                and load_optimizer
+            ):
+                warnings.warn(
+                    "Optimizer state not found in checkpoint. Training will proceed using a NEW optimizer instance with random/initial default state. ",
+                    stacklevel=2,
+                )
+
+            super().load_checkpoint(path + "/attributes.pt")
+            if lora_only:
+                self._load_model_checkpoint(path)
+
         if "lr_scheduler" in checkpoint and self.lr_scheduler is not None:
             self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
 
-    def _save_model_checkpoint(
-        self, path: str, selected_adapters: tuple[str, ...]
-    ) -> None:
-        """Save every selected LoRA adapter to disk via ``save_pretrained``.
-
-        The base model weights are never written \u2014 AgileRL's LLM algorithms are
-        adapter-only by design.
-
-        :param path: Directory where adapter weights should be saved.
-        :type path: str
-        :param selected_adapters: Names of adapters to persist (typically
-            :attr:`adapter_names`).
-        :type selected_adapters: list[str]
-        """
-        if self.accelerator is not None:
-            model_ref = self.accelerator.unwrap_model(self.actor)
-            with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
-                model_ref.save_pretrained(
-                    save_directory=path,
-                    selected_adapters=selected_adapters,
-                    is_main_process=self.accelerator.is_main_process,
-                )
-        else:
-            # No accelerator: save_pretrained is forwarded to the underlying PeftModel
-            # via DummyEvolvable.__getattr__.
-            self.actor.save_pretrained(
-                save_directory=path,
-                selected_adapters=selected_adapters,
-            )
-
-    def _build_attribute_checkpoint(self) -> dict[str, Any]:
+    def _build_attribute_checkpoint(
+        self,
+        omit_actor_info: bool,
+        omit_optimizer_info: bool,
+        lora_only: bool,
+        state_dict: dict[str, torch.Tensor],
+    ) -> dict[str, Any]:
         """Build the non-model checkpoint payload saved alongside adapter weights.
 
         :return: Serialised attribute payload for ``attributes.pt``.
         :rtype: dict[str, Any]
         """
-        checkpoint_dict = get_checkpoint_dict(self, omit_actor_info=True)
+        checkpoint_dict = get_checkpoint_dict(
+            self,
+            omit_actor_info=omit_actor_info,
+            omit_optimizer_info=omit_optimizer_info,
+        )
         checkpoint_dict.pop("llm", None)
         checkpoint_dict.pop("tp_group", None)
+        checkpoint_dict["_lora_only"] = lora_only
+        if state_dict:
+            checkpoint_dict["network_info"] = {}
+            checkpoint_dict["network_info"]["modules"] = {}
+            checkpoint_dict["network_info"]["modules"] = state_dict
         return checkpoint_dict
 
     def _save_attribute_checkpoint(
@@ -2416,13 +2459,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         self._load_adapter_weights(path, "actor", ckpt_lora_config)
 
-        if "reference" in self.adapter_names:
+        if "reference" in self.selected_adapters:
             if keep_existing_reference:
                 pass
             else:
                 self._copy_adapter_weights(src="actor", dst="reference")
 
-        if "critic" in self.adapter_names:
+        if "critic" in self.selected_adapters:
             if (Path(path) / "critic").exists():
                 self._load_adapter_weights(path, "critic", ckpt_lora_config)
             else:
@@ -2431,14 +2474,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _restore_checkpoint_attributes(self, checkpoint: dict[str, Any]) -> None:
         """Restore algorithm attributes from payload.
 
-        ``lora_config`` and ``adapter_names`` are intentionally skipped \u2014 the current
+        ``lora_config`` and ``selected_adapters`` are intentionally skipped \u2014 the current
         algorithm's values are authoritative, and any LoRA-shape reconciliation is done
         inside :meth:`_load_model_checkpoint`.
 
         :param checkpoint: Loaded attribute payload.
         :type checkpoint: dict[str, Any]
+        :param checkpoint_type: The checkpoint type.
+        :type checkpoint_type: Literal["peft", "deepspeed", "torch"]
         """
-        skip_attrs = {"lr_scheduler", "lora_config", "adapter_names"}
+        skip_attrs = {"lr_scheduler", "lora_config", "selected_adapters"}
         for attr, value in checkpoint.items():
             if attr in skip_attrs:
                 continue
@@ -2492,18 +2537,25 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             assert self.optimizer is not None, (
                 "Optimizer is set to None, please check that the optimizer is correctly defined."
             )
+            # The below is true when an optimizer is defined in the deepspeed config.
             is_dummy_optimizer = isinstance(self.optimizer.optimizer, DummyOptimizer)
-
             self._restore_adapter_trainability(["actor", "critic"])
 
+            # When prepare is called on the dummy optimizer, it is returned as a DummyOptimizer object.
+            # In the cases where self.optimizer.optimizer is an optim.Adam object, it is returned as DeepSpeedOptimizer
             self.actor, optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor,
                 self.optimizer.optimizer,
                 self.lr_scheduler,
             )
+            # If optimizer is a dummy optimizer, then the deepspeed engine has been initialized with
+            # an optimizer in the config and the optimizer is therefore part of the engine. We point the
+            # optimizer attribute of the OptimizerWrapper to the active optimizer.
             self.optimizer.optimizer = (
                 optimizer if not is_dummy_optimizer else self.actor.optimizer
             )
+
+            # Again, we retrospectively set the optimizer class to the type of the optimizer as returned by prepare.
             self.optimizer.optimizer_cls = (
                 type(optimizer)
                 if not is_dummy_optimizer
@@ -2898,6 +2950,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self,
         path: str,
         tag: str = "intermediate_checkpoint",
+        lora_only: bool = False,
     ) -> None:
         """Save actor/optimizer/scheduler state via DeepSpeed checkpointing.
 
@@ -2909,7 +2962,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             assert self.actor is not None, (
                 "Actor is not defined, please check that the actor is defined."
             )
-            self.actor.save_checkpoint(path, tag=tag)
+            self._restore_adapter_trainability(self.selected_adapters)
+            self.actor.save_checkpoint(
+                path, tag=tag, exclude_frozen_parameters=lora_only
+            )
             self.use_adapter("actor")
         else:
             warnings.warn(
@@ -3027,10 +3083,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 adapter_name="actor",
             )
 
-            # Add every adapter listed in ``adapter_names`` beyond ``actor`` as a fresh
+            # Add every adapter listed in ``selected_adapters`` beyond ``actor`` as a fresh
             # LoRA initialised from ``self.lora_config``. Downstream loads can overwrite
             # these (with padding for rank-mutation) via :meth:`_load_adapter_weights`.
-            for name in self.adapter_names:
+            for name in self.selected_adapters:
                 if name == "actor":
                     continue
                 if name not in peft_target.peft_config:
@@ -3041,10 +3097,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
             # Drop any adapters we don't own (e.g. from a user-supplied PEFT model).
             for stray in list(peft_target.peft_config.keys()):
-                if stray not in self.adapter_names:
+                if stray not in self.selected_adapters:
                     warnings.warn(
                         f"Adapter '{stray}' found in the model but is not listed in "
-                        f"`adapter_names={self.adapter_names!r}`. It will be removed "
+                        f"`selected_adapters={self.selected_adapters!r}`. It will be removed "
                         "and any weights will be lost.",
                         stacklevel=2,
                     )
@@ -3082,6 +3138,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.accelerator is None:
             self.actor = DummyEvolvable(module=self.actor, device=self.device)
 
+        # If an optimizer is defined in the deepspeed config, then the optimizer is part of the engine when
+        # accelerator.prepare() is called. Since we are yet to wrap the model, we pass a dummy optimizer to the OptimizerWrapper.
+        # In all other cases optim.Adam is used.
         optim_class = self._select_optim_class()
 
         self.optimizer = OptimizerWrapper(
@@ -3457,7 +3516,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             return self.actor.pretrained_model
         return self.actor
 
-    def _restore_adapter_trainability(self, adapter_names: list[str]) -> None:
+    def _restore_adapter_trainability(self, selected_adapters: list[str]) -> None:
         """Restore requires_grad=True for all trainable parameters of specified adapters.
 
         PEFT's set_adapter() sets requires_grad=False on all non-active adapter
@@ -3467,10 +3526,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         that ZeRO-2 registered hooks for, those hooks never fire, the bucket never
         completes, and reduce-scatter never runs - the optimizer sees zero gradients.
 
-        :param adapter_names: LoRA adapter names whose params should be trainable.
-        :type adapter_names: list[str]
+        :param selected_adapters: LoRA adapter names whose params should be trainable.
+        :type selected_adapters: list[str]
         """
-        key = tuple(sorted(adapter_names))
+        key = tuple(sorted(selected_adapters))
         cache = getattr(self, "_trainable_params_cache", None)
         if cache is not None and cache[0] == key:
             for param in cache[1]:
@@ -3480,7 +3539,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         model = self.actor.module if hasattr(self.actor, "module") else self.actor
         params: list[torch.nn.Parameter] = []
         for name, param in model.named_parameters():
-            for adapter in adapter_names:
+            for adapter in selected_adapters:
                 if adapter in name and "lora" in name:
                     params.append(param)
                     break
@@ -4176,7 +4235,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if hasattr(peft_model, "active_adapter")
             else "actor"
         )
-        for name in self.adapter_names:
+        for name in self.selected_adapters:
             live_cfg = peft_model.peft_config.get(name)
             if live_cfg is not None and self._lora_configs_equivalent(
                 live_cfg, target_config
@@ -4284,68 +4343,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             padded[key] = canvas
         return padded
 
-    def _save_optimizer_state(self, path: str) -> None:
-        """Persist optimizer (and LR scheduler) state for resume-training.
-
-        * DeepSpeed ZeRO \u2265 2: write the DeepSpeed checkpoint into ``<path>/deepspeed``.
-        * Non-distributed / ZeRO \u2264 1: write ``<path>/optimizer.pt``.
-
-        No-op when ``self.optimizer`` is ``None`` or the underlying optimizer is a
-        ``DummyOptimizer``.
-
-        :param path: Directory to write optimizer state into.
-        :type path: str
-        :return: None.
-        :rtype: None
-        """
-        if self.optimizer is None:
-            return
-
-        if self.accelerator is not None and self.zero_stage >= 2:
-            self._save_distributed_actor(f"{path}/deepspeed")
-            return
-
-        if self.accelerator is None or self.accelerator.is_main_process:
-            inner = self.optimizer.optimizer
-            if isinstance(inner, DummyOptimizer):
-                return
-            state = {
-                "optimizer": inner.state_dict(),
-                "lr_scheduler": (
-                    self.lr_scheduler.state_dict()
-                    if self.lr_scheduler is not None
-                    else None
-                ),
-            }
-            torch.save(state, f"{path}/optimizer.pt")
-
-    def _load_optimizer_state(self, path: str) -> None:
-        """Restore optimizer / scheduler state written by :meth:`_save_optimizer_state`.
-
-        :param path: Directory previously passed to :meth:`save_checkpoint`.
-        :type path: str
-        :return: None. Mutates the live optimizer / LR scheduler in place.
-        :rtype: None
-        """
-        if self.optimizer is None:
-            return
-
-        if self.accelerator is not None and self.zero_stage >= 2:
-            ds_path = Path(path) / "deepspeed"
-            if ds_path.exists():
-                self._load_distributed_actor(str(ds_path))
-            return
-
-        optim_path = Path(path) / "optimizer.pt"
-        if not optim_path.is_file():
-            return
-        state = torch.load(str(optim_path), weights_only=False, map_location="cpu")
-        inner = self.optimizer.optimizer
-        if not isinstance(inner, DummyOptimizer) and state.get("optimizer") is not None:
-            inner.load_state_dict(state["optimizer"])
-        if state.get("lr_scheduler") is not None and self.lr_scheduler is not None:
-            self.lr_scheduler.load_state_dict(state["lr_scheduler"])
-
     @staticmethod
     def _create_prompt_masks(
         prompt_lengths: list[int], max_length: int
@@ -4362,64 +4359,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         prompt_lengths_tensor = torch.tensor(prompt_lengths, dtype=torch.long)
         positions = torch.arange(max_length, dtype=torch.long).unsqueeze(0)
         return positions > prompt_lengths_tensor.unsqueeze(1)
-
-    @staticmethod
-    def _resolve_model_path_for_vllm(model_path: str) -> str:
-        """Return an on-disk path for vLLM's ``model`` (weights and tokenizer).
-
-        :param model_path: Hugging Face repo id or a local folder with ``config.json``.
-        :type model_path: str
-        :return: Path to a snapshot directory.
-        :rtype: str
-        :raises ValueError: If the resolved path is not an existing directory (e.g. bad
-            cache or unexpected ``snapshot_download`` result).
-
-        Repo ids are turned into a cache path via ``snapshot_download`` (so vLLM
-        always receives a directory; helps when only the cache, not the id, is usable).
-
-        vLLM loads the tokenizer from that same directory. A cache that has weights but
-        not tokenizer files can make ``AutoTokenizer`` fail (e.g. slow GPT2 path with
-        ``vocab_file`` unset). If the usual tokenizer files are missing and
-        ``model_path`` is a repo id, we call ``snapshot_download`` again with
-        ``local_files_only=False`` to fill the gap. Local paths are never modified.
-        """
-        path = Path(model_path)
-        from huggingface_hub import snapshot_download
-        from huggingface_hub.errors import LocalEntryNotFoundError
-
-        # Local checkpoint: use as-is (caller is responsible for a complete tree).
-        local_model_dir = path.is_dir() and (path / "config.json").is_file()
-        if local_model_dir:
-            resolved = str(path.resolve())
-        else:
-            # Repo id: snapshot on disk first, then hit the network if needed.
-            try:
-                resolved = snapshot_download(repo_id=model_path, local_files_only=True)
-            except LocalEntryNotFoundError:
-                resolved = snapshot_download(repo_id=model_path)
-
-        resolved_path = Path(resolved)
-        if not resolved_path.is_dir():
-            msg = (
-                "Expected a model directory for vLLM, but the resolved path is not a "
-                f"directory (missing, not a folder, or inaccessible): {resolved!r} "
-                f"(model_path={model_path!r})."
-            )
-            raise ValueError(msg)
-
-        # Files vLLM/transformers typically need to load a tokenizer from the snapshot.
-        has_tokenizer_files = any(
-            (resolved_path / name).is_file()
-            for name in ("tokenizer.json", "vocab.json", "tokenizer.model")
-        )
-        if has_tokenizer_files or local_model_dir:
-            return resolved
-
-        # Incomplete Hub cache: fetch remaining files (e.g. tokenizer) if allowed.
-        try:
-            return snapshot_download(repo_id=model_path, local_files_only=False)
-        except LocalEntryNotFoundError:
-            return resolved
 
     def _configure_vllm(self) -> None:
         """Configure vLLM for efficient inference during generation in 'get_action'."""
