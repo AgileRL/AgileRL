@@ -607,6 +607,7 @@ class TestGatherIfZero3:
 # These run a real Accelerator with a DeepSpeedPlugin and exercise the full
 # save/load pipeline end-to-end.
 
+
 def _require_cuda_deepspeed() -> None:
     """Skip if the environment can't run real DeepSpeed."""
     if not HAS_LLM_DEPENDENCIES:
@@ -624,7 +625,10 @@ def _build_e2e_grpo(accelerator):
     accelerator is attached.
     """
     actor = create_module(
-        input_size=6, max_tokens=4, vocab_size=64, device="cuda",
+        input_size=6,
+        max_tokens=4,
+        vocab_size=64,
+        device="cuda",
     )
     return GRPO(
         actor_network=actor,
@@ -658,11 +662,14 @@ def deepspeed_saved_e2e(
     _require_cuda_deepspeed()
     lora_only, save_optimizer = request.param
     accelerator = accelerator_factory(
-        use_deepspeed_optimizer=False, config=deepspeed_config_stage_2,
+        use_deepspeed_optimizer=False,
+        config=deepspeed_config_stage_2,
     )
     agent = _build_e2e_grpo(accelerator)
     agent.save_checkpoint(
-        str(tmp_path), lora_only=lora_only, save_optimizer=save_optimizer,
+        str(tmp_path),
+        lora_only=lora_only,
+        save_optimizer=save_optimizer,
     )
     return SimpleNamespace(
         agent=agent,
@@ -734,7 +741,8 @@ def deepspeed_load_scenario_e2e(
     _require_cuda_deepspeed()
     lora_only, save_optimizer = request.param
     accelerator = accelerator_factory(
-        use_deepspeed_optimizer=False, config=deepspeed_config_stage_2,
+        use_deepspeed_optimizer=False,
+        config=deepspeed_config_stage_2,
     )
     agent = _build_e2e_grpo(accelerator)
     return SimpleNamespace(
@@ -773,12 +781,15 @@ class TestDeepspeedLoadE2E:
                 base_param.fill_(base_sentinel)
 
         s.agent.save_checkpoint(
-            str(s.path), lora_only=s.lora_only, save_optimizer=s.save_optimizer,
+            str(s.path),
+            lora_only=s.lora_only,
+            save_optimizer=s.save_optimizer,
         )
 
         # Build the loading side on a fresh accelerator + agent.
         new_accel = s.accelerator_factory(
-            use_deepspeed_optimizer=False, config=deepspeed_config_stage_2,
+            use_deepspeed_optimizer=False,
+            config=deepspeed_config_stage_2,
         )
         new_agent = _build_e2e_grpo(new_accel)
 
@@ -789,14 +800,13 @@ class TestDeepspeedLoadE2E:
             new_lora.fill_(clobber)
 
         new_agent.load_checkpoint(
-            str(s.path), load_optimizer=s.save_optimizer,
+            str(s.path),
+            load_optimizer=s.save_optimizer,
         )
 
         # Re-fetch after load; load may rebuild adapter modules.
         _, lora_post = _find_param(new_agent, "lora_A.actor.weight")
-        assert torch.allclose(
-            lora_post, torch.full_like(lora_post, lora_sentinel)
-        ), (
+        assert torch.allclose(lora_post, torch.full_like(lora_post, lora_sentinel)), (
             f"LoRA weight not restored for cell "
             f"(lora_only={s.lora_only}, save_optimizer={s.save_optimizer})"
         )
@@ -830,26 +840,28 @@ class TestDeepspeedLoadE2E:
         s.agent.optimizer.step()
 
         s.agent.save_checkpoint(
-            str(s.path), lora_only=s.lora_only, save_optimizer=s.save_optimizer,
+            str(s.path),
+            lora_only=s.lora_only,
+            save_optimizer=s.save_optimizer,
         )
 
         new_accel = s.accelerator_factory(
-            use_deepspeed_optimizer=False, config=deepspeed_config_stage_2,
+            use_deepspeed_optimizer=False,
+            config=deepspeed_config_stage_2,
         )
         new_agent = _build_e2e_grpo(new_accel)
         # Pair load_optimizer with save_optimizer — that's the coherent
         # combination; load_optimizer=True on a no-optim-saved deepspeed
         # checkpoint raises ValueError from ``_load_distributed_actor``.
         new_agent.load_checkpoint(
-            str(s.path), load_optimizer=s.save_optimizer,
+            str(s.path),
+            load_optimizer=s.save_optimizer,
         )
 
         if s.save_optimizer:
             inner = getattr(new_agent.optimizer, "optimizer", new_agent.optimizer)
             sd = inner.state_dict() if hasattr(inner, "state_dict") else {}
-            has_state = bool(sd.get("state")) or bool(
-                sd.get("optimizer_state_dict")
-            )
+            has_state = bool(sd.get("state")) or bool(sd.get("optimizer_state_dict"))
             assert has_state, (
                 f"optimizer state empty after DeepSpeed load for cell "
                 f"(lora_only={s.lora_only}, save_optimizer=True); "
@@ -879,11 +891,11 @@ def _lora(r=4, target_modules=("linear_1",), modules_to_save=None, lora_alpha=8)
 class TestMergeLoraConfigs:
     """Unit tests for ``LLMAlgorithm._merge_lora_configs``. Rules under test:
 
-      * ``current=None`` → checkpoint is returned as-is, no warnings.
-      * ``r``               → ``max(current, checkpoint)``; warn on mismatch.
-      * ``target_modules``  → set union; warn on difference.
-      * ``modules_to_save`` → set union; warn on difference.
-      * anything else       → current kept; warn on difference.
+    * ``current=None`` → checkpoint is returned as-is, no warnings.
+    * ``r``               → ``max(current, checkpoint)``; warn on mismatch.
+    * ``target_modules``  → set union; warn on difference.
+    * ``modules_to_save`` → set union; warn on difference.
+    * anything else       → current kept; warn on difference.
     """
 
     def test_current_none_returns_checkpoint_unchanged(self):
@@ -1004,9 +1016,7 @@ class TestMergeLoraConfigsRoundtrip:
         saver = _build_grpo_with_lora(_lora(r=2, target_modules=("linear_1",)))
         saver.save_checkpoint(str(tmp_path), lora_only=True, save_optimizer=False)
 
-        loader = _build_grpo_with_lora(
-            _lora(r=8, target_modules=("linear_1",))
-        )
+        loader = _build_grpo_with_lora(_lora(r=8, target_modules=("linear_1",)))
         loader.load_checkpoint(str(tmp_path), load_optimizer=False)
         assert loader.lora_config.r == 8
 
@@ -1015,16 +1025,15 @@ class TestMergeLoraConfigsRoundtrip:
         saver = _build_grpo_with_lora(cfg)
         saver.save_checkpoint(str(tmp_path), lora_only=True, save_optimizer=False)
 
-        loader = _build_grpo_with_lora(
-            _lora(r=4, target_modules=("linear_1",))
-        )
+        loader = _build_grpo_with_lora(_lora(r=4, target_modules=("linear_1",)))
         # We only assert the merge-specific warnings don't fire — PEFT /
         # other parts of load may legitimately warn on unrelated things.
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             loader.load_checkpoint(str(tmp_path), load_optimizer=False)
         merge_warnings = [
-            w for w in caught
+            w
+            for w in caught
             if "rank mismatch" in str(w.message)
             or "'target_modules' differs" in str(w.message)
             or "'modules_to_save' differs" in str(w.message)
