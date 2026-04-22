@@ -294,9 +294,8 @@ class OptimizerWrapper:
         try:
             opt = object.__getattribute__(self, "optimizer")
         except AttributeError:
-            raise AttributeError(
-                f"{type(self).__name__!r} object has no attribute {name!r}"
-            ) from None
+            msg = f"{type(self).__name__!r} object has no attribute {name!r}"
+            raise AttributeError(msg) from None
         return getattr(opt, name)
 
     def _infer_parent_container(self) -> EvolvableAlgorithmProtocol:
