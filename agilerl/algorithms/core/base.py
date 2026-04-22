@@ -2394,10 +2394,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         result is rebuilt via :meth:`_reconfigure_adapters_to_match` before
         weights are loaded, so tensors always land in the correct shape.
 
-        Dispatch per cell of the ``(lora_only-on-disk, load_optimizer, deepspeed)``
-        grid, where ``lora_only-on-disk`` is read from ``attributes.pt``:
-
-          Plain (no accelerator):
+          No DeepSpeed:
             lora_only=T, load_optimizer=T  \u2192  PEFT adapter load + optimizer
                                                  state from ``attributes.pt``
             lora_only=T, load_optimizer=F  \u2192  PEFT adapter load only
@@ -2467,12 +2464,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     "Optimizer state not found in checkpoint. Training will proceed using a NEW optimizer instance with random/initial default state. ",
                     stacklevel=2,
                 )
-
-            super().load_checkpoint(path + "/attributes.pt")
+            # Load checkpoint before super() so that we can merge the LoRA configs if they are mismatched
             if lora_only:
                 self._load_model_checkpoint(
                     path, overwrite_reference_adapter, overwrite_critic_adapter
                 )
+            # ``super().load_checkpoint`` restores every attribute from the
+            # checkpoint, which would clobber the just-merged ``lora_config`` /
+            # ``selected_adapters``. Stash and restore, mirroring the deepspeed
+            # branch's ``_restore_checkpoint_attributes`` skip-list.
+            live_lora_config = self.lora_config
+            live_selected_adapters = self.selected_adapters
+            super().load_checkpoint(path + "/attributes.pt")
+            self.lora_config = live_lora_config
+            self.selected_adapters = live_selected_adapters
 
         if "lr_scheduler" in checkpoint and self.lr_scheduler is not None:
             self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
@@ -2504,6 +2509,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         for adapter in self.selected_adapters:
             if (Path(path) / adapter).exists():
+                # ``_load_adapter_weights`` itself invokes
+                # ``_pad_adapter_state_to_live_shape`` internally when ranks
+                # differ — no need to call it again out here.
                 self._load_adapter_weights(path, adapter, ckpt_lora_config)
 
         if "reference" in self.selected_adapters and overwrite_reference_adapter:
