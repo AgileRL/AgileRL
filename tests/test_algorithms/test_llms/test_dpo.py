@@ -901,6 +901,7 @@ def test_dpo_set_reference_policy(
     model_factory,
     config,
     use_deepspeed_optimizer,
+    use_separate_reference_adapter,
     pretrained_model_name_or_path,
     vocab_size,
     input_size,
@@ -915,6 +916,7 @@ def test_dpo_set_reference_policy(
         vocab_size,
         input_size,
         max_tokens,
+        use_separate_reference_adapter,
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     )
