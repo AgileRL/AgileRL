@@ -6,6 +6,7 @@ import inspect
 import os
 import pickle
 import tempfile
+from tkinter import Checkbutton
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict
@@ -68,6 +69,7 @@ from agilerl.typing import (
     ObservationType,
     OptimizerType,
     TorchObsType,
+    CheckpointInfo,
 )
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
@@ -135,7 +137,6 @@ if TYPE_CHECKING or HAS_VLLM:
 
 __all__ = ["EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
 
-SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
 
 
@@ -145,12 +146,12 @@ class _RegistryMeta(type):
     """
 
     def __call__(
-        cls: type[SelfEvolvableAlgorithm],
+        cls: type[EvolvableAlgorithm], # type: ignore[misc]
         *args: Any,
         **kwargs: Any,
-    ) -> SelfEvolvableAlgorithm:
+    ) -> EvolvableAlgorithm:
         # Create the instance
-        instance: SelfEvolvableAlgorithm = super().__call__(*args, **kwargs)
+        instance: EvolvableAlgorithm = super().__call__(*args, **kwargs) # type: ignore[misc]
 
         # Call the base class post_init_hook after all initialization
         if isinstance(instance, cls) and hasattr(instance, "_registry_init"):
@@ -164,7 +165,7 @@ class RegistryMeta(_RegistryMeta, ABCMeta):
 
 
 def get_checkpoint_dict(
-    agent: SelfEvolvableAlgorithm,
+    agent: EvolvableAlgorithm,
     omit_actor_info: bool = False,
     omit_optimizer_info: bool = False,
 ) -> dict[str, Any]:
@@ -188,41 +189,31 @@ def get_checkpoint_dict(
     attribute_dict = EvolvableAlgorithm.inspect_attributes(agent)
     attribute_dict["agilerl_version"] = version("agilerl")
     attribute_dict.pop("accelerator", None)
-
+    attribute_dict.pop("rollout_buffer", None)
     if attribute_dict.pop("lr_scheduler", None) is not None:
         attribute_dict["lr_scheduler"] = agent.lr_scheduler.state_dict()
 
-    if omit_actor_info:
-        attribute_dict.pop("actor", None)
-        return attribute_dict
-
-    if "rollout_buffer" in attribute_dict:
-        attribute_dict.pop("rollout_buffer")
-
     # Get checkpoint dictionaries for evolvable modules and optimizers
-    network_info: dict[str, dict[str, Any] | list[str]] = {
-        "modules": {},
-        "optimizers": {},
-    }
-    for attr in agent.evolvable_attributes():
-        evolvable_obj: EvolvableAttributeType = getattr(agent, attr)
-        if isinstance(evolvable_obj, (OptimizedModule, EvolvableModule)):
-            module_chkpt = module_checkpoint_dict(evolvable_obj, attr)
-            network_info["modules"].update(module_chkpt)
-        elif isinstance(evolvable_obj, OptimizerWrapper) and not omit_optimizer_info:
-            optimizer_chkpt = evolvable_obj.checkpoint_dict(attr)
-            network_info["optimizers"].update(optimizer_chkpt)
+    # Use type CheckpointInfo so load code can rely on the key existing.
+    checkpoint_info = CheckpointInfo(
+        modules={},
+        optimizers={},
+        network_names=[],
+        optimizer_names=[],
+    )
 
-    network_attr_names = list(agent.evolvable_attributes(networks_only=True))
-    optimizer_attr_names = [
-        name
-        for name in agent.evolvable_attributes()
-        if isinstance(getattr(agent, name), OptimizerWrapper)
-    ]
+    for name in agent.evolvable_attributes():
+        obj = getattr(agent, name)
+        if isinstance(obj, (OptimizedModule, EvolvableModule)):
+            if not omit_actor_info:
+                checkpoint_info["modules"].update(module_checkpoint_dict(obj, name))
+                checkpoint_info["network_names"].append(name)
+        elif isinstance(obj, OptimizerWrapper):
+            if not omit_optimizer_info:
+                checkpoint_info["optimizers"].update(obj.checkpoint_dict(name))
+                checkpoint_info["optimizer_names"].append(name)
 
-    network_info["network_names"] = network_attr_names
-    network_info["optimizer_names"] = optimizer_attr_names
-    attribute_dict["network_info"] = network_info
+    attribute_dict["network_info"] = checkpoint_info
 
     return attribute_dict
 
@@ -403,7 +394,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     @staticmethod
     def inspect_attributes(
-        agent: SelfEvolvableAlgorithm,
+        agent: EvolvableAlgorithm,
         input_args_only: bool = False,
     ) -> dict[str, Any]:
         """Inspect and retrieve the attributes of the current object, excluding attributes related to the
@@ -445,16 +436,16 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     @staticmethod
     def copy_attributes(
-        agent: SelfEvolvableAlgorithm,
-        clone: SelfEvolvableAlgorithm,
-    ) -> SelfEvolvableAlgorithm:
+        agent: EvolvableAlgorithm,
+        clone: EvolvableAlgorithm,
+    ) -> EvolvableAlgorithm:
         """Copy the non-evolvable attributes of the algorithm to a clone.
 
         :param clone: The clone of the algorithm.
-        :type clone: SelfEvolvableAlgorithm
+        :type clone: EvolvableAlgorithm
 
         :return: The clone of the algorithm.
-        :rtype: SelfEvolvableAlgorithm
+        :rtype: EvolvableAlgorithm
         """
         for attribute in EvolvableAlgorithm.inspect_attributes(agent):
             if hasattr(agent, attribute) and hasattr(clone, attribute):
@@ -521,7 +512,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :type size: int.
 
         :return: A list of algorithms.
-        :rtype: list[SelfEvolvableAlgorithm].
+        :rtype: list[EvolvableAlgorithm].
         """
         if wrapper_kwargs is None:
             wrapper_kwargs = {}
@@ -2260,11 +2251,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         Path(path).mkdir(parents=True, exist_ok=True)
 
-        # omit_actor_info is used to determine whether to save the actor information in the attributes.pt file.
-        # When lora_only is True and/or we are using deepspeed, omit_actor_info is True and the network is not saved in the attributes.pt file.
-        # In the alternate case, omit_actor_info is False and the actor information is saved in the attributes.pt file.
-
-        omit_actor_info = True
+        # omit_actor_info: actor state goes into attributes.pt only when we
+        # want a full-model torch save on the plain (non-deepspeed) path.
+        #   * lora_only=True  → adapter weights saved via PEFT on disk; no actor in attrs.pt.
+        #   * deepspeed        → actor state either lives in the engine's tag dir
+        #                        (save_optimizer=True) or is gathered and injected
+        #                        via the manual state_dict path below (F, F).
+        #   * plain + lora_only=False → full state_dict round-trips through attrs.pt.
+        omit_actor_info = lora_only or self._uses_deepspeed
         omit_optimizer_info = True
         state_dict = {}
         if save_optimizer:
@@ -2286,27 +2280,44 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     or self.accelerator.is_main_process,
                 )
 
-        elif not lora_only and not save_optimizer:
-            if self._uses_deepspeed:
-                model_ref = self._get_unwrapped_actor()
-                with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
-                    module_cls = model_ref.__class__
-                    state_dict = {
-                        "actor_cls": module_cls,
-                        "actor_init_dict": None,
-                        "actor_state_dict": model_ref.state_dict(),
-                        "actor_module_dict_cls": None,
-                    }
-            else:
-                omit_actor_info = False
+        elif self._uses_deepspeed and not save_optimizer:
+            # (lora_only=False, save_optimizer=False, deepspeed): the ZeRO-3
+            # shards aren't materialised in the default module loop, so gather
+            # manually and inject the state_dict into attributes.pt.
+            model_ref = self._get_unwrapped_actor()
+            with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
+                module_cls = model_ref.__class__
+                state_dict = {
+                    "actor_cls": module_cls,
+                    "actor_init_dict": None,
+                    "actor_state_dict": model_ref.state_dict(),
+                    "actor_module_dict_cls": None,
+                }
 
-        checkpoint_dict = self._build_attribute_checkpoint(
+        # Build the checkpoint payload saved alongside adapter weights.
+        checkpoint_dict = get_checkpoint_dict(
+            self,
             omit_actor_info=omit_actor_info,
             omit_optimizer_info=omit_optimizer_info,
-            lora_only=lora_only,
-            state_dict=state_dict,
         )
-        self._save_attribute_checkpoint(path, checkpoint_dict)
+        checkpoint_dict.pop("llm", None)
+        checkpoint_dict.pop("tp_group", None)
+        checkpoint_dict["_lora_only"] = lora_only
+        if state_dict:
+            checkpoint_dict["network_info"] = {}
+            checkpoint_dict["network_info"]["modules"] = {}
+            checkpoint_dict["network_info"]["modules"] = state_dict
+
+        # Persist non-model attributes to ``attributes.pt``.
+        # In distributed runs only the main process writes the file.
+        if self.accelerator is None or self.accelerator.is_main_process:
+            checkpoint_path = Path(path) / "attributes.pt"
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                checkpoint_dict,
+                str(checkpoint_path),
+                pickle_module=dill,
+            )
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
@@ -2351,8 +2362,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self._restore_checkpoint_attributes(checkpoint)
 
         else:
+            # ``get_checkpoint_dict`` always emits a ``network_info.optimizers``
+            # key — empty dict means "no optimizer state was saved". Check
+            # truthiness, not key presence.
             if (
-                "optimizers" not in checkpoint.get("network_info", {}).keys()
+                not checkpoint.get("network_info", {}).get("optimizers")
                 and load_optimizer
             ):
                 warnings.warn(
@@ -2366,57 +2380,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         if "lr_scheduler" in checkpoint and self.lr_scheduler is not None:
             self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-
-    def _build_attribute_checkpoint(
-        self,
-        omit_actor_info: bool,
-        omit_optimizer_info: bool,
-        lora_only: bool,
-        state_dict: dict[str, torch.Tensor],
-    ) -> dict[str, Any]:
-        """Build the non-model checkpoint payload saved alongside adapter weights.
-
-        :return: Serialised attribute payload for ``attributes.pt``.
-        :rtype: dict[str, Any]
-        """
-        checkpoint_dict = get_checkpoint_dict(
-            self,
-            omit_actor_info=omit_actor_info,
-            omit_optimizer_info=omit_optimizer_info,
-        )
-        checkpoint_dict.pop("llm", None)
-        checkpoint_dict.pop("tp_group", None)
-        checkpoint_dict["_lora_only"] = lora_only
-        if state_dict:
-            checkpoint_dict["network_info"] = {}
-            checkpoint_dict["network_info"]["modules"] = {}
-            checkpoint_dict["network_info"]["modules"] = state_dict
-        return checkpoint_dict
-
-    def _save_attribute_checkpoint(
-        self,
-        path: str,
-        checkpoint_dict: dict[str, Any],
-    ) -> None:
-        """Persist non-model attributes to ``attributes.pt``.
-
-        In distributed runs only the main process writes the file.
-
-        :param path: Checkpoint directory path.
-        :type path: str
-        :param checkpoint_dict: Attribute payload to serialize.
-        :type checkpoint_dict: dict[str, Any]
-        """
-        if self.accelerator is not None and not self.accelerator.is_main_process:
-            return
-
-        checkpoint_path = Path(path) / "attributes.pt"
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            checkpoint_dict,
-            str(checkpoint_path),
-            pickle_module=dill,
-        )
 
     def _load_attribute_checkpoint(self, path: str) -> dict[str, Any]:
         """Load non-model attributes from ``attributes.pt``.
@@ -2463,13 +2426,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if keep_existing_reference:
                 pass
             else:
-                self._copy_adapter_weights(src="actor", dst="reference")
+                self._copy_adapter_weights(source_adapter="actor", target_adapter="reference")
 
         if "critic" in self.selected_adapters:
             if (Path(path) / "critic").exists():
                 self._load_adapter_weights(path, "critic", ckpt_lora_config)
             else:
-                self._copy_adapter_weights(src="actor", dst="critic")
+                self._copy_adapter_weights(source_adapter="actor", target_adapter="critic")
 
     def _restore_checkpoint_attributes(self, checkpoint: dict[str, Any]) -> None:
         """Restore algorithm attributes from payload.

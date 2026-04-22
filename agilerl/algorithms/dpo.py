@@ -79,6 +79,12 @@ class DPO(LLMAlgorithm):
         Requires ``liger_kernel`` to be installed; pass ``False`` to fall back to the standard PyTorch path.
         When ``training=False`` the standard path is always used regardless of this flag.
     :type use_liger_loss: bool, optional
+    :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
+        adapter whose weights are frozen snapshots of the actor used for the
+        DPO log-probability baseline. When ``False`` the reference log-probs
+        are obtained by disabling the actor adapter at inference time.
+        Defaults to True.
+    :type use_separate_reference_adapter: bool, optional
     """
 
     def __init__(
@@ -147,7 +153,6 @@ class DPO(LLMAlgorithm):
             torch_compiler=torch_compiler,
             reduce_memory_peak=reduce_memory_peak,
             use_separate_reference_adapter=use_separate_reference_adapter,
-            adapter_names=("actor", "reference"),
         )
         self.beta = beta
         self.nll_alpha = nll_alpha

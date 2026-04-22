@@ -323,8 +323,8 @@ class MutationRegistryProtocol(Protocol):
         pass
 
 
-SelfEvolvableAlgorithm = TypeVar(
-    "SelfEvolvableAlgorithm",
+EvolvableAlgorithm = TypeVar(
+    "EvolvableAlgorithm",
     bound="EvolvableAlgorithmProtocol",
 )
 
@@ -355,9 +355,9 @@ class EvolvableAlgorithmProtocol(Protocol):
         pass
 
     def load(
-        self: type[SelfEvolvableAlgorithm],
+        self: type[EvolvableAlgorithm],
         path: str,
-    ) -> SelfEvolvableAlgorithm:
+    ) -> EvolvableAlgorithm:
         pass
 
     def load_checkpoint(

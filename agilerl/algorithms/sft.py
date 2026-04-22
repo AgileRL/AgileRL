@@ -90,6 +90,12 @@ class SFT(LLMAlgorithm):
         computation, defaults to False. Requires ``liger_kernel`` to be installed;
         pass ``False`` to fall back to the standard PyTorch path.
     :type use_liger_loss: bool, optional
+    :param use_separate_reference_adapter: Also create a ``reference`` LoRA adapter
+        alongside ``actor``. SFT does not itself use a reference policy, so this
+        defaults to ``False``; enable it when you plan to save an SFT checkpoint
+        that will be consumed by a downstream algorithm (e.g. DPO/GRPO) which
+        expects a reference adapter. Defaults to False.
+    :type use_separate_reference_adapter: bool, optional
     """
 
     def __init__(
@@ -116,6 +122,7 @@ class SFT(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         use_liger_loss: bool = False,
         reduce_memory_peak: bool = False,
+        use_separate_reference_adapter: bool = False,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -140,7 +147,7 @@ class SFT(LLMAlgorithm):
             pad_token=pad_token,
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
-            adapter_names=("actor",),
+            use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
             actor_network=actor_network,
             model_config=model_config,

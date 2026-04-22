@@ -65,6 +65,13 @@ class SFTPrompts(TypedDict):
     attention_mask: torch.Tensor
 
 
+class CheckpointInfo(TypedDict):
+    modules: dict[str, Module]
+    optimizers: dict[str, Optimizer]
+    network_names: list[str]
+    optimizer_names: list[str]
+
+
 class MultiAgentSetup(Enum):
     """Enum to specify the type of multi-agent setup."""
 

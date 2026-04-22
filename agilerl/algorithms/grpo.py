@@ -140,6 +140,12 @@ class GRPO(LLMAlgorithm):
     :param loss_type: PPO-style loss variant to optimize. One of ``"grpo"``,
         ``"gspo"``, or ``"cispo"``, defaults to ``"grpo"``.
     :type loss_type: Literal["grpo", "gspo", "cispo"], optional
+    :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
+        adapter whose weights are frozen snapshots of the actor used for the
+        KL-divergence baseline. When ``False`` the reference log-probs are
+        obtained by disabling the actor adapter at inference time.
+        Defaults to True.
+    :type use_separate_reference_adapter: bool, optional
     :param whiten_advantages: If ``True``, whiten token-level advantages over
         valid action positions, defaults to False.
     :type whiten_advantages: bool, optional
