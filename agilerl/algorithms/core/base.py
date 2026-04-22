@@ -4217,7 +4217,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return a_dict == b_dict
 
     def _reconfigure_adapters_to_match(self, target_config: LoraConfig) -> None:
-        """Ensure every adapter in :attr:`adapter_names` uses ``target_config``.
+        """Ensure every adapter in :attr:`selected_adapters` uses ``target_config``.
 
         If an adapter's live config already matches, it is left untouched. Otherwise it
         is rebuilt against ``target_config`` with freshly-initialised weights; callers

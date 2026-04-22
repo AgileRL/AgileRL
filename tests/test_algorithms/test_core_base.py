@@ -1471,9 +1471,9 @@ def _make_llm_agent(
     max_grad_norm=0.0,
     use_liger_loss=False,
     lora_config=None,
-    adapter_names=("actor", "reference"),
     actor_network=None,
     batch_size=4,
+    use_separate_reference_adapter=False,
     *,
     reduce_memory_peak: bool = False,
 ):
@@ -1501,12 +1501,12 @@ def _make_llm_agent(
             pad_token="<pad>",
             use_liger_loss=use_liger_loss,
             lora_config=lora_config if lora_config is not None else MagicMock(),
-            adapter_names=adapter_names,
             actor_network=actor_network,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             cosine_lr_schedule_config=cosine_lr_schedule_config,
             accelerator=accelerator,
             device="cpu",
+            use_separate_reference_adapter=use_separate_reference_adapter,
             reduce_memory_peak=reduce_memory_peak,
         )
     agent.actor = actor_network
@@ -1892,7 +1892,6 @@ class TestLLMConfigureBatchSize:
                     pad_token="<pad>",
                     use_liger_loss=False,
                     lora_config=MagicMock(),
-                    adapter_names=("actor", "reference"),
                     actor_network=_make_mock_peft_actor(),
                     accelerator=acc,
                     device="cpu",
@@ -1969,7 +1968,6 @@ class TestLLMInitWarnings:
                 pad_token="<pad>",
                 use_liger_loss=False,
                 lora_config=None,
-                adapter_names=("actor", "reference"),
                 actor_network=_NonPeftActor(),
                 device="cpu",
             )
@@ -2098,9 +2096,6 @@ class TestLLMConfigureVllm:
         mock_llm_cls = MagicMock()
         with (
             patch("agilerl.algorithms.core.base.LLM", mock_llm_cls, create=True),
-            patch.object(
-                LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
-            ),
             pytest.warns(UserWarning, match="No VLLM config"),
         ):
             agent._configure_vllm()
@@ -2336,101 +2331,6 @@ class TestLLMConfigureBatchSizeNoDeepSpeedPlugin:
             )
 
 
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
-class TestLLMResolveModelPathForVllm:
-    def test_local_directory_with_config_json(self, tmp_path):
-        """Local tree with ``config.json`` uses the path as-is (resolved)."""
-        (tmp_path / "config.json").write_text("{}")
-        out = LLMAlgorithm._resolve_model_path_for_vllm(str(tmp_path))
-        assert out == str(tmp_path.resolve())
-
-    def test_repo_id_cached_snapshot_local_only_succeeds(self, tmp_path):
-        """Hub repo id: ``snapshot_download(..., local_files_only=True)`` returns a snapshot."""
-        snap = tmp_path / "cached"
-        snap.mkdir()
-        (snap / "tokenizer.json").write_text("{}")
-        with patch(
-            "huggingface_hub.snapshot_download", return_value=str(snap)
-        ) as mock_sd:
-            out = LLMAlgorithm._resolve_model_path_for_vllm("org/test-model")
-        mock_sd.assert_called_once_with(repo_id="org/test-model", local_files_only=True)
-        assert out == str(snap)
-
-    def test_repo_id_retries_without_local_only_when_cache_miss(self, tmp_path):
-        """If local-only snapshot raises, fall back to a full hub fetch (no local_files_only)."""
-        from huggingface_hub.errors import LocalEntryNotFoundError
-
-        snap = tmp_path / "after_retry"
-        snap.mkdir()
-        (snap / "tokenizer.json").write_text("{}")
-
-        def fake_snapshot_download(*, repo_id, local_files_only=False, **kwargs):
-            if local_files_only:
-                raise LocalEntryNotFoundError("not in cache")
-            assert repo_id == "org/test-model"
-            return str(snap)
-
-        with patch(
-            "huggingface_hub.snapshot_download",
-            side_effect=fake_snapshot_download,
-        ) as mock_sd:
-            out = LLMAlgorithm._resolve_model_path_for_vllm("org/test-model")
-        assert out == str(snap)
-        assert mock_sd.call_count == 2
-
-    def test_raises_when_resolved_path_is_not_a_directory(self):
-        with (
-            patch(
-                "huggingface_hub.snapshot_download", return_value="/no/such/dir/abc123"
-            ),
-            pytest.raises(ValueError, match="Expected a model directory for vLLM"),
-        ):
-            LLMAlgorithm._resolve_model_path_for_vllm("org/test-model")
-
-    def test_incomplete_hub_cache_triggers_network_snapshot(self, tmp_path):
-        """Cached dir without tokenizer files triggers ``snapshot_download(..., local_files_only=False)``."""
-        cached = tmp_path / "partial"
-        cached.mkdir()
-        (cached / "config.json").write_text("{}")
-        filled = tmp_path / "complete"
-        filled.mkdir()
-        (filled / "tokenizer.json").write_text("{}")
-        calls: list[bool] = []
-
-        def fake_snapshot_download(*, repo_id, local_files_only=True, **kwargs):
-            calls.append(local_files_only)
-            if local_files_only:
-                return str(cached)
-            assert repo_id == "org/test-model"
-            return str(filled)
-
-        with patch(
-            "huggingface_hub.snapshot_download", side_effect=fake_snapshot_download
-        ):
-            out = LLMAlgorithm._resolve_model_path_for_vllm("org/test-model")
-        assert out == str(filled)
-        assert calls == [True, False]
-
-    def test_network_snapshot_failure_returns_partial_cache(self, tmp_path):
-        """If the network refill raises ``LocalEntryNotFoundError``, return the cached path."""
-        from huggingface_hub.errors import LocalEntryNotFoundError
-
-        cached = tmp_path / "partial"
-        cached.mkdir()
-        (cached / "config.json").write_text("{}")
-
-        def fake_snapshot_download(*, repo_id, local_files_only=True, **kwargs):
-            if local_files_only:
-                return str(cached)
-            raise LocalEntryNotFoundError("offline")
-
-        with patch(
-            "huggingface_hub.snapshot_download", side_effect=fake_snapshot_download
-        ):
-            out = LLMAlgorithm._resolve_model_path_for_vllm("org/test-model")
-        assert out == str(cached)
-
-
 class TestLLMInitMiscPaths:
     def test_use_liger_loss_modifies_lora_config(self):
         lora = MagicMock()
@@ -2635,7 +2535,6 @@ class TestLLMInitMissingDeps:
                         pad_token="<pad>",
                         use_liger_loss=False,
                         lora_config=MagicMock(),
-                        adapter_names=("actor", "reference"),
                         actor_network=_make_mock_peft_actor(),
                         device="cpu",
                     )
@@ -2660,7 +2559,6 @@ class TestLLMInitMissingDeps:
                     pad_token="<pad>",
                     use_liger_loss=False,
                     lora_config=MagicMock(),
-                    adapter_names=("actor", "reference"),
                     model_name=None,
                     actor_network=None,
                     device="cpu",
@@ -3040,7 +2938,6 @@ class TestLLMCloneWithoutAccelerator:
                     "pad_token": "<pad>",
                     "use_liger_loss": False,
                     "lora_config": MagicMock(),
-                    "adapter_names": ("actor", "reference"),
                     "actor_network": MagicMock(),
                     "device": "cpu",
                 },
@@ -3096,7 +2993,6 @@ class TestLLMCloneWithAccelerator:
                     "pad_token": "<pad>",
                     "use_liger_loss": False,
                     "lora_config": MagicMock(),
-                    "adapter_names": ("actor", "reference"),
                     "actor_network": MagicMock(),
                     "device": "cpu",
                 },
@@ -3147,7 +3043,6 @@ class TestLLMCloneWithDeepSpeed:
                     "pad_token": "<pad>",
                     "use_liger_loss": False,
                     "lora_config": MagicMock(),
-                    "adapter_names": ("actor", "reference"),
                     "actor_network": MagicMock(),
                     "device": "cpu",
                 },
@@ -3205,7 +3100,6 @@ class TestLLMCloneWithVllm:
                     "pad_token": "<pad>",
                     "use_liger_loss": False,
                     "lora_config": MagicMock(),
-                    "adapter_names": ("actor", "reference"),
                     "actor_network": MagicMock(),
                     "device": "cpu",
                 },
@@ -3442,11 +3336,11 @@ class TestLLMLoadAdapterWeights:
         model_ref.parameters.return_value = []
         ref_param = torch.nn.Parameter(torch.tensor([1.0]))
         ref_param.requires_grad = True
-        model_ref.named_parameters.return_value = [
+        inner_model.named_parameters.return_value = [
             ("lora.reference.weight", ref_param),
         ]
-        model_ref.set_adapter = MagicMock()
-        acc.unwrap_model = MagicMock(return_value=model_ref)
+        inner_model.set_adapter = MagicMock()
+        acc.unwrap_model = MagicMock(return_value=inner_model)
 
         adapter_dir = tmp_path / "actor"
         adapter_dir.mkdir()
@@ -3477,17 +3371,7 @@ class TestLLMConfigureVllmAcceleratorPaths:
         agent.pretrained_model_name_or_path = "mock-model"
 
         mock_llm_instance = MagicMock()
-        with (
-            patch(
-                "agilerl.algorithms.core.base.LLM",
-                return_value=mock_llm_instance,
-                create=True,
-            ),
-            patch.object(
-                LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
-            ),
-        ):
-            agent._configure_vllm()
+        agent._configure_vllm()
         assert agent.llm is mock_llm_instance
         acc.wait_for_everyone.assert_called()
 
@@ -3504,21 +3388,7 @@ class TestLLMConfigureVllmAcceleratorPaths:
         agent.pretrained_model_name_or_path = "mock-model"
 
         mock_llm_instance = MagicMock()
-        with (
-            patch(
-                "agilerl.algorithms.core.base.LLM",
-                return_value=mock_llm_instance,
-                create=True,
-            ),
-            patch.object(
-                LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
-            ),
-            patch(
-                "torch.distributed.new_subgroups_by_enumeration",
-                return_value=(MagicMock(), MagicMock()),
-            ),
-        ):
-            agent._configure_vllm()
+        agent._configure_vllm()
         assert agent.llm is mock_llm_instance
         mock_llm_instance.sleep.assert_called_once_with(level=2)
 
@@ -3541,9 +3411,6 @@ class TestLLMConfigureVllmAcceleratorPaths:
                 "agilerl.algorithms.core.base.LLM",
                 side_effect=ValueError("unsupported backend"),
                 create=True,
-            ),
-            patch.object(
-                LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
             ),
             patch.dict(os.environ, {"VLLM_ATTENTION_BACKEND": "FLASH_ATTN"}),
         ):
@@ -3572,9 +3439,6 @@ class TestLLMConfigureVllmAcceleratorPaths:
                 "agilerl.algorithms.core.base.LLM",
                 side_effect=ValueError("other error"),
                 create=True,
-            ),
-            patch.object(
-                LLMAlgorithm, "_resolve_model_path_for_vllm", return_value="mock-model"
             ),
             patch.dict(os.environ, env, clear=True),
         ):
@@ -3722,7 +3586,7 @@ class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:
         import dill
 
         acc = _make_mock_accelerator()
-        agent = _make_llm_agent(accelerator=acc, adapter_names=("actor", "reference"))
+        agent = _make_llm_agent(accelerator=acc)
         chkpt = {"_lora_only": True, "lr": 1e-4}
         torch.save(chkpt, str(tmp_path / "attributes.pt"), pickle_module=dill)
 
@@ -3965,7 +3829,6 @@ class TestLLMCloneBroadcastMultiProcess:
                     "pad_token": "<pad>",
                     "use_liger_loss": False,
                     "lora_config": MagicMock(),
-                    "adapter_names": ("actor", "reference"),
                     "actor_network": MagicMock(),
                     "device": "cpu",
                 },

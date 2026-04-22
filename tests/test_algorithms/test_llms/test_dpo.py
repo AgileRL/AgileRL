@@ -240,7 +240,6 @@ def test_init_dpo_model_name_none_actor_network_none(
             pad_token="<pad>",
             accelerator=None,
             device="cuda" if torch.cuda.is_available() else "cpu",
-            use_separate_reference_adapter=use_separate_reference_adapter,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         )
 
