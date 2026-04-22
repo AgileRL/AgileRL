@@ -157,7 +157,9 @@ def test_finetune_llm_reasoning_basic_training_loop(use_accelerator):
         expected_agg_calls = 36
         assert mock_agg.call_count == expected_agg_calls
         if not use_accelerator:
-            assert all(call_args.args[0] is None for call_args in mock_agg.call_args_list)
+            assert all(
+                call_args.args[0] is None for call_args in mock_agg.call_args_list
+            )
         assert mock_agent.test.call_count == 3  # Should be called at step 2
 
 
@@ -297,7 +299,9 @@ def test_finetune_llm_reasoning_evolvable_training_loop(use_accelerator):
         expected_agg_calls = 36
         assert mock_agg.call_count == expected_agg_calls
         if not use_accelerator:
-            assert all(call_args.args[0] is None for call_args in mock_agg.call_args_list)
+            assert all(
+                call_args.args[0] is None for call_args in mock_agg.call_args_list
+            )
         assert mock_agent.test.call_count == 3  # Should be called at step 2
         assert (
             mock_tournament_selection_and_mutation.call_count == 6
@@ -568,7 +572,9 @@ def test_finetune_llm_preference_basic_training_loop(use_accelerator):
         expected_agg_calls = 21
         assert mock_agg.call_count == expected_agg_calls
         if not use_accelerator:
-            assert all(call_args.args[0] is None for call_args in mock_agg.call_args_list)
+            assert all(
+                call_args.args[0] is None for call_args in mock_agg.call_args_list
+            )
         assert mock_agent.test.call_count == 3  # Should be called at step 2
 
 
@@ -715,7 +721,9 @@ def test_finetune_llm_preference_evolvable_training_loop(use_accelerator):
         expected_agg_calls = 21
         assert mock_agg.call_count == expected_agg_calls
         if not use_accelerator:
-            assert all(call_args.args[0] is None for call_args in mock_agg.call_args_list)
+            assert all(
+                call_args.args[0] is None for call_args in mock_agg.call_args_list
+            )
         assert mock_agent.test.call_count == 3  # Should be called at step 2
         assert (
             mock_tournament_selection_and_mutation.call_count == 6
@@ -2199,7 +2207,9 @@ def test_normalize_learn_metrics_error_paths_and_multiturn_len5():
     with pytest.raises(TypeError, match="Expected learn\\(\\) to return dict or tuple"):
         _normalize_learn_metrics(agent, 1.23, mode="reasoning")
 
-    with pytest.raises(ValueError, match="Preference learn\\(\\) tuple output must have 3 values"):
+    with pytest.raises(
+        ValueError, match="Preference learn\\(\\) tuple output must have 3 values"
+    ):
         _normalize_learn_metrics(agent, (1.0, 2.0), mode="preference")
 
     mt_metrics = _normalize_learn_metrics(
@@ -2254,10 +2264,20 @@ def test_init_llm_wandb_passes_entity_and_run_name():
             wandb_run_name="run-1",
         )
 
-    assert mock_init.call_args.kwargs["addl_args"] == {"entity": "acme", "name": "run-1"}
+    assert mock_init.call_args.kwargs["addl_args"] == {
+        "entity": "acme",
+        "name": "run-1",
+    }
 
 
-@pytest.mark.parametrize("finetune_fn, agent_spec", [(finetune_llm_reasoning, GRPO), (finetune_llm_preference, DPO), (finetune_llm_sft, SFT)])
+@pytest.mark.parametrize(
+    "finetune_fn, agent_spec",
+    [
+        (finetune_llm_reasoning, GRPO),
+        (finetune_llm_preference, DPO),
+        (finetune_llm_sft, SFT),
+    ],
+)
 def test_inner_loop_breaks_after_max_steps_first_agent(finetune_fn, agent_spec):
     if agent_spec is GRPO:
         agent0 = MagicMock(spec=GRPO)
@@ -2327,10 +2347,16 @@ def test_inner_loop_breaks_after_max_steps_first_agent(finetune_fn, agent_spec):
 
     env.data_batch_size_per_gpu = 1
 
-    with patch("agilerl.training.train_llm.trange"), patch(
-        "agilerl.training.train_llm.save_llm_checkpoint"
-    ), patch("agilerl.training.train_llm.aggregate_metrics_across_gpus", return_value=0.5), patch(
-        "agilerl.training.train_llm.safe_aggregate_metrics", side_effect=lambda _a, v: float(v)
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch(
+            "agilerl.training.train_llm.aggregate_metrics_across_gpus", return_value=0.5
+        ),
+        patch(
+            "agilerl.training.train_llm.safe_aggregate_metrics",
+            side_effect=lambda _a, v: float(v),
+        ),
     ):
         finetune_fn(
             pop=[agent0, agent1],
@@ -2370,11 +2396,13 @@ def test_finetune_llm_sft_env_fn_updates_prompts_by_agent():
         env.data_batch_size_per_gpu = 1
         return env
 
-    with patch("agilerl.training.train_llm.trange"), patch(
-        "agilerl.training.train_llm.save_llm_checkpoint"
-    ), patch(
-        "agilerl.training.train_llm.safe_aggregate_metrics",
-        side_effect=lambda _a, v: float(v),
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch(
+            "agilerl.training.train_llm.safe_aggregate_metrics",
+            side_effect=lambda _a, v: float(v),
+        ),
     ):
         finetune_llm_sft(
             pop=[agent0, agent1],

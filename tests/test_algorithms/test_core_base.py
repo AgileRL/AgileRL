@@ -1512,7 +1512,9 @@ def _make_llm_agent(
     agent.actor = actor_network
     agent.optimizer = MagicMock()
     agent.optimizer.optimizer = MagicMock()
-    agent.optimizer.optimizer.param_groups = [{"lr": 1e-4, "params": torch.tensor([1.0])}]
+    agent.optimizer.optimizer.param_groups = [
+        {"lr": 1e-4, "params": torch.tensor([1.0])}
+    ]
     agent.lr_scheduler = None
     agent.use_vllm = False
     agent.max_output_tokens = None
@@ -1869,7 +1871,10 @@ class TestLLMConfigureBatchSize:
             },
             num_processes=1,
         )
-        with pytest.raises(ValueError, match="micro_batch_size_per_gpu is equal to zero, which is not allowed."):
+        with pytest.raises(
+            ValueError,
+            match="micro_batch_size_per_gpu is equal to zero, which is not allowed.",
+        ):
             with (
                 patch.object(LLMAlgorithm, "_initialize_actors"),
                 patch.object(LLMAlgorithm, "_configure_vllm"),
@@ -1931,10 +1936,16 @@ class TestLLMInitWarnings:
                 "train_micro_batch_size_per_gpu": "auto",
             }
         )
-        with pytest.warns(UserWarning, match="Overwriting deepspeed learning rate with the argument 'lr'."):
+        with pytest.warns(
+            UserWarning,
+            match="Overwriting deepspeed learning rate with the argument 'lr'.",
+        ):
             agent = _make_llm_agent(accelerator=acc)
         assert agent.lr == 0.0001
-        assert acc.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"]["lr"] == 0.0001
+        assert (
+            acc.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"]["lr"]
+            == 0.0001
+        )
 
     def test_no_lora_config_applies_default(self):
         class _NonPeftActor:
@@ -2135,7 +2146,9 @@ class TestLLMSetReferencePolicy:
                 ("not_lora.weight", torch.tensor([1.0])),
             ],
         ):
-            with pytest.raises(ValueError, match="No LoRA tensors found for source adapter"):
+            with pytest.raises(
+                ValueError, match="No LoRA tensors found for source adapter"
+            ):
                 agent.set_reference_policy(1)
 
     def test_set_reference_raises_on_no_target_params(self):
@@ -2148,9 +2161,10 @@ class TestLLMSetReferencePolicy:
                 ("lora.actor.weight", torch.tensor([1.0])),
             ],
         ):
-            with pytest.raises(ValueError, match="No LoRA tensors found for target adapter"):
+            with pytest.raises(
+                ValueError, match="No LoRA tensors found for target adapter"
+            ):
                 agent.set_reference_policy(1)
-
 
     def test_set_reference_missing_params(self):
         agent = _make_llm_agent(use_separate_reference_adapter=True)
@@ -2164,9 +2178,11 @@ class TestLLMSetReferencePolicy:
                 ("lora.actor.two.weight", torch.tensor([1.0])),
             ],
         ):
-            with pytest.raises(ValueError, match="Target adapter 'reference' is missing 1 LoRA tensors present in source adapter 'actor'."):
+            with pytest.raises(
+                ValueError,
+                match="Target adapter 'reference' is missing 1 LoRA tensors present in source adapter 'actor'.",
+            ):
                 agent.set_reference_policy(1)
-
 
     def test_set_reference_without_separate_adapter_no_accelerator(self):
         agent = _make_llm_agent(use_separate_reference_adapter=False)
@@ -2323,7 +2339,10 @@ class TestLLMConfigureBatchSizeNoDeepSpeedPlugin:
 
     def test_value_error_raises_when_no_deepspeed_plugin(self):
         acc = self._accelerator_without_deepspeed()
-        with pytest.raises(ValueError, match="DeepSpeed plugin is not initialized. If using an accelerator,"):
+        with pytest.raises(
+            ValueError,
+            match="DeepSpeed plugin is not initialized. If using an accelerator,",
+        ):
             _make_llm_agent(
                 accelerator=acc,
                 clone=False,
@@ -2453,7 +2472,12 @@ class TestLLMGenerateWithVllmColocate:
     def test_raises_when_sampling_params_none(self):
         agent = _make_llm_agent()
         with patch("agilerl.algorithms.core.base.SamplingParams", None, create=True):
-            with pytest.raises(ImportError, match=re.escape("vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`.")):
+            with pytest.raises(
+                ImportError,
+                match=re.escape(
+                    "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
+                ),
+            ):
                 agent._generate_with_vllm_colocate([], 1, 0.9)
 
 
@@ -2701,7 +2725,9 @@ class TestLLMSaveDistributedActorWithAccelerator:
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
         save_dir = str(tmp_path / "ds_save")
-        with patch.object(agent, "use_adapter", wraps=agent.use_adapter) as mock_use_adapter:
+        with patch.object(
+            agent, "use_adapter", wraps=agent.use_adapter
+        ) as mock_use_adapter:
             agent._save_distributed_actor(save_dir)
         assert (tmp_path / "ds_save").exists()
         agent.actor.save_checkpoint.assert_called_once()
@@ -3265,7 +3291,9 @@ class TestLLMInitializeActors:
         peft_actor = _make_mock_peft_actor()
 
         with (
-            patch.object(LLMAlgorithm, "_warn_peft_model", return_value=dense) as mock_warn,
+            patch.object(
+                LLMAlgorithm, "_warn_peft_model", return_value=dense
+            ) as mock_warn,
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
             ) as mock_gpm,
@@ -3325,7 +3353,9 @@ class TestLLMInitializeActors:
         peft_out = _make_mock_peft_actor()
 
         with (
-            patch.object(LLMAlgorithm, "_warn_peft_model", return_value=dense) as mock_warn,
+            patch.object(
+                LLMAlgorithm, "_warn_peft_model", return_value=dense
+            ) as mock_warn,
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_out
             ) as mock_gpm,

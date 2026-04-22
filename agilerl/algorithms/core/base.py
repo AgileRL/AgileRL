@@ -2473,7 +2473,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 if not is_dummy_optimizer
                 else type(self.actor.optimizer)
             )
-            if self.gradient_checkpointing:                
+            if self.gradient_checkpointing:
                 self._get_unwrapped_actor().gradient_checkpointing_enable(
                     gradient_checkpointing_kwargs={"use_reentrant": False},
                 )
@@ -2791,7 +2791,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     self.accelerator.wait_for_everyone()
                 self.use_adapter("actor")
 
-                # FIXME not convinced about this 
+                # FIXME not convinced about this
                 optim_class = self._select_optim_class()
                 self.optimizer = OptimizerWrapper(
                     optim_class,
@@ -3822,7 +3822,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 "Please set micro_batch_size_per_gpu to a positive integer."
             )
             raise ValueError(msg)
-       
 
         self.micro_batch_size_per_gpu = int(micro_batch_size_per_gpu)
         if (
