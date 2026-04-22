@@ -924,7 +924,7 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
 
-        with patch.object(type(dpo_spec), "algo_class", mock_algo):
+        with patch.object(type(dpo_spec), "_algo_class_cache", mock_algo):
             agent = dpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
 
         mock_algo.assert_called_once()
@@ -940,7 +940,7 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
 
-        with patch.object(type(grpo_spec), "algo_class", mock_algo):
+        with patch.object(type(grpo_spec), "_algo_class_cache", mock_algo):
             agent = grpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=1)
 
         mock_algo.assert_called_once()
@@ -956,7 +956,7 @@ class TestLLMBuildAlgorithm:
         mock_accel = MagicMock()
         mock_accel.num_processes = 2
 
-        with patch.object(type(dpo_spec), "algo_class", mock_algo):
+        with patch.object(type(dpo_spec), "_algo_class_cache", mock_algo):
             dpo_spec.build_algorithm(
                 tokenizer=mock_tokenizer, index=0, accelerator=mock_accel
             )

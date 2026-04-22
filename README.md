@@ -33,9 +33,10 @@ We are constantly adding more algorithms and features. AgileRL already includes 
 ## Table of Contents
   * [Get Started](#get-started)
   * [Benchmarks](#benchmarks)
+  * [Arena](#arena)
   * [Tutorials](#tutorials)
   * [Algorithms implemented](#evolvable-algorithms-more-coming-soon)
-  * [Train an agent](#train-an-agent-to-beat-a-gym-environment)
+  * [Training](#training)
   * [Citing AgileRL](#citing-agilerl)
 
 ## Get Started
@@ -52,14 +53,17 @@ git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
 pip install -e .
 ```
 
-If you wish to install all additional dependencies please specify `[all]` or if you want to install a specific family of dependencies specify that family directly. At present, we have just one family, `[llm]`, which contains the dependencies related to our LLM RFT algorithms (datasets, deepspeed, peft, transformers, vllm).
+AgileRL ships optional dependency groups that you can install as needed:
 
+| Extra | Install | Description |
+|-------|---------|-------------|
+| `arena` | `pip install agilerl[arena]` | [Arena](https://arena.agilerl.com) SDK & CLI — validate, profile, and train with custom environments on Arena. |
+| `llm` | `pip install agilerl[llm]` | LLM reinforcement fine-tuning (GRPO, DPO) via DeepSpeed, vLLM, Transformers, and PEFT. |
+| `all` | `pip install agilerl[all]` | Everything above. |
+
+In development mode, quote the extras:
 ```bash
-pip install agilerl[all]
-```
-Or in development mode:
-```bash
-pip install -e ".[all]"
+pip install -e ".[arena]"
 ```
 
 To install the ``nightly`` version of AgileRL with the latest features, use:
@@ -84,6 +88,58 @@ AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-s
 <p align="center">
   <img src=https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png  min-width="100%" width="700">
 </p>
+
+## Arena
+
+[Arena](https://arena.agilerl.com) is the RLOps platform from AgileRL. We provide tools to create and validate custom reinforcement learning environments on the platform and train RL agents on managed cloud infrastructure — no cluster setup required. See the documentation
+
+AgileRL ships an **Arena SDK** (Python client) and an **Arena CLI** for interacting with the platform. Install them with:
+
+```bash
+pip install agilerl[arena]
+```
+
+### Arena SDK
+
+Use the `ArenaClient` to interact with Arena programmatically from scripts or notebooks:
+
+```python
+from agilerl.arena import ArenaClient
+
+client = ArenaClient()
+client.login()
+
+# Register and validate a custom environment
+client.validate_environment(
+    name="my-env",
+    source="path/to/my_env/",          # directory or .tar.gz
+
+    entrypoint="my_env:MyCustomEnv",
+)
+
+# Train on validated custom environment
+client.submit_training_job(
+  manifest=
+)
+```
+
+### Arena CLI
+
+The same operations are available from the command line:
+
+```bash
+# Authenticate with Arena
+arena login
+
+# Upload and validate
+arena env validate
+    --name my-env \
+    --source path/to/my_env/ \
+    --entrypoint my_env:MyCustomEnv
+
+# Train on validated custom environment
+arena train --manifest path/to/manifest
+```
 
 ## Tutorials
 
@@ -128,176 +184,156 @@ We are constantly updating our tutorials to showcase the latest features of Agil
   | [Off-Policy](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Direct Preference Optimization (DPO)](https://docs.agilerl.com/en/latest/api/algorithms/dpo.html)
 
 
-## Train an Agent to Beat a Gym Environment
+## Training
 
-Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities, and <code>NET_CONFIG</code>, which defines the network architecture. For example:
+AgileRL provides manifest-driven trainers that handle environment creation, population management, evolutionary HPO, and training loop dispatch from a single YAML file.
+
+### Local Training with a Manifest
+
+Define your entire experiment — algorithm, environment, network architecture, mutation probabilities, and training loop — in one YAML manifest:
 
 <details>
-<summary>Basic Hyperparameters</summary>
+<summary>Example manifest (<code>configs/training/ppo/ppo.yaml</code>)</summary>
 
-```python
-INIT_HP = {
-    'ENV_NAME': 'LunarLander-v3',   # Gym environment name
-    'ALGO': 'DQN',                  # Algorithm
-    'DOUBLE': True,                 # Use double Q-learning
-    'BATCH_SIZE': 256,              # Batch size
-    'LR': 1e-3,                     # Learning rate
-    'MAX_STEPS': 1_000_000,         # Max no. steps
-    'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
-    'GAMMA': 0.99,                  # Discount factor
-    'MEMORY_SIZE': 10000,           # Max memory buffer size
-    'LEARN_STEP': 1,                # Learning frequency
-    'TAU': 1e-3,                    # For soft update of target parameters
-    'TOURN_SIZE': 2,                # Tournament size
-    'ELITISM': True,                # Elitism in tournament selection
-    'POP_SIZE': 6,                  # Population size
-    'EVO_STEPS': 10_000,            # Evolution frequency
-    'EVAL_STEPS': None,             # Evaluation steps
-    'EVAL_LOOP': 1,                 # Evaluation episodes
-    'LEARNING_DELAY': 1000,         # Steps before starting learning
-    'WANDB': True,                  # Log with Weights and Biases
-}
+```yaml
+algorithm:
+    name: PPO
+    batch_size: 128
+    lr: 0.001
+    learn_step: 2048
+    gamma: 0.99
+    gae_lambda: 0.95
+    action_std_init: 0.6
+    clip_coef: 0.2
+    ent_coef: 0.01
+    vf_coef: 0.5
+    max_grad_norm: 0.5
+    update_epochs: 4
+
+environment:
+    name: LunarLander-v3
+    num_envs: 16
+
+network:
+    latent_dim: 64
+    arch: mlp
+    encoder_config:
+        hidden_size: [64]
+        activation: ReLU
+    head_config:
+        hidden_size: [64]
+        activation: ReLU
+
+mutation:
+    probabilities:
+        no_mut: 0.4
+        arch_mut: 0.2
+        new_layer: 0.2
+        params_mut: 0.2
+        act_mut: 0.0
+        rl_hp_mut: 0.2
+    mutation_sd: 0.1
+    rand_seed: 42
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true
+
+training:
+    max_steps: 6_000_000
+    target_score: 250.0
+    pop_size: 4
+    evo_steps: 10_240
+    eval_loop: 1
 ```
 
 </details>
 
-<details>
-<summary>Mutation Hyperparameters</summary>
+Then train with two lines of Python:
 
 ```python
-MUTATION_PARAMS = {
-    # Relative probabilities
-    'NO_MUT': 0.4,                              # No mutation
-    'ARCH_MUT': 0.2,                            # Architecture mutation
-    'NEW_LAYER': 0.2,                           # New layer mutation
-    'PARAMS_MUT': 0.2,                          # Network parameters mutation
-    'ACT_MUT': 0,                               # Activation layer mutation
-    'RL_HP_MUT': 0.2,                           # Learning HP mutation
-    'MUT_SD': 0.1,                              # Mutation strength
-    'RAND_SEED': 1,                             # Random seed
-}
+from agilerl.training.trainer import LocalTrainer
+
+trainer = LocalTrainer.from_manifest("configs/training/ppo/ppo.yaml", device="cuda")
+trainer.train()
 ```
 
-</details>
+`LocalTrainer.from_manifest` parses the YAML, builds the environment, creates the population, and configures evolutionary HPO before training — all validated through Pydantic models.
 
-<details>
-<summary>Basic Network Configuration</summary>
+### Training on Arena
+
+To run the same experiment on [Arena](https://arena.agilerl.com)'s managed infrastructure, use the `ArenaTrainer`. The manifest is identical except the `environment` section references an environment that has already been [validated on Arena](#arena):
 
 ```python
-NET_CONFIG = {
-    'latent_dim': 16
-    'encoder_config': {
-      'hidden_size': [32]     # Observation encoder configuration
-    }
-    'head_config': {
-      'hidden_size': [32]     # Network head configuration
-    }
+from agilerl.training.trainer import ArenaTrainer
 
-}
+trainer = ArenaTrainer.from_manifest("configs/training/ppo/ppo.yaml")
+trainer.train()
 ```
 
-</details>
+The `ArenaTrainer` builds a training manifest and submits it as a job to Arena. It handles authentication, manifest validation, and job submission automatically.
 
-### Creating a Population of Agents
+### Custom Training Pipelines
 
-First, use <code>utils.utils.create_population</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
+For full control — custom environments, network architectures, or training loops — you can build each component individually:
 
 <details>
-<summary>Population Creation Example</summary>
+<summary>Custom pipeline example</summary>
 
 ```python
 import torch
-from agilerl.utils.utils import (
-    make_vect_envs,
-    create_population,
-)
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-num_envs = 16
-env = make_vect_envs(env_name=INIT_HP['ENV_NAME'], num_envs=num_envs)
-
-observation_space = env.single_observation_space
-action_space = env.single_action_space
-
-agent_pop = create_population(
-    algo=INIT_HP['ALGO'],                 # Algorithm
-    observation_space=observation_space,  # Observation space
-    action_space=action_space,            # Action space
-    net_config=NET_CONFIG,                # Network configuration
-    INIT_HP=INIT_HP,                      # Initial hyperparameters
-    population_size=INIT_HP['POP_SIZE'],  # Population size
-    num_envs=num_envs,                    # Number of vectorized environments
-    device=device
-)
-```
-
-</details>
-
-### Initializing Evolutionary HPO
-
-Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
-
-<details>
-<summary>Mutations and Tournament Selection Example</summary>
-
-```python
+from agilerl.utils.utils import make_vect_envs, create_population
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.training.train_off_policy import train_off_policy
 
-memory = ReplayBuffer(
-    max_size=INIT_HP['MEMORY_SIZE'],   # Max replay buffer size
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+env = make_vect_envs(env_name="LunarLander-v3", num_envs=16)
+
+agent_pop = create_population(
+    algo="DQN",
+    observation_space=env.single_observation_space,
+    action_space=env.single_action_space,
+    net_config={"latent_dim": 16, "encoder_config": {"hidden_size": [32]}, "head_config": {"hidden_size": [32]}},
+    INIT_HP={"DOUBLE": True, "BATCH_SIZE": 256, "LR": 1e-3, "GAMMA": 0.99, "LEARN_STEP": 1, "TAU": 1e-3},
+    population_size=6,
+    num_envs=16,
     device=device,
 )
 
-tournament = TournamentSelection(
-    tournament_size=INIT_HP['TOURN_SIZE'], # Tournament selection size
-    elitism=INIT_HP['ELITISM'],            # Elitism in tournament selection
-    population_size=INIT_HP['POP_SIZE'],   # Population size
-)
-
+memory = ReplayBuffer(max_size=10_000, device=device)
+tournament = TournamentSelection(tournament_size=2, elitism=True, population_size=6)
 mutations = Mutations(
-    no_mutation=MUTATION_PARAMS['NO_MUT'],                # No mutation
-    architecture=MUTATION_PARAMS['ARCH_MUT'],             # Architecture mutation
-    new_layer_prob=MUTATION_PARAMS['NEW_LAYER'],          # New layer mutation
-    parameters=MUTATION_PARAMS['PARAMS_MUT'],             # Network parameters mutation
-    activation=MUTATION_PARAMS['ACT_MUT'],                # Activation layer mutation
-    rl_hp=MUTATION_PARAMS['RL_HP_MUT'],                   # Learning HP mutation
-    mutation_sd=MUTATION_PARAMS['MUT_SD'],                # Mutation strength
-    rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
+    no_mutation=0.4,
+    architecture=0.2,
+    new_layer_prob=0.2,
+    parameters=0.2,
+    activation=0.0,
+    rl_hp=0.2,
+    mutation_sd=0.1,
+    rand_seed=42,
     device=device,
+)
+
+trained_pop, pop_fitnesses = train_off_policy(
+    env=env,
+    env_name="LunarLander-v3",
+    algo="DQN",
+    pop=agent_pop,
+    memory=memory,
+    max_steps=1_000_000,
+    evo_steps=10_000,
+    target=200.0,
+    tournament=tournament,
+    mutation=mutations,
 )
 ```
 
 </details>
 
-### Train A Population of Agents
-
-The easiest training loop implementation is to use our <code>train_off_policy()</code> function. It requires the <code>agent</code> have methods <code>get_action()</code> and <code>learn().</code>
-
-
-```python
-from agilerl.training.train_off_policy import train_off_policy
-
-trained_pop, pop_fitnesses = train_off_policy(
-    env=env,                                   # Gym-style environment
-    env_name=INIT_HP['ENV_NAME'],              # Environment name
-    algo=INIT_HP['ALGO'],                      # Algorithm
-    pop=agent_pop,                             # Population of agents
-    memory=memory,                             # Replay buffer
-    max_steps=INIT_HP["MAX_STEPS"],            # Max number of training steps
-    evo_steps=INIT_HP['EVO_STEPS'],            # Evolution frequency
-    eval_steps=INIT_HP["EVAL_STEPS"],          # Number of steps in evaluation episode
-    eval_loop=INIT_HP["EVAL_LOOP"],            # Number of evaluation episodes
-    learning_delay=INIT_HP['LEARNING_DELAY'],  # Steps before starting learning
-    target=INIT_HP['TARGET_SCORE'],            # Target score for early stopping
-    tournament=tournament,                     # Tournament selection object
-    mutation=mutations,                        # Mutations object
-    wb=INIT_HP['WANDB'],                       # Weights and Biases tracking
-)
-
-```
+This approach gives you the flexibility to swap in your own Gymnasium or PettingZoo environments, custom evolvable networks, or entirely custom training loops while still leveraging AgileRL's evolutionary HPO.
 
 ## Citing AgileRL
 

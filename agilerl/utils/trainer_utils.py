@@ -30,7 +30,7 @@ from agilerl.components.replay_buffer import (
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.models.algo import (
-    LLMAlgorithmSpec,
+    AlgoSpecT,
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,
 )
@@ -46,7 +46,6 @@ if TYPE_CHECKING:
 
 LLMEnvType = ReasoningGym | PreferenceGym
 EnvironmentT = GymEnvType | PzEnvType | BanditEnv | LLMEnvType
-AlgoSpecT = RLAlgorithmSpec | LLMAlgorithmSpec | MultiAgentRLAlgorithmSpec
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 BufferT = (
     ReplayBuffer

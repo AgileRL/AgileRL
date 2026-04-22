@@ -133,7 +133,7 @@ class PPO(RLAlgorithm):
         device: str = "cpu",
         accelerator: Any | None = None,
         wrap: bool = True,
-        bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
+        bptt_sequence_type: str | BPTTSequenceType = BPTTSequenceType.CHUNKED,
         max_seq_len: int | None = None,
     ) -> None:
         super().__init__(
@@ -214,10 +214,8 @@ class PPO(RLAlgorithm):
             recurrent,
             bool,
         ), "Has hidden states flag must be boolean value True or False."
-        assert isinstance(
-            bptt_sequence_type,
-            BPTTSequenceType,
-        ), "bptt_sequence_type must be a BPTTSequenceType enum value."
+        if isinstance(bptt_sequence_type, str):
+            bptt_sequence_type = BPTTSequenceType(bptt_sequence_type)
 
         self.recurrent = recurrent
         self.net_config = net_config

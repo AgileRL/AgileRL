@@ -1,29 +1,19 @@
 """PPO algorithm specification."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
-from typing import Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BeforeValidator, Field
+from pydantic import Field
 
-from agilerl.algorithms import PPO
 from agilerl.models.algo import RLAlgorithmSpec, register
 from agilerl.models.networks import StochasticActorSpec
-from agilerl.modules import EvolvableModule
-from agilerl.training.train_on_policy import train_on_policy
-from agilerl.typing import BPTTSequenceType
 
-
-def _coerce_bptt_sequence_type(v: Any) -> BPTTSequenceType:
-    if isinstance(v, BPTTSequenceType):
-        return v
-    if isinstance(v, str):
-        return BPTTSequenceType(v)
-    return v
-
-
-BPTTSequenceTypeFromManifest = Annotated[
-    BPTTSequenceType, BeforeValidator(_coerce_bptt_sequence_type)
-]
+if TYPE_CHECKING:
+    from agilerl.modules import EvolvableModule
+else:
+    EvolvableModule = Any
 
 
 @register(arena=True)
@@ -44,20 +34,16 @@ class PPOSpec(RLAlgorithmSpec):
     recurrent: bool = Field(default=False)
     max_seq_len: int | None = Field(default=32, ge=1)
     share_encoders: bool = Field(default=True)
-    bptt_sequence_type: BPTTSequenceTypeFromManifest = Field(
-        default=BPTTSequenceType.CHUNKED
-    )
+    bptt_sequence_type: str = Field(default="chunked")
     lr: float = Field(default=0.0001, ge=0.0)
     net_config: StochasticActorSpec | None = Field(default=None)
     actor_network: EvolvableModule | None = Field(default=None)
     critic_network: EvolvableModule | None = Field(default=None)
 
-    algo_class: ClassVar[type[PPO]] = PPO
-
     @property
     def name(self) -> str:
         """Return the name of the algorithm."""
-        algo_name = self.algo_class.__name__
+        algo_name = self.__class__.__name__.removesuffix("Spec")
         prefix = "Recurrent " if self.recurrent else ""
         return f"{prefix}{algo_name}"
 
@@ -68,4 +54,6 @@ class PPOSpec(RLAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
+        from agilerl.training.train_on_policy import train_on_policy
+
         return train_on_policy

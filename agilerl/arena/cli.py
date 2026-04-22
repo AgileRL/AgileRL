@@ -1,32 +1,22 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 
 import click
-from rich.logging import RichHandler
 
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig, build_client
+from agilerl.arena.exceptions import ArenaError
 from agilerl.arena.output import (
-    StreamTableRenderer,
-    build_stream_handler,
     emit_csv_preview,
     emit_result,
     handle_error,
 )
-from agilerl.arena.payloads import load_json_payload, resolve_metrics_output_path
+from agilerl.arena.payloads import resolve_metrics_output_path
 
-logging.basicConfig(
-    format="%(message)s",
-    level=logging.INFO,
-    handlers=[RichHandler(show_time=False, show_path=False, markup=True)],
-)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
+ArenaError.enable_cli_mode()
 
 
 @contextmanager
@@ -40,28 +30,6 @@ def arena_client(
     except Exception as exc:
         handle_error(exc)
     finally:
-        client.close()
-
-
-@contextmanager
-def streaming_client(
-    config: CommandConfig,
-) -> Generator[tuple[ArenaClient, StreamTableRenderer], None, None]:
-    """Like :func:`arena_client` but also wires up a streaming event handler.
-
-    Yields ``(client, renderer)``.  Callers should call ``renderer.close()``
-    before emitting the final result so the live table is stopped first.
-    """
-    client = build_client(config)
-    handler, renderer = build_stream_handler()
-    client.set_stream_handler(handler)
-    try:
-        yield client, renderer
-    except Exception as exc:
-        handle_error(exc)
-    finally:
-        renderer.close()
-        client.set_stream_handler(None)
         client.close()
 
 
@@ -248,7 +216,7 @@ def env_entrypoints(
     help="Optional description of the environment.",
 )
 @click.option("--multi-agent/--single-agent", default=False, show_default=True)
-@click.option("--do-rollouts/--no-do-rollouts", default=True, show_default=True)
+@click.option("--do-rollouts/--no-do-rollouts", default=False, show_default=True)
 @click.pass_obj
 def env_validate(
     config: CommandConfig,
@@ -266,16 +234,16 @@ def env_validate(
     """Validate an environment on Arena.
 
     Pass 'name' to validate an already-registered environment.  Pass --source
-    to upload and validate in one step.  When using --source without a positional
+    to register and validate in one step.  When using --source without a positional
     'name', the source directory/file name is used by default.
     """
     env_name = name or name_opt or (source.stem if source else None)
     if env_name is None:
-        msg = "Provide an environment name or use --source to upload and validate."
+        msg = "Provide a name of an already-registered environment or use --source to upload and validate from scratch."
         raise click.UsageError(msg)
 
-    with streaming_client(config) as (client, renderer):
-        stream_resp = client.validate_environment(
+    with arena_client(config) as client:
+        client.validate_environment(
             name=env_name,
             version=version,
             source=source,
@@ -285,10 +253,7 @@ def env_validate(
             description=description,
             multi_agent=multi_agent,
             do_rollouts=do_rollouts,
-            stream=True,
         )
-        stream_resp.collect()
-        renderer.close()
 
 
 @env.command("profile")
@@ -301,14 +266,8 @@ def env_profile(
     version: str,
 ) -> None:
     """Profile a validated environment in Arena and get its resource requirements."""
-    with streaming_client(config) as (client, renderer):
-        stream_resp = client.profile_environment(
-            name=name,
-            version=version,
-            stream=True,
-        )
-        result = stream_resp.collect()
-        renderer.close()
+    with arena_client(config) as client:
+        result = client.profile_environment(name=name, version=version)
         if result:
             emit_result(result)
 
@@ -344,84 +303,63 @@ def env_delete(
         emit_result(result)
 
 
-@main.group("jobs")
-def jobs() -> None:
+@main.group("train")
+def train() -> None:
     """Submit, validate, and inspect training jobs."""
 
 
-@jobs.command("submit")
+@train.command("submit")
+@click.option(
+    "--manifest",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Path to manifest file.",
+)
 @click.option(
     "--resource-id",
-    type=int,
-    default=None,
+    type=str,
+    default="arena-medium",
     help="Arena cluster type to submit the training job to.",
 )
 @click.option(
-    "--manifest-json",
-    default=None,
-    help="Raw JSON manifest payload string.",
+    "--num-nodes",
+    type=int,
+    default=2,
+    help="Number of nodes to use for the training job.",
 )
 @click.option(
-    "--manifest-file",
-    type=click.Path(exists=True, dir_okay=False),
+    "--project",
+    type=str,
     default=None,
-    help="Path to JSON file containing manifest payload.",
+    help="Project to submit the training job to.",
+)
+@click.option(
+    "--experiment-name",
+    type=str,
+    default=None,
+    help="Name of the experiment to submit the training job to.",
 )
 @click.pass_obj
-def jobs_submit(
+def train_submit(
     config: CommandConfig,
+    manifest: Path,
     resource_id: int | None,
-    manifest_json: str | None,
-    manifest_file: str | None,
+    num_nodes: int | None,
+    project: str | None,
+    experiment_name: str | None,
 ) -> None:
     """Submit a training job from manifest and/or existing training job IDs."""
-    manifest: dict[str, Any] | None = None
-    if manifest_json is not None or manifest_file is not None:
-        manifest = load_json_payload(
-            manifest_json,
-            manifest_file,
-            json_option_name="--manifest-json",
-            file_option_name="--manifest-file",
-        )
-
-    with streaming_client(config) as (client, renderer):
-        stream_resp = client.submit_training_job(
+    with arena_client(config) as client:
+        client.submit_training_job(
             manifest=manifest,
             resource_id=resource_id,
-            stream=True,
+            num_nodes=num_nodes,
+            project=project,
+            experiment_name=experiment_name,
         )
-        result = stream_resp.collect()
-        renderer.close()
-        if result:
-            emit_result(result)
 
 
-@jobs.command("validate-manifest")
-@click.option("--manifest-json", default=None, help="Raw JSON manifest payload string.")
-@click.option(
-    "--manifest-file",
-    type=click.Path(exists=True, dir_okay=False),
-    default=None,
-    help="Path to JSON file containing manifest payload.",
-)
-@click.pass_obj
-def jobs_validate_manifest(
-    config: CommandConfig,
-    manifest_json: str | None,
-    manifest_file: str | None,
-) -> None:
-    """Validate whether a manifest is structurally valid for training."""
-    manifest = load_json_payload(
-        manifest_json,
-        manifest_file,
-        json_option_name="--manifest-json",
-        file_option_name="--manifest-file",
-    )
-    with arena_client(config) as client:
-        emit_result(client.validate_manifest(manifest))
-
-
-@jobs.command("get-metrics")
+@train.command("get-metrics")
 @click.argument("experiment_id", type=int)
 @click.option(
     "--metric",
@@ -444,7 +382,7 @@ def jobs_validate_manifest(
     help="When CSV is returned, preview this many rows in a rich table.",
 )
 @click.pass_obj
-def jobs_get_metrics(
+def train_get_metrics(
     config: CommandConfig,
     experiment_id: int,
     metrics: tuple[str, ...],
@@ -522,8 +460,18 @@ def projects_create(
 
 @projects.command("delete")
 @click.argument("name", type=str)
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Confirm deletion without interactive prompt.",
+)
 @click.pass_obj
-def projects_delete(config: CommandConfig, project_id: int) -> None:
+def projects_delete(config: CommandConfig, name: str, yes: bool) -> None:
     """Delete a project in Arena."""
+    if not yes and not click.confirm(f"Delete project {name!r}?", default=False):
+        click.echo("Aborted.")
+        return
+
     with arena_client(config) as client:
-        emit_result(client.delete_project(project_id=project_id))
+        emit_result(client.delete_project(name=name))

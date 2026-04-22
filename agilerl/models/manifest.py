@@ -2,34 +2,45 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+import functools
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any, get_args
 
+import yaml
 from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.models.algo import (
     ALGO_REGISTRY,
+    AlgoSpecT,
     LLMAlgorithmSpec,
-    MultiAgentRLAlgorithmSpec,
-    RLAlgorithmSpec,
 )
-from agilerl.models.env import (
-    ArenaEnvSpec,
-    GymEnvSpec,
-    LLMEnvSpec,
-    OfflineEnvSpec,
-    PzEnvSpec,
-)
+from agilerl.models.algorithms import populate_registry
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
-from agilerl.models.networks import FinetuningNetworkSpec, NetworkSpec
+from agilerl.models.networks import (
+    FinetuningNetworkSpec,
+    NetworkSpec,
+    normalize_manifest_network,
+)
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-from agilerl.typing import ConfigType
 
-AlgoSpecT = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec
-EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | ArenaEnvSpec
+if TYPE_CHECKING:
+    from agilerl.models.env import (
+        ArenaEnvSpec,
+        GymEnvSpec,
+        LLMEnvSpec,
+        OfflineEnvSpec,
+        PzEnvSpec,
+    )
+
+    EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | ArenaEnvSpec
+
+# NOTE: Need to populate the registry eagerly to identify the algorithm spec
+# class from the name field in the manifest before validating the manifest
+populate_registry()
 
 
-def _resolve_algorithm(data: ConfigType | AlgoSpecT) -> AlgoSpecT:
+def _resolve_algorithm(data: Any, *, arena_only: bool = False) -> AlgoSpecT:
     """Dispatch to the concrete algorithm spec using ``ALGO_REGISTRY``.
 
     Reads the ``name`` key from the raw dict (e.g. ``"DQN"``), looks up
@@ -37,7 +48,9 @@ def _resolve_algorithm(data: ConfigType | AlgoSpecT) -> AlgoSpecT:
     with the remaining fields.
 
     :param data: The raw dict or AlgorithmSpec to resolve.
-    :type v: ConfigType | AlgoSpecT
+    :type data: Any
+    :param arena_only: If True, reject algorithms not eligible for Arena.
+    :type arena_only: bool
     :returns: The resolved AlgorithmSpec.
     :rtype: AlgoSpecT
     :raises TypeError: If the input is not a dict or AlgorithmSpec.
@@ -56,6 +69,12 @@ def _resolve_algorithm(data: ConfigType | AlgoSpecT) -> AlgoSpecT:
         raise ValueError(msg)
 
     entry = ALGO_REGISTRY.get(name)
+
+    if arena_only and not entry.arena:
+        supported = ", ".join(sorted(ALGO_REGISTRY.arena_algorithms()))
+        msg = f"Algorithm {name!r} is not available on Arena. Available: {supported}"
+        raise ValueError(msg)
+
     if not HAS_LLM_DEPENDENCIES and issubclass(entry.spec_cls, LLMAlgorithmSpec):
         msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
         raise ImportError(msg)
@@ -63,7 +82,7 @@ def _resolve_algorithm(data: ConfigType | AlgoSpecT) -> AlgoSpecT:
     return entry.spec_cls(**data)
 
 
-def _coerce_environment(data: ConfigType | BaseModel) -> dict[str, Any]:
+def _coerce_environment(data: Any) -> dict[str, Any]:
     """Accept environment spec objects or raw dicts.
 
     If *data* is a Pydantic ``BaseModel`` (e.g. :class:`ArenaEnvSpec`,
@@ -71,7 +90,7 @@ def _coerce_environment(data: ConfigType | BaseModel) -> dict[str, Any]:
     Plain dicts are passed through unchanged.
 
     :param data: An environment spec or raw dict.
-    :type data: ConfigType
+    :type data: Any
     :returns: A plain dictionary suitable for manifest serialization.
     :rtype: dict[str, Any]
     """
@@ -84,16 +103,14 @@ def _coerce_environment(data: ConfigType | BaseModel) -> dict[str, Any]:
     raise TypeError(msg)
 
 
-def _resolve_network(
-    data: ConfigType | NetworkSpec | FinetuningNetworkSpec,
-) -> dict[str, Any]:
+def _resolve_network(data: Any) -> dict[str, Any]:
     """Normalise the network section to a plain dict.
 
     The top-level arch discriminator is moved into the encoder_config.arch field for
     proper dispatching to the correct encoder type.
 
     :param data: Network config dict or spec instance.
-    :type data: ConfigType | NetworkSpec | FinetuningNetworkSpec
+    :type data: Any
     :returns: A plain dictionary suitable for manifest storage.
     :rtype: dict[str, Any]
     """
@@ -105,12 +122,7 @@ def _resolve_network(
             data_dict["encoder_config"]["arch"] = data.encoder_config.arch
         return data_dict
 
-    data = dict(data)
-    arch = data.pop("arch", None)
-    if arch and "encoder_config" in data:
-        data["encoder_config"] = dict(data["encoder_config"])
-        data["encoder_config"].setdefault("arch", arch)
-    return data
+    return normalize_manifest_network(data)
 
 
 _ALGO_NON_SERIALIZABLE_FIELDS: set[str] = {
@@ -139,13 +151,18 @@ def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
     return dumped
 
 
-# NOTE: Use of PlainSerializer here I believe results in not being able to
-# serialize a TrainingManifest's algorithm section in "python" mode i.e. the non-serializable fields
-# are lost. Not really an issue because we serialize the algo spec directly (not through TrainingManifest)
-# to build the algorithm instance - but could lead to confusion?
+# NOTE: Use of PlainSerializer here I believe results in not being able to serialize a
+# TrainingManifest's algorithm section in "python" mode i.e. the non-serializable fields
+# are lost. Not really an issue because we serialize the algo spec directly (not through
+# TrainingManifest) when building the algorithm instance - but could lead to confusion?
 AlgorithmFromManifest = Annotated[
     AlgoSpecT,
     BeforeValidator(_resolve_algorithm),
+    PlainSerializer(_serialize_algorithm, return_type=dict[str, Any]),
+]
+ArenaAlgorithmFromManifest = Annotated[
+    AlgoSpecT,
+    BeforeValidator(functools.partial(_resolve_algorithm, arena_only=True)),
     PlainSerializer(_serialize_algorithm, return_type=dict[str, Any]),
 ]
 EnvironmentFromManifest = Annotated[
@@ -174,3 +191,93 @@ class TrainingManifest(BaseModel):
     mutation: MutationSpec | None = Field(default=None)
     replay_buffer: ReplayBufferSpec | None = Field(default=None)
     tournament_selection: TournamentSelectionSpec | None = Field(default=None)
+
+
+class ArenaManifest(TrainingManifest):
+    """Manifest variant that restricts algorithms to Arena-eligible ones."""
+
+    algorithm: ArenaAlgorithmFromManifest
+
+
+def _apply_network_to_algorithm(manifest: TrainingManifest) -> None:
+    """Merge the top-level ``network`` section into the algorithm spec in-place."""
+    algo_spec_cls = type(manifest.algorithm)
+    if manifest.network is None:
+        return
+
+    net_config_field = algo_spec_cls.model_fields.get("net_config")
+    if net_config_field is not None:
+        spec_cls: type[NetworkSpec] | None = next(
+            (t for t in get_args(net_config_field.annotation) if t is not type(None)),
+            None,
+        )
+        if spec_cls is not None:
+            manifest.algorithm.net_config = spec_cls.model_validate(manifest.network)
+    elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
+        llm_network = FinetuningNetworkSpec.model_validate(manifest.network)
+        manifest.algorithm.pretrained_model_name_or_path = (
+            llm_network.pretrained_model_name_or_path
+        )
+        manifest.algorithm.max_model_len = llm_network.max_context_length
+        manifest.algorithm.lora_config = llm_network.lora_config
+
+
+def _validate_llm_model_field(manifest: TrainingManifest) -> None:
+    """Raise if an LLM algorithm is missing its pretrained model path."""
+    algo_spec_cls = type(manifest.algorithm)
+    if (
+        issubclass(algo_spec_cls, LLMAlgorithmSpec)
+        and manifest.algorithm.pretrained_model_name_or_path is None
+    ):
+        msg = (
+            "Required field 'pretrained_model_name_or_path' wasn't found in the manifest. "
+            "This is required for LLM finetuning algorithms, and can be added under either the "
+            "'algorithm' or 'network' sections."
+        )
+        raise ValueError(msg)
+
+
+def _load_yaml(manifest: str | Path | dict[str, Any]) -> dict[str, Any]:
+    """Read a YAML/JSON file or pass through a raw dict."""
+    if isinstance(manifest, (str, Path)):
+        with open(manifest) as fh:
+            return yaml.safe_load(fh)
+    return manifest
+
+
+def get_validated_manifest(
+    manifest: str | Path | dict[str, Any],
+) -> TrainingManifest:
+    """Get a validated manifest from a YAML, JSON, or dict.
+
+    :param manifest: Path to a YAML/JSON file, or a raw dict.
+    :type manifest: str | Path | dict[str, Any]
+    :returns: A validated manifest.
+    :rtype: TrainingManifest
+    """
+    data = _load_yaml(manifest)
+    validated = TrainingManifest.model_validate(data)
+    _apply_network_to_algorithm(validated)
+    _validate_llm_model_field(validated)
+    return validated
+
+
+def get_arena_manifest(
+    manifest: str | Path | dict[str, Any],
+) -> dict[str, Any]:
+    """Parse and validate a manifest for Arena submission.
+
+    Performs full Pydantic validation (including algorithm fields)
+    and returns a JSON-serializable dict ready for the Arena API.
+    Only Arena-eligible algorithms are accepted.
+
+    :param manifest: Path to a YAML/JSON file or a pre-parsed dict.
+    :type manifest: str | Path | dict[str, Any]
+    :returns: Validated, JSON-serializable manifest dict.
+    :rtype: dict[str, Any]
+    """
+    data = _load_yaml(manifest)
+    validated = ArenaManifest.model_validate(data)
+    _apply_network_to_algorithm(validated)
+    _validate_llm_model_field(validated)
+    return validated.model_dump(mode="json", exclude_none=True)

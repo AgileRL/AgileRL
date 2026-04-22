@@ -1,15 +1,19 @@
 """Rainbow DQN algorithm specification."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
-from typing import Any, ClassVar, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from pydantic import Field, model_validator
 
-from agilerl.algorithms import RainbowDQN
 from agilerl.models.algo import RLAlgorithmSpec, off_policy, register
 from agilerl.models.networks import RainbowQNetworkSpec
-from agilerl.modules import EvolvableModule
-from agilerl.training.train_off_policy import train_off_policy
+
+if TYPE_CHECKING:
+    from agilerl.modules import EvolvableModule
+else:
+    EvolvableModule = Any
 
 
 @register(arena=True)
@@ -30,8 +34,6 @@ class RainbowDQNSpec(RLAlgorithmSpec):
     net_config: RainbowQNetworkSpec | None = Field(default=None)
     actor_network: EvolvableModule | None = Field(default=None)
 
-    algo_class: ClassVar[type[RainbowDQN]] = RainbowDQN
-
     @model_validator(mode="after")
     def _check_v_range(self) -> Self:
         if self.v_min >= self.v_max:
@@ -46,4 +48,6 @@ class RainbowDQNSpec(RLAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
+        from agilerl.training.train_off_policy import train_off_policy
+
         return train_off_policy

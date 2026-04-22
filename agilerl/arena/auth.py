@@ -190,11 +190,12 @@ class ArenaOAuth2:
         try:
             tokens = self.kc.refresh_token(refresh_token)
         except KeycloakError as exc:
-            msg = (
-                "Token refresh failed — your session may have expired. "
-                "Please run client.login() again."
-            )
-            raise ArenaAuthError(msg) from exc
+            msg = "Token refresh failed — your session may have expired."
+            raise ArenaAuthError(
+                msg,
+                sdk_hint="Please run client.login() again.",
+                cli_hint="Please run 'arena login' to re-authenticate.",
+            ) from exc
 
         creds = load_credentials(self.CREDENTIALS_FILE) or {}
         creds.update(tokens)

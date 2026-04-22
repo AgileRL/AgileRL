@@ -1,4 +1,5 @@
 import warnings
+from enum import Enum
 from importlib.metadata import PackageNotFoundError, metadata, version
 
 from packaging.markers import default_environment
@@ -39,3 +40,13 @@ def _is_distribution_installed(distribution: str) -> bool:
 
 HAS_LLM_DEPENDENCIES = all(_is_distribution_installed(pkg) for pkg in LLM_PACKAGES)
 HAS_ARENA_DEPENDENCIES = all(_is_distribution_installed(pkg) for pkg in ARENA_PACKAGES)
+
+
+class AgentType(Enum):
+    """Enumeration of supported agent types."""
+
+    SingleAgent = "single_agent"
+    MultiAgent = "multi_agent"
+    LLMAgent = "llm_agent"
+    OfflineAgent = "offline_agent"
+    BanditAgent = "bandit_agent"

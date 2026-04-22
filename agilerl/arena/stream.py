@@ -6,7 +6,6 @@ Handles newline-delimited JSON (NDJSON) responses from Arena streaming endpoints
 from __future__ import annotations
 
 import json
-import logging
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Self
@@ -14,30 +13,31 @@ from typing import TYPE_CHECKING, Any, Self
 if TYPE_CHECKING:
     import httpx
 
-logger = logging.getLogger(__name__)
-
 
 @dataclass(frozen=True, slots=True)
 class StatusEvent:
-    """A stage-progression event (``kind: "status"``).
+    """A stage-progression or warning event (``kind: "status"`` or ``kind: "warning"``).
 
     :param stage: The stage of the event.
     :type stage: str
     :param status: The status of the event.
     :type status: str
-    :param message: The message of the event.
+    :param message: Human-readable message.
     :type message: str
-    :param parsed_message: The parsed message of the event.
-    :type parsed_message: dict[str, Any] | list[Any] | None
-    :param raw: The raw message of the event.
+    :param detail: Structured payload from the ``detail`` envelope field.
+    :type detail: dict[str, Any]
+    :param raw: The full raw JSON payload.
     :type raw: dict[str, Any]
+    :param kind: The envelope ``kind`` field (``"status"`` or ``"warning"``).
+    :type kind: str
     """
 
     stage: str
     status: str
     message: str
-    parsed_message: dict[str, Any] | list[Any] | None
+    detail: dict[str, Any]
     raw: dict[str, Any]
+    kind: str = "status"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,17 +61,6 @@ class CheckEvent:
     warnings: list[str]
     error: str
     raw: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class CompletionEvent:
-    """Terminal event indicating the operation finished.
-
-    :param payload: The payload of the event.
-    :type payload: dict[str, Any]
-    """
-
-    payload: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,38 +88,25 @@ class LogEvent:
     text: str
 
 
-StreamEvent = StatusEvent | CheckEvent | CompletionEvent | ErrorEvent | LogEvent
-
-
-def _try_parse_json_message(message: str) -> dict[str, Any] | list[Any] | None:
-    """Try to parse a JSON message into a dictionary or list.
-
-    :param message: The message to parse.
-    :type message: str
-    :returns: The parsed dictionary or list.
-    :rtype: dict[str, Any] | list[Any] | None
-    """
-    message = message.strip()
-    if not message or message[0] not in "{[":
-        return None
-    try:
-        parsed = json.loads(message)
-    except json.JSONDecodeError:
-        return None
-    if isinstance(parsed, (dict, list)):
-        return parsed
-    return None
+StreamEvent = StatusEvent | CheckEvent | ErrorEvent | LogEvent
 
 
 def parse_ndjson_line(line: str) -> StreamEvent:
     """Parse a single NDJSON line into a typed :data:`StreamEvent`.
+
+    Every line from the backend is a uniform envelope with a ``kind`` field.
+    Dispatch order:
+
+    1. ``kind:"status"`` + ``status:"failed"`` -> :class:`ErrorEvent`
+    2. ``kind:"status"`` (other statuses) -> :class:`StatusEvent`
+    3. ``kind:"check"`` -> :class:`CheckEvent`
+    4. Anything else -> :class:`LogEvent`
 
     :param line: The NDJSON line to parse.
     :type line: str
     :returns: The parsed :data:`StreamEvent`.
     :rtype: StreamEvent
     """
-    # If the line is empty, return a LogEvent with an empty text
     if not line:
         return LogEvent(text="")
 
@@ -142,74 +118,53 @@ def parse_ndjson_line(line: str) -> StreamEvent:
     if not isinstance(payload, dict):
         return LogEvent(text=json.dumps(payload, default=str))
 
-    # StatusEvent
-    if payload.get("kind") == "status":
-        stage = str(payload.get("stage", "-"))
+    kind = payload.get("kind")
+    detail: dict[str, Any] = payload.get("detail") or {}
+
+    # Status (INFO) and warning logs
+    if kind in ("status", "warning"):
         status = str(payload.get("status", "-"))
-        raw_message = str(payload.get("message", ""))
-        parsed_message = _try_parse_json_message(raw_message)
+        message = str(payload.get("message", ""))
+
+        if status == "failed":
+            _skip = {"error_code"}
+            extras = {k: v for k, v in detail.items() if k not in _skip and v}
+            return ErrorEvent(message=message, extras=extras, raw=payload)
+
         return StatusEvent(
-            stage=stage,
+            stage=str(payload.get("stage", "-")),
             status=status,
-            message=raw_message,
-            parsed_message=parsed_message,
+            message=message,
+            detail=detail,
             raw=payload,
+            kind=kind,
         )
 
-    # CheckEvent
-    if "check" in payload and isinstance(payload.get("result"), dict):
-        result: dict[str, Any] = payload["result"]
-        warnings_raw = result.get("warnings")
+    # This is unique to environment validation checks
+    if kind == "check":
+        result_raw = detail.get("result")
+        if not isinstance(result_raw, dict):
+            return StatusEvent(
+                stage=str(payload.get("stage", "-")),
+                status=str(payload.get("status", "-")),
+                message=str(payload.get("message", "")),
+                detail=detail,
+                raw=payload,
+            )
+        warnings_raw = result_raw.get("warnings")
         warnings = (
             [str(w) for w in warnings_raw] if isinstance(warnings_raw, list) else []
         )
-        error = str(result.get("error msg") or result.get("error") or "")
+        error = str(result_raw.get("error msg") or result_raw.get("error") or "")
         return CheckEvent(
-            name=str(payload["check"]),
-            success=result.get("success"),
+            name=str(detail.get("check", "-")),
+            success=result_raw.get("success"),
             warnings=warnings,
             error=error,
             raw=payload,
         )
 
-    # CompletionEvent
-    if payload.get("complete") is True:
-        return CompletionEvent(payload=payload)
-
-    # ErrorEvent — server-side error embedded in the stream
-    if "error" in payload and "kind" not in payload and "check" not in payload:
-        _skip = {"error", "error_code", "status", "status_code"}
-        extras = {k: v for k, v in payload.items() if k not in _skip and v}
-        return ErrorEvent(
-            message=str(payload["error"]),
-            extras=extras,
-            raw=payload,
-        )
-
-    # LogEvent
     return LogEvent(text=json.dumps(payload, default=str))
-
-
-def _log_event(event: StreamEvent) -> None:
-    """Default stream handler that logs events at INFO level."""
-    if isinstance(event, StatusEvent):
-        logger.info("[%s] %s — %s", event.stage, event.status, event.message)
-    elif isinstance(event, CheckEvent):
-        status = "PASS" if event.success else "FAIL"
-        detail = event.error or ", ".join(event.warnings) or ""
-        logger.info("[check] %s — %s %s", event.name, status, detail)
-    elif isinstance(event, CompletionEvent):
-        logger.info("Completed.")
-    elif isinstance(event, ErrorEvent):
-        logger.error("%s", event.message)
-        for key, value in event.extras.items():
-            label = key.replace("_", " ").capitalize()
-            if isinstance(value, list):
-                logger.error("  %s: %s", label, ", ".join(str(v) for v in value))
-            else:
-                logger.error("  %s: %s", label, value)
-    elif isinstance(event, LogEvent) and event.text:
-        logger.info("%s", event.text)
 
 
 class NDJsonStream:
@@ -220,10 +175,10 @@ class NDJsonStream:
 
     :param response: The HTTP response to iterate over.
     :type response: httpx.Response
-    :param handler: Callback invoked for each event.  Defaults to a
-        logging-based handler that emits events at ``INFO`` level.
-        Pass an explicit callable to override, or ``False`` to disable.
-    :type handler: Callable[[StreamEvent], None] | None | bool
+    :param handler: Callback invoked for each event.  ``None`` means silent.
+    :type handler: Callable[[StreamEvent], None] | None
+    :param renderer: Optional renderer to close when the stream is fully consumed.
+    :type renderer: object | None
 
     Usage::
 
@@ -237,21 +192,16 @@ class NDJsonStream:
         result = client.validate_environment(name="MyEnv").collect()
     """
 
-    _DEFAULT_HANDLER: Callable[[StreamEvent], None] = staticmethod(_log_event)  # type: ignore[assignment]
-
     def __init__(
         self,
         response: httpx.Response,
         *,
-        handler: Callable[[StreamEvent], None] | None | bool = None,
+        handler: Callable[[StreamEvent], None] | None = None,
+        renderer: Any | None = None,
     ) -> None:
         self._response: httpx.Response = response
-        if handler is None:
-            self._handler: Callable[[StreamEvent], None] | None = self._DEFAULT_HANDLER
-        elif handler is False:
-            self._handler = None
-        else:
-            self._handler = handler
+        self._handler: Callable[[StreamEvent], None] | None = handler
+        self._renderer = renderer
 
         self._result: dict[str, Any] | None = None
         self._raw_chunks: list[str] = []
@@ -302,6 +252,8 @@ class NDJsonStream:
         for _ in self:
             pass
 
+        self._close_renderer()
+
         # If there is a result, return it
         if self._result is not None:
             return self._result
@@ -327,8 +279,14 @@ class NDJsonStream:
         return self._result
 
     def close(self) -> None:
-        """Close the underlying HTTP response."""
+        """Close the renderer (if any) and the underlying HTTP response."""
+        self._close_renderer()
         self._response.close()
+
+    def _close_renderer(self) -> None:
+        if self._renderer is not None:
+            self._renderer.close()
+            self._renderer = None
 
     def __enter__(self) -> Self:
         """Enter the context manager.
@@ -354,11 +312,9 @@ class NDJsonStream:
         :param event: The event to track.
         :type event: StreamEvent
         """
-        if isinstance(event, CompletionEvent):
-            self._result = event.payload
-        elif (
+        if (
             isinstance(event, StatusEvent)
             and event.status == "completed"
-            and isinstance(event.parsed_message, dict)
+            and event.detail
         ):
-            self._result = event.parsed_message
+            self._result = event.detail

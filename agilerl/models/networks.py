@@ -11,12 +11,27 @@ from pydantic import (
 
 from agilerl import HAS_LLM_DEPENDENCIES
 
-if HAS_LLM_DEPENDENCIES:
-    from peft import LoraConfig
-else:
-    LoraConfig = None
+LoraConfig = None
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def normalize_manifest_network(data: Any) -> Any:
+    """Move a top-level ``arch`` key into ``encoder_config.arch``.
+
+    Raw YAML/JSON manifests place ``arch`` at the network section root,
+    but :class:`NetworkSpec` (a discriminated union) expects it nested
+    under ``encoder_config``.  This helper bridges the two representations.
+    """
+    if not isinstance(data, dict):
+        return data
+    data = dict(data)
+    arch = data.pop("arch", None)
+    if arch and "encoder_config" in data:
+        data["encoder_config"] = dict(data["encoder_config"])
+        data["encoder_config"].setdefault("arch", arch)
+    return data
+
 
 MlpActivation = Literal[
     "Tanh",
@@ -370,17 +385,34 @@ class FinetuningNetworkSpec(BaseModel):
 
     pretrained_model_name_or_path: str = Field(..., min_length=1)
     max_context_length: int = Field(..., ge=1)
-    lora_config: LoraConfigDict | LoraConfig | None = Field(default=None)
+    lora_config: LoraConfigDict | None = Field(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_peft_lora(cls, data: Any) -> Any:
+        """Accept a peft ``LoraConfig`` instance and convert it to a dict
+        that Pydantic can validate as :class:`LoraConfigDict`.
+        """
+        if not isinstance(data, dict):
+            return data
+        lc = data.get("lora_config")
+        if lc is not None and not isinstance(lc, (dict, LoraConfigDict)):
+            data = dict(data)
+            data["lora_config"] = _peft_lora_config_to_manifest_dict(lc)
+        return data
 
     @model_validator(mode="after")
-    def _check_lora_config(self) -> Self:
+    def _resolve_lora_config(self) -> Self:
+        """Convert :class:`LoraConfigDict` to a peft ``LoraConfig`` at runtime."""
         if isinstance(self.lora_config, LoraConfigDict):
-            if not HAS_LLM_DEPENDENCIES or LoraConfig is None:
+            if not HAS_LLM_DEPENDENCIES:
                 msg = "LLM dependencies are required to resolve LoRA configuration."
                 raise ImportError(msg)
+            from peft import LoraConfig as _LoraConfig
+
             peft_lora = self.lora_config.model_dump()
             peft_lora["r"] = peft_lora.pop("lora_r")
-            self.lora_config = LoraConfig(**peft_lora)
+            self.lora_config = _LoraConfig(**peft_lora)
         return self
 
     @field_serializer("lora_config")

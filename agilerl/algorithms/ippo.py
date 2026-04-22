@@ -459,6 +459,7 @@ class IPPO(MultiAgentRLAlgorithm):
         """
         if group_ids is None:
             group_ids = list(observation.keys())
+
         preprocessed = {group_id: [] for group_id in group_ids}
         for agent_id, agent_obs in observation.items():
             group_id = (

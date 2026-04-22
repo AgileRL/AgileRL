@@ -1,15 +1,19 @@
 """NeuralTS algorithm specification."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
-from agilerl.algorithms import NeuralTS
 from agilerl.models.algo import RLAlgorithmSpec, bandit, register
 from agilerl.models.networks import QNetworkSpec
-from agilerl.modules import EvolvableModule
-from agilerl.training.train_bandits import train_bandits
+
+if TYPE_CHECKING:
+    from agilerl.modules import EvolvableModule
+else:
+    EvolvableModule = Any
 
 
 @register(arena=False)
@@ -25,8 +29,6 @@ class NeuralTSSpec(RLAlgorithmSpec):
     net_config: QNetworkSpec | None = Field(default=None)
     actor_network: EvolvableModule | None = Field(default=None)
 
-    algo_class: ClassVar[type[NeuralTS]] = NeuralTS
-
     @staticmethod
     def get_training_fn() -> Callable[..., Any]:
         """Get the training function for NeuralTS.
@@ -34,4 +36,6 @@ class NeuralTSSpec(RLAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
+        from agilerl.training.train_bandits import train_bandits
+
         return train_bandits

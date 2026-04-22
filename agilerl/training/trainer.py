@@ -5,23 +5,20 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, TypeVar
 
-import yaml
 from typing_extensions import Self
 
-from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
+from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES, AgentType
 from agilerl.algorithms.core.base import (
     LLMAlgorithm,
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
-from agilerl.models import ArenaCluster
 from agilerl.models.algo import (
     ALGO_REGISTRY,
+    AlgoSpecT,
     LLMAlgorithmSpec,
-    MultiAgentRLAlgorithmSpec,
-    RLAlgorithmSpec,
 )
 from agilerl.models.env import (
     ArenaEnvSpec,
@@ -32,10 +29,9 @@ from agilerl.models.env import (
     PzEnvSpec,
 )
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
-from agilerl.models.manifest import TrainingManifest
-from agilerl.models.networks import FinetuningNetworkSpec, NetworkSpec
+from agilerl.models.manifest import TrainingManifest, get_validated_manifest
+from agilerl.models.networks import FinetuningNetworkSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-from agilerl.protocols import AgentType
 from agilerl.utils.trainer_utils import (
     EnvironmentT,
     build_mutations_from_spec,
@@ -46,7 +42,6 @@ from agilerl.utils.trainer_utils import (
 
 logger = logging.getLogger(__name__)
 
-AlgoSpecT = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec
 EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
 ArenaEnvT = ArenaEnvSpec | dict[str, str] | str
 ReplayBufferT = ReplayBufferSpec | None
@@ -160,71 +155,6 @@ class Trainer(ABC):
         )
         raise ValueError(msg)
 
-    @staticmethod
-    def get_validated_manifest(
-        manifest: str | Path | dict[str, Any],
-    ) -> TrainingManifest:
-        """Get a validated manifest from a YAML, JSON, or dict.
-
-        :param manifest: Path to a YAML/JSON file, or a raw dict.
-        :type manifest: str | Path | dict[str, Any]
-        :returns: A validated manifest.
-        :rtype: TrainingManifest
-        """
-        if isinstance(manifest, (str, Path)):
-            with open(manifest) as fh:
-                data = yaml.safe_load(fh)
-        else:
-            data = manifest
-
-        validated_manifest = TrainingManifest.model_validate(data)
-
-        # 'network' component of manifest corresponds to algorithm's underlying networks
-        algo_spec_cls = type(validated_manifest.algorithm)
-        if validated_manifest.network is not None:
-            # Resolve the raw dict into the algorithm's concrete NetworkSpec
-            # if `net_config` field is present in the algorithm spec.
-            net_config_field = algo_spec_cls.model_fields.get("net_config")
-            if net_config_field is not None:
-                # get the NetworkSpec class from the type annotation and validate
-                spec_cls: NetworkSpec = next(
-                    (
-                        t
-                        for t in get_args(net_config_field.annotation)
-                        if t is not type(None)
-                    ),
-                    None,
-                )
-                if spec_cls is not None:
-                    validated_manifest.algorithm.net_config = spec_cls.model_validate(
-                        validated_manifest.network
-                    )
-            # LLM algorithms expect a pretrained model
-            elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
-                llm_network = FinetuningNetworkSpec.model_validate(
-                    validated_manifest.network
-                )
-                validated_manifest.algorithm.pretrained_model_name_or_path = (
-                    llm_network.pretrained_model_name_or_path
-                )
-                validated_manifest.algorithm.max_model_len = (
-                    llm_network.max_context_length
-                )
-                validated_manifest.algorithm.lora_config = llm_network.lora_config
-
-        if (
-            issubclass(algo_spec_cls, LLMAlgorithmSpec)
-            and validated_manifest.algorithm.pretrained_model_name_or_path is None
-        ):
-            msg = (
-                "Required field 'pretrained_model_name_or_path' wasn't found in the manifest. "
-                "This is required for LLM finetuning algorithms, and can be added under either the "
-                "'algorithm' or 'network' sections."
-            )
-            raise ValueError(msg)
-
-        return validated_manifest
-
     @classmethod
     def from_manifest(
         cls,
@@ -254,7 +184,7 @@ class Trainer(ABC):
         :rtype: SelfTrainerT
         """
         # Validate manifest and resolve environment spec.
-        validated_manifest = Trainer.get_validated_manifest(manifest)
+        validated_manifest = get_validated_manifest(manifest)
         env_spec = cls._resolve_env_spec(validated_manifest)
         return cls(
             algorithm=validated_manifest.algorithm,
@@ -654,7 +584,7 @@ class ArenaTrainer(Trainer):
         :rtype: ArenaTrainer
         """
         # Validate manifest and resolve environment spec.
-        validated_manifest = Trainer.get_validated_manifest(manifest)
+        validated_manifest = get_validated_manifest(manifest)
         env_spec = cls._resolve_env_spec(validated_manifest)
 
         return cls(
@@ -689,13 +619,9 @@ class ArenaTrainer(Trainer):
             version=str(env_data.get("version", "latest")),
         )
 
-    def train(
-        self, resources: ArenaCluster | None = None, stream: bool = False
-    ) -> dict[str, Any]:
+    def train(self, stream: bool = False) -> dict[str, Any]:
         """Build the manifest and submit the training job to Arena.
 
-        :param resources: The resources to use for the training job.
-        :type resources: ArenaCluster | None
         :param stream: If ``True``, stream logs to the terminal and block
             until the job finishes.
         :type stream: bool

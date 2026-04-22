@@ -233,7 +233,7 @@ class TestInitBufferNStep:
         """An algo spec without ``gamma`` should raise when n-step is requested."""
         from unittest.mock import MagicMock
 
-        from agilerl.protocols import AgentType
+        from agilerl import AgentType
 
         algo = MagicMock(spec=["agent_type"])
         algo.agent_type = AgentType.SingleAgent

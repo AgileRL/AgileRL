@@ -5,24 +5,20 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
-import h5py
 from pydantic import BaseModel, ConfigDict, Field
 
-from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.algorithms.core import LLMAlgorithm, MultiAgentRLAlgorithm, RLAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig
-from agilerl.protocols import AgentType
-from agilerl.typing import SupportedActionSpace, SupportedObservationSpace
-
-if HAS_LLM_DEPENDENCIES:
-    from peft import LoraConfig
-else:
-    LoraConfig = Any
+from agilerl import HAS_LLM_DEPENDENCIES, AgentType
 
 if TYPE_CHECKING:
     import torch
     from accelerate import Accelerator
 
+    from agilerl.algorithms.core import (
+        LLMAlgorithm,
+        MultiAgentRLAlgorithm,
+        RLAlgorithm,
+    )
+    from agilerl.algorithms.core.registry import HyperparameterConfig
     from agilerl.components.replay_buffer import MultiAgentReplayBuffer, ReplayBuffer
     from agilerl.models.env import (
         BanditEnvSpec,
@@ -33,16 +29,24 @@ if TYPE_CHECKING:
         PzEnvSpec,
     )
     from agilerl.models.training import TrainingSpec
+    from agilerl.typing import SupportedActionSpace, SupportedObservationSpace
 
+    if HAS_LLM_DEPENDENCIES:
+        from peft import LoraConfig
+
+    AlgoT = TypeVar("AlgoT", bound="RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm")
     EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
     ReplayBufferT = ReplayBuffer | MultiAgentReplayBuffer
     PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
+else:
+    HyperparameterConfig = Any
+    LoraConfig = Any
+    AlgoT = TypeVar("AlgoT")
 
 
 logger = logging.getLogger(__name__)
 
-AlgoT = TypeVar("AlgoT", bound=RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm)
-AlgoSpecT = TypeVar("AlgoSpecT", bound="AlgorithmSpec")
+AlgoSpecTV = TypeVar("AlgoSpecTV", bound="AlgorithmSpec")
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +127,8 @@ def register(
 ) -> Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]:
     """Class decorator that registers an algorithm spec.
 
-    The registry key is derived from ``spec_cls.algo_class.__name__``.
+    The registry key is derived from the spec class name by stripping
+    the ``"Spec"`` suffix (e.g. ``DQNSpec`` -> ``"DQN"``).
 
     :param arena: Whether the algorithm is available for training on Arena.
     :type arena: bool
@@ -135,36 +140,35 @@ def register(
 
         @register(arena=True)
         class DQNSpec(RLAlgorithmSpec):
-            algo_class: ClassVar[type[DQN]] = DQN
             ...
     """
 
     def decorator(spec_cls: type[AlgorithmSpec]) -> type[AlgorithmSpec]:
-        name = spec_cls.algo_class.__name__
+        name = spec_cls.__name__.removesuffix("Spec")
         ALGO_REGISTRY.add(name, spec_cls, arena=arena)
         return spec_cls
 
     return decorator
 
 
-def off_policy() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
+def off_policy() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
     """Decorate an algorithm to mark it as off-policy.
 
     By doing this we automatically signal the use
     of a replay buffer and, optionally, epsilon decay during training.
 
     :return: Decorated algorithm spec class
-    :rtype: Callable[[type[AlgoSpecT]], type[AlgoSpecT]]
+    :rtype: Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]
     """
 
-    def decorator(algo_spec_class: type[AlgoSpecT]) -> type[AlgoSpecT]:
+    def decorator(algo_spec_class: type[AlgoSpecTV]) -> type[AlgoSpecTV]:
         algo_spec_class.off_policy = True
         return algo_spec_class
 
     return decorator
 
 
-def offline() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
+def offline() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
     """Decorate an algorithm to mark it as offline.
 
     Offline algorithms learn from a fixed dataset rather than
@@ -173,10 +177,10 @@ def offline() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
     data from the dataset source declared in :class:`OfflineEnvSpec`.
 
     :return: Decorated algorithm spec class
-    :rtype: Callable[[type[AlgoSpecT]], type[AlgoSpecT]]
+    :rtype: Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]
     """
 
-    def decorator(algo_spec_class: type[AlgoSpecT]) -> type[AlgoSpecT]:
+    def decorator(algo_spec_class: type[AlgoSpecTV]) -> type[AlgoSpecTV]:
         algo_spec_class.offline = True
         algo_spec_class.agent_type = AgentType.OfflineAgent
         return algo_spec_class
@@ -184,7 +188,7 @@ def offline() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
     return decorator
 
 
-def bandit() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
+def bandit() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
     """Decorate an algorithm to mark it as a contextual bandit.
 
     Bandit algorithms learn from tabular datasets wrapped as
@@ -193,10 +197,10 @@ def bandit() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
     training loop.
 
     :return: Decorated algorithm spec class
-    :rtype: Callable[[type[AlgoSpecT]], type[AlgoSpecT]]
+    :rtype: Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]
     """
 
-    def decorator(algo_spec_class: type[AlgoSpecT]) -> type[AlgoSpecT]:
+    def decorator(algo_spec_class: type[AlgoSpecTV]) -> type[AlgoSpecTV]:
         algo_spec_class.bandit = True
         algo_spec_class.agent_type = AgentType.BanditAgent
         return algo_spec_class
@@ -209,8 +213,11 @@ class AlgorithmSpec(BaseModel):
 
     Defines common fields and behavior for algorithm specifications, including
     batch size and hyperparameter configuration.  Concrete subclasses must set
-    the ``algo_class`` and ``agent_type`` class variables, and override
-    :meth:`get_training_loop`.
+    the ``agent_type`` class variable and override :meth:`get_training_fn`.
+
+    The algorithm class is resolved lazily from ``agilerl.algorithms`` using
+    the naming convention ``<Name>Spec`` -> ``<Name>`` (e.g. ``PPOSpec`` ->
+    ``PPO``).  This avoids importing heavy dependencies at spec-import time.
     """
 
     batch_size: int = Field(default=128, ge=1)
@@ -220,15 +227,26 @@ class AlgorithmSpec(BaseModel):
     offline: ClassVar[bool] = False
     bandit: ClassVar[bool] = False
 
-    algo_class: ClassVar[type[AlgoT]]
+    _algo_class_cache: ClassVar[type | None] = None
 
     agent_type: ClassVar[AgentType]
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    @classmethod
+    def algo_class(cls) -> type:
+        """Lazily resolve the algorithm class from ``agilerl.algorithms``."""
+        if cls._algo_class_cache is None:
+            from agilerl import algorithms
+
+            cls._algo_class_cache = getattr(
+                algorithms, cls.__name__.removesuffix("Spec")
+            )
+        return cls._algo_class_cache
+
     @property
     def name(self) -> str:
         """Return the name of the algorithm."""
-        return self.algo_class.__name__
+        return self.__class__.__name__.removesuffix("Spec")
 
     def build_algorithm(self) -> AlgoT:
         """Build the algorithm instance using spec fields + runtime args."""
@@ -305,6 +323,8 @@ class AlgorithmSpec(BaseModel):
                 kwargs["minari_dataset_id"] = env_spec.minari_dataset_id
                 kwargs["remote"] = env_spec.remote
             elif env_spec.dataset_path is not None:
+                import h5py
+
                 kwargs["dataset"] = h5py.File(env_spec.dataset_path, "r")
 
         return kwargs
@@ -348,8 +368,8 @@ class RLAlgorithmSpec(AlgorithmSpec):
         :returns: Single-agent algorithm instance.
         :rtype: RLAlgorithm
         """
-        # Build algorithm
-        algo = self.algo_class(
+        algo_cls = self.algo_class()
+        algo = algo_cls(
             observation_space=observation_space,
             action_space=action_space,
             index=index,
@@ -358,7 +378,6 @@ class RLAlgorithmSpec(AlgorithmSpec):
             **self.model_dump(mode="python"),
         )
 
-        # Load checkpoint if provided
         if resume_from_checkpoint is not None:
             algo.load_checkpoint(resume_from_checkpoint)
 
@@ -404,8 +423,8 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         :returns: Multi-agent algorithm instance.
         :rtype: MultiAgentRLAlgorithm
         """
-        # Build algorithm
-        algo = self.algo_class(
+        algo_cls = self.algo_class()
+        algo = algo_cls(
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
             index=index,
@@ -414,7 +433,6 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
             **self.model_dump(mode="python"),
         )
 
-        # Load checkpoint if provided
         if resume_from_checkpoint is not None:
             algo.load_checkpoint(resume_from_checkpoint)
 
@@ -489,7 +507,8 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         if not use_vllm:
             kwargs.pop("max_model_len", None)
 
-        algo = self.algo_class(
+        algo_cls = self.algo_class()
+        algo = algo_cls(
             model_name=self.pretrained_model_name_or_path,
             pad_token_id=tokenizer.eos_token_id,
             pad_token=tokenizer.eos_token,
@@ -500,8 +519,10 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             **kwargs,
         )
 
-        # Load checkpoint if provided
         if resume_from_checkpoint is not None:
             algo.load_checkpoint(resume_from_checkpoint)
 
         return algo
+
+
+AlgoSpecT = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec

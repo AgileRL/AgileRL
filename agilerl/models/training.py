@@ -1,34 +1,27 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 from typing_extensions import Self
 
-from agilerl.components.replay_buffer import (
-    MultiAgentReplayBuffer,
-    MultiStepReplayBuffer,
-    PrioritizedReplayBuffer,
-    ReplayBuffer,
-)
-from agilerl.models.algo import (
-    LLMAlgorithmSpec,
-    MultiAgentRLAlgorithmSpec,
-    RLAlgorithmSpec,
-)
-from agilerl.models.algorithms import RainbowDQNSpec
-from agilerl.protocols import AgentType
-
-BufferT = (
-    ReplayBuffer
-    | MultiStepReplayBuffer
-    | PrioritizedReplayBuffer
-    | MultiAgentReplayBuffer
-)
-AlgoSpecT = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec
-
 if TYPE_CHECKING:
     import torch
+
+    from agilerl.components.replay_buffer import (
+        MultiAgentReplayBuffer,
+        MultiStepReplayBuffer,
+        PrioritizedReplayBuffer,
+        ReplayBuffer,
+    )
+    from agilerl.models.algo import AlgoSpecT
+
+    BufferT = (
+        ReplayBuffer
+        | MultiStepReplayBuffer
+        | PrioritizedReplayBuffer
+        | MultiAgentReplayBuffer
+    )
 
 
 class NStepBufferArgs(BaseModel):
@@ -86,7 +79,17 @@ class ReplayBufferSpec(BaseModel):
         :return: Replay buffer
         :rtype: BufferT
         """
-        buffer_args = {}
+        # Import lazily to avoid heavy dependencies for Arena manifest validation
+        from agilerl import AgentType
+        from agilerl.components.replay_buffer import (
+            MultiAgentReplayBuffer,
+            MultiStepReplayBuffer,
+            PrioritizedReplayBuffer,
+            ReplayBuffer,
+        )
+        from agilerl.models.algorithms import RainbowDQNSpec
+
+        buffer_args: dict[str, Any] = {}
         is_multi_agent = algo_spec.agent_type == AgentType.MultiAgent
         if not is_multi_agent:
             if self.n_step_buffer:
@@ -123,15 +126,15 @@ class ReplayBufferSpec(BaseModel):
 class TrainingSpec(BaseModel):
     """Pydantic model for AgileRL training arguments.
 
-    :param max_steps: Maximum number of steps to train for
+    :param max_steps: Maximum number of steps to train for. Defaults to 1,000,000.
     :type max_steps: int
     :param evo_steps: Number of steps to train between evolutions.
-    :type evo_steps: int
-    :param population_size: Number of agents in the population.
-    :type population_size: int
-    :param eval_steps: Number of steps to train for evaluation
+    :type evo_steps: int | None
+    :param pop_size: Number of agents in the population. Defaults to 1.
+    :type pop_size: int
+    :param eval_steps: Number of steps to train for evaluation. Defaults to None.
     :type eval_steps: int | None
-    :param eval_loop: Number of evaluation episodes
+    :param eval_loop: Number of evaluation episodes. Defaults to 1.
     :type eval_loop: int
     :param replay_buffer: Replay buffer specification.
     :type replay_buffer: ReplayBufferSpec | None
@@ -165,13 +168,13 @@ class TrainingSpec(BaseModel):
     :type experience_sharing: bool
     """
 
-    max_steps: int = Field(..., ge=1)
+    max_steps: int = Field(default=1_000_000, ge=1)
     evo_steps: int | None = Field(
         default=None,
         ge=1,
         validation_alias=AliasChoices("metrics_interval", "evo_steps"),
     )
-    population_size: int = Field(
+    pop_size: int = Field(
         default=1, ge=1, validation_alias=AliasChoices("population_size", "pop_size")
     )
     eval_steps: int | None = Field(default=None)

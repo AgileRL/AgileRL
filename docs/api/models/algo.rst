@@ -26,12 +26,3 @@ Base Specs
 
 .. autoclass:: agilerl.models.algo.LLMAlgorithmSpec
    :members:
-
-Convenience Types
------------------
-
-.. autodata:: agilerl.models.JobStatus
-.. autoclass:: agilerl.models.ArenaVM
-   :members:
-.. autoclass:: agilerl.models.ArenaCluster
-   :members:

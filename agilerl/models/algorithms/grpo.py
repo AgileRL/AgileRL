@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import Field, model_validator
 
-from agilerl.algorithms import GRPO
 from agilerl.models.algo import LLMAlgorithmSpec, register
-from agilerl.models.env import LLMEnvType
-from agilerl.training.train_llm import finetune_llm_reasoning
-from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
+
+if TYPE_CHECKING:
+    from agilerl.models.env import LLMEnvType
+    from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
+else:
+    CosineLRScheduleConfig = Any
+    VLLMConfig = Any
 
 
 @register(arena=True)
@@ -27,8 +30,6 @@ class GRPOSpec(LLMAlgorithmSpec):
     cosine_lr_schedule_config: CosineLRScheduleConfig | None = Field(default=None)
     vllm_config: VLLMConfig | None = Field(default=None)
     use_vllm: bool = Field(default=False)
-
-    algo_class: ClassVar[type[GRPO]] = GRPO
 
     env_type: ClassVar[LLMEnvType] = "reasoning"
 
@@ -46,4 +47,6 @@ class GRPOSpec(LLMAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
+        from agilerl.training.train_llm import finetune_llm_reasoning
+
         return finetune_llm_reasoning

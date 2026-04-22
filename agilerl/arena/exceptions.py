@@ -1,15 +1,109 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, ClassVar
 
 
 class ArenaError(Exception):
     """Base exception for all Arena client errors."""
 
+    _cli_mode: ClassVar[bool] = False
+
+    @classmethod
+    def enable_cli_mode(cls) -> None:
+        """Switch all Arena exceptions to CLI-friendly messages."""
+        cls._cli_mode = True
+
+    @staticmethod
+    def _generate_hints(
+        body: dict[str, Any],
+        extras: dict[str, Any],
+    ) -> tuple[str, str]:
+        """Return ``(sdk_hint, cli_hint)`` for known error patterns."""
+        error_code = body.get("error_code", "")
+
+        if error_code == "AMBIGUOUS_ENTRYPOINT":
+            entrypoints = extras.get("available_entrypoints", [])
+            example = entrypoints[0] if entrypoints else "<entrypoint>"
+            return (
+                f"Pass entrypoint='{example}' to specify which one.",
+                f"Retry with --entrypoint {example}",
+            )
+
+        return ("", "")
+
+    @staticmethod
+    def _parse_body(raw: str) -> dict[str, Any] | None:
+        """Best-effort parse of an API error body into a dict.
+
+        Handles:
+        * Valid JSON
+        * JSON with embedded newlines in string values (invalid but common)
+        * NDJSON bodies (picks the line containing ``"error"``)
+        * Nested JSON-in-string envelopes (one level)
+        """
+        body: dict[str, Any] | None = None
+
+        for attempt in (raw, raw.replace("\n", " ")):
+            try:
+                parsed = json.loads(attempt)
+                if isinstance(parsed, dict):
+                    body = parsed
+                    break
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+        if body is None:
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(parsed, dict) and "error" in parsed:
+                    body = parsed
+                    break
+
+        if body is None:
+            return None
+
+        # Unpack one level of nested JSON-in-string envelopes.
+        for key in _MESSAGE_KEYS:
+            value = body.get(key)
+            if not value or not isinstance(value, str):
+                continue
+            try:
+                inner = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(inner, dict) and any(k in inner for k in _MESSAGE_KEYS):
+                return inner
+
+        return body
+
 
 class ArenaAuthError(ArenaError):
     """Raised when authentication fails or credentials are missing/expired."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        sdk_hint: str = "",
+        cli_hint: str = "",
+    ) -> None:
+        self.message = message
+        self.sdk_hint = sdk_hint
+        self.cli_hint = cli_hint
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        hint = self.cli_hint if self._cli_mode and self.cli_hint else self.sdk_hint
+        if hint:
+            return f"{self.message} {hint}"
+        return self.message
 
 
 class ArenaTimeoutError(ArenaAuthError):
@@ -26,6 +120,8 @@ class ArenaAPIError(ArenaError):
     :param detail: Human-readable error description.
     :param status_code: HTTP status code from the API response.
     :param extras: Supplementary context from the error body.
+    :param sdk_hint: Guidance shown when running from the SDK.
+    :param cli_hint: Guidance shown when running from the CLI.
     """
 
     _label = "API error"
@@ -36,10 +132,14 @@ class ArenaAPIError(ArenaError):
         *,
         status_code: int = 0,
         extras: dict[str, Any] | None = None,
+        sdk_hint: str = "",
+        cli_hint: str = "",
     ) -> None:
         self.detail = detail
         self.status_code = status_code
         self.extras = extras or {}
+        self.sdk_hint = sdk_hint
+        self.cli_hint = cli_hint
         super().__init__(self._format())
 
     def _format(self) -> str:
@@ -50,6 +150,11 @@ class ArenaAPIError(ArenaError):
                 parts.append(f"{label}: {', '.join(str(v) for v in value)}")
             else:
                 parts.append(f"{label}: {value}")
+
+        hint = self.cli_hint if self._cli_mode and self.cli_hint else self.sdk_hint
+        if hint:
+            parts.append(hint)
+
         msg = "\n".join(parts)
         if self.status_code:
             return f"{self._label} ({self.status_code}): {msg}"
@@ -70,7 +175,7 @@ class ArenaAPIError(ArenaError):
         if not raw:
             return cls("No error details", status_code=status_code)
 
-        body = _parse_body(raw)
+        body = ArenaError._parse_body(raw)
         if body is None:
             return cls(raw[:500], status_code=status_code)
 
@@ -82,10 +187,13 @@ class ArenaAPIError(ArenaError):
                 break
 
         extras = {k: v for k, v in body.items() if k not in _SKIP_KEYS and v}
+        sdk_hint, cli_hint = ArenaError._generate_hints(body, extras)
         return cls(
             detail=primary or raw[:500],
             status_code=status_code,
             extras=extras,
+            sdk_hint=sdk_hint,
+            cli_hint=cli_hint,
         )
 
 
@@ -95,52 +203,7 @@ class ArenaValidationError(ArenaAPIError):
     _label = "ValidationError"
 
 
-def _parse_body(raw: str) -> dict[str, Any] | None:
-    """Best-effort parse of an API error body into a dict.
+class ArenaTrainingError(ArenaAPIError):
+    """Raised when a training job submission or execution fails."""
 
-    Handles:
-    * Valid JSON
-    * JSON with embedded newlines in string values (invalid but common)
-    * NDJSON bodies (picks the line containing ``"error"``)
-    * Nested JSON-in-string envelopes (one level)
-    """
-    body: dict[str, Any] | None = None
-
-    for attempt in (raw, raw.replace("\n", " ")):
-        try:
-            parsed = json.loads(attempt)
-            if isinstance(parsed, dict):
-                body = parsed
-                break
-        except (json.JSONDecodeError, ValueError):
-            continue
-
-    if body is None:
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                parsed = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if isinstance(parsed, dict) and "error" in parsed:
-                body = parsed
-                break
-
-    if body is None:
-        return None
-
-    # Unpack one level of nested JSON-in-string envelopes.
-    for key in _MESSAGE_KEYS:
-        value = body.get(key)
-        if not value or not isinstance(value, str):
-            continue
-        try:
-            inner = json.loads(value)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if isinstance(inner, dict) and any(k in inner for k in _MESSAGE_KEYS):
-            return inner
-
-    return body
+    _label = "TrainingError"

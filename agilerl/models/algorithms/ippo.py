@@ -1,15 +1,19 @@
 """IPPO algorithm specification."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
-from agilerl.algorithms import IPPO
 from agilerl.models.algo import MultiAgentRLAlgorithmSpec, register
 from agilerl.models.networks import StochasticActorSpec
-from agilerl.modules import ModuleDict
-from agilerl.training.train_multi_agent_on_policy import train_multi_agent_on_policy
+
+if TYPE_CHECKING:
+    from agilerl.modules import ModuleDict
+else:
+    ModuleDict = Any
 
 
 @register(arena=True)
@@ -32,8 +36,6 @@ class IPPOSpec(MultiAgentRLAlgorithmSpec):
     actor_networks: ModuleDict | None = Field(default=None)
     critic_networks: ModuleDict | None = Field(default=None)
 
-    algo_class: ClassVar[type[IPPO]] = IPPO
-
     @staticmethod
     def get_training_fn() -> Callable[..., Any]:
         """Get the training function for IPPO.
@@ -41,4 +43,8 @@ class IPPOSpec(MultiAgentRLAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
+        from agilerl.training.train_multi_agent_on_policy import (
+            train_multi_agent_on_policy,
+        )
+
         return train_multi_agent_on_policy

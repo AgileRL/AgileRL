@@ -1,14 +1,16 @@
 """DPO algorithm specification."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import Field
 
-from agilerl.algorithms import DPO
 from agilerl.models.algo import LLMAlgorithmSpec, register
-from agilerl.models.env import LLMEnvType
-from agilerl.training.train_llm import finetune_llm_preference
+
+if TYPE_CHECKING:
+    from agilerl.models.env import LLMEnvType
 
 
 @register(arena=True)
@@ -17,7 +19,6 @@ class DPOSpec(LLMAlgorithmSpec):
 
     lr: float = Field(default=0.000005)
 
-    algo_class: ClassVar[type[DPO]] = DPO
     env_type: ClassVar[LLMEnvType] = "preference"
 
     @staticmethod
@@ -27,4 +28,6 @@ class DPOSpec(LLMAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
+        from agilerl.training.train_llm import finetune_llm_preference
+
         return finetune_llm_preference

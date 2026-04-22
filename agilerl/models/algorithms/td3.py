@@ -1,15 +1,19 @@
 """TD3 algorithm specification."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
-from agilerl.algorithms import TD3
 from agilerl.models.algo import RLAlgorithmSpec, off_policy, register
 from agilerl.models.networks import DeterministicActorSpec
-from agilerl.modules import EvolvableModule
-from agilerl.training.train_off_policy import train_off_policy
+
+if TYPE_CHECKING:
+    from agilerl.modules import EvolvableModule
+else:
+    EvolvableModule = Any
 
 
 @register(arena=True)
@@ -32,8 +36,6 @@ class TD3Spec(RLAlgorithmSpec):
     actor_network: EvolvableModule | None = Field(default=None)
     critic_networks: list[EvolvableModule] | None = Field(default=None)
 
-    algo_class: ClassVar[type[TD3]] = TD3
-
     @staticmethod
     def get_training_fn() -> Callable[..., Any]:
         """Get the training function for TD3.
@@ -41,4 +43,6 @@ class TD3Spec(RLAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
+        from agilerl.training.train_off_policy import train_off_policy
+
         return train_off_policy

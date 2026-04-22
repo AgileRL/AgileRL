@@ -15,8 +15,10 @@ from agilerl.arena.auth import ArenaOAuth2, load_credentials
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
+    ArenaTrainingError,
     ArenaValidationError,
 )
+from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,7 @@ class ArenaClient:
         "/api/cli/v1/environments/create-and-validate": ArenaValidationError,
         "/api/cli/v1/environments/validate": ArenaValidationError,
         "/api/cli/v1/environments/profile": ArenaValidationError,
+        "/api/cli/v1/experiments/jobs/submit": ArenaTrainingError,
     }
 
     def __init__(
@@ -104,6 +107,7 @@ class ArenaClient:
         api_key: str | None = None,
         request_timeout: int = 30,
         upload_timeout: int = 300,
+        verbose: bool = True,
     ) -> None:
 
         self._base_url = self.BASE_URL.rstrip("/")
@@ -113,6 +117,7 @@ class ArenaClient:
         self._api_key = api_key or os.environ.get("ARENA_API_KEY")
         self._auth = ArenaOAuth2()
         self._tokens = _TokenStore()
+        self._verbose = verbose
         self._stream_handler: Callable[[StreamEvent], None] | None = None
 
         self._http = httpx.Client(
@@ -259,7 +264,7 @@ class ArenaClient:
         self,
         *,
         name: str | None = None,
-        version: str = "latest",
+        version: str = "v1",
         source: str | os.PathLike[str] | bytes | None = None,
         env_config: str | os.PathLike[str] | None = None,
         requirements: str | os.PathLike[str] | None = None,
@@ -267,21 +272,16 @@ class ArenaClient:
         description: str | None = None,
         multi_agent: bool = False,
         do_rollouts: bool = True,
-        stream: bool = False,
-    ) -> dict[str, Any] | NDJsonStream:
+    ) -> dict[str, Any]:
         """Validate a custom environment on Arena.
 
         When *source* is provided the environment is uploaded, created, and
         validated in a single step.  When *source* is ``None`` an
         already-registered environment is validated by *name*/*version*.
 
-        By default the stream is consumed internally and the final result
-        dict is returned.  Pass ``stream=True`` to get the raw
-        :class:`~agilerl.arena.stream.NDJsonStream` instead.
-
         :param name: Environment name.
         :type name: str | None
-        :param version: Environment version.
+        :param version: Environment version. Defaults to "v1".
         :type version: str
         :param source: Environment source — a directory path (compressed
             automatically), a ``.tar.gz`` file path, or raw ``bytes``.
@@ -298,15 +298,13 @@ class ArenaClient:
         :type multi_agent: bool
         :param do_rollouts: Whether to run rollout profiling.
         :type do_rollouts: bool
-        :param stream: If ``True``, return the raw :class:`NDJsonStream`.
-        :type stream: bool
         """
         if name is None and source is None:
             msg = "To validate an environment on Arena, either the name of an already registered environment or the source of a custom environment must be provided."
             raise ValueError(msg)
 
         if source is not None:
-            stream_resp = self._create_and_validate(
+            return self._create_and_validate(
                 name=name,
                 version=version,
                 source=source,
@@ -316,8 +314,7 @@ class ArenaClient:
                 description=description,
                 multi_agent=multi_agent,
                 do_rollouts=do_rollouts,
-            )
-            return stream_resp if stream else stream_resp.collect()
+            ).collect()
 
         payload: dict[str, Any] = {
             "name": name,
@@ -327,46 +324,44 @@ class ArenaClient:
         if entrypoint:
             payload["entrypoint"] = entrypoint
 
-        stream_resp = self._open_stream(
+        return self._open_stream(
             "POST",
             "/api/cli/v1/environments/validate",
             json=payload,
             timeout=self._upload_timeout,
-        )
-        return stream_resp if stream else stream_resp.collect()
+        ).collect()
 
     def profile_environment(
         self,
         *,
         name: str,
         version: str | None = None,
-        stream: bool = False,
-    ) -> dict[str, Any] | NDJsonStream:
+    ) -> dict[str, Any]:
         """Profile a validated environment version.
 
         :param name: Environment name, as specified in Arena.
-        :param version: Environment version. Defaults to the latest.
-        :param stream: If ``True``, return the raw :class:`NDJsonStream`.
+        :type name: str
+        :param version: Environment version. If None, resolve to the latest version.
+        :type version: str | None
         """
         payload: dict[str, Any] = {
             "name": name,
             "version": version,
         }
-        stream_resp = self._open_stream(
+        return self._open_stream(
             "POST",
             "/api/cli/v1/environments/profile",
             json=payload,
             timeout=self._upload_timeout,
-        )
-        return stream_resp if stream else stream_resp.collect()
+        ).collect()
 
-    def delete_environment(self, *, name: str, version: str) -> Any:
+    def delete_environment(self, *, name: str, version: str | None = None) -> Any:
         """Delete an environment version.
 
         :param name: Environment name, as specified in Arena.
         :type name: str
-        :param version: Environment version. Defaults to "latest".
-        :type version: str
+        :param version: Environment version. If None, delete all environment versions.
+        :type version: str | None
         """
         payload = {"name": name, "version": version}
         return self._unwrap_cli_data(
@@ -378,35 +373,51 @@ class ArenaClient:
     # -------------------------------------------------------------------------
 
     # TODO: Backend needs to return useful logs
-    # e.g. Submitting job with ID <job_id> to Arena
-    #      Job <job_id> submitted successfully
-    #      Job <job_id> is PENDING
+    # e.g. Submitting job '<experiment_name>' to Arena
+    #      '<experiment_name>' submitted successfully
+    #      '<experiment_name>' is PENDING
     #      View training progress at <url>
     def submit_training_job(
         self,
+        manifest: str | os.PathLike[str] | dict[str, Any],
         *,
-        manifest: dict[str, Any],
         resource_id: int | None = None,
         num_nodes: int | None = None,
-        stream: bool = False,
-    ) -> dict[str, Any] | NDJsonStream:
+        project: str | None = None,
+        experiment_name: str | None = None,
+    ) -> dict[str, Any]:
         """Submit a training job.
 
-        :param manifest: The fully validated training manifest.
+        :param manifest: Training manifest as a YAML/JSON file path, raw YAML
+            string, or a pre-parsed dict.
+        :type manifest: str | os.PathLike[str] | dict[str, Any]
         :param resource_id: The Arena cluster type to submit the experiment to.
-        :param stream: If ``True``, return the raw :class:`NDJsonStream`.
+        :type resource_id: int | None
+        :param num_nodes: The number of nodes to use for the training job.
+        :type num_nodes: int | None
+        :param project: The project to submit the training job to.
+        :type project: str | None
+        :param experiment_name: The name of the experiment to submit the training job to.
+        :type experiment_name: str | None
         """
+        from agilerl.models.manifest import get_arena_manifest
+
+        # Validate manifest using Pydantic prior to submitting to Arena
+        validated = get_arena_manifest(manifest)
+
         payload: dict[str, Any] = {
-            "manifest": manifest,
+            "manifest": validated,
             "resource_id": resource_id,
+            "num_nodes": num_nodes,
+            "project": project,
+            "experiment_name": experiment_name,
         }
-        stream_resp = self._open_stream(
+        return self._open_stream(
             "POST",
             "/api/cli/v1/experiments/jobs/submit",
             json=payload,
             timeout=self._upload_timeout,
-        )
-        return stream_resp if stream else stream_resp.collect()
+        ).collect()
 
     # TODO: Check with Rob
     # Should be a rich table showing [experiment name, job_id, env, algo, last_modified, status]
@@ -439,6 +450,8 @@ class ArenaClient:
             "/api/cli/v1/experiments/jobs/resume",
             json={"job_id": job_id, "max_steps": max_steps},
         )
+
+    # TODO: Update HPO params
 
     # TODO: Check with Rob
     # Should be a rich table sorted by evaluation score descending showing
@@ -628,11 +641,12 @@ class ArenaClient:
         if self._tokens.access_token:
             return {"Authorization": f"Bearer {self._tokens.access_token}"}
 
-        msg = (
-            "Client has not been authenticated with Arena. Call client.login() or provide an "
-            "API key to the ArenaClient constructor."
+        msg = "Client has not been authenticated with Arena."
+        raise ArenaAuthError(
+            msg,
+            sdk_hint="Call client.login() or provide an API key to the ArenaClient constructor.",
+            cli_hint="Run 'arena login' to authenticate.",
         )
-        raise ArenaAuthError(msg)
 
     def _send(
         self,
@@ -701,11 +715,12 @@ class ArenaClient:
         # Handle 401 Unauthorized.
         if resp.status_code == 401:
             raw = self._read_response_body(resp, stream=stream)
-            msg = (
-                "Session expired and could not be refreshed. "
-                f"Please run client.login() again. Server response: {raw[:200]}"
+            msg = f"Session expired and could not be refreshed. Server response: {raw[:200]}"
+            raise ArenaAuthError(
+                msg,
+                sdk_hint="Please run client.login() again.",
+                cli_hint="Please run 'arena login' to re-authenticate.",
             )
-            raise ArenaAuthError(msg)
 
         # Handle non-success responses.
         if not resp.is_success:
@@ -766,8 +781,14 @@ class ArenaClient:
         **kwargs: Any,
     ) -> NDJsonStream:
         """Send a streaming request and return an :class:`NDJsonStream`."""
+        handler = self._stream_handler
+        renderer: StreamRichRenderer | None = None
+        if handler is None and self._verbose:
+            error_cls = self._ERROR_MAP.get(path, ArenaAPIError)
+            renderer = StreamRichRenderer(error_cls=error_cls)
+            handler = renderer.handle_event
         resp = self._send(method, path, stream=True, timeout=timeout, **kwargs)
-        return NDJsonStream(resp, handler=self._stream_handler)
+        return NDJsonStream(resp, handler=handler, renderer=renderer)
 
     @staticmethod
     def _unwrap_cli_data(resp: Any) -> Any:
