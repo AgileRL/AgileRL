@@ -89,13 +89,16 @@ def _find_exp_avg(agent) -> torch.Tensor | None:
 
 def _load_attributes_pt(path):
     return torch.load(
-        str(path / "attributes.pt"), weights_only=False, pickle_module=dill,
+        str(path / "attributes.pt"),
+        weights_only=False,
+        pickle_module=dill,
     )
 
+
 SAVE_LOAD_OPTIONS = [
-    pytest.param((True,  True),  id="lora_only+optim"),
-    pytest.param((True,  False), id="lora_only"),
-    pytest.param((False, True),  id="full+optim"),
+    pytest.param((True, True), id="lora_only+optim"),
+    pytest.param((True, False), id="lora_only"),
+    pytest.param((False, True), id="full+optim"),
     pytest.param((False, False), id="full"),
 ]
 
@@ -142,6 +145,7 @@ def grpo_template():
 # SAVE — plain torch/peft path (accelerator is None)                          #
 # --------------------------------------------------------------------------- #
 
+
 @pytest.fixture(scope="session", params=SAVE_LOAD_OPTIONS)
 def plain_saved(request, grpo_template, tmp_path_factory):
     """One saved plain-path checkpoint per cell, shared across all tests that
@@ -156,7 +160,9 @@ def plain_saved(request, grpo_template, tmp_path_factory):
         f"plain_save_lora={lora_only}_optim={save_optimizer}"
     )
     agent.save_checkpoint(
-        str(tmp_path), lora_only=lora_only, save_optimizer=save_optimizer,
+        str(tmp_path),
+        lora_only=lora_only,
+        save_optimizer=save_optimizer,
     )
     return SimpleNamespace(
         agent=agent,
@@ -210,6 +216,7 @@ class TestPlainSave:
 # LOAD — plain torch/peft path                                                #
 # --------------------------------------------------------------------------- #
 
+
 @pytest.fixture(params=SAVE_LOAD_OPTIONS)
 def plain_load_scenario(request, grpo_template, tmp_path):
     """Fresh agent per test (load tests mutate state: stamp sentinels, step
@@ -244,7 +251,9 @@ class TestPlainLoad:
                 base_param.fill_(base_sentinel)
 
         s.agent.save_checkpoint(
-            str(s.path), lora_only=s.lora_only, save_optimizer=s.save_optimizer,
+            str(s.path),
+            lora_only=s.lora_only,
+            save_optimizer=s.save_optimizer,
         )
         with torch.no_grad():
             lora_param.fill_(clobber)
@@ -254,9 +263,7 @@ class TestPlainLoad:
         s.agent.load_checkpoint(str(s.path), load_optimizer=s.save_optimizer)
 
         _, lora_post = _find_param(s.agent, "lora_A.actor.weight")
-        assert torch.allclose(
-            lora_post, torch.full_like(lora_post, lora_sentinel)
-        ), (
+        assert torch.allclose(lora_post, torch.full_like(lora_post, lora_sentinel)), (
             f"LoRA weight not restored for cell "
             f"(lora_only={s.lora_only}, save_optimizer={s.save_optimizer})"
         )
@@ -286,7 +293,9 @@ class TestPlainLoad:
             exp_avg.fill_(sentinel)
 
         s.agent.save_checkpoint(
-            str(s.path), lora_only=s.lora_only, save_optimizer=s.save_optimizer,
+            str(s.path),
+            lora_only=s.lora_only,
+            save_optimizer=s.save_optimizer,
         )
         with torch.no_grad():
             exp_avg.fill_(clobber)
@@ -298,9 +307,7 @@ class TestPlainLoad:
                 f"optimizer state empty after load for cell "
                 f"(lora_only={s.lora_only}, save_optimizer=True)"
             )
-            assert torch.allclose(
-                restored, torch.full_like(restored, sentinel)
-            ), (
+            assert torch.allclose(restored, torch.full_like(restored, sentinel)), (
                 f"optimizer state not restored for cell "
                 f"(lora_only={s.lora_only}, save_optimizer=True)"
             )
@@ -311,14 +318,15 @@ class TestPlainLoad:
             post = _find_exp_avg(s.agent)
             # Sentinel must NOT be present (either rebuilt fresh or still clobbered).
             if post is not None:
-                assert not torch.allclose(
-                    post, torch.full_like(post, sentinel)
-                ), "optimizer state silently restored despite load_optimizer=False path"
+                assert not torch.allclose(post, torch.full_like(post, sentinel)), (
+                    "optimizer state silently restored despite load_optimizer=False path"
+                )
 
 
 # --------------------------------------------------------------------------- #
 # SAVE — deepspeed path                                                        #
 # --------------------------------------------------------------------------- #
+
 
 def _fit_deepspeed_mock(agent, zero_stage: int = 2) -> None:
     """Mutate ``agent`` so it looks like a DeepSpeed-wrapped agent for
@@ -365,7 +373,9 @@ def deepspeed_saved(request, grpo_template, tmp_path_factory):
         f"ds_save_lora={lora_only}_optim={save_optimizer}"
     )
     agent.save_checkpoint(
-        str(tmp_path), lora_only=lora_only, save_optimizer=save_optimizer,
+        str(tmp_path),
+        lora_only=lora_only,
+        save_optimizer=save_optimizer,
     )
     return SimpleNamespace(
         agent=agent,
@@ -401,19 +411,23 @@ class TestDeepspeedSave:
         assert (spy.call_count >= 1) == deepspeed_saved.lora_only
 
     def test_attributes_pt_has_actor_state_dict_only_when_full_no_optim(
-        self, deepspeed_saved,
+        self,
+        deepspeed_saved,
     ):
         ck = _load_attributes_pt(deepspeed_saved.path)
         ni = ck.get("network_info", {}) or {}
         modules = ni.get("modules", {}) if isinstance(ni, dict) else {}
         has_actor_sd = "actor_state_dict" in modules
-        expected = (not deepspeed_saved.lora_only) and (not deepspeed_saved.save_optimizer)
+        expected = (not deepspeed_saved.lora_only) and (
+            not deepspeed_saved.save_optimizer
+        )
         assert has_actor_sd == expected
 
 
 # --------------------------------------------------------------------------- #
 # LOAD — deepspeed path                                                        #
 # --------------------------------------------------------------------------- #
+
 
 @pytest.fixture(params=SAVE_LOAD_OPTIONS)
 def deepspeed_load_scenario(request, grpo_template, tmp_path):
@@ -438,7 +452,9 @@ def deepspeed_load_scenario(request, grpo_template, tmp_path):
 
     saver.actor.save_checkpoint = MagicMock(side_effect=_fake_ds_save)
     saver.save_checkpoint(
-        str(tmp_path), lora_only=lora_only, save_optimizer=save_optimizer,
+        str(tmp_path),
+        lora_only=lora_only,
+        save_optimizer=save_optimizer,
     )
 
     # Loader: spy its engine load so we can assert dispatch.
@@ -465,6 +481,7 @@ class TestDeepspeedLoad:
     def test_deepspeed_load_called_iff_save_optimizer(self, deepspeed_load_scenario):
         s = deepspeed_load_scenario
         from unittest.mock import patch
+
         inner = _inner_actor(s.agent)
         # Stub the non-deepspeed branches so they don't actually try to read
         # adapter files / overwrite state — we only care about dispatch here.
@@ -476,10 +493,12 @@ class TestDeepspeedLoad:
         assert (s.load_checkpoint_spy.call_count == 1) == s.save_optimizer
 
     def test_peft_adapter_load_when_lora_only_and_no_optim(
-        self, deepspeed_load_scenario,
+        self,
+        deepspeed_load_scenario,
     ):
         s = deepspeed_load_scenario
         from unittest.mock import patch
+
         inner = _inner_actor(s.agent)
         with (
             patch.object(s.agent, "_load_model_checkpoint") as peft_spy,
@@ -493,6 +512,7 @@ class TestDeepspeedLoad:
     def test_state_dict_load_when_full_and_no_optim(self, deepspeed_load_scenario):
         s = deepspeed_load_scenario
         from unittest.mock import patch
+
         inner = _inner_actor(s.agent)
         with (
             patch.object(s.agent, "_load_model_checkpoint"),
@@ -508,6 +528,7 @@ class TestDeepspeedLoad:
 # --------------------------------------------------------------------------- #
 # ZeRO-3 gather behaviour                                                      #
 # --------------------------------------------------------------------------- #
+
 
 class TestGatherIfZero3:
     """Sanity-check that gather_if_zero3 is entered when zero_stage=3.
@@ -533,10 +554,13 @@ class TestGatherIfZero3:
             yield
 
         with patch(
-            "agilerl.algorithms.core.base.gather_if_zero3", side_effect=gather_spy,
+            "agilerl.algorithms.core.base.gather_if_zero3",
+            side_effect=gather_spy,
         ):
             agent.save_checkpoint(
-                str(tmp_path), lora_only=True, save_optimizer=False,
+                str(tmp_path),
+                lora_only=True,
+                save_optimizer=False,
             )
         assert 3 in calls, "gather_if_zero3 was not entered for lora_only save"
 
@@ -556,10 +580,13 @@ class TestGatherIfZero3:
             yield
 
         with patch(
-            "agilerl.algorithms.core.base.gather_if_zero3", side_effect=gather_spy,
+            "agilerl.algorithms.core.base.gather_if_zero3",
+            side_effect=gather_spy,
         ):
             agent.save_checkpoint(
-                str(tmp_path), lora_only=False, save_optimizer=False,
+                str(tmp_path),
+                lora_only=False,
+                save_optimizer=False,
             )
         assert 3 in calls, "gather_if_zero3 was not entered for full save"
 
@@ -583,6 +610,7 @@ class TestGatherIfZero3:
 # cause the relevant tests to skip cleanly.
 try:
     from tests.test_algorithms.test_llms.test_grpo import deepspeed_config_stage_2
+
     _E2E_IMPORT_ERR: Exception | None = None
 except Exception as _e:  # pragma: no cover
     deepspeed_config_stage_2 = None  # type: ignore[assignment]
@@ -592,6 +620,7 @@ except Exception as _e:  # pragma: no cover
 def _require_cuda_deepspeed() -> None:
     """Skip if the environment can't run real DeepSpeed."""
     import torch
+
     if _E2E_IMPORT_ERR is not None:
         pytest.skip(f"E2E deepspeed imports unavailable: {_E2E_IMPORT_ERR!r}")
     if not torch.cuda.is_available():
@@ -606,7 +635,10 @@ def _require_cuda_deepspeed() -> None:
 
 @pytest.fixture(params=SAVE_LOAD_OPTIONS)
 def deepspeed_saved_e2e(
-    request, deepspeed_env, accelerator_factory, tmp_path,
+    request,
+    deepspeed_env,
+    accelerator_factory,
+    tmp_path,
 ):
     """Real DeepSpeed save per cell — ONE real accelerator+agent per test.
 
@@ -652,7 +684,10 @@ class TestDeepspeedSaveE2E:
 
 @pytest.fixture(params=SAVE_LOAD_OPTIONS)
 def deepspeed_load_scenario_e2e(
-    request, deepspeed_env, accelerator_factory, tmp_path,
+    request,
+    deepspeed_env,
+    accelerator_factory,
+    tmp_path,
 ):
     """Fresh real-DeepSpeed agent per load test.
 

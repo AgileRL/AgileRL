@@ -6,7 +6,6 @@ import inspect
 import os
 import pickle
 import tempfile
-from tkinter import Checkbutton
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict
@@ -58,6 +57,7 @@ from agilerl.protocols import (
 from agilerl.typing import (
     ActionType,
     ArrayDict,
+    CheckpointInfo,
     DeviceType,
     ExperiencesType,
     GymSpaceType,
@@ -69,7 +69,6 @@ from agilerl.typing import (
     ObservationType,
     OptimizerType,
     TorchObsType,
-    CheckpointInfo,
 )
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
@@ -146,12 +145,12 @@ class _RegistryMeta(type):
     """
 
     def __call__(
-        cls: type[EvolvableAlgorithm], # type: ignore[misc]
+        cls: type[EvolvableAlgorithm],  # type: ignore[misc]
         *args: Any,
         **kwargs: Any,
     ) -> EvolvableAlgorithm:
         # Create the instance
-        instance: EvolvableAlgorithm = super().__call__(*args, **kwargs) # type: ignore[misc]
+        instance: EvolvableAlgorithm = super().__call__(*args, **kwargs)  # type: ignore[misc]
 
         # Call the base class post_init_hook after all initialization
         if isinstance(instance, cls) and hasattr(instance, "_registry_init"):
@@ -2426,13 +2425,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if keep_existing_reference:
                 pass
             else:
-                self._copy_adapter_weights(source_adapter="actor", target_adapter="reference")
+                self._copy_adapter_weights(
+                    source_adapter="actor", target_adapter="reference"
+                )
 
         if "critic" in self.selected_adapters:
             if (Path(path) / "critic").exists():
                 self._load_adapter_weights(path, "critic", ckpt_lora_config)
             else:
-                self._copy_adapter_weights(source_adapter="actor", target_adapter="critic")
+                self._copy_adapter_weights(
+                    source_adapter="actor", target_adapter="critic"
+                )
 
     def _restore_checkpoint_attributes(self, checkpoint: dict[str, Any]) -> None:
         """Restore algorithm attributes from payload.
