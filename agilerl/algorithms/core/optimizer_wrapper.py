@@ -285,11 +285,19 @@ class OptimizerWrapper:
         )
 
     def __getattr__(self, name: str) -> Any:
+        # Never proxy dunder lookups — they must resolve against the class hierarchy,
+        # not self.optimizer. Proxying them breaks copy.deepcopy / pickle, because
+        # Python ends up calling e.g. self.optimizer.__getstate__ and then
+        # reconstructing a wrapper from the *inner* optimizer's state. This problem only comes up during testing on python < 3.12
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
         try:
-            return object.__getattribute__(self, name)
-        except AttributeError:
             opt = object.__getattribute__(self, "optimizer")
-            return getattr(opt, name)
+        except AttributeError:
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute {name!r}"
+            ) from None
+        return getattr(opt, name)
 
     def _infer_parent_container(self) -> EvolvableAlgorithmProtocol:
         """Infer the parent container dynamically using the stack frame.
