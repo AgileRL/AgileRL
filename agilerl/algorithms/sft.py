@@ -319,9 +319,12 @@ class SFT(LLMAlgorithm):
             prompts = env.reset()
             losses = []
             for _ in range(loop):
-                loss, _ = self.learn(prompts, training=False)
-                losses.append(loss)
+                metrics = self.learn(prompts, training=False)
+                losses.append(metrics["mean_loss"])
                 prompts = env.step()
+            print("Losses")
+            print(losses)
+            print(type(losses))
             mean_fit = -float(np.mean(losses))
         self.fitness.append(mean_fit)
         return np.array(mean_fit)

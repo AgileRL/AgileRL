@@ -10,12 +10,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -830,6 +830,7 @@ def create_population(
         _validate_llm_kwargs(kwargs, actor_network=actor_network)
         kwargs.pop("use_vllm", None)
         kwargs.pop("vllm_config", None)
+        kwargs.pop("use_separate_reference_adapter", None)
 
         for idx in range(population_size):
             act = (

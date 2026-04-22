@@ -375,11 +375,11 @@ def test_sft_learn(
     for name, param in sft.actor.named_parameters():
         if ("lora_A" in name or "lora_B" in name) and param is not None:
             param.data.normal_(mean=0, std=1.0)
-
     prompts = env.reset()
     pre_learn_actor_state_dict = copy.deepcopy(sft.actor.state_dict())
-    loss, perplexity = sft.learn(prompts)
-
+    metrics = sft.learn(prompts)
+    loss = metrics["mean_loss"]
+    perplexity = metrics["mean_perplexity"]
     assert isinstance(loss, float)
     assert isinstance(perplexity, float)
     assert perplexity >= 1.0  # perplexity is exp(loss), always >= 1
@@ -709,8 +709,8 @@ def test_sft_exception_on_recompile(
         reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
-    with pytest.raises(NotImplementedError):
-        sft.recompile()
+    # LLMAlgorithm.recompile() is a guarded no-op unless torch_compiler is enabled.
+    sft.recompile()
     sft.clean_up()
 
 

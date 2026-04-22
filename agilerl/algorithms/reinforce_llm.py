@@ -555,7 +555,7 @@ class REINFORCE(LLMAlgorithm):
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor.float()).item()
         self.fitness.append(mean_fit)
-        return reward_tensor
+        return np.array(mean_fit)
 
     def _compute_rebn_advantages(
         self,

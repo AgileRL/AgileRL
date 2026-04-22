@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import sys
 
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -190,7 +191,7 @@ class Info:
         self.dataset_name = name
 
 
-class DummyReasoningDataset(Datasets):
+class DummyReasoningDataset:
     def __init__(self, num_samples):
         # Create dummy questions and answers
         self.questions = [f"This is question {i}?" for i in range(num_samples)]
@@ -204,8 +205,21 @@ class DummyReasoningDataset(Datasets):
     def __getitem__(self, index):
         return {"question": self.questions[index], "answer": self.answers[index]}
 
+    def filter(self, fn):
+        keep_indices = [
+            i
+            for i in range(len(self))
+            if fn({"question": self.questions[i], "answer": self.answers[i]})
+        ]
+        filtered = DummyReasoningDataset(0)
+        filtered.questions = [self.questions[i] for i in keep_indices]
+        filtered.answers = [self.answers[i] for i in keep_indices]
+        filtered.features = {"question": filtered.questions, "answer": filtered.answers}
+        filtered.info = self.info
+        return filtered
 
-class DummyPreferenceDataset(Datasets):
+
+class DummyPreferenceDataset:
     def __init__(self, num_samples):
         self.prompt = [f"This is prompt {i}." for i in range(num_samples)]
         self.chosen = [f"This is chosen {i}." for i in range(num_samples)]
@@ -226,6 +240,30 @@ class DummyPreferenceDataset(Datasets):
             "chosen": self.chosen[index],
             "rejected": self.rejected[index],
         }
+
+    def filter(self, fn):
+        keep_indices = [
+            i
+            for i in range(len(self))
+            if fn(
+                {
+                    "prompt": self.prompt[i],
+                    "chosen": self.chosen[i],
+                    "rejected": self.rejected[i],
+                }
+            )
+        ]
+        filtered = DummyPreferenceDataset(0)
+        filtered.prompt = [self.prompt[i] for i in keep_indices]
+        filtered.chosen = [self.chosen[i] for i in keep_indices]
+        filtered.rejected = [self.rejected[i] for i in keep_indices]
+        filtered.features = {
+            "prompt": filtered.prompt,
+            "chosen": filtered.chosen,
+            "rejected": filtered.rejected,
+        }
+        filtered.info = self.info
+        return filtered
 
 
 def dummy_reward_fn(*args, **kwargs):
@@ -302,8 +340,7 @@ def test_reasoning_gym_init(
     assert list(next(env.train_dataloader_iter).keys()) == [
         "question",
         "answer",
-        "input_ids",
-        "attention_mask",
+        "tokenized_prompts",
     ]
     assert env.dataloader == env.train_dataloader_iter
     assert not env.reset_called
@@ -333,18 +370,11 @@ def test_reasoning_gym_step(
     env.reset()
     completions = [torch.randint(0, 1000, (10, 356)) for _ in range(data_batch_size)]
     tokenized_prompts, rewards = env.step(completions)
-    assert isinstance(tokenized_prompts, dict)
+    assert isinstance(tokenized_prompts, list)
     assert isinstance(rewards, torch.Tensor)
-    assert set(tokenized_prompts.keys()) == {
-        "input_ids",
-        "attention_mask",
-        "question",
-        "answer",
-    }
-    assert isinstance(tokenized_prompts["input_ids"], torch.Tensor)
-    assert isinstance(tokenized_prompts["attention_mask"], torch.Tensor)
-    assert isinstance(tokenized_prompts["question"], list)
-    assert isinstance(tokenized_prompts["answer"], list)
+    assert len(tokenized_prompts) > 0
+    assert isinstance(tokenized_prompts[0]["input_ids"], torch.Tensor)
+    assert isinstance(tokenized_prompts[0]["attention_mask"], torch.Tensor)
 
 
 @pytest.mark.parametrize("num_samples", [200])
@@ -366,17 +396,10 @@ def test_reasoning_gym_reset(
         data_batch_size_per_gpu=data_batch_size,
     )
     tokenized_prompts = env.reset(reset_dataloaders)
-    assert isinstance(tokenized_prompts, dict)
-    assert set(tokenized_prompts.keys()) == {
-        "input_ids",
-        "attention_mask",
-        "question",
-        "answer",
-    }
-    assert isinstance(tokenized_prompts["input_ids"], torch.Tensor)
-    assert isinstance(tokenized_prompts["attention_mask"], torch.Tensor)
-    assert isinstance(tokenized_prompts["question"], list)
-    assert isinstance(tokenized_prompts["answer"], list)
+    assert isinstance(tokenized_prompts, list)
+    assert len(tokenized_prompts) > 0
+    assert isinstance(tokenized_prompts[0]["input_ids"], torch.Tensor)
+    assert isinstance(tokenized_prompts[0]["attention_mask"], torch.Tensor)
 
 
 @pytest.mark.parametrize("num_samples", [200])
@@ -402,15 +425,15 @@ def test_reasoning_gym_reset_dataloaders(
     )  # use test_dataloader_iter as it is not shuffled
     env._reset_dataloaders()
     first_data_point_reset = next(env.test_dataloader_iter)
-    for key1, _key2 in zip(
-        first_data_point.keys(),
-        first_data_point_reset.keys(),
+    assert first_data_point["question"] == first_data_point_reset["question"]
+    assert first_data_point["answer"] == first_data_point_reset["answer"]
+    for prompt_a, prompt_b in zip(
+        first_data_point["tokenized_prompts"],
+        first_data_point_reset["tokenized_prompts"],
         strict=False,
     ):
-        if key1 in {"input_ids", "attention_mask"}:
-            assert torch.equal(first_data_point[key1], first_data_point_reset[key1])
-        else:
-            assert first_data_point[key1] == first_data_point_reset[key1]
+        assert torch.equal(prompt_a["input_ids"], prompt_b["input_ids"])
+        assert torch.equal(prompt_a["attention_mask"], prompt_b["attention_mask"])
 
 
 @pytest.mark.parametrize("num_samples", [200])
@@ -485,14 +508,14 @@ def test_create_chat_collate_fn(reasoning_dataset, num_samples):
     assert isinstance(result, dict)
     assert "question" in result
     assert "answer" in result
-    assert "input_ids" in result
-    assert "attention_mask" in result
+    assert "tokenized_prompts" in result
 
     # Verify the content
     assert result["question"] == ["What is 2+2?", "What is 3+3?"]
     assert result["answer"] == ["4", "6"]
-    assert result["input_ids"].shape[0] == 2
-    assert result["attention_mask"].shape[0] == 2
+    assert len(result["tokenized_prompts"]) == 2
+    assert isinstance(result["tokenized_prompts"][0]["input_ids"], torch.Tensor)
+    assert isinstance(result["tokenized_prompts"][0]["attention_mask"], torch.Tensor)
 
 
 @pytest.mark.parametrize("num_samples", [20])
@@ -961,8 +984,8 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             # Verify the fallback type aliases are set to Any
             assert llm_utils_reloaded.AutoTokenizer is Any
             assert llm_utils_reloaded.PreTrainedModel is Any
-            assert llm_utils_reloaded.BatchEncoding is Any
             assert llm_utils_reloaded.Dataset is Any
+            assert llm_utils_reloaded.AutoModelForCausalLM is Any
     finally:
         # Restore original module to avoid affecting other tests
         sys.modules["agilerl.utils.llm_utils"] = original_module

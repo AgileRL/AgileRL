@@ -3308,6 +3308,25 @@ class TestLLMInitializeActors:
         call_kw = mock_gpm.call_args
         assert call_kw[0][0] is dense
 
+    def test_warn_peft_model_warns_and_merges(self):
+        """_warn_peft_model emits the expected warning and merges adapters."""
+        agent = _make_llm_agent()
+        peft_model = _make_mock_peft_actor()
+        dense = torch.nn.Module()
+        peft_model.merge_and_unload.return_value = dense
+
+        with pytest.warns(
+            UserWarning,
+            match=re.escape(
+                "actor_network: A PeftModel was passed; calling merge_and_unload() to merge active adapter weights "
+                "into the dense base model before attaching new randomly initialized AgileRL adapters."
+            ),
+        ):
+            out = agent._warn_peft_model(peft_model, context="actor_network")
+
+        peft_model.merge_and_unload.assert_called_once_with()
+        assert out is dense
+
     def test_initialize_actors_with_separate_reference_adapter(self):
         agent = _make_llm_agent()
         agent.use_separate_reference_adapter = True

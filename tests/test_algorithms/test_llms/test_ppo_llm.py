@@ -773,7 +773,8 @@ def test_test_method_reasoning_gym_branch():
     ppo = _cpu_llmppo()
     env = _minimal_reasoning_gym("cpu", 100, 10, 2)
     out = ppo.test(env, loop=2)
-    assert out.numel() == 4  # loop=2 × batch_size=2
+    assert out.shape == ()
+    assert out.item() == pytest.approx(1.0)
 
 
 def test_test_method_multiturn_episode_env_branch():
@@ -822,7 +823,8 @@ def test_test_method_multiturn_episode_env_branch():
     ) as get_action:
         out = ppo.test(env, loop=2)
 
-    assert out.numel() == 4  # 2 loops × 2 turns
+    assert out.shape == ()
+    assert out.item() == pytest.approx(1.0)
     assert get_action.call_count == 4
     assert ppo.fitness[-1] == pytest.approx(1.0)
 
@@ -904,4 +906,5 @@ def test_llmppo_test_method_token_observation_wrapper_branch():
     )
     ppo = _cpu_llmppo(max_model_len=128, max_output_tokens=8)
     out = ppo.test(env, loop=1)
-    assert out.shape[0] >= 1
+    assert out.shape == ()
+    assert ppo.fitness[-1] == pytest.approx(float(out))

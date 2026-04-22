@@ -3148,7 +3148,7 @@ def test_grpo_test_method_multiturn_episode_env_branch(
     ) as get_action:
         out = grpo.test(env, loop=2)
 
-    assert out.numel() == 4  # 2 loops × 2 turns
+    assert out.shape == ()
     assert get_action.call_count == 4
     assert grpo.fitness[-1] == pytest.approx(1.0)
     grpo.clean_up()
@@ -3158,7 +3158,7 @@ def test_grpo_test_method_invalid_env_type_raises():
     grpo = _make_cpu_grpo_for_branch_tests()
     with pytest.raises(
         TypeError,
-        match="env must be a ReasoningGym \\(or subclass\\) or MultiTurnEpisodeEnv",
+        match=re.escape("env must be a ReasoningGym (or subclass) or MultiTurnEnv"),
     ):
         grpo.test(object(), loop=1)
     grpo.clean_up()
@@ -3805,8 +3805,7 @@ def test_grpo_exception_on_recompile(
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     )
-    with pytest.raises(NotImplementedError):
-        grpo.recompile()
+    grpo.recompile()
     grpo.clean_up()
 
 
@@ -3880,7 +3879,6 @@ def test_grpo_liger_unavailable_behaviour(
                 max_tokens=10,
                 use_separate_reference_adapter=False,
                 pretrained_model_name_or_path=None,
-                reduce_memory_peak=False,
                 micro_batch_size_per_gpu=None,
                 from_name=False,
                 group_size=2,
@@ -3899,7 +3897,6 @@ def test_grpo_liger_unavailable_behaviour(
             max_tokens=10,
             use_separate_reference_adapter=False,
             pretrained_model_name_or_path=None,
-            reduce_memory_peak=False,
             micro_batch_size_per_gpu=None,
             from_name=False,
             group_size=2,
@@ -4087,7 +4084,6 @@ def test_grpo_learn_raises_when_loss_not_finite(
         use_separate_reference_adapter=False,
         use_vllm=False,
         pretrained_model_name_or_path=None,
-        reduce_memory_peak=False,
         micro_batch_size_per_gpu=None,
         from_name=False,
     )
@@ -4101,7 +4097,7 @@ def test_grpo_learn_raises_when_loss_not_finite(
     with (
         patch.object(
             grpo,
-            "_grpo_loss",
+            "_loss",
             return_value=(
                 torch.tensor(float("nan"), device=grpo.device),
                 torch.tensor(0.0, device=grpo.device),
@@ -4113,7 +4109,7 @@ def test_grpo_learn_raises_when_loss_not_finite(
     grpo.clean_up()
 
 
-def test_grpo_learn_restores_gradient_checkpointing_after_base_disable(
+def test_grpo_learn_runs_without_gradient_checkpointing_hooks(
     deepspeed_env,
     grpo_factory,
     accelerator_factory,
@@ -4131,7 +4127,6 @@ def test_grpo_learn_restores_gradient_checkpointing_after_base_disable(
         use_separate_reference_adapter=False,
         use_vllm=False,
         pretrained_model_name_or_path=None,
-        reduce_memory_peak=False,
         micro_batch_size_per_gpu=None,
         from_name=False,
     )
@@ -4139,26 +4134,14 @@ def test_grpo_learn_restores_gradient_checkpointing_after_base_disable(
         if ("lora_A" in name or "lora_B" in name) and param is not None:
             param.data.normal_(mean=0, std=0.01)
 
-    base_lm = MagicMock()
-    base_lm.is_gradient_checkpointing = True
-    base_lm.gradient_checkpointing_disable = MagicMock()
-    base_lm.gradient_checkpointing_enable = MagicMock()
-
     completions = [
         torch.randint(0, 30, (2, 15), device=grpo.device),
     ]
     action_masks = [torch.ones((2, 14), device=grpo.device, dtype=torch.bool)]
     rewards = torch.stack([torch.rand(2, dtype=torch.float32)], dim=0)
 
-    with patch.object(
-        grpo,
-        "_get_base_lm_for_gradient_checkpointing",
-        return_value=base_lm,
-    ):
-        grpo.learn((completions, action_masks, rewards))
-
-    base_lm.gradient_checkpointing_disable.assert_called_once()
-    base_lm.gradient_checkpointing_enable.assert_called_once()
+    metrics = grpo.learn((completions, action_masks, rewards))
+    assert set(metrics.keys()) == {"mean_loss", "mean_kl"}
     grpo.clean_up()
 
 
@@ -4181,7 +4164,6 @@ def test_grpo_learn_calls_mps_empty_cache(
         use_separate_reference_adapter=False,
         use_vllm=False,
         pretrained_model_name_or_path=None,
-        reduce_memory_peak=False,
         micro_batch_size_per_gpu=None,
         from_name=False,
     )

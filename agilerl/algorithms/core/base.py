@@ -2941,12 +2941,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         separate PEFT adapters; forward behavior is kept in the merged dense model.
         """
         warnings.warn(
-            f"{context}: A PeftModel was passed; PEFT adapter tensors will be removed "
-            "and and the base model will be used with new randomly initialized adapters.",
+            f"{context}: A PeftModel was passed; calling merge_and_unload() to merge active adapter weights "
+            "into the dense base model before attaching new randomly initialized AgileRL adapters.",
             UserWarning,
             stacklevel=2,
         )
-        return peft_model.base_model
+        return peft_model.merge_and_unload()
 
     def _initialize_actors(
         self,
@@ -3382,7 +3382,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
             self.accelerator.backward(loss)
 
-            # FIXME fairly sure this doesnt need to be here as handled by accelerator
+            # FIXME fairly sure this does not need to be here as handled by accelerator
             # if not uses_deepspeed:
             #     for group in self.optimizer.optimizer.param_groups:
             #         clip_grad_norm_(group["params"], self.max_grad_norm)

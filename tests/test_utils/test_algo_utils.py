@@ -1400,14 +1400,14 @@ def test_concatenate_experiences_into_batches():
 
 def test_dummy_optimizer_step_raises():
     """DummyOptimizer.step raises RuntimeError."""
-    opt = DummyOptimizer([], 0.01)
+    opt = DummyOptimizer([])
     with pytest.raises(RuntimeError, match="DummyOptimizer"):
         opt.step()
 
 
 def test_dummy_optimizer_load_state_dict_raises():
     """DummyOptimizer.load_state_dict raises RuntimeError."""
-    opt = DummyOptimizer([], 0.01)
+    opt = DummyOptimizer([])
     with pytest.raises(RuntimeError, match="DummyOptimizer"):
         opt.load_state_dict({})
 
