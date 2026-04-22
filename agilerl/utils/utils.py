@@ -1152,9 +1152,7 @@ def tournament_selection_and_mutation(
 
     if language_model:
         elite, population = tournament.select(population)
-        if accelerator is None or (
-            accelerator is not None and accelerator.is_main_process
-        ):
+        if accelerator is None or accelerator.is_main_process:
             population = mutation.mutation(population)
         if accelerator is not None:
             accelerator.wait_for_everyone()

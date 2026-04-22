@@ -2255,11 +2255,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type path: string
         """
         checkpoint = self._load_attribute_checkpoint(path)
-        lora_only = checkpoint.get("lora_only", False) or checkpoint.get(
-            "_weights_only", False
+        # Backward compatibility: older checkpoints used "_weights_only" or
+        # "_lora_only" to signal adapter-only saves.
+        lora_only = any(
+            bool(checkpoint.get(flag, False))
+            for flag in ("lora_only", "_lora_only", "_weights_only")
         )
         if self.accelerator is not None or lora_only:
-            self._load_model_checkpoint(path, lora_only=lora_only)
+            self._load_model_checkpoint(path, weights_only=lora_only)
             self._restore_checkpoint_attributes(checkpoint)
             if hasattr(self.accelerator, "device"):
                 self.device = self.accelerator.device
@@ -2389,6 +2392,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             path,
             "actor",
         )
+        self._restore_adapter_trainability(["actor", "critic"])
 
     def _restore_checkpoint_attributes(self, checkpoint: dict[str, Any]) -> None:
         """Restore algorithm attributes from payload.
@@ -2469,7 +2473,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 if not is_dummy_optimizer
                 else type(self.actor.optimizer)
             )
-            if self.gradient_checkpointing:
+            if self.gradient_checkpointing:                
                 self._get_unwrapped_actor().gradient_checkpointing_enable(
                     gradient_checkpointing_kwargs={"use_reentrant": False},
                 )
@@ -2787,7 +2791,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     self.accelerator.wait_for_everyone()
                 self.use_adapter("actor")
 
-                # Reinit optimizer
+                # FIXME not convinced about this 
                 optim_class = self._select_optim_class()
                 self.optimizer = OptimizerWrapper(
                     optim_class,
@@ -2925,7 +2929,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 stacklevel=2,
             )
 
-    def _warn_merge_user_peft_to_dense(
+    def _warn_peft_model(
         self,
         peft_model: PeftModelProtocol,
         *,
@@ -2938,15 +2942,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         warnings.warn(
             f"{context}: A PeftModel was passed; PEFT adapter tensors will be removed "
-            "and active adapter weights merged into the base model, then new AgileRL "
-            "adapters will be added using lora_config. Pass a dense PreTrainedModel or "
-            "model_name to avoid merging. Use save_checkpoint / load_checkpoint to keep "
-            "AgileRL adapter weights across runs.",
+            "and and the base model will be used with new randomly initialized adapters.",
             UserWarning,
             stacklevel=2,
         )
-        with gather_if_zero3(self.zero_stage, list(peft_model.parameters())):
-            return peft_model.merge_and_unload()
+        return peft_model.base_model
 
     def _initialize_actors(
         self,
@@ -2974,7 +2974,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         if add_adapters:
             if isinstance(base_model, PeftModelProtocol):
-                base_model = self._warn_merge_user_peft_to_dense(
+                base_model = self._warn_peft_model(
                     base_model,
                     context="actor_network",
                 )
@@ -2983,7 +2983,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 getattr(base_model, "pretrained_model", None), PeftModelProtocol
             ):
                 inner = base_model.pretrained_model
-                base_model.pretrained_model = self._warn_merge_user_peft_to_dense(
+                base_model.pretrained_model = self._warn_peft_model(
                     inner,
                     context="actor_network.pretrained_model",
                 )
@@ -3377,16 +3377,19 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         :param loss: Combined loss.
         """
-        if self.accelerator is not None:
-            uses_deepspeed = self.accelerator.state.deepspeed_plugin is not None
+        if self._uses_deepspeed:
+            # uses_deepspeed = self.accelerator.state.deepspeed_plugin is not None
 
             self.accelerator.backward(loss)
 
-            if not uses_deepspeed:
-                for group in self.optimizer.optimizer.param_groups:
-                    clip_grad_norm_(group["params"], self.max_grad_norm)
-                self.optimizer.step()
-                self.optimizer.zero_grad()
+            # FIXME fairly sure this doesnt need to be here as handled by accelerator
+            # if not uses_deepspeed:
+            #     for group in self.optimizer.optimizer.param_groups:
+            #         clip_grad_norm_(group["params"], self.max_grad_norm)
+            #     self.optimizer.step()
+            #     self.optimizer.zero_grad()
+
+            # FIXMe lr scheduler needs a bit of work
             if self.lr_scheduler is not None:
                 self.lr_scheduler.step()
                 self.lr = self.lr_scheduler.get_last_lr()[0]
@@ -3506,9 +3509,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type prompts: list[dict[str, Any]]
         :param group_size: Repeat factor per prompt (1 for plain PPO).
         :type group_size: int
+        :param temperature: Temperature for sampling.
+        :type temperature: float | None
         :return: Per-prompt completion token tensors and matching action masks.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
+        if SamplingParams is None:
+            msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
+            raise ImportError(msg)
 
         def _trajectory_input_ids(prompt: dict[str, Any]) -> torch.Tensor:
             return cast(
@@ -3757,7 +3765,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if micro_batch_size_per_gpu is not None:
                 self.micro_batch_size_per_gpu = int(micro_batch_size_per_gpu)
             else:
-                self.micro_batch_size_per_gpu = 1
+                self.micro_batch_size_per_gpu = batch_size
             return
 
         ds_plugin = self.accelerator.state.deepspeed_plugin
@@ -3807,6 +3815,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
             ds_config["train_micro_batch_size_per_gpu"] = self.micro_batch_size_per_gpu
             return
+
+        if micro_batch_size_per_gpu == 0:
+            msg = (
+                "micro_batch_size_per_gpu is equal to zero, which is not allowed. "
+                "Please set micro_batch_size_per_gpu to a positive integer."
+            )
+            raise ValueError(msg)
+       
 
         self.micro_batch_size_per_gpu = int(micro_batch_size_per_gpu)
         if (

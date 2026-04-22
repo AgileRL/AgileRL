@@ -381,6 +381,7 @@ class GRPO(LLMAlgorithm):
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
+            
 
     def get_action(
         self,

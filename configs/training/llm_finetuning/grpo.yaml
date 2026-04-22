@@ -28,6 +28,7 @@ INIT_HP:
     ELITISM: true                         # Elitism in tournament selection
     POP_SIZE: 1                           # Population size
     EVAL_LOOP: 1                          # Evaluation episodes
+    USE_VLLM: true
     LORA:                                  # LoRA adapter configuration (passed to peft.LoraConfig)
         r: 16                              # LoRA rank
         lora_alpha: 64                     # LoRA scaling factor

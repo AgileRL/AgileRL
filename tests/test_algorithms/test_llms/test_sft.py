@@ -190,7 +190,7 @@ def test_init_sft(
         from_name=from_name,
     )
     assert sft.batch_size_per_process == 16 if not reduce_memory_peak else 1
-    assert sft.lr == 1e-4 if use_deepspeed_optimizer else 5e-5
+    assert sft.lr == 5e-5
     assert sft.max_grad_norm == 0.1
     assert sft.update_epochs == 1
     assert sft.temperature == 0

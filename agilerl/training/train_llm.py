@@ -43,8 +43,19 @@ def _validate_llm_evolution_args(
     evo_steps: int | None,
     tournament: TournamentSelection | None,
     mutation: Mutations | None,
+    checkpoint_steps: int | None = None,
 ) -> None:
-    """Validate that evolution arguments are provided in compatible combinations."""
+    """Validate that evolution/checkpoint arguments are provided compatibly.
+
+    :param evo_steps: Number of training iterations between evolution events.
+    :type evo_steps: int | None
+    :param tournament: Tournament selection operator.
+    :type tournament: TournamentSelection | None
+    :param mutation: Mutation operator.
+    :type mutation: Mutations | None
+    :param checkpoint_steps: Checkpoint cadence in training steps.
+    :type checkpoint_steps: int | None
+    """
     if evo_steps is not None and (tournament is None or mutation is None):
         warnings.warn(
             "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place.",
@@ -53,6 +64,17 @@ def _validate_llm_evolution_args(
     if (tournament is not None and mutation is not None) and evo_steps is None:
         msg = "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
         raise ValueError(msg)
+    if (
+        checkpoint_steps is not None
+        and evo_steps is not None
+        and tournament is not None
+        and mutation is not None
+    ):
+        warnings.warn(
+            "'checkpoint_steps' is set, but evolution is active ('evo_steps', 'tournament', and 'mutation'). "
+            "Periodic step-based checkpoints are skipped while evolution is enabled.",
+            stacklevel=2,
+        )
 
 
 def _validate_llm_mutation_probs(mutation: Mutations | None) -> None:
@@ -585,7 +607,7 @@ def finetune_llm_reasoning(
     :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps, defaults to None
     :type num_epochs: int, optional
     """
-    _validate_llm_evolution_args(evo_steps, tournament, mutation)
+    _validate_llm_evolution_args(evo_steps, tournament, mutation, checkpoint_steps)
     envs, uses_env_fn = _resolve_training_envs(pop=pop, env=env, env_fn=env_fn)
     env_name = envs[0].name
 
@@ -782,7 +804,7 @@ def finetune_llm_reasoning(
                 save_llm_checkpoint(agent, elite_path)
 
         wandb_dict: dict[str, Any] = {}
-        if wb or log_csv:
+        if agent_metrics_dict and (wb or log_csv):
             wandb_dict = build_train_wandb_dict(
                 agent_metrics_dict=agent_metrics_dict,
                 pop=pop,
@@ -913,7 +935,7 @@ def finetune_llm_preference(
     :param num_epochs: Number of epochs to run; takes precedence over max_steps.
     :type num_epochs: int | None
     """
-    _validate_llm_evolution_args(evo_steps, tournament, mutation)
+    _validate_llm_evolution_args(evo_steps, tournament, mutation, checkpoint_steps)
     envs, uses_env_fn = _resolve_training_envs(pop=pop, env=env, env_fn=env_fn)
     env_name = envs[0].name
     if num_epochs is not None and max_steps is not None:
@@ -1087,7 +1109,7 @@ def finetune_llm_preference(
                 save_llm_checkpoint(agent, elite_path)
 
         wandb_dict: dict[str, Any] = {}
-        if wb or log_csv:
+        if agent_metrics_dict and (wb or log_csv):
             wandb_dict = build_train_wandb_dict(
                 agent_metrics_dict=agent_metrics_dict,
                 pop=pop,
@@ -1131,7 +1153,10 @@ def finetune_llm_preference(
             f"{centered_text}\n"
             f"{border}\n"
             f"Fitness:\t\t{fitness}\n"
-            f"Score:\t\t{agg_metrics['rewards']}\n"
+            f"Reward Margin:\t{mean_reward_margin:.4f}\n"
+            f"Loss:\t\t{agg_metrics.get('loss', 'N/A')}\n"
+            f"Chosen Reward:\t{agg_metrics.get('mean_chosen_reward', 'N/A')}\n"
+            f"Rejected Reward:\t{agg_metrics.get('mean_rejected_reward', 'N/A')}\n"
             f"5 fitness avgs:\t{avg_fitness}\n"
             f"10 score avgs:\t{avg_score}\n"
             f"Agents:\t\t{agents}\n"
@@ -1225,7 +1250,7 @@ def finetune_llm_multiturn(
     :return: The finetuned population (same list object, possibly mutated in place).
     :rtype: PopulationType
     """
-    _validate_llm_evolution_args(evo_steps, tournament, mutation)
+    _validate_llm_evolution_args(evo_steps, tournament, mutation, checkpoint_steps)
     _validate_llm_mutation_probs(mutation)
 
     if not isinstance(pop[0], (LLMPPO, LLMReinforce, GRPO)):
@@ -1305,6 +1330,8 @@ def finetune_llm_multiturn(
     agg_eval_score: float | None = None
     group_seed = np.random.randint(0, 1000000)
     i = 0
+    next_checkpoint_step = checkpoint_steps
+    max_steps_checkpoint_saved = False
     group_size = getattr(pop[0], "group_size", 1)
     rollout_env = SyncMultiTurnVecEnv(env_factory, batch_size, group_size, env_config)
     while total_steps < max_steps:
@@ -1467,13 +1494,23 @@ def finetune_llm_multiturn(
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-        elif total_steps >= max_steps or (
-            checkpoint_steps is not None and (i + 1) % checkpoint_steps == 0
-        ):
-            save_llm_checkpoint(agent, elite_path)
+        else:
+            checkpoint_due = False
+            if checkpoint_steps is not None:
+                while (
+                    next_checkpoint_step is not None
+                    and total_steps >= next_checkpoint_step
+                ):
+                    checkpoint_due = True
+                    next_checkpoint_step += checkpoint_steps
+            if total_steps >= max_steps and not max_steps_checkpoint_saved:
+                checkpoint_due = True
+                max_steps_checkpoint_saved = True
+            if checkpoint_due:
+                save_llm_checkpoint(agent, elite_path)
 
         wandb_dict: dict[str, Any] = {}
-        if wb or log_csv:
+        if agent_metrics_dict and (wb or log_csv):
             wandb_dict = build_train_wandb_dict(
                 agent_metrics_dict=agent_metrics_dict,
                 pop=pop,
@@ -1589,7 +1626,7 @@ def finetune_llm_sft(
     :param num_epochs: Dataset passes; takes precedence over max_steps when set.
     :param log_csv: If True and ``elite_path`` is set, log aggregate metrics to CSV.
     """
-    _validate_llm_evolution_args(evo_steps, tournament, mutation)
+    _validate_llm_evolution_args(evo_steps, tournament, mutation, checkpoint_steps)
     envs, uses_env_fn = _resolve_training_envs(pop=pop, env=env, env_fn=env_fn)
     env_name = envs[0].name
 
