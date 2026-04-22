@@ -2513,9 +2513,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         if "critic" in self.selected_adapters and overwrite_critic_adapter:
             # Always overwrite the critic
-            self._copy_adapter_weights(
-                source_adapter="actor", target_adapter="critic"
-            )
+            self._copy_adapter_weights(source_adapter="actor", target_adapter="critic")
 
     def _restore_checkpoint_attributes(self, checkpoint: dict[str, Any]) -> None:
         """Restore algorithm attributes from payload.
@@ -3523,18 +3521,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param loss: Combined loss.
         """
         if self._uses_deepspeed:
-            # uses_deepspeed = self.accelerator.state.deepspeed_plugin is not None
-
             self.accelerator.backward(loss)
-
-            # FIXME fairly sure this does not need to be here as handled by accelerator
-            # if not uses_deepspeed:
-            #     for group in self.optimizer.optimizer.param_groups:
-            #         clip_grad_norm_(group["params"], self.max_grad_norm)
-            #     self.optimizer.step()
-            #     self.optimizer.zero_grad()
-
-            # FIXMe lr scheduler needs a bit of work
             if self.lr_scheduler is not None:
                 self.lr_scheduler.step()
                 self.lr = self.lr_scheduler.get_last_lr()[0]
