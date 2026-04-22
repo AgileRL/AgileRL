@@ -1693,7 +1693,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         for network in individual.evolvable_attributes(networks_only=True).values():
             network.rng = EvoDummyRNG()
 
-    test_agent = "agent_0" if algo != "IPPO" else "agent"
+    sample_agent_id = population[0].agent_ids[0]
+    test_agent = population[0].get_network_id(sample_agent_id)
     mut_methods = population[0].actors[test_agent].mutation_methods
     applied_mutations = set()
     for mut_method in mut_methods:
@@ -1815,7 +1816,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         accelerator=accelerator,
     )
 
-    test_agent = "agent_0"
+    sample_agent_id = population[0].agent_ids[0]
+    test_agent = population[0].get_network_id(sample_agent_id)
     mut_methods = population[0].actors[test_agent].mutation_methods
     for mut_method in mut_methods:
 

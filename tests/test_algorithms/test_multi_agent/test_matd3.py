@@ -117,6 +117,17 @@ class DummyDeterministicActor(DeterministicActor):
         return DummyNoSync()
 
 
+def get_group_index_map(agent_ids):
+    group_to_index = {}
+    for idx, agent_id in enumerate(agent_ids):
+        group_to_index.setdefault(agent_id.rsplit("_", 1)[0], idx)
+    return group_to_index
+
+
+def get_network_id(agent, agent_id):
+    return agent.get_group_id(agent_id) if agent.has_grouped_agents() else agent_id
+
+
 @pytest.fixture(scope="function")
 def mlp_actor(observation_spaces, action_spaces, request):
     observation_spaces = request.getfixturevalue(observation_spaces)
@@ -316,15 +327,76 @@ def test_initialize_matd3_with_net_config(
         )
 
     expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
-    for agent_id in matd3.agent_ids:
-        actor_optimizer = matd3.actor_optimizers[agent_id]
-        critic_1_optimizer = matd3.critic_1_optimizers[agent_id]
-        critic_2_optimizer = matd3.critic_2_optimizers[agent_id]
+    for network_id in matd3.observation_space:
+        actor_optimizer = matd3.actor_optimizers[network_id]
+        critic_1_optimizer = matd3.critic_1_optimizers[network_id]
+        critic_2_optimizer = matd3.critic_2_optimizers[network_id]
         assert isinstance(actor_optimizer, expected_optimizer_cls)
         assert isinstance(critic_1_optimizer, expected_optimizer_cls)
         assert isinstance(critic_2_optimizer, expected_optimizer_cls)
 
     assert isinstance(matd3.criterion, nn.MSELoss)
+
+
+def test_matd3_parameter_sharing_group_networks_and_optimizers(ma_vector_space):
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    matd3 = MATD3(
+        observation_spaces=ma_vector_space,
+        action_spaces=copy.deepcopy(ma_vector_space),
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+
+    assert set(matd3.actors.keys()) == set(matd3.shared_agent_ids)
+    assert set(matd3.critics_1.keys()) == set(matd3.shared_agent_ids)
+    assert set(matd3.critics_2.keys()) == set(matd3.shared_agent_ids)
+    assert set(matd3.actor_optimizers.optimizer.keys()) == set(matd3.shared_agent_ids)
+    assert set(matd3.critic_1_optimizers.optimizer.keys()) == set(
+        matd3.shared_agent_ids
+    )
+    assert set(matd3.critic_2_optimizers.optimizer.keys()) == set(
+        matd3.shared_agent_ids
+    )
+    assert set(matd3.learn_counter.keys()) == set(matd3.shared_agent_ids)
+
+    obs = {
+        agent_id: np.random.randn(*space.shape).astype(np.float32)
+        for agent_id, space in zip(agent_ids, ma_vector_space, strict=False)
+    }
+    processed_actions, raw_actions = matd3.get_action(obs)
+    assert set(processed_actions.keys()) == set(agent_ids)
+    assert set(raw_actions.keys()) == set(agent_ids)
+    matd3.clean_up()
+
+
+def test_matd3_learn_returns_group_losses_for_parameter_sharing(ma_vector_space):
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    batch_size = 8
+    matd3 = MATD3(
+        observation_spaces=ma_vector_space,
+        action_spaces=copy.deepcopy(ma_vector_space),
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+
+    states = {
+        agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+        for idx, agent_id in enumerate(agent_ids)
+    }
+    actions = {
+        agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+        for idx, agent_id in enumerate(agent_ids)
+    }
+    rewards = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
+    next_states = {
+        agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+        for idx, agent_id in enumerate(agent_ids)
+    }
+    dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
+
+    loss = matd3.learn((states, actions, rewards, next_states, dones))
+    assert set(loss.keys()) == set(matd3.shared_agent_ids)
+    matd3.clean_up()
 
 
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
@@ -381,19 +453,20 @@ def test_initialize_matd3_with_mlp_networks(
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
+    group_to_index = get_group_index_map(agent_ids)
     evo_actors = ModuleDict(
         {
-            agent_id: MakeEvolvable(
+            group_id: MakeEvolvable(
                 network=mlp_actor,
                 input_tensor=torch.randn(1, observation_spaces[0].shape[0]),
                 device=device,
             )
-            for agent_id in agent_ids
+            for group_id in group_to_index
         },
     )
     evo_critics_1 = ModuleDict(
         {
-            agent_id: MakeEvolvable(
+            group_id: MakeEvolvable(
                 network=mlp_critic,
                 input_tensor=torch.randn(
                     1,
@@ -401,12 +474,12 @@ def test_initialize_matd3_with_mlp_networks(
                 ),
                 device=device,
             )
-            for agent_id in agent_ids
+            for group_id in group_to_index
         },
     )
     evo_critics_2 = ModuleDict(
         {
-            agent_id: MakeEvolvable(
+            group_id: MakeEvolvable(
                 network=mlp_critic,
                 input_tensor=torch.randn(
                     1,
@@ -414,7 +487,7 @@ def test_initialize_matd3_with_mlp_networks(
                 ),
                 device=device,
             )
-            for agent_id in agent_ids
+            for group_id in group_to_index
         },
     )
     evo_critics = [evo_critics_1, evo_critics_2]
@@ -454,10 +527,10 @@ def test_initialize_matd3_with_mlp_networks(
     assert matd3.steps == [0]
 
     expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
-    for agent_id in matd3.agent_ids:
-        actor_optimizer = matd3.actor_optimizers[agent_id]
-        critic_1_optimizer = matd3.critic_1_optimizers[agent_id]
-        critic_2_optimizer = matd3.critic_2_optimizers[agent_id]
+    for network_id in matd3.observation_space:
+        actor_optimizer = matd3.actor_optimizers[network_id]
+        critic_1_optimizer = matd3.critic_1_optimizers[network_id]
+        critic_2_optimizer = matd3.critic_2_optimizers[network_id]
         assert isinstance(actor_optimizer, expected_optimizer_cls)
         assert isinstance(critic_1_optimizer, expected_optimizer_cls)
         assert isinstance(critic_2_optimizer, expected_optimizer_cls)
@@ -479,36 +552,37 @@ def test_initialize_matd3_with_cnn_networks(
 ):
     accelerator = Accelerator() if accelerator_flag else None
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    group_to_index = get_group_index_map(agent_ids)
     evo_actors = ModuleDict(
         {
-            agent_id: MakeEvolvable(
+            group_id: MakeEvolvable(
                 network=cnn_actor,
                 input_tensor=torch.randn(1, 3, 1, 32, 32),
                 device=device,
             )
-            for agent_id in agent_ids
+            for group_id in group_to_index
         },
     )
     evo_critics_1 = ModuleDict(
         {
-            agent_id: MakeEvolvable(
+            group_id: MakeEvolvable(
                 network=cnn_critic,
                 input_tensor=torch.randn(1, 3, 3, 32, 32),
                 secondary_input_tensor=torch.randn(1, 2),
                 device=device,
             )
-            for agent_id in agent_ids
+            for group_id in group_to_index
         },
     )
     evo_critics_2 = ModuleDict(
         {
-            agent_id: MakeEvolvable(
+            group_id: MakeEvolvable(
                 network=cnn_critic,
                 input_tensor=torch.randn(1, 3, 3, 32, 32),
                 secondary_input_tensor=torch.randn(1, 2),
                 device=device,
             )
-            for agent_id in agent_ids
+            for group_id in group_to_index
         },
     )
     evo_critics = [evo_critics_1, evo_critics_2]
@@ -547,10 +621,10 @@ def test_initialize_matd3_with_cnn_networks(
     assert matd3.steps == [0]
 
     expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
-    for agent_id in matd3.agent_ids:
-        actor_optimizer = matd3.actor_optimizers[agent_id]
-        critic_1_optimizer = matd3.critic_1_optimizers[agent_id]
-        critic_2_optimizer = matd3.critic_2_optimizers[agent_id]
+    for network_id in matd3.observation_space:
+        actor_optimizer = matd3.actor_optimizers[network_id]
+        critic_1_optimizer = matd3.critic_1_optimizers[network_id]
+        critic_2_optimizer = matd3.critic_2_optimizers[network_id]
         assert isinstance(actor_optimizer, expected_optimizer_cls)
         assert isinstance(critic_1_optimizer, expected_optimizer_cls)
         assert isinstance(critic_2_optimizer, expected_optimizer_cls)
@@ -582,35 +656,36 @@ def test_initialize_matd3_with_evo_networks(
     observation_space = spaces.Dict(
         {agent_id: observation_spaces[idx] for idx, agent_id in enumerate(agent_ids)},
     )
+    group_to_index = get_group_index_map(agent_ids)
 
     evo_actors = ModuleDict(
         {
-            agent_id: DeterministicActor(
+            group_id: DeterministicActor(
                 observation_spaces[idx],
                 ma_discrete_space[idx],
                 device=device,
             )
-            for idx, agent_id in enumerate(agent_ids)
+            for group_id, idx in group_to_index.items()
         },
     )
     evo_critics_1 = ModuleDict(
         {
-            agent_id: ContinuousQNetwork(
+            group_id: ContinuousQNetwork(
                 observation_space=observation_space,
                 action_space=concatenate_spaces(ma_discrete_space),
                 device=device,
             )
-            for agent_id in agent_ids
+            for group_id in group_to_index
         },
     )
     evo_critics_2 = ModuleDict(
         {
-            agent_id: ContinuousQNetwork(
+            group_id: ContinuousQNetwork(
                 observation_space=observation_space,
                 action_space=concatenate_spaces(ma_discrete_space),
                 device=device,
             )
-            for agent_id in agent_ids
+            for group_id in group_to_index
         },
     )
     evo_critics = [evo_critics_1, evo_critics_2]
@@ -656,10 +731,10 @@ def test_initialize_matd3_with_evo_networks(
     assert matd3.steps == [0]
 
     expected_optimizer_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
-    for agent_id in matd3.agent_ids:
-        actor_optimizer = matd3.actor_optimizers[agent_id]
-        critic_1_optimizer = matd3.critic_1_optimizers[agent_id]
-        critic_2_optimizer = matd3.critic_2_optimizers[agent_id]
+    for network_id in matd3.observation_space:
+        actor_optimizer = matd3.actor_optimizers[network_id]
+        critic_1_optimizer = matd3.critic_1_optimizers[network_id]
+        critic_2_optimizer = matd3.critic_2_optimizers[network_id]
         assert isinstance(actor_optimizer, expected_optimizer_cls)
         assert isinstance(critic_1_optimizer, expected_optimizer_cls)
         assert isinstance(critic_2_optimizer, expected_optimizer_cls)
@@ -679,24 +754,21 @@ def test_initialize_matd3_with_evo_networks(
         (
             ModuleDict(
                 {
-                    "agent_0": nn.Linear(6, 2),
-                    "agent_1": nn.Linear(6, 2),
-                    "other_agent_0": nn.Linear(6, 2),
+                    "agent": nn.Linear(6, 2),
+                    "other_agent": nn.Linear(6, 2),
                 },
             ),
             [
                 ModuleDict(
                     {
-                        "agent_0": nn.Linear(8, 1),
-                        "agent_1": nn.Linear(8, 1),
-                        "other_agent_0": nn.Linear(8, 1),
+                        "agent": nn.Linear(8, 1),
+                        "other_agent": nn.Linear(8, 1),
                     },
                 ),
                 ModuleDict(
                     {
-                        "agent_0": nn.Linear(8, 1),
-                        "agent_1": nn.Linear(8, 1),
-                        "other_agent_0": nn.Linear(8, 1),
+                        "agent": nn.Linear(8, 1),
+                        "other_agent": nn.Linear(8, 1),
                     },
                 ),
             ],
@@ -869,6 +941,30 @@ def test_matd3_get_action(
         for idx, env_action in enumerate(list(processed_action.values())):
             for action in env_action:
                 assert action <= action_spaces[idx].n - 1
+    matd3.clean_up()
+
+
+def test_matd3_get_action_with_partial_group_observations(
+    device,
+    ma_vector_space,
+    ma_discrete_space,
+):
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    state = {
+        "agent_0": np.random.randn(*ma_vector_space[0].shape),
+        "other_agent_0": np.random.randn(*ma_vector_space[2].shape),
+    }
+
+    matd3 = MATD3(
+        ma_vector_space,
+        ma_discrete_space,
+        agent_ids=agent_ids,
+        device=device,
+    )
+    processed_action, raw_action = matd3.get_action(state)
+
+    assert set(processed_action.keys()) == set(state.keys())
+    assert set(raw_action.keys()) == set(state.keys())
     matd3.clean_up()
 
 
@@ -1226,7 +1322,8 @@ def test_matd3_learns_from_experiences(
     assert isinstance(loss, dict)
 
     for agent_id in matd3.agent_ids:
-        assert loss[agent_id][-1] >= 0.0
+        network_id = get_network_id(matd3, agent_id)
+        assert loss[network_id][-1] >= 0.0
 
     for agent_id, old_actor_target in matd3.actor_targets.items():
         updated_actor_target = matd3.actor_targets[agent_id]
@@ -1295,13 +1392,13 @@ def test_matd3_learns_from_experiences_distributed(
         torch_compiler=compile_mode,
     )
 
-    for agent_id in matd3.agent_ids:
-        actor = matd3.actors[agent_id]
-        critic_1 = matd3.critics_1[agent_id]
-        critic_2 = matd3.critics_2[agent_id]
-        actor_target = matd3.actor_targets[agent_id]
-        critic_target_1 = matd3.critic_targets_1[agent_id]
-        critic_target_2 = matd3.critic_targets_2[agent_id]
+    for network_id in matd3.observation_space:
+        actor = matd3.actors[network_id]
+        critic_1 = matd3.critics_1[network_id]
+        critic_2 = matd3.critics_2[network_id]
+        actor_target = matd3.actor_targets[network_id]
+        critic_target_1 = matd3.critic_targets_1[network_id]
+        critic_target_2 = matd3.critic_targets_2[network_id]
         actor.no_sync = no_sync.__get__(actor)
         critic_1.no_sync = no_sync.__get__(critic_1)
         critic_2.no_sync = no_sync.__get__(critic_2)
@@ -1328,7 +1425,8 @@ def test_matd3_learns_from_experiences_distributed(
 
     assert isinstance(loss, dict)
     for agent_id in matd3.agent_ids:
-        assert loss[agent_id][-1] >= 0.0
+        network_id = get_network_id(matd3, agent_id)
+        assert loss[network_id][-1] >= 0.0
 
     for agent_id, old_actor_sd in actors_pre_learn_sd.items():
         updated_actor = matd3.actors[agent_id]
@@ -1368,13 +1466,13 @@ def test_matd3_soft_update(device, compile_mode, ma_vector_space, ma_discrete_sp
         torch_compiler=compile_mode,
     )
 
-    for agent_id in matd3.agent_ids:
-        actor = matd3.actors[agent_id]
-        actor_target = matd3.actor_targets[agent_id]
-        critic_1 = matd3.critics_1[agent_id]
-        critic_target_1 = matd3.critic_targets_1[agent_id]
-        critic_2 = matd3.critics_2[agent_id]
-        critic_target_2 = matd3.critic_targets_2[agent_id]
+    for network_id in matd3.observation_space:
+        actor = matd3.actors[network_id]
+        actor_target = matd3.actor_targets[network_id]
+        critic_1 = matd3.critics_1[network_id]
+        critic_target_1 = matd3.critic_targets_1[network_id]
+        critic_2 = matd3.critics_2[network_id]
+        critic_target_2 = matd3.critic_targets_2[network_id]
 
         # Check actors
         matd3.soft_update(actor, actor_target)
@@ -1553,36 +1651,37 @@ def test_matd3_clone_returns_identical_agent(
     assert clone_agent.torch_compiler == matd3.torch_compiler
 
     for agent_id in clone_agent.agent_ids:
+        network_id = get_network_id(matd3, agent_id)
         assert torch.equal(clone_agent.expl_noise[agent_id], matd3.expl_noise[agent_id])
 
-        clone_actor = clone_agent.actors[agent_id]
-        actor = matd3.actors[agent_id]
+        clone_actor = clone_agent.actors[network_id]
+        actor = matd3.actors[network_id]
         assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
 
-        clone_actor_target = clone_agent.actor_targets[agent_id]
-        actor_target = matd3.actor_targets[agent_id]
+        clone_actor_target = clone_agent.actor_targets[network_id]
+        actor_target = matd3.actor_targets[network_id]
         assert_state_dicts_equal(
             clone_actor_target.state_dict(),
             actor_target.state_dict(),
         )
 
-        clone_critic_1 = clone_agent.critics_1[agent_id]
-        critic_1 = matd3.critics_1[agent_id]
+        clone_critic_1 = clone_agent.critics_1[network_id]
+        critic_1 = matd3.critics_1[network_id]
         assert_state_dicts_equal(clone_critic_1.state_dict(), critic_1.state_dict())
 
-        clone_critic_target_1 = clone_agent.critic_targets_1[agent_id]
-        critic_target_1 = matd3.critic_targets_1[agent_id]
+        clone_critic_target_1 = clone_agent.critic_targets_1[network_id]
+        critic_target_1 = matd3.critic_targets_1[network_id]
         assert_state_dicts_equal(
             clone_critic_target_1.state_dict(),
             critic_target_1.state_dict(),
         )
 
-        clone_critic_2 = clone_agent.critics_2[agent_id]
-        critic_2 = matd3.critics_2[agent_id]
+        clone_critic_2 = clone_agent.critics_2[network_id]
+        critic_2 = matd3.critics_2[network_id]
         assert_state_dicts_equal(clone_critic_2.state_dict(), critic_2.state_dict())
 
-        clone_critic_target_2 = clone_agent.critic_targets_2[agent_id]
-        critic_target_2 = matd3.critic_targets_2[agent_id]
+        clone_critic_target_2 = clone_agent.critic_targets_2[network_id]
+        critic_target_2 = matd3.critic_targets_2[network_id]
         assert_state_dicts_equal(
             clone_critic_target_2.state_dict(),
             critic_target_2.state_dict(),
@@ -1653,36 +1752,37 @@ def test_clone_after_learning(compile_mode, ma_vector_space):
     assert matd3.torch_compiler == compile_mode
 
     for agent_id in clone_agent.agent_ids:
+        network_id = get_network_id(matd3, agent_id)
         assert torch.equal(clone_agent.expl_noise[agent_id], matd3.expl_noise[agent_id])
 
-        clone_actor = clone_agent.actors[agent_id]
-        actor = matd3.actors[agent_id]
+        clone_actor = clone_agent.actors[network_id]
+        actor = matd3.actors[network_id]
         assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
 
-        clone_actor_target = clone_agent.actor_targets[agent_id]
-        actor_target = matd3.actor_targets[agent_id]
+        clone_actor_target = clone_agent.actor_targets[network_id]
+        actor_target = matd3.actor_targets[network_id]
         assert_state_dicts_equal(
             clone_actor_target.state_dict(),
             actor_target.state_dict(),
         )
 
-        clone_critic_1 = clone_agent.critics_1[agent_id]
-        critic_1 = matd3.critics_1[agent_id]
+        clone_critic_1 = clone_agent.critics_1[network_id]
+        critic_1 = matd3.critics_1[network_id]
         assert_state_dicts_equal(clone_critic_1.state_dict(), critic_1.state_dict())
 
-        clone_critic_target_1 = clone_agent.critic_targets_1[agent_id]
-        critic_target_1 = matd3.critic_targets_1[agent_id]
+        clone_critic_target_1 = clone_agent.critic_targets_1[network_id]
+        critic_target_1 = matd3.critic_targets_1[network_id]
         assert_state_dicts_equal(
             clone_critic_target_1.state_dict(),
             critic_target_1.state_dict(),
         )
 
-        clone_critic_2 = clone_agent.critics_2[agent_id]
-        critic_2 = matd3.critics_2[agent_id]
+        clone_critic_2 = clone_agent.critics_2[network_id]
+        critic_2 = matd3.critics_2[network_id]
         assert_state_dicts_equal(clone_critic_2.state_dict(), critic_2.state_dict())
 
-        clone_critic_target_2 = clone_agent.critic_targets_2[agent_id]
-        critic_target_2 = matd3.critic_targets_2[agent_id]
+        clone_critic_target_2 = clone_agent.critic_targets_2[network_id]
+        critic_target_2 = matd3.critic_targets_2[network_id]
         assert_state_dicts_equal(
             clone_critic_target_2.state_dict(),
             critic_target_2.state_dict(),

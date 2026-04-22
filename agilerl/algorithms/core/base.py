@@ -78,6 +78,7 @@ from agilerl.utils.algo_utils import (
     check_supported_space,
     chkpt_attribute_to_device,
     clone_llm,
+    concatenate_tensors,
     create_warmup_cosine_scheduler,
     filter_init_dict,
     get_input_size_from_space,
@@ -1503,26 +1504,57 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     def preprocess_observation(
         self,
         observation: ObservationType,
+        group_ids: list[str] | None = None,
     ) -> dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
 
-        :param observations: Observations of environment
-        :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
+        :param observation: Observations of environment
+        :type observation: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
+        :param group_ids: Optional list of output IDs. When group IDs are provided
+            (e.g., ``["agent", "other_agent"]``), observations are grouped and
+            concatenated per group. Otherwise, observations are returned per
+            agent ID for backwards compatibility.
+        :type group_ids: list[str] | None
 
         :return: Preprocessed observations
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
-        preprocessed = {}
+        if group_ids is None:
+            preprocessed = {}
+            for agent_id, agent_obs in observation.items():
+                preprocessed[agent_id] = preprocess_observation(
+                    self.possible_observation_spaces.get(agent_id),
+                    observation=agent_obs,
+                    device=self.device,
+                    normalize_images=self.normalize_images,
+                    placeholder_value=self.placeholder_value,
+                )
+            return preprocessed
+
+        preprocessed: dict[str, list[TorchObsType] | TorchObsType] = {
+            group_id: [] for group_id in group_ids
+        }
         for agent_id, agent_obs in observation.items():
-            preprocessed[agent_id] = preprocess_observation(
-                self.possible_observation_spaces.get(agent_id),
-                observation=agent_obs,
-                device=self.device,
-                normalize_images=self.normalize_images,
-                placeholder_value=self.placeholder_value,
+            output_id = self.get_network_id(agent_id)
+            if output_id not in preprocessed:
+                preprocessed[output_id] = []
+
+            preprocessed[output_id].append(
+                preprocess_observation(
+                    self.observation_space.get(output_id),
+                    observation=agent_obs,
+                    device=self.device,
+                    normalize_images=self.normalize_images,
+                    placeholder_value=self.placeholder_value,
+                )
             )
 
-        return preprocessed
+        for output_id in list(preprocessed.keys()):
+            if not preprocessed[output_id]:
+                continue
+            preprocessed[output_id] = concatenate_tensors(preprocessed[output_id])
+
+        return cast("dict[str, TorchObsType]", preprocessed)
 
     def extract_action_masks(self, infos: InfosDict) -> ArrayDict:
         """Extract action masks from info dictionary.
@@ -1771,6 +1803,16 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :return: The group ID
         """
         return agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+
+    def get_network_id(self, agent_id: str) -> str:
+        """Get the actor/critic network ID for an agent.
+
+        :param agent_id: The agent ID
+        :type agent_id: str
+        :return: The network ID
+        :rtype: str
+        """
+        return self.get_group_id(agent_id) if self.has_grouped_agents() else agent_id
 
     def assemble_shared_inputs(self, experience: ExperiencesType) -> ExperiencesType:
         """Preprocesses inputs by constructing dictionaries by shared agents.
