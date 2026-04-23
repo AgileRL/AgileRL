@@ -1100,21 +1100,17 @@ def test_get_llm_accelerator_creates_new_plain_accelerator_for_nonzero_index():
     mock_ctor.assert_called_once_with()
 
 
-def test_get_llm_accelerator_clones_deepspeed_plugin_for_nonzero_index():
+def test_get_llm_accelerator_creates_new_plain_accelerator_with_plugin_for_nonzero_index():
     base = MagicMock(spec=Accelerator)
     plugin = object()
     base.state = MagicMock()
     base.state.deepspeed_plugin = plugin
-    cloned_plugin = object()
     fresh = MagicMock(spec=Accelerator)
     mock_ctor = MagicMock(return_value=fresh)
-    with (
-        patch("agilerl.utils.llm_utils.copy.deepcopy", return_value=cloned_plugin),
-        patch.dict(get_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
-    ):
+    with patch.dict(get_llm_accelerator.__globals__, {"Accelerator": mock_ctor}):
         out = get_llm_accelerator(base, idx=2)
     assert out is fresh
-    mock_ctor.assert_called_once_with(deepspeed_plugin=cloned_plugin)
+    mock_ctor.assert_called_once_with()
 
 
 def test_get_llm_accelerator_negative_index_raises():
