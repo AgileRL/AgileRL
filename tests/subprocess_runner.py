@@ -147,7 +147,7 @@ def resolve_fixtures(fixture_names, test_module, test_name):
             setup_deepspeed_env()
             fixtures[name] = None
         elif name == "accelerator_factory":
-            from tests.test_algorithms.test_llms.conftest import generate_accelerator
+            from tests.test_algorithms.conftest import generate_accelerator
 
             fixtures[name] = generate_accelerator
         elif name == "model_factory":
