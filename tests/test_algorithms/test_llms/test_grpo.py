@@ -2643,7 +2643,16 @@ def test_grpo_save_load_checkpoint(
                     assert getattr(grpo, attr) is not None
                     old_targets = set(getattr(grpo, attr).target_modules)
                     new_targets = set(getattr(new_grpo, attr).target_modules)
-                    assert old_targets.issubset(new_targets)
+                    assert old_targets == new_targets
+                    assert getattr(new_grpo, attr).r == getattr(grpo, attr).r
+                    assert (
+                        getattr(new_grpo, attr).lora_alpha
+                        == getattr(grpo, attr).lora_alpha
+                    )
+                    assert (
+                        getattr(new_grpo, attr).lora_dropout
+                        == getattr(grpo, attr).lora_dropout
+                    )
                 elif not isinstance(getattr(grpo, attr), torch.Tensor):
                     assert getattr(new_grpo, attr) == getattr(
                         grpo,
