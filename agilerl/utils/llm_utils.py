@@ -99,6 +99,10 @@ def normalize_reasoning_prompt_batch(
 
     Supports both legacy list-of-dicts and stacked dict formats where tensor/list
     values are batched on dimension 0.
+    :param prompts: The prompts to normalize.
+    :type prompts: ReasoningPrompts | list[ReasoningPrompts]
+    :return: The normalized prompts.
+    :rtype: list[ReasoningPrompts]
     """
     if isinstance(prompts, list):
         return prompts
@@ -321,6 +325,36 @@ def create_llm_accelerator(
         )
         raise RuntimeError(msg)
     return accelerator
+
+
+def get_llm_accelerator(
+    base_accelerator: Accelerator | None,
+    idx: int,
+) -> Accelerator | None:
+    """Return a per-agent accelerator from a base accelerator.
+
+    ``idx == 0`` reuses ``base_accelerator``. For additional agents this helper
+    creates a fresh ``Accelerator`` instance so each LLM algorithm owns an
+    independent accelerator/engine reference.
+
+    :param base_accelerator: Accelerator passed into population creation.
+    :type base_accelerator: Accelerator | None
+    :param idx: Agent index in the population.
+    :type idx: int
+    :return: Accelerator for the specific agent, or ``None``.
+    :rtype: Accelerator | None
+    """
+    if idx < 0:
+        msg = f"Population index must be non-negative, got {idx}."
+        raise ValueError(msg)
+
+    if base_accelerator is None:
+        return None
+
+    if idx == 0:
+        return base_accelerator
+
+    return Accelerator()
 
 
 def _auto_zero_stage(num_gpus: int, model_size_gb: float | None) -> int:

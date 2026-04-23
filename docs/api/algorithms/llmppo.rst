@@ -6,7 +6,7 @@ LLM Proximal Policy Optimization (LLM PPO)
 `PPO <https://arxiv.org/abs/1707.06347>`_ (Proximal Policy Optimization)
 is a policy-gradient method that keeps updates inside a clipped trust region.
 ``LLMPPO`` adapts this idea to causal language models and is designed for both
-single-turn and multi-turn finetuning.
+single-turn and multi-turn fine-tuning.
 
 In AgileRL, the implementation is turn-aware:
 

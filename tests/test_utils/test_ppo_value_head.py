@@ -51,3 +51,16 @@ def test_save_pretrained_peft_writes_bin_and_omits_state_dict_in_base_call(tmp_p
     assert (tmp_path / "pytorch_model.bin").exists()
     assert model._saved_args == (str(tmp_path),)
     assert "state_dict" not in model._saved_kwargs
+
+
+def test_save_pretrained_peft_accepts_save_directory_keyword(tmp_path):
+    model = _DummyPretrainedModel()
+    wrapped = AutoModelForCausalLMWithValueHead(model)
+    wrapped.is_peft_model = True
+
+    wrapped.save_pretrained(save_directory=str(tmp_path))
+
+    assert (tmp_path / "pytorch_model.bin").exists()
+    assert model._saved_args == ()
+    assert model._saved_kwargs["save_directory"] == str(tmp_path)
+    assert "state_dict" not in model._saved_kwargs

@@ -1,5 +1,5 @@
 import copy
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 import gymnasium as gym
 import numpy as np
@@ -553,6 +553,67 @@ def test_create_population_llmreinforce_normalized_name_and_kwargs_overrides(
     assert first_kw["torch_compiler"] == "inductor"
     assert first_kw["lr"] == init_hp["LR"]
     assert isinstance(first_kw["cosine_lr_schedule_config"], CosineLRScheduleConfig)
+
+
+@pytest.mark.skipif(
+    not HAS_LLM_DEPENDENCIES,
+    reason="agilerl[llm] not installed",
+)
+def test_create_population_llmppo_uses_unique_per_agent_accelerators(vector_space):
+    init_hp = {
+        "BATCH_SIZE": 2,
+        "LR": 7e-5,
+        "BETA": 0.01,
+        "MAX_GRAD_NORM": 0.5,
+        "UPDATE_EPOCHS": 1,
+        "MAX_MODEL_LEN": 96,
+        "MAX_OUTPUT_TOKENS": 12,
+        "USE_VLLM": False,
+        "GRADIENT_CHECKPOINTING": False,
+    }
+    actor = MagicMock(name="actor_network")
+    actor.state_dict.return_value = {"w": torch.tensor([1.0])}
+    cloned_actor = MagicMock(name="cloned_actor")
+    a0 = MagicMock(name="ppo_agent_0")
+    a1 = MagicMock(name="ppo_agent_1")
+    base_accelerator = MagicMock(name="base_accelerator")
+    acc0 = MagicMock(name="agent_accel_0")
+    acc1 = MagicMock(name="agent_accel_1")
+
+    with (
+        patch("agilerl.utils.utils.clone_llm", return_value=cloned_actor),
+        patch(
+            "agilerl.utils.utils.get_state_dict",
+            return_value={"w": torch.tensor([1.0])},
+        ),
+        patch(
+            "agilerl.utils.utils.get_llm_accelerator", side_effect=[acc0, acc1]
+        ) as mock_get_accel,
+        patch("agilerl.utils.utils.LLMPPO", side_effect=[a0, a1]) as mock_llmppo,
+    ):
+        population = create_population(
+            algo="LLMPPO",
+            observation_space=vector_space,
+            action_space=copy.deepcopy(vector_space),
+            net_config=None,
+            INIT_HP=init_hp,
+            hp_config=None,
+            population_size=2,
+            device="cpu",
+            accelerator=base_accelerator,
+            actor_network=actor,
+            algo_kwargs={"pad_token_id": 999, "pad_token": "<pad>", "use_vllm": False},
+        )
+
+    assert population == [a0, a1]
+    assert mock_get_accel.call_args_list == [
+        call(base_accelerator, 0),
+        call(base_accelerator, 1),
+    ]
+    first_kw = mock_llmppo.call_args_list[0].kwargs
+    second_kw = mock_llmppo.call_args_list[1].kwargs
+    assert first_kw["accelerator"] is acc0
+    assert second_kw["accelerator"] is acc1
 
 
 # The function returns a list of episode rewards from the first episode in each parallel environment.

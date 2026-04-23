@@ -385,6 +385,71 @@ def test_language_model_tournament(use_accelerator, elitism, num_processes):
     assert len(new_population) == population_size
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
+def test_tournament_detects_llm_by_type_not_algo_name():
+    """LLM branch selection should rely on type, not a specific algo string."""
+    tournament_selection = TournamentSelection(3, True, 1, 1)
+    actor_network = create_module(
+        input_size=1,
+        max_tokens=32,
+        vocab_size=128,
+        device="cpu",
+    )
+    agent = GRPO(
+        actor_network=actor_network,
+        pad_token_id=127,
+        pad_token="<pad>",
+        hp_config=None,
+        index=0,
+        batch_size=1,
+        beta=0.001,
+        lr=5e-6,
+        clip_coef=0.2,
+        max_grad_norm=0.1,
+        update_epochs=1,
+        group_size=1,
+        temperature=0.9,
+        calc_position_embeddings=True,
+        use_memory_efficient_params=True,
+        max_output_tokens=32,
+        min_output_tokens=None,
+        lora_config=LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        ),
+        cosine_lr_schedule_config=None,
+        accelerator=None,
+        device="cpu",
+    )
+    # Simulate a different LLM algorithm label to guard against string checks.
+    agent.algo = "LLMPPO"
+    agent.fitness = [1.0]
+
+    with (
+        pytest.MonkeyPatch.context() as m,
+    ):
+        llm_called = {"value": False}
+        std_called = {"value": False}
+
+        def _llm_branch(population):
+            llm_called["value"] = True
+            return (population[0], population)
+
+        def _std_branch(population):
+            std_called["value"] = True
+            return (population[0], population)
+
+        m.setattr(tournament_selection, "_select_llm_agents", _llm_branch)
+        m.setattr(tournament_selection, "_select_standard_agents", _std_branch)
+        tournament_selection.select([agent])
+
+    assert llm_called["value"] is True
+    assert std_called["value"] is False
+
+
 @pytest.mark.parametrize(
     "fitness_values,tournament_size",
     [

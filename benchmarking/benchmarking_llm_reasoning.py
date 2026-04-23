@@ -1,3 +1,6 @@
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl import HAS_LLM_DEPENDENCIES
 
 if not HAS_LLM_DEPENDENCIES:
@@ -93,7 +96,7 @@ def combined_rewards(completion, solution, prompt):
 
 
 def main(init_hp, mut_p):
-    del mut_p
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     train_dataset, test_dataset = make_dataset(DATASET)
 
@@ -132,11 +135,17 @@ def main(init_hp, mut_p):
         if use_vllm
         else None
     )
+    hp_config = HyperparameterConfig(
+        beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
+        lr=RLParameter(min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]),
+        lr_critic=RLParameter(min=mut_p["MIN_LR_CRITIC"], max=mut_p["MAX_LR_CRITIC"]),
+    )
+
     pop = create_population(
         algo=init_hp["ALGO"],
         net_config=None,
         INIT_HP=init_hp,
-        hp_config=None,
+        hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
         accelerator=accelerator,
         tokenizer=tokenizer,
@@ -144,18 +153,36 @@ def main(init_hp, mut_p):
         vllm_config=vllm_config,
     )
 
+    tournament = TournamentSelection(
+        init_hp["TOURN_SIZE"],
+        init_hp["ELITISM"],
+        init_hp["POP_SIZE"],
+        init_hp["EVAL_LOOP"],
+    )
+    mutations = Mutations(
+        no_mutation=mut_p["NO_MUT"],
+        architecture=mut_p.get("ARCH_MUT", 0.0),
+        new_layer_prob=mut_p.get("NEW_LAYER", 0.0),
+        parameters=mut_p.get("PARAMS_MUT", 0.0),
+        activation=mut_p.get("ACT_MUT", 0.0),
+        rl_hp=mut_p.get("RL_HP_MUT", 0.0),
+        mutation_sd=mut_p.get("MUT_SD", 0.0),
+        rand_seed=mut_p.get("RAND_SEED", 42),
+        device=accelerator.device,
+    )
+
     finetune_llm_reasoning(
         pop=pop,
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=None,
-        mutation=None,
-        tournament=None,
+        evo_steps=4,
+        mutation=mutations,
+        tournament=tournament,
         accelerator=accelerator,
         verbose=True,
     )

@@ -22,6 +22,7 @@ from agilerl.utils.llm_utils import (
     _auto_zero_stage,
     align_deepspeed_lr,
     create_llm_accelerator,
+    get_llm_accelerator,
     get_model_name_or_path,
     gather_if_zero3,
     get_state_dict,
@@ -1075,6 +1076,50 @@ def test_create_llm_accelerator_raises_without_explicit_or_launch_plugin():
         pytest.raises(RuntimeError, match="DeepSpeed is required"),
     ):
         create_llm_accelerator()
+
+
+def test_get_llm_accelerator_none_base_returns_none():
+    assert get_llm_accelerator(None, idx=0) is None
+    assert get_llm_accelerator(None, idx=3) is None
+
+
+def test_get_llm_accelerator_returns_base_for_first_index():
+    base = MagicMock(spec=Accelerator)
+    assert get_llm_accelerator(base, idx=0) is base
+
+
+def test_get_llm_accelerator_creates_new_plain_accelerator_for_nonzero_index():
+    base = MagicMock(spec=Accelerator)
+    base.state = MagicMock()
+    base.state.deepspeed_plugin = None
+    fresh = MagicMock(spec=Accelerator)
+    mock_ctor = MagicMock(return_value=fresh)
+    with patch.dict(get_llm_accelerator.__globals__, {"Accelerator": mock_ctor}):
+        out = get_llm_accelerator(base, idx=1)
+    assert out is fresh
+    mock_ctor.assert_called_once_with()
+
+
+def test_get_llm_accelerator_clones_deepspeed_plugin_for_nonzero_index():
+    base = MagicMock(spec=Accelerator)
+    plugin = object()
+    base.state = MagicMock()
+    base.state.deepspeed_plugin = plugin
+    cloned_plugin = object()
+    fresh = MagicMock(spec=Accelerator)
+    mock_ctor = MagicMock(return_value=fresh)
+    with (
+        patch("agilerl.utils.llm_utils.copy.deepcopy", return_value=cloned_plugin),
+        patch.dict(get_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
+    ):
+        out = get_llm_accelerator(base, idx=2)
+    assert out is fresh
+    mock_ctor.assert_called_once_with(deepspeed_plugin=cloned_plugin)
+
+
+def test_get_llm_accelerator_negative_index_raises():
+    with pytest.raises(ValueError, match="must be non-negative"):
+        get_llm_accelerator(None, idx=-1)
 
 
 def test_normalize_reasoning_prompt_batch_stacked_dict_to_per_sample_list():

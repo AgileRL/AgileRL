@@ -4,6 +4,7 @@ import gc
 import warnings
 from collections.abc import Callable
 from contextlib import nullcontext
+from inspect import Signature, signature
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -1058,3 +1059,20 @@ class GRPO(LLMAlgorithm):
 
         kl = aux[0]
         return loss.mean(), kl
+
+
+def _signatures_without_loss_type() -> tuple[Signature, Signature]:
+    """Build class and ``__init__`` signatures without ``loss_type``."""
+    grpo_sig = signature(GRPO.__init__)
+    class_params = [
+        param
+        for param in grpo_sig.parameters.values()
+        if param.name not in {"self", "loss_type"}
+    ]
+    init_params = [
+        param for param in grpo_sig.parameters.values() if param.name != "loss_type"
+    ]
+    return (
+        grpo_sig.replace(parameters=class_params),
+        grpo_sig.replace(parameters=init_params),
+    )

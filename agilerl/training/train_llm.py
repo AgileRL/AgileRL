@@ -6,10 +6,10 @@ from typing import Any
 
 import numpy as np
 import torch
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMREINFORCE, SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -786,6 +786,7 @@ def finetune_llm_reasoning(
                     elite_path=elite_path,
                     save_elite=save_elite,
                 )
+                print("POP MUTATED")
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
         else:

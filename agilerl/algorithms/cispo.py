@@ -3,27 +3,9 @@
 from __future__ import annotations
 
 from functools import partial
-from inspect import Signature, signature
 from typing import Any
 
-from agilerl.algorithms.grpo import GRPO
-
-
-def _signatures_without_loss_type() -> tuple[Signature, Signature]:
-    """Build class and ``__init__`` signatures without ``loss_type``."""
-    grpo_sig = signature(GRPO.__init__)
-    class_params = [
-        param
-        for param in grpo_sig.parameters.values()
-        if param.name not in {"self", "loss_type"}
-    ]
-    init_params = [
-        param for param in grpo_sig.parameters.values() if param.name != "loss_type"
-    ]
-    return (
-        grpo_sig.replace(parameters=class_params),
-        grpo_sig.replace(parameters=init_params),
-    )
+from agilerl.algorithms.grpo import GRPO, _signatures_without_loss_type
 
 
 class CISPO(GRPO):

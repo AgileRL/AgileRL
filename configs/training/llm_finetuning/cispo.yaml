@@ -9,13 +9,13 @@ MUTATION_PARAMS:
     MIN_BETA: 0.0001
     MAX_BETA: 0.01
     MIN_GROUP_SIZE: 4
-    MAX_GROUP_SIZE: 12
+    MAX_GROUP_SIZE: 20
 
 
 INIT_HP:
     ALGO: CISPO
-    BATCH_SIZE: 16
-    BETA: 0
+    BATCH_SIZE: 4
+    BETA: 0.001
     LR: 0.00001
     CLIP_COEF: 0.4
     MAX_GRAD_NORM: 1.0
@@ -33,6 +33,6 @@ INIT_HP:
     FILTER_ZERO_ADV: false
     USE_LIGER_LOSS: false
     ELITISM: true
-    POP_SIZE: 1
+    POP_SIZE: 4
     EVAL_LOOP: 1
-    USE_VLLM: true
+    USE_VLLM: false

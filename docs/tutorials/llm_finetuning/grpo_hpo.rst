@@ -8,8 +8,15 @@ on GRPO whilst finetuning an LLM, leading to superior reasoning performance with
 as referenced in the :ref:`evo_hyperparam_opt` section, we can select GRPO hyperparameters to maximise the performance of the LLM finetuning process.
 
 .. note::
-    Training populations of GRPO agents with HPO is computationally intensive, the below tutorial will take a long time to run. For faster, distributed training at scale
-    check out `AgileRL Arena <https://arena.agilerl.com>`_.
+    Population-based LLM training with GRPO is computationally intensive by nature and at larger
+    population sizes, wall-clock time becomes the bottleneck fast. This tutorial is
+    intentionally self-contained and runs agents sequentially, so expect it to be slow if
+    you're scaling up.
+
+    Parallelising this efficiently at scale is a hard infrastructure problem, and it's one
+    we've spent a lot of time on. `AgileRL Arena <https://arena.agilerl.com>`_ handles the
+    scheduling, parallelism, and resource management so you don't have to. If you're planning
+    to run serious experiments, it's worth taking a look.
 
 Dependencies
 ------------

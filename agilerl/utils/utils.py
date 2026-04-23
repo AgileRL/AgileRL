@@ -10,12 +10,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -43,7 +43,7 @@ from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 if HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import CISPO, DPO, GRPO, GSPO, SFT
-    from agilerl.utils.llm_utils import get_state_dict
+    from agilerl.utils.llm_utils import get_llm_accelerator, get_state_dict
 
 SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
 
@@ -741,6 +741,7 @@ def create_population(
             CosineLRScheduleConfig(**cosine_cfg) if cosine_cfg is not None else None
         )
         for idx in range(population_size):
+            agent_accelerator = get_llm_accelerator(accelerator, idx)
             act = (
                 (
                     clone_llm(
@@ -782,7 +783,7 @@ def create_population(
                 min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
                 max_model_len=INIT_HP.get("MAX_MODEL_LEN", 1024),
                 cosine_lr_schedule_config=cosine_lr,
-                accelerator=accelerator,
+                accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 seed=INIT_HP.get("SEED", 42),
@@ -828,6 +829,7 @@ def create_population(
         kwargs.pop("use_separate_reference_adapter", None)
 
         for idx in range(population_size):
+            agent_accelerator = get_llm_accelerator(accelerator, idx)
             act = (
                 (
                     clone_llm(
@@ -854,7 +856,7 @@ def create_population(
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-                accelerator=accelerator,
+                accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 seed=INIT_HP.get("SEED", 42),
@@ -883,6 +885,7 @@ def create_population(
         kwargs.pop("vllm_config", None)
 
         for idx in range(population_size):
+            agent_accelerator = get_llm_accelerator(accelerator, idx)
             act = (
                 (
                     clone_llm(
@@ -910,7 +913,7 @@ def create_population(
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-                accelerator=accelerator,
+                accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 seed=INIT_HP.get("SEED", 42),
@@ -940,6 +943,7 @@ def create_population(
             CosineLRScheduleConfig(**cosine_cfg) if cosine_cfg is not None else None
         )
         for idx in range(population_size):
+            agent_accelerator = get_llm_accelerator(accelerator, idx)
             act = (
                 (
                     clone_llm(
@@ -980,7 +984,7 @@ def create_population(
                 ),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
                 cosine_lr_schedule_config=cosine_lr,
-                accelerator=accelerator,
+                accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 seed=INIT_HP.get("SEED", 42),
@@ -1012,6 +1016,7 @@ def create_population(
             CosineLRScheduleConfig(**cosine_cfg) if cosine_cfg is not None else None
         )
         for idx in range(population_size):
+            agent_accelerator = get_llm_accelerator(accelerator, idx)
             act = (
                 (
                     clone_llm(
@@ -1049,7 +1054,7 @@ def create_population(
                     "USE_MEMORY_EFFICIENT_PARAMS", True
                 ),
                 cosine_lr_schedule_config=cosine_lr,
-                accelerator=accelerator,
+                accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 seed=INIT_HP.get("SEED", 42),

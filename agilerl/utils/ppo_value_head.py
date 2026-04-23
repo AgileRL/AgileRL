@@ -198,12 +198,16 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
             self.v_head.load_state_dict(v_sd, strict=False)
 
     def save_pretrained(self, *args: Any, **kwargs: Any) -> None:
+        """Save wrapped model while handling value-head state for PEFT and non-PEFT paths."""
         state_dict = kwargs.get("state_dict")
         if state_dict is None:
             state_dict = self.state_dict()
             kwargs["state_dict"] = state_dict
         if self.is_peft_model:
-            save_dir = args[0]
+            save_dir = args[0] if len(args) > 0 else kwargs.get("save_directory")
+            if save_dir is None:
+                msg = "save_pretrained requires a save directory via args or save_directory keyword."
+                raise ValueError(msg)
             os.makedirs(save_dir, exist_ok=True)
             torch.save(state_dict, os.path.join(save_dir, "pytorch_model.bin"))
             kwargs.pop("state_dict", None)

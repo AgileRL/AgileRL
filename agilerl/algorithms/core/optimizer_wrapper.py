@@ -28,6 +28,8 @@ def init_from_multiple(
     optimizer_cls: OptimizerType,
     lr: float,
     optimizer_kwargs: dict[str, Any],
+    lr_critic: bool = False,
+    use_lora: bool = False,
 ) -> Optimizer:
     """Initialize an optimizer from a list of networks.
 
@@ -127,6 +129,8 @@ class OptimizerWrapper:
     :param lr_critic: Learning rate for the critic/value-head group when
         ``use_llm_param_groups`` is True.
     :type lr_critic: float | None
+    :param is_llm_optimizer: If True, the optimizer is an LLM optimizer.
+    :type is_llm_optimizer: bool
     """
 
     optimizer: _Optimizer
@@ -139,15 +143,15 @@ class OptimizerWrapper:
         optimizer_kwargs: dict[str, Any] | None = None,
         network_names: list[str] | None = None,
         lr_name: LrNameType | None = None,
-        use_llm_param_groups: bool = False,
         lr_critic: float | None = None,
+        is_llm_optimizer: bool = False,
     ) -> None:
 
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs if optimizer_kwargs is not None else {}
         self.lr = lr
-        self.use_llm_param_groups = use_llm_param_groups
-        self.lr_critic = lr_critic if use_llm_param_groups else None
+        self.is_llm_optimizer = is_llm_optimizer
+        self.lr_critic = lr_critic
 
         if isinstance(networks, nn.Module):
             self.networks = [networks]
@@ -159,16 +163,16 @@ class OptimizerWrapper:
             msg = "Expected a single / list of torch.nn.Module objects."
             raise TypeError(msg)
 
-        if use_llm_param_groups:
+        if is_llm_optimizer:
             if isinstance(self.networks[0], ModuleDict):
-                msg = "use_llm_param_groups does not support ModuleDict networks."
+                msg = "is_llm_optimizer=True does not support ModuleDict networks."
                 raise TypeError(msg)
             if len(self.networks) != 1:
-                msg = "use_llm_param_groups expects exactly one network module."
+                msg = "is_llm_optimizer=True expects exactly one network module."
                 raise ValueError(msg)
             if network_names is None or lr_name is None:
                 msg = (
-                    "use_llm_param_groups requires explicit network_names and "
+                    "is_llm_optimizer=True requires explicit network_names and "
                     "lr_name=('lr_actor', 'lr_critic')."
                 )
                 raise ValueError(msg)
@@ -209,7 +213,7 @@ class OptimizerWrapper:
                     kwargs,
                 )
 
-        elif use_llm_param_groups:
+        elif is_llm_optimizer:
             assert isinstance(
                 optimizer_cls,
                 type,
@@ -449,7 +453,7 @@ class OptimizerWrapper:
 
     def __repr__(self) -> str:
         extra = ""
-        if self.use_llm_param_groups:
+        if self.is_llm_optimizer:
             extra = f",\n    lr_critic={self.lr_critic},\n    use_llm_param_groups=True"
         return (
             f"OptimizerWrapper(\n"

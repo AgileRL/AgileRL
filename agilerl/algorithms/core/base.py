@@ -912,7 +912,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             networks = [cloned_modules[net] for net in opt_config.networks]
             optim_cls = opt_config.get_optimizer_cls()
-            if getattr(orig_optimizer, "use_llm_param_groups", False) and isinstance(
+            if getattr(orig_optimizer, "is_llm_optimizer", False) and isinstance(
                 opt_config.lr,
                 tuple,
             ):
@@ -921,7 +921,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                     networks=networks,
                     lr=getattr(clone, opt_config.lr[0]),
                     lr_critic=getattr(clone, opt_config.lr[1]),
-                    use_llm_param_groups=True,
+                    is_llm_optimizer=True,
                     network_names=opt_config.networks,
                     lr_name=opt_config.lr,
                     optimizer_kwargs=opt_config.optimizer_kwargs,
@@ -1039,7 +1039,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             optimizer_cls = get_optimizer_cls(opt_dict[f"{name}_cls"])
             opt_networks = opt_dict[f"{name}_networks"]
             opt_lr = opt_dict[f"{name}_lr"]
-            use_llm_param_groups = opt_dict.get(f"{name}_use_llm_param_groups", False)
             networks = [getattr(self, net) for net in opt_networks]
             optimizer = OptimizerWrapper(
                 optimizer_cls=optimizer_cls,
@@ -1048,7 +1047,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 optimizer_kwargs=opt_kwargs,
                 network_names=opt_networks,
                 lr_name=opt_lr,
-                use_llm_param_groups=use_llm_param_groups,
                 lr_critic=getattr(self, "lr_critic", None),
             )
 
@@ -2051,13 +2049,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             warnings.warn(
                 "No LoRA config provided. AgileRL can only be used to finetune adapters at present. "
                 "Using default LoRA configuration for RL finetuning: "
-                "r=16, lora_alpha=64, target_modules='all-linear', task_type='CAUSAL_LM', lora_dropout=0.05."
+                "r=16, lora_alpha=32, target_modules='all-linear', task_type='CAUSAL_LM', lora_dropout=0.05."
                 "To use a different LoRA configuration, please pass lora_config to the constructor.",
                 stacklevel=2,
             )
             lora_config = LoraConfig(
                 r=16,
-                lora_alpha=64,
+                lora_alpha=32,
                 target_modules="all-linear",
                 task_type="CAUSAL_LM",
                 lora_dropout=0.05,
@@ -2589,7 +2587,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             network_names=["actor"],
             lr=self.lr,
             lr_critic=self.lr_critic,
-            use_llm_param_groups=True,
+            is_llm_optimizer=True,
             lr_name="lr" if self.lr_critic is None else ("lr_actor", "lr_critic"),
         )
 
@@ -2974,7 +2972,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     networks=[self.actor],
                     lr=self.lr,
                     lr_critic=self.lr_critic,
-                    use_llm_param_groups=True,
+                    is_llm_optimizer=True,
                     network_names=["actor"],
                     lr_name="lr"
                     if self.lr_critic is None
@@ -3247,7 +3245,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             networks=[self.actor],
             lr=self.lr,
             lr_critic=self.lr_critic,
-            use_llm_param_groups=True,
+            is_llm_optimizer=True,
             network_names=["actor"],
             lr_name="lr" if self.lr_critic is None else ("lr_actor", "lr_critic"),
         )
