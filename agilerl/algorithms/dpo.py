@@ -69,8 +69,6 @@ class DPO(LLMAlgorithm):
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
     :type clone: bool, optional
-    :param use_separate_reference_adapter: Flag to indicate if the reference policy should have a separate adapter, defaults to False
-    :type use_separate_reference_adapter: bool, optional
     :param seed: Seed for the random number generator, defaults to 42
     :type seed: int, optional
     :param gradient_checkpointing: Flag to indicate if gradient checkpointing should be used, defaults to True
@@ -81,6 +79,12 @@ class DPO(LLMAlgorithm):
         Requires ``liger_kernel`` to be installed; pass ``False`` to fall back to the standard PyTorch path.
         When ``training=False`` the standard path is always used regardless of this flag.
     :type use_liger_loss: bool, optional
+    :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
+        adapter whose weights are frozen snapshots of the actor used for the
+        DPO log-probability baseline. When ``False`` the reference log-probs
+        are obtained by disabling the actor adapter at inference time.
+        Defaults to True.
+    :type use_separate_reference_adapter: bool, optional
     """
 
     def __init__(
@@ -105,12 +109,12 @@ class DPO(LLMAlgorithm):
         accelerator: Accelerator | None = None,
         wrap: bool = True,
         clone: bool = False,
-        use_separate_reference_adapter: bool = False,
         seed: int = 42,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         use_liger_loss: bool = False,
         reduce_memory_peak: bool = False,
+        use_separate_reference_adapter: bool = True,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -135,7 +139,6 @@ class DPO(LLMAlgorithm):
             pad_token=pad_token,
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
-            use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
             actor_network=actor_network,
             model_config=model_config,
@@ -149,6 +152,7 @@ class DPO(LLMAlgorithm):
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
             reduce_memory_peak=reduce_memory_peak,
+            use_separate_reference_adapter=use_separate_reference_adapter,
         )
         self.beta = beta
         self.nll_alpha = nll_alpha

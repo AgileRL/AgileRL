@@ -663,6 +663,7 @@ def test_dpo_save_load_checkpoint(
             device="cuda" if torch.cuda.is_available() else "cpu",
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            lora_config=copy.deepcopy(dpo.lora_config),
         )
         new_dpo.load_checkpoint(tmpdir)
 
@@ -687,6 +688,20 @@ def test_dpo_save_load_checkpoint(
                     strict=False,
                 ):
                     assert torch.equal(param, new_param)
+            elif attr == "lora_config":
+                assert getattr(new_dpo, attr) is not None
+                assert getattr(dpo, attr) is not None
+                old_targets = set(getattr(dpo, attr).target_modules)
+                new_targets = set(getattr(new_dpo, attr).target_modules)
+                assert old_targets == new_targets
+                assert getattr(new_dpo, attr).r == getattr(dpo, attr).r
+                assert (
+                    getattr(new_dpo, attr).lora_alpha == getattr(dpo, attr).lora_alpha
+                )
+                assert (
+                    getattr(new_dpo, attr).lora_dropout
+                    == getattr(dpo, attr).lora_dropout
+                )
             elif attr in ("accelerator", "lr_scheduler"):
                 assert (
                     getattr(new_dpo, attr).__class__.__name__
@@ -741,8 +756,7 @@ def test_dpo_exception_on_recompile(
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     )
-    with pytest.raises(NotImplementedError):
-        dpo.recompile()
+    dpo.recompile()
     dpo.clean_up()
 
 

@@ -594,7 +594,6 @@ def test_sft_clean_up(
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-@pytest.mark.parametrize("lora_only", [False, True])
 def test_sft_save_load_checkpoint(
     deepspeed_env,
     sft_factory,
@@ -608,7 +607,6 @@ def test_sft_save_load_checkpoint(
     pretrained_model_name_or_path,
     reduce_memory_peak,
     micro_batch_size_per_gpu,
-    lora_only,
 ):
     sft = sft_factory(
         accelerator_factory,
@@ -624,7 +622,7 @@ def test_sft_save_load_checkpoint(
     )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with tempfile.TemporaryDirectory() as tmpdir:
-        sft.save_checkpoint(tmpdir, lora_only=lora_only)
+        sft.save_checkpoint(tmpdir)
         new_sft = SFT(
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
@@ -632,7 +630,7 @@ def test_sft_save_load_checkpoint(
             device="cuda" if torch.cuda.is_available() else "cpu",
             accelerator=accelerator,
         )
-        new_sft.load_checkpoint(tmpdir)
+        new_sft.load_checkpoint(tmpdir, merge_lora_configs=True)
 
         for attr in EvolvableAlgorithm.inspect_attributes(sft):
             if attr.startswith("_"):
@@ -660,6 +658,12 @@ def test_sft_save_load_checkpoint(
                     getattr(new_sft, attr).__class__.__name__
                     == getattr(sft, attr).__class__.__name__
                 )
+            elif attr == "lora_config":
+                assert getattr(new_sft, attr) is not None
+                assert getattr(sft, attr) is not None
+                old_targets = set(getattr(sft, attr).target_modules)
+                new_targets = set(getattr(new_sft, attr).target_modules)
+                assert old_targets.issubset(new_targets)
             elif not isinstance(getattr(sft, attr), torch.Tensor):
                 assert getattr(new_sft, attr) == getattr(sft, attr), (
                     f"Attribute {attr} is not equal"

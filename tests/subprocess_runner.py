@@ -26,6 +26,7 @@ import numpy as np
 import torch
 from _pytest.outcomes import Skipped
 from accelerate.state import AcceleratorState
+from torch._inductor.utils import fresh_cache
 
 from tests.utils import force_gpu_memory_release, wait_for_gpu_memory_to_clear
 

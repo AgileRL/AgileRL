@@ -8,6 +8,10 @@ proposes sequence-level importance-ratio optimization for LLM RL. Compared with
 token-level clipping, this reduces per-token noise and can improve long-run
 training stability on long responses.
 
+In AgileRL, GSPO can be used for single-turn reasoning tasks or multi-turn agentic finetuning. In the multi-turn case,
+rollouts are still treated as a bandit problem, with environment generated tokens masked and reward signal calculated
+from cumulative episode reward.
+
 Example
 -------
 

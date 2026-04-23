@@ -117,8 +117,6 @@ class GRPO(LLMAlgorithm):
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
     :type clone: bool, optional
-    :param use_separate_reference_adapter: Flag to indicate if the reference policy should have a separate adapter, defaults to False
-    :type use_separate_reference_adapter: bool, optional
     :param use_vllm: Flag to indicate if the model should use vllm for generation, defaults to False
     :type use_vllm: bool, optional
     :param vllm_config: Config for VLLM generation, defaults to None
@@ -141,6 +139,12 @@ class GRPO(LLMAlgorithm):
     :param loss_type: PPO-style loss variant to optimize. One of ``"grpo"``,
         ``"gspo"``, or ``"cispo"``, defaults to ``"grpo"``.
     :type loss_type: Literal["grpo", "gspo", "cispo"], optional
+    :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
+        adapter whose weights are frozen snapshots of the actor used for the
+        KL-divergence baseline. When ``False`` the reference log-probs are
+        obtained by disabling the actor adapter at inference time.
+        Defaults to True.
+    :type use_separate_reference_adapter: bool, optional
     :param whiten_advantages: If ``True``, whiten token-level advantages over
         valid action positions, defaults to False.
     :type whiten_advantages: bool, optional
@@ -190,7 +194,6 @@ class GRPO(LLMAlgorithm):
         device: str = "cpu",
         wrap: bool = True,
         clone: bool = False,
-        use_separate_reference_adapter: bool = False,
         use_vllm: bool = False,
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
@@ -200,6 +203,7 @@ class GRPO(LLMAlgorithm):
         use_kl_advantage_shaping: bool = False,
         adv_norm: str = "mean_std",
         loss_type: Literal["grpo", "gspo", "cispo"] = "grpo",
+        use_separate_reference_adapter: bool = True,
         whiten_advantages: bool = False,
         adv_clip_range: float | None = None,
         filter_zero_adv: bool = False,
