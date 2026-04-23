@@ -3,20 +3,18 @@
 Clipped Importance Sampling Policy Optimization (CISPO)
 =======================================================
 
-``CISPO`` (Clipped Importance Sampling Policy Optimization) is a
+`CISPO <https://arxiv.org/abs/2506.13585>`__ (Clipped Importance Sampling Policy Optimization) is a
 :class:`GRPO <agilerl.algorithms.grpo.GRPO>` specialization that clips
 importance weights directly and uses them to scale a log-prob objective.
 
-In practice this keeps all tokens in the gradient path while still bounding the
-magnitude of policy updates through clipped IS weights. The variant is used in
-modern LLM RL tooling and research codebases as an alternative to PPO-style
-surrogate clipping.
+CISPO uses the same group-based advantage calculation as GRPO, however, the objective function
+is closer to that of REINFORCE, multiplying the log-probability term of the function by a scaled
+importance ratio. A stop gradient is applied to the importance ratio, meaning the ratio is treated as
+a constant that scales each token's contribution to the overall policy gradient.
 
-In AgileRL, ``CISPO``:
-
-* inherits the full ``GRPO`` rollout/training stack,
-* fixes ``loss_type="cispo"`` at construction time,
-* keeps the same constructor arguments as ``GRPO`` except ``loss_type``.
+In AgileRL, CISPO can be used for single-turn reasoning tasks or multi-turn agentic finetuning. In the multi-turn case,
+rollouts are still treated as a bandit problem, with environment generated tokens masked and reward signal calculated
+from cumulative episode reward.
 
 Example
 -------

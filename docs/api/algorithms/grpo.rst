@@ -15,6 +15,10 @@ These changes are particularly valuable for LLM training because they reduce com
 need for a separate critic model, provide more stable gradient updates in environments with sparse or noisy rewards,
 and they simplify implementation while maintaining or improving performance.
 
+In AgileRL, GRPO can be used for single-turn reasoning tasks or multi-turn agentic finetuning. In the multi-turn case,
+rollouts are still treated as a bandit problem, with environment generated tokens masked and reward signal calculated
+from cumulative episode reward.
+
 
 Example
 -------

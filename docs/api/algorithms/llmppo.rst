@@ -17,6 +17,8 @@ In AgileRL, the implementation is turn-aware:
 * **Single-turn and multi-turn parity:** single-turn prompting is treated as
   the special case where all action tokens belong to turn ``0``.
 
+This algorithm can therefore be used in multi-turn agentic finetuning or single-turn reasoning tasks.
+
 Example
 -------
 
