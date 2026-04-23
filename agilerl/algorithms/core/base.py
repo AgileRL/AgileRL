@@ -1039,15 +1039,29 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             optimizer_cls = get_optimizer_cls(opt_dict[f"{name}_cls"])
             opt_networks = opt_dict[f"{name}_networks"]
             opt_lr = opt_dict[f"{name}_lr"]
+            is_llm_optimizer = bool(opt_dict.get(f"{name}_is_llm_optimizer", False))
+            if isinstance(opt_lr, (tuple, list)):
+                lr_attr = opt_lr[0]
+                lr_critic_attr = opt_lr[1] if len(opt_lr) > 1 else None
+                lr_value = getattr(self, lr_attr)
+                lr_critic_value = (
+                    getattr(self, lr_critic_attr)
+                    if lr_critic_attr is not None
+                    else None
+                )
+            else:
+                lr_value = getattr(self, opt_lr)
+                lr_critic_value = getattr(self, "lr_critic", None)
             networks = [getattr(self, net) for net in opt_networks]
             optimizer = OptimizerWrapper(
                 optimizer_cls=optimizer_cls,
                 networks=networks,
-                lr=getattr(self, opt_lr),
+                lr=lr_value,
                 optimizer_kwargs=opt_kwargs,
                 network_names=opt_networks,
                 lr_name=opt_lr,
-                lr_critic=getattr(self, "lr_critic", None),
+                lr_critic=lr_critic_value,
+                is_llm_optimizer=is_llm_optimizer,
             )
 
             # Load optimizer state
@@ -1205,16 +1219,31 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             # Add device to optimizer kwargs
             opt_kwargs = chkpt_attribute_to_device(opt_dict[f"{name}_kwargs"], device)
             lr = opt_dict[f"{name}_lr"]
+            is_llm_optimizer = bool(opt_dict.get(f"{name}_is_llm_optimizer", False))
             optimizer_cls = get_optimizer_cls(opt_dict[f"{name}_cls"])
             opt_networks = opt_dict[f"{name}_networks"]
+            if isinstance(lr, (tuple, list)):
+                lr_attr = lr[0]
+                lr_critic_attr = lr[1] if len(lr) > 1 else None
+                lr_value = getattr(self, lr_attr)
+                lr_critic_value = (
+                    getattr(self, lr_critic_attr)
+                    if lr_critic_attr is not None
+                    else None
+                )
+            else:
+                lr_value = getattr(self, lr)
+                lr_critic_value = getattr(self, "lr_critic", None)
             networks = [loaded_modules[net] for net in opt_networks]
             optimizer = OptimizerWrapper(
                 optimizer_cls=optimizer_cls,
                 networks=networks,
-                lr=getattr(self, lr),
+                lr=lr_value,
                 network_names=opt_networks,
                 lr_name=lr,
                 optimizer_kwargs=opt_kwargs,
+                lr_critic=lr_critic_value,
+                is_llm_optimizer=is_llm_optimizer,
             )
 
             state_dict = chkpt_attribute_to_device(
