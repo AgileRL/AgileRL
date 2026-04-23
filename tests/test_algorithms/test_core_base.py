@@ -1823,6 +1823,7 @@ class TestLLMCleanUp:
         assert agent.optimizer is None
         assert agent.lr_scheduler is None
 
+    @pytest.mark.llm
     def test_clean_up_deletes_vllm(self):
         agent = _make_llm_agent(accelerator=None)
         agent.accelerator = None
@@ -2154,6 +2155,7 @@ class TestLLMGetLmHead:
             agent._get_lm_head()
 
 
+@pytest.mark.llm
 class TestLLMConfigureVllm:
     def test_raises_when_vllm_not_installed(self):
         agent = _make_llm_agent()
@@ -3402,6 +3404,7 @@ class TestLLMInitMiscPaths:
             mock_set_seed.assert_called()
 
 
+@pytest.mark.llm
 class TestLLMGenerateWithVllmColocate:
     def test_raises_when_sampling_params_none(self):
         agent = _make_llm_agent()
@@ -3415,6 +3418,7 @@ class TestLLMGenerateWithVllmColocate:
                 agent._generate_with_vllm_colocate([], 1, 0.9)
 
 
+@pytest.mark.llm
 class TestLLMMoveModelToVllm:
     def test_move_model_to_vllm_resolves_model_ref(self):
         """``model_ref`` from unwrap (accelerator), ``DummyEvolvable.module``, or ``actor``."""
@@ -3927,6 +3931,7 @@ class TestLLMUseReferencePolicySeparateAdapter:
         assert critic_param.requires_grad
 
 
+@pytest.mark.llm
 class TestLLMMoveModelToVllmSkipsPrefixAndOriginalModule:
     """_move_model_to_vllm skips PEFT adapter params (lora_, original_module, etc.)."""
 
@@ -4123,6 +4128,7 @@ class TestLLMCloneWithDeepSpeed:
         assert result is cloned
 
 
+@pytest.mark.llm
 class TestLLMCloneWithVllm:
     """clone preserves vllm references during attribute copying."""
 
@@ -4434,6 +4440,7 @@ class TestLLMLoadAdapterWeights:
         assert not ref_param.requires_grad
 
 
+@pytest.mark.llm
 class TestLLMConfigureVllmAcceleratorPaths:
     """_configure_vllm with accelerator and various TP configurations."""
 
@@ -4458,7 +4465,8 @@ class TestLLMConfigureVllmAcceleratorPaths:
         mock_llm_cls.assert_called_once()
         acc.wait_for_everyone.assert_called()
 
-    def test_configure_vllm_tp_size_gt_1(self):
+    def test_configure_vllm_tp_size_gt_1(self, deepspeed_env):
+        del deepspeed_env
         acc = _make_mock_accelerator(num_processes=4)
         agent = _make_llm_agent(accelerator=acc)
         vllm_config = MagicMock()
@@ -4790,6 +4798,7 @@ class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:
         assert "linear_2" in set(agent.lora_config.target_modules)
 
 
+@pytest.mark.llm
 class TestLLMGenerateWithVllmColocateFullPaths:
     """_generate_with_vllm_colocate produces completions and action masks."""
 
@@ -4846,6 +4855,7 @@ class TestLLMGenerateWithVllmColocateFullPaths:
         assert len(action_masks) == 2
 
 
+@pytest.mark.llm
 class TestLLMGenerateWithVllmColocateAccelerator:
     """_generate_with_vllm_colocate waits for all processes with accelerator."""
 
@@ -4896,6 +4906,7 @@ class TestLLMGenerateWithVllmColocateAccelerator:
         assert len(completion_ids) == 1
 
 
+@pytest.mark.llm
 class TestLLMGenerateWithVllmColocateTP:
     """_generate_with_vllm_colocate gathers and slices with tensor_parallel > 1."""
 
