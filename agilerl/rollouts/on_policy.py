@@ -9,7 +9,6 @@ from gymnasium import spaces
 from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE, PPO
 from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType
-from agilerl.utils.algo_utils import stack_and_pad_experiences
 from agilerl.wrappers.llm_envs import SyncMultiTurnVecEnv
 
 SupportedOnPolicy = PPO
@@ -239,36 +238,6 @@ def collect_rollouts_recurrent(
     :rtype: list[float]
     """
     return _collect_rollouts(agent, env, n_steps, recurrent=True, **kwargs)
-
-
-def _stack_active_prompts(prompt_batch: list[dict[str, Any]]) -> dict[str, Any]:
-    stacked: dict[str, Any] = {}
-    tensor_keys = (
-        "input_ids",
-        "attention_mask",
-        "trajectory_input_ids",
-        "trajectory_attention_mask",
-        "stitch_prefix_ids",
-    )
-    for key in tensor_keys:
-        values = [prompt.get(key) for prompt in prompt_batch]
-        if any(v is None for v in values):
-            continue
-        (stacked_tensor,) = stack_and_pad_experiences(values, padding_values=[0])
-        if "attention_mask" in key:
-            stacked_tensor = stacked_tensor.long()
-        stacked[key] = stacked_tensor
-
-    initial_prompt_lengths = [
-        prompt.get("initial_prompt_len") for prompt in prompt_batch
-    ]
-    if all(v is not None for v in initial_prompt_lengths):
-        stacked["initial_prompt_len"] = torch.tensor(
-            initial_prompt_lengths,
-            dtype=torch.long,
-        )
-
-    return stacked
 
 
 def collect_rollouts_llm(

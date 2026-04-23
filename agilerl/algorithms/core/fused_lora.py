@@ -31,7 +31,7 @@ import torch.nn as nn
 
 try:
     from peft.tuners.lora.layer import LoraLayer
-except ImportError:
+except ImportError:  # pragma: no cover
     LoraLayer = None  # type: ignore[assignment, misc]
 
 

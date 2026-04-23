@@ -3681,15 +3681,20 @@ class TestEvolvableAlgorithmCloneWithAccelerator:
     def test_clone_unwraps_and_wraps_with_accelerator(self, vector_space):
         action_space = spaces.Discrete(2)
         AcceleratorState._reset_state(True)
-        accelerator = Accelerator()
+        accelerator = Accelerator(cpu=True)
+        accelerator.prepare = MagicMock(side_effect=lambda x: x)
+        accelerator.unwrap_model = MagicMock(side_effect=lambda x: x)
         agent = DummyRLAlgorithm(
             vector_space, action_space, index=0, accelerator=accelerator
         )
         clone = agent.clone(index=1, wrap=True)
         assert clone is not agent
         assert clone.index == 1
+        assert accelerator.unwrap_model.call_count >= 1
+        assert accelerator.prepare.call_count >= 1
         agent.accelerator = None
         clone.accelerator = None
+        AcceleratorState._reset_state(True)
 
 
 class _DummyRLWithTensor(DummyRLAlgorithm):

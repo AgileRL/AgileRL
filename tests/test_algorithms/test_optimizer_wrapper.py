@@ -9,11 +9,6 @@ from torch import nn
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.base import LLMAlgorithm
-from agilerl.algorithms.core.fused_lora import (
-    clear_fused_adapter_routing,
-    patch_lora_for_fused_forward,
-    set_fused_adapter_routing,
-)
 from agilerl.algorithms.core.optimizer_wrapper import init_llm_optimizer
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules import EvolvableModule, ModuleDict
@@ -1192,61 +1187,6 @@ def test_optimizer_wrapper_fallback_peft_type_when_no_llm_dependencies():
         sys.modules["agilerl.algorithms.core.optimizer_wrapper"] = original_module
 
 
-class _DummyLoraLayer(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.last_adapter_names = None
-
-    def forward(self, x, adapter_names=None):  # noqa: ANN001
-        self.last_adapter_names = adapter_names
-        return x
-
-
-class _DummyFusedModel(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.lora_a = _DummyLoraLayer()
-        self.linear = nn.Linear(2, 2)
-        self.lora_b = _DummyLoraLayer()
-
-
-def test_patch_lora_for_fused_forward_registers_hooks_and_cache():
-    model = _DummyFusedModel()
-    with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
-        patch_lora_for_fused_forward(model)
-
-    assert hasattr(model, "_fused_lora_layers")
-    assert len(model._fused_lora_layers) == 2
-    for layer in model._fused_lora_layers:
-        assert layer._fused_adapter_routing is None
-        assert len(layer._forward_pre_hooks) >= 1
-
-
-def test_set_and_clear_fused_adapter_routing_update_all_lora_layers():
-    model = _DummyFusedModel()
-    routing = ["actor", "critic"]
-    with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
-        patch_lora_for_fused_forward(model)
-        set_fused_adapter_routing(model, routing)
-        for layer in model._fused_lora_layers:
-            assert layer._fused_adapter_routing == routing
-
-        clear_fused_adapter_routing(model)
-        for layer in model._fused_lora_layers:
-            assert layer._fused_adapter_routing is None
-
-
-def test_fused_lora_hook_injects_adapter_names_into_forward_kwargs():
-    model = _DummyFusedModel()
-    routing = ["actor", "critic"]
-    with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
-        patch_lora_for_fused_forward(model)
-        set_fused_adapter_routing(model, routing)
-        _ = model.lora_a(torch.ones(1, 2))
-
-    assert model.lora_a.last_adapter_names == routing
-
-
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 def test_optimizer_wrapper_peft_type_when_llm_dependencies_available():
     original_module = sys.modules.pop("agilerl.algorithms.core.optimizer_wrapper", None)
@@ -1459,3 +1399,145 @@ def test_optimizer_cls_names_single_vs_multiagent():
     assert isinstance(names, dict)
     assert set(names.keys()) == {"net_0", "net_1"}
     assert all(v == "Adam" for v in names.values())
+
+
+def test_llm_param_groups_rejects_moduledict_networks():
+    networks = ModuleDict(
+        {"agent_0": MockEvolvableNetwork(name="agent_0")},
+    )
+    with pytest.raises(
+        TypeError,
+        match="use_llm_param_groups does not support ModuleDict networks",
+    ):
+        OptimizerWrapper(
+            torch.optim.Adam,
+            networks,
+            0.001,
+            use_llm_param_groups=True,
+            network_names=["networks"],
+            lr_name=("lr_actor", "lr_critic"),
+        )
+
+
+def test_llm_param_groups_requires_single_network():
+    net_a = MockEvolvableNetwork(name="a")
+    net_b = MockEvolvableNetwork(name="b")
+    with pytest.raises(
+        ValueError,
+        match="use_llm_param_groups expects exactly one network module",
+    ):
+        OptimizerWrapper(
+            torch.optim.Adam,
+            [net_a, net_b],
+            0.001,
+            use_llm_param_groups=True,
+            network_names=["actor"],
+            lr_name=("lr_actor", "lr_critic"),
+        )
+
+
+def test_llm_param_groups_requires_network_names_and_lr_name():
+    class _Net(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.actor_linear = nn.Linear(2, 1, bias=False)
+            self.critic_linear = nn.Linear(2, 1, bias=False)
+            self.v_head = nn.Module()
+            self.v_head.summary = nn.Linear(2, 1, bias=False)
+
+    with pytest.raises(
+        ValueError,
+        match="use_llm_param_groups requires explicit network_names and lr_name",
+    ):
+        OptimizerWrapper(
+            torch.optim.Adam,
+            _Net(),
+            0.001,
+            use_llm_param_groups=True,
+        )
+
+
+def test_getattr_dunder_name_raises_attribute_error():
+    network = MockEvolvableNetwork()
+    wrapper = OptimizerWrapper(
+        torch.optim.Adam,
+        network,
+        0.001,
+        network_names=["network"],
+        lr_name="lr",
+    )
+    with pytest.raises(AttributeError, match="__deepcopy__"):
+        wrapper.__getattr__("__deepcopy__")
+
+
+def test_getattr_missing_optimizer_attribute_has_clean_error():
+    wrapper = object.__new__(OptimizerWrapper)
+    with pytest.raises(
+        AttributeError,
+        match="OptimizerWrapper' object has no attribute 'anything'",
+    ):
+        _ = wrapper.anything
+
+
+def test_repr_includes_llm_param_group_fields():
+    class _Net(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.actor_linear = nn.Linear(2, 1, bias=False)
+            self.critic_linear = nn.Linear(2, 1, bias=False)
+            self.v_head = nn.Module()
+            self.v_head.summary = nn.Linear(2, 1, bias=False)
+
+    wrap = OptimizerWrapper(
+        torch.optim.Adam,
+        _Net(),
+        lr=0.01,
+        lr_critic=0.02,
+        use_llm_param_groups=True,
+        network_names=["actor"],
+        lr_name=("lr_actor", "lr_critic"),
+    )
+    text = repr(wrap)
+    assert "use_llm_param_groups=True" in text
+    assert "lr_critic=0.02" in text
+
+
+def test_init_llm_optimizer_enables_lora_actor_and_critic_params():
+    class _Net(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.actor_lora_weight = nn.Parameter(
+                torch.ones(2, 2),
+                requires_grad=False,
+            )
+            self.critic_lora_weight = nn.Parameter(
+                torch.ones(2, 2),
+                requires_grad=False,
+            )
+            self.other_weight = nn.Parameter(torch.ones(2, 2), requires_grad=False)
+            self.v_head = nn.Module()
+            self.v_head.summary = nn.Linear(2, 1, bias=False)
+
+    net = _Net()
+    _ = init_llm_optimizer(net, torch.optim.Adam, 0.01, {}, lr_critic=0.02)
+
+    assert net.actor_lora_weight.requires_grad is True
+    assert net.critic_lora_weight.requires_grad is True
+    assert net.other_weight.requires_grad is False
+
+
+def test_optimizer_wrapper_infers_parent_container_from_constructor_stack():
+    class _Container:
+        def __init__(self) -> None:
+            self.lr = 0.001
+            self.network = MockEvolvableNetwork()
+            self.wrapper = OptimizerWrapper(
+                torch.optim.Adam,
+                self.network,
+                self.lr,
+            )
+
+    container = _Container()
+
+    assert container.wrapper.network_names == ["network"]
+    assert container.wrapper.lr_name == "lr"

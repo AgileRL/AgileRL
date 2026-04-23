@@ -39,6 +39,7 @@ from agilerl.algorithms.core.base import (
     LLMAlgorithm,
     OptimizerWrapper,
 )
+from agilerl.algorithms.grpo import HAS_LIGER_KERNEL
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
 from tests.utils import (
@@ -1173,6 +1174,10 @@ def test_init_grpo_new_validation_errors(extra_kwargs, expected_msg):
         _make_cpu_grpo_for_branch_tests(**extra_kwargs)
 
 
+@pytest.mark.skipif(
+    not HAS_LIGER_KERNEL,
+    reason="KL-shaping liger warning path requires liger-kernel availability.",
+)
 def test_init_grpo_liger_warns_and_disables_unsupported_kl_shaping():
     with pytest.warns(
         UserWarning,
@@ -1186,6 +1191,10 @@ def test_init_grpo_liger_warns_and_disables_unsupported_kl_shaping():
     grpo.clean_up()
 
 
+@pytest.mark.skipif(
+    not HAS_LIGER_KERNEL,
+    reason="Non-grpo liger warning path requires liger-kernel availability.",
+)
 def test_init_grpo_liger_warns_and_falls_back_to_standard_path_for_non_grpo_loss():
     with pytest.warns(
         UserWarning,
