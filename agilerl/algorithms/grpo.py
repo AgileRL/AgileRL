@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import torch
-from transformers import GenerationConfig
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 
@@ -42,7 +41,7 @@ from agilerl.utils.llm_utils import (
     stitch_completion_after_windowed_hf_generate,
 )
 
-if HAS_LLM_DEPENDENCIES:
+if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from transformers import GenerationConfig
 
 
