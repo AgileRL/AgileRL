@@ -630,7 +630,7 @@ def test_sft_save_load_checkpoint(
             device="cuda" if torch.cuda.is_available() else "cpu",
             accelerator=accelerator,
         )
-        new_sft.load_checkpoint(tmpdir)
+        new_sft.load_checkpoint(tmpdir, merge_lora_configs=True)
 
         for attr in EvolvableAlgorithm.inspect_attributes(sft):
             if attr.startswith("_"):
@@ -658,6 +658,12 @@ def test_sft_save_load_checkpoint(
                     getattr(new_sft, attr).__class__.__name__
                     == getattr(sft, attr).__class__.__name__
                 )
+            elif attr == "lora_config":
+                assert getattr(new_sft, attr) is not None
+                assert getattr(sft, attr) is not None
+                old_targets = set(getattr(sft, attr).target_modules)
+                new_targets = set(getattr(new_sft, attr).target_modules)
+                assert old_targets.issubset(new_targets)
             elif not isinstance(getattr(sft, attr), torch.Tensor):
                 assert getattr(new_sft, attr) == getattr(sft, attr), (
                     f"Attribute {attr} is not equal"

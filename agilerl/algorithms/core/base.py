@@ -189,6 +189,12 @@ def get_checkpoint_dict(
     attribute_dict["agilerl_version"] = version("agilerl")
     attribute_dict.pop("accelerator", None)
     attribute_dict.pop("rollout_buffer", None)
+
+    # NOTE: this feels messy, refactor this to be more elegant
+    if omit_actor_info and "actor" in attribute_dict:
+        attribute_dict.pop("actor", None)
+    if omit_optimizer_info and "optimizer" in attribute_dict:
+        attribute_dict.pop("optimizer", None)
     if attribute_dict.pop("lr_scheduler", None) is not None:
         attribute_dict["lr_scheduler"] = agent.lr_scheduler.state_dict()
 
@@ -213,7 +219,6 @@ def get_checkpoint_dict(
                 checkpoint_info["optimizer_names"].append(name)
 
     attribute_dict["network_info"] = checkpoint_info
-
     return attribute_dict
 
 
@@ -1985,14 +1990,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     _separate_reference_adapter_deprecation_emitted = False
     _allowed_adapters = frozenset({"actor", "reference", "critic"})
 
-    # Typed as non-optional: the actor/optimizer are always assigned by
-    # ``_initialize_actors`` before any learn/get_action call. :meth:`clean_up` rebinds
-    # them to ``None`` purely to drop GPU refs — callers must not touch the algorithm
-    # after that.
-    actor: PeftModelProtocol
-    optimizer: OptimizerWrapper
-    lr_scheduler: SequentialLR | None
-
     def __init__(
         self,
         index: int,
@@ -2296,7 +2293,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         #                        (save_optimizer=True) or is gathered and injected
         #                        via the manual state_dict path below (F, F).
         #   * plain + lora_only=False → full state_dict round-trips through attrs.pt.
-        omit_actor_info = lora_only or self._uses_deepspeed
+        omit_actor_info = lora_only or self.accelerator is not None
         omit_optimizer_info = True
         state_dict = {}
         if save_optimizer:
@@ -2363,9 +2360,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def load_checkpoint(
         self,
         path: str,
-        load_optimizer: bool = True,
+        load_optimizer: bool = True,  # FIXME I think this should default to False
         overwrite_reference_adapter: bool = False,
         overwrite_critic_adapter: bool = True,
+        merge_lora_configs: bool = False,
     ) -> None:
         """Load adapter weights and algorithm state from a checkpoint directory.
 
@@ -2381,8 +2379,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             left as the live fresh LoRA init.
 
         LoRA config reconciliation: when the checkpoint's config and the live
-        algorithm's config disagree (e.g. after a rank mutation between
-        runs), the two are merged non-destructively:
+        algorithm's config disagree, loading fails fast by default. Pass
+        ``merge_lora_configs=True`` to merge them for compatibility:
 
           * ``r`` (rank) \u2192 ``max(current, checkpoint)``; the smaller side's
             weights are padded into the top-left rank slice of the larger
@@ -2390,8 +2388,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
           * ``target_modules`` / ``modules_to_save`` \u2192 union.
           * Any other mismatched field \u2192 current value wins, with a warning.
 
-        Any adapter whose live config ends up differing from the merged
-        result is rebuilt via :meth:`_reconfigure_adapters_to_match` before
+        Any adapter whose live config ends up differing from the selected
+        target config is rebuilt via :meth:`_reconfigure_adapters_to_match` before
         weights are loaded, so tensors always land in the correct shape.
 
           No DeepSpeed:
@@ -2425,6 +2423,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             ``<path>/save_checkpoint``; otherwise optimizer state is read
             from ``attributes.pt``.
         :type load_optimizer: bool
+        :param merge_lora_configs: If ``True``, allow loading checkpoints whose
+            LoRA config differs from the live agent by reconciling them.
+            If ``False`` (default), mismatched LoRA configs raise ``ValueError``.
+        :type merge_lora_configs: bool
         """
         pickle_module = dill if self.accelerator is None else pickle
         checkpoint = torch.load(
@@ -2439,9 +2441,22 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self._uses_deepspeed:
             if load_optimizer:
                 self._load_distributed_actor(path, tag="save_checkpoint")
+                # DeepSpeed restore resumes actor/optimizer shards. For LoRA-only
+                # checkpoints also load adapter dirs so reference/critic adapters
+                # are refreshed from PEFT artifacts.
+                if lora_only:
+                    self._load_model_checkpoint(
+                        path,
+                        overwrite_reference_adapter,
+                        overwrite_critic_adapter,
+                        merge_lora_configs,
+                    )
             elif lora_only:
                 self._load_model_checkpoint(
-                    path, overwrite_reference_adapter, overwrite_critic_adapter
+                    path,
+                    overwrite_reference_adapter,
+                    overwrite_critic_adapter,
+                    merge_lora_configs,
                 )
             else:
                 model_ref = self._get_unwrapped_actor()
@@ -2467,7 +2482,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             # Load checkpoint before super() so that we can merge the LoRA configs if they are mismatched
             if lora_only:
                 self._load_model_checkpoint(
-                    path, overwrite_reference_adapter, overwrite_critic_adapter
+                    path,
+                    overwrite_reference_adapter,
+                    overwrite_critic_adapter,
+                    merge_lora_configs,
                 )
             # ``super().load_checkpoint`` restores every attribute from the
             # checkpoint, which would clobber the just-merged ``lora_config`` /
@@ -2487,24 +2505,42 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         path: str,
         overwrite_reference_adapter: bool = False,
         overwrite_critic_adapter: bool = True,
+        merge_lora_configs: bool = False,
     ) -> None:
         """Restore LoRA adapter weights from a checkpoint directory.
 
         Reconciles any LoRA config mismatch (e.g. rank mutation) between the checkpoint
-        and the live algorithm via :meth:`_merge_lora_configs` / :meth:`_reconfigure_adapters_to_match`
-        before loading weights. Reference and Critic LoRA adapters in the checkpoint can be overwritten by the Actor using the ``overwrite_reference_adapter`` and ``overwrite_critic_adapter`` flags.
+        and the live algorithm before loading weights. By default mismatches raise
+        ``ValueError``; pass ``merge_lora_configs=True`` to use
+        :meth:`_merge_lora_configs` compatibility behavior. Reference and Critic
+        LoRA adapters in the checkpoint can be overwritten by the Actor using the
+        ``overwrite_reference_adapter`` and ``overwrite_critic_adapter`` flags.
 
         :param path: Checkpoint directory path.
         :type path: str
         :param overwrite_reference_adapter: If ``True`` do not overwrite the live reference
             adapter. Defaults to ``False``.
         :type overwrite_reference_adapter: bool
+        :param merge_lora_configs: Whether to merge mismatched LoRA configs instead
+            of failing fast.
+        :type merge_lora_configs: bool
         """
         ckpt_lora_config = self._load_checkpoint_lora_config(path)
         if ckpt_lora_config is not None:
-            self.lora_config = self._merge_lora_configs(
-                self.lora_config, ckpt_lora_config
-            )
+            if self.lora_config is None:
+                self.lora_config = ckpt_lora_config
+            elif self._lora_configs_equivalent(self.lora_config, ckpt_lora_config):
+                self.lora_config = ckpt_lora_config
+            elif merge_lora_configs:
+                self.lora_config = self._merge_lora_configs(
+                    self.lora_config, ckpt_lora_config
+                )
+            else:
+                raise ValueError(
+                    self._format_lora_config_mismatch_error(
+                        self.lora_config, ckpt_lora_config
+                    )
+                )
             self._reconfigure_adapters_to_match(self.lora_config)
 
         for adapter in self.selected_adapters:
@@ -2959,13 +2995,19 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type adapter_name: str
         """
         peft_model = self._peft_model
-        peft_model.set_adapter(adapter_name)
         if adapter_name == "reference":
-            for name, param in self.actor.named_parameters():
-                if param is not None and "reference" in name:
-                    param.requires_grad = False
+            if self.use_separate_reference_adapter:
+                peft_model.set_adapter("reference")
+                for name, param in self.actor.named_parameters():
+                    if param is not None and "reference" in name:
+                        param.requires_grad = False
+            else:
+                peft_model.base_model.disable_adapter_layers()
         else:
-            self._restore_adapter_trainability(["actor", "critic"])
+            if self.use_separate_reference_adapter:
+                peft_model.set_adapter(adapter_name)
+            else:
+                peft_model.base_model.enable_adapter_layers()
 
     @contextmanager
     def select_adapter(self, adapter_name: str) -> None:
@@ -3014,7 +3056,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             assert self.actor is not None, (
                 "Actor is not defined, please check that the actor is defined."
             )
-            self._restore_adapter_trainability(self.selected_adapters)
+            # Keep reference adapter frozen in DeepSpeed checkpoints so frozen
+            # param fragments are emitted consistently on save/load roundtrips.
+            trainable_adapters = [
+                name for name in self.selected_adapters if name != "reference"
+            ]
+            self._restore_adapter_trainability(trainable_adapters)
             self.actor.save_checkpoint(
                 path, tag=tag, exclude_frozen_parameters=lora_only
             )
@@ -4189,6 +4236,51 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return LoraConfig(**merged_kwargs)
 
     @staticmethod
+    def _format_lora_config_mismatch_error(
+        current: LoraConfig,
+        checkpoint: LoraConfig,
+    ) -> str:
+        """Format a user-facing error for mismatched LoRA configs.
+
+        :param current: LoRA config from the live loading agent.
+        :type current: peft.LoraConfig
+        :param checkpoint: LoRA config persisted in the checkpoint.
+        :type checkpoint: peft.LoraConfig
+        :return: Error string with mismatch context and remediation.
+        :rtype: str
+        """
+
+        def summarize(cfg: LoraConfig) -> dict[str, Any]:
+            """Summarize key LoRA config fields for mismatch messages."""
+            cfg_dict = cfg.to_dict() if hasattr(cfg, "to_dict") else dict(vars(cfg))
+            summary_keys = (
+                "r",
+                "lora_alpha",
+                "target_modules",
+                "modules_to_save",
+                "bias",
+                "task_type",
+            )
+            summary = {key: cfg_dict.get(key) for key in summary_keys}
+            for key in ("target_modules", "modules_to_save"):
+                value = summary.get(key)
+                if isinstance(value, (set, tuple)):
+                    summary[key] = sorted(value)
+            return summary
+
+        current_summary = summarize(current)
+        checkpoint_summary = summarize(checkpoint)
+        return (
+            "LoRA configs differ; refusing to load checkpoint with "
+            "merge_lora_configs=False.\n"
+            f"Current config: {current_summary}\n"
+            f"Checkpoint config: {checkpoint_summary}\n"
+            "Resolution:\n"
+            "  1) Ensure the loading agent uses the checkpoint LoRA config, or\n"
+            "  2) call load_checkpoint(..., merge_lora_configs=True)."
+        )
+
+    @staticmethod
     def _lora_configs_equivalent(a: LoraConfig, b: LoraConfig) -> bool:
         """Structural equality for two ``LoraConfig`` instances.
 
@@ -4202,13 +4294,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: ``True`` iff every keyword field is equal after normalisation.
         :rtype: bool
         """
+        ignore_keys = {"inference_mode"}
+        ordered_keys = ("target_modules", "modules_to_save", "exclude_modules")
         a_dict = a.to_dict() if hasattr(a, "to_dict") else dict(vars(a))
         b_dict = b.to_dict() if hasattr(b, "to_dict") else dict(vars(b))
-        for key in ("target_modules", "modules_to_save", "exclude_modules"):
+        for key in ordered_keys:
             for d in (a_dict, b_dict):
                 val = d.get(key)
                 if isinstance(val, (list, tuple, set)):
                     d[key] = sorted(val)
+        for key in ignore_keys:
+            a_dict.pop(key, None)
+            b_dict.pop(key, None)
         return a_dict == b_dict
 
     def _reconfigure_adapters_to_match(self, target_config: LoraConfig) -> None:

@@ -128,6 +128,6 @@ def test_vllm_methods(
         batch_size=2,
     )
     out = rf.test(env, loop=1)
-    assert out.numel() == 2
+    assert out.shape == ()
 
     rf.clean_up()

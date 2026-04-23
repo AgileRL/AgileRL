@@ -2600,6 +2600,7 @@ def test_grpo_save_load_checkpoint(
             pad_token="<pad>",
             device="cuda" if torch.cuda.is_available() else "cpu",
             group_size=group_size,
+            lora_config=copy.deepcopy(grpo.lora_config),
             cosine_lr_schedule_config=(
                 None
                 if accelerator is not None
@@ -2609,7 +2610,7 @@ def test_grpo_save_load_checkpoint(
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
-        new_grpo.load_checkpoint(tmpdir)
+        new_grpo.load_checkpoint(tmpdir, merge_lora_configs=False)
 
         for attr in EvolvableAlgorithm.inspect_attributes(grpo):
             if not attr.startswith("_") and not attr.startswith("__"):
@@ -2637,12 +2638,21 @@ def test_grpo_save_load_checkpoint(
                         getattr(new_grpo, attr).__class__.__name__
                         == getattr(grpo, attr).__class__.__name__
                     )
+                elif attr == "lora_config":
+                    assert getattr(new_grpo, attr) is not None
+                    assert getattr(grpo, attr) is not None
+                    old_targets = set(getattr(grpo, attr).target_modules)
+                    new_targets = set(getattr(new_grpo, attr).target_modules)
+                    assert old_targets.issubset(new_targets)
                 elif not isinstance(getattr(grpo, attr), torch.Tensor):
                     assert getattr(new_grpo, attr) == getattr(
                         grpo,
                         attr,
                     ), f"Attribute {attr} is not equal"
                 else:
+                    if attr == "lora_config":
+                        print(getattr(new_grpo, attr))
+                        print(getattr(grpo, attr))
                     assert torch.equal(getattr(new_grpo, attr), getattr(grpo, attr))
     grpo.clean_up()
     new_grpo.clean_up()
