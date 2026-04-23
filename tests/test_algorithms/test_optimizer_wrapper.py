@@ -1122,13 +1122,13 @@ class TestOptimizerWrapper:
             net,
             lr=0.01,
             lr_critic=0.02,
-            use_llm_param_groups=True,
+            is_llm_optimizer=True,
             network_names=["actor"],
             lr_name=("lr_actor", "lr_critic"),
             optimizer_kwargs={"eps": 1e-8},
         )
 
-        assert wrap.use_llm_param_groups is True
+        assert wrap.is_llm_optimizer is True
         assert wrap.lr_critic == 0.02
         assert wrap.lr_name == ("lr_actor", "lr_critic")
         assert len(wrap.optimizer.param_groups) == 2
@@ -1138,7 +1138,7 @@ class TestOptimizerWrapper:
         assert wrap.optimizer.param_groups[1]["lr"] == 0.02
 
         ckpt = wrap.checkpoint_dict("optimizer")
-        assert ckpt["optimizer_use_llm_param_groups"] is True
+        assert ckpt["optimizer_is_llm_optimizer"] is True
         assert ckpt["optimizer_lr"] == ("lr_actor", "lr_critic")
 
         state = wrap.state_dict()
@@ -1147,7 +1147,7 @@ class TestOptimizerWrapper:
             net,
             lr=0.05,
             lr_critic=0.06,
-            use_llm_param_groups=True,
+            is_llm_optimizer=True,
             network_names=["actor"],
             lr_name=("lr_actor", "lr_critic"),
             optimizer_kwargs={"eps": 1e-8},
@@ -1407,13 +1407,13 @@ def test_llm_param_groups_rejects_moduledict_networks():
     )
     with pytest.raises(
         TypeError,
-        match="use_llm_param_groups does not support ModuleDict networks",
+        match="is_llm_optimizer=True does not support ModuleDict networks\\.",
     ):
         OptimizerWrapper(
             torch.optim.Adam,
             networks,
             0.001,
-            use_llm_param_groups=True,
+            is_llm_optimizer=True,
             network_names=["networks"],
             lr_name=("lr_actor", "lr_critic"),
         )
@@ -1424,13 +1424,13 @@ def test_llm_param_groups_requires_single_network():
     net_b = MockEvolvableNetwork(name="b")
     with pytest.raises(
         ValueError,
-        match="use_llm_param_groups expects exactly one network module",
+        match="is_llm_optimizer=True expects exactly one network module\\.",
     ):
         OptimizerWrapper(
             torch.optim.Adam,
             [net_a, net_b],
             0.001,
-            use_llm_param_groups=True,
+            is_llm_optimizer=True,
             network_names=["actor"],
             lr_name=("lr_actor", "lr_critic"),
         )
@@ -1447,13 +1447,13 @@ def test_llm_param_groups_requires_network_names_and_lr_name():
 
     with pytest.raises(
         ValueError,
-        match="use_llm_param_groups requires explicit network_names and lr_name",
+        match="is_llm_optimizer=True requires explicit network_names and lr_name=\\('lr_actor', 'lr_critic'\\)\\.",
     ):
         OptimizerWrapper(
             torch.optim.Adam,
             _Net(),
             0.001,
-            use_llm_param_groups=True,
+            is_llm_optimizer=True,
         )
 
 
@@ -1493,12 +1493,12 @@ def test_repr_includes_llm_param_group_fields():
         _Net(),
         lr=0.01,
         lr_critic=0.02,
-        use_llm_param_groups=True,
+        is_llm_optimizer=True,
         network_names=["actor"],
         lr_name=("lr_actor", "lr_critic"),
     )
     text = repr(wrap)
-    assert "use_llm_param_groups=True" in text
+    assert "is_llm_optimizer=True" in text
     assert "lr_critic=0.02" in text
 
 

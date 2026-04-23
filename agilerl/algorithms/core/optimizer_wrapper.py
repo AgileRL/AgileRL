@@ -120,14 +120,14 @@ class OptimizerWrapper:
     :param network_names: The attribute names of the networks in the parent container.
     :type network_names: list[str]
     :param lr_name: Attribute name(s) on the parent for learning rate(s): ``str``
-        or ``("lr_actor", "lr_critic")`` when ``use_llm_param_groups`` is True.
+        or ``("lr_actor", "lr_critic")`` when ``is_llm_optimizer`` is True.
     :type lr_name: str | tuple[str, str] | None
-    :param use_llm_param_groups: If True, build actor/critic param groups via
+    :param is_llm_optimizer: If True, build actor/critic param groups via
         :func:`init_llm_optimizer` (single module only). Requires ``network_names``,
         ``lr_name`` as a 2-tuple, and ``lr_critic``.
-    :type use_llm_param_groups: bool
+    :type is_llm_optimizer: bool
     :param lr_critic: Learning rate for the critic/value-head group when
-        ``use_llm_param_groups`` is True.
+        ``is_llm_optimizer`` is True.
     :type lr_critic: float | None
     :param is_llm_optimizer: If True, the optimizer is an LLM optimizer.
     :type is_llm_optimizer: bool
@@ -427,8 +427,8 @@ class OptimizerWrapper:
             f"{name}_lr": self.lr_name,
             f"{name}_kwargs": self.optimizer_kwargs,
         }
-        if self.use_llm_param_groups:
-            out[f"{name}_use_llm_param_groups"] = True
+        if self.is_llm_optimizer:
+            out[f"{name}_is_llm_optimizer"] = True
         return out
 
     def zero_grad(self) -> None:
@@ -454,7 +454,7 @@ class OptimizerWrapper:
     def __repr__(self) -> str:
         extra = ""
         if self.is_llm_optimizer:
-            extra = f",\n    lr_critic={self.lr_critic},\n    use_llm_param_groups=True"
+            extra = f",\n    lr_critic={self.lr_critic},\n    is_llm_optimizer=True"
         return (
             f"OptimizerWrapper(\n"
             f"    optimizer={self.optimizer_cls_names()},\n"
