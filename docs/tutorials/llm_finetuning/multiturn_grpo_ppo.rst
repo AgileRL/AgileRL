@@ -1,10 +1,10 @@
 .. _multiturn_grpo_ppo_tutorial:
 
-Multi-turn finetuning with LLMPPO, LLMReinforce, and GRPO
+Multi-turn finetuning with LLMPPO, LLMREINFORCE, and GRPO
 =========================================================
 
 In this tutorial, we train three LLM reinforcement learning agents on the same multi-turn GEM task:
-``LLMPPO``, ``LLMReinforce``, and ``GRPO``. The environment, model, tokenizer, and training loop are kept fixed so you can
+``LLMPPO``, ``LLMREINFORCE``, and ``GRPO``. The environment, model, tokenizer, and training loop are kept fixed so you can
 compare algorithm behavior directly.
 
 The task is ``game:GuessTheNumber-v0-easy``, where the agent has to guess a number and gets iterative feedback over multiple turns,
@@ -17,7 +17,7 @@ Credit assignment: MDP vs bandit formulations
 The core difference between these algorithms is how they answer the question:
 *which actions caused the outcome?*
 
-MDP formulation — ``LLMPPO`` and ``LLMReinforce``
+MDP formulation — ``LLMPPO`` and ``LLMREINFORCE``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 These treat multi-turn interaction as a sequential decision process. Each
@@ -38,7 +38,7 @@ that led to a good outcome are credited separately from late turns that executed
 it. The value function explicitly models how good a conversational state is,
 independent of what actually happened afterward.
 
-**LLMReinforce** maps per-turn rewards through ``turn_ids`` and normalises them
+**LLMREINFORCE** maps per-turn rewards through ``turn_ids`` and normalises them
 with return batch normalisation (ReBN) rather than fitting a value function.
 Cheaper to run than PPO, but higher variance, there is no baseline to reduce
 the noise in early-turn credit estimates.
@@ -182,15 +182,15 @@ Use the LLMPPO multiturn config as a base and keep ``ALGO=LLMPPO``.
       --evaluation-interval 10 \
       --output-dir saved_llms/multiturn_ppo
 
-Run LLMReinforce baseline
+Run LLMREINFORCE baseline
 -------------------------
 
-Use the LLMReinforce config and set ``ALGO=LLMReinforce``.
+Use the LLMREINFORCE config and set ``ALGO=LLMREINFORCE``.
 
 .. code-block:: bash
 
     python tutorials/llm_finetuning/multiturn_grpo_ppo.py \
-      --algo LLMReinforce \
+      --algo LLMREINFORCE \
       --config configs/training/llm_finetuning/reinforce_llm.yaml \
       --max-steps 4096 \
       --evaluation-interval 10 \
@@ -236,9 +236,9 @@ These values are intentionally conservative and align with the shipped configs:
             "MICRO_BATCH_SIZE_PER_GPU": 32,
         }
 
-        # LLMReinforce
+        # LLMREINFORCE
         INIT_HP_REINFORCE = {
-            "ALGO": "LLMReinforce",
+            "ALGO": "LLMREINFORCE",
             "BATCH_SIZE": 32,
             "LR": 5e-6,
             "BETA": 0.01,

@@ -11,7 +11,7 @@ MUTATION_PARAMS:
 
 
 INIT_HP:
-    ALGO: LLMReinforce
+    ALGO: LLMREINFORCE
     BATCH_SIZE: 64
     BETA: 0.01                # KL penalty — keeps policy close to reference
     LR: 0.000005

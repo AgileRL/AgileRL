@@ -19,7 +19,7 @@ from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 from transformers import AutoTokenizer
 
-from agilerl.algorithms import GRPO, LLMPPO, LLMReinforce
+from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
 from agilerl.training import train_llm
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
@@ -40,13 +40,13 @@ def _prompt_dict_from_encoded(
     }
 
 
-def _uses_async_vllm(agent: LLMPPO | LLMReinforce | GRPO) -> bool:
+def _uses_async_vllm(agent: LLMPPO | LLMREINFORCE | GRPO) -> bool:
     # Keep debug eval path synchronous; async-vLLM eval is exercised via rollout/training.
     return False
 
 
 def evaluate_accuracy(
-    agent: LLMPPO | LLMReinforce | GRPO,
+    agent: LLMPPO | LLMREINFORCE | GRPO,
     tokenizer: Any,
     grid_size: int,
     max_turns: int,
@@ -202,7 +202,7 @@ def evaluate_accuracy(
 
 
 def detailed_eval(
-    agent: LLMPPO | LLMReinforce | GRPO,
+    agent: LLMPPO | LLMREINFORCE | GRPO,
     tokenizer: Any,
     grid_size: int,
     max_turns: int,

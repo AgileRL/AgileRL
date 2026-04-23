@@ -23,11 +23,11 @@ from agilerl.algorithms import (
     DQN,
     IPPO,
     LLMPPO,
+    LLMREINFORCE,
     MADDPG,
     MATD3,
     PPO,
     TD3,
-    LLMReinforce,
     NeuralTS,
     NeuralUCB,
     RainbowDQN,
@@ -74,14 +74,9 @@ def _check_box2d_available(env_name: str) -> None:
         raise ImportError(msg) from None
 
 
-def _normalize_llm_algo_name(algo: str) -> str | None:
-    """Map config-style names to internal LLM algorithm keys."""
-    key = algo.upper().replace(" ", "").replace("-", "_")
-    if key == "LLMPPO":
-        return "LLMPPO"
-    if key == "LLMREINFORCE":
-        return "LLMREINFORCE"
-    return None
+def _normalize_algo_name(algo: str) -> str | None:
+    """Map config-style names to internal algorithm keys."""
+    return algo.upper().replace(" ", "").replace("-", "_")
 
 
 def _lora_config_from_init_hp(INIT_HP: dict[str, Any]) -> Any | None:
@@ -117,7 +112,7 @@ def _prepare_llm_algo_kwargs(
 ) -> dict[str, Any]:
     """Merge tokenizer / model / LoRA defaults into ``algo_kwargs``.
 
-    When ``with_generation_defaults`` is True (GRPO / LLMPPO / LLMReinforce), also
+    When ``with_generation_defaults`` is True (GRPO / LLMPPO / LLMREINFORCE), also
     merges vLLM-related defaults. When False (DPO), skips generation stack keys so
     callers do not inherit ``use_vllm`` / ``vllm_config``; reference-adapter
     default matches offline preference training (False unless ``INIT_HP`` says
@@ -401,7 +396,7 @@ def create_population(
     :param torch_compiler: Torch compiler, defaults to None
     :type torch_compiler: Any, optional
     :param tokenizer: Hugging Face tokenizer; used to default ``pad_token_id`` /
-        ``pad_token`` for GRPO / DPO / LLMPPO / LLMReinforce when not set in ``algo_kwargs``.
+        ``pad_token`` for GRPO / DPO / LLMPPO / LLMREINFORCE when not set in ``algo_kwargs``.
     :type tokenizer: Any, optional
     :param model_name: HF model id or path; defaults ``algo_kwargs['model_name']``
         or ``INIT_HP['MODEL_NAME']`` for LLM agents.
@@ -409,7 +404,7 @@ def create_population(
     :param lora_config: ``peft.LoraConfig``; if omitted, built from
         ``LORA_*`` / ``TARGET_MODULES`` keys in ``INIT_HP`` when present.
     :type lora_config: Any, optional
-    :param vllm_config: ``VLLMConfig`` for GRPO / LLMPPO / LLMReinforce (ignored for DPO).
+    :param vllm_config: ``VLLMConfig`` for GRPO / LLMPPO / LLMREINFORCE (ignored for DPO).
     :type vllm_config: Any, optional
     :return: Population of agents
     :rtype: list[EvolvableAlgorithm]
@@ -926,7 +921,7 @@ def create_population(
             agent = DPO(**kw)
             population.append(agent)
 
-    elif _normalize_llm_algo_name(algo) == "LLMPPO":
+    elif _normalize_algo_name(algo) == "LLMPPO":
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLMPPO requires optional LLM dependencies (install agilerl[llm])."
             raise ImportError(msg)
@@ -995,10 +990,10 @@ def create_population(
             agent = LLMPPO(**kw)
             population.append(agent)
 
-    elif _normalize_llm_algo_name(algo) == "LLMREINFORCE":
+    elif _normalize_algo_name(algo) == "LLMREINFORCE":
         if not HAS_LLM_DEPENDENCIES:
             msg = (
-                "LLMReinforce requires optional LLM dependencies "
+                "LLMREINFORCE requires optional LLM dependencies "
                 "(install agilerl[llm])."
             )
             raise ImportError(msg)
@@ -1061,7 +1056,7 @@ def create_population(
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
-            agent = LLMReinforce(**kw)
+            agent = LLMREINFORCE(**kw)
             population.append(agent)
     return population
 

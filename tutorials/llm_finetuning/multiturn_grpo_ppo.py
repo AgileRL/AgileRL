@@ -1,4 +1,4 @@
-"""Train LLMPPO, LLMReinforce, or GRPO on multi-turn GuessTheNumber.
+"""Train LLMPPO, LLMREINFORCE, or GRPO on multi-turn GuessTheNumber.
 
 This script is used by the multi-turn GRPO vs LLMPPO tutorial and keeps the
 setup identical between runs so only the optimization algorithm changes.
@@ -18,7 +18,7 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
-from agilerl.utils.utils import create_population
+from agilerl.utils.utils import create_population, _normalize_algo_name
 from agilerl.wrappers.llm_envs import TokenObservationWrapper
 
 if not HAS_LLM_DEPENDENCIES:
@@ -55,14 +55,14 @@ def _load_init_hp(config_path: str) -> dict[str, Any]:
 
 def _default_config_for_algo(algo: str) -> str:
     """Return tutorial default config path for the selected algorithm."""
-    algo_upper = algo.upper()
-    if algo_upper == "LLMPPO":
+    algo_name = _normalize_algo_name(algo)
+    if algo_name == "LLMPPO":
         return DEFAULT_PPO_CONFIG
-    if algo_upper == "GRPO":
+    if algo_name == "GRPO":
         return DEFAULT_GRPO_CONFIG
-    if algo_upper == "LLMREINFORCE":
+    if algo_name == "LLMREINFORCE":
         return DEFAULT_REINFORCE_CONFIG
-    msg = f"Unsupported algorithm '{algo}'. Use LLMPPO, LLMReinforce, or GRPO."
+    msg = f"Unsupported algorithm '{algo}'. Use LLMPPO, LLMREINFORCE, or GRPO."
     raise ValueError(msg)
 
 
@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--algo",
         type=str,
-        choices=["LLMPPO", "LLMReinforce", "GRPO"],
+        choices=["LLMPPO", "LLMREINFORCE", "GRPO"],
         default="LLMPPO",
         help="Algorithm to train.",
     )
@@ -123,7 +123,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Run multi-turn training with LLMPPO, LLMReinforce, or GRPO."""
+    """Run multi-turn training with LLMPPO, LLMREINFORCE, or GRPO."""
     args = parse_args()
     config_path = args.config or _default_config_for_algo(args.algo)
     init_hp = _load_init_hp(config_path)

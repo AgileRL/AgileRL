@@ -195,7 +195,7 @@ class REINFORCE(LLMAlgorithm):
             wrap=wrap,
             device=device,
             accelerator=accelerator,
-            name="LLMReinforce",
+            name="LLMREINFORCE",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
             reduce_memory_peak=reduce_memory_peak,

@@ -13,7 +13,7 @@ from huggingface_hub import snapshot_download
 from gem.tools.tool_env_wrapper import ToolEnvWrapper
 import yaml
 from transformers import AutoTokenizer
-from agilerl.algorithms import LLMPPO, LLMReinforce, GRPO
+from agilerl.algorithms import LLMPPO, LLMREINFORCE, GRPO
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
@@ -32,7 +32,7 @@ PRELOAD_MODEL = True
 
 ALGO_REGISTRY = {
     "LLMPPO": LLMPPO,
-    "LLMReinforce": LLMReinforce,
+    "LLMREINFORCE": LLMREINFORCE,
     "GRPO": GRPO,
 }
 

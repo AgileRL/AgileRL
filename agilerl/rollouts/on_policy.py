@@ -6,14 +6,14 @@ import numpy as np
 import torch
 from gymnasium import spaces
 
-from agilerl.algorithms import GRPO, LLMPPO, PPO, LLMReinforce
+from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE, PPO
 from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
 from agilerl.wrappers.llm_envs import SyncMultiTurnVecEnv
 
 SupportedOnPolicy = PPO
-SupportedOnPolicyLLM = LLMPPO | LLMReinforce | GRPO
+SupportedOnPolicyLLM = LLMPPO | LLMREINFORCE | GRPO
 
 
 def _collect_rollouts(

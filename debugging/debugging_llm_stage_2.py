@@ -17,7 +17,7 @@ from config_load import load_debug_config
 from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
-from agilerl.algorithms import GRPO, LLMPPO, LLMReinforce
+from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
 from agilerl.training import train_llm
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.llm_utils import create_llm_accelerator, masked_whiten
@@ -28,7 +28,7 @@ TARGET_TOKEN_IDS = (1, 2, 3)
 
 
 def evaluate_accuracy(
-    agent: LLMPPO | LLMReinforce | GRPO,
+    agent: LLMPPO | LLMREINFORCE | GRPO,
     tokenizer: TinyDigitTokenizer,
     num_episodes: int,
     greedy: bool = False,

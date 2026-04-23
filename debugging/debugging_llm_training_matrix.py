@@ -279,7 +279,7 @@ def build_init_hp(
             "VF_COEF": 0.2,
             "TEMPERATURE": 0.7,
         }
-    elif algo == "LLMReinforce":
+    elif algo == "LLMREINFORCE":
         init_hp |= {
             "LR": 1e-4,
             "BETA": 0.0,
@@ -592,14 +592,14 @@ def build_cases() -> list[MatrixCase]:
     ]
     cases: list[MatrixCase] = []
 
-    for algo in ("GRPO", "LLMPPO", "LLMReinforce"):
+    for algo in ("GRPO", "LLMPPO", "LLMREINFORCE"):
         for scenario in scenarios:
             cases.append(MatrixCase(loop_name="reasoning", algo=algo, **scenario))
 
     for scenario in scenarios:
         cases.append(MatrixCase(loop_name="preference", algo="DPO", **scenario))
 
-    for algo in ("GRPO", "LLMPPO", "LLMReinforce"):
+    for algo in ("GRPO", "LLMPPO", "LLMREINFORCE"):
         for scenario in scenarios:
             cases.append(MatrixCase(loop_name="multiturn", algo=algo, **scenario))
 
@@ -623,7 +623,7 @@ def parse_args() -> argparse.Namespace:
         "--algo",
         type=str,
         default=None,
-        choices=["GRPO", "LLMPPO", "LLMReinforce", "DPO"],
+        choices=["GRPO", "LLMPPO", "LLMREINFORCE", "DPO"],
         help=("Run only one algorithm across compatible loops. Default runs all."),
     )
     parser.add_argument("--batch-size", type=int, default=4)

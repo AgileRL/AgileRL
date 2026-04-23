@@ -17,7 +17,7 @@ from agilerl.algorithms import (
     DQN,
     IPPO,
     LLMPPO,
-    LLMReinforce,
+    LLMREINFORCE,
     MADDPG,
     MATD3,
     NeuralTS,
@@ -359,7 +359,7 @@ def test_create_initial_population_multi_agent():
         ("GRPO", GRPO),
         ("LLMPPO", LLMPPO),
         ("llmppo", LLMPPO),
-        ("LLMReinforce", LLMReinforce),
+        ("LLMREINFORCE", LLMREINFORCE),
     ],
 )
 def test_create_population_llm_policy_gradient_algorithms(
@@ -517,7 +517,7 @@ def test_create_population_llmreinforce_normalized_name_and_kwargs_overrides(
     with (
         patch("agilerl.utils.utils.clone_llm", return_value=cloned_actor) as mock_clone,
         patch(
-            "agilerl.utils.utils.LLMReinforce",
+            "agilerl.utils.utils.LLMREINFORCE",
             side_effect=[pop0, pop1],
         ) as mock_reinforce,
     ):

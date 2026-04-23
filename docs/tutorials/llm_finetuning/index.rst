@@ -106,7 +106,7 @@ for fine-tuning LLMs.
          <h2>SFT &amp; DPO - Fine-Tuning</h2>
       </a>
       <a href="../llm_finetuning/multiturn_grpo_ppo.html" class="tile online">
-         <h2>Multiturn - LLMPPO, LLMReinforce, GRPO</h2>
+         <h2>Multiturn - LLMPPO, LLMREINFORCE, GRPO</h2>
       </a>
    </div>
 

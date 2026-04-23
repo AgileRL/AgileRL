@@ -10,7 +10,7 @@ import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
-from agilerl.algorithms import DPO, GRPO, LLMPPO, SFT, LLMReinforce
+from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMREINFORCE, SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.protocols import MultiTurnEnv
@@ -186,7 +186,7 @@ def _collect_hpo_wandb_fields(pop: PopulationType) -> dict[str, Any]:
 
 
 def _normalize_learn_metrics(
-    agent: GRPO | LLMPPO | LLMReinforce | DPO,
+    agent: GRPO | LLMPPO | LLMREINFORCE | DPO,
     learn_output: dict[str, Any] | tuple[Any, ...],
     mode: str,
 ) -> dict[str, Any]:
@@ -231,7 +231,7 @@ def _normalize_learn_metrics(
 def build_train_wandb_dict(
     agent_metrics_dict: dict[str, dict[str, Any]],
     pop: PopulationType,
-    agent: GRPO | LLMPPO | LLMReinforce | DPO | SFT,
+    agent: GRPO | LLMPPO | LLMREINFORCE | DPO | SFT,
     max_reward: float | None = None,
     mode: str = "reasoning",
 ) -> dict[str, Any]:
@@ -297,7 +297,7 @@ def build_train_wandb_dict(
         if values:
             wandb_dict[wandb_name] = np.mean(values)
 
-    if isinstance(agent, (LLMPPO, LLMReinforce)):
+    if isinstance(agent, (LLMPPO, LLMREINFORCE)):
         pg_values = _collect_metric_values(
             agent_metrics_dict, pop, "train_metrics", "Train/Mean PG Loss"
         ) or _collect_metric_values(
@@ -569,10 +569,10 @@ def finetune_llm_reasoning(
     num_epochs: int | None = None,
     log_csv: bool = False,
 ) -> PopulationType:
-    """Finetunes a population of GRPO/LLMPPO/LLMReinforce agents on a ReasoningGym environment.
+    """Finetunes a population of GRPO/LLMPPO/LLMREINFORCE agents on a ReasoningGym environment.
 
-    :param pop: Population of GRPO/LLMPPO/LLMReinforce agents to finetune
-    :type pop: list[GRPO | LLMPPO | LLMReinforce]
+    :param pop: Population of GRPO/LLMPPO/LLMREINFORCE agents to finetune
+    :type pop: list[GRPO | LLMPPO | LLMREINFORCE]
     :param env: Shared ReasoningGym environment to finetune on.
     :type env: ReasoningGym | None
     :param env_fn: Optional factory that creates one ReasoningGym environment
@@ -619,9 +619,9 @@ def finetune_llm_reasoning(
 
     _validate_llm_mutation_probs(mutation)
 
-    if not isinstance(pop[0], (GRPO, LLMPPO, LLMReinforce)):
+    if not isinstance(pop[0], (GRPO, LLMPPO, LLMREINFORCE)):
         msg = (
-            "The algorithm must be GRPO, LLMPPO, or LLMReinforce for reasoning-based reinforcement learning. "
+            "The algorithm must be GRPO, LLMPPO, or LLMREINFORCE for reasoning-based reinforcement learning. "
             f"Got {type(pop[0])} instead."
         )
         raise ValueError(
@@ -1193,7 +1193,7 @@ def finetune_llm_multiturn(
     wandb_project: str = "AgileRL",
     wandb_entity: str | None = None,
     wandb_run_name: str | None = None,
-    eval_fn: Callable[[LLMPPO | LLMReinforce], float] | None = None,
+    eval_fn: Callable[[LLMPPO | LLMREINFORCE], float] | None = None,
     evaluation_interval: int = 50,
     max_reward: float | None = None,
     verbose: bool = True,
@@ -1253,9 +1253,9 @@ def finetune_llm_multiturn(
     _validate_llm_evolution_args(evo_steps, tournament, mutation, checkpoint_steps)
     _validate_llm_mutation_probs(mutation)
 
-    if not isinstance(pop[0], (LLMPPO, LLMReinforce, GRPO)):
+    if not isinstance(pop[0], (LLMPPO, LLMREINFORCE, GRPO)):
         msg = (
-            "The algorithm must be LLMPPO, LLMReinforce, or GRPO for multi-turn GEM finetuning. "
+            "The algorithm must be LLMPPO, LLMREINFORCE, or GRPO for multi-turn GEM finetuning. "
             f"Got {type(pop[0])} instead."
         )
         raise ValueError(
@@ -1383,7 +1383,7 @@ def finetune_llm_multiturn(
 
             learn_kwargs = (
                 {"turn_ids": turn_ids_padded}
-                if isinstance(agent, (LLMReinforce, LLMPPO))
+                if isinstance(agent, (LLMREINFORCE, LLMPPO))
                 else {}
             )
             learn_output = agent.learn(experiences, **learn_kwargs)

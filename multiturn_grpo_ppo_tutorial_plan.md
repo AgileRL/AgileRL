@@ -13,7 +13,7 @@ Add one practical tutorial that demonstrates how to run and compare `LLMPPO` and
   - Reuse the algo registry and env/tokenizer construction path; this already supports both `LLMPPO` and `GRPO`.
 - `agilerl/training/train_llm.py`
   - Highlight `finetune_llm_multiturn(...)` as the shared training loop and call out that:
-    - `LLMPPO`/`LLMReinforce` pass `turn_ids` into `learn(...)`
+    - `LLMPPO`/`LLMREINFORCE` pass `turn_ids` into `learn(...)`
     - `GRPO` uses grouped rollouts (`group_size`) and batch/group divisibility constraints.
 - `configs/training/llm_finetuning/ppo_llm.yaml`
 - `configs/training/llm_finetuning/grpo_multiturn.yaml`
@@ -55,4 +55,4 @@ Add one practical tutorial that demonstrates how to run and compare `LLMPPO` and
 - Optional companion benchmark script section showing two command invocations and expected outputs.
 
 ### Why This Works
-It aligns directly with the current multiturn training implementation and tests (already validating `LLMPPO`, `LLMReinforce`, and `GRPO` in multiturn mode), so readers learn the real production path rather than a synthetic demo.
+It aligns directly with the current multiturn training implementation and tests (already validating `LLMPPO`, `LLMREINFORCE`, and `GRPO` in multiturn mode), so readers learn the real production path rather than a synthetic demo.

@@ -4,7 +4,7 @@ LLM REINFORCE
 =============
 
 `REINFORCE <https://doi.org/10.1007/BF00992696>`_ is the classic
-score-function policy-gradient method. ``LLMReinforce`` brings this approach to
+score-function policy-gradient method. ``LLMREINFORCE`` brings this approach to
 causal language model finetuning with turn-aware trajectories.
 
 In AgileRL, the algorithm uses Return Batch Normalization (ReBN) to improve
@@ -24,7 +24,7 @@ Example
 
   import torch
   from transformers import AutoModelForCausalLM, AutoTokenizer
-  from agilerl.algorithms import LLMReinforce
+  from agilerl.algorithms import LLMREINFORCE
 
   model = AutoModelForCausalLM.from_pretrained(
       "Qwen/Qwen2.5-0.5B",
@@ -33,7 +33,7 @@ Example
   )
   tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
 
-  agent = LLMReinforce(
+  agent = LLMREINFORCE(
       actor_network=model,
       pad_token_id=tokenizer.eos_token_id,
       pad_token=tokenizer.eos_token,

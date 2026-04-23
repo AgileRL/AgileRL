@@ -6,7 +6,7 @@ from accelerate import Accelerator
 
 pytest.importorskip("transformers", reason="LLM dependencies not installed")
 
-from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMReinforce
+from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMREINFORCE
 from agilerl.algorithms.sft import SFT
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.training.train_llm import (
@@ -64,8 +64,8 @@ def _make_multiturn_mock_agent(*, spec=LLMPPO):
     mock_agent.fitness = [0.0]
     if spec is LLMPPO:
         mock_agent.algo = "LLMPPO"
-    elif spec is LLMReinforce:
-        mock_agent.algo = "LLMReinforce"
+    elif spec is LLMREINFORCE:
+        mock_agent.algo = "LLMREINFORCE"
     elif spec is GRPO:
         mock_agent.algo = "GRPO"
         mock_agent.group_size = 1
@@ -881,7 +881,7 @@ def test_finetune_llm_reasoning_value_error_if_algo_not_grpo():
     mock_agent.scores = [0.0]
     with pytest.raises(
         ValueError,
-        match="The algorithm must be GRPO, LLMPPO, or LLMReinforce for reasoning-based reinforcement learning",
+        match="The algorithm must be GRPO, LLMPPO, or LLMREINFORCE for reasoning-based reinforcement learning",
     ):
         finetune_llm_reasoning(
             pop=[mock_agent],
@@ -1605,7 +1605,7 @@ def test_finetune_llm_checkpoint_triggering_non_divisible_steps(finetune_fn):
 # --- finetune_llm_multiturn ---
 
 
-@pytest.mark.parametrize("agent_spec", [LLMPPO, LLMReinforce, GRPO])
+@pytest.mark.parametrize("agent_spec", [LLMPPO, LLMREINFORCE, GRPO])
 @pytest.mark.parametrize("use_accelerator", [True, False])
 def test_finetune_llm_multiturn_basic_training_loop(agent_spec, use_accelerator):
     """Smoke: episode collection, learn with turn_ids, step accounting; no agent.test."""
@@ -1795,7 +1795,7 @@ def test_finetune_llm_multiturn_value_error_if_algo_not_supported():
     mock_agent.batch_size_per_process = 16
     with pytest.raises(
         ValueError,
-        match="The algorithm must be LLMPPO, LLMReinforce, or GRPO for multi-turn GEM",
+        match="The algorithm must be LLMPPO, LLMREINFORCE, or GRPO for multi-turn GEM",
     ):
         finetune_llm_multiturn(
             pop=[mock_agent],
@@ -2193,7 +2193,7 @@ def test_train_metric_format_and_learn_output_normalization_helpers():
     assert formatted["Train/Mean KL"] == 0.2
     assert formatted["Train/Mean PG Loss"] == 0.1
 
-    agent = MagicMock(spec=LLMReinforce)
+    agent = MagicMock(spec=LLMREINFORCE)
     metrics = _normalize_learn_metrics(agent, (1.0, 0.5, 0.2, 0.3), mode="multiturn")
     assert metrics["mean_loss"] == 1.0
     assert metrics["mean_kl"] == 0.5
