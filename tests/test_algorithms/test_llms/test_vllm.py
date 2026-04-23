@@ -61,6 +61,7 @@ def _minimal_reasoning_gym(
 @pytest.mark.parametrize("pretrained_model_name_or_path", ["facebook/opt-125m"])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_vllm_methods(
+    deepspeed_env,
     reinforce_factory,
     accelerator_factory,
     model_factory,
@@ -70,6 +71,7 @@ def test_vllm_methods(
     pretrained_model_name_or_path,
     micro_batch_size_per_gpu,
 ):
+    del deepspeed_env
     rf = reinforce_factory(
         accelerator_factory=accelerator_factory,
         model_factory=model_factory,
