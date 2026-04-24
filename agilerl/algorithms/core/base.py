@@ -2968,47 +2968,96 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if reference_update_tracker > self.reference_update_tracker:
             if self.accelerator is not None:
                 self.accelerator.wait_for_everyone()
-            # Merge adapter into base model
-            # Update the reference update tracker
             if self.use_separate_reference_adapter:
                 self._copy_adapter_weights(
                     source_adapter="actor", target_adapter="reference"
                 )
             else:
                 unwrapped = self._get_unwrapped_actor()
-                if self.use_value_head:
-                    merged = unwrapped.pretrained_model.merge_and_unload()
-                    unwrapped.pretrained_model = get_peft_model(
-                        merged, self.lora_config, adapter_name="actor"
-                    )
-                    unwrapped.is_peft_model = True
-                else:
-                    merged_base_model = unwrapped.merge_and_unload()
-                    self.actor = None
-                    self.actor = get_peft_model(
-                        merged_base_model,
-                        self.lora_config,
+                peft_model = (
+                    unwrapped.pretrained_model if self.use_value_head else unwrapped
+                )
+                with gather_if_zero3(self.zero_stage, list(peft_model.parameters())):
+                    self._merge_adapter_into_base_in_place(
+                        peft_model=peft_model,
                         adapter_name="actor",
                     )
                 if self.accelerator is not None:
                     self.accelerator.wait_for_everyone()
                 self.use_adapter("actor")
-
-                # FIXME not convinced about this
-                optim_class = self._select_optim_class()
-                self.optimizer = OptimizerWrapper(
-                    optim_class,
-                    networks=[self.actor],
-                    lr=self.lr,
-                    lr_critic=self.lr_critic,
-                    is_llm_optimizer=True,
-                    network_names=["actor"],
-                    lr_name="lr"
-                    if self.lr_critic is None
-                    else ("lr_actor", "lr_critic"),
-                )
-                self.wrap_models()
             self.reference_update_tracker += 1
+
+    def _merge_adapter_into_base_in_place(
+        self,
+        peft_model: Any,
+        adapter_name: str,
+    ) -> None:
+        """Manually add one LoRA adapter delta into dense base weights.
+
+        Unlike ``merge_adapter``, this does not flip LoRA layers to a merged
+        runtime mode, so actor LoRA params remain trainable after the merge.
+
+        :param peft_model: PEFT model that owns the adapter.
+        :type peft_model: Any
+        :param adapter_name: Adapter to merge into the dense base.
+        :type adapter_name: str
+        """
+        peft_model.set_adapter(adapter_name)
+        merged_any = False
+        with torch.no_grad():
+            for module in peft_model.base_model.model.modules():
+                is_lora_like = (
+                    hasattr(module, "lora_A")
+                    and hasattr(module, "lora_B")
+                    and hasattr(module, "lora_bias")
+                    and hasattr(module, "lora_variant")
+                    and hasattr(module, "get_base_layer")
+                    and hasattr(module, "get_delta_weight")
+                    and hasattr(module, "scaling")
+                )
+                if not is_lora_like or adapter_name not in module.lora_A:
+                    continue
+
+                base_layer = module.get_base_layer()
+                if adapter_name in module.lora_variant:
+                    module.lora_variant[adapter_name].merge_unsafe(
+                        module,
+                        adapter_name,
+                        base_layer.weight,
+                    )
+                else:
+                    delta_weight = module.get_delta_weight(adapter_name)
+                    base_layer.weight.data += delta_weight.to(base_layer.weight.dtype)
+
+                if module.lora_bias[adapter_name]:
+                    if getattr(base_layer, "bias", None) is None:
+                        msg = (
+                            "Cannot merge LoRA bias into base layer because bias is "
+                            "missing."
+                        )
+                        raise RuntimeError(msg)
+                    base_layer.bias.data += (
+                        module.lora_B[adapter_name].bias * module.scaling[adapter_name]
+                    ).to(base_layer.bias.dtype)
+
+                if hasattr(module, "reset_lora_parameters"):
+                    module.reset_lora_parameters(
+                        adapter_name,
+                        init_lora_weights=True,
+                    )
+                else:
+                    # Keep behavior aligned with PEFT defaults: A random init,
+                    # B zeros so the post-merge adapter delta starts neutral.
+                    torch.nn.init.kaiming_uniform_(
+                        module.lora_A[adapter_name].weight,
+                        a=5**0.5,
+                    )
+                    torch.nn.init.zeros_(module.lora_B[adapter_name].weight)
+                merged_any = True
+
+        if not merged_any:
+            msg = f"No LoRA tensors found for adapter '{adapter_name}'."
+            raise ValueError(msg)
 
     def use_adapter(self, adapter_name: str) -> None:
         """Switch the active PEFT adapter, handling all side-effects.
@@ -3748,7 +3797,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 return ref.new_zeros((ref.shape[0], 0))
             return cast("torch.Tensor", st)
 
-        def _vllm_max_new_tokens(model_prompt_len: int) -> int:
+        def _vllm_max_new_tokens(model_prompt_len: int, max_token_cap: int) -> int:
             room = self.max_model_len - model_prompt_len
             if room <= 0:
                 error_msg = f"Model prompt length ({model_prompt_len}) is greater than the model length ({self.max_model_len})"
@@ -3770,7 +3819,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             else self.max_model_len
         )
         max_output_tokens = [
-            _vllm_max_new_tokens(int(prompt_id.shape[1])) for prompt_id in prompts_ids
+            _vllm_max_new_tokens(int(prompt_id.shape[1]), max_token_cap)
+            for prompt_id in prompts_ids
         ]
 
         if self.vllm_config.tensor_parallel_size > 1:

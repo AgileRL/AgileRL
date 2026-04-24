@@ -100,7 +100,7 @@ pytest.importorskip("transformers", reason="LLM checkpoint tests require transfo
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from tests.test_algorithms.test_llms.test_grpo import deepspeed_config_stage_2
-    from peft import LoraConfig
+    from peft import LoraConfig, get_peft_model
 
 
 @pytest.fixture
@@ -2255,35 +2255,29 @@ class TestLLMSetReferencePolicy:
     def test_set_reference_without_separate_adapter_no_accelerator(self):
         agent = _make_llm_agent(use_separate_reference_adapter=False)
         agent.accelerator = None
-        merged = MagicMock(spec=torch.nn.Module)
-        merged.set_adapter = MagicMock()
-        merged.base_model = MagicMock()
-        merged.parameters.return_value = [torch.tensor([1.0])]
-        agent.actor.merge_and_unload.return_value = merged
-        agent.lora_config = MagicMock()
-        with (
-            patch("agilerl.algorithms.core.base.get_peft_model", return_value=merged),
-            patch.object(LLMAlgorithm, "wrap_models"),
-        ):
+        with patch.object(
+            LLMAlgorithm,
+            "_merge_adapter_into_base_in_place",
+        ) as mock_manual_merge:
             agent.set_reference_policy(1)
+        mock_manual_merge.assert_called_once()
         assert agent.reference_update_tracker == 1
 
     def test_set_reference_without_separate_adapter_with_accelerator(self):
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc, use_separate_reference_adapter=False)
-        merged = MagicMock(spec=torch.nn.Module)
-        merged.set_adapter = MagicMock()
-        merged.base_model = MagicMock()
-        merged.parameters.return_value = [torch.tensor([1.0])]
         unwrapped = MagicMock()
-        unwrapped.merge_and_unload.return_value = merged
+        unwrapped.parameters.return_value = [torch.tensor([1.0])]
         acc.unwrap_model = MagicMock(return_value=unwrapped)
-        agent.lora_config = MagicMock()
-        with (
-            patch("agilerl.algorithms.core.base.get_peft_model", return_value=merged),
-            patch.object(LLMAlgorithm, "wrap_models"),
-        ):
+        with patch.object(
+            LLMAlgorithm,
+            "_merge_adapter_into_base_in_place",
+        ) as mock_manual_merge:
             agent.set_reference_policy(1)
+        mock_manual_merge.assert_called_once_with(
+            peft_model=unwrapped,
+            adapter_name="actor",
+        )
         assert agent.reference_update_tracker == 1
         acc.wait_for_everyone.assert_called()
 
@@ -2294,6 +2288,77 @@ class TestLLMSetReferencePolicy:
             agent.set_reference_policy(5)
         mock_copy.assert_not_called()
         assert agent.reference_update_tracker == 5
+
+
+class TestLLMManualMergeIntoBase:
+    def test_merge_adapter_into_base_preserves_forward_and_resets_lora(self):
+        torch.manual_seed(0)
+        model = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
+        lora_cfg = LoraConfig(
+            r=2,
+            lora_alpha=4,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.0,
+        )
+        peft_model = get_peft_model(model, lora_cfg, adapter_name="actor")
+        peft_model.eval()
+
+        lora_modules = [
+            module
+            for module in peft_model.base_model.model.modules()
+            if hasattr(module, "lora_A") and "actor" in module.lora_A
+        ]
+        assert lora_modules, "Expected at least one LoRA-capable layer."
+        for module in lora_modules:
+            with torch.no_grad():
+                module.lora_A["actor"].weight.fill_(0.05)
+                module.lora_B["actor"].weight.fill_(0.05)
+
+        first = lora_modules[0]
+        base_before = first.get_base_layer().weight.detach().clone()
+        lora_a_before = first.lora_A["actor"].weight.detach().clone()
+        lora_b_before = first.lora_B["actor"].weight.detach().clone()
+
+        input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], dtype=torch.long)
+        attention_mask = torch.ones_like(input_ids)
+        with torch.no_grad():
+            logits_before = peft_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            ).logits
+
+        agent = _make_llm_agent()
+        agent._merge_adapter_into_base_in_place(
+            peft_model=peft_model,
+            adapter_name="actor",
+        )
+
+        with torch.no_grad():
+            logits_after = peft_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            ).logits
+
+        assert torch.allclose(logits_before, logits_after, atol=3.2e-2, rtol=1e-3)
+        assert not torch.allclose(base_before, first.get_base_layer().weight)
+        assert not torch.allclose(lora_a_before, first.lora_A["actor"].weight)
+        assert not torch.allclose(lora_b_before, first.lora_B["actor"].weight)
+        assert torch.allclose(
+            first.lora_B["actor"].weight,
+            torch.zeros_like(first.lora_B["actor"].weight),
+        )
+
+    def test_merge_adapter_into_base_raises_when_no_lora_tensors_found(self):
+        agent = _make_llm_agent()
+        peft_model = MagicMock()
+        peft_model.base_model.model.modules.return_value = []
+
+        with pytest.raises(ValueError, match="No LoRA tensors found for adapter"):
+            agent._merge_adapter_into_base_in_place(
+                peft_model=peft_model,
+                adapter_name="actor",
+            )
 
 
 class TestLLMGetLogprobs:
