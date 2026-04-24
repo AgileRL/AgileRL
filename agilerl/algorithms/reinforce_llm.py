@@ -501,10 +501,13 @@ class REINFORCE(LLMAlgorithm):
     ) -> torch.Tensor:
         """Return fitness (test) score tensor of llm on test sub-set.
 
-        Matches :meth:`agilerl.algorithms.ppo_llm.PPO.test` env handling.
+        ``ReasoningGym`` (and compatible dataset envs): ``reset`` returns a batch
+        of prompt dicts; each ``step`` accepts completion id tensors and returns
+        the next batch plus rewards. ``loop`` iterations advance the test
+        dataloader that many times.
 
         :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
-            :class:`~agilerl.wrappers.llm_envs.TokenObservationWrapper`.
+            :class:`~agilerl.llm_envs.TokenObservationWrapper`.
         :type env: ReasoningGym | MultiTurnEnv
         :param loop: Number of outer test iterations (dataloader passes or episodes).
         :type loop: int

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from accelerate import Accelerator
     from peft import LoraConfig
 
-    from agilerl.wrappers.llm_envs import ReasoningGym
+    from agilerl.llm_envs import ReasoningGym
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
@@ -658,10 +658,8 @@ class GRPO(LLMAlgorithm):
                             training=False,
                         )
                         full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _step_info = (
-                            env.step(
-                                full,
-                            )
+                        prompt_dict, reward, terminated, truncated, _info = env.step(
+                            full,
                         )
                         all_rewards.append(
                             torch.tensor(
@@ -895,7 +893,7 @@ class GRPO(LLMAlgorithm):
         reference_log_probs: torch.Tensor,
         advantages: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Calculate GSPO-like sequence-ratio clipped loss using standard PyTorch."""
+        """Calculate GSPO sequence-level ratio clipped loss."""
         kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
         advantages = self._apply_kl_advantage_shaping(advantages, kl, mask)
 

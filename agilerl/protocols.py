@@ -614,10 +614,10 @@ class PeftModelProtocol(Protocol):
 
 @runtime_checkable
 class MultiTurnEnv(Protocol):
-    """Protocol for GEM-style multi-turn environments and AgileRL wrappers.
+    """Protocol for multi-turn LLM environments and AgileRL wrappers.
 
     Covers both:
-    - raw GEM envs / ``FormatRewardWrapper``: text obs + text actions
+    - raw multi-turn envs / ``FormatRewardWrapper``: text obs + text actions
     - ``TokenObservationWrapper``: dict obs + token-id tensor actions
     """
 

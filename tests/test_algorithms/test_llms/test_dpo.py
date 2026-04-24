@@ -24,7 +24,7 @@ from agilerl.algorithms.core.base import (
     OptimizerWrapper,
 )
 from agilerl.algorithms.dpo import DPO
-from agilerl.wrappers.llm_envs import PreferenceGym
+from agilerl.llm_envs import PreferenceGym
 from tests.test_algorithms.test_llms.test_grpo import (
     create_module,
     deepspeed_config_stage_1,

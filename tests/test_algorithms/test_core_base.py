@@ -1747,6 +1747,25 @@ class TestLLMUpdateLr:
             == 5e-4
         )
 
+    def test_update_lr_accepts_actor_critic_lr_tuple(self):
+        actor_param = torch.tensor([1.0], requires_grad=True)
+        critic_param = torch.tensor([1.0], requires_grad=True)
+        opt = torch.optim.Adam(
+            [
+                {"params": [actor_param], "lr": 1e-3, "group": "actor"},
+                {"params": [critic_param], "lr": 2e-3, "group": "critic"},
+            ]
+        )
+
+        LLMAlgorithm.update_lr(
+            opt,
+            lr=(3e-4, 4e-4),
+            accelerator=None,
+        )
+
+        assert opt.param_groups[0]["lr"] == 3e-4
+        assert opt.param_groups[1]["lr"] == 4e-4
+
 
 class TestLLMSaveDistributedActor:
     def test_save_with_accelerator(self, tmp_path):
@@ -4701,6 +4720,37 @@ class TestLLMReinitOptFromConfig:
         ) as mock_update:
             EvolvableAlgorithm._reinit_opt_from_config(agent, config)
         mock_update.assert_called_once()
+
+    def test_reinit_opt_from_config_llm_with_split_lr_config(self):
+        acc = _make_mock_accelerator(
+            ds_config={
+                "zero_optimization": {"stage": 0},
+                "train_micro_batch_size_per_gpu": "auto",
+            }
+        )
+        agent = _make_llm_agent(accelerator=acc)
+        agent.cosine_lr_schedule_config = None
+
+        from agilerl.algorithms.core.registry import OptimizerConfig
+
+        config = OptimizerConfig(
+            name="optimizer",
+            lr=("lr", "lr_critic"),
+            networks=["actor"],
+            optimizer_cls=torch.optim.AdamW,
+            optimizer_kwargs={},
+        )
+
+        with patch.object(
+            LLMAlgorithm, "update_lr", return_value=(acc, None)
+        ) as mock_update:
+            EvolvableAlgorithm._reinit_opt_from_config(agent, config)
+
+        mock_update.assert_called_once()
+        _, kwargs = mock_update.call_args
+        assert kwargs["lr"] == (agent.lr, agent.lr_critic)
+        assert kwargs["accelerator"] is agent.accelerator
+        assert kwargs["scheduler_config"] is agent.cosine_lr_schedule_config
 
 
 class TestLLMCleanUpCudaPaths:

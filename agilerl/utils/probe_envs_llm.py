@@ -1,9 +1,8 @@
-"""Lightweight string-observation probe environments for GEM (`gem.Env`).
+"""Lightweight string-observation probe environments for multi-turn LLM debugging.
 
 These are ordered by increasing complexity for debugging LLM PPO training
 pipelines: fixed target, input-dependent target, multi-digit arithmetic
-target, then multi-turn spatial navigation. They are plain subclasses of
-``gem.core.Env`` and are not registered with GEM's environment registry.
+target, then multi-turn spatial navigation.
 """
 
 from __future__ import annotations

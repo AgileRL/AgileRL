@@ -13,7 +13,7 @@ import torch
 from accelerate import Accelerator
 from torch import nn
 
-from agilerl import HAS_DEEPSPEED, HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
+from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
 from agilerl.typing import ReasoningPrompts
 
 if TYPE_CHECKING or HAS_DEEPSPEED:
@@ -47,14 +47,14 @@ def __getattr__(name: str) -> Any:
         warnings.warn(
             (
                 f"Importing {name} from agilerl.utils.llm_utils is deprecated; "
-                "it has moved to agilerl.wrappers.llm_envs. Import from "
-                "agilerl.wrappers.llm_envs instead; importing from "
+                "it has moved to agilerl.llm_envs. Import from "
+                "agilerl.llm_envs instead; importing from "
                 "agilerl.utils.llm_utils will be removed in a future release."
             ),
             FutureWarning,
             stacklevel=2,
         )
-        import agilerl.wrappers.llm_envs as _llm_envs
+        import agilerl.llm_envs as _llm_envs
 
         return getattr(_llm_envs, name)
     msg = f"module {__name__!r} has no attribute {name!r}"
@@ -228,14 +228,12 @@ def masked_var(
     variance = masked_mean(centered_values**2, mask)
     if unbiased:
         mask_sum = mask.sum()
-        if mask_sum == 0:
+        if mask_sum <= 1:
             msg = (
-                "The sum of the mask is zero, which can happen when `mini_batch_size=1`;"
-                "try increase the `mini_batch_size` or `gradient_accumulation_steps`"
+                "Unbiased masked variance requires at least 2 unmasked values; "
+                "increase `mini_batch_size` or `gradient_accumulation_steps`."
             )
             raise ValueError(msg)
-        # note that if mask_sum == 1, then there is a division by zero issue
-        # to avoid it you just need to use a larger minibatch_size
         bessel_correction = mask_sum / (mask_sum - 1)
         variance = variance * bessel_correction
     return variance
@@ -770,7 +768,7 @@ def compare_responses(
     print(f"\n{'═' * width}\n")
 
 
-if HAS_LIGER_KERNEL or TYPE_CHECKING:
+try:
     from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOFunction
     from liger_kernel.chunked_loss.fused_linear_preference import (
         LigerFusedLinearPreferenceBase,
@@ -835,5 +833,6 @@ if HAS_LIGER_KERNEL or TYPE_CHECKING:
         def backward(ctx, *grad_output):
             grads = LigerFusedLinearPreferenceBase.backward(ctx, grad_output)[:4]
             return (*grads, *(None,) * 12)
-else:
+
+except ImportError:
     _LigerDPOWithAlpha = None

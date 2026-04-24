@@ -4,7 +4,7 @@ import numpy as np
 
 
 from agilerl.rollouts.on_policy import collect_rollouts_llm
-from agilerl.wrappers.llm_envs import (
+from agilerl.llm_envs import (
     SyncMultiTurnVecEnv,
     TokenObservationWrapper,
 )

@@ -7,9 +7,9 @@ import torch
 from gymnasium import spaces
 
 from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE, PPO
+from agilerl.llm_envs import SyncMultiTurnVecEnv
 from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType
-from agilerl.wrappers.llm_envs import SyncMultiTurnVecEnv
 
 SupportedOnPolicy = PPO
 SupportedOnPolicyLLM = LLMPPO | LLMREINFORCE | GRPO
@@ -259,7 +259,7 @@ def collect_rollouts_llm(
 
     :param agent: The agent to collect rollouts for.
     :type agent: SupportedOnPolicyLLM
-    :param env: Synchronous vectorized multi-turn GEM environment.
+    :param env: Synchronous vectorized multi-turn environment.
     :type env: SyncGemVecEnv
     :param n_steps: Number of steps (max turns) for the agent to take.
     :type n_steps: int

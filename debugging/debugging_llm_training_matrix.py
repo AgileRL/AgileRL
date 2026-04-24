@@ -28,7 +28,7 @@ from agilerl import HAS_LLM_DEPENDENCIES
 if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
-from agilerl.wrappers.llm_envs import TokenObservationWrapper
+from agilerl.llm_envs import TokenObservationWrapper
 from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 

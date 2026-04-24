@@ -672,23 +672,17 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             else:
                 optimizer = opt.optimizer
 
-            if isinstance(config.lr, tuple):
-                lr_actor = getattr(self, config.lr[0])
-                lr_critic = getattr(self, config.lr[1])
-                self.accelerator, self.lr_scheduler = LLMAlgorithm.update_lr(
-                    optimizer,
-                    lr=lr_actor,
-                    lr_critic=lr_critic,
-                    accelerator=self.accelerator,
-                    scheduler_config=self.cosine_lr_schedule_config,
-                )
-            else:
-                self.accelerator, self.lr_scheduler = LLMAlgorithm.update_lr(
-                    optimizer,
-                    lr=getattr(self, config.lr),
-                    accelerator=self.accelerator,
-                    scheduler_config=self.cosine_lr_schedule_config,
-                )
+            lr = (
+                tuple(getattr(self, lr_name) for lr_name in config.lr)
+                if isinstance(config.lr, tuple)
+                else getattr(self, config.lr)
+            )
+            self.accelerator, self.lr_scheduler = LLMAlgorithm.update_lr(
+                optimizer,
+                lr=lr,
+                accelerator=self.accelerator,
+                scheduler_config=self.cosine_lr_schedule_config,
+            )
         else:
             # Multiple optimizers in a single attribute (i.e. multi-agent)
             # or one module optimized by a single optimizer
@@ -912,29 +906,32 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             networks = [cloned_modules[net] for net in opt_config.networks]
             optim_cls = opt_config.get_optimizer_cls()
-            if getattr(orig_optimizer, "is_llm_optimizer", False) and isinstance(
-                opt_config.lr,
-                tuple,
-            ):
-                opt = OptimizerWrapper(
-                    optim_cls,
-                    networks=networks,
-                    lr=getattr(clone, opt_config.lr[0]),
-                    lr_critic=getattr(clone, opt_config.lr[1]),
-                    is_llm_optimizer=True,
-                    network_names=opt_config.networks,
-                    lr_name=opt_config.lr,
-                    optimizer_kwargs=opt_config.optimizer_kwargs,
-                )
+            is_llm_optimizer = bool(getattr(orig_optimizer, "is_llm_optimizer", False))
+            if is_llm_optimizer:
+                if not isinstance(opt_config.lr, tuple):
+                    msg = (
+                        "LLM optimizers require tuple lr config "
+                        "('lr_actor', 'lr_critic')."
+                    )
+                    raise TypeError(
+                        msg,
+                    )
+                lr = getattr(clone, opt_config.lr[0])
+                lr_critic = getattr(clone, opt_config.lr[1])
             else:
-                opt = OptimizerWrapper(
-                    optim_cls,
-                    networks=networks,
-                    lr=getattr(clone, opt_config.lr),
-                    network_names=opt_config.networks,
-                    lr_name=opt_config.lr,
-                    optimizer_kwargs=opt_config.optimizer_kwargs,
-                )
+                lr = getattr(clone, opt_config.lr)
+                lr_critic = None
+
+            opt = OptimizerWrapper(
+                optim_cls,
+                networks=networks,
+                lr=lr,
+                lr_critic=lr_critic,
+                is_llm_optimizer=is_llm_optimizer,
+                network_names=opt_config.networks,
+                lr_name=opt_config.lr,
+                optimizer_kwargs=opt_config.optimizer_kwargs,
+            )
             opt.load_state_dict(orig_optimizer.state_dict())
             setattr(clone, opt_config.name, opt)
 
@@ -2264,20 +2261,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         grid:
 
           Plain (no accelerator):
-            lora_only=T, save_optimizer=T  \u2192  PEFT adapter dirs on disk +
+            lora_only=T, save_optimizer=T  ->  PEFT adapter dirs on disk +
                                                  optimizer state in ``attributes.pt``
-            lora_only=T, save_optimizer=F  \u2192  PEFT adapter dirs only
-            lora_only=F, save_optimizer=T  \u2192  full actor state_dict +
+            lora_only=T, save_optimizer=F  ->  PEFT adapter dirs only
+            lora_only=F, save_optimizer=T  ->  full actor state_dict +
                                                  optimizer state in ``attributes.pt``
-            lora_only=F, save_optimizer=F  \u2192  full actor state_dict in ``attributes.pt``
+            lora_only=F, save_optimizer=F  ->  full actor state_dict in ``attributes.pt``
 
           DeepSpeed:
-            lora_only=T, save_optimizer=T  \u2192  engine tag dir (frozen params
+            lora_only=T, save_optimizer=T  ->  engine tag dir (frozen params
                                                  excluded) + PEFT adapter dirs
-            lora_only=T, save_optimizer=F  \u2192  PEFT adapter dirs only
-            lora_only=F, save_optimizer=T  \u2192  engine tag dir (frozen params
+            lora_only=T, save_optimizer=F  ->  PEFT adapter dirs only
+            lora_only=F, save_optimizer=T  ->  engine tag dir (frozen params
                                                  included)
-            lora_only=F, save_optimizer=F  \u2192  gathered (ZeRO-3 aware) actor
+            lora_only=F, save_optimizer=F  ->  gathered (ZeRO-3 aware) actor
                                                  state_dict injected into
                                                  ``attributes.pt``
 
@@ -2399,7 +2396,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
           * ``actor``     — the trained policy. Always loaded.
           * ``reference`` — the fixed policy used for KL / comparison. The
             checkpoint's ``actor`` adapter is copied onto ``reference`` so
-            that SFT \u2192 DPO \u2192 GRPO chains work out of the box: the stage-N
+            that SFT -> DPO -> GRPO chains work out of the box: the stage-N
             actor becomes the stage-N+1 reference.
           * ``critic``    — optional value head. Loaded from disk if a
             ``critic/`` adapter is present, else copied from ``actor``, else
@@ -2409,31 +2406,31 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         algorithm's config disagree, loading fails fast by default. Pass
         ``merge_lora_configs=True`` to merge them for compatibility:
 
-          * ``r`` (rank) \u2192 ``max(current, checkpoint)``; the smaller side's
+          * ``r`` (rank) -> ``max(current, checkpoint)``; the smaller side's
             weights are padded into the top-left rank slice of the larger
             adapter (see :meth:`_pad_adapter_state_to_live_shape`).
-          * ``target_modules`` / ``modules_to_save`` \u2192 union.
-          * Any other mismatched field \u2192 current value wins, with a warning.
+          * ``target_modules`` / ``modules_to_save`` -> union.
+          * Any other mismatched field -> current value wins, with a warning.
 
         Any adapter whose live config ends up differing from the selected
         target config is rebuilt via :meth:`_reconfigure_adapters_to_match` before
         weights are loaded, so tensors always land in the correct shape.
 
           No DeepSpeed:
-            lora_only=T, load_optimizer=T  \u2192  PEFT adapter load + optimizer
+            lora_only=T, load_optimizer=T  ->  PEFT adapter load + optimizer
                                                  state from ``attributes.pt``
-            lora_only=T, load_optimizer=F  \u2192  PEFT adapter load only
-            lora_only=F, load_optimizer=T  \u2192  torch load of actor +
+            lora_only=T, load_optimizer=F  ->  PEFT adapter load only
+            lora_only=F, load_optimizer=T  ->  torch load of actor +
                                                  optimizer from ``attributes.pt``
-            lora_only=F, load_optimizer=F  \u2192  torch load of actor only
+            lora_only=F, load_optimizer=F  ->  torch load of actor only
 
           DeepSpeed:
-            lora_only=T, load_optimizer=T  \u2192  DeepSpeed engine load from
+            lora_only=T, load_optimizer=T  ->  DeepSpeed engine load from
                                                  ``<path>/save_checkpoint``
-            lora_only=T, load_optimizer=F  \u2192  PEFT adapter load
-            lora_only=F, load_optimizer=T  \u2192  DeepSpeed engine load from
+            lora_only=T, load_optimizer=F  ->  PEFT adapter load
+            lora_only=F, load_optimizer=T  ->  DeepSpeed engine load from
                                                  ``<path>/save_checkpoint``
-            lora_only=F, load_optimizer=F  \u2192  ``actor.load_state_dict(...)``
+            lora_only=F, load_optimizer=F  ->  ``actor.load_state_dict(...)``
                                                  from ``attributes.pt``
 
         When ``load_optimizer=True`` but the checkpoint contains no optimizer
@@ -2891,28 +2888,30 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     @staticmethod
     def update_lr(
         optimizer: torch.optim.Optimizer,  # Deepspeed optimizers are subclasses of torch.optim.Optimizer
-        lr: float,
+        lr: float | tuple[float, float],
         accelerator: Accelerator | None = None,
         scheduler_config: CosineLRScheduleConfig | None = None,
-        lr_critic: float | None = None,
     ) -> tuple[Accelerator | None, SequentialLR | None]:
         """Update the learning rate of the optimizer.
 
         :param optimizer: Optimizer
         :type optimizer: Optimizer
-        :param lr: Learning rate
-        :type lr: float
+        :param lr: Learning rate value, or actor/critic pair.
+        :type lr: float | tuple[float, float]
         :param accelerator: Accelerator
         :type accelerator: Accelerator | None
         :param scheduler_config: Scheduler configuration
         :type scheduler_config: CosineLRScheduleConfig | None
-        :param lr_critic: When param groups include ``group`` ``actor``/``critic``,
-            set critic/value-head groups to this LR; actor groups use ``lr``.
-        :type lr_critic: float | None
 
         :return: Tuple of accelerator and scheduler
         :return: Accelerator
         """
+        if isinstance(lr, tuple):
+            lr_actor, lr_critic = lr
+            lr = lr_actor
+        else:
+            lr_critic = None
+
         split = lr_critic is not None and any(
             "group" in pg for pg in optimizer.param_groups
         )
@@ -3829,36 +3828,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             gathered_prompts_ids = [
                 None for _ in range(self.vllm_config.tensor_parallel_size)
             ]
-            gathered_token_prompts = [
-                None for _ in range(self.vllm_config.tensor_parallel_size)
-            ]
-            gathered_stitch_prefixes = [
-                None for _ in range(self.vllm_config.tensor_parallel_size)
-            ]
-            gathered_max_output_tokens = [
-                None for _ in range(self.vllm_config.tensor_parallel_size)
-            ]
+            gathered_token_prompts = [None] * self.vllm_config.tensor_parallel_size
+            gathered_stitch_prefixes = [None] * self.vllm_config.tensor_parallel_size
+            gathered_max_output_tokens = [None] * self.vllm_config.tensor_parallel_size
 
-            torch.distributed.all_gather_object(
-                gathered_prompts_ids,
-                prompts_ids,
-                group=self.tp_group,
-            )
-            torch.distributed.all_gather_object(
-                gathered_token_prompts,
-                token_prompts,
-                group=self.tp_group,
-            )
-            torch.distributed.all_gather_object(
-                gathered_stitch_prefixes,
-                stitch_prefixes,
-                group=self.tp_group,
-            )
-            torch.distributed.all_gather_object(
-                gathered_max_output_tokens,
-                max_output_tokens,
-                group=self.tp_group,
-            )
+            for gathered, obj in zip(
+                (
+                    gathered_prompts_ids,
+                    gathered_token_prompts,
+                    gathered_stitch_prefixes,
+                    gathered_max_output_tokens,
+                ),
+                (prompts_ids, token_prompts, stitch_prefixes, max_output_tokens),
+                strict=True,
+            ):
+                torch.distributed.all_gather_object(gathered, obj, group=self.tp_group)
 
             all_prompts_ids = [
                 prompt_id for sublist in gathered_prompts_ids for prompt_id in sublist

@@ -6,13 +6,19 @@ from typing import Any
 
 import numpy as np
 import torch
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMREINFORCE, SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.llm_envs import (
+    HuggingFaceGym,
+    ReasoningGym,
+    SFTGym,
+    SyncMultiTurnVecEnv,
+)
 from agilerl.protocols import MultiTurnEnv
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.typing import PopulationType
@@ -24,12 +30,6 @@ from agilerl.utils.utils import (
     safe_aggregate_metrics,
     save_llm_checkpoint,
     tournament_selection_and_mutation,
-)
-from agilerl.wrappers.llm_envs import (
-    HuggingFaceGym,
-    ReasoningGym,
-    SFTGym,
-    SyncMultiTurnVecEnv,
 )
 
 InitDictType = dict[str, Any] | None
@@ -786,7 +786,6 @@ def finetune_llm_reasoning(
                     elite_path=elite_path,
                     save_elite=save_elite,
                 )
-                print("POP MUTATED")
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
         else:
@@ -1201,7 +1200,7 @@ def finetune_llm_multiturn(
     accelerator: Accelerator | None = None,
     log_csv: bool = False,
 ) -> PopulationType:
-    """Finetune a population of LLMPPO agents on a multi-turn GEM environment.
+    """Finetune a population of LLMPPO agents on a multi-turn environment.
 
     Collects token-level episodes (``reset`` returns ``(obs, info)``,
     repeated ``get_action`` / ``step`` (full completion tensor), then
@@ -1256,7 +1255,7 @@ def finetune_llm_multiturn(
 
     if not isinstance(pop[0], (LLMPPO, LLMREINFORCE, GRPO)):
         msg = (
-            "The algorithm must be LLMPPO, LLMREINFORCE, or GRPO for multi-turn GEM finetuning. "
+            "The algorithm must be LLMPPO, LLMREINFORCE, or GRPO for multi-turn finetuning. "
             f"Got {type(pop[0])} instead."
         )
         raise ValueError(
@@ -1609,7 +1608,7 @@ def finetune_llm_sft(
     positions are masked with ``ignore_index=-100``).
 
     :param pop: Population of SFT agents.
-    :param env: Shared :class:`~agilerl.wrappers.llm_envs.SFTGym` instance.
+    :param env: Shared :class:`~agilerl.llm_envs.SFTGym` instance.
     :param env_fn: Optional factory returning one ``SFTGym`` per agent.
     :param init_hp: Hyperparameter dict forwarded to wandb, defaults to None.
     :param save_elite: Save best agent to disk, defaults to None.

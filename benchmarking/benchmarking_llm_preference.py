@@ -35,7 +35,7 @@ from agilerl.algorithms.dpo import DPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_preference
-from agilerl.wrappers.llm_envs import PreferenceGym
+from agilerl.llm_envs import PreferenceGym
 from agilerl.utils.llm_utils import (
     compare_responses,
     sample_eval_prompts,

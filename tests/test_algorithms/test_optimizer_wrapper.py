@@ -1166,7 +1166,7 @@ class TestOptimizerWrapper:
 
         net = _Net()
         opt = init_llm_optimizer(net, torch.optim.Adam, 0.1, {}, lr_critic=0.2)
-        LLMAlgorithm.update_lr(opt, lr=0.3, lr_critic=0.4)
+        LLMAlgorithm.update_lr(opt, lr=(0.3, 0.4))
         assert opt.param_groups[0]["lr"] == 0.3
         assert opt.param_groups[1]["lr"] == 0.4
 

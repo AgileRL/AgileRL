@@ -35,7 +35,7 @@ Dependencies
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_llm import finetune_llm_reasoning
-    from agilerl.wrappers.llm_envs import ReasoningGym
+    from agilerl.llm_envs import ReasoningGym
     from agilerl.utils.utils import create_population
 
 Defining Hyperparameters
@@ -121,7 +121,7 @@ become very good at taking actions to solve tasks - to develop *agency*. Since w
 with reinforcement learning, it becomes an agent through this process.
 
 We must create a reinforcement learning environment in which our agent can explore possible
-solutions and learn to optimise rewards. AgileRL provides a :class:`ReasoningGym <agilerl.wrappers.llm_envs.ReasoningGym>`
+solutions and learn to optimise rewards. AgileRL provides a :class:`ReasoningGym <agilerl.llm_envs.ReasoningGym>`
 class that wraps a Hugging Face dataset and converts it into a reinforcement learning, gymnasium-style environment.
 
 So, how does the environment know how to reward an agent for its outputs? Well, we must define a *reward_function*

@@ -187,4 +187,4 @@ def main(cfg: dict) -> None:
 
 
 if __name__ == "__main__":
-    main(load_debug_config("value_head_smoke.yaml"))
+    main(load_debug_config("ppo_value_head.yaml"))

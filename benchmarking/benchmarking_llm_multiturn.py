@@ -10,7 +10,6 @@ import argparse
 
 import gem
 from huggingface_hub import snapshot_download
-from gem.tools.tool_env_wrapper import ToolEnvWrapper
 import yaml
 from transformers import AutoTokenizer
 from agilerl.algorithms import LLMPPO, LLMREINFORCE, GRPO
@@ -18,7 +17,7 @@ from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.utils import create_population
-from agilerl.wrappers.llm_envs import (
+from agilerl.llm_envs import (
     FormatRewardWrapper,
     SearchTool,
     TokenObservationWrapper,
@@ -26,26 +25,12 @@ from agilerl.wrappers.llm_envs import (
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 ENV_NAME = "game:GuessTheNumber-v0-easy"
-USE_TINY_DEBUG_MODEL = False
-USE_VLLM = not USE_TINY_DEBUG_MODEL
-PRELOAD_MODEL = True
 
 ALGO_REGISTRY = {
     "LLMPPO": LLMPPO,
     "LLMREINFORCE": LLMREINFORCE,
     "GRPO": GRPO,
 }
-
-
-def _download_model_to_cache(model_name: str) -> str:
-    """Pre-download model artifacts into local HF cache and return cache path."""
-    print(f"Pre-downloading model to HF cache: {model_name}")
-    local_path = snapshot_download(
-        repo_id=model_name,
-        resume_download=True,
-    )
-    print(f"Model cached at: {local_path}")
-    return local_path
 
 
 def main(init_hp, mut_p):
@@ -55,41 +40,12 @@ def main(init_hp, mut_p):
         msg = f"Unknown algorithm '{algo_name}'. Supported: {', '.join(ALGO_REGISTRY)}"
         raise ValueError(msg)
 
-    if USE_TINY_DEBUG_MODEL:
-        from benchmarking.tiny_model import TinyDigitTokenizer, build_tiny_actor_network
-
-        actor_network = build_tiny_actor_network()
-        tokenizer = TinyDigitTokenizer()
-        model_name = None
-        target_modules = ["c_attn", "c_proj", "c_fc"]
-        apply_chat_template = False
-    else:
-        actor_network = None
-        model_name = MODEL_PATH
-        if PRELOAD_MODEL:
-            _download_model_to_cache(model_name)
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-        target_modules = [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "up_proj",
-            "down_proj",
-            "gate_proj",
-        ]
-        apply_chat_template = True
-    search_tool = SearchTool(search_url="http://localhost:8888/search")
+    actor_network = None
+    model_name = MODEL_PATH
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     base_env = gem.make(ENV_NAME)
-    # tool_env = ToolEnvWrapper(
-    #     env=sample_env,
-    #     tools=[search_tool],
-    #     tool_success_reward=0.1,
-    #     max_tool_uses=2,
-    # )
     max_turns = base_env.max_turns
 
-    # fmt_env = FormatRewardWrapper(tool_env)
     def env_factory():
         env = gem.make(ENV_NAME)
         return TokenObservationWrapper(
@@ -97,12 +53,11 @@ def main(init_hp, mut_p):
             tokenizer,
             max_turns,
             tokenizer.pad_token_id,
-            apply_chat_template=apply_chat_template,
             max_model_len=init_hp.get("MAX_MODEL_LEN", None),
             max_output_tokens=init_hp.get("MAX_OUTPUT_TOKENS", None),
         )
 
-    accelerator = create_llm_accelerator() if not USE_TINY_DEBUG_MODEL else None
+    accelerator = create_llm_accelerator()
 
     vllm_config = (
         VLLMConfig(
@@ -111,7 +66,7 @@ def main(init_hp, mut_p):
             max_num_seqs=16,
             sleep_mode=True,
         )
-        if USE_VLLM
+        if init_hp.get("USE_VLLM", False)
         else None
     )
     pop = create_population(

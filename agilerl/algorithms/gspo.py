@@ -9,7 +9,10 @@ from agilerl.algorithms.grpo import GRPO, _signatures_without_loss_type
 
 
 class GSPO(GRPO):
-    """GSPO loss variant of :class:`agilerl.algorithms.grpo.GRPO`."""
+    """GSPO loss variant of :class:`agilerl.algorithms.grpo.GRPO`.
+
+    Paper: https://arxiv.org/abs/2507.18071
+    """
 
     _init_with_gspo = partial(GRPO.__init__, loss_type="gspo")
 

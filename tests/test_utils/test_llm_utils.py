@@ -1147,6 +1147,16 @@ def test_masked_stats_and_pool_by_turns_helpers():
     assert pooled[0, 1].item() == pytest.approx(5.0)
 
 
+def test_masked_var_unbiased_requires_at_least_two_unmasked_values():
+    values = torch.tensor([[1.0, 3.0, 5.0, 7.0]])
+    mask = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+
+    with pytest.raises(
+        ValueError, match="Unbiased masked variance requires at least 2 unmasked values"
+    ):
+        masked_var(values, mask, unbiased=True)
+
+
 def test_move_params_helpers_call_model_move_and_cuda_sync():
     model_gpu = MagicMock()
     gpu_param = MagicMock()

@@ -583,7 +583,7 @@ class PPO(LLMAlgorithm):
         dataloader that many times.
 
         :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
-            :class:`~agilerl.wrappers.llm_envs.TokenObservationWrapper`.
+            :class:`~agilerl.llm_envs.TokenObservationWrapper`.
         :type env: ReasoningGym | MultiTurnEnv
         :param loop: Number of outer test iterations (dataloader passes or episodes).
         :type loop: int

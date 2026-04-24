@@ -118,7 +118,7 @@ Dependencies
     from agilerl.utils.algo_utils import VLLMConfig
     from agilerl.utils.llm_utils import create_llm_accelerator
     from agilerl.utils.utils import create_population
-    from agilerl.wrappers.llm_envs import TokenObservationWrapper
+    from agilerl.llm_envs import TokenObservationWrapper
 
 Shared setup
 ------------
@@ -127,7 +127,7 @@ All runs use:
 
 * Environment: ``game:GuessTheNumber-v0-easy``
 * Model: ``Qwen/Qwen2.5-0.5B-Instruct``
-* Wrapper: :class:`TokenObservationWrapper <agilerl.wrappers.llm_envs.TokenObservationWrapper>`
+* Wrapper: :class:`TokenObservationWrapper <agilerl.llm_envs.TokenObservationWrapper>`
 * Training loop: :meth:`finetune_llm_multiturn() <agilerl.training.train_llm.finetune_llm_multiturn>`
 * Population size: ``1``
 * Evolution/HPO: disabled

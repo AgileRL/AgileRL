@@ -10,12 +10,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -1512,12 +1512,16 @@ def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
                 if not isinstance(agent.optimizer.optimizer, DummyOptimizer)
                 else agent.actor.optimizer
             )
+            lr = (
+                (agent.lr, agent.lr_critic)
+                if getattr(agent, "lr_critic", None) is not None
+                else agent.lr
+            )
             update_lr_kw = {
                 "optimizer": opt,
-                "lr": agent.lr,
+                "lr": lr,
                 "accelerator": agent.accelerator,
                 "scheduler_config": agent.cosine_lr_schedule_config,
-                "lr_critic": agent.lr_critic,
             }
             agent.accelerator, agent.lr_scheduler = LLMAlgorithm.update_lr(
                 **update_lr_kw

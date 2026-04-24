@@ -19,7 +19,7 @@ from transformers import AutoTokenizer
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
 from agilerl.algorithms.sft import SFT
-from agilerl.wrappers.llm_envs import SFTGym
+from agilerl.llm_envs import SFTGym
 from tests.test_algorithms.test_llms.test_grpo import (
     _patch_mps_learn_hooks,
     create_module,
