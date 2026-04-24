@@ -177,6 +177,105 @@ class TestParseNdjsonLine:
         event = parse_ndjson_line(line)
         assert isinstance(event, LogEvent)
 
+    def test_warning_event(self):
+        """``kind:"warning"`` produces a StatusEvent with kind="warning"."""
+        line = json.dumps(
+            {
+                "kind": "warning",
+                "stage": "submission",
+                "status": "running",
+                "message": "Low credit balance",
+            }
+        )
+        event = parse_ndjson_line(line)
+        assert isinstance(event, StatusEvent)
+        assert event.kind == "warning"
+        assert event.message == "Low credit balance"
+        assert event.stage == "submission"
+
+    def test_warning_failed_becomes_error_event(self):
+        """``kind:"warning"`` with ``status:"failed"`` still becomes ErrorEvent."""
+        line = json.dumps(
+            {
+                "kind": "warning",
+                "stage": "submission",
+                "status": "failed",
+                "message": "Fatal warning",
+                "detail": {"info": "details"},
+            }
+        )
+        event = parse_ndjson_line(line)
+        assert isinstance(event, ErrorEvent)
+        assert event.message == "Fatal warning"
+
+    def test_failed_event_sanitizes_internal_url(self):
+        """Internal service URLs in failed-status messages are replaced."""
+        line = json.dumps(
+            {
+                "kind": "status",
+                "stage": "validation",
+                "status": "failed",
+                "message": (
+                    "Environment creation failed: Failed to call list-entrypoints: "
+                    "error sending request for url "
+                    "(http://env-validator:8080/api/v1/validations/custom-envs/list-entrypoints)"
+                ),
+            }
+        )
+        event = parse_ndjson_line(line)
+        assert isinstance(event, ErrorEvent)
+        assert "env-validator" not in event.message
+        assert "Something went wrong" in event.message
+
+    def test_check_without_dict_result_falls_back_to_status(self):
+        """``kind:"check"`` with non-dict ``detail.result`` falls back to StatusEvent."""
+        line = json.dumps(
+            {
+                "kind": "check",
+                "stage": "validation",
+                "status": "running",
+                "message": "Malformed check",
+                "detail": {"check": "imports", "result": "not-a-dict"},
+            }
+        )
+        event = parse_ndjson_line(line)
+        assert isinstance(event, StatusEvent)
+        assert event.stage == "validation"
+        assert event.message == "Malformed check"
+
+    def test_check_with_null_success(self):
+        """Explicit ``null`` success in JSON produces CheckEvent(success=None)."""
+        line = json.dumps(
+            {
+                "kind": "check",
+                "stage": "validation",
+                "status": "running",
+                "message": "unknown check",
+                "detail": {
+                    "check": "seed",
+                    "result": {"success": None},
+                },
+            }
+        )
+        event = parse_ndjson_line(line)
+        assert isinstance(event, CheckEvent)
+        assert event.success is None
+        assert event.name == "seed"
+
+    def test_check_missing_result_key_falls_back_to_status(self):
+        """``kind:"check"`` with no ``result`` key falls back to StatusEvent."""
+        line = json.dumps(
+            {
+                "kind": "check",
+                "stage": "validation",
+                "status": "running",
+                "message": "No result",
+                "detail": {"check": "imports"},
+            }
+        )
+        event = parse_ndjson_line(line)
+        assert isinstance(event, StatusEvent)
+
 
 # ---------------------------------------------------------------------------
 # NDJsonStream
@@ -398,3 +497,175 @@ class TestNDJsonStream:
         assert isinstance(events[0], ErrorEvent)
         assert events[0].message == "Insufficient resources"
         assert "response" in events[0].extras
+
+    def test_double_iteration_yields_nothing_second_time(self):
+        """Iterating a consumed stream yields no events (W1 documentation)."""
+        lines = [
+            json.dumps(
+                {"kind": "status", "stage": "a", "status": "running", "message": "x"}
+            ),
+        ]
+        resp = _make_mock_response(lines)
+        resp.iter_text.return_value = iter(
+            [
+                json.dumps(
+                    {
+                        "kind": "status",
+                        "stage": "a",
+                        "status": "running",
+                        "message": "x",
+                    }
+                )
+                + "\n"
+            ]
+        )
+        stream = NDJsonStream(resp)
+        first = list(stream)
+        assert len(first) == 1
+        assert stream._consumed is True
+
+        resp.iter_text.return_value = iter([])
+        second = list(stream)
+        assert second == []
+
+    def test_direct_close_without_context_manager(self):
+        """Calling close() directly still closes the HTTP response."""
+        resp = _make_mock_response([])
+        stream = NDJsonStream(resp)
+        stream.close()
+        resp.close.assert_called_once()
+
+    def test_collect_fallback_on_unparseable_body(self):
+        """When raw chunks are non-JSON text and no result tracked, collect returns {}."""
+        mock = MagicMock()
+        mock.iter_text.return_value = iter(["not valid json at all\n"])
+        mock.close = MagicMock()
+        stream = NDJsonStream(mock)
+        assert stream.collect() == {}
+
+    def test_trailing_buffer_without_newline(self):
+        """Server sends JSON without trailing newline — event is still yielded."""
+        payload = json.dumps(
+            {
+                "kind": "status",
+                "stage": "upload",
+                "status": "completed",
+                "message": "Done",
+                "detail": {"ok": True},
+            }
+        )
+        mock = MagicMock()
+        mock.iter_text.return_value = iter([payload])  # no trailing \n
+        mock.close = MagicMock()
+
+        stream = NDJsonStream(mock)
+        events = list(stream)
+
+        assert len(events) == 1
+        assert isinstance(events[0], StatusEvent)
+        assert events[0].status == "completed"
+        assert stream.result == {"ok": True}
+
+    def test_error_event_mid_stream_preserves_order(self):
+        """ErrorEvent interleaved between CheckEvents — all yielded in order."""
+        lines = [
+            json.dumps(
+                {
+                    "kind": "check",
+                    "stage": "validation",
+                    "status": "running",
+                    "message": "check1: passed",
+                    "detail": {"check": "check1", "result": {"success": True}},
+                }
+            ),
+            json.dumps(
+                {
+                    "kind": "status",
+                    "stage": "validation",
+                    "status": "failed",
+                    "message": "Profiling failed",
+                    "detail": {"error_code": "PROF_ERR"},
+                }
+            ),
+            json.dumps(
+                {
+                    "kind": "check",
+                    "stage": "validation",
+                    "status": "running",
+                    "message": "check2: passed",
+                    "detail": {"check": "check2", "result": {"success": True}},
+                }
+            ),
+        ]
+        resp = _make_mock_response(lines)
+        stream = NDJsonStream(resp)
+        events = list(stream)
+
+        assert len(events) == 3
+        assert isinstance(events[0], CheckEvent)
+        assert isinstance(events[1], ErrorEvent)
+        assert isinstance(events[2], CheckEvent)
+
+    def test_multiple_completed_events_keeps_last_result(self):
+        """Two completed events — result is the *last* one (documents W2)."""
+        lines = [
+            json.dumps(
+                {
+                    "kind": "status",
+                    "stage": "validation",
+                    "status": "completed",
+                    "message": "Validation done",
+                    "detail": {"phase": "validation", "passed": True},
+                }
+            ),
+            json.dumps(
+                {
+                    "kind": "status",
+                    "stage": "profiling",
+                    "status": "completed",
+                    "message": "Profiling done",
+                    "detail": {"phase": "profiling", "cpu": 0.5},
+                }
+            ),
+        ]
+        resp = _make_mock_response(lines)
+        stream = NDJsonStream(resp)
+        list(stream)
+
+        assert stream.result is not None
+        assert stream.result["phase"] == "profiling"
+
+    def test_collect_calls_renderer_close(self):
+        """collect() calls renderer.close() after consuming events."""
+        lines = [
+            json.dumps(
+                {"kind": "status", "stage": "a", "status": "running", "message": "m"}
+            ),
+        ]
+        resp = _make_mock_response(lines)
+        renderer = MagicMock()
+        stream = NDJsonStream(resp, renderer=renderer)
+        stream.collect()
+
+        renderer.close.assert_called_once()
+
+    def test_collect_with_renderer_that_was_already_closed(self):
+        """collect() sets renderer to None after closing — safe on double call (W4)."""
+        lines = [
+            json.dumps(
+                {
+                    "kind": "status",
+                    "stage": "a",
+                    "status": "completed",
+                    "message": "Done",
+                    "detail": {"ok": True},
+                }
+            ),
+        ]
+        resp = _make_mock_response(lines)
+        renderer = MagicMock()
+        stream = NDJsonStream(resp, renderer=renderer)
+        stream.collect()
+
+        assert stream._renderer is None
+        renderer.close.assert_called_once()

@@ -145,7 +145,10 @@ def mock_population():
 @pytest.fixture()
 def mock_client():
     client = MagicMock()
-    client.submit_job.return_value = {"job_id": "test-123", "status": "PENDING"}
+    client.submit_training_job.return_value = {
+        "job_id": "test-123",
+        "status": "PENDING",
+    }
     return client
 
 
@@ -256,7 +259,7 @@ class TestLocalTrainerConstruction:
             training=training_spec,
         )
         assert trainer.algorithm_spec is ppo_spec
-        assert trainer.training_spec.population_size == 2
+        assert trainer.training_spec.pop_size == 2
 
     def test_unknown_algorithm_raises(self, env, training_spec):
         with pytest.raises((ValueError, KeyError)):
@@ -364,7 +367,7 @@ class TestArenaTrainerConstruction:
         assert trainer.mutation_spec is mutation_spec
         assert trainer.tournament_selection_spec is tournament_spec
         assert trainer.replay_buffer_spec is buffer_spec
-        assert trainer.training_spec.population_size == 3
+        assert trainer.training_spec.pop_size == 3
 
     @patch("agilerl.arena.client.ArenaClient")
     def test_auto_creates_client(self, mock_cls, training_spec):
@@ -422,7 +425,7 @@ class TestArenaTrainerManifest:
 
         assert manifest["algorithm"]["name"] == "PPO"
         assert manifest["algorithm"]["learn_step"] == 128
-        assert manifest["training"]["population_size"] == 8
+        assert manifest["training"]["pop_size"] == 8
         assert manifest["environment"]["name"] == "MountainCar-v0"
 
     def test_env_spec_manifest(self, mock_client, training_spec):
@@ -540,8 +543,8 @@ class TestArenaTrainerTrain:
         )
         result = trainer.train()
 
-        mock_client.submit_job.assert_called_once()
-        submitted_manifest = mock_client.submit_job.call_args[0][0]
+        mock_client.submit_training_job.assert_called_once()
+        submitted_manifest = mock_client.submit_training_job.call_args[0][0]
         assert isinstance(submitted_manifest, dict)
         assert submitted_manifest["algorithm"]["name"] == "PPO"
         assert result["job_id"] == "test-123"
@@ -557,22 +560,86 @@ class TestArenaTrainerTrain:
             client=mock_client,
         )
         trainer.train()
-        submitted_manifest = mock_client.submit_job.call_args[0][0]
+        submitted_manifest = mock_client.submit_training_job.call_args[0][0]
         assert submitted_manifest["algorithm"]["name"] == "PPO"
         assert submitted_manifest["training"]["max_steps"] == 500
 
-    def test_train_with_stream(self, mock_client, ppo_spec, training_spec):
+
+class TestArenaTrainerDelegation:
+    """Tests for ArenaTrainer methods that delegate to the underlying client."""
+
+    def test_resume_from_checkpoint(self, mock_client, training_spec):
+        mock_client.resume_training_job.return_value = {"status": "RESUMED"}
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
-            algorithm=ppo_spec,
+            algorithm="PPO",
             environment=env_spec,
             training=training_spec,
             client=mock_client,
         )
-        trainer.train(stream=True)
+        trainer.resume_from_checkpoint("job-42", max_steps=1000)
+        mock_client.resume_training_job.assert_called_once_with("job-42", 1000)
 
-        _, call_kwargs = mock_client.submit_job.call_args
-        assert call_kwargs["stream"] is True
+    def test_list_experiments(self, mock_client, training_spec):
+        mock_client.list_experiments.return_value = [{"name": "exp1"}]
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
+        trainer = ArenaTrainer(
+            algorithm="PPO",
+            environment=env_spec,
+            training=training_spec,
+            client=mock_client,
+        )
+        result = trainer.list_experiments("my-project")
+        mock_client.list_experiments.assert_called_once_with("my-project")
+        assert result == [{"name": "exp1"}]
+
+    def test_list_checkpoints(self, mock_client, training_spec):
+        mock_client.list_checkpoints.return_value = [{"step": 100}]
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
+        trainer = ArenaTrainer(
+            algorithm="PPO",
+            environment=env_spec,
+            training=training_spec,
+            client=mock_client,
+        )
+        result = trainer.list_checkpoints("job-42")
+        mock_client.list_checkpoints.assert_called_once_with("job-42")
+        assert result == [{"step": 100}]
+
+
+class TestArenaTrainerFromManifest:
+    """Tests for ArenaTrainer.from_manifest()."""
+
+    def test_from_dict(self):
+        data = {
+            "algorithm": {"name": "DQN", "learn_step": 1},
+            "environment": {"name": "CartPole-v1", "num_envs": 4},
+            "training": {"max_steps": 100, "evo_steps": 50, "pop_size": 2},
+        }
+        mock_client = MagicMock()
+        trainer = ArenaTrainer.from_manifest(data, client=mock_client)
+        assert isinstance(trainer, ArenaTrainer)
+        assert trainer.algorithm_spec.name == "DQN"
+        assert trainer.env_spec.name == "CartPole-v1"
+        assert trainer._client is mock_client
+
+    def test_from_yaml_file(self):
+        mock_client = MagicMock()
+        trainer = ArenaTrainer.from_manifest(
+            "configs/training/ppo/ppo.yaml", client=mock_client
+        )
+        assert isinstance(trainer, ArenaTrainer)
+        assert trainer.algorithm_spec.name == "PPO"
+
+    def test_forwards_api_key(self):
+        data = {
+            "algorithm": {"name": "PPO"},
+            "environment": {"name": "CartPole-v1"},
+            "training": {"max_steps": 100, "evo_steps": 50, "pop_size": 2},
+        }
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            trainer = ArenaTrainer.from_manifest(data, api_key="my-api-key")
+        assert trainer._client._api_key == "my-api-key"
 
 
 # ---------------------------------------------------------------------------
@@ -1392,7 +1459,7 @@ class TestLocalTrainerIntegration:
                 num_envs=1,
                 dataset_path=str(h5_path),
             ),
-            training=self._training(max_steps=64, evo_steps=32, eval_steps=10),
+            training=self._training(max_steps=64, evo_steps=32, eval_steps=32),
             replay_buffer=ReplayBufferSpec(max_size=500),
         )
         try:
@@ -1444,7 +1511,7 @@ class TestLocalTrainerIntegration:
         )
         env_spec = LLMEnvSpec(
             env_type=LLMEnvType.REASONING,
-            dataset_path=str(dataset_path),
+            dataset=str(dataset_path),
             reward_file_path=str(reward_file),
             reward_fn_name="simple_reward",
             prompt_template={"user_0": "Solve: {question}"},
@@ -1525,7 +1592,7 @@ class TestLocalTrainerIntegration:
         )
         env_spec = LLMEnvSpec(
             env_type=LLMEnvType.PREFERENCE,
-            dataset_path=str(dataset_path),
+            dataset=str(dataset_path),
             data_batch_size_per_gpu=4,
         )
         algo_spec = DPOSpec(
@@ -1667,24 +1734,26 @@ class TestStringEnvironmentResolution:
 
 class TestGetValidatedManifest:
     def test_from_yaml_file(self):
-        from agilerl.training.trainer import Trainer
+        from agilerl.models.manifest import TrainingManifest
 
-        manifest = Trainer.get_validated_manifest("configs/training/ppo/ppo.yaml")
+        manifest = TrainingManifest.get_validated(
+            "configs/training/ppo/ppo.yaml", mode="python"
+        )
         assert manifest.algorithm.name == "PPO"
         assert manifest.training.max_steps == 6_000_000
 
     def test_from_dict(self):
-        from agilerl.training.trainer import Trainer
+        from agilerl.models.manifest import TrainingManifest
 
         data = {
             "algorithm": {"name": "DQN", "learn_step": 1},
             "environment": {"name": "CartPole-v1", "num_envs": 1},
             "training": {"max_steps": 100, "evo_steps": 50, "pop_size": 2},
         }
-        manifest = Trainer.get_validated_manifest(data)
+        manifest = TrainingManifest.get_validated(data, mode="python")
         assert manifest.algorithm.name == "DQN"
         assert manifest.training.max_steps == 100
-        assert manifest.training.population_size == 2
+        assert manifest.training.pop_size == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1780,7 +1849,7 @@ class TestLocalTrainerToManifestLLM:
         )
         env_spec = LLMEnvSpec(
             env_type="preference",
-            dataset_path="data.parquet",
+            dataset="data.parquet",
             columns={"prompt": "q", "chosen": "ok"},
         )
         mock_env = MagicMock()
@@ -1808,7 +1877,9 @@ class TestLocalTrainerToManifestLLM:
         assert lc["lora_dropout"] == pytest.approx(0.11)
         assert "peft_type" not in lc
 
-        round_trip = Trainer.get_validated_manifest(manifest)
+        from agilerl.models.manifest import TrainingManifest
+
+        round_trip = TrainingManifest.get_validated(manifest, mode="python")
         assert round_trip.algorithm.pretrained_model_name_or_path == "test-model"
         assert round_trip.algorithm.max_model_len == 333
         assert round_trip.algorithm.lora_config.r == 4

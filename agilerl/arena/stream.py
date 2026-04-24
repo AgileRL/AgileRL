@@ -10,6 +10,8 @@ from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Self
 
+from agilerl.arena.exceptions import _sanitize_detail
+
 if TYPE_CHECKING:
     import httpx
 
@@ -129,7 +131,9 @@ def parse_ndjson_line(line: str) -> StreamEvent:
         if status == "failed":
             _skip = {"error_code"}
             extras = {k: v for k, v in detail.items() if k not in _skip and v}
-            return ErrorEvent(message=message, extras=extras, raw=payload)
+            return ErrorEvent(
+                message=_sanitize_detail(message), extras=extras, raw=payload
+            )
 
         return StatusEvent(
             stage=str(payload.get("stage", "-")),

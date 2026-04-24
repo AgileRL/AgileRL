@@ -273,7 +273,7 @@ def build_tournament_from_spec(
     return TournamentSelection(
         tournament_size=tournament_spec.tournament_size,
         elitism=tournament_spec.elitism,
-        population_size=training_spec.population_size,
+        population_size=training_spec.pop_size,
     )
 
 

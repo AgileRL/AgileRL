@@ -233,7 +233,7 @@ class TestTrainingManifest:
             training={"max_steps": 100, "evo_steps": 10, "pop_size": 8},
         )
         manifest = TrainingManifest.model_validate(data)
-        assert manifest.training.population_size == 8
+        assert manifest.training.pop_size == 8
 
     def test_memory_size_alias(self):
         data = _make_manifest(
@@ -285,7 +285,7 @@ class TestTrainingManifest:
         assert manifest.replay_buffer.max_size == 100_000
         assert isinstance(manifest.tournament_selection, TournamentSelectionSpec)
         assert isinstance(manifest.training, TrainingSpec)
-        assert manifest.training.population_size == 4
+        assert manifest.training.pop_size == 4
         assert manifest.training.eps_start == 1.0
         assert manifest.training.eps_end == 0.1
 
@@ -612,7 +612,7 @@ class TestTrainerGetValidatedManifestLLMNetwork:
             algo={"name": "DPO", "batch_size": 8},
             env={
                 "env_type": "preference",
-                "dataset_path": "d.parquet",
+                "dataset": "d.parquet",
                 "columns": {"prompt": "p", "chosen": "c"},
             },
             network={
@@ -625,7 +625,7 @@ class TestTrainerGetValidatedManifestLLMNetwork:
                 },
             },
         )
-        manifest = Trainer.get_validated_manifest(data)
+        manifest = TrainingManifest.get_validated(data, mode="python")
         assert isinstance(manifest.algorithm, DPOSpec)
         assert manifest.algorithm.pretrained_model_name_or_path == "net-model"
         assert manifest.algorithm.max_model_len == 256
@@ -651,7 +651,7 @@ class TestTrainerGetValidatedManifestLLMNetwork:
             },
             env={
                 "env_type": "preference",
-                "dataset_path": "d.parquet",
+                "dataset": "d.parquet",
                 "columns": {"prompt": "p", "chosen": "c"},
             },
             network={
@@ -664,7 +664,7 @@ class TestTrainerGetValidatedManifestLLMNetwork:
                 },
             },
         )
-        manifest = Trainer.get_validated_manifest(data)
+        manifest = TrainingManifest.get_validated(data, mode="python")
         assert manifest.algorithm.pretrained_model_name_or_path == "network-model"
         assert manifest.algorithm.max_model_len == 512
         assert manifest.algorithm.lora_config.r == 32
@@ -676,12 +676,12 @@ class TestTrainerGetValidatedManifestLLMNetwork:
             algo={"name": "DPO", "batch_size": 8},
             env={
                 "env_type": "preference",
-                "dataset_path": "d.parquet",
+                "dataset": "d.parquet",
                 "columns": {"prompt": "p", "chosen": "c"},
             },
         )
         with pytest.raises(ValueError, match="pretrained_model_name_or_path"):
-            Trainer.get_validated_manifest(data)
+            TrainingManifest.get_validated(data, mode="python")
 
 
 # ============================================================================
@@ -728,7 +728,7 @@ class TestLocalTrainerLLM:
         return _make_manifest(
             algo=algo,
             env={
-                "dataset_path": "train.parquet",
+                "dataset": "train.parquet",
                 "reward_file_path": "reward.py",
                 "reward_fn_name": "combined_rewards",
                 "prompt_template": {
@@ -757,7 +757,7 @@ class TestLocalTrainerLLM:
             algo=algo,
             env={
                 "env_type": "preference",
-                "dataset_path": "dpo_data.parquet",
+                "dataset": "dpo_data.parquet",
                 "columns": {"prompt": "question", "chosen": "accepted"},
             },
             mutation={
@@ -807,7 +807,7 @@ class TestLocalTrainerLLM:
 
     def test_grpo_env_fields(self):
         trainer = LocalTrainer.from_manifest(self._grpo_manifest())
-        assert trainer.env_spec.dataset_path == "train.parquet"
+        assert trainer.env_spec.dataset == "train.parquet"
         assert trainer.env_spec.reward_file_path == "reward.py"
         assert trainer.env_spec.reward_fn_name == "combined_rewards"
         assert trainer.env_spec.max_reward == 10.0
@@ -829,7 +829,7 @@ class TestLocalTrainerLLM:
 
     def test_dpo_env_fields(self):
         trainer = LocalTrainer.from_manifest(self._dpo_manifest())
-        assert trainer.env_spec.dataset_path == "dpo_data.parquet"
+        assert trainer.env_spec.dataset == "dpo_data.parquet"
         assert trainer.env_spec.columns == {
             "prompt": "question",
             "chosen": "accepted",

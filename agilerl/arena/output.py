@@ -33,7 +33,12 @@ def _print_rich(renderable: Any, *, is_error: bool = False) -> None:
 
 
 @singledispatch
-def emit_result(result: Any, *, is_error: bool = False) -> None:
+def emit_result(
+    result: Any,
+    *,
+    is_error: bool = False,
+    columns: list[str] | None = None,
+) -> None:
     """Emit *result* to the terminal as a Rich table.
 
     Dispatches on the runtime type of *result*:
@@ -41,58 +46,80 @@ def emit_result(result: Any, *, is_error: bool = False) -> None:
     * ``dict`` — key/value table (or environment catalog if the shape matches).
     * ``list`` — table of dicts or simple value list.
     * anything else — ``str()`` fallback.
+
+    :param result: The result to emit.
+    :type result: Any
+    :param is_error: Whether to print the result as an error.
+    :type is_error: bool
+    :param columns: The columns to display in the table. If None, all columns will be displayed.
+    :type columns: list[str] | None
+    :returns: None
     """
     _print_rich(str(result), is_error=is_error)
 
 
 @emit_result.register(dict)
-def _emit_result_dict(result: dict, *, is_error: bool = False) -> None:
+def _emit_result_dict(
+    result: dict, *, is_error: bool = False, columns: list[str] | None = None
+) -> None:
     if _looks_like_environment_catalog(result):
         _emit_environment_catalog(result, is_error=is_error)
         return
-    _emit_key_value_table(result, is_error=is_error)
+    _emit_key_value_table(result, is_error=is_error, columns=columns)
 
 
 @emit_result.register(list)
-def _emit_result_list(result: list, *, is_error: bool = False) -> None:
+def _emit_result_list(
+    result: list, *, is_error: bool = False, columns: list[str] | None = None
+) -> None:
     if result and all(isinstance(item, dict) for item in result):
-        _emit_list_of_dicts(result, is_error=is_error)
+        _emit_list_of_dicts(result, is_error=is_error, columns=columns)
         return
-    _emit_simple_list(result, is_error=is_error)
+    _emit_simple_list(result, is_error=is_error, columns=columns)
 
 
-def _emit_key_value_table(values: dict[str, Any], *, is_error: bool = False) -> None:
+def _emit_key_value_table(
+    values: dict[str, Any], *, is_error: bool = False, columns: list[str] | None = None
+) -> None:
     table = Table(show_header=True, header_style="bold")
-    table.add_column("Field")
-    table.add_column("Value")
+    col_names = columns if columns and len(columns) == 2 else ["Field", "Value"]
+    for name in col_names:
+        table.add_column(name)
     for key, value in values.items():
         table.add_row(str(key), _format_cell(value))
     _print_rich(table, is_error=is_error)
 
 
-def _emit_simple_list(values: list[Any], *, is_error: bool = False) -> None:
+def _emit_simple_list(
+    values: list[Any], *, is_error: bool = False, columns: list[str] | None = None
+) -> None:
     table = Table(show_header=True, header_style="bold")
-    table.add_column("Value")
+    col_name = columns[0] if columns and len(columns) >= 1 else "Value"
+    table.add_column(col_name)
     for value in values:
         table.add_row(_format_cell(value))
     _print_rich(table, is_error=is_error)
 
 
 def _emit_list_of_dicts(
-    values: list[dict[str, Any]], *, is_error: bool = False
+    values: list[dict[str, Any]],
+    *,
+    is_error: bool = False,
+    columns: list[str] | None = None,
 ) -> None:
-    columns: list[str] = []
+    keys: list[str] = []
     for row in values:
         for key in row:
-            if key not in columns:
-                columns.append(key)
+            if key not in keys:
+                keys.append(key)
 
+    headers = columns if columns and len(columns) == len(keys) else keys
     table = Table(show_header=True, header_style="bold")
-    for column in columns:
-        table.add_column(str(column))
+    for header in headers:
+        table.add_column(str(header))
 
     for row in values:
-        table.add_row(*[_format_cell(row.get(column)) for column in columns])
+        table.add_row(*[_format_cell(row.get(key)) for key in keys])
     _print_rich(table, is_error=is_error)
 
 

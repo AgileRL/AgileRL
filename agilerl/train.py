@@ -139,7 +139,7 @@ def main() -> None:
         "Algorithm: %s | Env: %s | Pop size: %d | Steps: %d | Device: %s",
         trainer.algorithm_spec.name,
         trainer.env_spec.name,
-        trainer.training_spec.population_size,
+        trainer.training_spec.pop_size,
         trainer.training_spec.max_steps,
         args.device,
     )

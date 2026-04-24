@@ -7,7 +7,7 @@ import tarfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Literal, Self
 
 import httpx
 
@@ -20,6 +20,7 @@ from agilerl.arena.exceptions import (
 )
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
+from agilerl.models.manifest import ArenaManifest
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,10 @@ def prepare_env_upload(source: str | os.PathLike[str] | bytes) -> tuple[str, byt
     * A path to an existing ``.tar.gz`` file — read as-is.
     * Raw ``bytes`` — used directly (assumed to be a valid ``.tar.gz``).
 
-    :returns: ``(archive_name, archive_bytes)``
+    :param source: The source of the environment.
+    :type source: str | os.PathLike[str] | bytes
+    :returns: The name and bytes of the prepared environment.
+    :rtype: tuple[str, bytes]
     :raises FileNotFoundError: If *source* is a path that does not exist.
     """
     if isinstance(source, bytes):
@@ -71,6 +75,10 @@ class _TokenStore:
     def clear(self) -> None:
         self.access_token = None
         self.refresh_token = None
+
+
+# TODO: Will need to modify with all available resources
+ArenaResource = Literal["arena-small", "arena-medium", "arena-large"]
 
 
 class ArenaClient:
@@ -168,7 +176,7 @@ class ArenaClient:
         tokens = self._auth.device_login(timeout=timeout)
         self._tokens.access_token = tokens["access_token"]
         self._tokens.refresh_token = tokens.get("refresh_token")
-        logger.info("Authenticated with Arena.")
+        logger.info("Authenticated successfully with Arena.")
 
     def logout(self) -> None:
         """Clear the current session and remove stored credentials."""
@@ -205,20 +213,32 @@ class ArenaClient:
     ### Environments ###
     # -------------------------------------------------------------------------
 
-    def list_environments(self) -> Any:
-        """List environments available to the authenticated user."""
-        # TODO: Here we want to show a rich table showing all environments available, nested with their
-        # versions and whether they are validated and profiled.
-        return self._unwrap_cli_data(self._request("GET", "/api/cli/v1/environments"))
+    # TODO: Modify to optionally take in a name, in which case we
+    # list the versions for the specified environment only
+    def list_environments(self, name: str | None = None) -> list[dict[str, Any]]:
+        """List environments available to the authenticated user.
 
-    def environment_exists(self, name: str, version: str = "latest") -> bool:
-        """Check whether an environment name/version is registered."""
-        resp = self._unwrap_cli_data(
-            self._request(
-                "GET",
-                "/api/cli/v1/environments/exists",
-                params={"name": name, "version": version},
-            )
+        :param name: Environment name. If None, list all environments.
+        :type name: str | None
+        :returns: A list of environments.
+        :rtype: list[dict[str, Any]]
+        """
+        return self._request("GET", "/api/cli/v1/environments", params={"name": name})
+
+    def environment_exists(self, name: str, version: str | None = None) -> bool:
+        """Check whether an environment name/version is registered.
+
+        :param name: Environment name.
+        :type name: str
+        :param version: Environment version. Defaults to None, which resolves to the latest version.
+        :type version: str
+        :returns: True if the environment exists, False otherwise.
+        :rtype: bool
+        """
+        resp = self._request(
+            "GET",
+            "/api/cli/v1/environments/exists",
+            params={"name": name, "version": version},
         )
 
         if isinstance(resp, dict):
@@ -227,6 +247,10 @@ class ArenaClient:
                     return bool(resp[key])
         return bool(resp)
 
+    # TODO: In general, for all endpoints that take in a name and version, if the version
+    # is None, we should resolve to the latest version in the backend and return an INFO log
+    # saying "No version specified, resolving to latest version {latest_version}". The only
+    # exception is create-and-validate which should always expect a version to be given.
     def list_environment_entrypoints(
         self,
         name: str,
@@ -241,13 +265,12 @@ class ArenaClient:
         :returns: A list of entrypoints.
         :rtype: list[str]
         """
-        resp = self._unwrap_cli_data(
-            self._request(
-                "GET",
-                "/api/cli/v1/environments/entrypoints",
-                params={"name": name, "version": version},
-            )
+        resp = self._request(
+            "GET",
+            "/api/cli/v1/environments/entrypoints",
+            params={"name": name, "version": version},
         )
+
         # TODO: Again, cleaner if we knew exactly what response to expect
         if isinstance(resp, dict):
             entrypoints = resp.get("entrypoints", [])
@@ -257,14 +280,13 @@ class ArenaClient:
             return [str(ep) for ep in resp]
         return []
 
-    # TODO: Check with Rob
-    # Getting an ambiguous entrypoint error when validating an already registered environment.
-    # We should by default use the entrypoint the env was registered with
+    # TODO: Need to change ambiguous entrypoint error as raised by an error like in any other situation rathen than
+    # an embedded JSON object in the message.
     def validate_environment(
         self,
         *,
         name: str | None = None,
-        version: str = "v1",
+        version: str | None = None,
         source: str | os.PathLike[str] | bytes | None = None,
         env_config: str | os.PathLike[str] | None = None,
         requirements: str | os.PathLike[str] | None = None,
@@ -281,8 +303,9 @@ class ArenaClient:
 
         :param name: Environment name.
         :type name: str | None
-        :param version: Environment version. Defaults to "v1".
-        :type version: str
+        :param version: Environment version. If creating an environment from scratch, defaults to "v1",
+            if validating an already-registered environment, defaults to None, which resolves to the latest version.
+        :type version: str | None
         :param source: Environment source — a directory path (compressed
             automatically), a ``.tar.gz`` file path, or raw ``bytes``.
         :type source: str | os.PathLike[str] | bytes | None
@@ -298,12 +321,22 @@ class ArenaClient:
         :type multi_agent: bool
         :param do_rollouts: Whether to run rollout profiling.
         :type do_rollouts: bool
+
+        :returns: A dictionary containing the validation result.
+        :rtype: dict[str, Any]
         """
         if name is None and source is None:
-            msg = "To validate an environment on Arena, either the name of an already registered environment or the source of a custom environment must be provided."
+            msg = (
+                "To validate an environment on Arena, either the name of an already "
+                "registered environment or the source of a custom environment must be provided."
+            )
             raise ValueError(msg)
 
         if source is not None:
+            if version is None:
+                logger.info("No version specified, defaulting to v1.")
+                version = "v1"
+
             return self._create_and_validate(
                 name=name,
                 version=version,
@@ -341,7 +374,7 @@ class ArenaClient:
 
         :param name: Environment name, as specified in Arena.
         :type name: str
-        :param version: Environment version. If None, resolve to the latest version.
+        :param version: Environment version. Defaults to None, which resolves to the latest version.
         :type version: str | None
         """
         payload: dict[str, Any] = {
@@ -363,21 +396,38 @@ class ArenaClient:
         :param version: Environment version. If None, delete all environment versions.
         :type version: str | None
         """
+        if version is None:
+            # Fetch existing versions (assuming you have a list_environments method)
+            versions_data = self.list_environments(name=name)
+            version_list = [v["version"] for v in versions_data]
+
+            if not version_list:
+                logger.info(
+                    "No versions found for environment '%s'. Nothing to delete.", name
+                )
+                return None
+
+            # Format and Prompt
+            logger.info(
+                "The following versions for '%s' will be deleted: %s",
+                name,
+                ", ".join(version_list),
+            )
+            confirm = input("Do you wish to continue? [y/N]: ").strip().lower()
+
+            if confirm not in ("y", "yes"):
+                logger.info("Delete operation cancelled.")
+                return None
+
+        # 2. Proceed with the request
         payload = {"name": name, "version": version}
-        return self._unwrap_cli_data(
-            self._request("DELETE", "/api/cli/v1/environments/delete", json=payload)
-        )
+        return self._request("DELETE", "/api/cli/v1/environments/delete", json=payload)
 
     # -------------------------------------------------------------------------
     ### Training Jobs ###
     # -------------------------------------------------------------------------
 
-    # TODO: Backend needs to return useful logs
-    # e.g. Submitting job '<experiment_name>' to Arena
-    #      '<experiment_name>' submitted successfully
-    #      '<experiment_name>' is PENDING
-    #      View training progress at <url>
-    def submit_training_job(
+    def submit_experiment(
         self,
         manifest: str | os.PathLike[str] | dict[str, Any],
         *,
@@ -386,24 +436,22 @@ class ArenaClient:
         project: str | None = None,
         experiment_name: str | None = None,
     ) -> dict[str, Any]:
-        """Submit a training job.
+        """Submit an experiment (a training job).
 
         :param manifest: Training manifest as a YAML/JSON file path, raw YAML
             string, or a pre-parsed dict.
         :type manifest: str | os.PathLike[str] | dict[str, Any]
-        :param resource_id: The Arena cluster type to submit the experiment to.
+        :param resource_id: The Arena resource to submit the experiment to.
         :type resource_id: int | None
-        :param num_nodes: The number of nodes to use for the training job.
+        :param num_nodes: The number of nodes to use for training.
         :type num_nodes: int | None
-        :param project: The project to submit the training job to.
+        :param project: The project to submit the experiment to.
         :type project: str | None
-        :param experiment_name: The name of the experiment to submit the training job to.
+        :param experiment_name: The name of the experiment to submit.
         :type experiment_name: str | None
         """
-        from agilerl.models.manifest import get_arena_manifest
-
-        # Validate manifest using Pydantic prior to submitting to Arena
-        validated = get_arena_manifest(manifest)
+        # Pre-flight Pydantic manifest validation prior to submitting to Arena
+        validated = ArenaManifest.get_validated(manifest, mode="json")
 
         payload: dict[str, Any] = {
             "manifest": validated,
@@ -435,11 +483,11 @@ class ArenaClient:
 
     # TODO: Check with Rob
     # Is the only extra arg we should allow 'max_steps' here?
-    def resume_training_job(self, job_id: str, max_steps: int) -> dict[str, Any]:
-        """Resume a training job.
+    def resume_experiment(self, experiment_name: str, max_steps: int) -> dict[str, Any]:
+        """Resume an experiment (a training job).
 
-        :param job_id: The ID of the training job to resume.
-        :type job_id: str
+        :param experiment_name: The name of the experiment to resume.
+        :type experiment_name: str
         :param max_steps: The maximum number of steps to train for.
         :type max_steps: int
         :returns: A dictionary containing the resume result.
@@ -448,24 +496,26 @@ class ArenaClient:
         return self._request(
             "POST",
             "/api/cli/v1/experiments/jobs/resume",
-            json={"job_id": job_id, "max_steps": max_steps},
+            json={"experiment_name": experiment_name, "max_steps": max_steps},
         )
 
-    # TODO: Update HPO params
+    # TODO: Update HPO params (maybe leave for v2 if too complicated)
 
     # TODO: Check with Rob
     # Should be a rich table sorted by evaluation score descending showing
     # [steps, training_score, evaluation_score, size_mb]
-    def list_checkpoints(self, job_id: str) -> list[dict[str, Any]]:
-        """List all checkpoints for a training job.
+    def list_checkpoints(self, experiment_name: str) -> list[dict[str, Any]]:
+        """List all checkpoints for an experiment.
 
-        :param job_id: The ID of the training job to list checkpoints for.
-        :type job_id: str
+        :param experiment_name: The name of the experiment to list checkpoints for.
+        :type experiment_name: str
         :returns: A list of checkpoints.
         :rtype: list[dict[str, Any]]
         """
         return self._request(
-            "GET", "/api/cli/v1/experiments/jobs/checkpoints", params={"job_id": job_id}
+            "GET",
+            "/api/cli/v1/experiments/jobs/checkpoints",
+            params={"experiment_name": experiment_name},
         )
 
     def list_resources(self) -> list[dict[str, Any]]:
@@ -473,20 +523,22 @@ class ArenaClient:
         return self._request("GET", "/api/cli/v1/resources/list")
 
     def download_experiment_metrics(
-        self, experiment_id: int, metrics: list[str]
+        self,
+        experiment_name: str,
+        metrics: list[str] | None = None,
     ) -> tuple[bytes, str | None, str | None]:
         """Download experiment metrics payload (CSV or zipped CSV).
 
-        :param experiment_id: The ID of the experiment to download metrics for.
-        :type experiment_id: int
-        :param metrics: The metrics to download.
-        :type metrics: list[str]
+        :param experiment_name: The name of the experiment to download metrics for.
+        :type experiment_name: str
+        :param metrics: The metrics to download. If None, download all metrics.
+        :type metrics: list[str] | None
         :returns: A tuple of the metrics payload, content type, and disposition.
         :rtype: tuple[bytes, str | None, str | None]
         """
         return self._request_raw(
             "POST",
-            f"/api/experiments/{experiment_id}/metrics",
+            f"/api/experiments/{experiment_name}/metrics",
             json={"metrics": metrics},
         )
 
@@ -527,24 +579,19 @@ class ArenaClient:
     ### Inference ###
     # -------------------------------------------------------------------------
 
-    # TODO: Check with Rob
-    # My idea is that users train an agent, and when they come back they might want to check
-    # the experiments they have trained on Arena
-    # 1. list_experiments -> check job_id
-    # 2. list_checkpoints <job_id> -> check checkpoint_id
-    # 3. deploy_agent <job_id> <checkpoint>
-    def deploy_agent(self, job_id: str, checkpoint: str = "best") -> None:
+    # TODO: Make endpoint for deploying an agent
+    def deploy_agent(self, experiment_name: str, checkpoint: str | None = None) -> None:
         """Deploy an agent to Arena.
 
-        :param job_id: The ID of the training job to deploy an agent from.
-        :type job_id: str
-        :param checkpoint: The checkpoint to deploy.
-        :type checkpoint: str
+        :param experiment_name: The name of the experiment to deploy an agent from.
+        :type experiment_name: str
+        :param checkpoint: The checkpoint to deploy. If None, deploy the best checkpoint.
+        :type checkpoint: str | None
         """
         return self._request(
             "POST",
             "/api/cli/v1/inference/deploy",
-            json={"job_id": job_id, "checkpoint": checkpoint},
+            json={"experiment_name": experiment_name, "checkpoint": checkpoint},
         )
 
     def close(self) -> None:
@@ -753,7 +800,10 @@ class ArenaClient:
         resp = self._send(method, path, timeout=timeout, **kwargs)
         content_type: str = resp.headers.get("content-type", "")
         if content_type.startswith("application/json"):
-            return resp.json()
+            data = resp.json()
+            if isinstance(data, dict) and data.get("ok") is True and "data" in data:
+                return data["data"]
+            return data
         return resp.text
 
     def _request_raw(
@@ -789,16 +839,3 @@ class ArenaClient:
             handler = renderer.handle_event
         resp = self._send(method, path, stream=True, timeout=timeout, **kwargs)
         return NDJsonStream(resp, handler=handler, renderer=renderer)
-
-    @staticmethod
-    def _unwrap_cli_data(resp: Any) -> Any:
-        """Unwrap standardized CLI envelope responses when present.
-
-        :param resp: The response to unwrap.
-        :type resp: Any
-        :returns: The unwrapped response.
-        :rtype: Any
-        """
-        if isinstance(resp, dict) and resp.get("ok") is True and "data" in resp:
-            return resp["data"]
-        return resp

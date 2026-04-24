@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import functools
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, get_args
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, get_args
 
 import yaml
-from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer
+from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer, model_validator
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.models.algo import (
@@ -15,7 +15,6 @@ from agilerl.models.algo import (
     AlgoSpecT,
     LLMAlgorithmSpec,
 )
-from agilerl.models.algorithms import populate_registry
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.networks import (
     FinetuningNetworkSpec,
@@ -34,10 +33,6 @@ if TYPE_CHECKING:
     )
 
     EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | ArenaEnvSpec
-
-# NOTE: Need to populate the registry eagerly to identify the algorithm spec
-# class from the name field in the manifest before validating the manifest
-populate_registry()
 
 
 def _resolve_algorithm(data: Any, *, arena_only: bool = False) -> AlgoSpecT:
@@ -192,92 +187,83 @@ class TrainingManifest(BaseModel):
     replay_buffer: ReplayBufferSpec | None = Field(default=None)
     tournament_selection: TournamentSelectionSpec | None = Field(default=None)
 
+    @model_validator(mode="after")
+    def _process_manifest(self) -> Self:
+        """Process the manifest for submission to Arena."""
+        # 'network' component of manifest corresponds to algorithm's underlying networks
+        algo_spec_cls = type(self.algorithm)
+        if self.network is not None:
+            # Resolve the raw dict into the algorithm's concrete NetworkSpec
+            # if `net_config` field is present in the algorithm spec.
+            net_config_field = algo_spec_cls.model_fields.get("net_config")
+            if net_config_field is not None:
+                # get the NetworkSpec class from the type annotation and validate
+                spec_cls: NetworkSpec = next(
+                    (
+                        t
+                        for t in get_args(net_config_field.annotation)
+                        if t is not type(None)
+                    ),
+                    None,
+                )
+                if spec_cls is not None:
+                    self.algorithm.net_config = spec_cls.model_validate(self.network)
+            # LLM algorithms expect a pretrained model
+            elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
+                llm_network = FinetuningNetworkSpec.model_validate(self.network)
+                self.algorithm.pretrained_model_name_or_path = (
+                    llm_network.pretrained_model_name_or_path
+                )
+                self.algorithm.max_model_len = llm_network.max_context_length
+                self.algorithm.lora_config = llm_network.lora_config
+
+        if (
+            issubclass(algo_spec_cls, LLMAlgorithmSpec)
+            and self.algorithm.pretrained_model_name_or_path is None
+        ):
+            msg = (
+                "Required field 'pretrained_model_name_or_path' wasn't found in the manifest. "
+                "This is required for LLM finetuning algorithms, and can be added under either the "
+                "'algorithm' or 'network' sections."
+            )
+            raise ValueError(msg)
+
+        return self
+
+    @staticmethod
+    def _load_yaml(manifest: str | Path | dict[str, Any]) -> dict[str, Any]:
+        """Read a YAML/JSON file or pass through a raw dict."""
+        if isinstance(manifest, (str, Path)):
+            with open(manifest) as fh:
+                return yaml.safe_load(fh)
+        return manifest
+
+    @classmethod
+    def get_validated(
+        cls,
+        manifest: str | Path | dict[str, Any],
+        *,
+        mode: Literal["json", "python"] = "json",
+    ) -> dict[str, Any] | TrainingManifest:
+        """Validate a YAML file and return a JSON-serializable dict or TrainingManifest.
+
+        :param manifest: Path to a YAML/JSON file, or a raw dict.
+        :type manifest: str | Path | dict[str, Any]
+        :param mode: The mode to validate the manifest in.
+        :type mode: Literal["json", "python"]
+        :returns: A JSON-serializable dict or TrainingManifest.
+        :rtype: dict[str, Any] | TrainingManifest
+        """
+        data = TrainingManifest._load_yaml(manifest)
+        validated = cls.model_validate(data)
+        return (
+            validated.model_dump(mode="json", exclude_none=True)
+            if mode == "json"
+            else validated
+        )
+
 
 class ArenaManifest(TrainingManifest):
     """Manifest variant that restricts algorithms to Arena-eligible ones."""
 
     algorithm: ArenaAlgorithmFromManifest
-
-
-def _apply_network_to_algorithm(manifest: TrainingManifest) -> None:
-    """Merge the top-level ``network`` section into the algorithm spec in-place."""
-    algo_spec_cls = type(manifest.algorithm)
-    if manifest.network is None:
-        return
-
-    net_config_field = algo_spec_cls.model_fields.get("net_config")
-    if net_config_field is not None:
-        spec_cls: type[NetworkSpec] | None = next(
-            (t for t in get_args(net_config_field.annotation) if t is not type(None)),
-            None,
-        )
-        if spec_cls is not None:
-            manifest.algorithm.net_config = spec_cls.model_validate(manifest.network)
-    elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
-        llm_network = FinetuningNetworkSpec.model_validate(manifest.network)
-        manifest.algorithm.pretrained_model_name_or_path = (
-            llm_network.pretrained_model_name_or_path
-        )
-        manifest.algorithm.max_model_len = llm_network.max_context_length
-        manifest.algorithm.lora_config = llm_network.lora_config
-
-
-def _validate_llm_model_field(manifest: TrainingManifest) -> None:
-    """Raise if an LLM algorithm is missing its pretrained model path."""
-    algo_spec_cls = type(manifest.algorithm)
-    if (
-        issubclass(algo_spec_cls, LLMAlgorithmSpec)
-        and manifest.algorithm.pretrained_model_name_or_path is None
-    ):
-        msg = (
-            "Required field 'pretrained_model_name_or_path' wasn't found in the manifest. "
-            "This is required for LLM finetuning algorithms, and can be added under either the "
-            "'algorithm' or 'network' sections."
-        )
-        raise ValueError(msg)
-
-
-def _load_yaml(manifest: str | Path | dict[str, Any]) -> dict[str, Any]:
-    """Read a YAML/JSON file or pass through a raw dict."""
-    if isinstance(manifest, (str, Path)):
-        with open(manifest) as fh:
-            return yaml.safe_load(fh)
-    return manifest
-
-
-def get_validated_manifest(
-    manifest: str | Path | dict[str, Any],
-) -> TrainingManifest:
-    """Get a validated manifest from a YAML, JSON, or dict.
-
-    :param manifest: Path to a YAML/JSON file, or a raw dict.
-    :type manifest: str | Path | dict[str, Any]
-    :returns: A validated manifest.
-    :rtype: TrainingManifest
-    """
-    data = _load_yaml(manifest)
-    validated = TrainingManifest.model_validate(data)
-    _apply_network_to_algorithm(validated)
-    _validate_llm_model_field(validated)
-    return validated
-
-
-def get_arena_manifest(
-    manifest: str | Path | dict[str, Any],
-) -> dict[str, Any]:
-    """Parse and validate a manifest for Arena submission.
-
-    Performs full Pydantic validation (including algorithm fields)
-    and returns a JSON-serializable dict ready for the Arena API.
-    Only Arena-eligible algorithms are accepted.
-
-    :param manifest: Path to a YAML/JSON file or a pre-parsed dict.
-    :type manifest: str | Path | dict[str, Any]
-    :returns: Validated, JSON-serializable manifest dict.
-    :rtype: dict[str, Any]
-    """
-    data = _load_yaml(manifest)
-    validated = ArenaManifest.model_validate(data)
-    _apply_network_to_algorithm(validated)
-    _validate_llm_model_field(validated)
-    return validated.model_dump(mode="json", exclude_none=True)

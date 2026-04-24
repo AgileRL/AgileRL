@@ -156,37 +156,39 @@ def env_list(
 
 @env.command("exists")
 @click.argument("name")
-@click.option("--version", default="latest", show_default=True)
+@click.option("--version", default=None, show_default=True)
 @click.pass_obj
 def env_exists(
     config: CommandConfig,
     name: str,
-    version: str,
+    version: str | None,
 ) -> None:
     """Check if an environment version exists in Arena."""
     with arena_client(config) as client:
-        exists = client.environment_exists(name=name, version=version)
-        emit_result({"name": name, "version": version, "exists": exists})
+        emit_result(client.environment_exists(name=name, version=version))
 
 
 @env.command("list-entrypoints")
 @click.argument("name")
-@click.option("--version", default="latest", show_default=True)
+@click.option("--version", default=None, show_default=True)
 @click.pass_obj
 def env_entrypoints(
     config: CommandConfig,
     name: str,
-    version: str,
+    version: str | None,
 ) -> None:
     """List available entrypoints for an existing environment version."""
     with arena_client(config) as client:
-        emit_result(client.list_environment_entrypoints(name=name, version=version))
+        emit_result(
+            client.list_environment_entrypoints(name=name, version=version),
+            columns=["Entrypoints"],
+        )
 
 
 @env.command("validate")
 @click.argument("name", required=False, default=None, type=str)
 @click.option("--name", "name_opt", default=None, hidden=True)
-@click.option("--version", default="latest", show_default=True)
+@click.option("--version", default=None, show_default=True)
 @click.option(
     "--source",
     type=click.Path(exists=True, path_type=Path),
@@ -222,7 +224,7 @@ def env_validate(
     config: CommandConfig,
     name: str | None,
     name_opt: str | None,
-    version: str,
+    version: str | None,
     source: Path | None,
     env_config: Path | None,
     requirements: Path | None,
@@ -258,12 +260,12 @@ def env_validate(
 
 @env.command("profile")
 @click.argument("name")
-@click.option("--version", default="latest", show_default=True)
+@click.option("--version", default=None, show_default=True)
 @click.pass_obj
 def env_profile(
     config: CommandConfig,
     name: str,
-    version: str,
+    version: str | None,
 ) -> None:
     """Profile a validated environment in Arena and get its resource requirements."""
     with arena_client(config) as client:
@@ -274,7 +276,7 @@ def env_profile(
 
 @env.command("delete")
 @click.argument("name")
-@click.option("--version", default="latest", show_default=True)
+@click.option("--version", default=None, show_default=True)
 @click.option(
     "--yes",
     is_flag=True,
@@ -285,7 +287,7 @@ def env_profile(
 def env_delete(
     config: CommandConfig,
     name: str,
-    version: str,
+    version: str | None,
     yes: bool,
 ) -> None:
     """Delete an environment version from Arena."""

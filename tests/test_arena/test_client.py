@@ -14,8 +14,10 @@ from agilerl.arena.client import ArenaClient, _TokenStore, prepare_env_upload
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
+    ArenaTrainingError,
     ArenaValidationError,
 )
+from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
 
 
@@ -256,6 +258,31 @@ class TestRequest:
         result = api_key_client._request("GET", "/api/test")
         assert result == {"result": "ok"}
 
+    def test_unwraps_cli_envelope(self, api_key_client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.json.return_value = {
+            "ok": True,
+            "data": {"MyEnv": {"v1": {"validated": True}}},
+        }
+
+        api_key_client._http.request = MagicMock(return_value=mock_resp)
+        result = api_key_client._request("GET", "/api/cli/v1/environments")
+        assert result == {"MyEnv": {"v1": {"validated": True}}}
+
+    def test_does_not_unwrap_without_ok_true(self, api_key_client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.json.return_value = {"ok": False, "data": "should stay"}
+
+        api_key_client._http.request = MagicMock(return_value=mock_resp)
+        result = api_key_client._request("GET", "/api/test")
+        assert result == {"ok": False, "data": "should stay"}
+
     def test_successful_text_response(self, api_key_client):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -357,7 +384,7 @@ class TestRequest:
 class TestEnvironmentListMethods:
     def test_list_environments(self, api_key_client):
         api_key_client._request = MagicMock(
-            return_value={"ok": True, "data": {"MyEnv": {"v1": {"validated": True}}}}
+            return_value={"MyEnv": {"v1": {"validated": True}}}
         )
         result = api_key_client.list_environments()
         api_key_client._request.assert_called_once_with(
@@ -366,15 +393,11 @@ class TestEnvironmentListMethods:
         assert "MyEnv" in result
 
     def test_environment_exists(self, api_key_client):
-        api_key_client._request = MagicMock(
-            return_value={"ok": True, "data": {"exists": True}}
-        )
+        api_key_client._request = MagicMock(return_value={"exists": True})
         assert api_key_client.environment_exists("CartPole-v1", "v1") is True
 
     def test_list_environment_entrypoints(self, api_key_client):
-        api_key_client._request = MagicMock(
-            return_value={"ok": True, "data": ["main:MyEnv", "alt:AltEnv"]}
-        )
+        api_key_client._request = MagicMock(return_value=["main:MyEnv", "alt:AltEnv"])
         result = api_key_client.list_environment_entrypoints("MyEnv", version="v2")
         assert result == ["main:MyEnv", "alt:AltEnv"]
 
@@ -392,16 +415,6 @@ class TestValidateEnvironment:
         )
         mock_stream.collect.assert_called_once()
         assert result == {"valid": True}
-
-    def test_no_source_stream_true_returns_ndjson(self, api_key_client):
-        mock_stream = _mock_ndjson_stream({"valid": True})
-        api_key_client._open_stream = MagicMock(return_value=mock_stream)
-        result = api_key_client.validate_environment(
-            name="MyEnv",
-            version="v1",
-            stream=True,
-        )
-        assert result is mock_stream
 
     def test_source_file_calls_create_and_validate(self, api_key_client, tmp_path):
         archive = tmp_path / "env.tar.gz"
@@ -736,8 +749,8 @@ class TestCliV1EndpointPaths:
             timeout=api_key_client._upload_timeout,
         )
 
-    def test_delete_environment_uses_cli_v1_path_and_unwraps(self, api_key_client):
-        api_key_client._request = MagicMock(return_value={"ok": True, "data": None})
+    def test_delete_environment_uses_cli_v1_path(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=None)
         result = api_key_client.delete_environment(name="MyEnv", version="v1")
         assert result is None
         api_key_client._request.assert_called_once_with(
@@ -746,28 +759,175 @@ class TestCliV1EndpointPaths:
             json={"name": "MyEnv", "version": "v1"},
         )
 
-    def test_submit_experiment_job_uses_cli_v1_path(self, api_key_client):
-        mock_stream = _mock_ndjson_stream()
-        api_key_client._open_stream = MagicMock(return_value=mock_stream)
-        api_key_client.submit_experiment_job(
-            manifest={"algorithm": {}},
-            resource_id=1,
-        )
-        api_key_client._open_stream.assert_called_once_with(
-            "POST",
-            "/api/cli/v1/experiments/jobs/submit",
-            json={"manifest": {"algorithm": {}}, "resource_id": 1},
-            timeout=api_key_client._upload_timeout,
+
+# ---------------------------------------------------------------------------
+# _open_stream wiring
+# ---------------------------------------------------------------------------
+class TestOpenStream:
+    def test_verbose_creates_renderer_with_error_map(self, api_key_client):
+        """Verbose client creates a StreamRichRenderer with the correct error_cls."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        api_key_client._http.build_request = MagicMock(return_value=MagicMock())
+        api_key_client._http.send = MagicMock(return_value=mock_resp)
+
+        stream = api_key_client._open_stream(
+            "POST", "/api/cli/v1/environments/validate"
         )
 
-    def test_validate_job_run_spec_uses_cli_v1_and_handles_null_data(
+        assert isinstance(stream, NDJsonStream)
+        assert isinstance(stream._renderer, StreamRichRenderer)
+        assert stream._renderer._error_cls is ArenaValidationError
+        assert stream._handler is not None
+
+    def test_verbose_training_path_uses_training_error(self, api_key_client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        api_key_client._http.build_request = MagicMock(return_value=MagicMock())
+        api_key_client._http.send = MagicMock(return_value=mock_resp)
+
+        stream = api_key_client._open_stream(
+            "POST", "/api/cli/v1/experiments/jobs/submit"
+        )
+
+        assert stream._renderer._error_cls is ArenaTrainingError
+
+    def test_verbose_unmapped_path_uses_generic_error(self, api_key_client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        api_key_client._http.build_request = MagicMock(return_value=MagicMock())
+        api_key_client._http.send = MagicMock(return_value=mock_resp)
+
+        stream = api_key_client._open_stream("GET", "/api/some/other/path")
+
+        assert stream._renderer._error_cls is ArenaAPIError
+
+    def test_custom_stream_handler_bypasses_renderer(self, api_key_client):
+        """When set_stream_handler is used, _open_stream uses that handler."""
+        custom = MagicMock()
+        api_key_client.set_stream_handler(custom)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        api_key_client._http.build_request = MagicMock(return_value=MagicMock())
+        api_key_client._http.send = MagicMock(return_value=mock_resp)
+
+        stream = api_key_client._open_stream(
+            "POST", "/api/cli/v1/environments/validate"
+        )
+
+        assert stream._handler is custom
+        assert stream._renderer is None
+
+    def test_non_verbose_no_handler_no_renderer(self):
+        """verbose=False means no renderer and no handler (unless custom set)."""
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(api_key="test-key", verbose=False)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        client._http.build_request = MagicMock(return_value=MagicMock())
+        client._http.send = MagicMock(return_value=mock_resp)
+
+        stream = client._open_stream("POST", "/api/cli/v1/environments/validate")
+
+        assert stream._handler is None
+        assert stream._renderer is None
+
+
+# ---------------------------------------------------------------------------
+# _send with stream=True
+# ---------------------------------------------------------------------------
+class TestSendStreaming:
+    def test_success_returns_raw_response(self, api_key_client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        api_key_client._http.build_request = MagicMock(return_value=MagicMock())
+        api_key_client._http.send = MagicMock(return_value=mock_resp)
+
+        resp = api_key_client._send("POST", "/api/test", stream=True)
+        assert resp is mock_resp
+        mock_resp.read.assert_not_called()
+
+    def test_401_closes_stream_then_retries(self, token_client):
+        first_resp = MagicMock()
+        first_resp.status_code = 401
+        first_resp.is_success = False
+
+        second_resp = MagicMock()
+        second_resp.status_code = 200
+        second_resp.is_success = True
+
+        request_mock = MagicMock()
+        token_client._http.build_request = MagicMock(return_value=request_mock)
+        token_client._http.send = MagicMock(side_effect=[first_resp, second_resp])
+        token_client._auth.refresh_access_token = MagicMock(
+            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
+        )
+
+        resp = token_client._send("POST", "/api/test", stream=True)
+        first_resp.close.assert_called_once()
+        assert resp is second_resp
+        assert token_client._tokens.access_token == "new_at"
+
+    def test_401_after_retry_reads_body_raises(self, token_client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.is_success = False
+        mock_resp.read.return_value = b"Session expired"
+
+        request_mock = MagicMock()
+        token_client._http.build_request = MagicMock(return_value=request_mock)
+        token_client._http.send = MagicMock(return_value=mock_resp)
+        token_client._auth.refresh_access_token = MagicMock(
+            return_value={"access_token": "new_at"}
+        )
+
+        with pytest.raises(ArenaAuthError, match="Session expired"):
+            token_client._send("POST", "/api/test", stream=True)
+
+    def test_non_success_on_validation_path_raises_validation_error(
         self, api_key_client
     ):
-        api_key_client._request = MagicMock(return_value={"ok": True, "data": None})
-        result = api_key_client.validate_job_run_spec({"algorithm": {"name": "DQN"}})
-        assert result == {"valid": True}
-        api_key_client._request.assert_called_once_with(
-            "POST",
-            "/api/cli/v1/experiments/validate-run-spec",
-            json={"algorithm": {"name": "DQN"}},
-        )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 422
+        mock_resp.is_success = False
+        mock_resp.read.return_value = b'{"detail": "Bad environment"}'
+
+        api_key_client._http.build_request = MagicMock(return_value=MagicMock())
+        api_key_client._http.send = MagicMock(return_value=mock_resp)
+
+        with pytest.raises(ArenaValidationError):
+            api_key_client._send(
+                "POST",
+                "/api/cli/v1/environments/validate",
+                stream=True,
+            )
+
+    def test_non_success_on_unmapped_path_raises_generic(self, api_key_client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.is_success = False
+        mock_resp.read.return_value = b'{"message": "Server error"}'
+
+        api_key_client._http.build_request = MagicMock(return_value=MagicMock())
+        api_key_client._http.send = MagicMock(return_value=mock_resp)
+
+        with pytest.raises(ArenaAPIError) as exc_info:
+            api_key_client._send("POST", "/api/other", stream=True)
+        assert exc_info.value.status_code == 500
+
+    def test_network_error_raises_api_error(self, api_key_client):
+        api_key_client._http.build_request = MagicMock(return_value=MagicMock())
+        api_key_client._http.send = MagicMock(side_effect=httpx.ConnectError("refused"))
+
+        with pytest.raises(ArenaAPIError) as exc_info:
+            api_key_client._send("POST", "/api/test", stream=True)
+        assert exc_info.value.status_code == 0
+        assert "Network error" in exc_info.value.detail

@@ -1,7 +1,19 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, ClassVar
+
+_INTERNAL_URL_RE = re.compile(
+    r"https?://[a-zA-Z0-9_-]+(?::\d+)?/api/v\d+/\S*", re.ASCII
+)
+
+
+def _sanitize_detail(message: str) -> str:
+    """Replace messages that containing internal service URLs with a user-friendly fallback."""
+    if _INTERNAL_URL_RE.search(message):
+        return "Something went wrong. Please try again later."
+    return message
 
 
 class ArenaError(Exception):
@@ -186,6 +198,7 @@ class ArenaAPIError(ArenaError):
                 primary = value
                 break
 
+        primary = _sanitize_detail(primary) if primary else ""
         extras = {k: v for k, v in body.items() if k not in _SKIP_KEYS and v}
         sdk_hint, cli_hint = ArenaError._generate_hints(body, extras)
         return cls(

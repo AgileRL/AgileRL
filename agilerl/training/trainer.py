@@ -29,7 +29,7 @@ from agilerl.models.env import (
     PzEnvSpec,
 )
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
-from agilerl.models.manifest import TrainingManifest, get_validated_manifest
+from agilerl.models.manifest import TrainingManifest
 from agilerl.models.networks import FinetuningNetworkSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.utils.trainer_utils import (
@@ -119,7 +119,7 @@ class Trainer(ABC):
         self.replay_buffer_spec = replay_buffer
         self.device = device
         self.accelerator = accelerator
-        self.resume_from_checkpoint = resume_from_checkpoint
+        self._resume_checkpoint = resume_from_checkpoint
 
     @staticmethod
     def _env_spec_from_string(
@@ -184,7 +184,7 @@ class Trainer(ABC):
         :rtype: SelfTrainerT
         """
         # Validate manifest and resolve environment spec.
-        validated_manifest = get_validated_manifest(manifest)
+        validated_manifest = TrainingManifest.get_validated(manifest, mode="python")
         env_spec = cls._resolve_env_spec(validated_manifest)
         return cls(
             algorithm=validated_manifest.algorithm,
@@ -318,7 +318,7 @@ class LocalTrainer(Trainer):
         # Instantiate the training components from their specs.
         self.env = self._make_env()
         self.population = create_population_from_spec(
-            population_size=self.training_spec.population_size,
+            population_size=self.training_spec.pop_size,
             algo_spec=self.algorithm_spec,
             env=self.env,
             mutation_spec=self.mutation_spec,
@@ -326,7 +326,7 @@ class LocalTrainer(Trainer):
             device=self.device,
             accelerator=self.accelerator,
             tokenizer=self.tokenizer,
-            resume_from_checkpoint=self.resume_from_checkpoint,
+            resume_from_checkpoint=self._resume_checkpoint,
         )
         self.mutations = build_mutations_from_spec(
             self.mutation_spec, self.device, accelerator=self.accelerator
@@ -584,7 +584,7 @@ class ArenaTrainer(Trainer):
         :rtype: ArenaTrainer
         """
         # Validate manifest and resolve environment spec.
-        validated_manifest = get_validated_manifest(manifest)
+        validated_manifest = TrainingManifest.get_validated(manifest, mode="python")
         env_spec = cls._resolve_env_spec(validated_manifest)
 
         return cls(
@@ -619,18 +619,14 @@ class ArenaTrainer(Trainer):
             version=str(env_data.get("version", "latest")),
         )
 
-    def train(self, stream: bool = False) -> dict[str, Any]:
+    def train(self) -> dict[str, Any]:
         """Build the manifest and submit the training job to Arena.
 
-        :param stream: If ``True``, stream logs to the terminal and block
-            until the job finishes.
-        :type stream: bool
         :returns: Arena API response including ``job_id`` and ``status``.
-            When *stream* is ``True``, returns the final result payload.
         :rtype: dict[str, Any]
         """
         manifest = self.to_manifest()
-        return self._client.submit_training_job(manifest, stream=stream)
+        return self._client.submit_training_job(manifest)
 
     def resume_from_checkpoint(self, job_id: str, max_steps: int) -> None:
         """Resume a training job from a checkpoint.

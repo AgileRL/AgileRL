@@ -290,33 +290,38 @@ def mark_wrapped(env):
 class TestLLMEnvSpec:
     def test_reasoning_requires_reward_file_path(self):
         with pytest.raises(ValueError, match="reward_file_path is required"):
-            LLMEnvSpec(env_type=LLMEnvType.REASONING, reward_file_path=None)
+            LLMEnvSpec(
+                env_type=LLMEnvType.REASONING, dataset="ds", reward_file_path=None
+            )
 
     def test_preference_does_not_require_reward_file_path(self):
-        spec = LLMEnvSpec(env_type=LLMEnvType.PREFERENCE, reward_file_path=None)
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.PREFERENCE, dataset="ds", reward_file_path=None
+        )
         assert spec.reward_file_path is None
 
     def test_default_fields(self):
         spec = LLMEnvSpec(
             env_type=LLMEnvType.REASONING,
+            dataset="dataset.parquet",
             reward_file_path="reward.py",
             reward_fn_name="reward_fn",
             prompt_template={"role": "user", "content": "{q}"},
         )
         assert spec.train_test_split == 0.9
         assert spec.reward_file_path == "reward.py"
-        assert spec.dataset_path == "dataset.parquet"
+        assert spec.dataset == "dataset.parquet"
         assert spec.columns is None
         assert spec.max_reward is None
 
     def test_is_standalone_model(self):
         spec = LLMEnvSpec(
             env_type=LLMEnvType.REASONING,
+            dataset="dataset.parquet",
             reward_file_path="reward.py",
             reward_fn_name="reward_fn",
             prompt_template={"role": "user", "content": "{q}"},
         )
-        assert not hasattr(spec, "name")
         assert not hasattr(spec, "num_envs")
 
     def test_custom_fields(self):
@@ -328,24 +333,28 @@ class TestLLMEnvSpec:
             train_test_split=0.8,
             reward_file_path="my_reward.py",
             reward_fn_name="my_reward",
-            dataset_path="data/train.parquet",
+            dataset="data/train.parquet",
         )
         assert spec.columns == {"question": "input", "answer": "output"}
         assert spec.prompt_template == {"role": "user", "content": "{question}"}
         assert spec.max_reward == 5.0
         assert spec.train_test_split == 0.8
         assert spec.reward_file_path == "my_reward.py"
-        assert spec.dataset_path == "data/train.parquet"
+        assert spec.dataset == "data/train.parquet"
 
     def test_train_test_split_bounds(self):
         with pytest.raises(Exception):
-            LLMEnvSpec(env_type=LLMEnvType.REASONING, train_test_split=1.5)
+            LLMEnvSpec(
+                env_type=LLMEnvType.REASONING, dataset="ds", train_test_split=1.5
+            )
         with pytest.raises(Exception):
-            LLMEnvSpec(env_type=LLMEnvType.REASONING, train_test_split=-0.1)
+            LLMEnvSpec(
+                env_type=LLMEnvType.REASONING, dataset="ds", train_test_split=-0.1
+            )
 
     @patch("agilerl.models.env.make_conversation_template")
     @patch("agilerl.models.env.get_reward_fn")
-    @patch.object(LLMEnvSpec, "load_dataset")
+    @patch.object(LLMEnvSpec, "_load_dataset")
     def test_make_env_reasoning(self, mock_load, mock_reward_fn, mock_conv_tmpl):
         mock_train_ds = MagicMock()
         mock_test_ds = MagicMock()
@@ -356,6 +365,7 @@ class TestLLMEnvSpec:
 
         spec = LLMEnvSpec(
             env_type=LLMEnvType.REASONING,
+            dataset="dataset.parquet",
             reward_file_path="reward.py",
             reward_fn_name="reward_fn",
             prompt_template={"role": "user", "content": "{q}"},
@@ -372,7 +382,7 @@ class TestLLMEnvSpec:
         mock_conv_tmpl.assert_called_once()
         MockGym.assert_called_once()
 
-    @patch.object(LLMEnvSpec, "load_dataset")
+    @patch.object(LLMEnvSpec, "_load_dataset")
     def test_make_env_preference(self, mock_load):
         mock_train_ds = MagicMock()
         mock_test_ds = MagicMock()
@@ -381,6 +391,7 @@ class TestLLMEnvSpec:
 
         spec = LLMEnvSpec(
             env_type=LLMEnvType.PREFERENCE,
+            dataset="dataset.parquet",
             reward_file_path=None,
         )
 
@@ -396,7 +407,7 @@ class TestLLMEnvSpec:
             env_type=LLMEnvType.REASONING,
             columns={"q": "question"},
             max_reward=10.0,
-            dataset_path="data.parquet",
+            dataset="data.parquet",
             reward_file_path="reward.py",
             reward_fn_name="reward_fn",
             prompt_template={"role": "user", "content": "{q}"},
@@ -406,7 +417,7 @@ class TestLLMEnvSpec:
         assert restored.env_type == LLMEnvType.REASONING
         assert restored.columns == {"q": "question"}
         assert restored.max_reward == 10.0
-        assert restored.dataset_path == "data.parquet"
+        assert restored.dataset == "data.parquet"
 
 
 class TestBanditEnvSpec:

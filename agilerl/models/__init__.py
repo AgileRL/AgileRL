@@ -24,7 +24,6 @@ from agilerl.models.algorithms import (  # noqa: F401
     PPOSpec,
     RainbowDQNSpec,
     TD3Spec,
-    populate_registry,
 )
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec  # noqa: F401
 from agilerl.models.manifest import TrainingManifest  # noqa: F401
@@ -49,7 +48,7 @@ if HAS_LLM_DEPENDENCIES:
     from agilerl.models.algorithms import DPOSpec, GRPOSpec  # noqa: F401
 
 # NOTE: env has heavy imports (gymnasium, pandas, datasets, pettingzoo)
-# so we lazy-load it to keep `import agilerl.models` lightweight.
+# so we lazy-load it to keep imports from agilerl.models lightweight.
 __getattr__, __dir__, _ = lazy.attach(
     __name__,
     submod_attrs={

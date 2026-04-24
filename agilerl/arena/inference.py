@@ -21,20 +21,18 @@ SerializedRLData: TypeAlias = (
 class Agent:
     """HTTP client for a deployed Arena inference endpoint.
 
-    :param endpoint: Full URL of the ``/get_action`` endpoint.
+    :param endpoint: Full URL of the Arena inference endpoint.
     :type endpoint: str
-    :param token: Bearer token for authentication (e.g.
-        ``"Bearer <uuid>"``).  When ``None``, requests are sent
-        without authentication.
-    :type token: str or None
+    :param api_key: API key for authentication with the Arena inference endpoint.
+    :type api_key: str or None
     :param timeout: Request timeout in seconds.
     :type timeout: int
 
     Example::
 
         agent = Agent(
-            "https://<id>.inference.agilerl.com/get_action",
-            token="Bearer <uuid>",
+            "https://<id>.inference.agilerl.com",
+            api_key="<api_key>",
         )
         hidden_state = None
         status, action, hidden_state = agent.get_action(
@@ -46,13 +44,16 @@ class Agent:
         self,
         endpoint: str,
         *,
-        token: str | None = None,
+        api_key: str | None = None,
         timeout: int = 30,
     ) -> None:
+
         self._endpoint = endpoint
+        self._get_action_endpoint = f"{endpoint}/get_action"
+
         headers: dict[str, str] = {}
-        if token is not None:
-            headers["authorization"] = token
+        if api_key is not None:
+            headers["authorization"] = f"Bearer {api_key}"
 
         self._http = httpx.Client(
             headers=headers,
@@ -84,9 +85,13 @@ class Agent:
             return tuple(Agent.serialize(v, batched) for v in data)
         if data is None:
             return None
-        buffer = io.BytesIO()
+
+        # Add a batch dimension if not already batched
         if not batched:
             data = np.expand_dims(data, axis=0)
+
+        # Save the data to a buffer and encode it to base64
+        buffer = io.BytesIO()
         np.save(buffer, data, allow_pickle=False)
         buffer.seek(0)
         return base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -111,11 +116,13 @@ class Agent:
             return tuple(Agent.deserialize(v, batched) for v in data)
         if data is None:
             return None
+
+        # Decode the base64-encoded data and load it into a NumPy array
         decoded = base64.b64decode(data, validate=True)
         arr: np.ndarray = np.load(io.BytesIO(decoded), allow_pickle=False)
-        if not batched:
-            arr = arr.squeeze(axis=0)
-        return arr
+
+        # Remove the batch dimension if not batched
+        return arr if batched else arr.squeeze(axis=0)
 
     @staticmethod
     def get_batch_size(observation: RLData) -> int:
@@ -203,7 +210,7 @@ class Agent:
         payload = self._build_payload(observation, batched, hidden_state, info)
 
         try:
-            resp = self._http.post(self._endpoint, json=payload)
+            resp = self._http.post(self._get_action_endpoint, json=payload)
         except httpx.HTTPError as exc:
             raise ArenaAPIError(
                 status_code=0,

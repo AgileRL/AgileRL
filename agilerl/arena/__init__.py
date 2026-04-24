@@ -23,8 +23,9 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 if HAS_ARENA_DEPENDENCIES:
     from agilerl.arena.client import ArenaClient
+    from agilerl.arena.inference import Agent
 
-    __all__ = ["ArenaClient"]
+    __all__ = ["Agent", "ArenaClient"]
 else:
     msg = "Arena dependencies are not installed. Please install them using: pip install agilerl[arena]"
     raise ImportError(msg)
