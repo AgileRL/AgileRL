@@ -164,13 +164,7 @@ class Trainer(ABC):
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
     ) -> Self:
-        """Instantiate a :class:`Trainer` from a YAML, JSON, or dict manifest.
-
-        The ``algorithm.name`` field is used to dispatch to the correct
-        :class:`~agilerl.models.algo.AlgorithmSpec` subclass via the
-        algorithm registry.  The environment section is resolved into
-        the appropriate env spec based on the concrete trainer subclass
-        (``cls``).
+        """Instantiate a :class:`Trainer` from a JSON-style manifest or a TrainingManifest instance.
 
         :param manifest: Path to a YAML/JSON file, or a raw dict, or a TrainingManifest instance.
         :type manifest: str | Path | dict[str, Any] | TrainingManifest
@@ -357,8 +351,8 @@ class LocalTrainer(Trainer):
             self.algorithm_spec.pretrained_model_name_or_path
         )
 
-        # NOTE: For now we provide a simple chat template but could always give options to the user in
-        # in the future.
+        # NOTE: For now we provide a simple chat template but could always
+        # give options to the user in the future.
         if tokenizer.chat_template is None:
             tokenizer.chat_template = (
                 "{% for message in messages %}"
@@ -504,11 +498,7 @@ class LocalTrainer(Trainer):
 
 
 class ArenaTrainer(Trainer):
-    """Submits evolutionary training jobs to the Arena RLOps platform.
-
-    Builds an :class:`~agilerl.models.TrainingManifest` from the
-    provided specs and submits it via
-    :class:`~agilerl.arena.client.ArenaClient`.
+    """Submits AgileRL training jobs to the Arena RLOps platform.
 
     :param algorithm: An `:class:`AlgorithmSpec` instance or a string algorithm name.
     :type algorithm: AlgoSpecT | str

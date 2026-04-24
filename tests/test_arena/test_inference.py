@@ -168,7 +168,8 @@ class TestParseResponse:
 class TestGetAction:
     def _make_agent_with_mock_http(self):
         agent = Agent.__new__(Agent)
-        agent._endpoint = "http://test/get_action"
+        agent._endpoint = "http://test"
+        agent._get_action_endpoint = "http://test/get_action"
         agent._http = MagicMock(spec=httpx.Client)
         return agent
 
@@ -244,8 +245,8 @@ class TestAgentInit:
         assert call_kwargs["headers"] == {}
 
     @patch("agilerl.arena.inference.httpx.Client")
-    def test_with_token(self, mock_http_cls):
-        agent = Agent("http://endpoint/get_action", token="Bearer abc")
+    def test_with_api_key(self, mock_http_cls):
+        agent = Agent("http://endpoint/get_action", api_key="abc")
         call_kwargs = mock_http_cls.call_args[1]
         assert call_kwargs["headers"]["authorization"] == "Bearer abc"
 

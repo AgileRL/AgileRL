@@ -388,7 +388,7 @@ class TestEnvironmentListMethods:
         )
         result = api_key_client.list_environments()
         api_key_client._request.assert_called_once_with(
-            "GET", "/api/cli/v1/environments"
+            "GET", "/api/cli/v1/environments", params={"name": None}
         )
         assert "MyEnv" in result
 
