@@ -193,7 +193,7 @@ class SFT(LLMAlgorithm):
         self,
         experiences: ExperiencesType,
         training: bool = True,
-    ) -> tuple[float, float]:
+    ) -> dict[str, float]:
         """Update model parameters using cross-entropy loss on response tokens.
 
         The loss is computed only on response tokens; prompt tokens and padding
