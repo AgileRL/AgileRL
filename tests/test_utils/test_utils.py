@@ -8,11 +8,11 @@ from accelerate import Accelerator, DeepSpeedPlugin
 from gymnasium import spaces
 from pettingzoo.mpe import simple_speaker_listener_v4
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
     DDPG,
     DQN,
-    GRPO,
     IPPO,
     MADDPG,
     MATD3,
@@ -23,6 +23,9 @@ from agilerl.algorithms import (
     RainbowDQN,
 )
 from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
+
+if HAS_LLM_DEPENDENCIES:
+    from agilerl.algorithms import GRPO
 from agilerl.typing import BatchDimension
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -448,8 +451,8 @@ def test_save_with_accelerator(tmp_path):
     agent.algo = "grpo"
     save_llm_checkpoint(agent, str(tmp_path))
     agent.save_checkpoint.assert_called_once_with(
-        f"{tmp_path}/grpo",
-        weights_only=False,
+        str(tmp_path),
+        lora_only=True,
     )
     agent.accelerator.wait_for_everyone.assert_called()
 
@@ -462,8 +465,8 @@ def test_save_without_accelerator(tmp_path):
     agent.accelerator = None
     save_llm_checkpoint(agent, str(tmp_path))
     agent.save_checkpoint.assert_called_once_with(
-        f"{tmp_path}/grpo",
-        weights_only=False,
+        str(tmp_path),
+        lora_only=True,
     )
 
 
@@ -596,18 +599,18 @@ def test_save_llm_checkpoint_with_path(tmp_path):
     agent.accelerator = None
     path = str(tmp_path / "my_ckpt")
     save_llm_checkpoint(agent, path)
-    agent.save_checkpoint.assert_called_once_with(f"{path}/grpo", weights_only=False)
+    agent.save_checkpoint.assert_called_once_with(path, lora_only=True)
 
 
-def test_save_llm_checkpoint_weights_only(tmp_path):
+def test_save_llm_checkpoint_lora_only(tmp_path):
     agent = Mock()
     agent.actor = Mock()
     agent.algo = "grpo"
     agent.accelerator = None
-    save_llm_checkpoint(agent, str(tmp_path), weights_only=True)
+    save_llm_checkpoint(agent, str(tmp_path), lora_only=True)
     agent.save_checkpoint.assert_called_once_with(
-        f"{tmp_path}/grpo",
-        weights_only=True,
+        str(tmp_path),
+        lora_only=True,
     )
 
 
@@ -738,6 +741,7 @@ def test_consolidate_mutations_warning_if_not_llm_algorithm():
         consolidate_mutations(population)
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 def test_consolidate_mutations():
     population = [MagicMock(spec=GRPO) for _ in range(3)]
     for agent in population:
@@ -807,3 +811,88 @@ def test_tournament_selection_and_mutation_language_model():
     tournament.select.assert_called_once_with(population)
     mutation.mutation.assert_called_once_with(population)
     accelerator.wait_for_everyone.assert_called()
+
+
+def test_check_box2d_available_raises_when_box2d_missing(monkeypatch):
+    """Covers the ImportError path when Box2D is required but not installed."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "Box2D":
+            raise ImportError
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    from agilerl.utils.utils import _check_box2d_available
+
+    with pytest.raises(ImportError, match="Box2D physics engine"):
+        _check_box2d_available("LunarLander-v2")
+
+
+@pytest.mark.llm
+def test_create_population_sft_cpu():
+    """Exercise ``create_population`` SFT branch (clone after first agent)."""
+    pytest.importorskip("peft")
+    from peft import LoraConfig
+
+    from agilerl.algorithms.sft import SFT
+    from tests.test_algorithms.test_llms.test_grpo import create_module
+
+    lora_config = LoraConfig(
+        r=8,
+        lora_alpha=16,
+        target_modules=["linear_1"],
+        task_type="CAUSAL_LM",
+        lora_dropout=0.05,
+    )
+    actor = create_module(5, 10, 30, "cpu")
+    pop = create_population(
+        algo="SFT",
+        net_config=None,
+        INIT_HP=SHARED_INIT_HP,
+        population_size=2,
+        actor_network=actor,
+        algo_kwargs={
+            "pad_token_id": 29,
+            "pad_token": "<pad>",
+            "lora_config": lora_config,
+        },
+    )
+    assert len(pop) == 2
+    assert all(isinstance(agent, SFT) for agent in pop)
+
+
+@pytest.mark.llm
+def test_create_population_dpo_cpu():
+    """Exercise ``create_population`` DPO branch (clone after first agent)."""
+    pytest.importorskip("peft")
+    from peft import LoraConfig
+
+    from agilerl.algorithms.dpo import DPO
+    from tests.test_algorithms.test_llms.test_grpo import create_module
+
+    lora_config = LoraConfig(
+        r=8,
+        lora_alpha=16,
+        target_modules=["linear_1"],
+        task_type="CAUSAL_LM",
+        lora_dropout=0.05,
+    )
+    actor = create_module(5, 10, 30, "cpu")
+    pop = create_population(
+        algo="DPO",
+        net_config=None,
+        INIT_HP=SHARED_INIT_HP,
+        population_size=2,
+        actor_network=actor,
+        algo_kwargs={
+            "pad_token_id": 29,
+            "pad_token": "<pad>",
+            "lora_config": lora_config,
+            "use_separate_reference_adapter": False,
+        },
+    )
+    assert len(pop) == 2
+    assert all(isinstance(agent, DPO) for agent in pop)

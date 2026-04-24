@@ -298,6 +298,9 @@ def test_prepare_inputs():
         def to_sequence(self, **kwargs):
             return [("test", None)], True
 
+        def __str__(self):
+            return "LangObs"
+
         def metadata(self):
             return {"test": 1}
 
@@ -698,6 +701,9 @@ def test_act():
     class LangObs(Language_Observation):
         def to_sequence(self, **kwargs):
             return [("asdfg", None), ("zxcvb", 1)], True
+
+        def __str__(self):
+            return "LangObs"
 
     lang_obs = LangObs()
 

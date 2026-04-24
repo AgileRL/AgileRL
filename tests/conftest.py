@@ -33,6 +33,22 @@ if not torch.cuda.is_available():
     os.environ.setdefault("ACCELERATE_USE_CPU", "true")
 
 
+def pytest_collection_modifyitems(items):
+    """Pin tests that share mutable global state to dedicated xdist workers so
+    they never run in parallel with each other.
+
+    - ``llm``-marked tests: vLLM / DeepSpeed need exclusive GPU access.
+    - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
+    """
+    llm_group = pytest.mark.xdist_group("llm")
+    minari_group = pytest.mark.xdist_group("minari")
+    for item in items:
+        if item.get_closest_marker("llm"):
+            item.add_marker(llm_group)
+        elif "test_minari_utils" in item.nodeid:
+            item.add_marker(minari_group)
+
+
 # Only clear CUDA cache when actually needed
 @pytest.fixture(autouse=True, scope="function")
 def cleanup():

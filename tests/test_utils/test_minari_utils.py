@@ -15,6 +15,8 @@ from requests.exceptions import ReadTimeout
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.utils import minari_utils
 
+pytestmark = pytest.mark.xdist_group("minari")
+
 
 def check_delete_dataset(dataset_id: str) -> None:
     """Test deletion of local Minari datasets.
@@ -34,9 +36,11 @@ def check_delete_dataset(dataset_id: str) -> None:
 def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
     buffer = []
 
-    # Delete the test dataset if it already exists.
-    if Path(get_dataset_path(dataset_id)).exists():
+    # Delete the test dataset if it already exists (registry or filesystem).
+    try:
         minari.delete_dataset(dataset_id)
+    except Exception:
+        pass
 
     env = gym.make(env_id)
 

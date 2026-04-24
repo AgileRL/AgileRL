@@ -54,6 +54,14 @@ class PreferencePrompts(TypedDict):
     rejected_attention_mask: torch.Tensor
 
 
+class SFTPrompts(TypedDict):
+    prompt: list[str]
+    prompt_lengths: list[int]
+    response: list[str]
+    input_ids: torch.Tensor
+    attention_mask: torch.Tensor
+
+
 class MultiAgentSetup(Enum):
     """Enum to specify the type of multi-agent setup."""
 

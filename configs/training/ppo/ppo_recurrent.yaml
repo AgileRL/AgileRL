@@ -47,8 +47,8 @@ network:
     latent_dim: 64
     arch: lstm
     encoder_config:
-        hidden_state_size: 64
-        num_layers: 1
+        hidden_state_size: 64         # LSTM hidden state size
+        num_layers: 1                 # Number of recurrent layers
 
     head_config:
         hidden_size:

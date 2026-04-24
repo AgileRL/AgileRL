@@ -371,7 +371,7 @@ class TestLLMEnvSpec:
             prompt_template={"role": "user", "content": "{q}"},
         )
 
-        with patch("agilerl.utils.llm_utils.ReasoningGym") as MockGym:
+        with patch("agilerl.wrappers.llm_envs.ReasoningGym") as MockGym:
             MockGym.return_value = "reasoning_gym"
             result = spec.make_env(tokenizer=mock_tokenizer)
 
@@ -395,7 +395,7 @@ class TestLLMEnvSpec:
             reward_file_path=None,
         )
 
-        with patch("agilerl.utils.llm_utils.PreferenceGym") as MockGym:
+        with patch("agilerl.wrappers.llm_envs.PreferenceGym") as MockGym:
             MockGym.return_value = "preference_gym"
             result = spec.make_env(tokenizer=mock_tokenizer)
 

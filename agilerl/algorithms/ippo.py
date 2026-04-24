@@ -31,7 +31,6 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
     concatenate_experiences_into_batches,
-    concatenate_tensors,
     configure_tf32_precision,
     get_experiences_samples,
     get_vect_dim,
@@ -439,50 +438,6 @@ class IPPO(MultiAgentRLAlgorithm):
                 action_masks[group_id] = torch.Tensor(action_masks[group_id])
 
         return action_masks
-
-    def preprocess_observation(
-        self,
-        observation: ObservationType,
-        group_ids: list[str] | None = None,
-        *args: Any,
-        **kwargs: Any,
-    ) -> dict[str, TorchObsType]:
-        """Preprocesses observations for forward pass through neural network.
-
-        :param observation: Observations of environment
-        :type observation: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
-        :param group_ids: List of group IDs
-        :type group_ids: list[str]
-
-        :return: Preprocessed observations
-        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
-        """
-        if group_ids is None:
-            group_ids = list(observation.keys())
-
-        preprocessed = {group_id: [] for group_id in group_ids}
-        for agent_id, agent_obs in observation.items():
-            group_id = (
-                self.get_group_id(agent_id) if self.has_grouped_agents() else agent_id
-            )
-            preprocessed[group_id].append(
-                preprocess_observation_fn(
-                    self.observation_space.get(group_id),
-                    observation=agent_obs,
-                    device=self.device,
-                    normalize_images=self.normalize_images,
-                    swap_channels=self.swap_channels,
-                ),
-            )
-
-        # Need to concatenate / stack observations for each group of homogeneous agents
-        for group_id in group_ids:
-            if not preprocessed[group_id]:
-                continue
-
-            preprocessed[group_id] = concatenate_tensors(preprocessed[group_id])
-
-        return preprocessed
 
     def _get_action_and_values(
         self,

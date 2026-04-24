@@ -19,6 +19,7 @@ from .td3 import TD3Spec
 if HAS_LLM_DEPENDENCIES:
     from .dpo import DPOSpec
     from .grpo import GRPOSpec
+    from .sft import SFTSpec
 
 __all__ = [
     "CQNSpec",
@@ -35,4 +36,4 @@ __all__ = [
 ]
 
 if HAS_LLM_DEPENDENCIES:
-    __all__ += ["DPOSpec", "GRPOSpec"]
+    __all__ += ["DPOSpec", "GRPOSpec", "SFTSpec"]

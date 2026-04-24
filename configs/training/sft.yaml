@@ -1,0 +1,55 @@
+---
+algorithm:
+    name: SFT
+    batch_size: 16
+    lr: 0.00005
+    update_epochs: 1
+    max_grad_norm: 0.1
+    reduce_memory_peak: false
+    calc_position_embeddings: true
+    gradient_checkpointing: true
+
+environment:
+    dataset: HumanLLMs/Human-Like-DPO-Dataset
+    response_column: chosen
+
+training:
+    max_steps: 100000
+    evo_steps: 10
+    pop_size: 4
+    eval_loop: 1
+    evaluation_interval: 5
+    num_epochs: 1
+
+mutation:
+    mutation_sd: 0.1
+    rand_seed: 42
+    probabilities:
+        no_mut: 0.1
+        arch_mut: 0.0
+        new_layer: 0.0
+        params_mut: 0.0
+        act_mut: 0.0
+        rl_hp_mut: 0.6
+    rl_hp_selection:
+        lr:
+            min: 0.000001
+            max: 0.0001
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true
+
+network:
+    pretrained_model_name_or_path: Qwen/Qwen2.5-0.5B
+    max_context_length: 1024
+    lora_config:
+        lora_r: 16
+        lora_alpha: 64
+        target_modules:
+            - q_proj
+            - k_proj
+            - v_proj
+            - o_proj
+        lora_dropout: 0.05
+        task_type: CAUSAL_LM

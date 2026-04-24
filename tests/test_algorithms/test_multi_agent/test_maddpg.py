@@ -157,6 +157,17 @@ class DummyDeterministicActor(DeterministicActor):
         return DummyNoSync()
 
 
+def get_group_index_map(agent_ids):
+    group_to_index = {}
+    for idx, agent_id in enumerate(agent_ids):
+        group_to_index.setdefault(agent_id.rsplit("_", 1)[0], idx)
+    return group_to_index
+
+
+def get_network_id(agent, agent_id):
+    return agent.get_group_id(agent_id) if agent.has_grouped_agents() else agent_id
+
+
 @pytest.fixture(scope="function")
 def mlp_actor(observation_spaces, action_spaces, request):
     observation_spaces = request.getfixturevalue(observation_spaces)
@@ -363,9 +374,9 @@ def test_initialize_maddpg_with_net_config(
             isinstance(critic, OptimizedModule) for critic in maddpg.critics.values()
         )
     else:
-        for agent_id in maddpg.agent_ids:
-            actor = maddpg.actors[agent_id]
-            critic = maddpg.critics[agent_id]
+        for network_id in maddpg.observation_space:
+            actor = maddpg.actors[network_id]
+            critic = maddpg.critics[network_id]
             assert isinstance(actor, DeterministicActor)
             assert isinstance(critic, ContinuousQNetwork)
 
@@ -376,6 +387,62 @@ def test_initialize_maddpg_with_net_config(
         assert isinstance(critic_optimizer, expected_optimizer_cls)
 
     assert isinstance(maddpg.criterion, nn.MSELoss)
+    maddpg.clean_up()
+
+
+def test_maddpg_parameter_sharing_group_networks_and_optimizers(ma_vector_space):
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    maddpg = MADDPG(
+        observation_spaces=ma_vector_space,
+        action_spaces=copy.deepcopy(ma_vector_space),
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+
+    assert set(maddpg.actors.keys()) == set(maddpg.shared_agent_ids)
+    assert set(maddpg.critics.keys()) == set(maddpg.shared_agent_ids)
+    assert set(maddpg.actor_optimizers.optimizer.keys()) == set(maddpg.shared_agent_ids)
+    assert set(maddpg.critic_optimizers.optimizer.keys()) == set(
+        maddpg.shared_agent_ids
+    )
+
+    obs = {
+        agent_id: np.random.randn(*space.shape).astype(np.float32)
+        for agent_id, space in zip(agent_ids, ma_vector_space, strict=False)
+    }
+    processed_actions, raw_actions = maddpg.get_action(obs)
+    assert set(processed_actions.keys()) == set(agent_ids)
+    assert set(raw_actions.keys()) == set(agent_ids)
+    maddpg.clean_up()
+
+
+def test_maddpg_learn_returns_group_losses_for_parameter_sharing(ma_vector_space):
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    batch_size = 8
+    maddpg = MADDPG(
+        observation_spaces=ma_vector_space,
+        action_spaces=copy.deepcopy(ma_vector_space),
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+
+    states = {
+        agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+        for idx, agent_id in enumerate(agent_ids)
+    }
+    actions = {
+        agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+        for idx, agent_id in enumerate(agent_ids)
+    }
+    rewards = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
+    next_states = {
+        agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+        for idx, agent_id in enumerate(agent_ids)
+    }
+    dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
+
+    loss = maddpg.learn((states, actions, rewards, next_states, dones))
+    assert set(loss.keys()) == set(maddpg.shared_agent_ids)
     maddpg.clean_up()
 
 
@@ -398,24 +465,25 @@ def test_initialize_maddpg_with_mlp_networks(
     action_spaces = request.getfixturevalue(action_spaces)
     accelerator = Accelerator() if accelerator_flag else None
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    group_to_index = get_group_index_map(agent_ids)
     evo_actors = ModuleDict(
         {
-            agent_id: MakeEvolvable(
+            group_id: MakeEvolvable(
                 network=mlp_actor,
                 input_tensor=torch.randn(1, 6),
                 device=device,
             )
-            for agent_id in agent_ids
+            for group_id in group_to_index
         },
     )
     evo_critics = ModuleDict(
         {
-            agent_id: MakeEvolvable(
+            group_id: MakeEvolvable(
                 network=mlp_critic,
                 input_tensor=torch.randn(1, 8),
                 device=device,
             )
-            for agent_id in agent_ids
+            for group_id in group_to_index
         },
     )
     maddpg = MADDPG(
@@ -437,9 +505,9 @@ def test_initialize_maddpg_with_mlp_networks(
             isinstance(critic, OptimizedModule) for critic in maddpg.critics.values()
         )
     else:
-        for agent_id in maddpg.agent_ids:
-            actor = maddpg.actors[agent_id]
-            critic = maddpg.critics[agent_id]
+        for network_id in maddpg.observation_space:
+            actor = maddpg.actors[network_id]
+            critic = maddpg.critics[network_id]
             assert isinstance(actor, MakeEvolvable)
             assert isinstance(critic, MakeEvolvable)
 
@@ -513,25 +581,26 @@ def test_initialize_maddpg_with_cnn_networks(
 ):
     accelerator = Accelerator() if accelerator_flag else None
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    group_to_index = get_group_index_map(agent_ids)
     evo_actors = ModuleDict(
         {
-            agent_id: MakeEvolvable(
+            group_id: MakeEvolvable(
                 network=cnn_actor,
                 input_tensor=torch.randn(1, 3, 1, 32, 32),
                 device=device,
             )
-            for agent_id in agent_ids
+            for group_id in group_to_index
         },
     )
     evo_critics = ModuleDict(
         {
-            agent_id: MakeEvolvable(
+            group_id: MakeEvolvable(
                 network=cnn_critic,
                 input_tensor=torch.randn(1, 3, 3, 32, 32),
                 secondary_input_tensor=torch.randn(1, 2),
                 device=device,
             )
-            for agent_id in agent_ids
+            for group_id in group_to_index
         },
     )
     maddpg = MADDPG(
@@ -552,9 +621,9 @@ def test_initialize_maddpg_with_cnn_networks(
             isinstance(critic, OptimizedModule) for critic in maddpg.critics.values()
         )
     else:
-        for agent_id in maddpg.agent_ids:
-            actor = maddpg.actors[agent_id]
-            critic = maddpg.critics[agent_id]
+        for network_id in maddpg.observation_space:
+            actor = maddpg.actors[network_id]
+            critic = maddpg.critics[network_id]
             assert isinstance(actor, MakeEvolvable)
             assert isinstance(critic, MakeEvolvable)
 
@@ -602,25 +671,26 @@ def test_initialize_maddpg_with_evo_networks(
     observation_space = spaces.Dict(
         {agent_id: observation_spaces[idx] for idx, agent_id in enumerate(agent_ids)},
     )
+    group_to_index = get_group_index_map(agent_ids)
 
     evo_actors = ModuleDict(
         {
-            agent_id: DeterministicActor(
-                observation_spaces[i],
-                ma_discrete_space[i],
+            group_id: DeterministicActor(
+                observation_spaces[idx],
+                ma_discrete_space[idx],
                 device=device,
             )
-            for i, agent_id in enumerate(agent_ids)
+            for group_id, idx in group_to_index.items()
         },
     )
     evo_critics = ModuleDict(
         {
-            agent_id: ContinuousQNetwork(
+            group_id: ContinuousQNetwork(
                 observation_space=observation_space,
                 action_space=concatenate_spaces(ma_discrete_space),
                 device=device,
             )
-            for agent_id in agent_ids
+            for group_id in group_to_index
         },
     )
 
@@ -642,9 +712,9 @@ def test_initialize_maddpg_with_evo_networks(
             isinstance(critic, OptimizedModule) for critic in maddpg.critics.values()
         )
     else:
-        for agent_id in maddpg.agent_ids:
-            actor = maddpg.actors[agent_id]
-            critic = maddpg.critics[agent_id]
+        for network_id in maddpg.observation_space:
+            actor = maddpg.actors[network_id]
+            critic = maddpg.critics[network_id]
             assert isinstance(actor.encoder, encoder_cls)
             assert isinstance(critic.encoder, EvolvableMultiInput)
 
@@ -681,16 +751,14 @@ def test_initialize_maddpg_with_evo_networks(
         (
             ModuleDict(
                 {
-                    "agent_0": nn.Linear(6, 2),
-                    "agent_1": nn.Linear(6, 2),
-                    "other_agent_0": nn.Linear(6, 2),
+                    "agent": nn.Linear(6, 2),
+                    "other_agent": nn.Linear(6, 2),
                 },
             ),
             ModuleDict(
                 {
-                    "agent_0": nn.Linear(8, 1),
-                    "agent_1": nn.Linear(8, 1),
-                    "other_agent_0": nn.Linear(8, 1),
+                    "agent": nn.Linear(8, 1),
+                    "other_agent": nn.Linear(8, 1),
                 },
             ),
             TypeError,
@@ -871,6 +939,30 @@ def test_maddpg_get_action(
         for idx, env_action in enumerate(list(processed_action.values())):
             for action in env_action:
                 assert action <= action_spaces[idx].n - 1
+    maddpg.clean_up()
+
+
+def test_maddpg_get_action_with_partial_group_observations(
+    device,
+    ma_vector_space,
+    ma_discrete_space,
+):
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    state = {
+        "agent_0": np.random.randn(*ma_vector_space[0].shape),
+        "other_agent_0": np.random.randn(*ma_vector_space[2].shape),
+    }
+
+    maddpg = MADDPG(
+        ma_vector_space,
+        ma_discrete_space,
+        agent_ids=agent_ids,
+        device=device,
+    )
+    processed_action, raw_action = maddpg.get_action(state)
+
+    assert set(processed_action.keys()) == set(state.keys())
+    assert set(raw_action.keys()) == set(state.keys())
     maddpg.clean_up()
 
 
@@ -1239,17 +1331,18 @@ def test_maddpg_learns_from_experiences(
     assert isinstance(loss, dict)
 
     for agent_id in maddpg.agent_ids:
-        assert loss[agent_id][-1] >= 0.0
+        network_id = get_network_id(maddpg, agent_id)
+        assert loss[network_id][-1] >= 0.0
 
-        updated_actor = maddpg.actors[agent_id]
+        updated_actor = maddpg.actors[network_id]
         assert_not_equal_state_dict(
-            actors_pre_learn_sd[agent_id],
+            actors_pre_learn_sd[network_id],
             updated_actor.state_dict(),
         )
 
-        updated_critic = maddpg.critics[agent_id]
+        updated_critic = maddpg.critics[network_id]
         assert_not_equal_state_dict(
-            critics_pre_learn_sd[agent_id],
+            critics_pre_learn_sd[network_id],
             updated_critic.state_dict(),
         )
     maddpg.clean_up()
@@ -1443,23 +1536,24 @@ def test_maddpg_clone_returns_identical_agent(
     assert clone_agent.accelerator == maddpg.accelerator
 
     for agent_id in clone_agent.agent_ids:
-        actor = maddpg.actors[agent_id]
-        clone_actor = clone_agent.actors[agent_id]
+        network_id = get_network_id(maddpg, agent_id)
+        actor = maddpg.actors[network_id]
+        clone_actor = clone_agent.actors[network_id]
         assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
 
-        critic = maddpg.critics[agent_id]
-        clone_critic = clone_agent.critics[agent_id]
+        critic = maddpg.critics[network_id]
+        clone_critic = clone_agent.critics[network_id]
         assert_state_dicts_equal(clone_critic.state_dict(), critic.state_dict())
 
-        actor_target = maddpg.actor_targets[agent_id]
-        clone_actor_target = clone_agent.actor_targets[agent_id]
+        actor_target = maddpg.actor_targets[network_id]
+        clone_actor_target = clone_agent.actor_targets[network_id]
         assert_state_dicts_equal(
             clone_actor_target.state_dict(),
             actor_target.state_dict(),
         )
 
-        critic_target = maddpg.critic_targets[agent_id]
-        clone_critic_target = clone_agent.critic_targets[agent_id]
+        critic_target = maddpg.critic_targets[network_id]
+        clone_critic_target = clone_agent.critic_targets[network_id]
         assert_state_dicts_equal(
             clone_critic_target.state_dict(),
             critic_target.state_dict(),
@@ -1550,34 +1644,35 @@ def test_clone_after_learning(compile_mode, ma_vector_space):
     assert clone_agent.accelerator == maddpg.accelerator
 
     for agent_id in clone_agent.agent_ids:
-        actor = maddpg.actors[agent_id]
-        clone_actor = clone_agent.actors[agent_id]
+        network_id = get_network_id(maddpg, agent_id)
+        actor = maddpg.actors[network_id]
+        clone_actor = clone_agent.actors[network_id]
         assert_state_dicts_equal(clone_actor.state_dict(), actor.state_dict())
 
-        critic = maddpg.critics[agent_id]
-        clone_critic = clone_agent.critics[agent_id]
+        critic = maddpg.critics[network_id]
+        clone_critic = clone_agent.critics[network_id]
         assert_state_dicts_equal(clone_critic.state_dict(), critic.state_dict())
 
-        clone_actor_target = clone_agent.actor_targets[agent_id]
-        actor_target = maddpg.actor_targets[agent_id]
+        clone_actor_target = clone_agent.actor_targets[network_id]
+        actor_target = maddpg.actor_targets[network_id]
         assert_state_dicts_equal(
             clone_actor_target.state_dict(),
             actor_target.state_dict(),
         )
 
-        clone_critic_target = clone_agent.critic_targets[agent_id]
-        critic_target = maddpg.critic_targets[agent_id]
+        clone_critic_target = clone_agent.critic_targets[network_id]
+        critic_target = maddpg.critic_targets[network_id]
         assert_state_dicts_equal(
             clone_critic_target.state_dict(),
             critic_target.state_dict(),
         )
 
-        clone_actor_opt = clone_agent.actor_optimizers.optimizer[agent_id]
-        actor_opt = maddpg.actor_optimizers.optimizer[agent_id]
+        clone_actor_opt = clone_agent.actor_optimizers.optimizer[network_id]
+        actor_opt = maddpg.actor_optimizers.optimizer[network_id]
         assert str(clone_actor_opt) == str(actor_opt)
 
-        clone_critic_opt = clone_agent.critic_optimizers.optimizer[agent_id]
-        critic_opt = maddpg.critic_optimizers.optimizer[agent_id]
+        clone_critic_opt = clone_agent.critic_optimizers.optimizer[network_id]
+        critic_opt = maddpg.critic_optimizers.optimizer[network_id]
         assert str(clone_critic_opt) == str(critic_opt)
     maddpg.clean_up()
     clone_agent.clean_up()

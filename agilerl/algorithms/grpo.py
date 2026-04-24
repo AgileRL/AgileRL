@@ -1,24 +1,26 @@
+from __future__ import annotations
+
 import gc
-import warnings
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from accelerate import Accelerator
+from transformers import GenerationConfig
 
-try:
+from agilerl import HAS_LIGER_KERNEL
+
+if TYPE_CHECKING:
+    from accelerate import Accelerator
+    from peft import LoraConfig
+
+    from agilerl.wrappers.llm_envs import ReasoningGym
+
+if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
 
-    HAS_LIGER_KERNEL = True
-except ImportError:
-    LigerFusedLinearGRPOFunction = None
-    HAS_LIGER_KERNEL = False
-
-from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import (
-    LoraConfigProtocol,
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
@@ -29,10 +31,7 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
-from agilerl.utils.llm_utils import ReasoningGym, aggregate_metrics_across_gpus
-
-if HAS_LLM_DEPENDENCIES:
-    from transformers import GenerationConfig
+from agilerl.utils.llm_utils import safe_aggregate_metrics
 
 
 class GRPO(LLMAlgorithm):
@@ -85,7 +84,7 @@ class GRPO(LLMAlgorithm):
     :param max_model_len: Maximum context window length, defaults to None
     :type max_model_len: int, optional
     :param lora_config: Config for LoRA, defaults to None
-    :type lora_config: LoraConfigProtocol, optional
+    :type lora_config: LoraConfig, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
     :type cosine_lr_schedule_config: CosineLRScheduleConfig, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -138,7 +137,7 @@ class GRPO(LLMAlgorithm):
         max_output_tokens: int | None = 1024,
         min_output_tokens: int | None = None,
         max_model_len: int | None = None,
-        lora_config: LoraConfigProtocol | None = None,
+        lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
         device: str = "cpu",
@@ -151,18 +150,16 @@ class GRPO(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         use_liger_loss: bool = False,
     ) -> None:
-        if use_liger_loss and not HAS_LIGER_KERNEL:
-            warnings.warn(
-                "use_liger_loss=True requested, but `liger-kernel` is not available on this platform/environment. "
-                "Falling back to standard loss.",
-                stacklevel=2,
-            )
-            use_liger_loss = False
-
         resolved_device = (
             f"cuda:{accelerator.process_index}"
             if accelerator is not None
-            else ("cuda" if torch.cuda.is_available() else "cpu")
+            else (
+                "cuda"
+                if torch.cuda.is_available()
+                else "mps"
+                if torch.backends.mps.is_available()
+                else "cpu"
+            )
         )
         super().__init__(
             index=index,
@@ -213,7 +210,6 @@ class GRPO(LLMAlgorithm):
                 actor_network,
                 (PeftModelProtocol, PreTrainedModelProtocol),
             ), "Actor network must be a PeftModelProtocol or PreTrainedModelProtocol"
-        self.use_liger_loss = use_liger_loss
         self.clip_coef = clip_coef
         self.update_epochs = update_epochs
         self.group_size = group_size
@@ -316,6 +312,8 @@ class GRPO(LLMAlgorithm):
         else:
             if self.vllm_config.sleep_mode:
                 torch.cuda.empty_cache()
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
                 self.llm.wake_up()
             self._move_model_to_vllm()
             completion_ids, action_masks = self._generate_with_vllm_colocate(
@@ -337,81 +335,98 @@ class GRPO(LLMAlgorithm):
         """
         gc.collect()
         torch.cuda.empty_cache()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
-        # Compute completion lengths from raw experiences before stacking
-        raw_completion_ids = experiences[0]
-        completion_lengths = np.mean([x.shape[1] for x in raw_completion_ids])
+        self.actor.set_adapter("actor")
+        self.actor.train()
+        self._ensure_peft_training_ready()
 
-        completion_ids, action_masks, rewards = stack_and_pad_experiences(
-            *experiences,
-            padding_values=[self.pad_token_id, False, None],
+        base_lm = self._get_base_lm_for_gradient_checkpointing()
+        grad_ckpt_was_on = (
+            bool(getattr(base_lm, "is_gradient_checkpointing", False))
+            if base_lm is not None
+            else False
         )
-        advantages = self._calculate_advantage(rewards).to(self.device)
+        if grad_ckpt_was_on:
+            base_lm.gradient_checkpointing_disable()
 
-        num_samples = advantages.shape[0]
-        batch_idxs = np.arange(num_samples)
-        mean_loss, mean_kl = 0, 0
-        batch_size = min(num_samples, self.micro_batch_size_per_gpu)
+        try:
+            raw_completion_ids = experiences[0]
+            completion_lengths = np.mean([x.shape[1] for x in raw_completion_ids])
 
-        with torch.no_grad():
-            reference_log_probs = self._get_logprobs(
-                completion_ids,
-                batch_size=batch_size,
-                use_reference=True,
-                eval_mode=True,
+            completion_ids, action_masks, rewards = stack_and_pad_experiences(
+                *experiences,
+                padding_values=[self.pad_token_id, False, None],
             )
-            old_log_probs = self._get_logprobs(
-                completion_ids,
-                batch_size=batch_size,
-                use_reference=False,
-                eval_mode=True,
-            )
+            advantages = self._calculate_advantage(rewards).to(self.device)
 
-        for _ in range(self.update_epochs):
-            self.rng.shuffle(batch_idxs)
-            for start in range(0, num_samples, batch_size):
-                minibatch_idxs = batch_idxs[
-                    start : min((start + batch_size), num_samples)
-                ]
-                loss, kl = self._grpo_loss(
-                    batch_size,
-                    minibatch_idxs,
+            num_samples = advantages.shape[0]
+            batch_idxs = np.arange(num_samples)
+            mean_loss, mean_kl = 0, 0
+            batch_size = min(num_samples, self.micro_batch_size_per_gpu)
+
+            with torch.no_grad():
+                reference_log_probs = self._get_logprobs(
                     completion_ids,
-                    action_masks,
-                    advantages,
-                    old_log_probs,
-                    reference_log_probs,
+                    batch_size=batch_size,
+                    use_reference=True,
+                    eval_mode=True,
                 )
-                if not loss.isfinite():
-                    msg = f"Loss is not finite: {loss}"
-                    raise ValueError(msg)
-                self._backward_pass(loss)
-                mean_loss += loss.item()
-                mean_kl += kl.item()
+                old_log_probs = self._get_logprobs(
+                    completion_ids,
+                    batch_size=batch_size,
+                    use_reference=False,
+                    eval_mode=True,
+                )
 
-        mean_loss /= len(completion_ids)
-        mean_kl /= len(completion_ids)
+            for _ in range(self.update_epochs):
+                self.rng.shuffle(batch_idxs)
+                for start in range(0, num_samples, batch_size):
+                    minibatch_idxs = batch_idxs[
+                        start : min((start + batch_size), num_samples)
+                    ]
+                    loss, kl = self._grpo_loss(
+                        batch_size,
+                        minibatch_idxs,
+                        completion_ids,
+                        action_masks,
+                        advantages,
+                        old_log_probs,
+                        reference_log_probs,
+                    )
+                    if not loss.isfinite():
+                        msg = f"Loss is not finite: {loss}"
+                        raise ValueError(msg)
+                    self._backward_pass(loss)
+                    mean_loss += loss.item()
+                    mean_kl += kl.item()
+            mean_loss /= len(completion_ids)
+            mean_kl /= len(completion_ids)
 
-        # Aggregate metrics across GPUs and report to metrics
-        if self.accelerator is not None:
-            agg_loss = aggregate_metrics_across_gpus(self.accelerator, mean_loss)
-            agg_kl = aggregate_metrics_across_gpus(self.accelerator, mean_kl)
-            agg_rewards = aggregate_metrics_across_gpus(self.accelerator, rewards)
-            agg_completion_lengths = aggregate_metrics_across_gpus(
-                self.accelerator, completion_lengths
-            )
-        else:
-            agg_loss = mean_loss
-            agg_kl = mean_kl
-            agg_rewards = float(rewards.mean().item())
-            agg_completion_lengths = float(completion_lengths)
+            # Aggregate metrics across GPUs and report to metrics
+            if self.accelerator is not None:
+                agg_loss = safe_aggregate_metrics(self.accelerator, mean_loss)
+                agg_kl = safe_aggregate_metrics(self.accelerator, mean_kl)
+                agg_rewards = safe_aggregate_metrics(self.accelerator, rewards)
+                agg_completion_lengths = safe_aggregate_metrics(
+                    self.accelerator, completion_lengths
+                )
+            else:
+                agg_loss = mean_loss
+                agg_kl = mean_kl
+                agg_rewards = float(rewards.mean().item())
+                agg_completion_lengths = float(completion_lengths)
 
-        self.metrics.log("loss", agg_loss)
-        self.metrics.log("kl", agg_kl)
-        self.metrics.log("mean_reward", agg_rewards)
-        self.metrics.log("completion_length", int(agg_completion_lengths))
+            self.metrics.log("loss", agg_loss)
+            self.metrics.log("kl", agg_kl)
+            self.metrics.log("mean_reward", agg_rewards)
+            self.metrics.log("completion_length", int(agg_completion_lengths))
 
-        return agg_loss, agg_kl
+            return agg_loss, agg_kl
+        finally:
+            if grad_ckpt_was_on and base_lm is not None:
+                base_lm.gradient_checkpointing_enable()
 
     def test(
         self,
@@ -614,7 +629,7 @@ class GRPO(LLMAlgorithm):
         :return: Mean loss and mean KL divergence.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
-        if LigerFusedLinearGRPOFunction is None:
+        if not HAS_LIGER_KERNEL:
             msg = (
                 "Liger GRPO loss was requested but `liger-kernel` is not available. "
                 "Set use_liger_loss=False."

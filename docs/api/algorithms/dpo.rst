@@ -21,7 +21,7 @@ Example
 .. code-block:: python
 
   from agilerl.algorithms import DPO
-  from agilerl.utils.llm_utils import PreferenceGym
+  from agilerl.wrappers.llm_envs import PreferenceGym
   from accelerate import Accelerator
   from datasets import load_dataset
   from peft import get_peft_model

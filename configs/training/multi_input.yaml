@@ -44,7 +44,7 @@ network:
     arch: multiinput
 
     encoder_config:
-        latent_dim: 64
+        latent_dim: 64                # Per-input encoder output dimension
         mlp_config:
             hidden_size:
                 - 64

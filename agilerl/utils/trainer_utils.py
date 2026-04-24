@@ -37,14 +37,14 @@ from agilerl.models.algo import (
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.typing import GymEnvType, PzEnvType
-from agilerl.utils.llm_utils import PreferenceGym, ReasoningGym
 from agilerl.wrappers.learning import BanditEnv
+from agilerl.wrappers.llm_envs import PreferenceGym, ReasoningGym, SFTGym
 
 if TYPE_CHECKING:
     import torch
     from gymnasium import spaces
 
-LLMEnvType = ReasoningGym | PreferenceGym
+LLMEnvType = ReasoningGym | PreferenceGym | SFTGym
 EnvironmentT = GymEnvType | PzEnvType | BanditEnv | LLMEnvType
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 BufferT = (

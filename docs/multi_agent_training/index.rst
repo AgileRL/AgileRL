@@ -169,8 +169,10 @@ the convention that such environments only return observations for agents that s
 ``AsyncPettingZooVecEnv``.
 
 .. warning::
-    The :class:`AsyncAgentsWrapper <agilerl.wrappers.agents.AsyncAgentsWrapper>` class is currently only compatible with the
-    :class:`IPPO <agilerl.algorithms.ippo.IPPO>` algorithm.
+    The :class:`AsyncAgentsWrapper <agilerl.wrappers.agents.AsyncAgentsWrapper>` class currently supports
+    :class:`IPPO <agilerl.algorithms.ippo.IPPO>`,
+    :class:`MADDPG <agilerl.algorithms.maddpg.MADDPG>`, and
+    :class:`MATD3 <agilerl.algorithms.matd3.MATD3>`.
 
 .. _initpop_ma:
 

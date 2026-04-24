@@ -6,7 +6,7 @@ It starts coverage measurement in subprocesses when COVERAGE_PROCESS_START is se
 
 import os
 
-import coverage
-
 if os.environ.get("COVERAGE_PROCESS_START"):
+    import coverage
+
     coverage.process_startup()

@@ -33,7 +33,7 @@ from agilerl.vector import AsyncPettingZooVecEnv
 if TYPE_CHECKING:
     from accelerate import Accelerator
 
-    from agilerl.utils.llm_utils import PreferenceGym, ReasoningGym
+    from agilerl.wrappers.llm_envs import PreferenceGym, ReasoningGym, SFTGym
 
 
 class LLMEnvType(str, Enum):
@@ -41,6 +41,7 @@ class LLMEnvType(str, Enum):
 
     REASONING = "reasoning"
     PREFERENCE = "preference"
+    SFT = "sft"
 
     def __str__(self) -> str:
         return str(self.value)
@@ -325,6 +326,7 @@ class LLMEnvSpec(BaseModel):
     train_test_split: float = Field(default=0.9, ge=0.0, le=1.0)
     reward_file_path: str | None = Field(default=None)
     reward_fn_name: str | None = Field(default=None)
+    response_column: str = Field(default="response")
 
     # These fields are overridden given the rest of the training configuration
     data_batch_size_per_gpu: int = Field(default=8, ge=1, exclude=True)
@@ -355,6 +357,13 @@ class LLMEnvSpec(BaseModel):
     def _validate_preference_fields(self) -> Self:
         if self.env_type == LLMEnvType.PREFERENCE and self.reward_file_path is not None:
             msg = "Reward file path has been specified, but is not supported for preference environments."
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_sft_fields(self) -> Self:
+        if self.env_type == LLMEnvType.SFT and self.reward_file_path is not None:
+            msg = "Reward file path has been specified, but is not supported for SFT environments."
             raise ValueError(msg)
         return self
 
@@ -397,7 +406,7 @@ class LLMEnvSpec(BaseModel):
 
     def make_env(
         self, tokenizer: Any, accelerator: Accelerator | None = None
-    ) -> ReasoningGym | PreferenceGym:
+    ) -> ReasoningGym | PreferenceGym | SFTGym:
         """Make the environment for the LLM agent.
 
         :param tokenizer: The tokenizer.
@@ -413,6 +422,8 @@ class LLMEnvSpec(BaseModel):
             return self._make_reasoning_env(train_ds, test_ds, tokenizer, accelerator)
         if self.env_type == LLMEnvType.PREFERENCE:
             return self._make_preference_env(train_ds, test_ds, tokenizer, accelerator)
+        if self.env_type == LLMEnvType.SFT:
+            return self._make_sft_env(train_ds, test_ds, tokenizer, accelerator)
         msg = f"Invalid environment type: {self.env_type}"
         raise ValueError(msg)
 
@@ -436,7 +447,7 @@ class LLMEnvSpec(BaseModel):
         :return: The reasoning gym environment.
         :rtype: ReasoningGym
         """
-        from agilerl.utils.llm_utils import ReasoningGym
+        from agilerl.wrappers.llm_envs import ReasoningGym
 
         reward_fn = get_reward_fn(
             reward_fn_name=self.reward_fn_name, file_path=self.reward_file_path
@@ -477,13 +488,46 @@ class LLMEnvSpec(BaseModel):
         :return: The preference gym environment.
         :rtype: PreferenceGym
         """
-        from agilerl.utils.llm_utils import PreferenceGym
+        from agilerl.wrappers.llm_envs import PreferenceGym
 
         return PreferenceGym(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=self.data_batch_size_per_gpu,
+            accelerator=accelerator,
+            max_context_length=self.max_context_length,
+            seed=self.seed,
+        )
+
+    def _make_sft_env(
+        self,
+        train_dataset: Dataset,
+        test_dataset: Dataset,
+        tokenizer: Any,
+        accelerator: Accelerator | None = None,
+    ) -> SFTGym:
+        """Make the SFT gym environment.
+
+        :param train_dataset: The training dataset.
+        :type train_dataset: Dataset
+        :param test_dataset: The test dataset.
+        :type test_dataset: Dataset
+        :param tokenizer: The tokenizer.
+        :type tokenizer: Any
+        :param accelerator: The accelerator.
+        :type accelerator: Accelerator | None
+        :return: The SFT gym environment.
+        :rtype: SFTGym
+        """
+        from agilerl.wrappers.llm_envs import SFTGym
+
+        return SFTGym(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            data_batch_size_per_gpu=self.data_batch_size_per_gpu,
+            response_column=self.response_column,
             accelerator=accelerator,
             max_context_length=self.max_context_length,
             seed=self.seed,

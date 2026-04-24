@@ -24,7 +24,7 @@ For more details on how to set up GRPO and use it for training, check out the :r
 .. code-block:: python
 
   from agilerl.algorithms import GRPO
-  from agilerl.utils.llm_utils import ReasoningGym
+  from agilerl.wrappers.llm_envs import ReasoningGym
 
   model = AutoModelForCausalLM.from_pretrained(
       "Qwen/Qwen2.5-3B",

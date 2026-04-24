@@ -9,9 +9,12 @@ from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from accelerate.utils import DeepSpeedPlugin
 from gymnasium import spaces
-from peft import LoraConfig
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+
+if HAS_LLM_DEPENDENCIES:
+    from peft import LoraConfig
 from agilerl.hpo.mutation import (
     MutationError,
     Mutations,
@@ -1689,7 +1692,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         for network in individual.evolvable_attributes(networks_only=True).values():
             network.rng = EvoDummyRNG()
 
-    test_agent = "agent_0" if algo != "IPPO" else "agent"
+    sample_agent_id = population[0].agent_ids[0]
+    test_agent = population[0].get_network_id(sample_agent_id)
     mut_methods = population[0].actors[test_agent].mutation_methods
     applied_mutations = set()
     for mut_method in mut_methods:
@@ -1811,7 +1815,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         accelerator=accelerator,
     )
 
-    test_agent = "agent_0"
+    sample_agent_id = population[0].agent_ids[0]
+    test_agent = population[0].get_network_id(sample_agent_id)
     mut_methods = population[0].actors[test_agent].mutation_methods
     for mut_method in mut_methods:
 
@@ -1852,6 +1857,7 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
             assert old.index == individual.index
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 @pytest.mark.parametrize(
     "use_accelerator, use_deepspeed_optimizer",
     [
@@ -2028,6 +2034,7 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
         AcceleratorState._reset_state(True)
 
 
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 @pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])
 @pytest.mark.parametrize("algo", ["GRPO", "DPO"])
 def test_mutations_warns_on_llm_algorithm(

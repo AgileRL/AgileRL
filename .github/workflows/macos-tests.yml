@@ -6,10 +6,20 @@ on:
         branches: [main, nightly]
         paths:
             - agilerl/**
+            - tests/**
+            - .github/workflows/**
+            - pyproject.toml
     pull_request:
         branches: [main, nightly]
         paths:
             - agilerl/**
+            - tests/**
+            - .github/workflows/**
+            - pyproject.toml
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+    cancel-in-progress: true
 
 permissions:
     contents: read
@@ -32,10 +42,10 @@ jobs:
                   python-version: ${{ matrix.python-version }}
 
             - name: Install dependencies
+              # swig is needed to build box2d-py from source (no pre-built wheels for py3.10+).
               run: |
-                  pip install uv
                   uv sync --locked --all-groups --extra all
 
             - name: Test with pytest
               run: |
-                  uv run pytest --exitfirst --cov=agilerl --cov-report=term-missing
+                  uv run pytest --exitfirst --cov=agilerl --cov-report=term-missing --durations=0 --durations-min=1.0
