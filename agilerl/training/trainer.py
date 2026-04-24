@@ -158,7 +158,7 @@ class Trainer(ABC):
     @classmethod
     def from_manifest(
         cls,
-        manifest: str | Path | dict[str, Any],
+        manifest: str | Path | dict[str, Any] | TrainingManifest,
         *,
         resume_from_checkpoint: str | None = None,
         device: str | torch.device = "cpu",
@@ -172,8 +172,8 @@ class Trainer(ABC):
         the appropriate env spec based on the concrete trainer subclass
         (``cls``).
 
-        :param manifest: Path to a YAML/JSON file, or a raw dict.
-        :type manifest: str | Path | dict[str, Any]
+        :param manifest: Path to a YAML/JSON file, or a raw dict, or a TrainingManifest instance.
+        :type manifest: str | Path | dict[str, Any] | TrainingManifest
         :param resume_from_checkpoint: Path to resume from checkpoint.
         :type resume_from_checkpoint: str | None
         :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
@@ -183,8 +183,11 @@ class Trainer(ABC):
         :returns: A fully configured :class:`Trainer` instance.
         :rtype: SelfTrainerT
         """
-        # Validate manifest and resolve environment spec.
-        validated_manifest = TrainingManifest.get_validated(manifest, mode="python")
+        validated_manifest = (
+            TrainingManifest.get_validated(manifest, mode="python")
+            if not isinstance(manifest, TrainingManifest)
+            else manifest
+        )
         env_spec = cls._resolve_env_spec(validated_manifest)
         return cls(
             algorithm=validated_manifest.algorithm,
