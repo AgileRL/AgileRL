@@ -1,7 +1,6 @@
 [project]
 name = "agilerl"
-
-version = "2.7.0.dev0"
+version = "2.7.0.dev1"
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
@@ -190,4 +189,4 @@ ignore = [
     "PIE790",        # unnecessary ...
     "PD011",         # .values -> .to_numpy()
 ]
-"{tests,benchmarking,demos,tutorials}/**" = ["ALL"]
+"{tests,benchmarking,demos,tutorials,debugging}/**" = ["ALL"]

@@ -51,8 +51,9 @@ class OptimizerConfig:
     :type name: str
     :param networks: The list of network attribute names that the optimizer will update.
     :type networks: list[str]
-    :param lr: The learning rate of the optimizer.
-    :type lr: str
+    :param lr: Attribute name(s) for learning rate on the algorithm: ``str`` or
+        ``("lr_actor", "lr_critic")`` for split LLM optimizers.
+    :type lr: str | tuple[str, str]
     :param optimizer_cls: The optimizer class to be used.
     :type optimizer_cls: type[Optimizer]
     :param optimizer_kwargs: The keyword arguments to be passed to the optimizer.
@@ -61,7 +62,7 @@ class OptimizerConfig:
 
     name: str
     networks: str | list[str]
-    lr: str
+    lr: str | tuple[str, str]
     optimizer_cls: type[Optimizer] | list[type[Optimizer]]
     optimizer_kwargs: dict[str, Any] | list[dict[str, Any]]
 

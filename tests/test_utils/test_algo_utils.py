@@ -4,6 +4,8 @@ import importlib
 import sys
 import types
 from collections import OrderedDict
+from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Union, get_args, get_origin
 from unittest.mock import MagicMock, Mock, patch
 
@@ -18,6 +20,8 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.modules import EvolvableModule
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.networks import EvolvableNetwork
+from agilerl.typing import BPTTSequenceType
+import agilerl.utils.algo_utils as algo_utils
 from agilerl.utils.algo_utils import (
     check_supported_space,
     clone_llm,
@@ -1400,14 +1404,14 @@ def test_concatenate_experiences_into_batches():
 
 def test_dummy_optimizer_step_raises():
     """DummyOptimizer.step raises RuntimeError."""
-    opt = DummyOptimizer([], 0.01)
+    opt = DummyOptimizer([])
     with pytest.raises(RuntimeError, match="DummyOptimizer"):
         opt.step()
 
 
 def test_dummy_optimizer_load_state_dict_raises():
     """DummyOptimizer.load_state_dict raises RuntimeError."""
-    opt = DummyOptimizer([], 0.01)
+    opt = DummyOptimizer([])
     with pytest.raises(RuntimeError, match="DummyOptimizer"):
         opt.load_state_dict({})
 
@@ -1577,3 +1581,383 @@ def test_get_output_size_from_space():
     assert get_output_size_from_space(spaces.MultiDiscrete([2, 3])) == 5
     with pytest.raises(AttributeError, match="Can't access"):
         get_output_size_from_space(spaces.Text(5))
+
+
+class TestExtractSequencesFromEpisode:
+    def test_chunked_maximum_and_overlap_paths(self):
+        episode = torch.arange(8)
+        chunked = algo_utils.extract_sequences_from_episode(
+            episode, max_seq_len=4, sequence_type=BPTTSequenceType.CHUNKED
+        )
+        maximum = algo_utils.extract_sequences_from_episode(
+            episode, max_seq_len=4, sequence_type=BPTTSequenceType.MAXIMUM
+        )
+        overlap = algo_utils.extract_sequences_from_episode(
+            episode, max_seq_len=4, sequence_type=BPTTSequenceType.FIFTY_PERCENT_OVERLAP
+        )
+        assert len(chunked) == 2
+        assert len(maximum) == 5
+        assert len(overlap) == 3
+
+
+class TestGetObsShape:
+    def test_handles_discrete_multidiscrete_multibinary_dict_tuple(self):
+        dict_space = spaces.Dict(
+            {
+                "d": spaces.Discrete(3),
+                "md": spaces.MultiDiscrete([2, 3]),
+                "mb": spaces.MultiBinary(4),
+            }
+        )
+        tup_space = spaces.Tuple((spaces.Discrete(2), spaces.MultiBinary(3)))
+        assert algo_utils.get_obs_shape(spaces.Discrete(3)) == (1,)
+        assert algo_utils.get_obs_shape(spaces.MultiDiscrete([2, 3])) == (2,)
+        assert algo_utils.get_obs_shape(spaces.MultiBinary(4)) == (4,)
+        out_dict = algo_utils.get_obs_shape(dict_space)
+        assert out_dict["d"] == (1,)
+        assert out_dict["md"] == (2,)
+        assert out_dict["mb"] == (4,)
+        assert algo_utils.get_obs_shape(tup_space) == ((1,), (3,))
+
+    def test_returns_box_shape_directly(self):
+        box = spaces.Box(low=-1.0, high=1.0, shape=(3, 2), dtype=np.float32)
+        assert algo_utils.get_obs_shape(box) == (3, 2)
+
+
+class TestGetNumActions:
+    def test_handles_box_discrete_multidiscrete_multibinary(self):
+        box = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+        assert algo_utils.get_num_actions(box) == 3
+        assert algo_utils.get_num_actions(spaces.Discrete(5)) == 1
+        assert algo_utils.get_num_actions(spaces.MultiDiscrete([2, 3, 4])) == 3
+        assert algo_utils.get_num_actions(spaces.MultiBinary(6)) == 6
+
+
+class TestRecursiveCheckModuleAttrs:
+    def test_raises_for_raw_optimizer(self):
+        optimizer = torch.optim.SGD([torch.nn.Parameter(torch.tensor(1.0))], lr=0.1)
+        with pytest.raises(TypeError, match="Optimizer objects should be wrapped"):
+            algo_utils.recursive_check_module_attrs(optimizer)
+
+    def test_returns_false_for_class_objects(self):
+        assert algo_utils.recursive_check_module_attrs(dict) is False
+
+
+class TestModuleCheckpointDict:
+    def test_dispatches_to_multiagent_for_module_dict(self, monkeypatch):
+        import agilerl.modules.base as base_mod
+
+        class FakeModuleDict:
+            pass
+
+        monkeypatch.setattr(base_mod, "ModuleDict", FakeModuleDict)
+        sentinel = {"multi": True}
+        monkeypatch.setattr(
+            algo_utils, "module_checkpoint_multiagent", lambda module, name: sentinel
+        )
+        out = algo_utils.module_checkpoint_dict(FakeModuleDict(), "actor")
+        assert out == sentinel
+
+    def test_dispatches_to_single_for_non_module_dict(self, monkeypatch):
+        sentinel = {"single": True}
+        monkeypatch.setattr(
+            algo_utils, "module_checkpoint_single", lambda module, name: sentinel
+        )
+        out = algo_utils.module_checkpoint_dict(object(), "actor")
+        assert out == sentinel
+
+
+class TestModuleCheckpointMultiagent:
+    def test_collects_module_cls_init_and_state_dict(self, monkeypatch):
+        class FakeOptimizedModule:
+            def __init__(self, orig):
+                self._orig_mod = orig
+                self.init_dict = {"unused": True}
+
+            def state_dict(self):
+                return {"_orig_mod.w": torch.tensor([1.0])}
+
+        class FakeAgentModule:
+            def __init__(self):
+                self.init_dict = {"hidden": 4}
+
+            def state_dict(self):
+                return {"weight": torch.tensor([2.0])}
+
+        monkeypatch.setattr(algo_utils, "OptimizedModule", FakeOptimizedModule)
+
+        module = {
+            "a0": FakeOptimizedModule(FakeAgentModule()),
+            "a1": FakeAgentModule(),
+        }
+        out = algo_utils.module_checkpoint_multiagent(module, "actor")
+        assert set(out["actor_cls"].keys()) == {"a0", "a1"}
+        assert set(out["actor_init_dict"].keys()) == {"a0", "a1"}
+        assert set(out["actor_state_dict"].keys()) == {"a0", "a1"}
+
+
+class TestFormatSharedCriticEncoder:
+    def test_puts_non_mlp_entries_under_init_dicts(self):
+        out = algo_utils.format_shared_critic_encoder({"cnn_config": {"k": 1}})
+        assert out["init_dicts"]["cnn_config"] == {"k": 1}
+
+
+class TestGetDeepestHeadConfig:
+    def test_raises_when_no_head_config_present(self):
+        net_config = {"agent_0": {}, "agent_1": {}}
+        with pytest.raises(ValueError, match="No head config found"):
+            algo_utils.get_deepest_head_config(net_config, ["agent_0", "agent_1"])
+
+    def test_returns_deepest_head_config_when_present(self):
+        net_config = {
+            "agent_0": {"head_config": {"hidden_size": [32]}},
+            "agent_1": {"head_config": {"hidden_size": [64, 64]}},
+        }
+        out = algo_utils.get_deepest_head_config(net_config, ["agent_0", "agent_1"])
+        assert out == {"hidden_size": [64, 64]}
+
+
+class TestObsToTensor:
+    def test_raises_for_unsupported_observation_type(self):
+        with pytest.raises(TypeError, match="Unrecognized type of observation"):
+            algo_utils.obs_to_tensor(set([1, 2]), device="cpu")
+
+
+class TestMaybeAddBatchDim:
+    def test_default_dispatch_raises_type_error(self):
+        with pytest.raises(TypeError, match="Cannot add batch dimension"):
+            algo_utils.maybe_add_batch_dim("bad", spaces.Discrete(2))
+
+    def test_numpy_adds_or_reshapes_batch_dimension(self):
+        space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+        arr = np.array([1.0, 2.0], dtype=np.float32)
+        out = algo_utils.maybe_add_batch_dim(arr, space)
+        assert out.shape == (1, 2)
+
+        seq = np.arange(8, dtype=np.float32).reshape(2, 2, 2)
+        reshaped = algo_utils.maybe_add_batch_dim(seq, space)
+        assert reshaped.shape == (4, 2)
+
+
+class TestPreprocessObservations:
+    def test_discrete_and_multidiscrete_replace_nans_with_placeholder(self):
+        d_space = spaces.Discrete(4)
+        d_obs = np.array([np.nan], dtype=np.float32)
+        d_out = algo_utils.preprocess_discrete_observation(
+            d_space, d_obs, placeholder_value=0.0
+        )
+        assert d_out.shape == (1, 4)
+
+        md_space = spaces.MultiDiscrete([2, 3])
+        md_obs = np.array([[np.nan, 1]], dtype=np.float32)
+        md_out = algo_utils.preprocess_multidiscrete_observation(
+            md_space, md_obs, placeholder_value=0.0
+        )
+        assert md_out.shape == (1, 5)
+
+
+class TestApplyImageNormalization:
+    def test_raises_for_non_box_space(self):
+        with pytest.raises(TypeError, match="Expected spaces.Box"):
+            algo_utils.apply_image_normalization(
+                np.array([1.0], dtype=np.float32), spaces.Discrete(2)
+            )
+
+
+class TestGetExperiencesSamples:
+    def test_samples_tuple_experiences(self):
+        idx = np.array([0, 2])
+        exp = (torch.tensor([1, 2, 3]), torch.tensor([4, 5, 6]))
+        sampled = algo_utils.get_experiences_samples(idx, exp)[0]
+        assert torch.equal(sampled[0], torch.tensor([1, 3]))
+        assert torch.equal(sampled[1], torch.tensor([4, 6]))
+
+
+class TestStackAndPadExperiences:
+    def test_raises_for_unsupported_list_item_type(self):
+        with pytest.raises(TypeError, match="Unsupported experience type"):
+            algo_utils.stack_and_pad_experiences(
+                ["bad", "input"],
+                padding_values=[0],
+            )
+
+
+class TestFlattenExperiences:
+    def test_flattens_short_arrays_and_tuple_inputs(self):
+        arr = np.array([[1.0, 2.0]], dtype=np.float32)
+        tup = (
+            np.array([[3.0, 4.0]], dtype=np.float32),
+            np.array([[5.0, 6.0]], dtype=np.float32),
+        )
+        flat_arr, flat_tup = algo_utils.flatten_experiences(arr, tup)
+        assert flat_arr.shape == (2, 1)
+        assert isinstance(flat_tup, tuple)
+        assert len(flat_tup) == 2
+
+
+class TestVectorizeExperiencesByAgent:
+    def test_handles_empty_dict_dict_values_and_tuple_values(self):
+        empty = algo_utils.vectorize_experiences_by_agent({})
+        assert empty.numel() == 0
+
+        dict_exp = {
+            "a0": {"obs": [1.0, 2.0]},
+            "a1": {"obs": [3.0, 4.0]},
+        }
+        out_dict = algo_utils.vectorize_experiences_by_agent(dict_exp)
+        assert "obs" in out_dict
+
+        tup_exp = {
+            "a0": ([1.0, 2.0], [3.0, 4.0]),
+            "a1": ([5.0, 6.0], [7.0, 8.0]),
+        }
+        out_tup = algo_utils.vectorize_experiences_by_agent(tup_exp)
+        assert isinstance(out_tup, tuple)
+        assert len(out_tup) == 2
+
+
+class TestConcatenateAndReshapeHelpers:
+    def test_concatenate_tensors_handles_dict_and_tuple(self):
+        dict_tensors = [{"a": torch.tensor([[1.0]])}, {"a": torch.tensor([[2.0]])}]
+        out_dict = algo_utils.concatenate_tensors(dict_tensors)
+        assert torch.equal(out_dict["a"], torch.tensor([[1.0], [2.0]]))
+
+        tuple_tensors = [
+            (torch.tensor([[1.0]]), torch.tensor([[2.0]])),
+            (torch.tensor([[3.0]]), torch.tensor([[4.0]])),
+        ]
+        out_tuple = algo_utils.concatenate_tensors(tuple_tensors)
+        assert isinstance(out_tuple, tuple)
+        assert len(out_tuple) == 2
+
+    def test_reshape_from_space_handles_dict_and_tuple(self):
+        d_space = spaces.Dict({"x": spaces.Box(-1, 1, shape=(2,), dtype=np.float32)})
+        d_tensor = {"x": torch.tensor([[1.0, 2.0], [3.0, 4.0]])}
+        d_out = algo_utils.reshape_from_space(d_tensor, d_space)
+        assert d_out["x"].shape == (2, 2)
+
+        t_space = spaces.Tuple(
+            (
+                spaces.Box(-1, 1, shape=(2,), dtype=np.float32),
+                spaces.Box(-1, 1, shape=(1,), dtype=np.float32),
+            )
+        )
+        t_tensor = (torch.tensor([[1.0, 2.0]]), torch.tensor([[3.0]]))
+        t_out = algo_utils.reshape_from_space(tensor=t_tensor, space=t_space)
+        assert isinstance(t_out, tuple)
+        assert t_out[0].shape == (2,)
+        assert t_out[1].shape == ()
+
+
+class TestRenamePeftPrimaryAdapterKeysInStateDict:
+    def test_returns_original_state_dict_when_adapter_names_match(self):
+        sd = {"x": torch.tensor([1.0])}
+        out = algo_utils._rename_peft_primary_adapter_keys_in_state_dict(
+            sd, old_adapter="actor", new_adapter="actor"
+        )
+        assert out is sd
+
+    def test_rewrites_adapter_key_patterns(self):
+        sd = {
+            "base.default.weight": torch.tensor([1.0]),
+            "lora_default.bias": torch.tensor([2.0]),
+        }
+        out = algo_utils._rename_peft_primary_adapter_keys_in_state_dict(
+            sd, old_adapter="default", new_adapter="actor"
+        )
+        assert "base.actor.weight" in out
+        assert "lora_actor.bias" in out
+
+
+class TestCloneLlm:
+    def test_clone_llm_peft_path_handles_multiple_adapters_and_state_rename(
+        self, monkeypatch
+    ):
+        class FakeBaseModel:
+            def __init__(self, config):
+                self.config = config
+                self.added = []
+                self.disabled = False
+                self.loaded = None
+
+            def add_adapter(self, peft_config, adapter_name):
+                self.added.append((adapter_name, peft_config))
+
+            def disable_adapter(self):
+                self.disabled = True
+
+            def load_state_dict(self, state_dict, strict=False):
+                self.loaded = dict(state_dict)
+
+        class FakePeftModel:
+            def __init__(self):
+                self.config = SimpleNamespace()
+                self.model = FakeBaseModel(SimpleNamespace())
+                self.peft_config = {"default": {"r": 1}, "extra": {"r": 2}}
+
+            def parameters(self):
+                return [torch.nn.Parameter(torch.tensor([1.0]))]
+
+        @contextmanager
+        def fake_gather_if_zero3(zero_stage, params):
+            yield
+
+        def fake_get_peft_model(model, first_config, adapter_name="actor"):
+            assert adapter_name == "actor"
+            return model
+
+        monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
+        monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
+        monkeypatch.setattr(algo_utils, "gather_if_zero3", fake_gather_if_zero3)
+
+        original = FakePeftModel()
+        cloned = algo_utils.clone_llm(
+            original_model=original,
+            zero_stage=0,
+            state_dict={
+                "base.default.weight": torch.tensor([1.0]),
+                "lora_default.bias": torch.tensor([2.0]),
+            },
+        )
+        assert isinstance(cloned, FakeBaseModel)
+        assert ("extra", {"r": 2}) in cloned.added
+        assert cloned.disabled is True
+        assert "base.actor.weight" in cloned.loaded
+
+    def test_clone_llm_pretrained_model_path(self, monkeypatch):
+        class FakeBaseModel:
+            def __init__(self, config):
+                self.config = config
+
+            def load_state_dict(self, state_dict, strict=False):
+                self.loaded = dict(state_dict)
+
+        class FakePreTrainedModel:
+            def __init__(self):
+                self.config = SimpleNamespace()
+                self.model = FakeBaseModel(SimpleNamespace())
+
+            def parameters(self):
+                return [torch.nn.Parameter(torch.tensor([1.0]))]
+
+        @contextmanager
+        def fake_gather_if_zero3(zero_stage, params):
+            yield
+
+        monkeypatch.setattr(algo_utils, "PreTrainedModel", FakePreTrainedModel)
+        monkeypatch.setattr(algo_utils, "gather_if_zero3", fake_gather_if_zero3)
+        original = FakePreTrainedModel()
+        cloned = algo_utils.clone_llm(original_model=original, zero_stage=0)
+        assert isinstance(cloned, FakeBaseModel)
+
+
+class TestDummyOptimizer:
+    def test_zero_grad_raises_runtime_error(self):
+        opt = algo_utils.DummyOptimizer([torch.nn.Parameter(torch.tensor([1.0]))])
+        with pytest.raises(RuntimeError, match="DummyOptimizer is a placeholder"):
+            opt.zero_grad()
+
+    def test_state_dict_raises_runtime_error(self):
+        opt = algo_utils.DummyOptimizer([torch.nn.Parameter(torch.tensor([1.0]))])
+        with pytest.raises(RuntimeError, match="DummyOptimizer is a placeholder"):
+            opt.state_dict()

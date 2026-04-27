@@ -1,33 +1,13 @@
 import gc
 import os
 import random
-from importlib import import_module
 from importlib.util import find_spec
 
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
 from accelerate.state import AcceleratorState
-from accelerate.utils import DeepSpeedPlugin
-
-try:
-    import deepspeed.comm.comm as ds_comm
-    import deepspeed.utils.groups as ds_groups
-except ImportError:
-    ds_comm = None
-    ds_groups = None
-
-try:
-    cleanup_dist_env_and_memory = import_module(
-        "vllm.distributed"
-    ).cleanup_dist_env_and_memory
-    destroy_model_parallel = import_module(
-        "vllm.distributed.parallel_state"
-    ).destroy_model_parallel
-except ImportError:
-    cleanup_dist_env_and_memory = None
-    destroy_model_parallel = None
+from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
 from tests.utils import (
     force_gpu_memory_release,
@@ -50,20 +30,24 @@ def cleanup_after_test(request):
 
     yield
 
-    if (
-        "vllm" in request.node.name
-        and destroy_model_parallel is not None
-        and cleanup_dist_env_and_memory is not None
-        and ds_groups is not None
-        and ds_comm is not None
-    ):
-        # vLLM-specific cleanup
-        destroy_model_parallel()
-        cleanup_dist_env_and_memory()
-        for attr in dir(ds_groups):
-            if attr.startswith("_") and attr.endswith("_GROUP"):
-                setattr(ds_groups, attr, None)
-        ds_comm.cdb = None
+    # vLLM + DeepSpeed cleanup (only when vLLM tests ran and deps exist). Imported
+    # lazily so `pytest -m "not llm"` can collect this package on hosts without vllm.
+    if "vllm" in request.node.name and find_spec("vllm") is not None:
+        try:
+            import deepspeed.comm.comm as ds_comm
+        except ImportError:
+            ds_comm = None
+        if ds_comm is not None:
+            import deepspeed.utils.groups as ds_groups
+            from vllm.distributed import cleanup_dist_env_and_memory
+            from vllm.distributed.parallel_state import destroy_model_parallel
+
+            destroy_model_parallel()
+            cleanup_dist_env_and_memory()
+            for attr in dir(ds_groups):
+                if attr.startswith("_") and attr.endswith("_GROUP"):
+                    setattr(ds_groups, attr, None)
+            ds_comm.cdb = None
 
     torch._dynamo.reset()
     force_gpu_memory_release()
@@ -82,38 +66,7 @@ def set_seed():
     random.seed(SEED)
 
 
-def generate_accelerator(use_deepspeed_optimizer, config):
-    if config is not None and not torch.cuda.is_available():
-        pytest.skip("DeepSpeed-configured LLM tests require CUDA support.")
-    if config is not None and find_spec("deepspeed") is None:
-        pytest.skip("DeepSpeed-configured LLM tests require deepspeed.")
-
-    gc.collect()
-    torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
-    if use_deepspeed_optimizer and (config is not None):
-        config["optimizer"] = {
-            "type": "AdamW",
-            "params": {
-                "lr": 1e-4,  # Smaller learning rate
-                "betas": [0.9, 0.999],
-                "eps": 1e-8,
-                "weight_decay": 0.01,
-            },
-        }
-    return (
-        Accelerator(deepspeed_plugin=DeepSpeedPlugin(hf_ds_config=config))
-        if config is not None
-        else None
-    )
-
-
-@pytest.fixture(scope="function")
-def accelerator_factory():
-    return generate_accelerator
-
-
-def generate_model(pretrained_model_name_or_path):
+def generate_model(pretrained_model_name_or_path, add_value_head=False):
     pytest.importorskip("peft", reason="LLM tests require peft.")
     pytest.importorskip("transformers", reason="LLM tests require transformers.")
     from peft import LoraConfig, get_peft_model
@@ -133,6 +86,16 @@ def generate_model(pretrained_model_name_or_path):
             "down_proj",
         ],
     )
+    if add_value_head:
+        peft_config.modules_to_save = ["summary"]
+        model = AutoModelForCausalLMWithValueHead.from_pretrained(
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            torch_dtype=torch.bfloat16,
+            attn_implementation="sdpa",
+        )
+        model.gradient_checkpointing_enable()
+        model = get_peft_model(model, peft_config)
+        return model
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         dtype=(

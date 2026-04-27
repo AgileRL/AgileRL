@@ -1,31 +1,27 @@
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl import HAS_LLM_DEPENDENCIES
 
 if not HAS_LLM_DEPENDENCIES:
-    msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
     raise ImportError(
-        msg,
+        "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`.",
     )
 
 import re
 
 import yaml
-from accelerate import Accelerator
 from datasets import load_dataset
-from peft import LoraConfig
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
-from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_reasoning
-from agilerl.wrappers.llm_envs import ReasoningGym
+from agilerl.utils.algo_utils import VLLMConfig
+from agilerl.utils.llm_utils import ReasoningGym, create_llm_accelerator
 from agilerl.utils.utils import create_population
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
-USE_VLLM = True
-MAX_CONTEXT_LENGTH = 1024
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
@@ -44,7 +40,6 @@ def format_reward_func(completions, target, **kwargs):
     rewards = []
     for completion, _gt in zip(completions, target, strict=False):
         try:
-            # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
             regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
             matches = re.search(regex, completion, re.DOTALL)
@@ -62,7 +57,6 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
     for completion, gt, numbers in zip(completions, target, nums, strict=False):
         try:
-            # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
             completion = "<think>" + completion
             answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
 
@@ -102,12 +96,10 @@ def combined_rewards(completion, solution, prompt):
 
 
 def main(init_hp, mut_p):
-    # Instantiate the model and the associated tokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
-    # Define a conversation template for the reasoning task, refer to questions and answers as q and a respectively
     conversation_template = [
         {
             "role": "system",
@@ -120,48 +112,34 @@ def main(init_hp, mut_p):
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
 
-    # Convert the HuggingFace dataset into a Gymnasium environment
-    accelerator = None  # Accelerator()
+    accelerator = create_llm_accelerator()
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         conversation_template=conversation_template,
-        data_batch_size_per_gpu=10,
+        data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
         accelerator=accelerator,
-        max_context_length=MAX_CONTEXT_LENGTH,
-        return_raw_completions=USE_VLLM,
+        max_context_length=init_hp["MAX_MODEL_LEN"],
     )
 
-    init_hp["ZERO_STAGE"] = 0
-    if (
-        accelerator is not None
-        and getattr(accelerator.state, "deepspeed_plugin", None) is not None
-    ):
-        init_hp["ZERO_STAGE"] = accelerator.state.deepspeed_plugin.deepspeed_config[
-            "zero_optimization"
-        ]["stage"]
-    init_hp["MAX_MODEL_LEN"] = MAX_CONTEXT_LENGTH
-
+    use_vllm = bool(init_hp.get("USE_VLLM", True))
+    vllm_config = (
+        VLLMConfig(
+            tensor_parallel_size=1,
+            gpu_memory_utilization=0.8,
+            max_num_seqs=12,
+            sleep_mode=True,
+        )
+        if use_vllm
+        else None
+    )
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
         lr=RLParameter(min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]),
-        group_size=RLParameter(
-            min=mut_p["MIN_GROUP_SIZE"],
-            max=mut_p["MAX_GROUP_SIZE"],
-            dtype=int,
-        ),
+        lr_critic=RLParameter(min=mut_p["MIN_LR_CRITIC"], max=mut_p["MAX_LR_CRITIC"]),
     )
-
-    # Define the algorithm kwargs
-    algo_kwargs = {
-        "model_name": MODEL_PATH,
-        "lora_config": LoraConfig(**init_hp["LORA"]),
-        "use_vllm": USE_VLLM,
-        "pad_token_id": tokenizer.pad_token_id,
-        "pad_token": tokenizer.pad_token,
-    }
 
     pop = create_population(
         algo=init_hp["ALGO"],
@@ -170,7 +148,9 @@ def main(init_hp, mut_p):
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
         accelerator=accelerator,
-        algo_kwargs=algo_kwargs,
+        tokenizer=tokenizer,
+        model_name=MODEL_PATH,
+        vllm_config=vllm_config,
     )
 
     tournament = TournamentSelection(
@@ -179,17 +159,16 @@ def main(init_hp, mut_p):
         init_hp["POP_SIZE"],
         init_hp["EVAL_LOOP"],
     )
-
     mutations = Mutations(
         no_mutation=mut_p["NO_MUT"],
-        architecture=0,
-        new_layer_prob=0,
-        parameters=0,
-        activation=0,
-        rl_hp=mut_p["RL_HP_MUT"],
-        mutation_sd=mut_p["MUT_SD"],
-        rand_seed=mut_p["RAND_SEED"],
-        accelerator=accelerator,
+        architecture=mut_p.get("ARCH_MUT", 0.0),
+        new_layer_prob=mut_p.get("NEW_LAYER", 0.0),
+        parameters=mut_p.get("PARAMS_MUT", 0.0),
+        activation=mut_p.get("ACT_MUT", 0.0),
+        rl_hp=mut_p.get("RL_HP_MUT", 0.0),
+        mutation_sd=mut_p.get("MUT_SD", 0.0),
+        rand_seed=mut_p.get("RAND_SEED", 42),
+        device=accelerator.device,
     )
 
     finetune_llm_reasoning(
@@ -197,11 +176,11 @@ def main(init_hp, mut_p):
         env=env,
         init_hp=init_hp,
         evaluation_interval=10,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=10,
+        evo_steps=4,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerator,
@@ -212,7 +191,7 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
-    with open("configs/training/grpo.yaml") as file:
+    with open("configs/training/llm_finetuning/ppo_llm.yaml") as file:
         config = yaml.safe_load(file)
     init_hp = config["INIT_HP"]
     mut_p = config["MUTATION_PARAMS"]

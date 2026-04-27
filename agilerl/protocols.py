@@ -323,8 +323,8 @@ class MutationRegistryProtocol(Protocol):
         pass
 
 
-SelfEvolvableAlgorithm = TypeVar(
-    "SelfEvolvableAlgorithm",
+EvolvableAlgorithm = TypeVar(
+    "EvolvableAlgorithm",
     bound="EvolvableAlgorithmProtocol",
 )
 
@@ -355,9 +355,9 @@ class EvolvableAlgorithmProtocol(Protocol):
         pass
 
     def load(
-        self: type[SelfEvolvableAlgorithm],
+        self: type[EvolvableAlgorithm],
         path: str,
-    ) -> SelfEvolvableAlgorithm:
+    ) -> EvolvableAlgorithm:
         pass
 
     def load_checkpoint(
@@ -610,3 +610,23 @@ class PeftModelProtocol(Protocol):
         **kwargs: Any,
     ) -> "PeftModelProtocol":
         pass
+
+
+@runtime_checkable
+class MultiTurnEnv(Protocol):
+    """Protocol for multi-turn LLM environments and AgileRL wrappers.
+
+    Covers both:
+    - raw multi-turn envs / ``FormatRewardWrapper``: text obs + text actions
+    - ``TokenObservationWrapper``: dict obs + token-id tensor actions
+    """
+
+    max_turns: int
+
+    def reset(
+        self, seed: int | None = None
+    ) -> tuple[str | dict[str, Any], dict[str, Any]]: ...
+    def step(
+        self, action: str | torch.Tensor, **kwargs: Any
+    ) -> tuple[str | dict[str, Any], float, bool, bool, dict[str, Any]]: ...
+    def close(self) -> None: ...
