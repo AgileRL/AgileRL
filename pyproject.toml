@@ -148,6 +148,7 @@ exclude = ["tutorials"]
 [tool.ruff]
 target-version = "py310"
 line-length = 88
+extend-exclude = ["tests/assets/tiny_llm"]
 
 [tool.ruff.lint]
 select = ["ALL"]

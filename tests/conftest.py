@@ -18,6 +18,12 @@ if _xdist_worker_id:
         _inductor_base, f"worker_{_xdist_worker_id}"
     )
 
+# Force HF libs offline during tests. Any test that tries to download from the
+# Hub fails loudly instead of silently fetching (and getting CI rate-limited).
+# Tests that need an LLM use tests/assets/tiny_llm/ via TINY_LLM_FIXTURE_PATH.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import torch  # noqa: E402

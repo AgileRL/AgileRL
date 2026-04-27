@@ -40,6 +40,8 @@ jobs:
         env:
             UV_CACHE_DIR: /tmp/uv-cache
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
+            # HF cache is isolated to /tmp; tests run with HF_HUB_OFFLINE=1 (set in
+            # tests/conftest.py) and use the vendored fixture in tests/assets/tiny_llm.
             HF_HOME: /tmp/hf-cache
             TORCHINDUCTOR_CACHE_DIR: /tmp/inductor-cache
 
@@ -49,13 +51,6 @@ jobs:
               with:
                   enable-cache: true
                   python-version: ${{ matrix.python-version }}
-
-            - name: Cache HuggingFace models
-              uses: actions/cache@v4
-              with:
-                  path: /tmp/hf-cache
-                  key: hf-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
-                  restore-keys: hf-${{ matrix.python-version }}-
 
             - name: Cache torch inductor compilations
               uses: actions/cache@v4

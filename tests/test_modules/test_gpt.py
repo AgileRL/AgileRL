@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import numpy as np
 import torch
 
@@ -8,6 +10,26 @@ from agilerl.modules.gpt import (
     PositionalEncoding,
     TokenEmbedding,
 )
+
+
+def _build_gpt2_from_config(model_type, *args, **kwargs):
+    """Stand-in for ``GPT2LMHeadModel.from_pretrained`` that avoids the network.
+
+    Builds a randomly-initialized model with the same shape as the real
+    pretrained checkpoint so the state-dict copy in ``EvolvableGPT.from_pretrained``
+    succeeds. Architecture-only test assertions still pass.
+    """
+    from transformers import GPT2Config, GPT2LMHeadModel
+
+    arch = {
+        "gpt2": {"n_layer": 12, "n_head": 12, "n_embd": 768},
+        "gpt2-medium": {"n_layer": 24, "n_head": 16, "n_embd": 1024},
+        "gpt2-large": {"n_layer": 36, "n_head": 20, "n_embd": 1280},
+        "gpt2-xl": {"n_layer": 48, "n_head": 25, "n_embd": 1600},
+    }[model_type]
+    return GPT2LMHeadModel(
+        GPT2Config(vocab_size=50257, n_positions=1024, **arch)
+    )
 
 #### TESTING EvolvableGPT CLASS ####
 
@@ -64,7 +86,13 @@ def test_custom_parameters_initialization():
 
 # The model can be loaded from a pretrained GPT model.
 def test_pretrained_model_loading():
-    model = EvolvableGPT.from_pretrained("gpt2", override_args={"dropout": 0.1})
+    # Mock the upstream HF download to avoid network in CI; the test only
+    # asserts architectural properties that come from the local config table.
+    with patch(
+        "transformers.GPT2LMHeadModel.from_pretrained",
+        side_effect=_build_gpt2_from_config,
+    ):
+        model = EvolvableGPT.from_pretrained("gpt2", override_args={"dropout": 0.1})
     assert model.n_layer == 12
     assert model.vocab_size == 50257
     assert model.n_embd == 768
