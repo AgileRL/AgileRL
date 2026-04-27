@@ -27,9 +27,8 @@ def _build_gpt2_from_config(model_type, *args, **kwargs):
         "gpt2-large": {"n_layer": 36, "n_head": 20, "n_embd": 1280},
         "gpt2-xl": {"n_layer": 48, "n_head": 25, "n_embd": 1600},
     }[model_type]
-    return GPT2LMHeadModel(
-        GPT2Config(vocab_size=50257, n_positions=1024, **arch)
-    )
+    return GPT2LMHeadModel(GPT2Config(vocab_size=50257, n_positions=1024, **arch))
+
 
 #### TESTING EvolvableGPT CLASS ####
 
