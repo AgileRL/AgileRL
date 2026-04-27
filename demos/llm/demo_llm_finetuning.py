@@ -7,23 +7,23 @@ Examples
 --------
 Train SFT::
 
-    python demos/demo_llm_finetuning.py sft
+    python demos/llm/demo_llm_finetuning.py sft
 
 Train DPO from the base model::
 
-    python demos/demo_llm_finetuning.py dpo
+    python demos/llm/demo_llm_finetuning.py dpo
 
 Warm-start DPO from a prior SFT checkpoint::
 
-    python demos/demo_llm_finetuning.py dpo --load-path outputs/sft/actor
+    python demos/llm/demo_llm_finetuning.py dpo --load-path outputs/sft/actor
 
 Evaluate a saved checkpoint interactively::
 
-    python demos/demo_llm_finetuning.py sft --eval --load-path outputs/sft/actor
+    python demos/llm/demo_llm_finetuning.py sft --eval --load-path outputs/sft/actor
 
 Multi-GPU / DeepSpeed via accelerate::
 
-    accelerate launch demos/demo_llm_finetuning.py sft
+    accelerate launch demos/llm/demo_llm_finetuning.py sft
 """
 
 from agilerl import HAS_LLM_DEPENDENCIES

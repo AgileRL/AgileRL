@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
-from typing import Any, ForwardRef, NoReturn, Union
+from typing import TYPE_CHECKING, Any, ForwardRef, NoReturn, Union
 
 import numpy as np
 import torch
@@ -40,6 +40,9 @@ from agilerl.typing import (
     SupportedObsSpaces,
     TorchObsType,
 )
+
+if TYPE_CHECKING:
+    from agilerl.algorithms.core.base import EvolvableAlgorithm
 
 if HAS_LLM_DEPENDENCIES:
     from peft import PeftModel, get_peft_model
@@ -1896,3 +1899,18 @@ def apply_env_defined_actions(
         action[mask] = override[mask]
         action_dict[agent_id] = action
     return action_dict
+
+
+def _resolve_lr(
+    agent: "EvolvableAlgorithm", lr: str | tuple[str, str]
+) -> tuple[str, str]:
+    """Resolve the learning rate from a string or tuple of strings.
+
+    :param lr: Learning rate
+    :type lr: str | tuple[str, str]
+    :return: Learning rate
+    :rtype: tuple[str, str]
+    """
+    if isinstance(lr, tuple):
+        return getattr(agent, lr[0]), getattr(agent, lr[1])
+    return getattr(agent, lr), None

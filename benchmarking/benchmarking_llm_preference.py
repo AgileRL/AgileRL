@@ -4,7 +4,7 @@ Runs DPO with default hyperparameters from ``configs/training/dpo.yaml``.
 For full CLI options (custom save paths, checkpoint warm-starting, eval mode),
 use the demo script instead::
 
-    python demos/demo_llm_finetuning.py dpo --help
+    python demos/llm/demo_llm_finetuning.py dpo --help
 
 To run (single GPU, no accelerate):
     python benchmarking/benchmarking_dpo.py

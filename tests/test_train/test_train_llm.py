@@ -1795,7 +1795,7 @@ def test_finetune_llm_multiturn_value_error_if_algo_not_supported():
     mock_agent.batch_size_per_process = 16
     with pytest.raises(
         ValueError,
-        match="The algorithm must be LLMPPO, LLMREINFORCE, or GRPO for multi-turn GEM",
+        match="The algorithm must be LLMPPO, LLMREINFORCE, or GRPO for multi-turn finetuning",
     ):
         finetune_llm_multiturn(
             pop=[mock_agent],

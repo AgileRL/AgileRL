@@ -74,6 +74,7 @@ from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     DummyOptimizer,
     VLLMConfig,
+    _resolve_lr,
     check_supported_space,
     chkpt_attribute_to_device,
     clone_llm,
@@ -906,28 +907,13 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             networks = [cloned_modules[net] for net in opt_config.networks]
             optim_cls = opt_config.get_optimizer_cls()
-            is_llm_optimizer = bool(getattr(orig_optimizer, "is_llm_optimizer", False))
-            if is_llm_optimizer:
-                if not isinstance(opt_config.lr, tuple):
-                    msg = (
-                        "LLM optimizers require tuple lr config "
-                        "('lr_actor', 'lr_critic')."
-                    )
-                    raise TypeError(
-                        msg,
-                    )
-                lr = getattr(clone, opt_config.lr[0])
-                lr_critic = getattr(clone, opt_config.lr[1])
-            else:
-                lr = getattr(clone, opt_config.lr)
-                lr_critic = None
-
+            lr_value, lr_critic_value = _resolve_lr(self, opt_config.lr)
             opt = OptimizerWrapper(
                 optim_cls,
                 networks=networks,
-                lr=lr,
-                lr_critic=lr_critic,
-                is_llm_optimizer=is_llm_optimizer,
+                lr=lr_value,
+                lr_critic=lr_critic_value,
+                is_llm_optimizer=getattr(orig_optimizer, "is_llm_optimizer", False),
                 network_names=opt_config.networks,
                 lr_name=opt_config.lr,
                 optimizer_kwargs=opt_config.optimizer_kwargs,
@@ -1037,27 +1023,16 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             opt_networks = opt_dict[f"{name}_networks"]
             opt_lr = opt_dict[f"{name}_lr"]
             is_llm_optimizer = bool(opt_dict.get(f"{name}_is_llm_optimizer", False))
-            if isinstance(opt_lr, (tuple, list)):
-                lr_attr = opt_lr[0]
-                lr_critic_attr = opt_lr[1] if len(opt_lr) > 1 else None
-                lr_value = getattr(self, lr_attr)
-                lr_critic_value = (
-                    getattr(self, lr_critic_attr)
-                    if lr_critic_attr is not None
-                    else None
-                )
-            else:
-                lr_value = getattr(self, opt_lr)
-                lr_critic_value = getattr(self, "lr_critic", None)
+            lr, lr_critic = _resolve_lr(self, opt_lr)
             networks = [getattr(self, net) for net in opt_networks]
             optimizer = OptimizerWrapper(
                 optimizer_cls=optimizer_cls,
                 networks=networks,
-                lr=lr_value,
+                lr=lr,
                 optimizer_kwargs=opt_kwargs,
                 network_names=opt_networks,
                 lr_name=opt_lr,
-                lr_critic=lr_critic_value,
+                lr_critic=lr_critic,
                 is_llm_optimizer=is_llm_optimizer,
             )
 
@@ -1219,18 +1194,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             is_llm_optimizer = bool(opt_dict.get(f"{name}_is_llm_optimizer", False))
             optimizer_cls = get_optimizer_cls(opt_dict[f"{name}_cls"])
             opt_networks = opt_dict[f"{name}_networks"]
-            if isinstance(lr, (tuple, list)):
-                lr_attr = lr[0]
-                lr_critic_attr = lr[1] if len(lr) > 1 else None
-                lr_value = getattr(self, lr_attr)
-                lr_critic_value = (
-                    getattr(self, lr_critic_attr)
-                    if lr_critic_attr is not None
-                    else None
-                )
-            else:
-                lr_value = getattr(self, lr)
-                lr_critic_value = getattr(self, "lr_critic", None)
+            lr_value, lr_critic_value = _resolve_lr(self, lr)
             networks = [loaded_modules[net] for net in opt_networks]
             optimizer = OptimizerWrapper(
                 optimizer_cls=optimizer_cls,
