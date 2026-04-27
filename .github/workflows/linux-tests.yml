@@ -70,20 +70,14 @@ jobs:
                   uv sync --locked --all-groups --extra all
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
 
-            - name: Run non-LLM tests (parallel)
-              run: uv run pytest -m "not llm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
-              env:
-                  COVERAGE_FILE: .coverage.parallel
+            - name: Run tests
+              # LLM tests are pinned to a single worker via xdist_group("llm")
+              # in tests/conftest.py, so a single pytest invocation runs the
+              # parallel and sequential portions in one pass.
+              run: uv run pytest --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
 
-            - name: Run LLM tests (sequential, exclusive GPU)
-              run: uv run pytest -n0 -m "llm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
-              env:
-                  COVERAGE_FILE: .coverage.llm
-
-            - name: Combine coverage and generate report
-              run: |
-                  uv run coverage combine
-                  uv run coverage xml -o coverage.xml
+            - name: Generate coverage report
+              run: uv run coverage xml -o coverage.xml
 
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3

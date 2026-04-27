@@ -111,7 +111,7 @@ markers = [
 [tool.coverage.run]
 parallel = true
 source = ["agilerl"]
-concurrency = ["multiprocessing"]
+concurrency = ["multiprocessing", "thread"]
 sigterm = true
 omit = ["agilerl/networks/distributions_experimental.py"]
 

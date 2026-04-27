@@ -3,15 +3,29 @@ import os
 import shutil
 import socket
 import sys
+import tempfile
 
-import numpy as np
-import pytest
-import torch
-from gymnasium import spaces
-from torch import nn
+# Give each xdist worker its own torch inductor cache dir BEFORE torch is
+# imported. Parallel workers sharing the default cache race on precompiled
+# headers (mtime checks fail on macOS clang++ and can cause flaky rebuilds
+# elsewhere). When the CI presets TORCHINDUCTOR_CACHE_DIR for restoration,
+# we nest each worker under it so cache reuse across runs still works.
+# This is a no-op when running without xdist.
+_xdist_worker_id = os.environ.get("PYTEST_XDIST_WORKER")
+if _xdist_worker_id:
+    _inductor_base = os.environ.get("TORCHINDUCTOR_CACHE_DIR") or tempfile.gettempdir()
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(
+        _inductor_base, f"worker_{_xdist_worker_id}"
+    )
 
-from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from tests.helper_functions import (
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
+import torch  # noqa: E402
+from gymnasium import spaces  # noqa: E402
+from torch import nn  # noqa: E402
+
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter  # noqa: E402
+from tests.helper_functions import (  # noqa: E402
     gen_multi_agent_dict_or_tuple_spaces,
     generate_dict_or_tuple_space,
     generate_discrete_space,
@@ -26,12 +40,18 @@ if not torch.cuda.is_available():
     os.environ.setdefault("ACCELERATE_USE_CPU", "true")
 
 
-def pytest_collection_modifyitems(items):
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):
     """Pin tests that share mutable global state to dedicated xdist workers so
     they never run in parallel with each other.
 
     - ``llm``-marked tests: vLLM / DeepSpeed need exclusive GPU access.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
+
+    Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
+    before xdist's own ``pytest_collection_modifyitems`` (in ``xdist/remote.py``)
+    reads them and appends ``@group`` suffixes to nodeids for loadgroup
+    scheduling.
     """
     llm_group = pytest.mark.xdist_group("llm")
     minari_group = pytest.mark.xdist_group("minari")
