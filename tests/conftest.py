@@ -3,15 +3,60 @@ import os
 import shutil
 import socket
 import sys
+import tempfile
 
-import numpy as np
-import pytest
-import torch
-from gymnasium import spaces
-from torch import nn
+# Give each xdist worker its own torch inductor cache dir BEFORE torch is
+# imported. Parallel workers sharing the default cache race on precompiled
+# headers (mtime checks fail on macOS clang++ and can cause flaky rebuilds
+# elsewhere). When the CI presets TORCHINDUCTOR_CACHE_DIR for restoration,
+# we nest each worker under it so cache reuse across runs still works.
+# This is a no-op when running without xdist.
+_xdist_worker_id = os.environ.get("PYTEST_XDIST_WORKER")
+if _xdist_worker_id:
+    _inductor_base = os.environ.get("TORCHINDUCTOR_CACHE_DIR") or tempfile.gettempdir()
+    _worker_cache = os.path.join(_inductor_base, f"worker_{_xdist_worker_id}")
 
-from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from tests.helper_functions import (
+    def _writable(path: str) -> bool:
+        try:
+            os.makedirs(path, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=path, delete=True):
+                pass
+            return True
+        except OSError:
+            return False
+
+    # A stale dir left by a previous run (e.g. created inside a container as
+    # root, or with restrictive perms after a tmpwatch sweep on /var/tmp) can
+    # be unwritable by the current user, causing torch.compile to crash with
+    # PermissionError. Probe both the worker dir and the inner ``cache/``
+    # subdir torch.compile creates; wipe and retry on failure, falling back
+    # to ``mkdtemp`` so the run can always proceed.
+    _inner = os.path.join(_worker_cache, "cache")
+    if not (
+        _writable(_worker_cache) and (not os.path.exists(_inner) or _writable(_inner))
+    ):
+        shutil.rmtree(_worker_cache, ignore_errors=True)
+        if not _writable(_worker_cache):
+            _worker_cache = tempfile.mkdtemp(
+                prefix=f"torchinductor_{_xdist_worker_id}_"
+            )
+
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = _worker_cache
+
+# Force HF libs offline during tests. Any test that tries to download from the
+# Hub fails loudly instead of silently fetching (and getting CI rate-limited).
+# Tests that need an LLM use tests/assets/tiny_llm/ via TINY_LLM_FIXTURE_PATH.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
+import torch  # noqa: E402
+from gymnasium import spaces  # noqa: E402
+from torch import nn  # noqa: E402
+
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter  # noqa: E402
+from tests.helper_functions import (  # noqa: E402
     gen_multi_agent_dict_or_tuple_spaces,
     generate_dict_or_tuple_space,
     generate_discrete_space,
@@ -26,18 +71,29 @@ if not torch.cuda.is_available():
     os.environ.setdefault("ACCELERATE_USE_CPU", "true")
 
 
-def pytest_collection_modifyitems(items):
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):
     """Pin tests that share mutable global state to dedicated xdist workers so
     they never run in parallel with each other.
 
     - ``llm``-marked tests: vLLM / DeepSpeed need exclusive GPU access.
+    - ``gpu``-marked tests: serialised onto one worker to avoid CUDA OOM from
+      concurrent allocations across xdist workers.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
+
+    Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
+    before xdist's own ``pytest_collection_modifyitems`` (in ``xdist/remote.py``)
+    reads them and appends ``@group`` suffixes to nodeids for loadgroup
+    scheduling.
     """
     llm_group = pytest.mark.xdist_group("llm")
+    gpu_group = pytest.mark.xdist_group("gpu")
     minari_group = pytest.mark.xdist_group("minari")
     for item in items:
         if item.get_closest_marker("llm"):
             item.add_marker(llm_group)
+        elif item.get_closest_marker("gpu"):
+            item.add_marker(gpu_group)
         elif "test_minari_utils" in item.nodeid:
             item.add_marker(minari_group)
 

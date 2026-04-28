@@ -20,6 +20,7 @@ from transformers import AutoTokenizer
 from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
 from agilerl.algorithms.sft import SFT
 from agilerl.wrappers.llm_envs import SFTGym
+from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.test_grpo import (
     _patch_mps_learn_hooks,
     create_module,
@@ -153,7 +154,7 @@ def sft_factory():
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
     [
-        "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+        TINY_LLM_FIXTURE_PATH,
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [4])
@@ -263,7 +264,7 @@ def test_init_sft_model_name_none_actor_network_none(
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
     [
-        "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+        TINY_LLM_FIXTURE_PATH,
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [4])
@@ -315,7 +316,7 @@ def test_sft_get_action(
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
     [
-        "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+        TINY_LLM_FIXTURE_PATH,
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [32])
@@ -415,7 +416,7 @@ def test_sft_learn(
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
     [
-        "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+        TINY_LLM_FIXTURE_PATH,
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [2])
@@ -545,7 +546,7 @@ def test_sft_load():
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -590,7 +591,7 @@ def test_sft_clean_up(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -679,7 +680,7 @@ def test_sft_save_load_checkpoint(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -747,7 +748,7 @@ def test_sft_no_llm_dependencies(sft_factory, model_factory, accelerator_factory
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -796,7 +797,7 @@ def test_sft_get_logprobs(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -845,7 +846,7 @@ def test_sft_backward_pass(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])

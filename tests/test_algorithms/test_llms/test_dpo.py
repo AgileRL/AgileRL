@@ -25,6 +25,7 @@ from agilerl.algorithms.core.base import (
 )
 from agilerl.algorithms.dpo import DPO
 from agilerl.wrappers.llm_envs import PreferenceGym
+from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.test_grpo import (
     create_module,
     deepspeed_config_stage_1,
@@ -158,7 +159,7 @@ def dpo_factory():
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
     [
-        "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+        TINY_LLM_FIXTURE_PATH,
         # None,
     ],
 )
@@ -276,7 +277,7 @@ def test_init_dpo_model_name_none_actor_network_none(
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
     [
-        "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+        TINY_LLM_FIXTURE_PATH,
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [4])
@@ -331,7 +332,7 @@ def test_dpo_get_action(
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
     [
-        "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+        TINY_LLM_FIXTURE_PATH,
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [32])
@@ -442,7 +443,7 @@ def test_dpo_learn(
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
     [
-        "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+        TINY_LLM_FIXTURE_PATH,
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [2])
@@ -619,7 +620,7 @@ def test_liger_dpo_with_alpha_backward_returns_sixteen_outputs_with_trailing_non
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -667,7 +668,7 @@ def test_dpo_clean_up(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -760,7 +761,7 @@ def test_dpo_save_load_checkpoint(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -832,7 +833,7 @@ def test_dpo_no_llm_dependencies(dpo_factory, model_factory, accelerator_factory
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -884,7 +885,7 @@ def test_dpo_get_logprobs(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -936,7 +937,7 @@ def test_dpo_backward_pass(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -985,7 +986,7 @@ def test_dpo_preprocess_observation(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])

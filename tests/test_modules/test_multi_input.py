@@ -15,6 +15,8 @@ from tests.helper_functions import (
 
 DictOrTupleSpace = Dict | Tuple
 
+pytestmark = pytest.mark.gpu
+
 
 @pytest.fixture(scope="module")
 def default_cnn_config():

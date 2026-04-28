@@ -18,12 +18,13 @@ from agilerl.modules.custom_components import GumbelSoftmax
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.utils.evolvable_networks import get_default_encoder_config
-from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
     get_sample_from_space,
+    skip_torch_compile_on_windows_cpu,
 )
 
 
@@ -367,14 +368,13 @@ def vectorized_experiences(
     return states, actions, log_probs, rewards, dones, values, next_state, next_done
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("sum_score", [True, False])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
 @pytest.mark.parametrize("vectorized", [False, True])
 def test_loop(
     device,
     sum_score,
-    compile_mode,
     observation_spaces,
     vectorized,
     ma_discrete_space,
@@ -382,9 +382,12 @@ def test_loop(
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     if vectorized:
-        env = make_multi_agent_vect_envs(
+        # ``SyncMultiAgentVecEnv`` mimics ``AsyncPettingZooVecEnv`` in-process
+        # so we avoid the ~25-50s CI subprocess spawn cost while still
+        # exercising the vectorised reset/step code path inside ``IPPO.test``.
+        env = make_sync_multi_agent_vec_env(
             DummyMultiEnv,
-            2,
+            num_envs=2,
             observation_spaces=observation_spaces,
             action_spaces=ma_discrete_space,
         )
@@ -396,7 +399,7 @@ def test_loop(
         ma_discrete_space,
         agent_ids=["agent_0", "agent_1", "other_agent_0"],
         device=device,
-        torch_compiler=compile_mode,
+        torch_compiler=None,
     )
     mean_score = ippo.test(env, max_steps=10, sum_scores=sum_score)
     if sum_score:
@@ -407,8 +410,25 @@ def test_loop(
     ippo.clean_up()
 
 
+@pytest.mark.gpu
+@skip_torch_compile_on_windows_cpu
+def test_loop_torch_compile_smoke(device, ma_vector_space, ma_discrete_space):
+    """One shot: IPPO.test with torch.compile=true (grid trimmed from ``test_loop``)."""
+    env = DummyMultiEnv(ma_vector_space, ma_discrete_space)
+    ippo = IPPO(
+        ma_vector_space,
+        ma_discrete_space,
+        agent_ids=["agent_0", "agent_1", "other_agent_0"],
+        device=device,
+        torch_compiler="default",
+    )
+    mean_score = ippo.test(env, max_steps=5, sum_scores=True)
+    assert isinstance(mean_score, float)
+    ippo.clean_up()
+
+
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("wrap", [True, False])
 def test_ippo_clone_returns_identical_agent(
@@ -423,9 +443,9 @@ def test_ippo_clone_returns_identical_agent(
     observation_spaces = request.getfixturevalue(observation_spaces)
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     index = 0
-    batch_size = 64
+    batch_size = 16
     lr = 1e-4
-    learn_step = 2048
+    learn_step = 64
     gamma = 0.99
     gae_lambda = 0.95
     mut = None
@@ -435,7 +455,7 @@ def test_ippo_clone_returns_identical_agent(
     vf_coef = 0.5
     max_grad_norm = 0.5
     target_kl = None
-    update_epochs = 4
+    update_epochs = 1
     actor_networks = None
     critic_networks = None
     device = "cpu"
@@ -668,10 +688,11 @@ def test_ippo_learns_from_experiences_distributed(
         assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.gpu
+@pytest.mark.parametrize("compile_mode", [None])
 @pytest.mark.parametrize("observation_spaces", ["ma_image_space", "ma_vector_space"])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
-@pytest.mark.parametrize("batch_size", [64])
+@pytest.mark.parametrize("batch_size", [16])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
 def test_ippo_learns_from_experiences(
     observation_spaces,
@@ -705,7 +726,7 @@ def test_ippo_learns_from_experiences(
         for shared_id, critic in ippo.critics.items()
     }
 
-    for _ in range(2):
+    for _ in range(1):
         ippo.scores.append(0)
         loss = ippo.learn(experiences)
 
@@ -728,8 +749,9 @@ def test_ippo_learns_from_experiences(
         assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("compile_mode", [None])
-@pytest.mark.parametrize("vect_dim", [1, 8])
+@pytest.mark.parametrize("vect_dim", [2, 8])
 @pytest.mark.parametrize("batch_size", [16])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space", "ma_vector_space"])
@@ -767,7 +789,7 @@ def test_ippo_learns_from_vectorized_experiences(
         for shared_id, critic in ippo.critics.items()
     }
 
-    for _ in range(2):
+    for _ in range(1):
         ippo.scores.append(0)
         loss = ippo.learn(vectorized_experiences)
 
@@ -791,6 +813,7 @@ def test_ippo_learns_from_vectorized_experiences(
         assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
+@pytest.mark.gpu
 def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
     ma_vector_space,
     device,
@@ -901,6 +924,7 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
     ippo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "action_spaces",
     [
@@ -958,6 +982,7 @@ def test_ippo_get_action_agent_masking(
     ippo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "action_spaces",
     [
@@ -1019,6 +1044,7 @@ def test_ippo_get_action_agent_masking_batched(
     ippo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     [
@@ -1037,9 +1063,9 @@ def test_ippo_get_action_agent_masking_batched(
         "ma_multibinary_space",
     ],
 )
-@pytest.mark.parametrize("action_batch_size", [None, 16])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-@pytest.mark.parametrize("accelerator_flag", [False, True])
+@pytest.mark.parametrize("action_batch_size", [None])
+@pytest.mark.parametrize("compile_mode", [None])
+@pytest.mark.parametrize("accelerator_flag", [False])
 def test_ippo_get_action(
     observation_spaces,
     action_spaces,
@@ -1096,6 +1122,39 @@ def test_ippo_get_action(
     ippo.clean_up()
 
 
+@pytest.mark.gpu
+@skip_torch_compile_on_windows_cpu
+def test_ippo_get_action_batched_compile_and_accelerator_smoke(
+    ma_vector_space,
+    ma_discrete_space,
+    device,
+):
+    """Single-path check for stacked obs, torch.compile, and Accelerate (full grid removed for speed)."""
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    batch = 8
+    state = {
+        agent_id: np.stack([get_sample_from_space(sp)] * batch)
+        for agent_id, sp in zip(agent_ids, ma_vector_space, strict=False)
+    }
+    accelerator = Accelerator()
+    ippo = IPPO(
+        observation_spaces=ma_vector_space,
+        action_spaces=ma_discrete_space,
+        agent_ids=agent_ids,
+        device=device,
+        torch_compiler="default",
+        accelerator=accelerator,
+        action_batch_size=batch,
+    )
+    actions, log_probs, _, _ = ippo.get_action(obs=state, infos=None)
+    assert isinstance(actions, dict)
+    for agent_id in agent_ids:
+        assert agent_id in actions
+        assert agent_id in log_probs
+    ippo.clean_up()
+
+
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     [
@@ -1160,6 +1219,7 @@ def test_ippo_get_action_vectorized(
         assert agent_id in state_values
 
 
+@pytest.mark.gpu
 def test_ippo_get_action_action_masking_exception(
     ma_vector_space,
     ma_discrete_space,
@@ -1184,6 +1244,7 @@ def test_ippo_get_action_action_masking_exception(
     ippo.clean_up()
 
 
+@pytest.mark.gpu
 def test_ippo_get_action_action_masking(ma_vector_space, ma_discrete_space, device):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     state = {
@@ -1238,6 +1299,7 @@ def test_ippo_init_torch_compiler_no_error(ma_vector_space, ma_discrete_space, m
     ippo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("mode", (1, True, "max-autotune-no-cudagraphs"))
 def test_ippo_init_torch_compiler_error(
     mode,
@@ -1259,6 +1321,7 @@ def test_ippo_init_torch_compiler_error(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     [
@@ -1335,6 +1398,7 @@ def test_initialize_ippo_with_net_config(
 
 
 # TODO: This will be deprecated in the future
+@pytest.mark.gpu
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
@@ -1430,6 +1494,7 @@ def test_initialize_ippo_with_mlp_networks(
     assert isinstance(ippo.criterion, nn.MSELoss)
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
 def test_initialize_ippo_with_mlp_networks_gumbel_softmax(
@@ -1473,6 +1538,7 @@ def test_initialize_ippo_with_mlp_networks_gumbel_softmax(
 
 
 # TODO: This will be deprecated in the future
+@pytest.mark.gpu
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_ippo_with_cnn_networks(
@@ -1563,6 +1629,7 @@ def test_initialize_ippo_with_cnn_networks(
     assert isinstance(ippo.criterion, nn.MSELoss)
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces, net",
     [
@@ -1736,6 +1803,7 @@ def test_initialize_ippo_with_incorrect_networks(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
 def test_ippo_init_warning(

@@ -19,9 +19,13 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.utils.algo_utils import concatenate_spaces
 from agilerl.utils.evolvable_networks import get_default_encoder_config
-from agilerl.utils.utils import make_multi_agent_vect_envs
+from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from tests.helper_functions import assert_not_equal_state_dict, assert_state_dicts_equal
+from tests.helper_functions import (
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
+    skip_torch_compile_on_windows_cpu,
+)
 
 
 class DummyMultiEnv(ParallelEnv):
@@ -294,6 +298,7 @@ def experiences(
     return states, actions, rewards, next_states, dones
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     [
@@ -304,7 +309,7 @@ def experiences(
     ],
 )
 @pytest.mark.parametrize("accelerator_flag", [False, True])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_initialize_maddpg_with_net_config(
     accelerator_flag,
     observation_spaces,
@@ -371,6 +376,32 @@ def test_initialize_maddpg_with_net_config(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
+def test_initialize_maddpg_with_net_config_torch_compile_smoke(
+    ma_vector_space,
+    device,
+):
+    """One path with ``torch_compiler='default'`` (trimmed from the parametrized grid)."""
+    net_config = {
+        "encoder_config": get_default_encoder_config(ma_vector_space[0]),
+        "head_config": {"hidden_size": [16]},
+    }
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    maddpg = MADDPG(
+        observation_spaces=ma_vector_space,
+        net_config=net_config,
+        action_spaces=ma_vector_space,
+        agent_ids=agent_ids,
+        device=device,
+        torch_compiler="default",
+    )
+    assert all(isinstance(actor, OptimizedModule) for actor in maddpg.actors.values())
+    assert all(
+        isinstance(critic, OptimizedModule) for critic in maddpg.critics.values()
+    )
+    maddpg.clean_up()
+
+
 def test_maddpg_parameter_sharing_group_networks_and_optimizers(ma_vector_space):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     maddpg = MADDPG(
@@ -428,6 +459,7 @@ def test_maddpg_learn_returns_group_losses_for_parameter_sharing(ma_vector_space
 
 
 # TODO: This will be deprecated in the future
+@pytest.mark.gpu
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
@@ -512,6 +544,7 @@ def test_initialize_maddpg_with_mlp_networks(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
 def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
@@ -549,6 +582,7 @@ def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
 
 
 # TODO: This will be deprecated in the future
+@pytest.mark.gpu
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_maddpg_with_cnn_networks(
@@ -628,6 +662,7 @@ def test_initialize_maddpg_with_cnn_networks(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
@@ -768,6 +803,7 @@ def test_initialize_maddpg_with_incorrect_evo_networks(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
@@ -798,6 +834,7 @@ def test_maddpg_init_warning(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "mode",
     (None, 0, False, "default", "reduce-overhead", "max-autotune"),
@@ -836,6 +873,7 @@ def test_maddpg_init_torch_compiler_no_error(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("mode", (1, True, "max-autotune-no-cudagraphs"))
 def test_maddpg_init_torch_compiler_error(
     mode,
@@ -857,13 +895,14 @@ def test_maddpg_init_torch_compiler_error(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     ["ma_vector_space", "ma_discrete_space", "ma_image_space"],
 )
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
 @pytest.mark.parametrize("training", [0, 1])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_maddpg_get_action(
     training,
     observation_spaces,
@@ -923,6 +962,32 @@ def test_maddpg_get_action(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
+@skip_torch_compile_on_windows_cpu
+def test_maddpg_get_action_torch_compile_smoke(
+    device,
+    ma_vector_space,
+    ma_discrete_space,
+):
+    """One path with ``torch_compiler='default'`` (trimmed from ``test_maddpg_get_action`` grid)."""
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    state = {
+        agent: np.random.randn(*ma_vector_space[idx].shape)
+        for idx, agent in enumerate(agent_ids)
+    }
+    maddpg = MADDPG(
+        ma_vector_space,
+        ma_discrete_space,
+        agent_ids=agent_ids,
+        device=device,
+        torch_compiler="default",
+    )
+    maddpg.set_training_mode(True)
+    maddpg.get_action(state)
+    maddpg.clean_up()
+
+
+@pytest.mark.gpu
 def test_maddpg_get_action_with_partial_group_observations(
     device,
     ma_vector_space,
@@ -947,6 +1012,7 @@ def test_maddpg_get_action_with_partial_group_observations(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("training", [False, True])
 def test_maddpg_get_action_action_masking_exception(
     training,
@@ -974,6 +1040,7 @@ def test_maddpg_get_action_action_masking_exception(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("training", [False, True])
 def test_maddpg_get_action_action_masking(
     training,
@@ -1007,7 +1074,7 @@ def test_maddpg_get_action_action_masking(
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space", "ma_vector_space"])
 @pytest.mark.parametrize("training", [False, True])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_get_action_distributed(
     training,
     observation_spaces,
@@ -1079,6 +1146,45 @@ def test_get_action_distributed(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
+@skip_torch_compile_on_windows_cpu
+def test_get_action_distributed_torch_compile_smoke(
+    ma_vector_space,
+    ma_discrete_space,
+):
+    """``torch_compiler='default'`` with Accelerate (trimmed from parametrized grid)."""
+    accelerator = Accelerator()
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    state = {
+        agent: np.random.randn(*ma_vector_space[idx].shape)
+        for idx, agent in enumerate(agent_ids)
+    }
+    maddpg = MADDPG(
+        ma_vector_space,
+        ma_discrete_space,
+        agent_ids=agent_ids,
+        accelerator=accelerator,
+        torch_compiler="default",
+    )
+    new_actors = ModuleDict(
+        {
+            agent_id: DummyDeterministicActor(
+                observation_space=actor.observation_space,
+                action_space=actor.action_space,
+                encoder_config=actor.encoder.net_config,
+                head_config=actor.head_net.net_config,
+                device=actor.device,
+            )
+            for agent_id, actor in maddpg.actors.items()
+        },
+    )
+    maddpg.actors = new_actors
+    maddpg.set_training_mode(True)
+    maddpg.get_action(state)
+    maddpg.clean_up()
+
+
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
 @pytest.mark.parametrize("training", [False, True])
@@ -1131,6 +1237,7 @@ def test_maddpg_get_action_agent_masking(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "action_spaces",
     [
@@ -1192,6 +1299,7 @@ def test_maddpg_get_action_agent_masking_batched(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
@@ -1254,6 +1362,7 @@ def test_maddpg_get_action_vectorized_agent_masking(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     ["ma_vector_space", "ma_discrete_space", "ma_image_space"],
@@ -1340,6 +1449,7 @@ def no_sync(self):
     return DummyNoSync()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("compile_mode", [None])
 def test_maddpg_soft_update(device, compile_mode, ma_vector_space, ma_discrete_space):
     maddpg = MADDPG(
@@ -1399,6 +1509,7 @@ def test_maddpg_soft_update(device, compile_mode, ma_vector_space, ma_discrete_s
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None])
@@ -1416,9 +1527,11 @@ def test_maddpg_algorithm_test_loop(
 
     # Define environment and algorithm
     if vectorized:
-        env = make_multi_agent_vect_envs(
+        # In-process sync vec env avoids the AsyncPettingZooVecEnv subprocess
+        # spawn that dominates this test's runtime in CI.
+        env = make_sync_multi_agent_vec_env(
             DummyMultiEnv,
-            2,
+            num_envs=2,
             observation_spaces=observation_spaces[0],
             action_spaces=ma_discrete_space,
         )
@@ -1452,6 +1565,7 @@ def test_maddpg_clone_returns_identical_agent(
     compile_mode,
     observation_spaces,
     ma_vector_space,
+    encoder_mlp_config,
     request,
 ):
     # Clones the agent and returns an identical copy.
@@ -1471,6 +1585,9 @@ def test_maddpg_clone_returns_identical_agent(
     device = "cpu"
     accelerator = Accelerator(device_placement=False) if accelerator_flag else None
 
+    # Tiny ``net_config`` keeps cloning logic identical but shrinks the per-
+    # network ``torch.compile`` graph that dominates runtime when
+    # ``compile_mode='default'``.
     maddpg = MADDPG(
         observation_spaces,
         ma_vector_space,
@@ -1486,6 +1603,7 @@ def test_maddpg_clone_returns_identical_agent(
         mut=mut,
         actor_networks=actor_networks,
         critic_networks=critic_networks,
+        net_config=encoder_mlp_config,
         device=device,
         accelerator=accelerator,
         wrap=wrap,
@@ -1544,13 +1662,16 @@ def test_maddpg_clone_returns_identical_agent(
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_clone_new_index(compile_mode, ma_vector_space, ma_discrete_space):
+def test_clone_new_index(
+    compile_mode, ma_vector_space, ma_discrete_space, encoder_mlp_config
+):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
 
     maddpg = MADDPG(
         ma_vector_space,
         ma_discrete_space,
         agent_ids,
+        net_config=encoder_mlp_config,
         torch_compiler=compile_mode,
     )
     clone_agent = maddpg.clone(index=100)

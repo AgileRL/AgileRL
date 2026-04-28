@@ -1,3 +1,5 @@
+import os
+import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -9,13 +11,38 @@ from accelerate import Accelerator
 from minari import MinariDataset
 from minari.data_collector import EpisodeBuffer
 from minari.storage.datasets_root_dir import get_dataset_path
-from requests import HTTPError
-from requests.exceptions import ReadTimeout
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.utils import minari_utils
 
 pytestmark = pytest.mark.xdist_group("minari")
+
+FIXTURE_DIR = Path(__file__).resolve().parents[1] / "assets" / "minari_cache"
+
+
+@pytest.fixture(autouse=True)
+def _minari_cache(tmp_path):
+    """Seed a tmp Minari cache from the committed fixture and point Minari at it.
+
+    Tests that read remote datasets (D4RL/door/human-v2) load from the offline
+    fixture. Tests that create datasets write into the tmp dir, keeping the
+    source tree clean. Function-scoped so each test starts from a clean cache —
+    several tests delete the dataset as part of their assertions.
+    """
+    cache_root = tmp_path / "minari_cache"
+    if FIXTURE_DIR.exists():
+        shutil.copytree(FIXTURE_DIR, cache_root)
+    else:
+        cache_root.mkdir()
+    prev = os.environ.get("MINARI_DATASETS_PATH")
+    os.environ["MINARI_DATASETS_PATH"] = str(cache_root)
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("MINARI_DATASETS_PATH", None)
+        else:
+            os.environ["MINARI_DATASETS_PATH"] = prev
 
 
 def check_delete_dataset(dataset_id: str) -> None:
@@ -99,6 +126,7 @@ def test_minari_to_agile_dataset(dataset_id: str, env_id: str) -> None:
     check_delete_dataset(dataset_id)
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "dataset_id,env_id",
     [("cartpole/test-v0", "CartPole-v1")],
@@ -131,15 +159,12 @@ def test_load_minari_dataset_errors(dataset_id: str) -> None:
         minari_utils.load_minari_dataset(dataset_id)
 
     # test load a dataset absent in remote
-    try:
-        with pytest.raises(
-            KeyError,
-            match="Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ "
-            "for more details.",
-        ):
-            minari_utils.load_minari_dataset(dataset_id, remote=True)
-    except ReadTimeout as e:
-        pytest.skip(f"Skipping test due to remote dataset not being available: {e}")
+    with pytest.raises(
+        KeyError,
+        match="Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ "
+        "for more details.",
+    ):
+        minari_utils.load_minari_dataset(dataset_id, remote=True)
 
 
 @pytest.mark.parametrize(
@@ -147,11 +172,7 @@ def test_load_minari_dataset_errors(dataset_id: str) -> None:
     ["D4RL/door/human-v2"],
 )
 def test_load_remote_minari_dataset(dataset_id: str) -> None:
-    dataset: MinariDataset | None = None
-    try:
-        dataset = minari_utils.load_minari_dataset(dataset_id, remote=True)
-    except (KeyError, HTTPError, ValueError) as e:
-        pytest.skip(f"Skipping test due to remote dataset not being available: {e}")
+    dataset = minari_utils.load_minari_dataset(dataset_id, remote=True)
 
     assert dataset is not None
     assert isinstance(dataset, MinariDataset)
@@ -263,16 +284,11 @@ def test_load_minari_dataset_remote_worker_process():
 )
 def test_load_remote_minari_dataset_accelerator(dataset_id: str) -> None:
     accelerator = Accelerator()
-    dataset: MinariDataset | None = None
-
-    try:
-        dataset = minari_utils.load_minari_dataset(
-            dataset_id,
-            accelerator=accelerator,
-            remote=True,
-        )
-    except (HTTPError, KeyError, ValueError) as e:
-        pytest.skip(f"Skipping test due to remote dataset not being available: {e}")
+    dataset = minari_utils.load_minari_dataset(
+        dataset_id,
+        accelerator=accelerator,
+        remote=True,
+    )
 
     assert dataset is not None
     assert isinstance(dataset, MinariDataset)

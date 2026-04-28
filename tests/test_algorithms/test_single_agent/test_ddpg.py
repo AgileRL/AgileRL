@@ -369,7 +369,7 @@ def test_returns_expected_action_training(observation_space, request, action_dty
         "multidiscrete_space",
     ],
 )
-@pytest.mark.parametrize("accelerator_flag", [False, True])
+@pytest.mark.parametrize("accelerator_flag", [False])
 def test_learns_from_experiences(observation_space, accelerator_flag, request):
     accelerator = Accelerator() if accelerator_flag else None
     action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
@@ -415,6 +415,33 @@ def test_learns_from_experiences(observation_space, accelerator_flag, request):
     assert critic == ddpg.critic
     assert critic_target == ddpg.critic_target
     assert_not_equal_state_dict(critic_pre_learn_sd, ddpg.critic.state_dict())
+    ddpg.clean_up()
+
+
+@pytest.mark.gpu
+def test_learns_from_experiences_accelerator_smoke(vector_space, request):
+    observation_space = request.getfixturevalue("vector_space")
+    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+    batch_size = 4
+    policy_freq = 4
+    accelerator = Accelerator()
+    ddpg = DDPG(
+        observation_space,
+        action_space,
+        batch_size=batch_size,
+        policy_freq=policy_freq,
+        accelerator=accelerator,
+    )
+    device = accelerator.device
+    for _i in range(policy_freq):
+        experiences = get_experiences_batch(
+            observation_space,
+            action_space,
+            batch_size,
+            device,
+        )
+        ddpg.scores.append(0)
+        ddpg.learn(experiences)
     ddpg.clean_up()
 
 
@@ -491,6 +518,7 @@ def test_soft_update():
 
 
 # Runs algorithm test loop
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
 @pytest.mark.parametrize("num_envs", [1, 3])
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

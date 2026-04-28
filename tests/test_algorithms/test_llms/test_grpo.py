@@ -38,6 +38,7 @@ from agilerl.algorithms.core.base import (
 )
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
+from tests import TINY_LLM_FIXTURE_PATH
 from tests.utils import spawn_new_process_for_each_test
 
 pytestmark = pytest.mark.llm
@@ -328,7 +329,7 @@ def generate_grpo(
     if use_vllm:
         lora_config = None
         vllm_config = VLLMConfig(
-            gpu_memory_utilization=0.2, max_num_seqs=1, sleep_mode=sleep_mode
+            gpu_memory_utilization=0.5, max_num_seqs=1, sleep_mode=sleep_mode
         )
 
         actor = model_factory(pretrained_model_name_or_path)
@@ -407,7 +408,7 @@ def grpo_factory():
     "use_vllm, pretrained_model_name_or_path",
     # Use the same tiny Qwen fixture as test_grpo_save_load_checkpoint (not OPT):
     # vLLM + OPT can fail on Linux CI when resolving GPT2 tokenizer files from the hub cache.
-    [(True, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(True, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -515,7 +516,7 @@ def test_grpo_save_load_checkpoint_vllm(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
+    [(True, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -587,7 +588,7 @@ def test_grpo_clean_up_vllm(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
+    [(True, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -634,8 +635,8 @@ def test_grpo_move_model_to_vllm(
     model_ref.unmerge_adapter()
     grpo._move_model_to_vllm()
 
-    llm_prefix = "model.decoder."
-    merged_prefix = "base_model.model.model.decoder."
+    llm_prefix = "model."
+    merged_prefix = "base_model.model.model."
 
     for (
         name,
@@ -653,8 +654,8 @@ def test_grpo_move_model_to_vllm(
     # Test with original_module
     fake_named_params = [
         (
-            "base_model.model.model.decoder.layers.0.self_attn_layer_norm.weight.original_module",
-            torch.randn(768),
+            "base_model.model.model.layers.0.input_layernorm.weight.original_module",
+            torch.randn(8),
         ),
     ]
     model_ref = grpo.accelerator.unwrap_model(grpo.actor)
@@ -675,8 +676,8 @@ def test_grpo_move_model_to_vllm(
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
     [
-        (False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"),
-        (True, "facebook/opt-125m"),
+        (False, TINY_LLM_FIXTURE_PATH),
+        (True, TINY_LLM_FIXTURE_PATH),
     ],
 )
 @pytest.mark.parametrize("training", [True, False])
@@ -753,7 +754,7 @@ def test_get_action_grpo_including_vllm(
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
     [
-        (True, "facebook/opt-125m"),
+        (True, TINY_LLM_FIXTURE_PATH),
     ],
 )
 @pytest.mark.parametrize("training", [True, False])
@@ -840,7 +841,7 @@ def test_get_action_grpo_vllm_sleep_mode(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
+    [(True, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -905,7 +906,7 @@ def test_grpo_test_vllm(
 )
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize(
     "reduce_memory_peak, micro_batch_size_per_gpu",
@@ -1002,7 +1003,7 @@ def test_init_grpo_with_accelerator(
 @pytest.mark.parametrize("use_vllm", [True])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
@@ -1086,7 +1087,7 @@ def test_init_grpo_vllm_with_tp_gt_one(
 @pytest.mark.parametrize("use_vllm", [True])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
@@ -1165,7 +1166,7 @@ def test_init_grpo_vllm_tp_value_error(
 @pytest.mark.parametrize("use_vllm", [True])
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path",
-    ["trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"],
+    [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
@@ -1232,7 +1233,7 @@ def test_init_grpo_vllm_invalid_attention_backend_value_error(
 @pytest.mark.parametrize("use_separate_reference_adapter", [False])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 def test_init_grpo_scheduler_warning_no_accelerator(
@@ -1273,7 +1274,7 @@ def test_init_grpo_scheduler_warning_no_accelerator(
 @pytest.mark.parametrize("use_separate_reference_adapter", [False])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True, False])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -1329,7 +1330,7 @@ def test_init_grpo_batch_size_value_error(
 @pytest.mark.parametrize("use_separate_reference_adapter", [False])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True, False])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -1383,7 +1384,7 @@ def test_init_grpo_max_model_len_and_max_output_tokens_none_error(
 @pytest.mark.parametrize("use_separate_reference_adapter", [False])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [False])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -1447,7 +1448,7 @@ def test_init_grpo_batch_size_grad_accum_error(
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -1836,7 +1837,7 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
+    [(True, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("training", [True, False])
 @pytest.mark.parametrize("data_batch_size", [8])
@@ -1953,7 +1954,7 @@ def test_get_action_grpo_vllm_multiple_gpus(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize(
@@ -2017,7 +2018,7 @@ def test_calculate_advantage(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -2075,7 +2076,7 @@ def test_calculate_kl_divergence(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -2150,7 +2151,7 @@ def test_grpo_loss(
 @pytest.mark.parametrize("group_size", [6])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path, reduce_memory_peak",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5", True)],
+    [(False, TINY_LLM_FIXTURE_PATH, True)],
 )
 @pytest.mark.parametrize("batch_size", [6])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -2248,7 +2249,7 @@ def test_grpo_learn(
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path, reduce_memory_peak",
     [
-        (False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5", True),
+        (False, TINY_LLM_FIXTURE_PATH, True),
         (False, None, False),
     ],
 )
@@ -2359,7 +2360,7 @@ def test_get_backward_pass_with_scheduler(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -2445,7 +2446,7 @@ def test_grpo_load():
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -2550,7 +2551,7 @@ def test_grpo_save_load_checkpoint(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -2607,7 +2608,7 @@ def test_save_load_distributed_actor_no_accelerator(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -2726,7 +2727,7 @@ def test_grpo_save_load_distributed_actor(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
+    [(True, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -2842,7 +2843,7 @@ def test_grpo_save_load_distributed_actor_vllm(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -2947,7 +2948,7 @@ def test_grpo_clone_with_accelerator(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
+    [(True, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -3056,7 +3057,7 @@ def test_grpo_clone_with_accelerator_vllm(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -3173,7 +3174,7 @@ def test_clone_llm_peft_raises_error():
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("batch_size", [1])
@@ -3226,7 +3227,7 @@ def test_grpo_clean_up(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -3280,7 +3281,7 @@ def test_grpo_preprocess_observation(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -3339,7 +3340,7 @@ def test_load_distributed_actor_value_error(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -3440,7 +3441,7 @@ def test_init_grpo_lora_config_warning(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -3523,7 +3524,7 @@ def test_grpo_update_lr(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -3596,7 +3597,7 @@ def test_set_reference_policy(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -3685,7 +3686,7 @@ def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 def test_grpo_set_reference_policy_with_wrong_adapter_name(
@@ -3752,7 +3753,7 @@ def test_grpo_set_reference_policy_with_wrong_adapter_name(
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
     [
-        (False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"),
+        (False, TINY_LLM_FIXTURE_PATH),
     ],
 )
 @pytest.mark.parametrize("training", [True, False])
