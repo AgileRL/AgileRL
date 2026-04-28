@@ -19,7 +19,11 @@ from agilerl.utils.algo_utils import concatenate_spaces
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from tests.helper_functions import assert_not_equal_state_dict, assert_state_dicts_equal
+from tests.helper_functions import (
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
+    skip_torch_compile_on_windows_cpu,
+)
 from tests.test_algorithms.test_multi_agent.test_maddpg import DummyMultiEnv
 
 
@@ -983,6 +987,7 @@ def test_matd3_get_action(
 
 
 @pytest.mark.gpu
+@skip_torch_compile_on_windows_cpu
 def test_matd3_get_action_torch_compile_smoke(
     device,
     ma_vector_space,
@@ -1106,6 +1111,7 @@ def test_matd3_get_action_distributed(
 
 
 @pytest.mark.gpu
+@skip_torch_compile_on_windows_cpu
 def test_matd3_get_action_distributed_torch_compile_smoke(
     ma_vector_space,
     ma_discrete_space,

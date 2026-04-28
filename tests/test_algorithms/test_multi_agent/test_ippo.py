@@ -1,5 +1,4 @@
 import copy
-import sys
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -25,6 +24,7 @@ from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
     get_sample_from_space,
+    skip_torch_compile_on_windows_cpu,
 )
 
 
@@ -408,10 +408,7 @@ def test_loop(
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(
-    sys.platform == "win32" and not torch.cuda.is_available(),
-    reason="torch.compile inductor backend on CPU/Windows requires MSVC (cl.exe)",
-)
+@skip_torch_compile_on_windows_cpu
 def test_loop_torch_compile_smoke(device, ma_vector_space, ma_discrete_space):
     """One shot: IPPO.test with torch.compile=true (grid trimmed from ``test_loop``)."""
     env = DummyMultiEnv(ma_vector_space, ma_discrete_space)
@@ -1123,6 +1120,7 @@ def test_ippo_get_action(
 
 
 @pytest.mark.gpu
+@skip_torch_compile_on_windows_cpu
 def test_ippo_get_action_batched_compile_and_accelerator_smoke(
     ma_vector_space,
     ma_discrete_space,
