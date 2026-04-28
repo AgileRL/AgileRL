@@ -31,32 +31,17 @@ torch.serialization.add_safe_globals(
 )
 
 
-@pytest.mark.parametrize("use_net_config", [True, False])
-def test_ilql_init(use_net_config):
+def test_ilql_init():
+    """Use a tiny EvolvableGPT config (same spirit as TINY_LLM_FIXTURE_PATH for HF tests).
+
+    net_config=None builds GPT-2–scale networks (three EvolvableGPT stacks); that is too
+    slow for default CI and is not needed to assert hyperparameter wiring.
+    """
     List_RL_Dataset.__abstractmethods__ = set()
     tokenizer = WordleTokenizer()
     token_reward = ConstantTokenReward(1)
     rl_ds = List_RL_Dataset(tokenizer, token_reward, 10)
-    if use_net_config:
-        net_config = {
-            "arch": "gpt",
-            "vocab_size": 12,
-            "n_layer": 2,
-            "n_embd": 12,
-            "n_head": 2,
-            "dim_feedfwd": 8,
-            "block_size": 8,
-            "activation": "GELU",
-            "dropout": 0.1,
-            "layer_norm_eps": 1e-5,
-            "min_layers": 8,
-            "max_layers": 16,
-            "bias": True,
-        }
-    else:
-        net_config = None
-
-    algo = ILQL(rl_ds, net_config=net_config)
+    algo = ILQL(rl_ds, net_config=_net_config())
 
     assert algo.algo == "ILQL"
     assert algo.index == 0
@@ -89,21 +74,7 @@ def test_forward():
     tokenizer = WordleTokenizer()
     token_reward = ConstantTokenReward(1)
     rl_ds = List_RL_Dataset(tokenizer, token_reward, 10)
-    net_config = {
-        "arch": "gpt",
-        "vocab_size": 12,
-        "n_layer": 2,
-        "n_embd": 12,
-        "n_head": 2,
-        "dim_feedfwd": 8,
-        "block_size": 8,
-        "activation": "GELU",
-        "dropout": 0.1,
-        "layer_norm_eps": 1e-5,
-        "min_layers": 8,
-        "max_layers": 16,
-        "bias": True,
-    }
+    net_config = _net_config()
     double_q = True
 
     algo = ILQL(
@@ -169,7 +140,7 @@ def test_get_weights_sample_raw():
     tokenizer = WordleTokenizer()
     token_reward = ConstantTokenReward(1)
     rl_ds = List_RL_Dataset(tokenizer, token_reward, 10)
-    algo = ILQL(rl_ds)
+    algo = ILQL(rl_ds, net_config=_net_config())
 
     tokens = torch.tensor([[0, 1, 2, 3, 4]])
     vs = torch.tensor([[0.1, 0.2, 0.3, 0.4, 0.5]])
@@ -186,22 +157,7 @@ def test_get_loss():
     tokenizer = WordleTokenizer()
     token_reward = ConstantTokenReward(1)
     rl_ds = List_RL_Dataset(tokenizer, token_reward, 10)
-    net_config = {
-        "arch": "gpt",
-        "vocab_size": 12,
-        "n_layer": 2,
-        "n_embd": 12,
-        "n_head": 2,
-        "dim_feedfwd": 8,
-        "block_size": 8,
-        "activation": "GELU",
-        "dropout": 0.1,
-        "layer_norm_eps": 1e-5,
-        "min_layers": 8,
-        "max_layers": 16,
-        "bias": True,
-    }
-
+    net_config = _net_config()
     algo = ILQL(rl_ds, net_config=net_config, double_q=True)
 
     inputs = {

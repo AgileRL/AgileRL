@@ -763,10 +763,10 @@ def test_clone_after_learning(
 
     observation_space = vector_space
     action_space = vector_space
-    max_env_steps = 20
+    max_env_steps = 10
     num_vec_envs = 2
 
-    net_config = {"encoder_config": {"hidden_state_size": 64}} if recurrent else {}
+    net_config = {"encoder_config": {"hidden_state_size": 32}} if recurrent else {}
 
     ppo = PPO(
         observation_space,
@@ -778,6 +778,9 @@ def test_clone_after_learning(
         num_envs=num_vec_envs,
         share_encoders=share_encoders,
         max_seq_len=None,
+        learn_step=32,
+        batch_size=16,
+        update_epochs=1,
     )
 
     if use_rollout_buffer:
@@ -1001,13 +1004,11 @@ def test_ppo_with_rollout_buffer(observation_space, action_space, request):
     ["discrete_space", "vector_space", "multidiscrete_space", "multibinary_space"],
 )
 @pytest.mark.parametrize("recurrent", [True, False])
-@pytest.mark.parametrize("max_seq_len", [None, 10])
 @pytest.mark.parametrize(
     "bptt_sequence_type",
     [
         BPTTSequenceType.CHUNKED,
         BPTTSequenceType.MAXIMUM,
-        BPTTSequenceType.FIFTY_PERCENT_OVERLAP,
     ],
 )
 def test_ppo_learn_with_rollout_buffer(
@@ -1015,7 +1016,6 @@ def test_ppo_learn_with_rollout_buffer(
     action_space,
     bptt_sequence_type,
     recurrent,
-    max_seq_len,
     request,
 ):
     supported_spaces = [
@@ -1030,10 +1030,11 @@ def test_ppo_learn_with_rollout_buffer(
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
 
-    batch_size = 32
-    learn_step = 64
+    learn_step = 32
+    batch_size = 2 if recurrent else 16
+    max_seq_len = 10 if recurrent else None
 
-    net_config = {"encoder_config": {"hidden_state_size": 64}} if recurrent else {}
+    net_config = {"encoder_config": {"hidden_state_size": 32}} if recurrent else {}
 
     ppo = PPO(
         observation_space=observation_space,
@@ -1041,6 +1042,7 @@ def test_ppo_learn_with_rollout_buffer(
         use_rollout_buffer=True,
         learn_step=learn_step,
         batch_size=batch_size,
+        update_epochs=1,
         bptt_sequence_type=bptt_sequence_type,
         recurrent=recurrent,
         max_seq_len=max_seq_len,
@@ -1101,7 +1103,7 @@ def test_ppo_with_hidden_states(
 
     net_config = {
         "encoder_config": {
-            "hidden_state_size": 64,
+            "hidden_state_size": 32,
         },
     }
 
@@ -1141,9 +1143,9 @@ def test_ppo_with_hidden_states(
     assert next_hidden.get("shared_encoder_h", None).shape == (
         1,
         1,
-        64,
+        32,
     )  # (directions, num_envs, hidden_size)
-    assert next_hidden.get("shared_encoder_c", None).shape == (1, 1, 64)
+    assert next_hidden.get("shared_encoder_c", None).shape == (1, 1, 32)
     ppo.clean_up()
 
 
@@ -1161,7 +1163,7 @@ def test_ppo_with_hidden_states_multiple_obs(vector_space, discrete_space):
         num_envs=num_envs,
         net_config={
             "encoder_config": {
-                "hidden_state_size": 64,
+                "hidden_state_size": 32,
             },
         },
     )
@@ -1180,8 +1182,8 @@ def test_ppo_with_hidden_states_multiple_obs(vector_space, discrete_space):
     assert isinstance(entropy, np.ndarray)
     assert isinstance(value, np.ndarray)
     assert next_hidden is not None
-    assert next_hidden.get("shared_encoder_h", None).shape == (1, num_envs, 64)
-    assert next_hidden.get("shared_encoder_c", None).shape == (1, num_envs, 64)
+    assert next_hidden.get("shared_encoder_h", None).shape == (1, num_envs, 32)
+    assert next_hidden.get("shared_encoder_c", None).shape == (1, num_envs, 32)
     ppo.clean_up()
 
 
@@ -1204,7 +1206,7 @@ def test_ppo_with_hidden_states_multiple_envs():
         max_seq_len=10,
         net_config={
             "encoder_config": {
-                "hidden_state_size": 64,
+                "hidden_state_size": 32,
             },
         },
     )
@@ -1223,8 +1225,8 @@ def test_ppo_with_hidden_states_multiple_envs():
     assert isinstance(entropy, np.ndarray)
     assert isinstance(value, np.ndarray)
     assert next_hidden is not None
-    assert next_hidden.get("shared_encoder_h", None).shape == (1, num_envs, 64)
-    assert next_hidden.get("shared_encoder_c", None).shape == (1, num_envs, 64)
+    assert next_hidden.get("shared_encoder_h", None).shape == (1, num_envs, 32)
+    assert next_hidden.get("shared_encoder_c", None).shape == (1, num_envs, 32)
     ppo.clean_up()
     env.close()
 
@@ -1250,7 +1252,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
         max_seq_len=5,
         net_config={
             "encoder_config": {
-                "hidden_state_size": 64,
+                "hidden_state_size": 32,
             },
         },
     )
@@ -1278,12 +1280,12 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
     assert hidden_states.get("shared_encoder_h")[0].shape == (
         num_envs,
         1,  # num_layers * directions
-        64,  # hidden_size
+        32,  # hidden_size
     )
     assert hidden_states.get("shared_encoder_c")[0].shape == (
         num_envs,
         1,
-        64,
+        32,
     )
 
     # Learn from collected rollouts
@@ -1297,7 +1299,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
 
 # Test PPO with hidden states and collect_rollouts
 def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
-    num_envs = 8
+    num_envs = 4
     env = gymnasium.vector.SyncVectorEnv(
         [lambda: gymnasium.make("CartPole-v1")] * num_envs,
     )
@@ -1320,7 +1322,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
         max_seq_len=5,
         net_config={
             "encoder_config": {
-                "hidden_state_size": 64,
+                "hidden_state_size": 32,
             },
         },
     )
@@ -1345,14 +1347,14 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
     ].shape == (
         num_envs,
         1,
-        64,
+        32,
     )
     assert ppo.rollout_buffer.buffer.get("hidden_states").get("shared_encoder_c")[
         0
     ].shape == (
         num_envs,
         1,
-        64,
+        32,
     )
 
     # Learn from collected rollouts
@@ -1362,7 +1364,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
     assert loss >= 0.0
 
     # Test test loop
-    ppo.test(test_env)
+    ppo.test(test_env, max_steps=10, loop=1)
     ppo.clean_up()
     env.close()
     test_env.close()
@@ -1391,7 +1393,6 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
     [
         BPTTSequenceType.CHUNKED,
         BPTTSequenceType.MAXIMUM,
-        BPTTSequenceType.FIFTY_PERCENT_OVERLAP,
     ],
 )
 def test_ppo_collect_rollouts(

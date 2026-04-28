@@ -475,7 +475,7 @@ def test_returns_expected_action_float64(discrete_space):
     "min_action, max_action",
     [(-1, 1), ([-1, 0], [1, 1]), ([-1, -1], [0, 1]), ([-1, -2], [1, 0])],
 )
-@pytest.mark.parametrize("accelerator_flag", [False, True])
+@pytest.mark.parametrize("accelerator_flag", [False])
 def test_learns_from_experiences(
     observation_space,
     min_action,
@@ -491,7 +491,7 @@ def test_learns_from_experiences(
     action_space = spaces.Box(low=low, high=high, shape=(2,))
 
     # Create an instance of the td3 class
-    batch_size = 64
+    batch_size = 32
     policy_freq = 2
     td3 = TD3(
         observation_space,
@@ -544,6 +544,33 @@ def test_learns_from_experiences(
     assert critic_2 == td3.critic_2
     assert critic_target_2 == td3.critic_target_2
     assert_not_equal_state_dict(critic_2_pre_learn_sd, td3.critic_2.state_dict())
+    td3.clean_up()
+
+
+@pytest.mark.gpu
+def test_learns_from_experiences_accelerator_smoke(vector_space, request):
+    observation_space = request.getfixturevalue("vector_space")
+    action_space = spaces.Box(low=-1, high=1, shape=(2,))
+    batch_size = 32
+    policy_freq = 2
+    accelerator = Accelerator()
+    td3 = TD3(
+        observation_space,
+        action_space,
+        batch_size=batch_size,
+        policy_freq=policy_freq,
+        accelerator=accelerator,
+    )
+    device = accelerator.device
+    experiences = get_experiences_batch(
+        observation_space,
+        action_space,
+        batch_size,
+        device,
+    )
+    td3.scores = [0, 0]
+    _, critic_loss = td3.learn(experiences)
+    assert isinstance(critic_loss, float)
     td3.clean_up()
 
 
