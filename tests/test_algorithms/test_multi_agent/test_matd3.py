@@ -893,7 +893,7 @@ def test_matd3_init_with_compile_error(mode, ma_vector_space, device):
 )
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
 @pytest.mark.parametrize("training", [0, 1])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_matd3_get_action(
     training,
     observation_spaces,
@@ -954,6 +954,30 @@ def test_matd3_get_action(
 
 
 @pytest.mark.gpu
+def test_matd3_get_action_torch_compile_smoke(
+    device,
+    ma_vector_space,
+    ma_discrete_space,
+):
+    """One path with ``torch_compiler='default'`` (trimmed from ``test_matd3_get_action`` grid)."""
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    state = {
+        agent: np.random.randn(*ma_vector_space[idx].shape)
+        for idx, agent in enumerate(agent_ids)
+    }
+    matd3 = MATD3(
+        ma_vector_space,
+        ma_discrete_space,
+        agent_ids=agent_ids,
+        device=device,
+        torch_compiler="default",
+    )
+    matd3.set_training_mode(True)
+    matd3.get_action(state)
+    matd3.clean_up()
+
+
+@pytest.mark.gpu
 def test_matd3_get_action_with_partial_group_observations(
     device,
     ma_vector_space,
@@ -981,7 +1005,7 @@ def test_matd3_get_action_with_partial_group_observations(
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space", "ma_vector_space"])
 @pytest.mark.parametrize("training", [0, 1])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_matd3_get_action_distributed(
     training,
     observation_spaces,
@@ -1049,6 +1073,44 @@ def test_matd3_get_action_distributed(
             )
             for action in env_action:
                 assert action <= action_dim - 1
+    matd3.clean_up()
+
+
+@pytest.mark.gpu
+def test_matd3_get_action_distributed_torch_compile_smoke(
+    ma_vector_space,
+    ma_discrete_space,
+):
+    """``torch_compiler='default'`` with Accelerate (trimmed from parametrized grid)."""
+    accelerator = Accelerator()
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    state = {
+        agent: np.random.randn(*ma_vector_space[idx].shape)
+        for idx, agent in enumerate(agent_ids)
+    }
+    matd3 = MATD3(
+        ma_vector_space,
+        ma_discrete_space,
+        agent_ids=agent_ids,
+        accelerator=accelerator,
+        torch_compiler="default",
+    )
+    new_actors = ModuleDict(
+        {
+            agent_id: DummyDeterministicActor(
+                observation_space=actor.observation_space,
+                action_space=actor.action_space,
+                encoder_config=actor.encoder.net_config,
+                head_config=actor.head_net.net_config,
+                device=actor.device,
+            )
+            for agent_id, actor in matd3.actors.items()
+        },
+    )
+    matd3.actors = new_actors
+    matd3.set_training_mode(True)
+    matd3.get_action(state)
+    matd3.clean_up()
 
 
 @pytest.mark.gpu

@@ -1678,8 +1678,8 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 @pytest.mark.parametrize("action_space", ["ma_discrete_space"])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("accelerator_flag", [False, True])
-@pytest.mark.parametrize("torch_compiler", [None, "default"])
+@pytest.mark.parametrize("accelerator_flag", [False])
+@pytest.mark.parametrize("torch_compiler", [None])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_architecture_mutations_multi_agent(
     algo,

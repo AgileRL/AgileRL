@@ -872,7 +872,7 @@ def test_maddpg_init_torch_compiler_error(
 )
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
 @pytest.mark.parametrize("training", [0, 1])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_maddpg_get_action(
     training,
     observation_spaces,
@@ -929,6 +929,30 @@ def test_maddpg_get_action(
         for idx, env_action in enumerate(list(processed_action.values())):
             for action in env_action:
                 assert action <= action_spaces[idx].n - 1
+    maddpg.clean_up()
+
+
+@pytest.mark.gpu
+def test_maddpg_get_action_torch_compile_smoke(
+    device,
+    ma_vector_space,
+    ma_discrete_space,
+):
+    """One path with ``torch_compiler='default'`` (trimmed from ``test_maddpg_get_action`` grid)."""
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    state = {
+        agent: np.random.randn(*ma_vector_space[idx].shape)
+        for idx, agent in enumerate(agent_ids)
+    }
+    maddpg = MADDPG(
+        ma_vector_space,
+        ma_discrete_space,
+        agent_ids=agent_ids,
+        device=device,
+        torch_compiler="default",
+    )
+    maddpg.set_training_mode(True)
+    maddpg.get_action(state)
     maddpg.clean_up()
 
 
@@ -1019,7 +1043,7 @@ def test_maddpg_get_action_action_masking(
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space", "ma_vector_space"])
 @pytest.mark.parametrize("training", [False, True])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_get_action_distributed(
     training,
     observation_spaces,
@@ -1088,6 +1112,43 @@ def test_get_action_distributed(
             )
             for action in env_action:
                 assert action <= action_dim - 1
+    maddpg.clean_up()
+
+
+@pytest.mark.gpu
+def test_get_action_distributed_torch_compile_smoke(
+    ma_vector_space,
+    ma_discrete_space,
+):
+    """``torch_compiler='default'`` with Accelerate (trimmed from parametrized grid)."""
+    accelerator = Accelerator()
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    state = {
+        agent: np.random.randn(*ma_vector_space[idx].shape)
+        for idx, agent in enumerate(agent_ids)
+    }
+    maddpg = MADDPG(
+        ma_vector_space,
+        ma_discrete_space,
+        agent_ids=agent_ids,
+        accelerator=accelerator,
+        torch_compiler="default",
+    )
+    new_actors = ModuleDict(
+        {
+            agent_id: DummyDeterministicActor(
+                observation_space=actor.observation_space,
+                action_space=actor.action_space,
+                encoder_config=actor.encoder.net_config,
+                head_config=actor.head_net.net_config,
+                device=actor.device,
+            )
+            for agent_id, actor in maddpg.actors.items()
+        },
+    )
+    maddpg.actors = new_actors
+    maddpg.set_training_mode(True)
+    maddpg.get_action(state)
     maddpg.clean_up()
 
 
