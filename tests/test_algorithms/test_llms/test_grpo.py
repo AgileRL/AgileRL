@@ -588,7 +588,7 @@ def test_grpo_clean_up_vllm(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
+    [(True, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -635,8 +635,8 @@ def test_grpo_move_model_to_vllm(
     model_ref.unmerge_adapter()
     grpo._move_model_to_vllm()
 
-    llm_prefix = "model.decoder."
-    merged_prefix = "base_model.model.model.decoder."
+    llm_prefix = "model."
+    merged_prefix = "base_model.model.model."
 
     for (
         name,
@@ -654,8 +654,8 @@ def test_grpo_move_model_to_vllm(
     # Test with original_module
     fake_named_params = [
         (
-            "base_model.model.model.decoder.layers.0.self_attn_layer_norm.weight.original_module",
-            torch.randn(768),
+            "base_model.model.model.layers.0.input_layernorm.weight.original_module",
+            torch.randn(8),
         ),
     ]
     model_ref = grpo.accelerator.unwrap_model(grpo.actor)
@@ -677,7 +677,7 @@ def test_grpo_move_model_to_vllm(
     "use_vllm, pretrained_model_name_or_path",
     [
         (False, TINY_LLM_FIXTURE_PATH),
-        (True, "facebook/opt-125m"),
+        (True, TINY_LLM_FIXTURE_PATH),
     ],
 )
 @pytest.mark.parametrize("training", [True, False])
@@ -754,7 +754,7 @@ def test_get_action_grpo_including_vllm(
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
     [
-        (True, "facebook/opt-125m"),
+        (True, TINY_LLM_FIXTURE_PATH),
     ],
 )
 @pytest.mark.parametrize("training", [True, False])
@@ -841,7 +841,7 @@ def test_get_action_grpo_vllm_sleep_mode(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
+    [(True, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
@@ -1837,7 +1837,7 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
+    [(True, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("training", [True, False])
 @pytest.mark.parametrize("data_batch_size", [8])
@@ -2727,7 +2727,7 @@ def test_grpo_save_load_distributed_actor(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
+    [(True, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -2948,7 +2948,7 @@ def test_grpo_clone_with_accelerator(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
+    [(True, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
