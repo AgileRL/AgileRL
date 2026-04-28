@@ -1,4 +1,5 @@
 import copy
+import sys
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -407,6 +408,10 @@ def test_loop(
 
 
 @pytest.mark.gpu
+@pytest.mark.skipif(
+    sys.platform == "win32" and not torch.cuda.is_available(),
+    reason="torch.compile inductor backend on CPU/Windows requires MSVC (cl.exe)",
+)
 def test_loop_torch_compile_smoke(device, ma_vector_space, ma_discrete_space):
     """One shot: IPPO.test with torch.compile=true (grid trimmed from ``test_loop``)."""
     env = DummyMultiEnv(ma_vector_space, ma_discrete_space)
