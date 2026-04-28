@@ -15,6 +15,7 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -23,6 +24,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 UPSTREAM_MODEL_ID = "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"
 FIXTURE_DIR = Path(__file__).resolve().parent / "tiny_llm"
 SIZE_BUDGET_MB = 25
+# transformers >=4.57.3 flags any local non-mistral tokenizer with vocab >100k
+# as a "broken Mistral regex" unless the saved transformers_version is <=4.57.2.
+# Pin the saved version so AutoTokenizer doesn't emit the false-positive warning.
+PINNED_TRANSFORMERS_VERSION = "4.57.2"
 
 
 def main() -> None:
@@ -40,6 +45,11 @@ def main() -> None:
     # Drop redundant slow-tokenizer files; the fast tokenizer.json is sufficient.
     for legacy in ("vocab.json", "merges.txt"):
         (FIXTURE_DIR / legacy).unlink(missing_ok=True)
+
+    config_path = FIXTURE_DIR / "config.json"
+    config = json.loads(config_path.read_text())
+    config["transformers_version"] = PINNED_TRANSFORMERS_VERSION
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
 
     total_bytes = sum(p.stat().st_size for p in FIXTURE_DIR.rglob("*") if p.is_file())
     total_mb = total_bytes / (1024 * 1024)
