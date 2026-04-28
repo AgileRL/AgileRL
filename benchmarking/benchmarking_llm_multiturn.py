@@ -107,7 +107,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/training/llm_finetuning/grpo.yaml",
+        default="configs/training/llm_finetuning/ppo_llm.yaml",
         help="Path to the YAML config file",
     )
     args = parser.parse_args()

@@ -6,10 +6,10 @@ from typing import Any
 
 import numpy as np
 import torch
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMREINFORCE, SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -1711,7 +1711,7 @@ def finetune_llm_sft(
 
             training_env = envs[agent_idx] if uses_env_fn else envs[0]
             current_prompts = prompts_by_agent[agent_idx] if uses_env_fn else prompts
-
+            agent.set_reference_policy(training_env.num_epochs)
             loss, perplexity = agent.learn(current_prompts)
             next_prompts = training_env.step()
             agg_metrics = [

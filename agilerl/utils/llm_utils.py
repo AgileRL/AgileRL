@@ -273,8 +273,11 @@ def pool_by_turns(
         if reduction == "mean":
             count = mask_t.sum(dim=1).clamp(min=1)
             turn_values[:, t] = summed / count
-        else:
+        elif reduction == "sum":
             turn_values[:, t] = summed
+        else:
+            msg = f"Invalid reduction: {reduction}. Must be 'mean' or 'sum'."
+            raise ValueError(msg)
     return turn_values
 
 

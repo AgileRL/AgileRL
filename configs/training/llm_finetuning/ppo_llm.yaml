@@ -23,7 +23,7 @@ INIT_HP:
     MAX_GRAD_NORM: 1.0
     UPDATE_EPOCHS: 2
     TEMPERATURE: 0.7          # Higher temp for better exploration in sparse reward setting
-    MAX_MODEL_LEN: 1024
+    MAX_MODEL_LEN: 4096
     MAX_OUTPUT_TOKENS: 64
     TOURN_SIZE: 2
     GAMMA: 0.99               # Higher discount for multi-turn credit assignment
@@ -33,7 +33,8 @@ INIT_HP:
     ELITISM: true
     POP_SIZE: 4
     EVAL_LOOP: 1
-    USE_VLLM: false
+    USE_VLLM: true
+    USE_SEPARATE_REFERENCE_ADAPTER: true
     LORA_R: 16
     LORA_ALPHA: 64
     LORA_DROPOUT: 0.05
