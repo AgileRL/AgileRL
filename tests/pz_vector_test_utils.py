@@ -48,7 +48,9 @@ class SpeakerListenerLikeEnv(ParallelEnv):
         return observations, rewards, terminations, truncations, infos
 
     def observation_space(self, agent):
-        return Box(low=-np.inf, high=np.inf, shape=self._obs_shape[agent], dtype=np.float32)
+        return Box(
+            low=-np.inf, high=np.inf, shape=self._obs_shape[agent], dtype=np.float32
+        )
 
     def action_space(self, agent):
         if self._continuous:
@@ -134,9 +136,7 @@ class SyncMultiAgentVecEnv:
     @staticmethod
     def _stack(per_env_dicts, agents):
         return {
-            agent: np.stack(
-                [np.asarray(d[agent]) for d in per_env_dicts], axis=0
-            )
+            agent: np.stack([np.asarray(d[agent]) for d in per_env_dicts], axis=0)
             for agent in agents
         }
 
@@ -179,9 +179,7 @@ class SyncMultiAgentVecEnv:
                             self.num_envs, fill_value=np.nan, dtype=np.float32
                         )
                     else:
-                        array = np.full(
-                            self.num_envs, fill_value=None, dtype=object
-                        )
+                        array = np.full(self.num_envs, fill_value=None, dtype=object)
                 else:
                     array = vector_infos[key]
                 array[env_num] = value
@@ -211,18 +209,10 @@ class SyncMultiAgentVecEnv:
                 if agent in self.possible_agents
             }
             per_env_results.append(env.step(env_actions))
-        obs_list = self._fill_missing(
-            [r[0] for r in per_env_results], "observation"
-        )
-        reward_list = self._fill_missing(
-            [r[1] for r in per_env_results], "reward"
-        )
-        term_list = self._fill_missing(
-            [r[2] for r in per_env_results], "terminated"
-        )
-        trunc_list = self._fill_missing(
-            [r[3] for r in per_env_results], "truncated"
-        )
+        obs_list = self._fill_missing([r[0] for r in per_env_results], "observation")
+        reward_list = self._fill_missing([r[1] for r in per_env_results], "reward")
+        term_list = self._fill_missing([r[2] for r in per_env_results], "terminated")
+        trunc_list = self._fill_missing([r[3] for r in per_env_results], "truncated")
         info_list = [r[4] for r in per_env_results]
         obs = self._stack(obs_list, self.possible_agents)
         rewards = self._stack_as_float(reward_list, self.possible_agents)
@@ -252,6 +242,7 @@ def make_sync_multi_agent_vec_env(
     """Convenience constructor mirroring ``make_multi_agent_vect_envs``."""
     env_fns = [lambda: env_cls(**env_kwargs) for _ in range(num_envs)]
     return SyncMultiAgentVecEnv(env_fns=env_fns)
+
 
 ROCK = 0
 PAPER = 1

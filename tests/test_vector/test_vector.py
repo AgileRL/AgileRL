@@ -396,10 +396,7 @@ def test_reset_async_pz_vector_env(seed, env_fns):
 @pytest.mark.parametrize(
     "env_fns",
     [
-        [
-            lambda: speaker_listener_like_env(render_mode="rgb_array")
-            for _ in range(2)
-        ],
+        [lambda: speaker_listener_like_env(render_mode="rgb_array") for _ in range(2)],
     ],
 )
 def test_render_async_pz_vector_env(env_fns):
@@ -418,10 +415,7 @@ def test_render_async_pz_vector_env(env_fns):
 @pytest.mark.parametrize(
     "env_fns",
     [
-        [
-            lambda: speaker_listener_like_env(continuous_actions=False)
-            for _ in range(2)
-        ],
+        [lambda: speaker_listener_like_env(continuous_actions=False) for _ in range(2)],
     ],
 )
 def test_step_async_pz_vector_env(use_single_action_space, env_fns):
@@ -431,7 +425,9 @@ def test_step_async_pz_vector_env(use_single_action_space, env_fns):
         env.reset()
         if use_single_action_space:
             actions = {
-                agent: [env.single_action_space(agent).sample() for _ in range(num_envs)]
+                agent: [
+                    env.single_action_space(agent).sample() for _ in range(num_envs)
+                ]
                 for agent in env.agents
             }
         else:
@@ -504,10 +500,7 @@ def test_call_async_pz_vector_env(env_fns):
 @pytest.mark.parametrize(
     "env_fns",
     [
-        [
-            lambda: speaker_listener_like_env(continuous_actions=False)
-            for _ in range(2)
-        ],
+        [lambda: speaker_listener_like_env(continuous_actions=False) for _ in range(2)],
     ],
 )
 def test_get_attr_async_pz_vector_env(env_fns):
@@ -521,10 +514,7 @@ def test_get_attr_async_pz_vector_env(env_fns):
 @pytest.mark.parametrize(
     "env_fns",
     [
-        [
-            lambda: speaker_listener_like_env(continuous_actions=False)
-            for _ in range(1)
-        ],
+        [lambda: speaker_listener_like_env(continuous_actions=False) for _ in range(1)],
     ],
 )
 def test_set_attr_make_values_list(env_fns):
@@ -1391,8 +1381,7 @@ def test_vec_env_unwrapped():
 
 def test_delete_async_pz_vec_env():
     env_fns = [
-        lambda: speaker_listener_like_env(continuous_actions=False)
-        for _ in range(2)
+        lambda: speaker_listener_like_env(continuous_actions=False) for _ in range(2)
     ]
     env = AsyncPettingZooVecEnv(env_fns)
     assert len(env.processes) > 0  # Ensure subprocesses were created
