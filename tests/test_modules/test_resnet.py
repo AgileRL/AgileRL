@@ -4,6 +4,8 @@ import torch
 from agilerl.modules.resnet import EvolvableResNet
 from tests.helper_functions import assert_state_dicts_equal
 
+pytestmark = pytest.mark.gpu
+
 
 ######### Test instantiation #########
 @pytest.mark.parametrize(

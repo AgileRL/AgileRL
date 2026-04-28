@@ -636,6 +636,7 @@ def test_soft_update(vector_space):
 
 
 # Runs algorithm test loop
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
 @pytest.mark.parametrize("num_envs", [1, 3])
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

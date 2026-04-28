@@ -99,6 +99,7 @@ def test_minari_to_agile_dataset(dataset_id: str, env_id: str) -> None:
     check_delete_dataset(dataset_id)
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "dataset_id,env_id",
     [("cartpole/test-v0", "CartPole-v1")],

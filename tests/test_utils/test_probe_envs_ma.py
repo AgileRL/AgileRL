@@ -614,6 +614,7 @@ def test_discrete_actions_multi_policy_envs(
             states, _ = env.reset()
 
 
+@pytest.mark.gpu
 def test_policy_q_learning_with_probe_env():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardEnv()
@@ -643,6 +644,7 @@ def test_policy_q_learning_with_probe_env():
     )
 
 
+@pytest.mark.gpu
 def test_policy_q_learning_with_probe_env_mlp():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = FixedObsPolicyContActionsEnv()
@@ -673,6 +675,7 @@ def test_policy_q_learning_with_probe_env_mlp():
     gc.collect()
 
 
+@pytest.mark.gpu
 def test_policy_q_learning_with_probe_env_cnn():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = FixedObsPolicyContActionsImageEnv()
@@ -719,6 +722,7 @@ def test_policy_q_learning_with_probe_env_cnn():
     gc.collect()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "Env, discrete",
     [
@@ -754,6 +758,7 @@ def test_on_policy_learning_with_probe_env_mlp(Env, discrete):
     gc.collect()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "Env, discrete",
     [

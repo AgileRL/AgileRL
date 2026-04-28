@@ -733,6 +733,7 @@ def test_clone_new_index(vector_space, discrete_space):
     clone_agent.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("device", ["cpu", "cuda"], ids=lambda d: f"device={d}")
 @pytest.mark.parametrize(
     "use_rollout_buffer",

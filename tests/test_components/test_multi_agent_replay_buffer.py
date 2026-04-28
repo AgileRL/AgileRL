@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
@@ -525,6 +526,7 @@ def test_returns_np_transition_dictionary_images():
 
 
 # Can process a transition from experiences and return a dictionary of torch tensors.
+@pytest.mark.gpu
 def test_returns_torch_transition_dictionary():
     memory_size = 100
     field_names = ["state", "action", "reward", "next_state", "done"]

@@ -294,6 +294,7 @@ def experiences(
     return states, actions, rewards, next_states, dones
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     [
@@ -428,6 +429,7 @@ def test_maddpg_learn_returns_group_losses_for_parameter_sharing(ma_vector_space
 
 
 # TODO: This will be deprecated in the future
+@pytest.mark.gpu
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
@@ -512,6 +514,7 @@ def test_initialize_maddpg_with_mlp_networks(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
 def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
@@ -549,6 +552,7 @@ def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
 
 
 # TODO: This will be deprecated in the future
+@pytest.mark.gpu
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_maddpg_with_cnn_networks(
@@ -628,6 +632,7 @@ def test_initialize_maddpg_with_cnn_networks(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
@@ -768,6 +773,7 @@ def test_initialize_maddpg_with_incorrect_evo_networks(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
@@ -798,6 +804,7 @@ def test_maddpg_init_warning(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "mode",
     (None, 0, False, "default", "reduce-overhead", "max-autotune"),
@@ -836,6 +843,7 @@ def test_maddpg_init_torch_compiler_no_error(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("mode", (1, True, "max-autotune-no-cudagraphs"))
 def test_maddpg_init_torch_compiler_error(
     mode,
@@ -857,6 +865,7 @@ def test_maddpg_init_torch_compiler_error(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     ["ma_vector_space", "ma_discrete_space", "ma_image_space"],
@@ -923,6 +932,7 @@ def test_maddpg_get_action(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 def test_maddpg_get_action_with_partial_group_observations(
     device,
     ma_vector_space,
@@ -947,6 +957,7 @@ def test_maddpg_get_action_with_partial_group_observations(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("training", [False, True])
 def test_maddpg_get_action_action_masking_exception(
     training,
@@ -974,6 +985,7 @@ def test_maddpg_get_action_action_masking_exception(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("training", [False, True])
 def test_maddpg_get_action_action_masking(
     training,
@@ -1079,6 +1091,7 @@ def test_get_action_distributed(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
 @pytest.mark.parametrize("training", [False, True])
@@ -1131,6 +1144,7 @@ def test_maddpg_get_action_agent_masking(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "action_spaces",
     [
@@ -1192,6 +1206,7 @@ def test_maddpg_get_action_agent_masking_batched(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
@@ -1254,6 +1269,7 @@ def test_maddpg_get_action_vectorized_agent_masking(
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     ["ma_vector_space", "ma_discrete_space", "ma_image_space"],
@@ -1340,6 +1356,7 @@ def no_sync(self):
     return DummyNoSync()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("compile_mode", [None])
 def test_maddpg_soft_update(device, compile_mode, ma_vector_space, ma_discrete_space):
     maddpg = MADDPG(
@@ -1399,6 +1416,7 @@ def test_maddpg_soft_update(device, compile_mode, ma_vector_space, ma_discrete_s
     maddpg.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None])

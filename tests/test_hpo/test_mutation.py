@@ -262,6 +262,7 @@ def test_find_analogous_mutation_returns_none_when_bottom_matches_but_no_agent_o
     )
 
 
+@pytest.mark.gpu
 def test_gaussian_parameter_mutation_skips_zero_sized_weights(device):
     class ZeroWeightModule(EvolvableModule):
         def __init__(self):
@@ -280,6 +281,7 @@ def test_gaussian_parameter_mutation_skips_zero_sized_weights(device):
     assert out is mod
 
 
+@pytest.mark.gpu
 def test_architecture_mutate_single_no_methods_sets_none(monkeypatch, device):
     class DummyPolicy:
         mutation_methods = []
@@ -301,6 +303,7 @@ def test_architecture_mutate_single_no_methods_sets_none(monkeypatch, device):
     assert out.mut == "None"
 
 
+@pytest.mark.gpu
 def test_architecture_mutate_multi_no_methods_sets_none(monkeypatch, device):
     class DummyPolicy:
         mutation_methods = []
@@ -322,6 +325,7 @@ def test_architecture_mutate_multi_no_methods_sets_none(monkeypatch, device):
     assert out.mut == "None"
 
 
+@pytest.mark.gpu
 def test_architecture_mutate_multi_none_applied_mutation_branch(monkeypatch, device):
     class DummySubmodule:
         mutation_methods = ["add_node"]
@@ -358,6 +362,7 @@ def test_architecture_mutate_multi_none_applied_mutation_branch(monkeypatch, dev
     assert out.mut == "None"
 
 
+@pytest.mark.gpu
 def test_architecture_mutate_multi_raises_when_no_analogous(monkeypatch, device):
     class DummyEval:
         mutation_methods = ["agent_9.other_mut"]
@@ -395,6 +400,7 @@ def test_architecture_mutate_multi_raises_when_no_analogous(monkeypatch, device)
         muts._architecture_mutate_multi(DummyIndividual())
 
 
+@pytest.mark.gpu
 def test_apply_arch_mutation_error_and_none_paths(device):
     muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
 
@@ -427,6 +433,7 @@ def test_apply_arch_mutation_error_and_none_paths(device):
         muts._apply_arch_mutation(net, "missing_mut")
 
 
+@pytest.mark.gpu
 def test_reinit_bandit_grads_error_and_matrix_resize_paths(device):
     class DummyActor(EvolvableModule):
         def __init__(self, out_mod):
@@ -474,6 +481,7 @@ def test_reinit_bandit_grads_error_and_matrix_resize_paths(device):
 
 
 # Checks no mutations if all probabilities set to zero
+@pytest.mark.gpu
 @pytest.mark.parametrize("algo", ["DQN"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
@@ -500,6 +508,7 @@ def test_mutation_no_options(init_pop, device):
 
 #### Single-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "algo, hp_config, action_space",
     [
@@ -564,6 +573,7 @@ def test_mutation_applies_random_mutations(algo, init_pop, device, accelerator_f
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "algo, action_space",
     [
@@ -616,6 +626,7 @@ def test_mutation_applies_no_mutations(init_pop, device, accelerator_flag):
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "algo, action_space",
     [
@@ -677,6 +688,7 @@ def test_mutation_applies_no_mutations_pre_training_mut(
 
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "algo, hp_config, action_space",
     [
@@ -737,6 +749,7 @@ def test_mutation_applies_rl_hp_mutations(
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "algo, action_space",
     [
@@ -804,6 +817,7 @@ def test_mutation_applies_activation_mutations(
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_space, net_config",
     [
@@ -853,6 +867,7 @@ def test_mutation_applies_activation_mutations_no_skip(
 
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "algo, action_space, wrapper_cls",
     [
@@ -995,6 +1010,7 @@ def test_no_mutation_sets_mut_none():
     assert out.mut == "None"
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("algo", ["PPO", "DDPG", "TD3"])
 def test_activation_mutation_warns_for_policy_gradient_algos(
     algo, vector_space, encoder_mlp_config, device
@@ -1021,6 +1037,7 @@ def test_activation_mutation_warns_for_policy_gradient_algos(
     assert out.mut == "None"
 
 
+@pytest.mark.gpu
 def test_rl_hyperparam_mutation_returns_none_when_hp_config_empty(device):
     class DummyIndividual:
         mut = None
@@ -1068,6 +1085,7 @@ def test_architecture_mutate_raises_for_unsupported_individual():
 
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "algo, action_space, wrapper_cls",
     [
@@ -1187,6 +1205,7 @@ def test_mutation_applies_architecture_mutations(
 
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.skip(reason="Skipping BERT architecture mutations test.")
 @pytest.mark.parametrize(
     "algo, actor_network, critic_network",
@@ -1291,6 +1310,7 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 
 #### Multi-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
@@ -1350,6 +1370,7 @@ def test_mutation_applies_random_mutations_multi_agent(
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
@@ -1391,6 +1412,7 @@ def test_mutation_applies_no_mutations_multi_agent(init_pop, device, accelerator
         assert old.actors == individual.actors
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "algo, hp_config",
     [
@@ -1449,6 +1471,7 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
@@ -1503,6 +1526,7 @@ def test_mutation_applies_activation_mutations_multi_agent(
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
 @pytest.mark.parametrize(
     "observation_space, net_config",
@@ -1559,6 +1583,7 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
 
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "algo, wrapper_cls",
     [
@@ -1632,6 +1657,7 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "algo, wrapper_cls",
     [
@@ -1746,6 +1772,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
+@pytest.mark.gpu
 @pytest.mark.skip(reason="Skipping BERT architecture mutations test.")
 @pytest.mark.parametrize(
     "algo, actor_network, critic_network",

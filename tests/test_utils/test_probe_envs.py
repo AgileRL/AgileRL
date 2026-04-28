@@ -444,6 +444,7 @@ def test_continuous_actions_policy_envs_simple(
             state, _ = env.reset()
 
 
+@pytest.mark.gpu
 def test_q_learning_with_probe_env():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardEnv()
@@ -461,6 +462,7 @@ def test_q_learning_with_probe_env():
     gc.collect()
 
 
+@pytest.mark.gpu
 def test_q_learning_with_probe_env_cnn():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardImageEnv()
@@ -486,6 +488,7 @@ def test_q_learning_with_probe_env_cnn():
     gc.collect()
 
 
+@pytest.mark.gpu
 def test_q_learning_with_probe_env_dict():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardDictEnv()
@@ -517,6 +520,7 @@ def test_q_learning_with_probe_env_dict():
     gc.collect()
 
 
+@pytest.mark.gpu
 def test_policy_q_learning_with_probe_env():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardContActionsEnv()
@@ -542,6 +546,7 @@ def test_policy_q_learning_with_probe_env():
     gc.collect()
 
 
+@pytest.mark.gpu
 def test_policy_q_learning_with_probe_env_cnn():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardContActionsImageEnv()
@@ -579,6 +584,7 @@ def test_policy_q_learning_with_probe_env_cnn():
     gc.collect()
 
 
+@pytest.mark.gpu
 def test_policy_q_learning_with_probe_env_dict():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardContActionsDictEnv()
@@ -662,6 +668,7 @@ def test_policy_on_policy_with_probe_env():
     gc.collect()
 
 
+@pytest.mark.gpu
 def test_policy_on_policy_with_probe_env_cnn():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardContActionsImageEnv()  # FixedObsPolicyContActionsImageEnv()
@@ -693,6 +700,7 @@ def test_policy_on_policy_with_probe_env_cnn():
     gc.collect()
 
 
+@pytest.mark.gpu
 def test_policy_on_policy_with_probe_env_dict():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardContActionsDictEnv()  # FixedObsPolicyContActionsDictEnv()

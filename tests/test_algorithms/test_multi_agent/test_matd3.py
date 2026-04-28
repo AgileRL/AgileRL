@@ -250,6 +250,7 @@ def experiences(
     return states, actions, rewards, next_states, dones
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     [
@@ -399,6 +400,7 @@ def test_matd3_learn_returns_group_losses_for_parameter_sharing(ma_vector_space)
     matd3.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
 def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
@@ -435,6 +437,7 @@ def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
 
 
 # TODO: This will be deprecated in the future
+@pytest.mark.gpu
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
@@ -539,6 +542,7 @@ def test_initialize_matd3_with_mlp_networks(
 
 
 # TODO: This will be deprecated in the future
+@pytest.mark.gpu
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_matd3_with_cnn_networks(
@@ -632,6 +636,7 @@ def test_initialize_matd3_with_cnn_networks(
     assert isinstance(matd3.criterion, nn.MSELoss)
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
@@ -798,6 +803,7 @@ def test_initialize_matd3_with_incorrect_evo_networks(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
@@ -834,6 +840,7 @@ def test_matd3_init_warning(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "mode",
     [None, 0, False, "default", "reduce-overhead", "max-autotune"],
@@ -862,6 +869,7 @@ def test_matd3_init_with_compile_no_error(mode, ma_vector_space, device):
         assert isinstance(matd3, MATD3)
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("mode", [1, True, "max-autotune-no-cudagraphs"])
 def test_matd3_init_with_compile_error(mode, ma_vector_space, device):
     err_string = (
@@ -878,6 +886,7 @@ def test_matd3_init_with_compile_error(mode, ma_vector_space, device):
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     ["ma_vector_space", "ma_discrete_space", "ma_image_space"],
@@ -944,6 +953,7 @@ def test_matd3_get_action(
     matd3.clean_up()
 
 
+@pytest.mark.gpu
 def test_matd3_get_action_with_partial_group_observations(
     device,
     ma_vector_space,
@@ -1041,6 +1051,7 @@ def test_matd3_get_action_distributed(
                 assert action <= action_dim - 1
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space", "ma_vector_space"])
 @pytest.mark.parametrize("training", [False, True])
@@ -1092,6 +1103,7 @@ def test_matd3_get_action_agent_masking(
         ), action["agent_0"]
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "action_spaces",
     [
@@ -1153,6 +1165,7 @@ def test_matd3_get_action_agent_masking_batched(
     matd3.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space", "ma_vector_space"])
 @pytest.mark.parametrize("training", [False, True])
@@ -1217,6 +1230,7 @@ def test_matd3_get_action_vectorized_agent_masking(
         ).all(), action["agent_0"]
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("training", [False, True])
 def test_matd3_get_action_action_masking_exception(
     training,
@@ -1243,6 +1257,7 @@ def test_matd3_get_action_action_masking_exception(
         _, raw_action = matd3.get_action(state)
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("training", [False, True])
 def test_matd3_get_action_action_masking(
     training,
@@ -1272,6 +1287,7 @@ def test_matd3_get_action_action_masking(
     assert all(i in [1, 3] for i in action.values())
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     ["ma_discrete_space", "ma_vector_space", "ma_image_space"],
@@ -1453,6 +1469,7 @@ def test_matd3_learns_from_experiences_distributed(
         assert old_critic_target_2 == updated_critic_target_2
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("compile_mode", [None])
 def test_matd3_soft_update(device, compile_mode, ma_vector_space, ma_discrete_space):
     accelerator = None
@@ -1536,6 +1553,7 @@ def test_matd3_soft_update(device, compile_mode, ma_vector_space, ma_discrete_sp
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None])

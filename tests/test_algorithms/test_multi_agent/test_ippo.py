@@ -367,6 +367,7 @@ def vectorized_experiences(
     return states, actions, log_probs, rewards, dones, values, next_state, next_done
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space", "ma_image_space"])
@@ -668,6 +669,7 @@ def test_ippo_learns_from_experiences_distributed(
         assert_not_equal_state_dict(old_actor_state_dict, updated_actor.state_dict())
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("observation_spaces", ["ma_image_space", "ma_vector_space"])
 @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
@@ -728,6 +730,7 @@ def test_ippo_learns_from_experiences(
         assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("compile_mode", [None])
 @pytest.mark.parametrize("vect_dim", [1, 8])
 @pytest.mark.parametrize("batch_size", [16])
@@ -791,6 +794,7 @@ def test_ippo_learns_from_vectorized_experiences(
         assert_not_equal_state_dict(old_critic_state_dict, updated_critic.state_dict())
 
 
+@pytest.mark.gpu
 def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
     ma_vector_space,
     device,
@@ -901,6 +905,7 @@ def test_ippo_learns_from_hardcoded_vectorized_experiences_mlp(
     ippo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "action_spaces",
     [
@@ -958,6 +963,7 @@ def test_ippo_get_action_agent_masking(
     ippo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "action_spaces",
     [
@@ -1019,6 +1025,7 @@ def test_ippo_get_action_agent_masking_batched(
     ippo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     [
@@ -1096,6 +1103,7 @@ def test_ippo_get_action(
     ippo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     [
@@ -1160,6 +1168,7 @@ def test_ippo_get_action_vectorized(
         assert agent_id in state_values
 
 
+@pytest.mark.gpu
 def test_ippo_get_action_action_masking_exception(
     ma_vector_space,
     ma_discrete_space,
@@ -1184,6 +1193,7 @@ def test_ippo_get_action_action_masking_exception(
     ippo.clean_up()
 
 
+@pytest.mark.gpu
 def test_ippo_get_action_action_masking(ma_vector_space, ma_discrete_space, device):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
     state = {
@@ -1238,6 +1248,7 @@ def test_ippo_init_torch_compiler_no_error(ma_vector_space, ma_discrete_space, m
     ippo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("mode", (1, True, "max-autotune-no-cudagraphs"))
 def test_ippo_init_torch_compiler_error(
     mode,
@@ -1259,6 +1270,7 @@ def test_ippo_init_torch_compiler_error(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces",
     [
@@ -1335,6 +1347,7 @@ def test_initialize_ippo_with_net_config(
 
 
 # TODO: This will be deprecated in the future
+@pytest.mark.gpu
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None])
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
@@ -1430,6 +1443,7 @@ def test_initialize_ippo_with_mlp_networks(
     assert isinstance(ippo.criterion, nn.MSELoss)
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
 def test_initialize_ippo_with_mlp_networks_gumbel_softmax(
@@ -1473,6 +1487,7 @@ def test_initialize_ippo_with_mlp_networks_gumbel_softmax(
 
 
 # TODO: This will be deprecated in the future
+@pytest.mark.gpu
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_initialize_ippo_with_cnn_networks(
@@ -1563,6 +1578,7 @@ def test_initialize_ippo_with_cnn_networks(
     assert isinstance(ippo.criterion, nn.MSELoss)
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "observation_spaces, net",
     [
@@ -1736,6 +1752,7 @@ def test_initialize_ippo_with_incorrect_networks(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
 @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
 def test_ippo_init_warning(

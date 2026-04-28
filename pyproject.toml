@@ -106,6 +106,7 @@ filterwarnings = [
 ]
 markers = [
     "llm: LLM-related tests (exclude with -m 'not llm')",
+    "gpu: tests that use a GPU when one is available (exclude with -m 'not gpu')",
 ]
 
 [tool.coverage.run]

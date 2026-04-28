@@ -241,6 +241,7 @@ def test_instantiation_with_rainbow():
 
 
 ######### Test forward #########
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "network, input_tensor, secondary_input_tensor, expected_result",
     [
@@ -279,6 +280,7 @@ def test_forward_method(
     assert output_shape == expected_result
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "network, input_tensor, secondary_input_tensor, expected_result",
     [
@@ -370,6 +372,7 @@ def test_reset_noise():
 
 
 # Detects architecture of a neural network with convolutional layers and without normalization layers
+@pytest.mark.gpu
 def test_detect_architecture_mlp_simple(device):
     net = nn.Sequential(
         nn.Linear(4, 16),
@@ -388,6 +391,7 @@ def test_detect_architecture_mlp_simple(device):
     assert str(unpack_network(net)) == str(unpack_network(evolvable_net))
 
 
+@pytest.mark.gpu
 def test_detect_architecture_medium(device):
     net = nn.Sequential(
         nn.Linear(4, 16),
@@ -401,6 +405,7 @@ def test_detect_architecture_medium(device):
     assert str(unpack_network(net)) == str(unpack_network(evolvable_net))
 
 
+@pytest.mark.gpu
 def test_detect_architecture_complex(device):
     net = nn.Sequential(
         nn.Linear(4, 16),
@@ -419,6 +424,7 @@ def test_detect_architecture_complex(device):
 
 
 # Test if network after detect arch has the same arch as original network
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "network, input_tensor",
     [
@@ -434,6 +440,7 @@ def test_detect_architecture_networks_the_same(network, input_tensor, device, re
     assert str(unpack_network(network)) == str(unpack_network(evolvable_network))
 
 
+@pytest.mark.gpu
 def test_detect_architecure_exception(device):
     net = nn.Sequential(
         nn.Linear(4, 16),
@@ -446,12 +453,14 @@ def test_detect_architecure_exception(device):
         MakeEvolvable(net, torch.randn(1, 4), device=device)
 
 
+@pytest.mark.gpu
 def test_detect_architecture_empty_hidden_size(device):
     net = nn.Sequential(nn.Linear(2, 10))
     with pytest.raises(TypeError):
         MakeEvolvable(net, torch.randn(1, 2), device=device)
 
 
+@pytest.mark.gpu
 def test_detect_architecure_different_acitvations(device):
     net = nn.Sequential(
         nn.Linear(2, 16),
@@ -467,6 +476,7 @@ def test_detect_architecure_different_acitvations(device):
 ######### Test add_mlp_layer #########
 
 
+@pytest.mark.gpu
 def test_add_mlp_layer_simple(simple_mlp, device):
     input_tensor = torch.randn(1, 10)
     evolvable_network = MakeEvolvable(
@@ -492,6 +502,7 @@ def test_add_mlp_layer_simple(simple_mlp, device):
             assert torch.equal(param, feature_net_dict[key])
 
 
+@pytest.mark.gpu
 def test_add_mlp_layer_medium(device):
     network = nn.Sequential(
         nn.Linear(4, 16),
@@ -518,6 +529,7 @@ def test_add_mlp_layer_medium(device):
             assert torch.equal(param, feature_net_dict[key])
 
 
+@pytest.mark.gpu
 def test_add_mlp_layer_complex(device):
     net = nn.Sequential(
         nn.Linear(4, 16),
@@ -547,6 +559,7 @@ def test_add_mlp_layer_complex(device):
             assert torch.equal(param, feature_net_dict[key])
 
 
+@pytest.mark.gpu
 def test_add_mlp_layer_else_statement(device):
     network = nn.Sequential(
         nn.Linear(4, 16),
@@ -567,6 +580,7 @@ def test_add_mlp_layer_else_statement(device):
 
 
 ######### Test remove_mlp_layer #########
+@pytest.mark.gpu
 def test_remove_mlp_layer_simple(simple_mlp_2, device):
     input_tensor = torch.randn(1, 10)
     evolvable_network = MakeEvolvable(simple_mlp_2, input_tensor, device=device)
@@ -587,6 +601,7 @@ def test_remove_mlp_layer_simple(simple_mlp_2, device):
             torch.testing.assert_close(param, feature_net_dict[key])
 
 
+@pytest.mark.gpu
 def test_remove_mlp_layer_medium(device):
     network = nn.Sequential(
         nn.Linear(4, 16),
@@ -613,6 +628,7 @@ def test_remove_mlp_layer_medium(device):
             assert torch.equal(param, feature_net_dict[key])
 
 
+@pytest.mark.gpu
 def test_remove_mlp_layer_complex(device):
     net = nn.Sequential(
         nn.Linear(4, 16),
@@ -643,6 +659,7 @@ def test_remove_mlp_layer_complex(device):
             assert torch.equal(param, feature_net_dict[key])
 
 
+@pytest.mark.gpu
 def test_remove_mlp_layer_else_statement(device):
     network = nn.Sequential(
         nn.Linear(4, 16),
@@ -662,6 +679,7 @@ def test_remove_mlp_layer_else_statement(device):
     assert initial_num_layers == len(evolvable_network.hidden_size)
 
 
+@pytest.mark.gpu
 def test_remove_mlp_layer_no_output_activation(device):
     net = nn.Sequential(
         nn.Linear(4, 16),
@@ -689,6 +707,7 @@ def test_remove_mlp_layer_no_output_activation(device):
 
 
 ######### Test add_mlp_node #########
+@pytest.mark.gpu
 def test_add_mlp_node_fixed(simple_mlp, device):
     input_tensor = torch.randn(1, 10)
     evolvable_network = MakeEvolvable(simple_mlp, input_tensor, device=device)
@@ -705,6 +724,7 @@ def test_add_mlp_node_fixed(simple_mlp, device):
 
 
 ######### Test remove_mlp_node #########
+@pytest.mark.gpu
 def test_remove_mlp_node(simple_mlp_2, device):
     input_tensor = torch.randn(1, 10)
     evolvable_network = MakeEvolvable(simple_mlp_2, input_tensor, device=device)
@@ -725,6 +745,7 @@ def test_remove_mlp_node(simple_mlp_2, device):
     assert evolvable_network.hidden_size[0] == 123
 
 
+@pytest.mark.gpu
 def test_remove_mlp_node_no_arg(device):
     mlp = nn.Sequential(
         nn.Linear(10, 256),
@@ -751,6 +772,7 @@ def test_remove_mlp_node_no_arg(device):
 
 
 ######### Test add_cnn_layer #########
+@pytest.mark.gpu
 def test_make_evo_add_cnn_layer(simple_cnn, device):
     input_tensor = torch.randn(1, 3, 64, 64)
     evolvable_network = MakeEvolvable(simple_cnn, input_tensor, device=device)
@@ -773,6 +795,7 @@ def test_make_evo_add_cnn_layer(simple_cnn, device):
     }, evolvable_network.cnn_layer_info
 
 
+@pytest.mark.gpu
 def test_make_evo_add_cnn_layer_multi(two_arg_cnn, device):
     evolvable_cnn = MakeEvolvable(
         two_arg_cnn,
@@ -785,6 +808,7 @@ def test_make_evo_add_cnn_layer_multi(two_arg_cnn, device):
     assert len(original_channels) + 1 == len(evolvable_cnn.channel_size)
 
 
+@pytest.mark.gpu
 def test_make_evo_add_cnn_layer_no_activation(device):
     cnn = nn.Sequential(
         nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
@@ -800,6 +824,7 @@ def test_make_evo_add_cnn_layer_no_activation(device):
     assert len(original_channels) + 1 == len(evolvable_cnn.channel_size)
 
 
+@pytest.mark.gpu
 def test_make_evo_add_cnn_layer_else_statement(simple_cnn, device):
     evolvable_cnn = MakeEvolvable(
         simple_cnn,
@@ -813,6 +838,7 @@ def test_make_evo_add_cnn_layer_else_statement(simple_cnn, device):
 
 
 ######### Test remove_cnn_layer #########
+@pytest.mark.gpu
 def test_remove_cnn_layer(simple_cnn, device):
     input_tensor = torch.randn(1, 3, 64, 64)
     evolvable_network = MakeEvolvable(simple_cnn, input_tensor, device=device)
@@ -834,6 +860,7 @@ def test_remove_cnn_layer(simple_cnn, device):
     }, evolvable_network.cnn_layer_info
 
 
+@pytest.mark.gpu
 def test_remove_cnn_layer_no_activation(device):
     cnn = nn.Sequential(
         nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
@@ -850,6 +877,7 @@ def test_remove_cnn_layer_no_activation(device):
     assert len(original_channels) - 1 == len(evolvable_cnn.channel_size)
 
 
+@pytest.mark.gpu
 def test_remove_cnn_layer_else_statement(simple_cnn, device):
     evolvable_cnn = MakeEvolvable(
         simple_cnn,
@@ -863,6 +891,7 @@ def test_remove_cnn_layer_else_statement(simple_cnn, device):
 
 
 ######### Test add_cnn_channel #########
+@pytest.mark.gpu
 def test_make_evo_add_cnn_channel(simple_cnn, device):
     input_tensor = torch.randn(1, 3, 64, 64)
     evolvable_network = MakeEvolvable(simple_cnn, input_tensor, device=device)
@@ -877,6 +906,7 @@ def test_make_evo_add_cnn_channel(simple_cnn, device):
 
 
 ######### Test remove_cnn_channel #########
+@pytest.mark.gpu
 def test_remove_cnn_channel(device):
     input_tensor = torch.randn(1, 3, 64, 64)
     cnn = nn.Sequential(
@@ -906,6 +936,7 @@ def test_remove_cnn_channel(device):
     )
 
 
+@pytest.mark.gpu
 def test_remove_cnn_channel_specified_hidden_layer(device):
     input_tensor = torch.randn(1, 3, 64, 64)
     cnn = nn.Sequential(
@@ -935,6 +966,7 @@ def test_remove_cnn_channel_specified_hidden_layer(device):
 
 
 ######### Test change_cnn_kernel #########
+@pytest.mark.gpu
 def test_change_cnn_kernel(simple_cnn, device):
     input_tensor = torch.randn(1, 3, 64, 64)
     evolvable_network = MakeEvolvable(simple_cnn, input_tensor, device=device)
@@ -955,6 +987,7 @@ def test_change_cnn_kernel(simple_cnn, device):
     ], evolvable_network.kernel_size
 
 
+@pytest.mark.gpu
 def test_change_cnn_kernel_else_statement(device):
     network = nn.Sequential(
         nn.Conv2d(3, 16, kernel_size=(3, 3), stride=1, padding=1),
@@ -975,6 +1008,7 @@ def test_change_cnn_kernel_else_statement(device):
     assert len(evolvable_network.kernel_size[-1]) == 2
 
 
+@pytest.mark.gpu
 def test_change_kernel_multi_single_arg(device):
     network = nn.Sequential(
         nn.Conv3d(3, 16, kernel_size=(1, 3, 3), stride=(1, 3, 3), padding=1),
@@ -1000,6 +1034,7 @@ def test_change_kernel_multi_single_arg(device):
     ], evolvable_cnn.kernel_size
 
 
+@pytest.mark.gpu
 def test_change_kernel_multi_single_arg_else_statement(device):
     network = nn.Sequential(
         nn.Conv3d(3, 16, kernel_size=(1, 3, 3), stride=(1, 3, 3), padding=1),
@@ -1019,6 +1054,7 @@ def test_change_kernel_multi_single_arg_else_statement(device):
     assert len(evolvable_cnn.kernel_size[-1]) == 3
 
 
+@pytest.mark.gpu
 def test_change_kernel_multi_two_arg(two_arg_cnn, device):
     evolvable_cnn = MakeEvolvable(
         two_arg_cnn,
@@ -1036,6 +1072,7 @@ def test_change_kernel_multi_two_arg(two_arg_cnn, device):
 
 
 ######### Test recreate_nets #########
+@pytest.mark.gpu
 def test_recreate_nets_parameters_preserved(simple_mlp, device):
     input_tensor = torch.randn(1, 10)
     evolvable_network = MakeEvolvable(simple_mlp, input_tensor, device=device)
@@ -1054,6 +1091,7 @@ def test_recreate_nets_parameters_preserved(simple_mlp, device):
             assert torch.equal(param, feature_net_dict[key])
 
 
+@pytest.mark.gpu
 def test_recreate_nets_parameters_preserved_rainbow(simple_mlp, device):
     input_tensor = torch.randn(1, 10)
     support = torch.linspace(-200, 200, 51).to(device)
@@ -1095,6 +1133,7 @@ def test_recreate_nets_parameters_preserved_rainbow(simple_mlp, device):
             assert torch.equal(param, advantage_net_dict[key])
 
 
+@pytest.mark.gpu
 def test_recreate_nets_parameters_shrink_preserved(device):
     network = nn.Sequential(
         nn.Linear(4, 32),
@@ -1124,6 +1163,7 @@ def test_recreate_nets_parameters_shrink_preserved(device):
 
 
 # The clone() method successfully creates a deep copy of the model.
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "network, input_tensor, secondary_input_tensor",
     [
@@ -1182,12 +1222,14 @@ def cnn_net():
     )
 
 
+@pytest.mark.gpu
 def test_change_activation_output_false(mlp_net, device):
     evolvable = MakeEvolvable(mlp_net, torch.randn(1, 10), device=device)
     evolvable.change_activation("LeakyReLU", output=False)
     assert evolvable.mlp_activation == "LeakyReLU"
 
 
+@pytest.mark.gpu
 def test_change_activation_output_true(mlp_net, device):
     evolvable = MakeEvolvable(mlp_net, torch.randn(1, 10), device=device)
     evolvable.change_activation("LeakyReLU", output=True)
@@ -1195,6 +1237,7 @@ def test_change_activation_output_true(mlp_net, device):
     assert evolvable.mlp_output_activation == "LeakyReLU"
 
 
+@pytest.mark.gpu
 def test_init_weights_gaussian_cnn(cnn_net, device):
     evolvable = MakeEvolvable(cnn_net, torch.randn(1, 3, 64, 64), device=device)
     evolvable.init_weights_gaussian(std_coeff=2.0, output_coeff=1.0)
@@ -1202,6 +1245,7 @@ def test_init_weights_gaussian_cnn(cnn_net, device):
     assert evolvable.value_net is not None
 
 
+@pytest.mark.gpu
 def test_make_evolvable_init_layers_output_vanish(device):
     net = nn.Sequential(
         nn.Linear(10, 32),
@@ -1223,6 +1267,7 @@ def test_make_evolvable_init_layers_output_vanish(device):
     assert out.shape == (2, 1)
 
 
+@pytest.mark.gpu
 def test_calc_stride_size_ranges_conv3d(device):
     net = nn.Sequential(
         nn.Conv3d(3, 16, kernel_size=(1, 3, 3), stride=(1, 3, 3), padding=1),
@@ -1247,6 +1292,7 @@ def test_calc_stride_size_ranges_conv3d(device):
     assert all(isinstance(s, tuple) and len(s) == 2 for s in strides)
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "method",
     ["add_mlp_layer", "remove_mlp_layer", "add_mlp_node", "remove_mlp_node"],
@@ -1256,6 +1302,7 @@ def test_make_evolvable_mlp_mutations(mlp_net, device, method):
     getattr(evolvable, method)()
 
 
+@pytest.mark.gpu
 def test_make_evolvable_get_output_dense(mlp_net, device):
     evolvable = MakeEvolvable(mlp_net, torch.randn(1, 10), device=device)
     layer = evolvable.get_output_dense()
