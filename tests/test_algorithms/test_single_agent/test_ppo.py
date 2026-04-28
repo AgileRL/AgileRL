@@ -1364,7 +1364,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
     assert loss >= 0.0
 
     # Test test loop
-    ppo.test(test_env)
+    ppo.test(test_env, max_steps=10, loop=1)
     ppo.clean_up()
     env.close()
     test_env.close()

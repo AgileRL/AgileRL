@@ -74,21 +74,7 @@ def test_forward():
     tokenizer = WordleTokenizer()
     token_reward = ConstantTokenReward(1)
     rl_ds = List_RL_Dataset(tokenizer, token_reward, 10)
-    net_config = {
-        "arch": "gpt",
-        "vocab_size": 12,
-        "n_layer": 2,
-        "n_embd": 12,
-        "n_head": 2,
-        "dim_feedfwd": 8,
-        "block_size": 8,
-        "activation": "GELU",
-        "dropout": 0.1,
-        "layer_norm_eps": 1e-5,
-        "min_layers": 8,
-        "max_layers": 16,
-        "bias": True,
-    }
+    net_config = _net_config()
     double_q = True
 
     algo = ILQL(
@@ -171,22 +157,7 @@ def test_get_loss():
     tokenizer = WordleTokenizer()
     token_reward = ConstantTokenReward(1)
     rl_ds = List_RL_Dataset(tokenizer, token_reward, 10)
-    net_config = {
-        "arch": "gpt",
-        "vocab_size": 12,
-        "n_layer": 2,
-        "n_embd": 12,
-        "n_head": 2,
-        "dim_feedfwd": 8,
-        "block_size": 8,
-        "activation": "GELU",
-        "dropout": 0.1,
-        "layer_norm_eps": 1e-5,
-        "min_layers": 8,
-        "max_layers": 16,
-        "bias": True,
-    }
-
+    net_config = _net_config()
     algo = ILQL(rl_ds, net_config=net_config, double_q=True)
 
     inputs = {

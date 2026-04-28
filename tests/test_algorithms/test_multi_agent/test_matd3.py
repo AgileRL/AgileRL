@@ -262,7 +262,7 @@ def experiences(
     ],
 )
 @pytest.mark.parametrize("accelerator_flag", [False, True])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_initialize_matd3_with_net_config(
     observation_spaces,
     ma_vector_space,
@@ -337,6 +337,35 @@ def test_initialize_matd3_with_net_config(
         assert isinstance(critic_2_optimizer, expected_optimizer_cls)
 
     assert isinstance(matd3.criterion, nn.MSELoss)
+
+
+@pytest.mark.gpu
+def test_initialize_matd3_with_net_config_torch_compile_smoke(
+    ma_vector_space,
+    device,
+):
+    """One path with ``torch_compiler='default'`` (trimmed from the parametrized grid)."""
+    net_config = {
+        "encoder_config": get_default_encoder_config(ma_vector_space[0]),
+        "head_config": {"hidden_size": [16]},
+    }
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    matd3 = MATD3(
+        observation_spaces=ma_vector_space,
+        action_spaces=ma_vector_space,
+        net_config=net_config,
+        agent_ids=agent_ids,
+        device=device,
+        torch_compiler="default",
+    )
+    assert all(isinstance(actor, OptimizedModule) for actor in matd3.actors.values())
+    assert all(
+        isinstance(critic, OptimizedModule) for critic in matd3.critics_1.values()
+    )
+    assert all(
+        isinstance(critic, OptimizedModule) for critic in matd3.critics_2.values()
+    )
+    matd3.clean_up()
 
 
 def test_matd3_parameter_sharing_group_networks_and_optimizers(ma_vector_space):

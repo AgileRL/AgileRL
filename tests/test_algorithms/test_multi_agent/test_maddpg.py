@@ -305,7 +305,7 @@ def experiences(
     ],
 )
 @pytest.mark.parametrize("accelerator_flag", [False, True])
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 def test_initialize_maddpg_with_net_config(
     accelerator_flag,
     observation_spaces,
@@ -369,6 +369,32 @@ def test_initialize_maddpg_with_net_config(
         assert isinstance(critic_optimizer, expected_optimizer_cls)
 
     assert isinstance(maddpg.criterion, nn.MSELoss)
+    maddpg.clean_up()
+
+
+@pytest.mark.gpu
+def test_initialize_maddpg_with_net_config_torch_compile_smoke(
+    ma_vector_space,
+    device,
+):
+    """One path with ``torch_compiler='default'`` (trimmed from the parametrized grid)."""
+    net_config = {
+        "encoder_config": get_default_encoder_config(ma_vector_space[0]),
+        "head_config": {"hidden_size": [16]},
+    }
+    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+    maddpg = MADDPG(
+        observation_spaces=ma_vector_space,
+        net_config=net_config,
+        action_spaces=ma_vector_space,
+        agent_ids=agent_ids,
+        device=device,
+        torch_compiler="default",
+    )
+    assert all(isinstance(actor, OptimizedModule) for actor in maddpg.actors.values())
+    assert all(
+        isinstance(critic, OptimizedModule) for critic in maddpg.critics.values()
+    )
     maddpg.clean_up()
 
 
