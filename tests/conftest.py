@@ -14,9 +14,35 @@ import tempfile
 _xdist_worker_id = os.environ.get("PYTEST_XDIST_WORKER")
 if _xdist_worker_id:
     _inductor_base = os.environ.get("TORCHINDUCTOR_CACHE_DIR") or tempfile.gettempdir()
-    os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(
-        _inductor_base, f"worker_{_xdist_worker_id}"
-    )
+    _worker_cache = os.path.join(_inductor_base, f"worker_{_xdist_worker_id}")
+
+    def _writable(path: str) -> bool:
+        try:
+            os.makedirs(path, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=path, delete=True):
+                pass
+            return True
+        except OSError:
+            return False
+
+    # A stale dir left by a previous run (e.g. created inside a container as
+    # root, or with restrictive perms after a tmpwatch sweep on /var/tmp) can
+    # be unwritable by the current user, causing torch.compile to crash with
+    # PermissionError. Probe both the worker dir and the inner ``cache/``
+    # subdir torch.compile creates; wipe and retry on failure, falling back
+    # to ``mkdtemp`` so the run can always proceed.
+    _inner = os.path.join(_worker_cache, "cache")
+    if not (
+        _writable(_worker_cache)
+        and (not os.path.exists(_inner) or _writable(_inner))
+    ):
+        shutil.rmtree(_worker_cache, ignore_errors=True)
+        if not _writable(_worker_cache):
+            _worker_cache = tempfile.mkdtemp(
+                prefix=f"torchinductor_{_xdist_worker_id}_"
+            )
+
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = _worker_cache
 
 # Force HF libs offline during tests. Any test that tries to download from the
 # Hub fails loudly instead of silently fetching (and getting CI rate-limited).
