@@ -3,7 +3,6 @@
 import multiprocessing as mp
 import os
 import signal
-import time
 from unittest.mock import patch
 
 import gymnasium as gym
@@ -18,9 +17,13 @@ from gymnasium.error import (
 from gymnasium.spaces import Box, Discrete, MultiDiscrete
 from gymnasium.vector.utils import CloudpickleWrapper
 from pettingzoo import ParallelEnv
-from pettingzoo.mpe import simple_speaker_listener_v4
 from pettingzoo.sisl import pursuit_v4
-from tests.pz_vector_test_utils import GenericTestEnv, term_env
+from tests.pz_vector_test_utils import (
+    GenericTestEnv,
+    SpeakerListenerLikeEnv,
+    speaker_listener_like_env,
+    term_env,
+)
 
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.vector.pz_async_vec_env import (  # PettingZooExperienceSpec,; SharedMemory,
@@ -333,7 +336,7 @@ def clean_process_fixture():
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(8)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_create_async_pz_vector_env(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -341,7 +344,7 @@ def test_create_async_pz_vector_env(env_fns):
     assert env.action_space
     assert env.single_observation_space
     assert env.observation_space
-    assert env.num_envs == 8
+    assert env.num_envs == 2
     for val in env._obs_buffer.values():
         assert isinstance(val, mp.sharedctypes.SynchronizedArray)
     assert isinstance(env.observations, Observations)
@@ -353,9 +356,10 @@ def test_create_async_pz_vector_env(env_fns):
 @pytest.mark.parametrize("seed", [1, None])
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(8)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_reset_async_pz_vector_env(seed, env_fns):
+    num_envs = 2
     env = AsyncPettingZooVecEnv(env_fns)
     agents = env.possible_agents[:]
     observations, infos = env.reset(seed=seed)
@@ -366,14 +370,14 @@ def test_reset_async_pz_vector_env(seed, env_fns):
         assert observations[agent].dtype == env.observation_space(agent).dtype
         assert (
             observations[agent].shape
-            == (8,) + env.single_observation_space(agent).shape
+            == (num_envs,) + env.single_observation_space(agent).shape
         )
         assert observations[agent].shape == env.observation_space(agent).shape
     assert isinstance(infos, dict)
     assert set(agents).issubset(set(infos.keys()))
 
     try:
-        env_fns = [simple_speaker_listener_v4.parallel_env for _ in range(8)]
+        env_fns = [speaker_listener_like_env for _ in range(num_envs)]
         env = AsyncPettingZooVecEnv(env_fns)
     finally:
         env.close()
@@ -383,7 +387,7 @@ def test_reset_async_pz_vector_env(seed, env_fns):
         assert observations[agent].dtype == env.observation_space(agent).dtype
         assert (
             observations[agent].shape
-            == (8,) + env.single_observation_space(agent).shape
+            == (num_envs,) + env.single_observation_space(agent).shape
         )
         assert observations[agent].shape == env.observation_space(agent).shape
         assert set(agents).issubset(set(infos.keys()))
@@ -393,8 +397,8 @@ def test_reset_async_pz_vector_env(seed, env_fns):
     "env_fns",
     [
         [
-            lambda: simple_speaker_listener_v4.parallel_env(render_mode="rgb_array")
-            for _ in range(8)
+            lambda: speaker_listener_like_env(render_mode="rgb_array")
+            for _ in range(2)
         ],
     ],
 )
@@ -415,22 +419,19 @@ def test_render_async_pz_vector_env(env_fns):
     "env_fns",
     [
         [
-            lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=False)
-            for _ in range(8)
+            lambda: speaker_listener_like_env(continuous_actions=False)
+            for _ in range(2)
         ],
     ],
 )
 def test_step_async_pz_vector_env(use_single_action_space, env_fns):
+    num_envs = 2
     try:
-        env_fns = [
-            lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=False)
-            for _ in range(8)
-        ]
         env = AsyncPettingZooVecEnv(env_fns)
         env.reset()
         if use_single_action_space:
             actions = {
-                agent: [env.single_action_space(agent).sample() for _ in range(8)]
+                agent: [env.single_action_space(agent).sample() for _ in range(num_envs)]
                 for agent in env.agents
             }
         else:
@@ -444,21 +445,21 @@ def test_step_async_pz_vector_env(use_single_action_space, env_fns):
             assert observations[agent].dtype == env.observation_space(agent).dtype
             assert (
                 observations[agent].shape
-                == (8,) + env.single_observation_space(agent).shape
+                == (num_envs,) + env.single_observation_space(agent).shape
             )
             assert observations[agent].shape == env.observation_space(agent).shape
             assert isinstance(rewards[agent], np.ndarray)
             assert isinstance(rewards[agent][0], (float, np.floating))
             assert rewards[agent].ndim == 1
-            assert rewards[agent].size == 8
+            assert rewards[agent].size == num_envs
             assert isinstance(terminations[agent], np.ndarray)
             assert terminations[agent].dtype == bool
             assert terminations[agent].ndim == 1
-            assert terminations[agent].size == 8
+            assert terminations[agent].size == num_envs
             assert isinstance(truncations[agent], np.ndarray)
             assert truncations[agent].dtype == bool
             assert truncations[agent].ndim == 1
-            assert truncations[agent].size == 8
+            assert truncations[agent].size == num_envs
         env.close()
 
     except Exception as e:
@@ -470,16 +471,17 @@ def test_step_async_pz_vector_env(use_single_action_space, env_fns):
     "env_fns",
     [
         [
-            lambda: simple_speaker_listener_v4.parallel_env(
+            lambda: speaker_listener_like_env(
                 render_mode="rgb_array",
                 continuous_actions=False,
             )
-            for _ in range(4)
+            for _ in range(2)
         ],
     ],
 )
 def test_call_async_pz_vector_env(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
+    num_envs = 2
     env.reset()
 
     images = env.call("render")
@@ -487,14 +489,14 @@ def test_call_async_pz_vector_env(env_fns):
     env.close()
 
     assert isinstance(images, tuple)
-    assert len(images) == 4
-    for i in range(4):
+    assert len(images) == num_envs
+    for i in range(num_envs):
         assert images[i].shape[-1] == 3
         assert isinstance(images[i][0], np.ndarray)
 
     assert isinstance(max_num_agents, tuple)
-    assert len(max_num_agents) == 4
-    for i in range(4):
+    assert len(max_num_agents) == num_envs
+    for i in range(num_envs):
         assert isinstance(max_num_agents[i], int)
         assert max_num_agents[i] == 2
 
@@ -503,7 +505,7 @@ def test_call_async_pz_vector_env(env_fns):
     "env_fns",
     [
         [
-            lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=False)
+            lambda: speaker_listener_like_env(continuous_actions=False)
             for _ in range(2)
         ],
     ],
@@ -520,7 +522,7 @@ def test_get_attr_async_pz_vector_env(env_fns):
     "env_fns",
     [
         [
-            lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=False)
+            lambda: speaker_listener_like_env(continuous_actions=False)
             for _ in range(1)
         ],
     ],
@@ -533,9 +535,10 @@ def test_set_attr_make_values_list(env_fns):
 
 
 def test_env_order_preserved():
+    num_envs = 4
     env_fns = [
-        lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=False)
-        for _ in range(16)
+        lambda: speaker_listener_like_env(continuous_actions=False)
+        for _ in range(num_envs)
     ]
     env = AsyncPettingZooVecEnv(env_fns)
     env.reset()
@@ -545,7 +548,7 @@ def test_env_order_preserved():
         agent_id: env.single_action_space(agent_id).sample()
         for agent_id in env.possible_agents
     }
-    rand_env = np.random.randint(0, 16)
+    rand_env = np.random.randint(0, num_envs)
     env.parent_pipes[rand_env].send(("step", actions))
     env.parent_pipes[rand_env].recv()
     for agent in env.agents:
@@ -636,7 +639,7 @@ def test_async_vector_subenv_init_error(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_reset_async_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -648,7 +651,7 @@ def test_reset_async_exception(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_reset_wait_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -661,7 +664,7 @@ def test_reset_wait_exception(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_step_async_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -673,7 +676,7 @@ def test_step_async_exception(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_step_wait_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -685,7 +688,7 @@ def test_step_wait_exception(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_call_async_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -697,7 +700,7 @@ def test_call_async_exception(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_call_wait_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -709,7 +712,7 @@ def test_call_wait_exception(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_call_exception_worker(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -720,7 +723,7 @@ def test_call_exception_worker(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_set_attr_val_error(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -731,7 +734,7 @@ def test_set_attr_val_error(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_set_attr_exception(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -743,7 +746,7 @@ def test_set_attr_exception(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_close_extras_warning(env_fns):
     env = AsyncPettingZooVecEnv(
@@ -759,7 +762,7 @@ def test_close_extras_warning(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_close_extras_terminate(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -773,7 +776,7 @@ def test_close_extras_terminate(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_poll_pipe_envs(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -785,7 +788,7 @@ def test_poll_pipe_envs(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_poll_pipe_envs_ready(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -807,7 +810,7 @@ def test_poll_pipe_envs_ready(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_assert_is_running(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -819,7 +822,7 @@ def test_assert_is_running(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_step_wait_timeout_async_pz_vector_env(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -833,7 +836,7 @@ def test_step_wait_timeout_async_pz_vector_env(env_fns):
 
 @pytest.mark.parametrize(
     "env_fns",
-    [[simple_speaker_listener_v4.parallel_env for _ in range(2)]],
+    [[speaker_listener_like_env for _ in range(2)]],
 )
 def test_call_wait_timeout_async_pz_vector_env(env_fns):
     env = AsyncPettingZooVecEnv(env_fns)
@@ -850,7 +853,7 @@ def test_call_wait_timeout_async_pz_vector_env(env_fns):
     ["reward", "truncated", "terminated", "info", "observation"],
 )
 def test_get_placeholder_value(transition_name):
-    env_fns = [simple_speaker_listener_v4.parallel_env for _ in range(2)]
+    env_fns = [speaker_listener_like_env for _ in range(2)]
     env = AsyncPettingZooVecEnv(env_fns)
     if transition_name != "observation":
         val = get_placeholder_value("agent", transition_name)
@@ -905,7 +908,7 @@ def test_add_info_dictionaries():
         },
         {"agent_0": {}, "other_agent_0": {}},
     ]
-    env_fns = [simple_speaker_listener_v4.parallel_env for _ in range(3)]
+    env_fns = [speaker_listener_like_env for _ in range(3)]
     env = AsyncPettingZooVecEnv(env_fns)
     vector_infos = {}
     for i, info in enumerate(info_list):
@@ -958,7 +961,7 @@ def test_add_info_unknown_objects():
 
 
 def test_worker_reset():
-    env_fns = [simple_speaker_listener_v4.parallel_env for _ in range(1)]
+    env_fns = [speaker_listener_like_env for _ in range(1)]
     env_fn = env_fns[0]
     env = env_fn()
     env.reset()
@@ -983,7 +986,7 @@ def test_worker_reset():
     results, success = parent_pipe.recv()
     assert success
     assert len(results) == 2
-    assert sorted(results.keys()) == sorted(env.aec_env.agents)
+    assert sorted(results.keys()) == sorted(env.possible_agents)
     parent_pipe.close()
     p.terminate()
     p.join()
@@ -992,7 +995,7 @@ def test_worker_reset():
 def test_worker_step_simple():
     num_envs = 1
     env_fns = [
-        lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=True)
+        lambda: speaker_listener_like_env(continuous_actions=True)
         for _ in range(num_envs)
     ]
 
@@ -1019,10 +1022,11 @@ def test_worker_step_simple():
     )
     p.start()
     child_pipe.close()
-    # Reset the environment before stepping
+    # Reset the environment before stepping. ``parent_pipe.recv`` already
+    # synchronises with the worker; the previous ``time.sleep(1)`` was a
+    # leftover hand-tuning that just inflated runtime.
     parent_pipe.send(("reset", {}))
     parent_pipe.recv()
-    time.sleep(1)
 
     parent_pipe.send(("step", actions))
     results, success = parent_pipe.recv()
@@ -1081,10 +1085,10 @@ def test_worker_step_autoreset():
     )
     p.start()
     child_pipe.close()
-    # Reset the environment before stepping
+    # Reset the environment before stepping. ``recv`` is the synchronisation
+    # primitive; the previous ``time.sleep(1)`` here was redundant.
     parent_pipe.send(("reset", {}))
     parent_pipe.recv()
-    time.sleep(1)
     parent_pipe.send(("step", actions))
     results, success = parent_pipe.recv()
     assert success
@@ -1101,7 +1105,7 @@ def test_worker_step_autoreset():
 
 def test_worker_runtime_error():
     num_envs = 1
-    env_fns = [simple_speaker_listener_v4.parallel_env for _ in range(num_envs)]
+    env_fns = [speaker_listener_like_env for _ in range(num_envs)]
     vec_env = AsyncPettingZooVecEnv(env_fns)
     env_fn = env_fns[0]
     env = env_fn()
@@ -1150,7 +1154,7 @@ def test_worker_runtime_error():
 def test_observations_vector():
     num_envs = 1
     agents = ["speaker_0", "listener_0"]
-    env_fns = [simple_speaker_listener_v4.parallel_env for _ in range(num_envs)]
+    env_fns = [speaker_listener_like_env for _ in range(num_envs)]
     vec_env = AsyncPettingZooVecEnv(env_fns)
     assert (
         vec_env.observations.__str__()
@@ -1387,7 +1391,7 @@ def test_vec_env_unwrapped():
 
 def test_delete_async_pz_vec_env():
     env_fns = [
-        lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=False)
+        lambda: speaker_listener_like_env(continuous_actions=False)
         for _ in range(2)
     ]
     env = AsyncPettingZooVecEnv(env_fns)

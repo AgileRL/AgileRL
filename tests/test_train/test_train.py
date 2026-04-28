@@ -40,7 +40,7 @@ from agilerl.training.train_multi_agent_on_policy import train_multi_agent_on_po
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
-from agilerl.utils.utils import make_multi_agent_vect_envs
+from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 
 
 class DummyEnv:
@@ -1787,7 +1787,11 @@ def test_train_off_policy_tourn_mut_calls(
     mocked_tournament.select.assert_called()
 
 
-@pytest.mark.parametrize("state_size, action_size, vect", [((250, 160, 3), 2, False)])
+# NOTE: Image dimensions are intentionally tiny — DummyEnv just produces random
+# arrays of this shape, so we only need a 3D HWC tensor to exercise the
+# rgb/swap_channels code path. Reducing from (250, 160, 3) keeps coverage
+# identical while shrinking the per-step memory traffic ~80x.
+@pytest.mark.parametrize("state_size, action_size, vect", [((32, 32, 3), 2, False)])
 def test_train_off_policy_rgb_input(
     env,
     population_off_policy,
@@ -2391,7 +2395,7 @@ def test_train_on_policy(
     assert len(pop) == len(population_on_policy)
 
 
-@pytest.mark.parametrize("state_size, action_size, vect", [((250, 160, 3), 2, False)])
+@pytest.mark.parametrize("state_size, action_size, vect", [((32, 32, 3), 2, False)])
 def test_train_on_policy_rgb_input(env, population_on_policy, tournament, mutations):
     pop, _ = train_on_policy(
         env,
@@ -2658,7 +2662,7 @@ def test_train_multi_agent_off_policy(
 @pytest.mark.parametrize("on_policy", [True])
 @pytest.mark.parametrize(
     "state_size, action_size, sum_scores, swap_channels",
-    [((6,), 2, True, False), ((6,), 2, False, False), ((250, 160, 3), 2, False, True)],
+    [((6,), 2, True, False), ((6,), 2, False, False), ((32, 32, 3), 2, False, True)],
 )
 @pytest.mark.parametrize("accelerator_flag", [False, True])
 def test_train_multi_agent_on_policy(
@@ -2728,7 +2732,7 @@ def test_train_multi_agent_off_policy_agent_masking():
 
 
 @pytest.mark.parametrize("on_policy", [False])
-@pytest.mark.parametrize("state_size, action_size", [((250, 160, 3), 2)])
+@pytest.mark.parametrize("state_size, action_size", [((32, 32, 3), 2)])
 def test_train_multi_agent_off_policy_rgb(
     multi_env,
     population_multi_agent,
@@ -2757,7 +2761,7 @@ def test_train_multi_agent_off_policy_rgb(
 
 
 @pytest.mark.parametrize("on_policy", [False])
-@pytest.mark.parametrize("state_size, action_size", [((250, 160, 3), 2)])
+@pytest.mark.parametrize("state_size, action_size", [((32, 32, 3), 2)])
 def test_train_multi_agent_off_policy_rgb_vectorized(
     multi_env,
     population_multi_agent,
@@ -2768,14 +2772,17 @@ def test_train_multi_agent_off_policy_rgb_vectorized(
     state_size,
     action_size,
 ):
-    env = make_multi_agent_vect_envs(
+    # In-process sync vec env covers the vectorised training path without
+    # paying the AsyncPettingZooVecEnv subprocess spawn cost (~20-40s in CI).
+    num_envs = 2
+    env = make_sync_multi_agent_vec_env(
         DummyMultiEnv,
-        num_envs=4,
+        num_envs=num_envs,
         state_dims=state_size,
         action_dims=action_size,
     )
     for agent in population_multi_agent:
-        agent.num_envs = 4
+        agent.num_envs = num_envs
         agent.scores = [1]
     env.reset()
     pop, _ = train_multi_agent_off_policy(
@@ -2798,7 +2805,7 @@ def test_train_multi_agent_off_policy_rgb_vectorized(
 
 
 @pytest.mark.parametrize("on_policy", [True])
-@pytest.mark.parametrize("state_size, action_size", [((250, 160, 3), 2)])
+@pytest.mark.parametrize("state_size, action_size", [((32, 32, 3), 2)])
 def test_train_multi_agent_on_policy_rgb_vectorized(
     multi_env,
     population_multi_agent,
@@ -2809,14 +2816,15 @@ def test_train_multi_agent_on_policy_rgb_vectorized(
     state_size,
     action_size,
 ):
-    env = make_multi_agent_vect_envs(
+    num_envs = 2
+    env = make_sync_multi_agent_vec_env(
         DummyMultiEnv,
-        num_envs=4,
+        num_envs=num_envs,
         state_dims=state_size,
         action_dims=action_size,
     )
     for agent in population_multi_agent:
-        agent.num_envs = 4
+        agent.num_envs = num_envs
         agent.scores = [1]
     env.reset()
     pop, _ = train_multi_agent_on_policy(
@@ -3677,7 +3685,7 @@ def test_train_multi_save_checkpoint_on_policy(
     "state_size, action_size, vect, swap_channels",
     [
         ((6,), 2, True, False),
-        ((250, 160, 3), 2, False, True),
+        ((32, 32, 3), 2, False, True),
     ],
 )
 def test_train_offline(
@@ -4402,7 +4410,7 @@ def test_train_bandit_tourn_mut_calls(
     mocked_tournament.select.assert_called()
 
 
-@pytest.mark.parametrize("state_size, action_size", [((250, 160, 3), 2)])
+@pytest.mark.parametrize("state_size, action_size", [((32, 32, 3), 2)])
 def test_train_bandit_rgb_input(
     bandit_env,
     population_bandit,
@@ -5424,5 +5432,17 @@ def test_train_offline_minari_branch_and_early_stop(env, memory):
 # LEAVE LAST, TEMPORARY TO DELETE SAVED MODELS
 # TODO: Properly handle saving/deletion in tests
 def test_remove_saved_models():
-    if os.path.exists("models"):
-        shutil.rmtree("models")
+    # Under xdist a sibling worker may still be writing into ``models/`` (e.g.
+    # checkpoint-saving training tests on another worker) while this teardown
+    # runs, racing ``rmtree`` to ``OSError: Directory not empty``. The test is
+    # purely a cleanup hook, so swallow the race and retry once.
+    if not os.path.exists("models"):
+        return
+    for _ in range(3):
+        try:
+            shutil.rmtree("models")
+            return
+        except OSError:
+            if not os.path.exists("models"):
+                return
+    shutil.rmtree("models", ignore_errors=True)

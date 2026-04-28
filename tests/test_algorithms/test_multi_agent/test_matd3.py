@@ -17,7 +17,7 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.utils.algo_utils import concatenate_spaces
 from agilerl.utils.evolvable_networks import get_default_encoder_config
-from agilerl.utils.utils import make_multi_agent_vect_envs
+from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
@@ -1669,9 +1669,12 @@ def test_matd3_algorithm_test_loop(
 
     # Define environment and algorithm
     if vectorized:
-        env = make_multi_agent_vect_envs(
+        # ``SyncMultiAgentVecEnv`` exercises the vectorised reset/step path
+        # used by ``MATD3.test`` without paying the AsyncPettingZooVecEnv
+        # subprocess spawn cost (~5-25s in CI per fresh worker).
+        env = make_sync_multi_agent_vec_env(
             DummyMultiEnv,
-            2,
+            num_envs=2,
             observation_spaces=observation_spaces[0],
             action_spaces=ma_discrete_space,
         )
@@ -1706,6 +1709,7 @@ def test_matd3_clone_returns_identical_agent(
     compile_mode,
     observation_spaces,
     ma_vector_space,
+    encoder_mlp_config,
     request,
 ):
     # Clones the agent and returns an identical copy.
@@ -1725,6 +1729,10 @@ def test_matd3_clone_returns_identical_agent(
     policy_freq = 2
     device = "cpu"
     accelerator = Accelerator(device_placement=False) if accelerator_flag else None
+    # MATD3 default net config builds 18 (3-agent × 6-network) MLPs with
+    # hidden_size=[64]; with ``torch_compiler='default'`` each of those is
+    # individually compiled which dominates the test runtime. A tiny config
+    # shrinks the compile graph without affecting the cloning logic under test.
     matd3 = MATD3(
         observation_spaces,
         ma_vector_space,
@@ -1741,6 +1749,7 @@ def test_matd3_clone_returns_identical_agent(
         mut=mut,
         actor_networks=actor_networks,
         critic_networks=critic_networks,
+        net_config=encoder_mlp_config,
         device=device,
         accelerator=accelerator,
         torch_compiler=compile_mode,
@@ -1804,13 +1813,14 @@ def test_matd3_clone_returns_identical_agent(
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_clone_new_index(compile_mode, ma_vector_space):
+def test_clone_new_index(compile_mode, ma_vector_space, encoder_mlp_config):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
 
     matd3 = MATD3(
         ma_vector_space,
         copy.deepcopy(ma_vector_space),
         agent_ids,
+        net_config=encoder_mlp_config,
         torch_compiler=compile_mode,
     )
     clone_agent = matd3.clone(index=100)

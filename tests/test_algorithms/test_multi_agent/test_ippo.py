@@ -18,8 +18,8 @@ from agilerl.modules.custom_components import GumbelSoftmax
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.utils.evolvable_networks import get_default_encoder_config
-from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
@@ -382,9 +382,12 @@ def test_loop(
 ):
     observation_spaces = request.getfixturevalue(observation_spaces)
     if vectorized:
-        env = make_multi_agent_vect_envs(
+        # ``SyncMultiAgentVecEnv`` mimics ``AsyncPettingZooVecEnv`` in-process
+        # so we avoid the ~25-50s CI subprocess spawn cost while still
+        # exercising the vectorised reset/step code path inside ``IPPO.test``.
+        env = make_sync_multi_agent_vec_env(
             DummyMultiEnv,
-            2,
+            num_envs=2,
             observation_spaces=observation_spaces,
             action_spaces=ma_discrete_space,
         )

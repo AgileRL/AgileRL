@@ -19,7 +19,7 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.utils.algo_utils import concatenate_spaces
 from agilerl.utils.evolvable_networks import get_default_encoder_config
-from agilerl.utils.utils import make_multi_agent_vect_envs
+from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
@@ -1527,9 +1527,11 @@ def test_maddpg_algorithm_test_loop(
 
     # Define environment and algorithm
     if vectorized:
-        env = make_multi_agent_vect_envs(
+        # In-process sync vec env avoids the AsyncPettingZooVecEnv subprocess
+        # spawn that dominates this test's runtime in CI.
+        env = make_sync_multi_agent_vec_env(
             DummyMultiEnv,
-            2,
+            num_envs=2,
             observation_spaces=observation_spaces[0],
             action_spaces=ma_discrete_space,
         )
@@ -1563,6 +1565,7 @@ def test_maddpg_clone_returns_identical_agent(
     compile_mode,
     observation_spaces,
     ma_vector_space,
+    encoder_mlp_config,
     request,
 ):
     # Clones the agent and returns an identical copy.
@@ -1582,6 +1585,9 @@ def test_maddpg_clone_returns_identical_agent(
     device = "cpu"
     accelerator = Accelerator(device_placement=False) if accelerator_flag else None
 
+    # Tiny ``net_config`` keeps cloning logic identical but shrinks the per-
+    # network ``torch.compile`` graph that dominates runtime when
+    # ``compile_mode='default'``.
     maddpg = MADDPG(
         observation_spaces,
         ma_vector_space,
@@ -1597,6 +1603,7 @@ def test_maddpg_clone_returns_identical_agent(
         mut=mut,
         actor_networks=actor_networks,
         critic_networks=critic_networks,
+        net_config=encoder_mlp_config,
         device=device,
         accelerator=accelerator,
         wrap=wrap,
@@ -1655,13 +1662,16 @@ def test_maddpg_clone_returns_identical_agent(
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_clone_new_index(compile_mode, ma_vector_space, ma_discrete_space):
+def test_clone_new_index(
+    compile_mode, ma_vector_space, ma_discrete_space, encoder_mlp_config
+):
     agent_ids = ["agent_0", "agent_1", "other_agent_0"]
 
     maddpg = MADDPG(
         ma_vector_space,
         ma_discrete_space,
         agent_ids,
+        net_config=encoder_mlp_config,
         torch_compiler=compile_mode,
     )
     clone_agent = maddpg.clone(index=100)

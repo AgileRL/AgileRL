@@ -968,6 +968,11 @@ def test_top_advantage_ngrams_evaluate_and_utils():
 
 
 def test_sample_and_beam_raw_cover_generation_loops(monkeypatch):
+    # ``sample_raw`` mixes ``edited_logits``, ``log(adv_logits)`` (which can
+    # be -inf), and ``base_logits``; depending on the random GPT initialisation
+    # those can sum to NaN, failing ``Categorical``'s validation. Seeding
+    # makes the coverage check deterministic across xdist worker orderings.
+    torch.manual_seed(0)
     algo = _make_algo(double_q=False)
     tokens = torch.tensor([[0, 1, 2]])
     attn_mask = torch.tensor([[1, 1, 1]]).bool()

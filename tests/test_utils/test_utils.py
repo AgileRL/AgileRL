@@ -6,8 +6,6 @@ import pytest
 import torch
 from accelerate import Accelerator, DeepSpeedPlugin
 from gymnasium import spaces
-from pettingzoo.mpe import simple_speaker_listener_v4
-
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -223,10 +221,17 @@ def test_returns_asyncvectorenv_object():
 
 # Returns an AsyncVectorEnv object when given a valid environment name and number of environments
 def test_returns_asyncvectorenv_object_multiagent():
-    num_envs = 3
-    env = simple_speaker_listener_v4.parallel_env
+    # ``speaker_listener_like_env`` mirrors the MPE speaker/listener API but
+    # imports trivially, so workers spawn far faster than with the real
+    # ``simple_speaker_listener_v4.parallel_env`` (which pulls PettingZoo
+    # MPE + PyGame on each subprocess startup).
+    from tests.pz_vector_test_utils import speaker_listener_like_env
+
+    num_envs = 2
     env_kwargs = {"continuous_actions": False}
-    env = make_multi_agent_vect_envs(env, num_envs=num_envs, **env_kwargs)
+    env = make_multi_agent_vect_envs(
+        speaker_listener_like_env, num_envs=num_envs, **env_kwargs
+    )
     env.close()
     assert env.num_envs == num_envs
 

@@ -4,8 +4,254 @@ from collections.abc import Callable
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-from gymnasium.spaces import Box, Discrete
+from gymnasium.spaces import Box, Discrete, MultiDiscrete
 from pettingzoo import ParallelEnv
+
+
+class SpeakerListenerLikeEnv(ParallelEnv):
+    """Lightweight stand-in for ``simple_speaker_listener_v4.parallel_env``.
+
+    Mirrors the agent names and observation/action shapes of the MPE speaker /
+    listener task without pulling in the heavy MPE/PyGame dependency tree.
+    Workers spawned for ``AsyncPettingZooVecEnv`` only need to import this file
+    instead of the full pettingzoo MPE module, which is the dominant cost in
+    most ``test_vector`` tests.
+    """
+
+    metadata = {"render_modes": ["human", "rgb_array"], "name": "speaker_listener_like"}
+
+    def __init__(self, render_mode=None, continuous_actions=True):
+        self.possible_agents = ["speaker_0", "listener_0"]
+        self.agents = self.possible_agents.copy()
+        self.render_mode = render_mode
+        self._continuous = continuous_actions
+        self._obs_shape = {"speaker_0": (3,), "listener_0": (11,)}
+
+    def reset(self, seed=None, options=None):
+        self.agents = self.possible_agents.copy()
+        observations = {
+            agent: np.zeros(self._obs_shape[agent], dtype=np.float32)
+            for agent in self.agents
+        }
+        infos = {agent: {} for agent in self.agents}
+        return observations, infos
+
+    def step(self, actions):
+        observations = {
+            agent: np.zeros(self._obs_shape[agent], dtype=np.float32)
+            for agent in self.agents
+        }
+        rewards = dict.fromkeys(self.agents, 0.0)
+        terminations = dict.fromkeys(self.agents, False)
+        truncations = dict.fromkeys(self.agents, False)
+        infos = {agent: {} for agent in self.agents}
+        return observations, rewards, terminations, truncations, infos
+
+    def observation_space(self, agent):
+        return Box(low=-np.inf, high=np.inf, shape=self._obs_shape[agent], dtype=np.float32)
+
+    def action_space(self, agent):
+        if self._continuous:
+            return Box(low=0.0, high=1.0, shape=(5,), dtype=np.float32)
+        return Discrete(5)
+
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return np.zeros((4, 4, 3), dtype=np.uint8)
+        return None
+
+    def close(self):
+        pass
+
+
+def speaker_listener_like_env(render_mode=None, continuous_actions=True):
+    """Factory matching ``simple_speaker_listener_v4.parallel_env``'s call shape."""
+    return SpeakerListenerLikeEnv(
+        render_mode=render_mode, continuous_actions=continuous_actions
+    )
+
+
+class SyncMultiAgentVecEnv:
+    """In-process stand-in for ``AsyncPettingZooVecEnv`` for tests.
+
+    Spawning even one ``AsyncPettingZooVecEnv`` worker subprocess costs ~5-40s
+    in CI (Python re-import + shared-memory setup). The vast majority of
+    multi-agent algorithm/training tests only need an env-shaped object that
+    responds to ``reset``/``step`` with the correct vectorised shapes; they do
+    not rely on real cross-process parallelism. This helper provides exactly
+    that interface synchronously, eliminating the subprocess startup cost.
+
+    Mimics the subset of ``AsyncPettingZooVecEnv``'s public API required by
+    ``train_multi_agent_*`` and ``algorithm.test()`` (``num_envs``,
+    ``agents``, ``possible_agents``, ``single_action_space``,
+    ``single_observation_space``, ``reset``, ``step``, ``close``).
+
+    Like ``AsyncPettingZooVecEnv``, missing agents (those that aren't returned
+    by an env's ``reset``/``step`` for a given env index — the async-agent
+    case) are filled with NaN placeholders via ``get_placeholder_value`` so
+    downstream algorithm code that masks via ``np.isnan`` keeps working.
+    """
+
+    def __init__(self, env_fns: list[Callable[[], ParallelEnv]]):
+        self.envs = [fn() for fn in env_fns]
+        self.num_envs = len(self.envs)
+        dummy = self.envs[0]
+        self.possible_agents = list(dummy.possible_agents)
+        self.agents = list(self.possible_agents)
+        self._single_action_spaces = {
+            agent: dummy.action_space(agent) for agent in self.possible_agents
+        }
+        self._single_observation_spaces = {
+            agent: dummy.observation_space(agent) for agent in self.possible_agents
+        }
+        self.metadata = getattr(dummy, "metadata", None)
+        self.render_mode = getattr(dummy, "render_mode", None)
+
+    def _fill_missing(self, per_env_dicts, transition_name):
+        from agilerl.vector.pz_async_vec_env import get_placeholder_value
+
+        filled = []
+        for env_dict in per_env_dicts:
+            new = {}
+            for agent in self.possible_agents:
+                if agent in env_dict:
+                    new[agent] = env_dict[agent]
+                else:
+                    new[agent] = get_placeholder_value(
+                        agent,
+                        transition_name,
+                        self._single_observation_spaces,
+                    )
+            filled.append(new)
+        return filled
+
+    def single_action_space(self, agent):
+        return self._single_action_spaces[agent]
+
+    def single_observation_space(self, agent):
+        return self._single_observation_spaces[agent]
+
+    @staticmethod
+    def _stack(per_env_dicts, agents):
+        return {
+            agent: np.stack(
+                [np.asarray(d[agent]) for d in per_env_dicts], axis=0
+            )
+            for agent in agents
+        }
+
+    @staticmethod
+    def _stack_as_float(per_env_dicts, agents):
+        # ``AsyncPettingZooVecEnv`` represents per-agent ``terminated`` /
+        # ``truncated`` / ``reward`` arrays as floats so callers can use NaN
+        # to mark inactive agents. Replicate that here so downstream code
+        # (e.g. ``algorithm.test`` calling ``np.isnan``) works identically.
+        return {
+            agent: np.stack(
+                [np.asarray(d[agent], dtype=np.float64) for d in per_env_dicts],
+                axis=0,
+            )
+            for agent in agents
+        }
+
+    def _add_info(self, vector_infos, env_info, env_num):
+        """Compile a vectorised info dict.
+
+        Mirrors ``AsyncPettingZooVecEnv._add_info`` so callers see the same
+        per-info-key arrays + ``_{key}`` masks shape regardless of which vec
+        env implementation they got.
+        """
+        for key, value in env_info.items():
+            if isinstance(value, dict):
+                array = self._add_info(vector_infos.get(key, {}), value, env_num)
+            else:
+                if key not in vector_infos:
+                    if type(value) in [int, float, bool] or issubclass(
+                        type(value), np.number
+                    ):
+                        array = np.zeros(self.num_envs, dtype=type(value))
+                    elif isinstance(value, np.ndarray):
+                        array = np.zeros(
+                            (self.num_envs, *value.shape), dtype=value.dtype
+                        )
+                    elif value is None:
+                        array = np.full(
+                            self.num_envs, fill_value=np.nan, dtype=np.float32
+                        )
+                    else:
+                        array = np.full(
+                            self.num_envs, fill_value=None, dtype=object
+                        )
+                else:
+                    array = vector_infos[key]
+                array[env_num] = value
+            array_mask = vector_infos.get(
+                f"_{key}", np.zeros(self.num_envs, dtype=bool)
+            )
+            array_mask[env_num] = True
+            vector_infos[key], vector_infos[f"_{key}"] = array, array_mask
+        return vector_infos
+
+    def reset(self, seed=None, options=None):
+        per_env = [env.reset() for env in self.envs]
+        obs_dicts = self._fill_missing([out[0] for out in per_env], "observation")
+        info_dicts = [out[1] for out in per_env]
+        obs = self._stack(obs_dicts, self.possible_agents)
+        infos: dict = {}
+        for env_idx, info in enumerate(info_dicts):
+            infos = self._add_info(infos, info, env_idx)
+        return obs, infos
+
+    def step(self, actions):
+        per_env_results = []
+        for env_idx, env in enumerate(self.envs):
+            env_actions = {
+                agent: np.asarray(actions[agent])[env_idx]
+                for agent in actions
+                if agent in self.possible_agents
+            }
+            per_env_results.append(env.step(env_actions))
+        obs_list = self._fill_missing(
+            [r[0] for r in per_env_results], "observation"
+        )
+        reward_list = self._fill_missing(
+            [r[1] for r in per_env_results], "reward"
+        )
+        term_list = self._fill_missing(
+            [r[2] for r in per_env_results], "terminated"
+        )
+        trunc_list = self._fill_missing(
+            [r[3] for r in per_env_results], "truncated"
+        )
+        info_list = [r[4] for r in per_env_results]
+        obs = self._stack(obs_list, self.possible_agents)
+        rewards = self._stack_as_float(reward_list, self.possible_agents)
+        terms = self._stack_as_float(term_list, self.possible_agents)
+        truncs = self._stack_as_float(trunc_list, self.possible_agents)
+        infos: dict = {}
+        for env_idx, info in enumerate(info_list):
+            infos = self._add_info(infos, info, env_idx)
+        return obs, rewards, terms, truncs, infos
+
+    def render(self):
+        return [env.render() for env in self.envs]
+
+    def close(self, **_kwargs):
+        for env in self.envs:
+            close = getattr(env, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
+
+def make_sync_multi_agent_vec_env(
+    env_cls: Callable[..., ParallelEnv], num_envs: int = 2, **env_kwargs
+) -> SyncMultiAgentVecEnv:
+    """Convenience constructor mirroring ``make_multi_agent_vect_envs``."""
+    env_fns = [lambda: env_cls(**env_kwargs) for _ in range(num_envs)]
+    return SyncMultiAgentVecEnv(env_fns=env_fns)
 
 ROCK = 0
 PAPER = 1

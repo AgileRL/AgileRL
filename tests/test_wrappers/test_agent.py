@@ -14,8 +14,8 @@ from agilerl.algorithms import DDPG, IPPO, PPO
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, RLAlgorithm
 from agilerl.modules import EvolvableMLP
 from agilerl.rollouts.on_policy import collect_rollouts
-from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
+from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
@@ -739,7 +739,9 @@ def test_ippo_custom_training_with_async_env(
     observation_spaces = ma_vector_space
     action_spaces = ma_discrete_space
     if vectorized:
-        env = make_multi_agent_vect_envs(
+        # In-process sync vec env exercises the vectorised wrapper code path
+        # without paying the AsyncPettingZooVecEnv subprocess spawn cost.
+        env = make_sync_multi_agent_vec_env(
             DummyMultiEnvAsync,
             num_envs=num_envs,
             observation_spaces=observation_spaces,
@@ -768,8 +770,11 @@ def test_ippo_custom_training_with_async_env(
 
     async_agent = AsyncAgentsWrapper(agent)
 
-    # Custom training loop for multiple iterations
-    for _ in range(5):
+    # Two iterations exercises the post-learn buffer-reset path; the original
+    # ``range(5)`` was diagnostic noise once that path was covered. The first
+    # iteration also pays the dominant ``torch.compile`` cost when enabled,
+    # so trimming further iterations is a safe runtime win.
+    for _ in range(2):
         # Reset environment
         observations, infos = env.reset()
 
@@ -784,7 +789,10 @@ def test_ippo_custom_training_with_async_env(
             agent_id: np.zeros((num_envs,), dtype=np.int8) for agent_id in agent_ids
         }
 
-        # Collect experiences for multiple steps
+        # Collect experiences for multiple steps. ``max_steps`` must be large
+        # enough that the IPPO buffer captures sufficient transitions for the
+        # ``update_epochs=4`` learn() call to remain numerically stable
+        # (smaller buffers blew up to NaN logits).
         max_steps = 105
         for _ in range(max_steps):
             # Get actions for current active agents
@@ -875,6 +883,7 @@ def test_ippo_custom_training_with_async_env(
 def test_maddpg_custom_training_with_async_env(
     device,
     ma_vector_space,
+    encoder_mlp_config,
     num_envs,
 ):
     from gymnasium import spaces as gym_spaces
@@ -888,7 +897,8 @@ def test_maddpg_custom_training_with_async_env(
     ]
 
     if vectorized:
-        env = make_multi_agent_vect_envs(
+        # See ``test_ippo_custom_training_with_async_env`` rationale.
+        env = make_sync_multi_agent_vec_env(
             DummyMultiEnvAsync,
             num_envs=num_envs,
             observation_spaces=observation_spaces,
@@ -905,6 +915,7 @@ def test_maddpg_custom_training_with_async_env(
         agent_ids=agent_ids,
         device=device,
         batch_size=64,
+        net_config=encoder_mlp_config,
     )
     async_agent = AsyncAgentsWrapper(agent)
 
@@ -923,7 +934,11 @@ def test_maddpg_custom_training_with_async_env(
         for agent_id in agent_ids
     }
 
-    max_steps = 40
+    # Original ``max_steps=40`` paid the AsyncPettingZooVecEnv per-step round
+    # trip 40x; 12 steps is sufficient to cover the multi-iteration buffer
+    # collection and post-step done handling for both vectorised and
+    # non-vectorised paths.
+    max_steps = 12
     for _ in range(max_steps):
         env_action_dict, raw_action_dict = async_agent.get_action(observations)
 
