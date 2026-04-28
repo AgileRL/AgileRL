@@ -231,9 +231,9 @@ class TestDQNInit:
             if torch.equal(initial_params[name], param):
                 not_updated.append(name)
 
-        assert (
-            not not_updated
-        ), f"The following parameters weren't updated:\n{not_updated}"
+        assert not not_updated, (
+            f"The following parameters weren't updated:\n{not_updated}"
+        )
         dqn.clean_up()
 
 
@@ -459,7 +459,9 @@ class TestDQNTest:
     ):
         observation_space = request.getfixturevalue(observation_space)
         vect = num_envs > 1
-        env = DummyEnv(observation_space=observation_space, vect=vect, num_envs=num_envs)
+        env = DummyEnv(
+            observation_space=observation_space, vect=vect, num_envs=num_envs
+        )
         agent = DQN(observation_space=observation_space, action_space=discrete_space)
         mean_score = agent.test(env, max_steps=10)
         assert isinstance(mean_score, float)

@@ -33,8 +33,7 @@ if _xdist_worker_id:
     # to ``mkdtemp`` so the run can always proceed.
     _inner = os.path.join(_worker_cache, "cache")
     if not (
-        _writable(_worker_cache)
-        and (not os.path.exists(_inner) or _writable(_inner))
+        _writable(_worker_cache) and (not os.path.exists(_inner) or _writable(_inner))
     ):
         shutil.rmtree(_worker_cache, ignore_errors=True)
         if not _writable(_worker_cache):
