@@ -52,6 +52,8 @@ def pytest_collection_modifyitems(config, items):
     they never run in parallel with each other.
 
     - ``llm``-marked tests: vLLM / DeepSpeed need exclusive GPU access.
+    - ``gpu``-marked tests: serialised onto one worker to avoid CUDA OOM from
+      concurrent allocations across xdist workers.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
@@ -60,10 +62,13 @@ def pytest_collection_modifyitems(config, items):
     scheduling.
     """
     llm_group = pytest.mark.xdist_group("llm")
+    gpu_group = pytest.mark.xdist_group("gpu")
     minari_group = pytest.mark.xdist_group("minari")
     for item in items:
         if item.get_closest_marker("llm"):
             item.add_marker(llm_group)
+        elif item.get_closest_marker("gpu"):
+            item.add_marker(gpu_group)
         elif "test_minari_utils" in item.nodeid:
             item.add_marker(minari_group)
 
