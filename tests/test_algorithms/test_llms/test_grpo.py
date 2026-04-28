@@ -516,7 +516,7 @@ def test_grpo_save_load_checkpoint_vllm(
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, "facebook/opt-125m")],
+    [(True, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
