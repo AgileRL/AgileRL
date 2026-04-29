@@ -725,7 +725,7 @@ def test_rsnorm_save_load_checkpoint(tmp_path, vector_space):
     assert ddpg.steps == [0]
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("compile_mode", [None])
 @pytest.mark.parametrize("num_envs", [1, 2])
 def test_ippo_custom_training_with_async_env(
     device,

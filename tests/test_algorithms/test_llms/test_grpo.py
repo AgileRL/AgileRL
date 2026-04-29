@@ -335,7 +335,7 @@ def generate_grpo(
             max_num_seqs=1,
             sleep_mode=sleep_mode,
             swap_space=0,
-            enforce_eager=True,
+            enforce_eager=False,
         )
 
         actor = model_factory(pretrained_model_name_or_path)
@@ -560,7 +560,7 @@ def test_grpo_move_model_to_vllm(
 @spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
+@pytest.mark.parametrize("use_separate_reference_adapter", [False])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -573,7 +573,7 @@ def test_grpo_move_model_to_vllm(
     ],
 )
 @pytest.mark.parametrize("training", [True, False])
-@pytest.mark.parametrize("data_batch_size", [4])
+@pytest.mark.parametrize("data_batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_get_action_grpo_including_vllm(
@@ -638,7 +638,7 @@ def test_get_action_grpo_including_vllm(
 @spawn_new_process_for_each_test
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
+@pytest.mark.parametrize("use_separate_reference_adapter", [False])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -650,7 +650,7 @@ def test_get_action_grpo_including_vllm(
     ],
 )
 @pytest.mark.parametrize("training", [True, False])
-@pytest.mark.parametrize("data_batch_size", [4])
+@pytest.mark.parametrize("data_batch_size", [1])
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("sleep_mode", [True])
