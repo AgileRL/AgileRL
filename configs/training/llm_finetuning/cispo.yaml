@@ -23,7 +23,6 @@ INIT_HP:
     GROUP_SIZE: 16
     TEMPERATURE: 0.7
     MAX_MODEL_LEN: 4096  # Maximum context length for the model
-    # MAX_OUTPUT_TOKENS: 64
     MICRO_BATCH_SIZE_PER_GPU: 1
     COSINE_lR_SCHEDULER:
     TOURN_SIZE: 2
@@ -34,6 +33,6 @@ INIT_HP:
     FILTER_ZERO_ADV: false
     USE_LIGER_LOSS: false
     ELITISM: true
-    POP_SIZE: 4
+    POP_SIZE: 1
     EVAL_LOOP: 1
     USE_VLLM: true
