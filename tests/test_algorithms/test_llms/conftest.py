@@ -40,9 +40,7 @@ def cleanup_after_test(request):
         # All GPU-touching tests are pinned to one xdist worker (see
         # tests/conftest.py), so this process owns the GPU and we can gate on
         # the global free-memory threshold.
-        wait_for_gpu_memory_to_clear(
-            devices=list(range(num_gpus)), threshold_ratio=0.4
-        )
+        wait_for_gpu_memory_to_clear(devices=list(range(num_gpus)), threshold_ratio=0.4)
 
     yield
 
