@@ -901,6 +901,7 @@ def test_get_action_grpo_vllm_sleep_mode(
     use_vllm,
     training,
     data_batch_size,
+    reduce_memory_peak,
     micro_batch_size_per_gpu,
     sleep_mode,
 ):

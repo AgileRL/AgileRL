@@ -3726,29 +3726,34 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         model_ref = self._get_unwrapped_actor()
         peft_ref = model_ref.pretrained_model if self.use_value_head else model_ref
         peft_ref.set_adapter("actor")
+        modules_to_skip = (
+            "lora_",
+            "original_module",
+            "modules_to_save",
+            "ia3_",
+            "ranknum",
+            "summary",
+        )
         with gather_if_zero3(self.zero_stage, list(peft_ref.parameters())):
             peft_ref.merge_adapter(adapter_names=["actor"])
-            for name, param in peft_ref.named_parameters():
-                # weight_name = name.removeprefix("pretrained_model.")
-                weight_name = name.removeprefix("base_model.model.").replace(
-                    ".base_layer", ""
-                )
-                # weight_name = weight_name.
-                if peft_ref.prefix in weight_name:
-                    continue
+            weights_to_load = []
+            try:
+                for name, param in peft_ref.named_parameters():
+                    weight_name = name.removeprefix("base_model.model.").replace(
+                        ".base_layer", ""
+                    )
+                    if peft_ref.prefix in weight_name:
+                        continue
+                    if any(tok in weight_name for tok in modules_to_skip):
+                        continue
+                    weights_to_load.append((weight_name, param.data))
 
-                if "original_module" in weight_name:
-                    continue
+                def _load_weights(model):
+                    model.load_weights(weights_to_load)
 
-                if "summary" in weight_name:
-                    continue
-
-                llm_model = (
-                    self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-                )
-
-                llm_model.load_weights([(weight_name, param.data)])
-            peft_ref.unmerge_adapter()
+                self.llm.apply_model(_load_weights)
+            finally:
+                peft_ref.unmerge_adapter()
         self.llm.reset_prefix_cache()
         self._vllm_moved = True
 
