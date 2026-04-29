@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from accelerate import Accelerator
     from peft import LoraConfig
 
-    from agilerl.wrappers.llm_envs import PreferenceGym
+    from agilerl.llm_envs import PreferenceGym
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -21,71 +21,8 @@ from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import get_experiences_samples
 
-if HAS_LIGER_KERNEL or TYPE_CHECKING:
-    from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOFunction
-    from liger_kernel.chunked_loss.fused_linear_preference import (
-        LigerFusedLinearPreferenceBase,
-    )
-
-    class _LigerDPOWithAlpha(LigerFusedLinearPreferenceBase):
-        """Thin wrapper that exposes ``alpha`` for NLL scaling.
-
-        ``LigerFusedLinearDPOFunction`` passes ``compute_nll_loss`` as a bool
-        but never forwards ``alpha`` to the base class (which defaults to 1.0).
-        This subclass reuses the DPO preference loss and adds ``alpha`` so the
-        fused kernel correctly scales the NLL component.
-        """
-
-        preference_loss_fn = staticmethod(
-            LigerFusedLinearDPOFunction.preference_loss_fn
-        )
-
-        @classmethod
-        def forward(
-            cls,
-            ctx,
-            _input,
-            weight,
-            target,
-            bias=None,
-            ref_input=None,
-            ref_weight=None,
-            ref_bias=None,
-            ignore_index=-100,
-            beta=0.1,
-            alpha=1.0,
-            compute_nll_loss=True,
-            compiled=True,
-            use_ref_model=True,
-            average_log_prob=False,
-            chunk_size=1,
-            loss_type="sigmoid",
-        ):
-            return LigerFusedLinearPreferenceBase.forward(
-                cls=cls,
-                ctx=ctx,
-                _input=_input,
-                weight=weight,
-                target=target,
-                bias=bias,
-                ignore_index=ignore_index,
-                alpha=alpha,
-                beta=beta,
-                compute_nll_loss=compute_nll_loss,
-                compiled=compiled,
-                use_ref_model=use_ref_model,
-                ref_input=ref_input,
-                ref_weight=ref_weight,
-                ref_bias=ref_bias,
-                average_log_prob=average_log_prob,
-                chunk_size=chunk_size,
-                loss_type=loss_type,
-            )
-
-        @staticmethod
-        def backward(ctx, *grad_output):
-            grads = LigerFusedLinearPreferenceBase.backward(ctx, grad_output)[:4]
-            return (*grads, *(None,) * 12)
+if HAS_LIGER_KERNEL:
+    from agilerl.utils.llm_utils import _LigerDPOWithAlpha
 
 
 class DPO(LLMAlgorithm):
@@ -99,7 +36,8 @@ class DPO(LLMAlgorithm):
     :type model_name: str, optional
     :param actor_network: HuggingFace LLM
     :type actor_network: PreTrainedModelProtocol
-    :param model_config: Model configuration, to be used when creating the model from a name or path
+    :param model_config: Model configuration, to be used when creating the model from a name or path.
+    :type model_config: dict[str, Any] | None
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
@@ -121,8 +59,6 @@ class DPO(LLMAlgorithm):
     :type calc_position_embeddings: bool, optional
     :param micro_batch_size_per_gpu: Micro batch size per GPU, defaults to None
     :type micro_batch_size_per_gpu: int, optional
-    :param reduce_memory_peak: Flag to indicate if memory peak should be reduced, defaults to False
-    :type reduce_memory_peak: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param lora_config: Config for LoRA, defaults to None
@@ -133,16 +69,22 @@ class DPO(LLMAlgorithm):
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
     :type clone: bool, optional
-    :param use_separate_reference_adapter: Flag to indicate if the reference policy should have a separate adapter, defaults to False
-    :type use_separate_reference_adapter: bool, optional
     :param seed: Seed for the random number generator, defaults to 42
     :type seed: int, optional
     :param gradient_checkpointing: Flag to indicate if gradient checkpointing should be used, defaults to True
     :type gradient_checkpointing: bool, optional
+    :param torch_compiler: Torch compile mode (e.g. ``'default'``), defaults to None
+    :type torch_compiler: str | None, optional
     :param use_liger_loss: Use Liger kernel for memory-efficient loss computation, defaults to False.
         Requires ``liger_kernel`` to be installed; pass ``False`` to fall back to the standard PyTorch path.
         When ``training=False`` the standard path is always used regardless of this flag.
     :type use_liger_loss: bool, optional
+    :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
+        adapter whose weights are frozen snapshots of the actor used for the
+        DPO log-probability baseline. When ``False`` the reference log-probs
+        are obtained by disabling the actor adapter at inference time.
+        Defaults to True.
+    :type use_separate_reference_adapter: bool, optional
     """
 
     def __init__(
@@ -162,16 +104,17 @@ class DPO(LLMAlgorithm):
         update_epochs: int = 1,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
-        reduce_memory_peak: bool = False,
         device: str = "cpu",
         lora_config: LoraConfig | None = None,
         accelerator: Accelerator | None = None,
         wrap: bool = True,
         clone: bool = False,
-        use_separate_reference_adapter: bool = False,
         seed: int = 42,
         gradient_checkpointing: bool = True,
+        torch_compiler: str | None = None,
         use_liger_loss: bool = False,
+        reduce_memory_peak: bool = False,
+        use_separate_reference_adapter: bool = True,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -190,14 +133,12 @@ class DPO(LLMAlgorithm):
             lr=lr,
             max_grad_norm=max_grad_norm,
             clone=clone,
-            reduce_memory_peak=reduce_memory_peak,
             calc_position_embeddings=calc_position_embeddings,
             seed=seed,
             pad_token_id=pad_token_id,
             pad_token=pad_token,
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
-            use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
             actor_network=actor_network,
             model_config=model_config,
@@ -209,6 +150,9 @@ class DPO(LLMAlgorithm):
             accelerator=accelerator,
             name="DPO",
             gradient_checkpointing=gradient_checkpointing,
+            torch_compiler=torch_compiler,
+            reduce_memory_peak=reduce_memory_peak,
+            use_separate_reference_adapter=use_separate_reference_adapter,
         )
         self.beta = beta
         self.nll_alpha = nll_alpha
@@ -248,15 +192,15 @@ class DPO(LLMAlgorithm):
         self,
         experiences: ExperiencesType,
         training: bool = True,
-    ) -> tuple[float, float, float]:
+    ) -> dict[str, float]:
         """Update agent network parameters to learn from preference data.
 
         :param experiences: Batched chosen_input_ids, rejected_input_ids, chosen_attention_mask, rejected_attention_mask and rewards
         :type experiences: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
         :param training: Whether the agent is training or not
         :type training: bool
-        :return: mean loss, mean chosen reward, mean rejected reward
-        :rtype: tuple[float, float, float]
+        :return: Dict with keys ``mean_loss``, ``mean_chosen_reward``, ``mean_rejected_reward``.
+        :rtype: dict[str, float]
         """
         gc.collect()
         torch.cuda.empty_cache()
@@ -297,7 +241,11 @@ class DPO(LLMAlgorithm):
             getattr(self, "micro_batch_size_per_gpu", self.batch_size_per_process),
         )
         batch_idxs = np.arange(num_samples)
-        mean_loss, mean_chosen_reward, mean_rejected_reward = 0.0, 0.0, 0.0
+        learn_metrics = {
+            "mean_loss": 0.0,
+            "mean_chosen_reward": 0.0,
+            "mean_rejected_reward": 0.0,
+        }
         ref_rejected_log_probs, ref_chosen_log_probs = None, None
         if not self.use_liger_loss:
             with torch.no_grad():
@@ -336,13 +284,11 @@ class DPO(LLMAlgorithm):
                 )
                 if training:
                     self._backward_pass(loss)
-                mean_loss += loss.item()
-                mean_chosen_reward += chosen_reward.mean().item()
-                mean_rejected_reward += rejected_reward.mean().item()
-        mean_loss /= num_samples
-        mean_chosen_reward /= num_samples
-        mean_rejected_reward /= num_samples
-        return mean_loss, mean_chosen_reward, mean_rejected_reward
+                learn_metrics["mean_loss"] += loss.item()
+                learn_metrics["mean_chosen_reward"] += chosen_reward.mean().item()
+                learn_metrics["mean_rejected_reward"] += rejected_reward.mean().item()
+        updates = num_samples
+        return {key: value / updates for key, value in learn_metrics.items()}
 
     def _dpo_loss(
         self,
@@ -362,8 +308,8 @@ class DPO(LLMAlgorithm):
 
         :param batch_size: Batch size
         :type batch_size: int
-        :param minibatch_idxs: Minibatch indices
-        :type minibatch_idxs: torch.Tensor
+        :param minibatch_idxs: Indices selecting rows for this minibatch.
+        :type minibatch_idxs: numpy.ndarray
         :param chosen_input_ids: Chosen input IDs
         :type chosen_input_ids: torch.Tensor
         :param chosen_attention_mask: Chosen attention mask
@@ -446,18 +392,22 @@ class DPO(LLMAlgorithm):
         chosen_mask: torch.Tensor,
         rejected_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Calculate the DPO loss.xw.
+        """Calculate the DPO loss (standard PyTorch path, summed log-probs per sequence).
 
-        :param chosen_mask: Mask for the prompt and padding tokens of the chosen completions
-        :type chosen_mask: torch.Tensor
-        :param rejected_mask: Mask for the prompt and padding tokens of the rejected completions
-        :type rejected_mask: torch.Tensor
-        :param chosen_log_probs: Log probabilities of the chosen completions
+        :param chosen_log_probs: Policy log-probs for chosen completions ``[B, seq_len-1]``.
         :type chosen_log_probs: torch.Tensor
-        :param rejected_log_probs: Log probabilities of the rejected completions
+        :param rejected_log_probs: Policy log-probs for rejected completions ``[B, seq_len-1]``.
         :type rejected_log_probs: torch.Tensor
-        :param ref_chosen_log_probs: Log probabilities of the chosen completions using the reference model
-
+        :param ref_chosen_log_probs: Reference log-probs for chosen ``[B, seq_len-1]``.
+        :type ref_chosen_log_probs: torch.Tensor
+        :param ref_rejected_log_probs: Reference log-probs for rejected ``[B, seq_len-1]``.
+        :type ref_rejected_log_probs: torch.Tensor
+        :param chosen_mask: Mask over completion tokens (shifted) for chosen.
+        :type chosen_mask: torch.Tensor
+        :param rejected_mask: Mask over completion tokens (shifted) for rejected.
+        :type rejected_mask: torch.Tensor
+        :return: Tuple of ``(loss, implicit_chosen_reward, implicit_rejected_reward)``.
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         # Mask and sum the logprobs
         assert chosen_log_probs.shape == chosen_mask.shape, (
@@ -526,7 +476,15 @@ class DPO(LLMAlgorithm):
         lm_head_bias = lm_head.bias
 
         def _get_hidden(ids, attn_mask):
-            """Run forward pass; capture the input to lm_head via a pre-hook."""
+            """Run a forward pass and return hidden states fed into the language-model head.
+
+            :param ids: Token IDs ``[batch, seq_len]``.
+            :type ids: torch.Tensor
+            :param attn_mask: Attention mask ``[batch, seq_len]``.
+            :type attn_mask: torch.Tensor
+            :return: Hidden states before the LM head ``[batch, seq_len, hidden]``.
+            :rtype: torch.Tensor
+            """
             captured = []
             hook = lm_head.register_forward_pre_hook(
                 lambda m, inputs: captured.append(inputs[0])
@@ -544,7 +502,7 @@ class DPO(LLMAlgorithm):
 
         # Reference hidden states — no gradient, two separate forward passes (B each)
         with torch.no_grad():
-            with self.select_policy(use_reference=True):
+            with self.select_adapter("reference"):
                 self.actor.eval()
                 ref_chosen_hidden = _get_hidden(
                     chosen_ids, chosen_attn
@@ -557,7 +515,7 @@ class DPO(LLMAlgorithm):
         )  # (2B, seq_len, H)
 
         # Policy hidden states — with gradient, two separate forward passes (B each)
-        with self.select_policy(use_reference=False):
+        with self.select_adapter("actor"):
             self.actor.train()
             policy_chosen_hidden = _get_hidden(
                 chosen_ids, chosen_attn
@@ -617,9 +575,9 @@ class DPO(LLMAlgorithm):
     ) -> torch.Tensor:
         """Calculate the preference reward for the chosen and rejected completions.
 
-        :param log_probs: Log probabilities of the completions
+        :param log_probs: Summed log-probabilities under the policy (1-D per batch row).
         :type log_probs: torch.Tensor
-        :param ref_log_probs: Log probabilities of the completions using the reference model
+        :param ref_log_probs: Summed log-probabilities under the reference policy.
         :type ref_log_probs: torch.Tensor
         :return: Implicit reward (beta * (log_probs - ref_log_probs))
         :rtype: torch.Tensor
@@ -647,7 +605,9 @@ class DPO(LLMAlgorithm):
             prompts = env.reset()
             rewards = []
             for _ in range(loop):
-                _, chosen_reward, rejected_reward = self.learn(prompts, training=False)
+                learn_result = self.learn(prompts, training=False)
+                chosen_reward = learn_result["mean_chosen_reward"]
+                rejected_reward = learn_result["mean_rejected_reward"]
                 reward_margin = chosen_reward - rejected_reward
                 rewards.append(np.asarray(reward_margin).item())
                 prompts = env.step()

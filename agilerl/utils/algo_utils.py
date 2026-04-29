@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
-from typing import Any, ForwardRef, NoReturn, Union
+from typing import TYPE_CHECKING, Any, ForwardRef, NoReturn, Union
 
 import numpy as np
 import torch
@@ -40,6 +40,9 @@ from agilerl.typing import (
     SupportedObsSpaces,
     TorchObsType,
 )
+
+if TYPE_CHECKING:
+    from agilerl.algorithms.core.base import EvolvableAlgorithm
 
 if HAS_LLM_DEPENDENCIES:
     from peft import PeftModel, get_peft_model
@@ -1412,18 +1415,37 @@ class CosineLRScheduleConfig:
 
 @dataclass
 class VLLMConfig:
-    """Data class to configure a VLLM client.
+    """Data class to configure a colocated vLLM instance.
 
-    Note: has the same defaults as the VLLMClient class from trl library.
-
-    :param base_url: Base URL of the VLLM server, defaults to None
-    :type base_url: str | None, optional
-    :param host: Host of the VLLM server, defaults to "0.0.0.0"
-    :type host: str, optional
-    :param server_port: Server port of the VLLM server, defaults to 8000
-    :type server_port: int, optional
-    :param group_port: Group port of the VLLM server, defaults to 51216
-    :type group_port: int, optional
+    :param tensor_parallel_size: Number of GPUs for tensor parallelism, defaults to 1.
+    :type tensor_parallel_size: int, optional
+    :param gpu_memory_utilization: Fraction of GPU memory to reserve for vLLM KV cache,
+        defaults to 0.3.
+    :type gpu_memory_utilization: float, optional
+    :param max_num_seqs: Maximum number of sequences processed concurrently.  For GRPO,
+        set this to at least ``group_size`` to avoid request queuing, defaults to 8.
+    :type max_num_seqs: int, optional
+    :param sleep_mode: Put vLLM to sleep between ``get_action`` calls to free GPU memory
+        for training.  Cannot be used with agent populations on a single device,
+        defaults to False.
+    :type sleep_mode: bool, optional
+    :param dtype: Model weight dtype passed to the vLLM ``LLM`` constructor
+        (e.g. ``"bfloat16"``, ``"float16"``).  ``None`` lets vLLM choose,
+        defaults to None.
+    :type dtype: str | None, optional
+    :param quantization: Quantization method passed to the vLLM ``LLM`` constructor
+        (e.g. ``"awq"``, ``"gptq"``).  ``None`` disables quantization, defaults to None.
+    :type quantization: str | None, optional
+    :param stop_sequences: List of strings that terminate generation early (e.g.
+        ``["</answer>"]``).  Passed as ``stop`` to ``SamplingParams``, defaults to None.
+    :type stop_sequences: list[str] | None, optional
+    :param presence_penalty: Penalise tokens that have already appeared in the output;
+        positive values discourage repetition.  Passed to ``SamplingParams``,
+        defaults to 0.0 (disabled).
+    :type presence_penalty: float, optional
+    :param frequency_penalty: Penalise tokens proportionally to how often they have
+        appeared so far.  Passed to ``SamplingParams``, defaults to 0.0 (disabled).
+    :type frequency_penalty: float, optional
     """
 
     # Colocate mode parameters
@@ -1433,6 +1455,11 @@ class VLLMConfig:
     swap_space: float | None = None
     enforce_eager: bool | None = None
     sleep_mode: bool = False
+    dtype: str | None = None
+    quantization: str | None = None
+    stop_sequences: list[str] | None = None
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
 
     def __post_init__(self) -> None:
         if self.sleep_mode:
@@ -1685,6 +1712,23 @@ def is_peft_model(model: nn.Module) -> bool:
     return isinstance(model, PeftModel)
 
 
+def _rename_peft_primary_adapter_keys_in_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    *,
+    old_adapter: str,
+    new_adapter: str,
+) -> dict[str, torch.Tensor]:
+    """Rewrite state-dict keys when the primary PEFT adapter is renamed (e.g. to ``actor``)."""
+    if old_adapter == new_adapter:
+        return state_dict
+    out: dict[str, torch.Tensor] = {}
+    for k, v in state_dict.items():
+        nk = k.replace(f".{old_adapter}.", f".{new_adapter}.")
+        nk = nk.replace(f"lora_{old_adapter}", f"lora_{new_adapter}")
+        out[nk] = v
+    return out
+
+
 def clone_llm(
     original_model: PreTrainedModelType | DummyEvolvable,
     zero_stage: int,
@@ -1714,7 +1758,7 @@ def clone_llm(
         model_config = original_model.config
         base_model = original_model.model
         model = type(base_model)(model_config)
-        # Get all adapter names
+        adapter_names: list[str] = []
 
         if hasattr(original_model, "peft_config"):
             adapter_names = list(original_model.peft_config.keys())
@@ -1724,10 +1768,10 @@ def clone_llm(
                     "Multiple adapters detected. Only the first adapter will be used for RL finetuning.",
                     stacklevel=2,
                 )
-            # Add first adapter using get_peft_model
+            # AgileRL standardizes on adapter name "actor" for the primary adapter.
             first_adapter = adapter_names[0]
             first_config = original_model.peft_config[first_adapter]
-            model = get_peft_model(model, first_config, adapter_name=first_adapter)
+            model = get_peft_model(model, first_config, adapter_name="actor")
 
             # Add remaining adapters using add_adapter
             for adapter_name in adapter_names[1:]:
@@ -1736,20 +1780,25 @@ def clone_llm(
             model.disable_adapter()
 
         if state_dict is not None:
-            model.load_state_dict(state_dict, strict=False)
+            sd = state_dict
+            if adapter_names and adapter_names[0] != "actor":
+                sd = _rename_peft_primary_adapter_keys_in_state_dict(
+                    sd,
+                    old_adapter=adapter_names[0],
+                    new_adapter="actor",
+                )
+            model.load_state_dict(sd, strict=False)
     return model
 
 
 class DummyOptimizer:
     """Placeholder optimizer class to pass to the OptimizerWrapper when the optimizer is defined in the deepspeed config."""
 
-    def __init__(self, params: list[torch.Tensor], lr: float, **kwargs) -> None:
+    def __init__(self, params: list[torch.Tensor], **kwargs) -> None:
         """Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
 
         :param params: Parameters to optimize.
         :type params: list[torch.Tensor]
-        :param lr: Learning rate.
-        :type lr: float
         """
 
     def step(self, closure: Callable[[], torch.Tensor] | None = None) -> NoReturn:
@@ -1852,3 +1901,18 @@ def apply_env_defined_actions(
         action[mask] = override[mask]
         action_dict[agent_id] = action
     return action_dict
+
+
+def _resolve_lr(
+    agent: "EvolvableAlgorithm", lr: str | tuple[str, str]
+) -> tuple[str, str]:
+    """Resolve the learning rate from a string or tuple of strings.
+
+    :param lr: Learning rate
+    :type lr: str | tuple[str, str]
+    :return: Learning rate
+    :rtype: tuple[str, str]
+    """
+    if isinstance(lr, tuple):
+        return getattr(agent, lr[0]), getattr(agent, lr[1])
+    return getattr(agent, lr), None

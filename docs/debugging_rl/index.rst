@@ -306,3 +306,63 @@ Multi-agent Probe Environments
      - **Observation-dependent Multi-agent Policy Environment**
 
        Harder version of Observation-dependent Policy Environment. Critic networks should be able to evaluate a reward dependent on actions taken by all agents, while actors should still learn to take the correct action. Failure indicates a problem with the mutli-agent algorithm, or may have other minor causes such as incorrect hyperparameters.
+
+
+Debugging with LLM Probe Environments
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For LLM-based agents, use ``agilerl.utils.probe_envs_llm`` to isolate failures in token generation, reward wiring, and multi-turn behavior before running larger tasks.
+
+All probe environments use string observations and string actions. The first three probes are single-turn (``max_turns=1``) and return terminal rewards of ``+1`` or ``-1``. In these probes, reward is positive when the expected target digit appears anywhere in the generated text.
+
+Use the probes in this order:
+
+1. ``ConstantTargetEnv``: fixed prompt and fixed target digit. This is a basic end-to-end sanity check.
+2. ``ConditionalTargetEnv``: one input digit, target ``(digit % 3) + 1``. This checks whether the policy conditions on the observation.
+3. ``MultiInputConditionalEnv``: two input digits, target ``((d1 + d2) % 3) + 1``. This checks multi-input composition.
+4. ``GridNavigationEnv``: multi-turn 1D navigation with step costs. The reset observation is ``<start><target>``, later observations are only the current position, and actions are parsed from the first valid digit in generated text (``"1"=left, "2"=stay, "3"=right``).
+
+The ready-to-run staged scripts in ``demos/llm/debugging/`` follow the same progression:
+
+- ``debugging_llm.py`` -> ``ConstantTargetEnv``
+- ``debugging_llm_stage_1.py`` -> ``ConditionalTargetEnv``
+- ``debugging_llm_stage_2.py`` -> ``MultiInputConditionalEnv``
+- ``debugging_llm_stage_3.py`` -> ``GridNavigationEnv``
+
+These scripts use slightly different evaluation metrics by stage. Some stages use exact-match accuracy for generated output, which is stricter than the substring-based reward used by the environment.
+
+Minimal environment sanity check:
+
+.. code-block:: python
+
+    from agilerl.utils.probe_envs_llm import ConditionalTargetEnv
+
+    env = ConditionalTargetEnv(seed=0)
+    obs, info = env.reset()
+    print("obs:", obs, "target:", info["target"])
+
+    # In this env the expected mapping is target = (digit % 3) + 1.
+    # Reward is positive if the generated action contains that target digit.
+    action = info["target"]
+    next_obs, reward, terminated, truncated, _ = env.step(action)
+    print(next_obs, reward, terminated, truncated)
+
+When debugging training runs, start with short ``max_steps`` and frequent evaluation, and only move to the next probe after the current one reaches stable, high accuracy.
+
+LLM probe environments
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :widths: 45, 55
+   :header-rows: 1
+
+   * - **Probe Environment**
+     - **Details**
+   * - ``ConstantTargetEnv``
+     - **Constant target (single turn).** Fixed prompt and fixed target digit. Reward is ``+1`` when the generated text contains the target digit, otherwise ``-1``. Useful for basic end-to-end wiring checks.
+   * - ``ConditionalTargetEnv``
+     - **Observation-conditioned target (single turn).** Observation is one digit and target is ``(digit % 3) + 1``. Reward is substring-based (target digit appears in generated text). Useful for checking observation conditioning.
+   * - ``MultiInputConditionalEnv``
+     - **Two-input conditional target (single turn).** Observation is two digits and target is ``((d1 + d2) % 3) + 1``. Reward is substring-based. Useful for checking simple compositional reasoning over multiple inputs.
+   * - ``GridNavigationEnv``
+     - **Multi-turn navigation.** Initial observation encodes ``<start><target>``; later observations provide current position only. Actions are parsed from the first valid generated digit (``"1"`` left, ``"2"`` stay, ``"3"`` right). Rewards are ``+1`` on success, ``step_cost`` on intermediate steps, and ``-1`` when max turns are reached without success.

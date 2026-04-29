@@ -35,12 +35,15 @@ class IsDataclass(Protocol):
     __dataclass_fields__: ClassVar[dict[str, Any]]
 
 
-# TODO ideally adjust the ReasoningGym to match the PreferencePrompts type (e.g the lists/btaching happens for the values of the
-# keys, not just returning a list of 'ReasoningPrompts')
 class ReasoningPrompts(TypedDict):
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
-    text: str | None
+    question: str | list[str] | None
+    answer: str | list[str] | None
+    trajectory_input_ids: torch.Tensor | None
+    trajectory_attention_mask: torch.Tensor | None
+    initial_prompt_len: int | list[int] | torch.Tensor | None
+    stitch_prefix_ids: torch.Tensor | None
 
 
 class PreferencePrompts(TypedDict):
@@ -60,6 +63,13 @@ class SFTPrompts(TypedDict):
     response: list[str]
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
+
+
+class CheckpointInfo(TypedDict):
+    modules: dict[str, Module]
+    optimizers: dict[str, Optimizer]
+    network_names: list[str]
+    optimizer_names: list[str]
 
 
 class MultiAgentSetup(Enum):
@@ -101,7 +111,7 @@ KernelSizeType = int | tuple[int, ...]
 GymSpaceType = SupportedObsSpaces | list[SupportedObsSpaces]
 GymEnvType = str | gym.Env | gym.vector.VectorEnv | gym.vector.AsyncVectorEnv
 PzEnvType = str | ParallelEnv
-LLMObsType = list[ReasoningPrompts]
+LLMObsType = list[ReasoningPrompts] | ReasoningPrompts
 
 NumpyObsType = np.ndarray | ArrayDict | ArrayTuple
 TorchObsType = torch.Tensor | TensorDict | TensorTuple | StandardTensorDict
@@ -139,6 +149,7 @@ PopulationType = list[EvolvableAlgorithmProtocol]
 MutationMethod = Callable[[EvolvableAlgorithmProtocol], EvolvableAlgorithmProtocol]
 ConfigType = IsDataclass | NetConfigType
 StateDict = dict[str, Any] | dict[str, dict[str, Any]] | list[dict[str, Any]]
+LrNameType = str | tuple[str, str]
 
 
 class BatchDimension:

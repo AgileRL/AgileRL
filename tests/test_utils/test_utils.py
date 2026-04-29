@@ -1,4 +1,5 @@
-from unittest.mock import MagicMock, Mock, patch
+import copy
+from unittest.mock import MagicMock, Mock, call, patch
 
 import gymnasium as gym
 import numpy as np
@@ -6,12 +7,15 @@ import pytest
 import torch
 from accelerate import Accelerator, DeepSpeedPlugin
 from gymnasium import spaces
+from peft import LoraConfig
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
     DDPG,
     DQN,
     IPPO,
+    LLMPPO,
+    LLMREINFORCE,
     MADDPG,
     MATD3,
     NeuralTS,
@@ -47,7 +51,11 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
     init_wandb,
 )
+from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.wrappers.learning import Skill
+from tests.test_algorithms.test_llms.test_grpo import (
+    create_module as create_dummy_lm_for_reinforce,
+)
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -346,6 +354,273 @@ def test_create_initial_population_multi_agent():
             assert agent.accelerator is None
 
 
+@pytest.mark.skipif(
+    not HAS_LLM_DEPENDENCIES,
+    reason="agilerl[llm] not installed",
+)
+@pytest.mark.parametrize(
+    "algo,expected_type",
+    [
+        ("GRPO", GRPO),
+        ("LLMPPO", LLMPPO),
+        ("llmppo", LLMPPO),
+        ("LLMREINFORCE", LLMREINFORCE),
+    ],
+)
+def test_create_population_llm_policy_gradient_algorithms(
+    vector_space, algo, expected_type
+):
+    init_hp = {
+        "PAD_TOKEN_ID": 1000 - 1,
+        "PAD_TOKEN": "<pad>",
+        "BATCH_SIZE": 2,
+        "BETA": 0.001,
+        "LR": 0.001,
+        "MAX_GRAD_NORM": 0.5,
+        "UPDATE_EPOCHS": 1,
+        "MAX_MODEL_LEN": 100,
+        "GRADIENT_CHECKPOINTING": False,
+    }
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    population_size = 1
+
+    lora_kw = {
+        "r": 16,
+        "lora_alpha": 64,
+        "target_modules": ["linear_1"],
+        "task_type": "CAUSAL_LM",
+        "lora_dropout": 0.05,
+    }
+    actor = create_dummy_lm_for_reinforce(
+        input_size=10,
+        max_tokens=20,
+        vocab_size=1000,
+        device=device,
+    )
+    common_kw = dict(
+        algo=algo,
+        observation_space=vector_space,
+        action_space=copy.deepcopy(vector_space),
+        net_config=None,
+        INIT_HP=init_hp,
+        hp_config=None,
+        population_size=population_size,
+        device=device,
+        accelerator=None,
+        actor_network=actor,
+        algo_kwargs={
+            "lora_config": LoraConfig(**lora_kw),
+            "pad_token_id": 1000 - 1,
+            "pad_token": "<pad>",
+            "use_vllm": False,
+        },
+    )
+
+    if expected_type is LLMPPO:
+        mock_agent = MagicMock(spec=LLMPPO)
+        with patch("agilerl.utils.utils.LLMPPO", return_value=mock_agent) as mock_cls:
+            population = create_population(**common_kw)
+        assert len(population) == population_size
+        assert population[0] is mock_agent
+        mock_cls.assert_called_once()
+        call_kw = mock_cls.call_args.kwargs
+        assert call_kw["batch_size"] == init_hp["BATCH_SIZE"]
+        assert call_kw["beta"] == init_hp["BETA"]
+        assert call_kw["vf_coef"] == SHARED_INIT_HP["VF_COEF"]
+        assert call_kw["lr_actor"] == init_hp["LR"]
+    else:
+        population = create_population(**common_kw)
+        assert len(population) == population_size
+        for agent in population:
+            assert isinstance(agent, expected_type)
+            assert agent.accelerator is None
+            assert agent.batch_size == init_hp["BATCH_SIZE"]
+
+
+@pytest.mark.skipif(
+    not HAS_LLM_DEPENDENCIES,
+    reason="agilerl[llm] not installed",
+)
+def test_create_population_llmppo_uses_clone_and_generation_defaults(vector_space):
+    init_hp = {
+        "BATCH_SIZE": 2,
+        "LR": 7e-5,
+        "BETA": 0.01,
+        "MAX_GRAD_NORM": 0.5,
+        "UPDATE_EPOCHS": 1,
+        "MAX_MODEL_LEN": 96,
+        "MAX_OUTPUT_TOKENS": 12,
+        "USE_VLLM": True,
+        "GRADIENT_CHECKPOINTING": False,
+        "COSINE_lR_SCHEDULER": {"num_epochs": 10, "warmup_proportion": 0.1},
+    }
+    actor = MagicMock(name="actor_network")
+    actor.state_dict.return_value = {"w": torch.tensor([1.0])}
+    cloned_actor = MagicMock(name="cloned_actor")
+    vllm_cfg = object()
+    a0 = MagicMock(name="ppo_agent_0")
+    a1 = MagicMock(name="ppo_agent_1")
+
+    with (
+        patch("agilerl.utils.utils.clone_llm", return_value=cloned_actor) as mock_clone,
+        patch("agilerl.utils.utils.LLMPPO", side_effect=[a0, a1]) as mock_llmppo,
+    ):
+        population = create_population(
+            algo="LLMPPO",
+            observation_space=vector_space,
+            action_space=copy.deepcopy(vector_space),
+            net_config=None,
+            INIT_HP=init_hp,
+            hp_config=None,
+            population_size=2,
+            device="cpu",
+            accelerator=None,
+            actor_network=actor,
+            vllm_config=vllm_cfg,
+            algo_kwargs={"pad_token_id": 999, "pad_token": "<pad>"},
+        )
+
+    assert population == [a0, a1]
+    mock_clone.assert_called_once()
+    first_kw = mock_llmppo.call_args_list[0].kwargs
+    second_kw = mock_llmppo.call_args_list[1].kwargs
+    assert first_kw["actor_network"] is actor
+    assert second_kw["actor_network"] is cloned_actor
+    assert first_kw["use_vllm"] is True
+    assert first_kw["vllm_config"] is vllm_cfg
+    assert first_kw["lr_actor"] == init_hp["LR"]
+    assert first_kw["cosine_lr_schedule_config"] is not None
+    assert isinstance(first_kw["cosine_lr_schedule_config"], CosineLRScheduleConfig)
+
+
+@pytest.mark.skipif(
+    not HAS_LLM_DEPENDENCIES,
+    reason="agilerl[llm] not installed",
+)
+def test_create_population_llmreinforce_normalized_name_and_kwargs_overrides(
+    vector_space,
+):
+    init_hp = {
+        "BATCH_SIZE": 3,
+        "LR": 5e-6,
+        "BETA": 0.02,
+        "MAX_GRAD_NORM": 0.7,
+        "UPDATE_EPOCHS": 2,
+        "MAX_MODEL_LEN": 80,
+        "USE_VLLM": False,
+        "GRADIENT_CHECKPOINTING": False,
+        "COSINE_lR_SCHEDULER": {"num_epochs": 8, "warmup_proportion": 0.2},
+    }
+    actor = MagicMock(name="actor_network")
+    actor.state_dict.return_value = {"w": torch.tensor([2.0])}
+    cloned_actor = MagicMock(name="cloned_actor")
+    pop0 = MagicMock(name="reinforce_agent_0")
+    pop1 = MagicMock(name="reinforce_agent_1")
+    global_vllm_cfg = object()
+    local_vllm_cfg = object()
+
+    with (
+        patch("agilerl.utils.utils.clone_llm", return_value=cloned_actor) as mock_clone,
+        patch(
+            "agilerl.utils.utils.LLMREINFORCE",
+            side_effect=[pop0, pop1],
+        ) as mock_reinforce,
+    ):
+        population = create_population(
+            algo="llmreinforce",
+            observation_space=vector_space,
+            action_space=copy.deepcopy(vector_space),
+            net_config=None,
+            INIT_HP=init_hp,
+            hp_config=None,
+            population_size=2,
+            device="cpu",
+            accelerator=None,
+            actor_network=actor,
+            vllm_config=global_vllm_cfg,
+            torch_compiler="inductor",
+            algo_kwargs={
+                "pad_token_id": 999,
+                "pad_token": "<pad>",
+                "use_vllm": True,
+                "vllm_config": local_vllm_cfg,
+            },
+        )
+
+    assert population == [pop0, pop1]
+    mock_clone.assert_called_once()
+    first_kw = mock_reinforce.call_args_list[0].kwargs
+    second_kw = mock_reinforce.call_args_list[1].kwargs
+    assert first_kw["actor_network"] is actor
+    assert second_kw["actor_network"] is cloned_actor
+    assert first_kw["use_vllm"] is True
+    assert first_kw["vllm_config"] is local_vllm_cfg
+    assert first_kw["torch_compiler"] == "inductor"
+    assert first_kw["lr"] == init_hp["LR"]
+    assert isinstance(first_kw["cosine_lr_schedule_config"], CosineLRScheduleConfig)
+
+
+@pytest.mark.skipif(
+    not HAS_LLM_DEPENDENCIES,
+    reason="agilerl[llm] not installed",
+)
+def test_create_population_llmppo_uses_unique_per_agent_accelerators(vector_space):
+    init_hp = {
+        "BATCH_SIZE": 2,
+        "LR": 7e-5,
+        "BETA": 0.01,
+        "MAX_GRAD_NORM": 0.5,
+        "UPDATE_EPOCHS": 1,
+        "MAX_MODEL_LEN": 96,
+        "MAX_OUTPUT_TOKENS": 12,
+        "USE_VLLM": False,
+        "GRADIENT_CHECKPOINTING": False,
+    }
+    actor = MagicMock(name="actor_network")
+    actor.state_dict.return_value = {"w": torch.tensor([1.0])}
+    cloned_actor = MagicMock(name="cloned_actor")
+    a0 = MagicMock(name="ppo_agent_0")
+    a1 = MagicMock(name="ppo_agent_1")
+    base_accelerator = MagicMock(name="base_accelerator")
+    acc0 = MagicMock(name="agent_accel_0")
+    acc1 = MagicMock(name="agent_accel_1")
+
+    with (
+        patch("agilerl.utils.utils.clone_llm", return_value=cloned_actor),
+        patch(
+            "agilerl.utils.utils.get_state_dict",
+            return_value={"w": torch.tensor([1.0])},
+        ),
+        patch(
+            "agilerl.utils.utils.get_llm_accelerator", side_effect=[acc0, acc1]
+        ) as mock_get_accel,
+        patch("agilerl.utils.utils.LLMPPO", side_effect=[a0, a1]) as mock_llmppo,
+    ):
+        population = create_population(
+            algo="LLMPPO",
+            observation_space=vector_space,
+            action_space=copy.deepcopy(vector_space),
+            net_config=None,
+            INIT_HP=init_hp,
+            hp_config=None,
+            population_size=2,
+            device="cpu",
+            accelerator=base_accelerator,
+            actor_network=actor,
+            algo_kwargs={"pad_token_id": 999, "pad_token": "<pad>", "use_vllm": False},
+        )
+
+    assert population == [a0, a1]
+    assert mock_get_accel.call_args_list == [
+        call(base_accelerator, 0),
+        call(base_accelerator, 1),
+    ]
+    first_kw = mock_llmppo.call_args_list[0].kwargs
+    second_kw = mock_llmppo.call_args_list[1].kwargs
+    assert first_kw["accelerator"] is acc0
+    assert second_kw["accelerator"] is acc1
+
+
 # The function returns a list of episode rewards from the first episode in each parallel environment.
 def test_returns_list_of_episode_rewards():
     rewards = np.array([[1, 2, 3, 4, 5], [4, 5, 6, 7, 8]])
@@ -514,10 +789,7 @@ def test_save_with_accelerator(tmp_path):
     agent.accelerator.wait_for_everyone = Mock()
     agent.algo = "grpo"
     save_llm_checkpoint(agent, str(tmp_path))
-    agent.save_checkpoint.assert_called_once_with(
-        str(tmp_path),
-        lora_only=True,
-    )
+    agent.save_checkpoint.assert_called_once_with(str(tmp_path))
     agent.accelerator.wait_for_everyone.assert_called()
 
 
@@ -528,10 +800,7 @@ def test_save_without_accelerator(tmp_path):
     agent.algo = "grpo"
     agent.accelerator = None
     save_llm_checkpoint(agent, str(tmp_path))
-    agent.save_checkpoint.assert_called_once_with(
-        str(tmp_path),
-        lora_only=True,
-    )
+    agent.save_checkpoint.assert_called_once_with(str(tmp_path))
 
 
 def test_init_wandb_addl_args():
@@ -663,19 +932,7 @@ def test_save_llm_checkpoint_with_path(tmp_path):
     agent.accelerator = None
     path = str(tmp_path / "my_ckpt")
     save_llm_checkpoint(agent, path)
-    agent.save_checkpoint.assert_called_once_with(path, lora_only=True)
-
-
-def test_save_llm_checkpoint_lora_only(tmp_path):
-    agent = Mock()
-    agent.actor = Mock()
-    agent.algo = "grpo"
-    agent.accelerator = None
-    save_llm_checkpoint(agent, str(tmp_path), lora_only=True)
-    agent.save_checkpoint.assert_called_once_with(
-        str(tmp_path),
-        lora_only=True,
-    )
+    agent.save_checkpoint.assert_called_once_with(path)
 
 
 def test_gather_tensor_with_tensor_input():
@@ -811,6 +1068,7 @@ def test_consolidate_mutations():
     for agent in population:
         agent.mut = "lr"
         agent.lr = 0.01
+        agent.lr_critic = None
         agent.optimizer = Mock()
         agent.optimizer.param_groups = [{"lr": 0.01}]
         agent.cosine_lr_schedule_config = {"warmup_steps": 0, "total_steps": 100}
@@ -955,7 +1213,6 @@ def test_create_population_dpo_cpu():
             "pad_token_id": 29,
             "pad_token": "<pad>",
             "lora_config": lora_config,
-            "use_separate_reference_adapter": False,
         },
     )
     assert len(pop) == 2

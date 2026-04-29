@@ -22,6 +22,8 @@ from agilerl.algorithms import (
     DDPG,
     DQN,
     IPPO,
+    LLMPPO,
+    LLMREINFORCE,
     MADDPG,
     MATD3,
     PPO,
@@ -40,8 +42,8 @@ from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clo
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 if HAS_LLM_DEPENDENCIES:
-    from agilerl.algorithms import DPO, GRPO, SFT
-    from agilerl.utils.llm_utils import get_state_dict
+    from agilerl.algorithms import CISPO, DPO, GRPO, GSPO, SFT
+    from agilerl.utils.llm_utils import get_llm_accelerator, get_state_dict
 
 SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
 
@@ -70,6 +72,103 @@ def _check_box2d_available(env_name: str) -> None:
             "Alternatively, use a non-Box2D environment such as 'CartPole-v1'."
         )
         raise ImportError(msg) from None
+
+
+def _normalize_algo_name(algo: str) -> str | None:
+    """Map config-style names to internal algorithm keys."""
+    return algo.upper().replace(" ", "").replace("-", "_")
+
+
+def _lora_config_from_init_hp(INIT_HP: dict[str, Any]) -> Any | None:
+    """Build a ``peft.LoraConfig`` from INIT_HP keys, or return None."""
+    modules = INIT_HP.get("LORA_TARGET_MODULES") or INIT_HP.get("TARGET_MODULES")
+    if not modules:
+        return None
+    if not HAS_LLM_DEPENDENCIES:
+        return None
+    from peft import LoraConfig
+
+    if isinstance(modules, str):
+        modules = [modules]
+    return LoraConfig(
+        r=int(INIT_HP.get("LORA_R", 16)),
+        lora_alpha=int(INIT_HP.get("LORA_ALPHA", 64)),
+        target_modules=list(modules),
+        lora_dropout=float(INIT_HP.get("LORA_DROPOUT", 0.0)),
+        bias=str(INIT_HP.get("LORA_BIAS", "none")),
+        task_type=str(INIT_HP.get("LORA_TASK_TYPE", "CAUSAL_LM")),
+    )
+
+
+def _prepare_llm_algo_kwargs(
+    algo_kwargs: dict[str, Any],
+    *,
+    tokenizer: Any | None,
+    model_name: str | None,
+    lora_config: Any | None,
+    vllm_config: Any | None,
+    INIT_HP: dict[str, Any],
+    with_generation_defaults: bool = True,
+) -> dict[str, Any]:
+    """Merge tokenizer / model / LoRA defaults into ``algo_kwargs``.
+
+    When ``with_generation_defaults`` is True (GRPO / LLMPPO / LLMREINFORCE), also
+    merges vLLM-related defaults. When False (DPO), skips generation stack keys so
+    callers do not inherit ``use_vllm`` / ``vllm_config``; reference-adapter
+    default matches offline preference training (False unless ``INIT_HP`` says
+    otherwise).
+    """
+    merged = dict(algo_kwargs)
+    if tokenizer is not None:
+        merged.setdefault("pad_token_id", tokenizer.pad_token_id)
+        merged.setdefault("pad_token", tokenizer.pad_token)
+    if model_name is not None:
+        merged.setdefault("model_name", model_name)
+    if INIT_HP.get("MODEL_NAME"):
+        merged.setdefault("model_name", INIT_HP["MODEL_NAME"])
+    if lora_config is not None:
+        merged.setdefault("lora_config", lora_config)
+    if merged.get("lora_config") is None:
+        built = _lora_config_from_init_hp(INIT_HP)
+        if built is not None:
+            merged["lora_config"] = built
+    if with_generation_defaults:
+        if vllm_config is not None:
+            merged.setdefault("vllm_config", vllm_config)
+        merged.setdefault("use_vllm", bool(INIT_HP.get("USE_VLLM", False)))
+        merged.setdefault(
+            "use_separate_reference_adapter",
+            INIT_HP.get("USE_SEPARATE_REFERENCE_ADAPTER", True),
+        )
+    else:
+        merged.setdefault(
+            "use_separate_reference_adapter",
+            INIT_HP.get("USE_SEPARATE_REFERENCE_ADAPTER", False),
+        )
+    if "micro_batch_size_per_gpu" not in merged:
+        batch_size = INIT_HP.get("BATCH_SIZE", 16)
+        merged["micro_batch_size_per_gpu"] = INIT_HP.get(
+            "MICRO_BATCH_SIZE_PER_GPU",
+            batch_size,
+        )  # NOTE we should take a look into deepspeed auto batch-sizing
+    if "reduce_memory_peak" not in merged and "REDUCE_MEMORY_PEAK" in INIT_HP:
+        merged["reduce_memory_peak"] = bool(INIT_HP["REDUCE_MEMORY_PEAK"])
+    return merged
+
+
+def _validate_llm_kwargs(merged: dict[str, Any], *, actor_network: Any | None) -> None:
+    if merged.get("pad_token_id") is None or merged.get("pad_token") is None:
+        msg = (
+            "LLM agents require pad_token_id and pad_token; pass tokenizer= to "
+            "create_population or set them in algo_kwargs."
+        )
+        raise ValueError(msg)
+    if merged.get("model_name") is None and actor_network is None:
+        msg = (
+            "LLM agents require model_name or actor_network; pass model_name=, "
+            "set MODEL_NAME in INIT_HP, or pass actor_network=."
+        )
+        raise ValueError(msg)
 
 
 def make_vect_envs(
@@ -262,6 +361,10 @@ def create_population(
     device: str = "cpu",
     accelerator: Any | None = None,
     torch_compiler: Any | None = None,
+    tokenizer: Any | None = None,
+    model_name: str | None = None,
+    lora_config: Any | None = None,
+    vllm_config: Any | None = None,
     algo_kwargs: dict[str, Any] | None = None,
 ) -> PopulationType:
     """Return population of identical agents.
@@ -292,6 +395,19 @@ def create_population(
     :type accelerator: accelerate.Accelerator(), optional
     :param torch_compiler: Torch compiler, defaults to None
     :type torch_compiler: Any, optional
+    :param tokenizer: Hugging Face tokenizer; used to default ``pad_token_id`` /
+        ``pad_token`` for GRPO / DPO / LLMPPO / LLMREINFORCE when not set in ``algo_kwargs``.
+    :type tokenizer: Any, optional
+    :param model_name: HF model id or path; defaults ``algo_kwargs['model_name']``
+        or ``INIT_HP['MODEL_NAME']`` for LLM agents.
+    :type model_name: str, optional
+    :param lora_config: ``peft.LoraConfig``; if omitted, built from
+        ``LORA_*`` / ``TARGET_MODULES`` keys in ``INIT_HP`` when present.
+    :type lora_config: Any, optional
+    :param vllm_config: ``VLLMConfig`` for GRPO / LLMPPO / LLMREINFORCE (ignored for DPO).
+    :type vllm_config: Any, optional
+    :return: Population of agents
+    :rtype: list[EvolvableAlgorithm]
     :param algo_kwargs: Additional keyword arguments for the algorithm
     :type algo_kwargs: dict, optional
     :return: Population of agents
@@ -606,29 +722,48 @@ def create_population(
             )
             population.append(agent)
 
-    elif algo == "GRPO":
+    elif algo in ("GRPO", "CISPO", "GSPO"):
+        if not HAS_LLM_DEPENDENCIES:
+            msg = "GRPO/CISPO/GSPO require optional LLM dependencies (install agilerl[llm])."
+            raise ImportError(msg)
+
+        kwargs = _prepare_llm_algo_kwargs(
+            algo_kwargs,
+            tokenizer=tokenizer,
+            model_name=model_name,
+            lora_config=lora_config,
+            vllm_config=vllm_config,
+            INIT_HP=INIT_HP,
+        )
+        _validate_llm_kwargs(kwargs, actor_network=actor_network)
+        cosine_cfg = INIT_HP.get("COSINE_lR_SCHEDULER")
+        cosine_lr = (
+            CosineLRScheduleConfig(**cosine_cfg) if cosine_cfg is not None else None
+        )
         for idx in range(population_size):
-            agent = GRPO(
-                actor_network=(
-                    (
-                        clone_llm(
-                            actor_network,
-                            zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                            state_dict=(
-                                actor_network.state_dict()
-                                if accelerator is None
-                                else get_state_dict(actor_network)
-                            ),
-                        )
-                        if idx != 0
-                        else actor_network
+            agent_accelerator = get_llm_accelerator(accelerator, idx)
+            act = (
+                (
+                    clone_llm(
+                        actor_network,
+                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
+                        state_dict=(
+                            actor_network.state_dict()
+                            if accelerator is None
+                            else get_state_dict(actor_network)
+                        ),
                     )
-                    if actor_network is not None
-                    else None
-                ),
+                    if idx != 0
+                    else actor_network
+                )
+                if actor_network is not None
+                else None
+            )
+            kw = dict(kwargs)
+            kw.update(
                 hp_config=hp_config,
                 index=idx,
-                batch_size=INIT_HP.get("BATCH_SIZE", 2),
+                batch_size=INIT_HP.get("BATCH_SIZE", 16),
                 beta=INIT_HP.get("BETA", 0.001),
                 lr=INIT_HP.get("LR", 5e-7),
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
@@ -636,55 +771,67 @@ def create_population(
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 group_size=INIT_HP.get("GROUP_SIZE", 8),
                 temperature=INIT_HP.get("TEMPERATURE", 0.9),
+                repetition_penalty=INIT_HP.get("REPETITION_PENALTY", 1.0),
+                top_p=INIT_HP.get("TOP_P", 0.95),
+                top_k=INIT_HP.get("TOP_K", 50),
+                min_p=INIT_HP.get("MIN_P", 0.0),
+                use_memory_efficient_params=INIT_HP.get(
+                    "USE_MEMORY_EFFICIENT_PARAMS", True
+                ),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
                 max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
                 min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
-                cosine_lr_schedule_config=(
-                    CosineLRScheduleConfig(**INIT_HP.get("COSINE_lR_SCHEDULER"))
-                    if INIT_HP.get("COSINE_lR_SCHEDULER") is not None
-                    else None
+                max_model_len=INIT_HP.get("MAX_MODEL_LEN", 1024),
+                cosine_lr_schedule_config=cosine_lr,
+                accelerator=agent_accelerator,
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
+                actor_network=act,
+                seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
+                adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
+                loss_type=INIT_HP.get("LOSS_TYPE", "grpo"),
+                whiten_advantages=INIT_HP.get("WHITEN_ADVANTAGES", False),
+                adv_clip_range=INIT_HP.get("ADV_CLIP_RANGE"),
+                filter_zero_adv=INIT_HP.get(
+                    "FILTER_ZERO_ADV",
+                    INIT_HP.get("FILTER_ZERO_ADVANTAGES", False),
                 ),
-                accelerator=Accelerator() if accelerator else None,
-                device=device,
-                max_model_len=INIT_HP.get("MAX_MODEL_LEN"),
-                **algo_kwargs,
-            )
-            population.append(agent)
-    elif algo == "DPO":
-        for idx in range(population_size):
-            agent = DPO(
-                actor_network=(
-                    clone_llm(
-                        actor_network,
-                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                        state_dict=(
-                            actor_network.state_dict()
-                            if accelerator is None
-                            else get_state_dict(actor_network)
-                        ),
-                    )
-                    if idx != 0
-                    else actor_network
+                adv_filter_eps=INIT_HP.get(
+                    "ADV_FILTER_EPS",
+                    INIT_HP.get("ADVANTAGE_FILTER_EPS", 0.0),
                 ),
-                hp_config=hp_config,
-                index=idx,
-                batch_size=INIT_HP.get("BATCH_SIZE", 2),
-                beta=INIT_HP.get("BETA", 0.001),
-                lr=INIT_HP.get("LR", 5e-7),
-                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
-                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
-                calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
-                accelerator=Accelerator() if accelerator else None,
-                device=device,
-                **algo_kwargs,
             )
+            if torch_compiler is not None:
+                kw.setdefault("torch_compiler", torch_compiler)
+            algo_cls = {"GRPO": GRPO, "CISPO": CISPO, "GSPO": GSPO}[algo]
+            if algo in ("CISPO", "GSPO"):
+                kw.pop("loss_type", None)
+            agent = algo_cls(**kw)
             population.append(agent)
     elif algo == "SFT":
+        if not HAS_LLM_DEPENDENCIES:
+            msg = "SFT requires optional LLM dependencies (install agilerl[llm])."
+            raise ImportError(msg)
+
+        kwargs = _prepare_llm_algo_kwargs(
+            algo_kwargs,
+            tokenizer=tokenizer,
+            model_name=model_name,
+            lora_config=lora_config,
+            vllm_config=vllm_config,
+            INIT_HP=INIT_HP,
+            with_generation_defaults=False,
+        )
+        _validate_llm_kwargs(kwargs, actor_network=actor_network)
+        kwargs.pop("use_vllm", None)
+        kwargs.pop("vllm_config", None)
+        kwargs.pop("use_separate_reference_adapter", None)
+
         for idx in range(population_size):
-            agent = SFT(
-                actor_network=(
+            agent_accelerator = get_llm_accelerator(accelerator, idx)
+            act = (
+                (
                     clone_llm(
                         actor_network,
                         zero_stage=INIT_HP.get("ZERO_STAGE", 0),
@@ -696,19 +843,227 @@ def create_population(
                     )
                     if idx != 0
                     else actor_network
-                ),
+                )
+                if actor_network is not None
+                else None
+            )
+            kw = dict(kwargs)
+            kw.update(
                 hp_config=hp_config,
                 index=idx,
-                batch_size=INIT_HP.get("BATCH_SIZE", 2),
-                lr=INIT_HP.get("LR", 5e-7),
+                batch_size=INIT_HP.get("BATCH_SIZE", 16),
+                lr=INIT_HP.get("LR", 5e-5),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-                reduce_memory_peak=INIT_HP.get("REDUCE_MEMORY_PEAK", False),
-                accelerator=Accelerator() if accelerator else None,
-                device=device,
-                **algo_kwargs,
+                accelerator=agent_accelerator,
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
+                actor_network=act,
+                seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
             )
+            if torch_compiler is not None:
+                kw.setdefault("torch_compiler", torch_compiler)
+            agent = SFT(**kw)
+            population.append(agent)
+    elif algo == "DPO":
+        if not HAS_LLM_DEPENDENCIES:
+            msg = "DPO requires optional LLM dependencies (install agilerl[llm])."
+            raise ImportError(msg)
+
+        kwargs = _prepare_llm_algo_kwargs(
+            algo_kwargs,
+            tokenizer=tokenizer,
+            model_name=model_name,
+            lora_config=lora_config,
+            vllm_config=vllm_config,
+            INIT_HP=INIT_HP,
+            with_generation_defaults=False,
+        )
+        _validate_llm_kwargs(kwargs, actor_network=actor_network)
+        kwargs.pop("use_vllm", None)
+        kwargs.pop("vllm_config", None)
+
+        for idx in range(population_size):
+            agent_accelerator = get_llm_accelerator(accelerator, idx)
+            act = (
+                (
+                    clone_llm(
+                        actor_network,
+                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
+                        state_dict=(
+                            actor_network.state_dict()
+                            if accelerator is None
+                            else get_state_dict(actor_network)
+                        ),
+                    )
+                    if idx != 0
+                    else actor_network
+                )
+                if actor_network is not None
+                else None
+            )
+            kw = dict(kwargs)
+            kw.update(
+                hp_config=hp_config,
+                index=idx,
+                batch_size=INIT_HP.get("BATCH_SIZE", 16),
+                beta=INIT_HP.get("BETA", 0.001),
+                lr=INIT_HP.get("LR", 0.000005),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
+                calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
+                accelerator=agent_accelerator,
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
+                actor_network=act,
+                seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+            )
+            if torch_compiler is not None:
+                kw.setdefault("torch_compiler", torch_compiler)
+            agent = DPO(**kw)
+            population.append(agent)
+
+    elif _normalize_algo_name(algo) == "LLMPPO":
+        if not HAS_LLM_DEPENDENCIES:
+            msg = "LLMPPO requires optional LLM dependencies (install agilerl[llm])."
+            raise ImportError(msg)
+
+        kwargs = _prepare_llm_algo_kwargs(
+            algo_kwargs,
+            tokenizer=tokenizer,
+            model_name=model_name,
+            lora_config=lora_config,
+            vllm_config=vllm_config,
+            INIT_HP=INIT_HP,
+        )
+        _validate_llm_kwargs(kwargs, actor_network=actor_network)
+        cosine_cfg = INIT_HP.get("COSINE_lR_SCHEDULER")
+        cosine_lr = (
+            CosineLRScheduleConfig(**cosine_cfg) if cosine_cfg is not None else None
+        )
+        for idx in range(population_size):
+            agent_accelerator = get_llm_accelerator(accelerator, idx)
+            act = (
+                (
+                    clone_llm(
+                        actor_network,
+                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
+                        state_dict=(
+                            actor_network.state_dict()
+                            if accelerator is None
+                            else get_state_dict(actor_network)
+                        ),
+                    )
+                    if idx != 0
+                    else actor_network
+                )
+                if actor_network is not None
+                else None
+            )
+            kw = dict(kwargs)
+            kw.update(
+                hp_config=hp_config,
+                index=idx,
+                batch_size=INIT_HP.get("BATCH_SIZE", 16),
+                beta=INIT_HP.get("BETA", 0.01),
+                vf_coef=INIT_HP.get("VF_COEF", 0.5),
+                clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
+                gamma=INIT_HP.get("GAMMA", 1.0),
+                gae_lambda=INIT_HP.get("GAE_LAMBDA", 1.0),
+                action_granularity=INIT_HP.get("ACTION_GRANULARITY", "auto"),
+                lr_actor=INIT_HP.get("LR_ACTOR", INIT_HP.get("LR", 5e-6)),
+                lr_critic=INIT_HP.get("LR_CRITIC"),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
+                temperature=INIT_HP.get("TEMPERATURE", 1.0),
+                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
+                min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
+                max_model_len=INIT_HP.get("MAX_MODEL_LEN", 1024),
+                use_memory_efficient_params=INIT_HP.get(
+                    "USE_MEMORY_EFFICIENT_PARAMS", True
+                ),
+                calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
+                cosine_lr_schedule_config=cosine_lr,
+                accelerator=agent_accelerator,
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
+                actor_network=act,
+                seed=INIT_HP.get("SEED", 42),
+            )
+            if torch_compiler is not None:
+                kw.setdefault("torch_compiler", torch_compiler)
+            agent = LLMPPO(**kw)
+            population.append(agent)
+
+    elif _normalize_algo_name(algo) == "LLMREINFORCE":
+        if not HAS_LLM_DEPENDENCIES:
+            msg = (
+                "LLMREINFORCE requires optional LLM dependencies "
+                "(install agilerl[llm])."
+            )
+            raise ImportError(msg)
+
+        kwargs = _prepare_llm_algo_kwargs(
+            algo_kwargs,
+            tokenizer=tokenizer,
+            model_name=model_name,
+            lora_config=lora_config,
+            vllm_config=vllm_config,
+            INIT_HP=INIT_HP,
+        )
+        _validate_llm_kwargs(kwargs, actor_network=actor_network)
+        cosine_cfg = INIT_HP.get("COSINE_lR_SCHEDULER")
+        cosine_lr = (
+            CosineLRScheduleConfig(**cosine_cfg) if cosine_cfg is not None else None
+        )
+        for idx in range(population_size):
+            agent_accelerator = get_llm_accelerator(accelerator, idx)
+            act = (
+                (
+                    clone_llm(
+                        actor_network,
+                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
+                        state_dict=(
+                            actor_network.state_dict()
+                            if accelerator is None
+                            else get_state_dict(actor_network)
+                        ),
+                    )
+                    if idx != 0
+                    else actor_network
+                )
+                if actor_network is not None
+                else None
+            )
+            kw = dict(kwargs)
+            kw.update(
+                hp_config=hp_config,
+                index=idx,
+                batch_size=INIT_HP.get("BATCH_SIZE", 16),
+                beta=INIT_HP.get("BETA", 0.01),
+                clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
+                gamma=INIT_HP.get("GAMMA", 0.99),
+                action_granularity=INIT_HP.get("ACTION_GRANULARITY", "auto"),
+                lr=INIT_HP.get("LR", 5e-7),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
+                temperature=INIT_HP.get("TEMPERATURE", 1.0),
+                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
+                min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
+                max_model_len=INIT_HP.get("MAX_MODEL_LEN"),
+                calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
+                use_memory_efficient_params=INIT_HP.get(
+                    "USE_MEMORY_EFFICIENT_PARAMS", True
+                ),
+                cosine_lr_schedule_config=cosine_lr,
+                accelerator=agent_accelerator,
+                gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
+                actor_network=act,
+                seed=INIT_HP.get("SEED", 42),
+            )
+            if torch_compiler is not None:
+                kw.setdefault("torch_compiler", torch_compiler)
+            agent = LLMREINFORCE(**kw)
             population.append(agent)
     return population
 
@@ -800,9 +1155,7 @@ def tournament_selection_and_mutation(
 
     if language_model:
         elite, population = tournament.select(population)
-        if accelerator is None or (
-            accelerator is not None and accelerator.is_main_process
-        ):
+        if accelerator is None or accelerator.is_main_process:
             population = mutation.mutation(population)
         if accelerator is not None:
             accelerator.wait_for_everyone()
@@ -1074,6 +1427,12 @@ def aggregate_metrics_across_gpus(
     :return: Mean metric
     :rtype: float
     """
+    if accelerator is None:
+        return (
+            metric_tensor.mean().item()
+            if isinstance(metric_tensor, torch.Tensor)
+            else metric_tensor
+        )
     all_metrics = gather_tensor(metric_tensor, accelerator)
     return all_metrics.mean().item()
 
@@ -1096,12 +1455,10 @@ def safe_aggregate_metrics(
 def save_llm_checkpoint(
     agent: LLMAlgorithm,
     checkpoint_path: str | None,
-    lora_only: bool = True,
 ) -> None:
-    """Checkpoint the LLM.
+    """Checkpoint the LLM, saving LoRA adapter weights via HuggingFace ``save_pretrained``.
 
-    When ``lora_only=True`` (the default) the LoRA adapters are saved via HuggingFace
-    ``save_pretrained``, producing a directory that can be reloaded with::
+    The saved directory can be reloaded with::
 
         from peft import PeftModel
         from transformers import AutoModelForCausalLM
@@ -1109,27 +1466,21 @@ def save_llm_checkpoint(
         base_model = AutoModelForCausalLM.from_pretrained("<base-model-name>")
         model = PeftModel.from_pretrained(base_model, "<checkpoint_path>/actor/")
 
-    When ``lora_only=False`` a full AgileRL checkpoint is saved (includes optimizer state
-    and all hyperparameters), which is larger but allows resuming training via
-    ``agent.load_checkpoint(path)``.
-
     :param agent: Agent
     :type agent: LLMAlgorithm
     :param checkpoint_path: Checkpoint path — used as-is (no algo sub-directory is appended).
         Defaults to ``"./saved_checkpoints"`` when ``None``.
     :type checkpoint_path: str
-    :param lora_only: Save only LoRA adapter weights (HuggingFace format), defaults to True
-    :type lora_only: bool, optional
     """
     assert agent.actor is not None, "Actor is not initialized"
     path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
     Path(path).mkdir(parents=True, exist_ok=True)
     if agent.accelerator is not None:
         agent.accelerator.wait_for_everyone()
-        agent.save_checkpoint(path, lora_only=lora_only)
+        agent.save_checkpoint(path)
         agent.accelerator.wait_for_everyone()
     else:
-        agent.save_checkpoint(path, lora_only=lora_only)
+        agent.save_checkpoint(path)
 
 
 def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
@@ -1156,15 +1507,31 @@ def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
         assert index == agent.index
         agent.mut = mut
         setattr(agent, mut, mut_value)
-        if mut == "lr":
+
+        if mut in ("lr", "critic_lr"):
             opt = (
                 agent.optimizer
                 if not isinstance(agent.optimizer.optimizer, DummyOptimizer)
                 else agent.actor.optimizer
             )
-            agent.accelerator, agent.lr_scheduler = LLMAlgorithm.update_lr(
-                opt,
-                getattr(agent, mut),
-                agent.accelerator,
-                agent.cosine_lr_schedule_config,
+            lr = (
+                (agent.lr, agent.lr_critic)
+                if getattr(agent, "lr_critic", None) is not None
+                else agent.lr
             )
+            update_lr_kw = {
+                "optimizer": opt,
+                "lr": lr,
+                "accelerator": agent.accelerator,
+                "scheduler_config": agent.cosine_lr_schedule_config,
+            }
+            agent.accelerator, agent.lr_scheduler = LLMAlgorithm.update_lr(
+                **update_lr_kw
+            )
+
+
+def _distributed_world_size(accelerator: Accelerator | None) -> int:
+    """World size for batch accounting: prefer Accelerate, else torch.distributed."""
+    if accelerator is not None:
+        return accelerator.num_processes
+    return 1

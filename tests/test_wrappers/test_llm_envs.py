@@ -1,5 +1,7 @@
-"""Tests for :mod:`agilerl.wrappers.llm_envs` (reasoning, preference, and SFT gyms)."""
+"""Tests for :mod:`agilerl.llm_envs` (reasoning, preference, and SFT gyms)."""
 
+import importlib
+import sys
 import pytest
 import torch
 from accelerate import Accelerator
@@ -12,7 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
 
-from agilerl.wrappers.llm_envs import (
+from agilerl.llm_envs import (
     IterablePromptBatchGym,
     PreferenceGym,
     ReasoningGym,
@@ -29,6 +31,15 @@ DUMMY_CONVERSATION_TEMPLATE = [
         "content": "question: {question}\nanswer: {answer}",
     },
 ]
+
+
+def test_wrappers_llm_envs_compat_module_warns_and_reexports():
+    sys.modules.pop("agilerl.wrappers.llm_envs", None)
+    with pytest.warns(FutureWarning, match="deprecated"):
+        compat_module = importlib.import_module("agilerl.wrappers.llm_envs")
+    from agilerl.llm_envs import ReasoningGym as NewReasoningGym
+
+    assert compat_module.ReasoningGym is NewReasoningGym
 
 
 def dummy_reward_fn(*args, **kwargs):

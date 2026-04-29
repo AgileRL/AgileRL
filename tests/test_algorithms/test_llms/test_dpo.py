@@ -24,7 +24,7 @@ from agilerl.algorithms.core.base import (
     OptimizerWrapper,
 )
 from agilerl.algorithms.dpo import DPO
-from agilerl.wrappers.llm_envs import PreferenceGym
+from agilerl.llm_envs import PreferenceGym
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.test_grpo import (
     create_module,
@@ -80,7 +80,6 @@ def generate_dpo(
     max_tokens,
     use_separate_reference_adapter,
     pretrained_model_name_or_path,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
     from_name=False,
     use_liger_loss=False,
@@ -130,7 +129,6 @@ def generate_dpo(
         accelerator=accelerator,
         device="cuda" if torch.cuda.is_available() else "cpu",
         use_separate_reference_adapter=use_separate_reference_adapter,
-        reduce_memory_peak=reduce_memory_peak,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
     )
@@ -164,7 +162,6 @@ def dpo_factory():
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [4])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("from_name", [True, False])
 def test_init_dpo(
@@ -180,7 +177,6 @@ def test_init_dpo(
     input_size,
     max_tokens,
     data_batch_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
     from_name,
 ):
@@ -194,13 +190,12 @@ def test_init_dpo(
         max_tokens,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
         from_name=from_name,
     )
-    assert dpo.batch_size_per_process == 16 if not reduce_memory_peak else 1
+    assert dpo.batch_size_per_process == 16
     assert dpo.beta == 0.1
-    assert dpo.lr == 1e-4 if use_deepspeed_optimizer else 1e-5, dpo.lr == 1e-4
+    assert dpo.lr == 0.000005
     assert dpo.max_grad_norm == 0.1
     assert dpo.update_epochs == 1
     assert dpo.temperature == 1
@@ -235,12 +230,10 @@ def test_init_dpo(
 
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_dpo_model_name_none_actor_network_none(
     use_separate_reference_adapter,
     vocab_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     with pytest.raises(
@@ -255,7 +248,6 @@ def test_init_dpo_model_name_none_actor_network_none(
             accelerator=None,
             device="cuda" if torch.cuda.is_available() else "cpu",
             use_separate_reference_adapter=use_separate_reference_adapter,
-            reduce_memory_peak=reduce_memory_peak,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         )
 
@@ -281,7 +273,6 @@ def test_init_dpo_model_name_none_actor_network_none(
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [4])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_get_action(
     deepspeed_env,
@@ -296,7 +287,6 @@ def test_dpo_get_action(
     input_size,
     max_tokens,
     data_batch_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     dpo = dpo_factory(
@@ -309,7 +299,6 @@ def test_dpo_get_action(
         max_tokens,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     with pytest.raises(NotImplementedError):
@@ -336,7 +325,6 @@ def test_dpo_get_action(
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [32])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("use_liger_loss", [False, True])
 def test_dpo_learn(
@@ -352,7 +340,6 @@ def test_dpo_learn(
     input_size,
     max_tokens,
     data_batch_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
     use_liger_loss,
 ):
@@ -366,7 +353,6 @@ def test_dpo_learn(
         max_tokens,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
     )
@@ -405,7 +391,10 @@ def test_dpo_learn(
 
     prompts = env.reset()
     pre_learn_actor_state_dict = copy.deepcopy(dpo.actor.state_dict())
-    loss, chosen_reward, rejected_reward = dpo.learn(prompts)
+    learn_result = dpo.learn(prompts)
+    loss = learn_result["mean_loss"]
+    chosen_reward = learn_result["mean_chosen_reward"]
+    rejected_reward = learn_result["mean_rejected_reward"]
 
     assert isinstance(loss, float)
     assert isinstance(chosen_reward, float)
@@ -447,7 +436,6 @@ def test_dpo_learn(
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [2])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_test(
     deepspeed_env,
@@ -462,7 +450,6 @@ def test_dpo_test(
     input_size,
     max_tokens,
     data_batch_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     dpo = dpo_factory(
@@ -475,7 +462,6 @@ def test_dpo_test(
         max_tokens,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     train_dataset = Dataset.from_dict(
@@ -540,7 +526,6 @@ def test_dpo_liger_unavailable_behaviour(
                 max_tokens=10,
                 use_separate_reference_adapter=False,
                 pretrained_model_name_or_path=None,
-                reduce_memory_peak=False,
                 micro_batch_size_per_gpu=None,
                 from_name=False,
                 use_liger_loss=True,
@@ -557,7 +542,6 @@ def test_dpo_liger_unavailable_behaviour(
             max_tokens=10,
             use_separate_reference_adapter=False,
             pretrained_model_name_or_path=None,
-            reduce_memory_peak=False,
             micro_batch_size_per_gpu=None,
             from_name=False,
             use_liger_loss=False,
@@ -584,32 +568,6 @@ def test_dpo_load():
         DPO.load("path")
 
 
-def test_liger_dpo_with_alpha_backward_returns_sixteen_outputs_with_trailing_nones() -> (
-    None
-):
-    """``_LigerDPOWithAlpha.backward`` forwards to the base, keeps four grads, pads twelve ``None``."""
-    from agilerl import HAS_LIGER_KERNEL
-
-    if not HAS_LIGER_KERNEL:
-        pytest.skip("liger-kernel not installed")
-
-    import agilerl.algorithms.dpo as dpo_mod
-
-    def fake_parent_backward(ctx, grad_output):
-        return tuple(range(16))
-
-    with patch.object(
-        dpo_mod.LigerFusedLinearPreferenceBase,
-        "backward",
-        staticmethod(fake_parent_backward),
-    ):
-        out = dpo_mod._LigerDPOWithAlpha.backward(MagicMock(), torch.tensor(1.0))
-
-    assert len(out) == 16
-    assert out[:4] == (0, 1, 2, 3)
-    assert out[4:] == (None,) * 12
-
-
 @pytest.mark.parametrize(
     "config, use_deepspeed_optimizer",
     [(None, False)],
@@ -622,7 +580,6 @@ def test_liger_dpo_with_alpha_backward_returns_sixteen_outputs_with_trailing_non
     "pretrained_model_name_or_path",
     [TINY_LLM_FIXTURE_PATH],
 )
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_clean_up(
     deepspeed_env,
@@ -636,7 +593,6 @@ def test_dpo_clean_up(
     vocab_size,
     input_size,
     max_tokens,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     dpo = dpo_factory(
@@ -649,7 +605,6 @@ def test_dpo_clean_up(
         max_tokens,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     dpo.clean_up()
@@ -670,7 +625,6 @@ def test_dpo_clean_up(
     "pretrained_model_name_or_path",
     [TINY_LLM_FIXTURE_PATH],
 )
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("lora_only", [False, True])
 def test_dpo_save_load_checkpoint(
@@ -685,7 +639,6 @@ def test_dpo_save_load_checkpoint(
     input_size,
     max_tokens,
     pretrained_model_name_or_path,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
     lora_only,
 ):
@@ -699,7 +652,6 @@ def test_dpo_save_load_checkpoint(
         max_tokens,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
@@ -712,6 +664,7 @@ def test_dpo_save_load_checkpoint(
             device="cuda" if torch.cuda.is_available() else "cpu",
             accelerator=accelerator,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            lora_config=copy.deepcopy(dpo.lora_config),
         )
         new_dpo.load_checkpoint(tmpdir)
 
@@ -736,6 +689,20 @@ def test_dpo_save_load_checkpoint(
                     strict=False,
                 ):
                     assert torch.equal(param, new_param)
+            elif attr == "lora_config":
+                assert getattr(new_dpo, attr) is not None
+                assert getattr(dpo, attr) is not None
+                old_targets = set(getattr(dpo, attr).target_modules)
+                new_targets = set(getattr(new_dpo, attr).target_modules)
+                assert old_targets == new_targets
+                assert getattr(new_dpo, attr).r == getattr(dpo, attr).r
+                assert (
+                    getattr(new_dpo, attr).lora_alpha == getattr(dpo, attr).lora_alpha
+                )
+                assert (
+                    getattr(new_dpo, attr).lora_dropout
+                    == getattr(dpo, attr).lora_dropout
+                )
             elif attr in ("accelerator", "lr_scheduler"):
                 assert (
                     getattr(new_dpo, attr).__class__.__name__
@@ -763,7 +730,6 @@ def test_dpo_save_load_checkpoint(
     "pretrained_model_name_or_path",
     [TINY_LLM_FIXTURE_PATH],
 )
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_exception_on_recompile(
     deepspeed_env,
@@ -777,7 +743,6 @@ def test_dpo_exception_on_recompile(
     vocab_size,
     input_size,
     max_tokens,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     dpo = dpo_factory(
@@ -790,11 +755,9 @@ def test_dpo_exception_on_recompile(
         max_tokens,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
-    with pytest.raises(NotImplementedError):
-        dpo.recompile()
+    dpo.recompile()
     dpo.clean_up()
 
 
@@ -816,7 +779,6 @@ def test_dpo_no_llm_dependencies(dpo_factory, model_factory, accelerator_factory
             max_tokens=10,
             use_separate_reference_adapter=False,
             pretrained_model_name_or_path=None,
-            reduce_memory_peak=False,
             micro_batch_size_per_gpu=None,
             from_name=False,
         )
@@ -836,7 +798,6 @@ def test_dpo_no_llm_dependencies(dpo_factory, model_factory, accelerator_factory
     [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("batch_size", [1])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_get_logprobs(
     deepspeed_env,
@@ -851,7 +812,6 @@ def test_dpo_get_logprobs(
     max_tokens,
     pretrained_model_name_or_path,
     batch_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     dpo = dpo_factory(
@@ -864,7 +824,6 @@ def test_dpo_get_logprobs(
         max_tokens,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     ids = torch.randint(0, vocab_size, (batch_size, input_size + max_tokens)).to(
@@ -888,7 +847,6 @@ def test_dpo_get_logprobs(
     [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("batch_size", [1])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_backward_pass(
     deepspeed_env,
@@ -903,7 +861,6 @@ def test_dpo_backward_pass(
     max_tokens,
     pretrained_model_name_or_path,
     batch_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     dpo = dpo_factory(
@@ -916,7 +873,6 @@ def test_dpo_backward_pass(
         max_tokens,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     ids = torch.randint(0, vocab_size, (batch_size, input_size + max_tokens)).to(
@@ -939,7 +895,6 @@ def test_dpo_backward_pass(
     "pretrained_model_name_or_path",
     [TINY_LLM_FIXTURE_PATH],
 )
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_preprocess_observation(
     deepspeed_env,
@@ -953,7 +908,6 @@ def test_dpo_preprocess_observation(
     vocab_size,
     input_size,
     max_tokens,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     dpo = dpo_factory(
@@ -966,7 +920,6 @@ def test_dpo_preprocess_observation(
         max_tokens,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     obs = dpo.preprocess_observation(
@@ -988,7 +941,6 @@ def test_dpo_preprocess_observation(
     "pretrained_model_name_or_path",
     [TINY_LLM_FIXTURE_PATH],
 )
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_set_reference_policy(
     deepspeed_env,
@@ -1002,7 +954,6 @@ def test_dpo_set_reference_policy(
     vocab_size,
     input_size,
     max_tokens,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     dpo = dpo_factory(
@@ -1015,7 +966,6 @@ def test_dpo_set_reference_policy(
         max_tokens,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     reference_update_tracker = 0
@@ -1038,53 +988,3 @@ def test_dpo_set_reference_policy(
     assert torch.allclose(output_before, output_after)
     assert dpo.reference_update_tracker == reference_update_tracker
     dpo.clean_up()
-
-
-@pytest.mark.parametrize(
-    "config, use_deepspeed_optimizer",
-    [(None, False)],
-)
-@pytest.mark.parametrize("use_separate_reference_adapter", [True])
-@pytest.mark.parametrize("vocab_size", [100])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
-def test_dpo_set_reference_policy_with_wrong_adapter_name(
-    deepspeed_env,
-    accelerator_factory,
-    config,
-    use_deepspeed_optimizer,
-    use_separate_reference_adapter,
-    vocab_size,
-    input_size,
-    max_tokens,
-    reduce_memory_peak,
-):
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    lora_config = LoraConfig(
-        r=16,
-        lora_alpha=64,
-        target_modules=["linear_1"],
-        task_type="CAUSAL_LM",
-        lora_dropout=0.05,
-    )
-    with pytest.raises(ValueError):
-        dpo = DPO(
-            actor_network=create_module(
-                input_size=input_size,
-                max_tokens=max_tokens,
-                vocab_size=vocab_size,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            ),
-            lr=0.1,
-            pad_token_id=vocab_size - 1,
-            pad_token="<pad>",
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            lora_config=lora_config,
-            accelerator=accelerator,
-            use_separate_reference_adapter=True,
-        )
-        dpo.actor.add_adapter("wrong_adapter", peft_config=lora_config)
-        dpo.set_reference_policy(reference_update_tracker=1)
-    dpo.clean_up()
-    AcceleratorState._reset_state(True)

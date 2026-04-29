@@ -6,11 +6,13 @@ import numpy as np
 import torch
 from gymnasium import spaces
 
-from agilerl.algorithms import PPO
+from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE, PPO
+from agilerl.llm_envs import SyncMultiTurnVecEnv
 from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType
 
 SupportedOnPolicy = PPO
+SupportedOnPolicyLLM = LLMPPO | LLMREINFORCE | GRPO
 
 
 def _collect_rollouts(
@@ -236,3 +238,66 @@ def collect_rollouts_recurrent(
     :rtype: list[float]
     """
     return _collect_rollouts(agent, env, n_steps, recurrent=True, **kwargs)
+
+
+def collect_rollouts_llm(
+    agent: SupportedOnPolicyLLM,
+    env: SyncMultiTurnVecEnv,
+    n_steps: int,
+    batch_size: int,
+    group_seed: int,
+    **kwargs,
+) -> tuple[
+    list[torch.Tensor],
+    list[torch.Tensor],
+    list[torch.Tensor],
+    list[torch.Tensor],
+    int,
+    int,
+]:
+    """Collect multi-turn rollouts for LLM on-policy algorithms.
+
+    :param agent: The agent to collect rollouts for.
+    :type agent: SupportedOnPolicyLLM
+    :param env: Synchronous vectorized multi-turn environment.
+    :type env: SyncGemVecEnv
+    :param n_steps: Number of steps (max turns) for the agent to take.
+    :type n_steps: int
+    :param batch_size: Number of environments to collect rollouts from.
+    :type batch_size: int
+    :param group_seed: Seed for the group of environments.
+    :type group_seed: int
+    :return: Episode tensors, masks, turn ids, rewards, counted batch steps,
+        and updated group seed.
+    :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int]
+    """
+    prompts = env.reset(
+        seed=group_seed,
+    )
+
+    for _turn_idx in range(n_steps):
+        if prompts is None:
+            break
+        if isinstance(agent, GRPO):
+            completion_ids, _ = agent.get_action(
+                prompts,
+                training=True,
+                repeat_prompts=False,
+            )
+        else:
+            completion_ids, _ = agent.get_action(prompts, training=True)
+        prompts = env.step(completion_ids)
+
+    completion_ids_list, action_masks_list, all_turn_ids, all_rewards, batch_steps = (
+        env.get_trajectories()
+    )
+    group_seed = group_seed + batch_size
+
+    return (
+        completion_ids_list,
+        action_masks_list,
+        all_turn_ids,
+        all_rewards,
+        batch_steps,
+        group_seed,
+    )
