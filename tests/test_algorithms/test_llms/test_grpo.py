@@ -46,6 +46,7 @@ from tests import TINY_LLM_FIXTURE_PATH
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
+    spawn_new_process_for_each_test,
 )
 from agilerl.utils.llm_utils import ReasoningGym
 
@@ -645,7 +646,7 @@ def test_init_grpo_vllm_sleep_mode_calls_sleep(MockLLM, model_factory):
     MockLLM.return_value = mock_instance
 
     grpo = GRPO(
-        actor_network=model_factory("facebook/opt-125m"),
+        actor_network=model_factory(TINY_LLM_FIXTURE_PATH),
         pad_token_id=999,
         pad_token="<pad>",
         group_size=2,
@@ -844,7 +845,7 @@ def test_init_grpo_warns_when_hf_generate_chunk_size_set_with_vllm(
         UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
     ):
         grpo = GRPO(
-            actor_network=model_factory("facebook/opt-125m"),
+            actor_network=model_factory(TINY_LLM_FIXTURE_PATH),
             pad_token_id=999,
             pad_token="<pad>",
             group_size=2,

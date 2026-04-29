@@ -14,8 +14,6 @@ from agilerl.algorithms import (
     DDPG,
     DQN,
     IPPO,
-    LLMPPO,
-    LLMREINFORCE,
     MADDPG,
     MATD3,
     NeuralTS,
@@ -27,7 +25,9 @@ from agilerl.algorithms import (
 from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 
 if HAS_LLM_DEPENDENCIES:
-    from agilerl.algorithms import GRPO
+    from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
+else:
+    LLMPPO = LLMREINFORCE = None
 from agilerl.typing import BatchDimension
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection

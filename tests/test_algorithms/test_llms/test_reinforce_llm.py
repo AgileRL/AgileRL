@@ -5,6 +5,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+
+pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
+pytest.importorskip("vllm", reason="LLM tests require vllm.")
+
 from accelerate.state import AcceleratorState
 from peft import LoraConfig
 from torch import nn
@@ -14,6 +18,7 @@ from transformers.modeling_utils import PreTrainedModel
 from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym
+from tests import TINY_LLM_FIXTURE_PATH
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
@@ -648,7 +653,7 @@ def test_init_action_granularity_must_be_valid():
 def test_init_clone_requires_pretrained_like_actor():
     with pytest.raises(AssertionError, match="PeftModelProtocol"):
         REINFORCE(
-            model_name="facebook/opt-125m",
+            model_name=TINY_LLM_FIXTURE_PATH,
             actor_network=object(),
             pad_token_id=99,
             pad_token="<pad>",

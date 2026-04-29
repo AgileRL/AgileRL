@@ -1,18 +1,25 @@
 """Functions for collecting rollouts for on-policy algorithms."""
 
-from typing import Any
+from __future__ import annotations
+
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import torch
 from gymnasium import spaces
 
-from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE, PPO
-from agilerl.llm_envs import SyncMultiTurnVecEnv
+from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.algorithms import PPO
 from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType
 
+if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
+    from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
+    from agilerl.llm_envs import SyncMultiTurnVecEnv
+
+    SupportedOnPolicyLLM = LLMPPO | LLMREINFORCE | GRPO
+
 SupportedOnPolicy = PPO
-SupportedOnPolicyLLM = LLMPPO | LLMREINFORCE | GRPO
 
 
 def _collect_rollouts(

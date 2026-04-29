@@ -1870,6 +1870,10 @@ class TestRenamePeftPrimaryAdapterKeysInStateDict:
         assert "lora_actor.bias" in out
 
 
+@pytest.mark.skipif(
+    not HAS_LLM_DEPENDENCIES,
+    reason="clone_llm tests require peft/transformers (LLM extras).",
+)
 class TestCloneLlm:
     def test_clone_llm_peft_path_handles_multiple_adapters_and_state_rename(
         self, monkeypatch

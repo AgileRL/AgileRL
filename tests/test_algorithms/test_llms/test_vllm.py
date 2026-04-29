@@ -3,8 +3,12 @@ from contextlib import contextmanager
 import pytest
 import torch
 
+pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
+pytest.importorskip("vllm", reason="LLM tests require vllm.")
+
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym
+from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.test_reinforce_llm import (
     generate_reinforce,
 )
@@ -58,7 +62,7 @@ def _minimal_reasoning_gym(
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("pretrained_model_name_or_path", ["facebook/opt-125m"])
+@pytest.mark.parametrize("pretrained_model_name_or_path", [TINY_LLM_FIXTURE_PATH])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_vllm_methods(
     deepspeed_env,
