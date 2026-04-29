@@ -39,7 +39,7 @@ from agilerl.algorithms.core.base import (
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
 from tests import TINY_LLM_FIXTURE_PATH
-from tests.utils import spawn_new_process_for_each_test
+from tests.utils import force_gpu_memory_release, spawn_new_process_for_each_test
 
 pytestmark = pytest.mark.llm
 
@@ -455,65 +455,108 @@ def test_grpo_save_load_checkpoint_vllm(
         reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with tempfile.TemporaryDirectory() as checkpoint_dir:
-        grpo.save_checkpoint(checkpoint_dir)
-        new_grpo = GRPO(
-            actor_network=model_factory(pretrained_model_name_or_path),
-            pad_token_id=vocab_size - 1,
-            pad_token="<pad>",
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            group_size=group_size,
-            cosine_lr_schedule_config=(
-                None
-                if accelerator is not None
-                else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
-            ),
-            use_vllm=use_vllm,
-            vllm_config=VLLMConfig(gpu_memory_utilization=0.05, max_num_seqs=1),
-            accelerator=accelerator,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-            max_output_tokens=max_tokens,
-        )
-        new_grpo.load_checkpoint(checkpoint_dir)
+    new_grpo = None
+    try:
+        with tempfile.TemporaryDirectory() as checkpoint_dir:
+            grpo.save_checkpoint(checkpoint_dir)
 
-        assert isinstance(new_grpo.actor, DeepSpeedEngine)
-        assert isinstance(new_grpo.actor.base_model, (PeftModel, LoraModel))
+            expected_actor_params = [
+                param.detach().cpu().clone() for param in grpo.actor.parameters()
+            ]
+            expected_optimizer_params = [
+                param.detach().cpu().clone() for param in grpo.optimizer.parameters()
+            ]
+            expected_class_names = {
+                attr: getattr(grpo, attr).__class__.__name__
+                for attr in ("accelerator", "lr_scheduler")
+            }
+            expected_attr_names = EvolvableAlgorithm.inspect_attributes(grpo)
+            expected_attrs = {}
+            for attr in expected_attr_names:
+                if (
+                    attr.startswith("_")
+                    or attr.startswith("__")
+                    or attr
+                    in {"actor", "optimizer", "accelerator", "lr_scheduler", "llm"}
+                ):
+                    continue
 
-        for attr in EvolvableAlgorithm.inspect_attributes(grpo):
-            if not attr.startswith("_") and not attr.startswith("__"):
-                if attr == "rng":
-                    assert hasattr(new_grpo, attr)
-                elif attr == "actor":
-                    for param, new_param in zip(
-                        grpo.actor.parameters(),
-                        new_grpo.actor.parameters(),
-                        strict=False,
-                    ):
-                        assert torch.equal(param, new_param)
-                elif attr == "optimizer":
-                    for param, new_param in zip(
-                        grpo.optimizer.parameters(),
-                        new_grpo.optimizer.parameters(),
-                        strict=False,
-                    ):
-                        assert torch.equal(param, new_param)
-                elif attr == "accelerator" or attr == "lr_scheduler":
-                    assert (
-                        getattr(new_grpo, attr).__class__.__name__
-                        == getattr(grpo, attr).__class__.__name__
-                    )
-                elif attr == "llm":
-                    assert hasattr(new_grpo, attr) and isinstance(new_grpo.llm, LLM)
-                elif not isinstance(getattr(grpo, attr), torch.Tensor):
-                    assert getattr(new_grpo, attr) == getattr(
-                        grpo,
-                        attr,
-                    ), f"Attribute {attr} is not equal"
-                else:
-                    assert torch.equal(getattr(new_grpo, attr), getattr(grpo, attr))
-    new_grpo.clean_up()
-    grpo.clean_up()
+                value = getattr(grpo, attr)
+                expected_attrs[attr] = (
+                    value.detach().cpu().clone()
+                    if isinstance(value, torch.Tensor)
+                    else copy.deepcopy(value)
+                )
+
+            # vLLM profiles available memory during construction. Release the
+            # first engine before creating the second one so the profile sees a
+            # stable CUDA allocation within this subprocess.
+            grpo.clean_up()
+            grpo = None
+            force_gpu_memory_release()
+
+            accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+            new_grpo = GRPO(
+                actor_network=model_factory(pretrained_model_name_or_path),
+                pad_token_id=vocab_size - 1,
+                pad_token="<pad>",
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                group_size=group_size,
+                cosine_lr_schedule_config=(
+                    None
+                    if accelerator is not None
+                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+                ),
+                use_vllm=use_vllm,
+                vllm_config=VLLMConfig(gpu_memory_utilization=0.05, max_num_seqs=1),
+                accelerator=accelerator,
+                use_separate_reference_adapter=use_separate_reference_adapter,
+                max_output_tokens=max_tokens,
+                max_model_len=max_tokens + 2048,
+            )
+            new_grpo.load_checkpoint(checkpoint_dir)
+
+            assert isinstance(new_grpo.actor, DeepSpeedEngine)
+            assert isinstance(new_grpo.actor.base_model, (PeftModel, LoraModel))
+
+            for attr in expected_attr_names:
+                if not attr.startswith("_") and not attr.startswith("__"):
+                    if attr == "rng":
+                        assert hasattr(new_grpo, attr)
+                    elif attr == "actor":
+                        for param, new_param in zip(
+                            expected_actor_params,
+                            new_grpo.actor.parameters(),
+                            strict=False,
+                        ):
+                            assert torch.equal(param, new_param.cpu())
+                    elif attr == "optimizer":
+                        for param, new_param in zip(
+                            expected_optimizer_params,
+                            new_grpo.optimizer.parameters(),
+                            strict=False,
+                        ):
+                            assert torch.equal(param, new_param.cpu())
+                    elif attr == "accelerator" or attr == "lr_scheduler":
+                        assert (
+                            getattr(new_grpo, attr).__class__.__name__
+                            == expected_class_names[attr]
+                        )
+                    elif attr == "llm":
+                        assert hasattr(new_grpo, attr) and isinstance(new_grpo.llm, LLM)
+                    elif not isinstance(expected_attrs[attr], torch.Tensor):
+                        assert getattr(new_grpo, attr) == expected_attrs[attr], (
+                            f"Attribute {attr} is not equal"
+                        )
+                    else:
+                        assert torch.equal(
+                            getattr(new_grpo, attr).cpu(), expected_attrs[attr]
+                        )
+    finally:
+        if new_grpo is not None:
+            new_grpo.clean_up()
+        if grpo is not None:
+            grpo.clean_up()
 
 
 @spawn_new_process_for_each_test
