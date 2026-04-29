@@ -328,8 +328,14 @@ def generate_grpo(
         accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
     if use_vllm:
         lora_config = None
+        # Keep gpu_memory_utilization low: the Linux CI matrix runs 4
+        # containers sharing one physical GPU, and vLLM's profiler asserts
+        # that initial vs. current free memory differ. A high request can't
+        # be satisfied alongside the other containers and the profile pass
+        # allocates nothing, tripping the assertion. The model under test is
+        # the tiny Qwen2 fixture with max_num_seqs=1, so this is plenty.
         vllm_config = VLLMConfig(
-            gpu_memory_utilization=0.5, max_num_seqs=1, sleep_mode=sleep_mode
+            gpu_memory_utilization=0.22, max_num_seqs=1, sleep_mode=sleep_mode
         )
 
         actor = model_factory(pretrained_model_name_or_path)
