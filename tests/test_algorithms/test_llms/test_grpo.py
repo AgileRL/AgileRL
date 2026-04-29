@@ -1029,8 +1029,10 @@ def test_grpo_test_vllm(
 )
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(False, TINY_LLM_FIXTURE_PATH)],
-    [(True, TINY_LLM_FIXTURE_PATH)],
+    [
+        (False, TINY_LLM_FIXTURE_PATH),
+        (True, TINY_LLM_FIXTURE_PATH),
+    ],
 )
 @pytest.mark.parametrize(
     "micro_batch_size_per_gpu",
