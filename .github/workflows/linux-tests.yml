@@ -70,11 +70,22 @@ jobs:
                   uv sync --locked --all-groups --extra all
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
 
+            - name: Reset coverage data
+              run: rm -f .coverage .coverage.*
+
             - name: Run non-LLM tests (parallel)
               run: uv run pytest -m "not llm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
 
             - name: Run LLM tests (sequential, exclusive GPU)
               run: uv run pytest -n0 -m "llm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
+
+            - name: Combine coverage data
+              run: |
+                  if ls .coverage.* >/dev/null 2>&1; then
+                      uv run coverage combine
+                  else
+                      echo "No parallel coverage shards found; skipping combine."
+                  fi
 
             - name: Generate coverage report
               run: uv run coverage xml -o coverage.xml
