@@ -316,9 +316,7 @@ class ComplexTupleSpaceTestEnv(ParallelEnv):
 
 def make_observation_views(env_cls, num_envs=1):
     env = env_cls()
-    obs_spaces = {
-        agent: env.observation_space(agent) for agent in env.possible_agents
-    }
+    obs_spaces = {agent: env.observation_space(agent) for agent in env.possible_agents}
     agents = env.possible_agents.copy()
     env.close()
     shared_memory = create_shared_memory(num_envs, obs_spaces, mp.get_context())
@@ -1205,9 +1203,9 @@ class ImageObsTestEnv(ParallelEnv):
 
     def reset(self, seed=None, options=None):
         self.agents = self.possible_agents.copy()
-        return {
-            agent: np.zeros((7, 7, 3), dtype=np.uint8) for agent in self.agents
-        }, {agent: {} for agent in self.agents}
+        return {agent: np.zeros((7, 7, 3), dtype=np.uint8) for agent in self.agents}, {
+            agent: {} for agent in self.agents
+        }
 
     def step(self, actions):
         return (
