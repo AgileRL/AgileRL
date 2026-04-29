@@ -87,6 +87,7 @@ def generate_dpo(
     if config is not None and not torch.cuda.is_available():
         pytest.skip("DeepSpeed-configured LLM tests require CUDA support.")
 
+    config = copy.deepcopy(config)
     gc.collect()
     torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
@@ -140,30 +141,94 @@ def dpo_factory():
     return generate_dpo
 
 
+def _make_cpu_dpo_for_branch_tests(**kwargs):
+    vocab_size = kwargs.pop("vocab_size", 100)
+    input_size = kwargs.pop("input_size", 10)
+    max_tokens = kwargs.pop("max_tokens", 20)
+    defaults = {
+        "actor_network": create_module(
+            input_size=input_size,
+            max_tokens=max_tokens,
+            vocab_size=vocab_size,
+            device="cpu",
+        ),
+        "pad_token_id": vocab_size - 1,
+        "pad_token": "<pad>",
+        "lora_config": LoraConfig(
+            r=4,
+            lora_alpha=16,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        ),
+        "batch_size": 4,
+        "micro_batch_size_per_gpu": 2,
+        "accelerator": None,
+        "wrap": False,
+        "gradient_checkpointing": False,
+        "device": "cpu",
+    }
+    defaults.update(kwargs)
+    return DPO(**defaults)
+
+
 @pytest.mark.parametrize(
-    "config, use_deepspeed_optimizer",
+    (
+        "config",
+        "use_deepspeed_optimizer",
+        "pretrained_model_name_or_path",
+        "from_name",
+        "use_separate_reference_adapter",
+    ),
     [
-        (None, False),
-        (deepspeed_config_stage_1, True),
-        (deepspeed_config_stage_1, False),
-        (deepspeed_config_stage_2, True),
-        (deepspeed_config_stage_2, False),
+        pytest.param(None, False, None, False, False, id="actor-network"),
+        pytest.param(None, False, None, False, True, id="actor-network-reference"),
+        pytest.param(
+            None,
+            False,
+            TINY_LLM_FIXTURE_PATH,
+            True,
+            False,
+            id="model-name",
+        ),
+        pytest.param(
+            deepspeed_config_stage_1,
+            True,
+            None,
+            False,
+            False,
+            id="zero1-ds-optimizer",
+        ),
+        pytest.param(
+            deepspeed_config_stage_1,
+            False,
+            None,
+            False,
+            False,
+            id="zero1-torch-optimizer",
+        ),
+        pytest.param(
+            deepspeed_config_stage_2,
+            True,
+            None,
+            False,
+            False,
+            id="zero2-ds-optimizer",
+        ),
+        pytest.param(
+            deepspeed_config_stage_2,
+            False,
+            None,
+            False,
+            False,
+            id="zero2-torch-optimizer",
+        ),
     ],
 )
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize(
-    "pretrained_model_name_or_path",
-    [
-        TINY_LLM_FIXTURE_PATH,
-        # None,
-    ],
-)
-@pytest.mark.parametrize("data_batch_size", [4])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-@pytest.mark.parametrize("from_name", [True, False])
 def test_init_dpo(
     deepspeed_env,
     dpo_factory,
@@ -176,7 +241,6 @@ def test_init_dpo(
     vocab_size,
     input_size,
     max_tokens,
-    data_batch_size,
     micro_batch_size_per_gpu,
     from_name,
 ):
@@ -254,57 +318,11 @@ def test_init_dpo_model_name_none_actor_network_none(
     AcceleratorState._reset_state(True)
 
 
-@pytest.mark.parametrize(
-    "config, use_deepspeed_optimizer",
-    [
-        (None, False),
-        (deepspeed_config_stage_2, True),
-        (deepspeed_config_stage_2, False),
-    ],
-)
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
-@pytest.mark.parametrize("vocab_size", [100])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize(
-    "pretrained_model_name_or_path",
-    [
-        TINY_LLM_FIXTURE_PATH,
-    ],
-)
-@pytest.mark.parametrize("data_batch_size", [4])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_dpo_get_action(
-    deepspeed_env,
-    dpo_factory,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
-    use_separate_reference_adapter,
-    pretrained_model_name_or_path,
-    vocab_size,
-    input_size,
-    max_tokens,
-    data_batch_size,
-    micro_batch_size_per_gpu,
-):
-    dpo = dpo_factory(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        use_separate_reference_adapter,
-        pretrained_model_name_or_path,
-        micro_batch_size_per_gpu,
-    )
+def test_dpo_get_action():
+    dpo = _make_cpu_dpo_for_branch_tests()
     with pytest.raises(NotImplementedError):
         dpo.get_action(obs=None)
     dpo.clean_up()
-    AcceleratorState._reset_state(True)
 
 
 @pytest.mark.parametrize(
@@ -785,46 +803,17 @@ def test_dpo_no_llm_dependencies(dpo_factory, model_factory, accelerator_factory
     AcceleratorState._reset_state(True)
 
 
-@pytest.mark.parametrize(
-    "config, use_deepspeed_optimizer",
-    [(None, False)],
-)
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
-@pytest.mark.parametrize("vocab_size", [100])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize(
-    "pretrained_model_name_or_path",
-    [TINY_LLM_FIXTURE_PATH],
-)
 @pytest.mark.parametrize("batch_size", [1])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_get_logprobs(
-    deepspeed_env,
-    dpo_factory,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
     use_separate_reference_adapter,
-    vocab_size,
-    input_size,
-    max_tokens,
-    pretrained_model_name_or_path,
     batch_size,
-    micro_batch_size_per_gpu,
 ):
-    dpo = dpo_factory(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        use_separate_reference_adapter,
-        pretrained_model_name_or_path,
-        micro_batch_size_per_gpu,
+    vocab_size = 100
+    input_size = 10
+    max_tokens = 20
+    dpo = _make_cpu_dpo_for_branch_tests(
+        use_separate_reference_adapter=use_separate_reference_adapter,
     )
     ids = torch.randint(0, vocab_size, (batch_size, input_size + max_tokens)).to(
         dpo.device,
@@ -834,47 +823,12 @@ def test_dpo_get_logprobs(
     dpo.clean_up()
 
 
-@pytest.mark.parametrize(
-    "config, use_deepspeed_optimizer",
-    [(None, False)],
-)
-@pytest.mark.parametrize("use_separate_reference_adapter", [False])
-@pytest.mark.parametrize("vocab_size", [100])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize(
-    "pretrained_model_name_or_path",
-    [TINY_LLM_FIXTURE_PATH],
-)
 @pytest.mark.parametrize("batch_size", [1])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_dpo_backward_pass(
-    deepspeed_env,
-    dpo_factory,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
-    use_separate_reference_adapter,
-    vocab_size,
-    input_size,
-    max_tokens,
-    pretrained_model_name_or_path,
-    batch_size,
-    micro_batch_size_per_gpu,
-):
-    dpo = dpo_factory(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        use_separate_reference_adapter,
-        pretrained_model_name_or_path,
-        micro_batch_size_per_gpu,
-    )
+def test_dpo_backward_pass(batch_size):
+    vocab_size = 100
+    input_size = 10
+    max_tokens = 20
+    dpo = _make_cpu_dpo_for_branch_tests()
     ids = torch.randint(0, vocab_size, (batch_size, input_size + max_tokens)).to(
         dpo.device,
     )
@@ -883,45 +837,8 @@ def test_dpo_backward_pass(
     dpo.clean_up()
 
 
-@pytest.mark.parametrize(
-    "config, use_deepspeed_optimizer",
-    [(None, False)],
-)
-@pytest.mark.parametrize("use_separate_reference_adapter", [False])
-@pytest.mark.parametrize("vocab_size", [100])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize(
-    "pretrained_model_name_or_path",
-    [TINY_LLM_FIXTURE_PATH],
-)
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_dpo_preprocess_observation(
-    deepspeed_env,
-    dpo_factory,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
-    use_separate_reference_adapter,
-    pretrained_model_name_or_path,
-    vocab_size,
-    input_size,
-    max_tokens,
-    micro_batch_size_per_gpu,
-):
-    dpo = dpo_factory(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        use_separate_reference_adapter,
-        pretrained_model_name_or_path,
-        micro_batch_size_per_gpu,
-    )
+def test_dpo_preprocess_observation():
+    dpo = _make_cpu_dpo_for_branch_tests()
     obs = dpo.preprocess_observation(
         orig_obs := torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
     )
@@ -929,44 +846,14 @@ def test_dpo_preprocess_observation(
     dpo.clean_up()
 
 
-@pytest.mark.parametrize(
-    "config, use_deepspeed_optimizer",
-    [(None, False)],
-)
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
-@pytest.mark.parametrize("vocab_size", [100])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize(
-    "pretrained_model_name_or_path",
-    [TINY_LLM_FIXTURE_PATH],
-)
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_set_reference_policy(
-    deepspeed_env,
-    dpo_factory,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
     use_separate_reference_adapter,
-    pretrained_model_name_or_path,
-    vocab_size,
-    input_size,
-    max_tokens,
-    micro_batch_size_per_gpu,
 ):
-    dpo = dpo_factory(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        use_separate_reference_adapter,
-        pretrained_model_name_or_path,
-        micro_batch_size_per_gpu,
+    input_size = 10
+    max_tokens = 20
+    dpo = _make_cpu_dpo_for_branch_tests(
+        use_separate_reference_adapter=use_separate_reference_adapter,
     )
     reference_update_tracker = 0
     dpo.set_reference_policy(reference_update_tracker)
