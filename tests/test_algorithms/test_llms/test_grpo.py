@@ -397,7 +397,6 @@ def generate_grpo(
         vllm_config=vllm_config,
         max_output_tokens=max_tokens,
         max_model_len=max_tokens + 5,
-
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
     )
@@ -603,9 +602,6 @@ def test_grpo_clean_up_vllm(
     assert grpo.actor is None
     assert grpo.optimizer is None
     assert grpo.lr_scheduler is None
-
-    
-
 
 
 def test_get_action_grpo_hf_repeats_stitch_prefix_ids_for_grouped_training():
@@ -836,6 +832,8 @@ def test_get_action_grpo_including_vllm(
         assert ids.shape[1] <= max_tokens + input_size
     if grpo.accelerator is None:
         assert not grpo.actor.training
+
+
 @patch("agilerl.algorithms.core.base.LLM")
 def test_init_grpo_warns_when_hf_generate_chunk_size_set_with_vllm(
     MockLLM, model_factory
