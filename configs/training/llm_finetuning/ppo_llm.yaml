@@ -25,14 +25,15 @@ INIT_HP:
     TEMPERATURE: 0.7          # Higher temp for better exploration in sparse reward setting
     MAX_MODEL_LEN: 4096
     TOURN_SIZE: 2
-    GAMMA: 0.99               # Higher discount for multi-turn credit assignment
+    GAMMA: 1.0              # Higher discount for multi-turn credit assignment
     VF_COEF: 0.5              # Stronger value loss to train critic faster
-    GAE_LAMBDA: 0.95
+    GAE_LAMBDA: 1.0
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
     USE_VLLM: true
     MICRO_BATCH_SIZE_PER_GPU: 16
+    ACTION_GRANULARITY: turn
     LORA_R: 16
     LORA_ALPHA: 32
     LORA_DROPOUT: 0.0

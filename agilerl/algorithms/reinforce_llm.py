@@ -1,6 +1,6 @@
 import warnings
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -117,6 +117,10 @@ class REINFORCE(LLMAlgorithm):
     :type vllm_config: VLLMConfig | None
     :param seed: Random seed.
     :type seed: int
+    :param action_granularity: Policy-action granularity. ``"turn"`` enforces
+        turn-level advantages, ``"token"`` enforces token-level advantages, and
+        ``"auto"`` uses token-level only when all samples are single-turn.
+    :type action_granularity: Literal["turn", "token", "auto"]
     :param gradient_checkpointing: Enable gradient checkpointing.
     :type gradient_checkpointing: bool
     :param torch_compiler: Torch compiler mode.
@@ -161,6 +165,7 @@ class REINFORCE(LLMAlgorithm):
         use_vllm: bool = False,
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
+        action_granularity: Literal["turn", "token", "auto"] = "auto",
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
@@ -216,6 +221,13 @@ class REINFORCE(LLMAlgorithm):
         assert update_epochs >= 1, (
             "Policy update epochs must be greater than or equal to one."
         )
+        valid_action_granularities = {"turn", "token", "auto"}
+        if action_granularity not in valid_action_granularities:
+            msg = (
+                "action_granularity must be one of "
+                f"{sorted(valid_action_granularities)}."
+            )
+            raise ValueError(msg)
         if clone and actor_network is not None:
             assert isinstance(
                 actor_network,
@@ -228,6 +240,7 @@ class REINFORCE(LLMAlgorithm):
         self.beta = beta
         self.clip_coef = clip_coef
         self.gamma = gamma
+        self.action_granularity = action_granularity
         self.update_epochs = update_epochs
         self.temperature = temperature
         self.repetition_penalty = repetition_penalty
@@ -386,6 +399,7 @@ class REINFORCE(LLMAlgorithm):
                 rewards_2d = rewards.to(self.device).float()
                 if rewards_2d.dim() == 1:
                     rewards_2d = rewards_2d.unsqueeze(-1)
+            action_granularity = self._resolve_action_granularity(turn_ids)
 
             del rewards
 
@@ -421,9 +435,15 @@ class REINFORCE(LLMAlgorithm):
                     old_log_probs - reference_log_probs
                 )
 
-                advantages = self._compute_rebn_advantages(
-                    token_penalised_rewards, action_masks, turn_ids
-                )
+                if action_granularity == "token":
+                    advantages = self._compute_rebn_advantages_token(
+                        token_penalised_rewards,
+                        action_masks,
+                    )
+                else:
+                    advantages = self._compute_rebn_advantages(
+                        token_penalised_rewards, action_masks, turn_ids
+                    )
                 del token_rewards, token_penalised_rewards
 
             self.actor.train()
@@ -493,6 +513,21 @@ class REINFORCE(LLMAlgorithm):
         return {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
+
+    def _resolve_action_granularity(self, turn_ids: torch.Tensor) -> str:
+        """Resolve effective policy granularity for the current batch.
+
+        :param turn_ids: Turn index per token ``[batch, seq_len]``; ``-1`` for padding.
+        :type turn_ids: torch.Tensor
+        :return: Effective policy granularity.
+        :rtype: str
+        """
+        if self.action_granularity in {"turn", "token"}:
+            return self.action_granularity
+
+        per_sample_num_turns = turn_ids.max(dim=1).values + 1
+        all_single_turn = bool((per_sample_num_turns <= 1).all())
+        return "token" if all_single_turn else "turn"
 
     def test(
         self,
@@ -625,6 +660,49 @@ class REINFORCE(LLMAlgorithm):
             token_advantages += mask_t * normalized_returns[:, t : t + 1]
 
         return token_advantages * action_mask
+
+    def _compute_rebn_advantages_token(
+        self,
+        rewards: torch.Tensor,
+        action_mask: torch.Tensor,
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        """Compute token-level ReBN advantages.
+
+        This computes discounted Monte Carlo returns over token positions, then
+        z-scores all valid token returns across the batch.
+
+        :param rewards: Per-token rewards ``[batch, seq_len]``.
+        :type rewards: torch.Tensor
+        :param action_mask: Mask of action positions ``[batch, seq_len]``.
+        :type action_mask: torch.Tensor
+        :param eps: Small constant added to standard deviation when z-scoring.
+        :type eps: float
+        :return: Token-level advantages ``[batch, seq_len]``.
+        :rtype: torch.Tensor
+        """
+        mask = action_mask.float()
+        batch_size, seq_len = rewards.shape
+        token_returns = torch.zeros_like(rewards)
+        next_return = torch.zeros(batch_size, device=rewards.device)
+
+        for t in reversed(range(seq_len)):
+            if t == seq_len - 1:
+                next_mask = torch.zeros(batch_size, device=rewards.device)
+            else:
+                next_mask = mask[:, t + 1]
+            next_return = rewards[:, t] + self.gamma * next_return * next_mask
+            token_returns[:, t] = next_return * mask[:, t]
+
+        valid_returns = token_returns[action_mask.bool()]
+        if valid_returns.numel() > 1:
+            mean_g = valid_returns.mean()
+            std_g = valid_returns.std() + eps
+            normalized_returns = (token_returns - mean_g) / std_g
+        else:
+            normalized_returns = torch.zeros_like(token_returns)
+
+        return normalized_returns * mask
 
     def _compute_token_rewards(
         self,

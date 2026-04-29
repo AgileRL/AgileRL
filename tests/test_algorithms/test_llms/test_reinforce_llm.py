@@ -475,10 +475,13 @@ def test_compute_token_rewards_minus_one_positions_ignore_turn_columns():
 
 
 class _RebnStub:
-    def __init__(self, gamma: float = 1.0):
+    def __init__(self, gamma: float = 1.0, action_granularity: str = "auto"):
         self.gamma = gamma
+        self.action_granularity = action_granularity
 
     _compute_rebn_advantages = REINFORCE._compute_rebn_advantages
+    _compute_rebn_advantages_token = REINFORCE._compute_rebn_advantages_token
+    _resolve_action_granularity = REINFORCE._resolve_action_granularity
 
 
 def test_compute_rebn_advantages_single_turn_batch_zscore_broadcasts_to_tokens():
@@ -519,6 +522,46 @@ def test_compute_rebn_advantages_skips_zscore_when_at_most_one_valid_turn_return
     turn_ids = torch.zeros(1, 3, dtype=torch.long)
     advantages = stub._compute_rebn_advantages(rewards, action_mask, turn_ids)
     assert torch.allclose(advantages, torch.zeros_like(advantages))
+
+
+def test_compute_rebn_advantages_token_padding_positions_zero_advantage():
+    stub = _RebnStub(gamma=0.99)
+    rewards = torch.tensor([[1.0, 0.5, 0.0, 0.0]])
+    action_mask = torch.tensor([[True, True, False, False]])
+    advantages = stub._compute_rebn_advantages_token(rewards, action_mask)
+    assert advantages.shape == rewards.shape
+    assert torch.allclose(
+        advantages[~action_mask], torch.zeros_like(advantages[~action_mask])
+    )
+    assert not torch.isnan(advantages).any()
+
+
+def test_compute_rebn_advantages_token_skips_zscore_when_at_most_one_valid_return():
+    stub = _RebnStub(gamma=0.99)
+    rewards = torch.tensor([[2.0, 0.0, 0.0]])
+    action_mask = torch.tensor([[True, False, False]])
+
+    advantages = stub._compute_rebn_advantages_token(rewards, action_mask)
+
+    assert torch.allclose(advantages, torch.zeros_like(advantages))
+
+
+def test_resolve_action_granularity_auto_single_turn_batch_is_token():
+    stub = _RebnStub(action_granularity="auto")
+    turn_ids = torch.tensor([[0, 0, -1], [0, -1, -1]])
+    assert stub._resolve_action_granularity(turn_ids) == "token"
+
+
+def test_resolve_action_granularity_auto_multi_turn_batch_is_turn():
+    stub = _RebnStub(action_granularity="auto")
+    turn_ids = torch.tensor([[0, 1, -1], [0, 0, 1]])
+    assert stub._resolve_action_granularity(turn_ids) == "turn"
+
+
+def test_resolve_action_granularity_override_token():
+    stub = _RebnStub(action_granularity="token")
+    turn_ids = torch.tensor([[0, 1, -1]])
+    assert stub._resolve_action_granularity(turn_ids) == "token"
 
 
 def test_init_requires_max_output_or_max_model_len():
@@ -577,6 +620,26 @@ def test_init_update_epochs_at_least_one():
             pad_token="<pad>",
             lora_config=lora,
             update_epochs=0,
+            wrap=False,
+            gradient_checkpointing=False,
+        )
+
+
+def test_init_action_granularity_must_be_valid():
+    actor = create_dummy_actor(10, 8, 100, "cpu")
+    lora = LoraConfig(
+        r=4,
+        lora_alpha=16,
+        target_modules=["lin"],
+        task_type="CAUSAL_LM",
+    )
+    with pytest.raises(ValueError, match="action_granularity"):
+        REINFORCE(
+            actor_network=actor,
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=lora,
+            action_granularity="bad",
             wrap=False,
             gradient_checkpointing=False,
         )
@@ -703,6 +766,17 @@ def test_llmreinforce_learns_multiturn(use_vllm):
             actor_lora_changed = True
 
     assert actor_lora_changed, "Expected at least one actor LoRA parameter to update"
+
+
+def test_learn_token_granularity():
+    rf = _cpu_llmreinforce(action_granularity="token", lr=0.05, update_epochs=1)
+    vocab = 100
+    inp, mtok = 10, 8
+    seq_len = inp + mtok
+    completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(2)]
+    action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
+    rewards = torch.tensor([1.0, -1.0], dtype=torch.float32).unsqueeze(-1)
+    rf.learn((completions, action_masks, rewards))
 
 
 def _minimal_reasoning_gym(device: str, vocab_size: int, input_size: int, bs: int):

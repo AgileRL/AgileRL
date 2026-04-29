@@ -13,7 +13,7 @@ MUTATION_PARAMS:
 INIT_HP:
     ALGO: LLMREINFORCE
     BATCH_SIZE: 64
-    BETA: 0.01                # KL penalty — keeps policy close to reference
+    BETA: 0.001                # KL penalty — keeps policy close to reference
     LR: 0.000005
     CLIP_COEF: 0.2            # PPO-style clipping for multi-epoch stability
     MAX_GRAD_NORM: 1.0
@@ -22,12 +22,13 @@ INIT_HP:
     MAX_MODEL_LEN: 1024
     MAX_OUTPUT_TOKENS: 64
     TOURN_SIZE: 2
-    GAMMA: 0.9                # Discount factor — key advantage over GRPO; <1 encourages efficiency
+    GAMMA: 0.95                # Discount factor — key advantage over GRPO; <1 encourages efficiency
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
     USE_VLLM: true
     MICRO_BATCH_SIZE_PER_GPU: 32
+    ACTION_GRANULARITY: token
     # LORA_R: 16
     # LORA_ALPHA: 64
     # LORA_DROPOUT: 0.05

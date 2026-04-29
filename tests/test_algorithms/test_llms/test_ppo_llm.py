@@ -418,13 +418,23 @@ class _PPOStub:
         gamma: float = 1.0,
         gae_lambda: float = 1.0,
         turn_value_reduction: str = "mean",
+        action_granularity: str = "auto",
+        clip_coef: float = 0.2,
+        vf_coef: float = 0.5,
+        adv_whitening: bool = True,
     ):
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.turn_value_reduction = turn_value_reduction
+        self.action_granularity = action_granularity
+        self.clip_coef = clip_coef
+        self.vf_coef = vf_coef
+        self.adv_whitening = adv_whitening
 
     _compute_token_rewards = LLMPPO._compute_token_rewards
     _compute_gae_returns = LLMPPO._compute_gae_returns
+    _compute_gae_returns_token = LLMPPO._compute_gae_returns_token
+    _resolve_action_granularity = LLMPPO._resolve_action_granularity
 
 
 def test_compute_token_rewards_per_turn_reward_broadcasts_to_that_turns_tokens():
@@ -447,7 +457,7 @@ def test_compute_token_rewards_minus_one_positions_ignore_turn_columns():
     assert torch.allclose(out, expected)
 
 
-def test_compute_gae_returns_two_turns_manual_then_whiten_matches_reference():
+def test_compute_gae_returns_two_turns_manual_matches_reference():
     stub = _PPOStub(gamma=1.0, gae_lambda=1.0)
     action_mask = torch.ones(1, 2, dtype=torch.bool)
     turn_ids = torch.tensor([[0, 1]])
@@ -478,6 +488,41 @@ def test_compute_gae_returns_padding_positions_zero_advantage():
     assert advantages[0, 2].item() == 0.0
 
 
+def test_compute_gae_returns_token_padding_positions_zero_advantage():
+    stub = _PPOStub(gamma=0.99, gae_lambda=0.95)
+    action_mask = torch.tensor([[True, True, False, False]])
+    values = torch.tensor([[0.1, 0.2, 0.0, 0.0]])
+    rewards = torch.tensor([[1.0, 0.5, 0.0, 0.0]])
+    returns, advantages = stub._compute_gae_returns_token(rewards, values, action_mask)
+    assert returns.shape == values.shape
+    assert advantages.shape == values.shape
+    assert torch.allclose(
+        returns[~action_mask], torch.zeros_like(returns[~action_mask])
+    )
+    assert torch.allclose(
+        advantages[~action_mask], torch.zeros_like(advantages[~action_mask])
+    )
+    assert not torch.isnan(advantages).any()
+
+
+def test_resolve_action_granularity_auto_single_turn_batch_is_token():
+    stub = _PPOStub(action_granularity="auto")
+    turn_ids = torch.tensor([[0, 0, -1], [0, -1, -1]])
+    assert stub._resolve_action_granularity(turn_ids) == "token"
+
+
+def test_resolve_action_granularity_auto_multi_turn_batch_is_turn():
+    stub = _PPOStub(action_granularity="auto")
+    turn_ids = torch.tensor([[0, 1, -1], [0, 0, 1]])
+    assert stub._resolve_action_granularity(turn_ids) == "turn"
+
+
+def test_resolve_action_granularity_override_token():
+    stub = _PPOStub(action_granularity="token")
+    turn_ids = torch.tensor([[0, 1, -1]])
+    assert stub._resolve_action_granularity(turn_ids) == "token"
+
+
 def test_compute_gae_returns_turn_value_reduction_final_value_uses_last_token_value():
     stub = _PPOStub(gamma=1.0, gae_lambda=1.0, turn_value_reduction="final_value")
     action_mask = torch.ones(1, 4, dtype=torch.bool)
@@ -492,8 +537,27 @@ def test_compute_gae_returns_turn_value_reduction_final_value_uses_last_token_va
         turn_ids,
     )
 
-    expected_advantages = torch.tensor([[-4.0, -4.0, -8.0, -8.0]])
+    expected_advantages = torch.tensor(
+        [[0.70710677, 0.70710677, -0.70710677, -0.70710677]]
+    )
     expected_returns = torch.tensor([[0.0, 0.0, 0.0, 0.0]])
+    assert torch.allclose(advantages, expected_advantages, atol=1e-6)
+    assert torch.allclose(returns, expected_returns)
+
+
+def test_compute_gae_returns_without_whitening_uses_raw_turn_advantages():
+    stub = _PPOStub(gamma=1.0, gae_lambda=1.0, adv_whitening=False)
+    action_mask = torch.ones(1, 2, dtype=torch.bool)
+    turn_ids = torch.tensor([[0, 1]])
+    values = torch.tensor([[0.0, 0.0]])
+    rewards = torch.tensor([[1.0, 2.0]])
+
+    returns, advantages = stub._compute_gae_returns(
+        rewards, values, action_mask, turn_ids
+    )
+
+    expected_advantages = torch.tensor([[3.0, 2.0]])
+    expected_returns = torch.tensor([[3.0, 2.0]])
     assert torch.allclose(advantages, expected_advantages)
     assert torch.allclose(returns, expected_returns)
 
@@ -557,6 +621,69 @@ def test_init_update_epochs_at_least_one():
             pad_token="<pad>",
             lora_config=lora,
             update_epochs=0,
+            wrap=False,
+            gradient_checkpointing=False,
+        )
+
+
+def test_init_action_granularity_must_be_valid():
+    actor = create_module(10, 8, 100, "cpu")
+    lora = LoraConfig(
+        r=4,
+        lora_alpha=16,
+        target_modules=["lin"],
+        task_type="CAUSAL_LM",
+        modules_to_save=["summary"],
+    )
+    with pytest.raises(ValueError, match="action_granularity"):
+        LLMPPO(
+            actor_network=actor,
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=lora,
+            action_granularity="bad",
+            wrap=False,
+            gradient_checkpointing=False,
+        )
+
+
+def test_init_turn_value_reduction_must_be_valid():
+    actor = create_module(10, 8, 100, "cpu")
+    lora = LoraConfig(
+        r=4,
+        lora_alpha=16,
+        target_modules=["lin"],
+        task_type="CAUSAL_LM",
+        modules_to_save=["summary"],
+    )
+    with pytest.raises(ValueError, match="turn_value_reduction"):
+        LLMPPO(
+            actor_network=actor,
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=lora,
+            turn_value_reduction="median",
+            wrap=False,
+            gradient_checkpointing=False,
+        )
+
+
+def test_init_adv_whitening_must_be_boolean():
+    actor = create_module(10, 8, 100, "cpu")
+    lora = LoraConfig(
+        r=4,
+        lora_alpha=16,
+        target_modules=["lin"],
+        task_type="CAUSAL_LM",
+        modules_to_save=["summary"],
+    )
+    with pytest.raises(TypeError, match="adv_whitening must be a boolean"):
+        LLMPPO(
+            actor_network=actor,
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=lora,
+            adv_whitening="yes",  # type: ignore[arg-type]
             wrap=False,
             gradient_checkpointing=False,
         )
@@ -761,6 +888,36 @@ def test_llmppo_learns_multiturn(use_vllm):
 
 def test_learn_turn_level_clip_false():
     ppo = _cpu_llmppo(turn_level_clip=False, lr_actor=0.05)
+    vocab = 100
+    inp, mtok = 10, 8
+    seq_len = inp + mtok
+    completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(2)]
+    action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
+    rewards = torch.tensor([1.0, -1.0], dtype=torch.float32).unsqueeze(-1)
+    ppo.learn((completions, action_masks, rewards))
+
+
+def test_learn_turn_granularity_turn_level_clip_false():
+    ppo = _cpu_llmppo(action_granularity="turn", turn_level_clip=False, lr_actor=0.05)
+    vocab = 100
+    inp, mtok = 10, 8
+    seq_len = inp + mtok
+    completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(2)]
+    action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
+    one_turn_ids = torch.tensor(
+        [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
+        dtype=torch.long,
+    )[:, : seq_len - 1]
+    turn_ids = one_turn_ids.repeat(2, 1)
+    rewards = torch.tensor([[1.0, -1.0], [0.5, -0.25]], dtype=torch.float32)
+
+    metrics = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+
+    assert "mean_loss" in metrics
+
+
+def test_learn_token_granularity():
+    ppo = _cpu_llmppo(action_granularity="token", lr_actor=0.05)
     vocab = 100
     inp, mtok = 10, 8
     seq_len = inp + mtok

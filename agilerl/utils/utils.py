@@ -10,12 +10,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -971,6 +971,7 @@ def create_population(
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
                 gamma=INIT_HP.get("GAMMA", 1.0),
                 gae_lambda=INIT_HP.get("GAE_LAMBDA", 1.0),
+                action_granularity=INIT_HP.get("ACTION_GRANULARITY", "auto"),
                 lr_actor=INIT_HP.get("LR_ACTOR", INIT_HP.get("LR", 5e-6)),
                 lr_critic=INIT_HP.get("LR_CRITIC"),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
@@ -1042,6 +1043,7 @@ def create_population(
                 beta=INIT_HP.get("BETA", 0.01),
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
                 gamma=INIT_HP.get("GAMMA", 0.99),
+                action_granularity=INIT_HP.get("ACTION_GRANULARITY", "auto"),
                 lr=INIT_HP.get("LR", 5e-7),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),

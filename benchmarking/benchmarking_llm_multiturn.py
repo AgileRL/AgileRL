@@ -24,7 +24,7 @@ from agilerl.llm_envs import (
 )
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
-ENV_NAME = "game:Sudoku-v0-easy"
+ENV_NAME = "game:GuessTheNumber-v0-easy"
 
 ALGO_REGISTRY = {
     "LLMPPO": LLMPPO,
@@ -88,7 +88,7 @@ def main(init_hp, mut_p):
         pop=[agent],
         max_turns=max_turns,
         init_hp=init_hp,
-        wb=True,
+        wb=False,
         save_elite=True,
         elite_path="saved_llms",
         evo_steps=None,
@@ -109,7 +109,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/training/llm_finetuning/cispo.yaml",
+        default="configs/training/llm_finetuning/ppo_llm.yaml",
         help="Path to the YAML config file",
     )
     args = parser.parse_args()

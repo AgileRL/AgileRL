@@ -26,6 +26,7 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.llm_utils import (
     ReasoningGym,
     masked_mean,
+    masked_whiten,
     normalize_reasoning_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
@@ -124,10 +125,17 @@ class PPO(LLMAlgorithm):
     :type seed: int, optional
     :param turn_level_clip: Apply clipping at per-turn ratio level.
     :type turn_level_clip: bool, optional
+    :param action_granularity: PPO action granularity. ``"turn"`` enforces
+        turn-level updates, ``"token"`` enforces token-level updates, and
+        ``"auto"`` uses token-level only when all samples are single-turn.
+    :type action_granularity: Literal["turn", "token", "auto"], optional
     :param turn_value_reduction: Aggregation used to map token critic values to
         turn values. ``"mean"`` reproduces existing behavior, ``"final_value"``
         uses the final action token value in each turn.
     :type turn_value_reduction: str, optional
+    :param adv_whitening: Whether to whiten computed advantages before PPO
+        optimization.
+    :type adv_whitening: bool, optional
     :param gradient_checkpointing: Enable gradient checkpointing.
     :type gradient_checkpointing: bool, optional
     :param torch_compiler: Optional torch compile mode.
@@ -176,7 +184,9 @@ class PPO(LLMAlgorithm):
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         turn_level_clip: bool = True,
+        action_granularity: Literal["turn", "token", "auto"] = "auto",
         turn_value_reduction: Literal["mean", "final_value"] = "final_value",
+        adv_whitening: bool = True,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
@@ -233,6 +243,13 @@ class PPO(LLMAlgorithm):
         assert update_epochs >= 1, (
             "Policy update epochs must be greater than or equal to one."
         )
+        valid_action_granularities = {"turn", "token", "auto"}
+        if action_granularity not in valid_action_granularities:
+            msg = (
+                "action_granularity must be one of "
+                f"{sorted(valid_action_granularities)}."
+            )
+            raise ValueError(msg)
         if clone and actor_network is not None:
             assert isinstance(
                 actor_network,
@@ -248,6 +265,7 @@ class PPO(LLMAlgorithm):
         self.vf_coef = vf_coef
         self.clip_coef = clip_coef
         self.turn_level_clip = turn_level_clip
+        self.action_granularity = action_granularity
         valid_turn_value_reductions = {"mean", "final_value"}
         if turn_value_reduction not in valid_turn_value_reductions:
             msg = (
@@ -255,7 +273,11 @@ class PPO(LLMAlgorithm):
                 f"{sorted(valid_turn_value_reductions)}."
             )
             raise ValueError(msg)
+        if not isinstance(adv_whitening, bool):
+            msg = "adv_whitening must be a boolean."
+            raise TypeError(msg)
         self.turn_value_reduction = turn_value_reduction
+        self.adv_whitening = adv_whitening
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.update_epochs = update_epochs
@@ -381,7 +403,7 @@ class PPO(LLMAlgorithm):
         experiences: ExperiencesType,
         turn_ids: torch.Tensor | None = None,
     ) -> dict[str, float]:
-        """Update actor and critic adapters using turn-level PPO objectives.
+        """Update actor and critic adapters using configured PPO granularity.
 
         :param experiences: ``(completion_ids, action_masks, rewards)``. For
             single-turn, ``rewards`` is a flat tensor of scalars; for multi-turn,
@@ -417,6 +439,7 @@ class PPO(LLMAlgorithm):
                 rewards_2d = rewards.to(self.device).float()
                 if rewards_2d.dim() == 1:
                     rewards_2d = rewards_2d.unsqueeze(-1)
+            ppo_granularity = self._resolve_action_granularity(turn_ids)
 
             del rewards
 
@@ -452,9 +475,16 @@ class PPO(LLMAlgorithm):
                 reference_log_probs = torch.masked_fill(
                     reference_log_probs, ~action_mask_bool, 1.0
                 )
-                returns, advantages = self._compute_gae_returns(
-                    token_rewards, old_values, action_masks, turn_ids
-                )
+                if ppo_granularity == "token":
+                    returns, advantages = self._compute_gae_returns_token(
+                        token_rewards,
+                        old_values,
+                        action_masks,
+                    )
+                else:
+                    returns, advantages = self._compute_gae_returns(
+                        token_rewards, old_values, action_masks, turn_ids
+                    )
                 del token_rewards
 
             self.actor.train()
@@ -502,49 +532,54 @@ class PPO(LLMAlgorithm):
                         -batch_log_probs.detach(), batch_action_mask
                     )
 
-                    # Compute turn-level quantities shared by both policy and
-                    # value loss: num_turns, pooled values, and turn mask.
                     batch_values = torch.masked_fill(
                         batch_values, ~batch_mask_bool, 0.0
                     )
-                    mb_num_turns = batch_turn_ids.max().item() + 1
-                    turn_pred = pool_by_turns(
-                        batch_values,
-                        batch_turn_ids,
-                        mb_num_turns,
-                        reduction=self.turn_value_reduction,
-                    )
-                    turn_old = pool_by_turns(
-                        batch_old_values,
-                        batch_turn_ids,
-                        mb_num_turns,
-                        reduction=self.turn_value_reduction,
-                    )
-                    turn_ret = pool_by_turns(
-                        batch_returns, batch_turn_ids, mb_num_turns
-                    )
-
-                    # Mask: which (sample, turn) pairs actually exist in this batch.
-                    turn_mask = torch.zeros_like(turn_pred)
-                    for t in range(mb_num_turns):
-                        turn_mask[:, t] = (batch_turn_ids == t).any(dim=1).float()
-
                     token_log_ratio = batch_log_probs - batch_old_log_probs
-                    if self.turn_level_clip:
-                        # Turn-PPO: sum token log-ratios per turn so the
-                        # ratio is the product of token-level ratios.
-                        log_ratio = pool_by_turns(
-                            token_log_ratio,
+                    if ppo_granularity == "turn":
+                        # Compute turn-level quantities shared by both policy and
+                        # value loss: num_turns, pooled values, and turn mask.
+                        mb_num_turns = batch_turn_ids.max().item() + 1
+                        turn_pred = pool_by_turns(
+                            batch_values,
                             batch_turn_ids,
                             mb_num_turns,
-                            reduction="sum",
+                            reduction=self.turn_value_reduction,
                         )
-                        adv = pool_by_turns(
-                            batch_advantages, batch_turn_ids, mb_num_turns
+                        turn_old = pool_by_turns(
+                            batch_old_values,
+                            batch_turn_ids,
+                            mb_num_turns,
+                            reduction=self.turn_value_reduction,
                         )
-                        pg_mask = turn_mask
+                        turn_ret = pool_by_turns(
+                            batch_returns, batch_turn_ids, mb_num_turns
+                        )
+
+                        # Mask: which (sample, turn) pairs actually exist in this batch.
+                        turn_mask = torch.zeros_like(turn_pred)
+                        for t in range(mb_num_turns):
+                            turn_mask[:, t] = (batch_turn_ids == t).any(dim=1).float()
+
+                        if self.turn_level_clip:
+                            # Turn-PPO: sum token log-ratios per turn so the
+                            # ratio is the product of token-level ratios.
+                            log_ratio = pool_by_turns(
+                                token_log_ratio,
+                                batch_turn_ids,
+                                mb_num_turns,
+                                reduction="sum",
+                            )
+                            adv = pool_by_turns(
+                                batch_advantages, batch_turn_ids, mb_num_turns
+                            )
+                            pg_mask = turn_mask
+                        else:
+                            # Standard PPO: use token-level log-ratios.
+                            log_ratio = token_log_ratio
+                            adv = batch_advantages
+                            pg_mask = batch_action_mask
                     else:
-                        # Standard PPO: use token-level log-ratios.
                         log_ratio = token_log_ratio
                         adv = batch_advantages
                         pg_mask = batch_action_mask
@@ -561,17 +596,25 @@ class PPO(LLMAlgorithm):
                         torch.max(-adv * ratio, -adv * clipped_ratio), pg_mask
                     )
 
-                    vf_loss = (turn_ret - turn_pred).pow(2)
-                    clipped_turn_values = turn_old + torch.clamp(
-                        turn_pred - turn_old, -self.clip_coef, self.clip_coef
-                    )
-                    clipped_vf_loss = (turn_ret - clipped_turn_values).pow(2)
-                    vf_loss = (
-                        0.5
-                        * (torch.max(vf_loss, clipped_vf_loss) * turn_mask).sum()
-                        / turn_mask.sum().clamp(min=1)
-                        * self.vf_coef
-                    )
+                    if ppo_granularity == "turn":
+                        vf_loss = (turn_ret - turn_pred).pow(2)
+                        clipped_turn_values = turn_old + torch.clamp(
+                            turn_pred - turn_old, -self.clip_coef, self.clip_coef
+                        )
+                        clipped_vf_loss = (turn_ret - clipped_turn_values).pow(2)
+                        vf_loss = (
+                            0.5
+                            * (torch.max(vf_loss, clipped_vf_loss) * turn_mask).sum()
+                            / turn_mask.sum().clamp(min=1)
+                            * self.vf_coef
+                        )
+                    else:
+                        vf_loss = self._compute_vf_loss_token(
+                            batch_values,
+                            batch_old_values,
+                            batch_returns,
+                            batch_action_mask,
+                        )
 
                     kl_loss = masked_mean(kl, batch_action_mask)
                     total_loss = pg_loss + vf_loss + self.beta * kl_loss
@@ -590,6 +633,21 @@ class PPO(LLMAlgorithm):
         return {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
+
+    def _resolve_action_granularity(self, turn_ids: torch.Tensor) -> str:
+        """Resolve effective PPO granularity for the current batch.
+
+        :param turn_ids: Turn index per token ``[batch, seq_len]``; ``-1`` for padding.
+        :type turn_ids: torch.Tensor
+        :return: Effective PPO granularity.
+        :rtype: str
+        """
+        if self.action_granularity in {"turn", "token"}:
+            return self.action_granularity
+
+        per_sample_num_turns = turn_ids.max(dim=1).values + 1
+        all_single_turn = bool((per_sample_num_turns <= 1).all())
+        return "token" if all_single_turn else "turn"
 
     def test(
         self,
@@ -666,9 +724,9 @@ class PPO(LLMAlgorithm):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute turn-level GAE and broadcast advantages to all action tokens.
 
-        Each generation turn is treated as a single RL action.  Per-turn values
-        are the mean of critic values over the turn's action tokens, and gamma
-        discounts between turns (not between tokens within a turn).
+        Each generation turn is treated as a single RL action. Per-turn values
+        are aggregated from token values according to ``self.turn_value_reduction``,
+        and gamma discounts between turns (not between tokens within a turn).
 
         :param rewards: Per-token (penalised) rewards ``[batch, seq_len]``.
         :type rewards: torch.Tensor
@@ -715,19 +773,92 @@ class PPO(LLMAlgorithm):
 
         del turn_rewards
 
-        token_advantages = torch.zeros_like(values)
-        token_returns = torch.zeros_like(values)
-        for t in range(num_turns):
-            mask_t = (turn_ids == t).float()
-            token_advantages += mask_t * turn_advantages[:, t : t + 1]
-            token_returns += mask_t * (
-                turn_advantages[:, t : t + 1] + turn_values[:, t : t + 1]
-            )
+        turn_index = torch.arange(num_turns, device=turn_ids.device).view(1, 1, -1)
+        turn_mask = (turn_ids.unsqueeze(-1) == turn_index).any(dim=1).float()
+        if self.adv_whitening:
+            turn_advantages_for_pg = masked_whiten(turn_advantages, turn_mask)
+        else:
+            turn_advantages_for_pg = turn_advantages
+        valid_turn_mask = turn_ids >= 0
+        safe_turn_ids = turn_ids.clamp(min=0)
 
+        turn_returns = turn_advantages + turn_values
+        token_returns = turn_returns.gather(dim=1, index=safe_turn_ids)
+        token_advantages = turn_advantages_for_pg.gather(dim=1, index=safe_turn_ids)
+        token_returns = token_returns * valid_turn_mask.float()
+        token_advantages = token_advantages * valid_turn_mask.float()
         del turn_values, turn_advantages
+        return token_returns, token_advantages
 
-        # token_advantages = masked_whiten(token_advantages, action_mask)
-        return token_returns, token_advantages  # * action_mask
+    def _compute_gae_returns_token(
+        self,
+        rewards: torch.Tensor,
+        values: torch.Tensor,
+        action_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute token-level GAE and returns.
+
+        :param rewards: Per-token rewards ``[batch, seq_len]``.
+        :type rewards: torch.Tensor
+        :param values: Per-token critic values ``[batch, seq_len]``.
+        :type values: torch.Tensor
+        :param action_mask: Bool mask of valid action positions ``[batch, seq_len]``.
+        :type action_mask: torch.Tensor
+        :return: Tuple of ``(token_returns, token_advantages)``, each ``[batch, seq_len]``.
+        :rtype: tuple[torch.Tensor, torch.Tensor]
+        """
+        mask = action_mask.float()
+        batch_size, seq_len = values.shape
+        token_advantages = torch.zeros_like(values)
+        last_gae = torch.zeros(batch_size, device=values.device)
+
+        for t in reversed(range(seq_len)):
+            if t == seq_len - 1:
+                next_value = torch.zeros(batch_size, device=values.device)
+                next_mask = torch.zeros(batch_size, device=values.device)
+            else:
+                next_value = values[:, t + 1]
+                next_mask = mask[:, t + 1]
+
+            delta = rewards[:, t] + self.gamma * next_value * next_mask - values[:, t]
+            last_gae = delta + self.gamma * self.gae_lambda * last_gae * next_mask
+            token_advantages[:, t] = last_gae * mask[:, t]
+
+        token_returns = (token_advantages + values) * mask
+        if self.adv_whitening:
+            token_advantages = masked_whiten(token_advantages, action_mask)
+        return token_returns, token_advantages * mask
+
+    def _compute_vf_loss_token(
+        self,
+        values: torch.Tensor,
+        old_values: torch.Tensor,
+        returns: torch.Tensor,
+        action_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute token-level clipped value loss.
+
+        :param values: Current value predictions ``[batch, seq_len]``.
+        :type values: torch.Tensor
+        :param old_values: Old value predictions ``[batch, seq_len]``.
+        :type old_values: torch.Tensor
+        :param returns: Token-level returns ``[batch, seq_len]``.
+        :type returns: torch.Tensor
+        :param action_mask: Bool mask of valid action positions ``[batch, seq_len]``.
+        :type action_mask: torch.Tensor
+        :return: Scalar token-level value loss.
+        :rtype: torch.Tensor
+        """
+        vf_loss = (returns - values).pow(2)
+        clipped_values = old_values + torch.clamp(
+            values - old_values, -self.clip_coef, self.clip_coef
+        )
+        clipped_vf_loss = (returns - clipped_values).pow(2)
+        return (
+            0.5
+            * masked_mean(torch.max(vf_loss, clipped_vf_loss), action_mask)
+            * self.vf_coef
+        )
 
     def _compute_token_rewards(
         self,
