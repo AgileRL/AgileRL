@@ -2104,6 +2104,7 @@ def test_build_train_wandb_dict_reasoning_llmppo_uses_fallback_pg_and_entropy_ke
             "Train/PG Loss": 0.2,
             "Train/Entropy": 1.2,
             "Train/Mean VF Loss": 0.3,
+            "Train/Mean Clipfrac": 0.15,
             "Train/Accuracy": 0.5,
         },
         "agent_1/train_metrics": {
@@ -2114,6 +2115,7 @@ def test_build_train_wandb_dict_reasoning_llmppo_uses_fallback_pg_and_entropy_ke
             "Train/PG Loss": 0.4,
             "Train/Entropy": 1.0,
             "Train/Mean VF Loss": 0.5,
+            "Train/Mean Clipfrac": 0.35,
             "Train/Accuracy": 0.75,
         },
     }
@@ -2130,6 +2132,7 @@ def test_build_train_wandb_dict_reasoning_llmppo_uses_fallback_pg_and_entropy_ke
     assert out["Train/Mean Population PG Loss"] == pytest.approx(0.3)
     assert out["Train/Mean Population Entropy"] == pytest.approx(1.1)
     assert out["Train/Mean Population Critic Loss"] == pytest.approx(0.4)
+    assert out["Train/Mean Population Clipfrac"] == pytest.approx(0.25)
     assert out["Train/Best Accuracy"] == pytest.approx(0.75)
     assert "HPO_agent_0/lr" in out
 

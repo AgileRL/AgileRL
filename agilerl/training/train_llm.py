@@ -317,8 +317,15 @@ def build_train_wandb_dict(
         vf_values = _collect_metric_values(
             agent_metrics_dict, pop, "train_metrics", "Train/Mean VF Loss"
         )
+        clipfrac_values = _collect_metric_values(
+            agent_metrics_dict, pop, "train_metrics", "Train/Mean Clipfrac"
+        ) or _collect_metric_values(
+            agent_metrics_dict, pop, "train_metrics", "Train/Clipfrac"
+        )
         if vf_values:
             wandb_dict["Train/Mean Population Critic Loss"] = np.mean(vf_values)
+        if clipfrac_values:
+            wandb_dict["Train/Mean Population Clipfrac"] = np.mean(clipfrac_values)
 
     if max_reward is not None:
         accuracy_values = _collect_metric_values(

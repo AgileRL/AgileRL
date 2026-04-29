@@ -1,6 +1,6 @@
 import warnings
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -26,7 +26,6 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.llm_utils import (
     ReasoningGym,
     masked_mean,
-    masked_whiten,
     normalize_reasoning_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
@@ -125,6 +124,10 @@ class PPO(LLMAlgorithm):
     :type seed: int, optional
     :param turn_level_clip: Apply clipping at per-turn ratio level.
     :type turn_level_clip: bool, optional
+    :param turn_value_reduction: Aggregation used to map token critic values to
+        turn values. ``"mean"`` reproduces existing behavior, ``"final_value"``
+        uses the final action token value in each turn.
+    :type turn_value_reduction: str, optional
     :param gradient_checkpointing: Enable gradient checkpointing.
     :type gradient_checkpointing: bool, optional
     :param torch_compiler: Optional torch compile mode.
@@ -173,6 +176,7 @@ class PPO(LLMAlgorithm):
         vllm_config: VLLMConfig | None = None,
         seed: int = 42,
         turn_level_clip: bool = True,
+        turn_value_reduction: Literal["mean", "final_value"] = "final_value",
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
@@ -244,6 +248,14 @@ class PPO(LLMAlgorithm):
         self.vf_coef = vf_coef
         self.clip_coef = clip_coef
         self.turn_level_clip = turn_level_clip
+        valid_turn_value_reductions = {"mean", "final_value"}
+        if turn_value_reduction not in valid_turn_value_reductions:
+            msg = (
+                "turn_value_reduction must be one of "
+                f"{sorted(valid_turn_value_reductions)}."
+            )
+            raise ValueError(msg)
+        self.turn_value_reduction = turn_value_reduction
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.update_epochs = update_epochs
@@ -368,7 +380,7 @@ class PPO(LLMAlgorithm):
         self,
         experiences: ExperiencesType,
         turn_ids: torch.Tensor | None = None,
-    ) -> tuple[float, float, float, float, float]:
+    ) -> dict[str, float]:
         """Update actor and critic adapters using turn-level PPO objectives.
 
         :param experiences: ``(completion_ids, action_masks, rewards)``. For
@@ -378,8 +390,8 @@ class PPO(LLMAlgorithm):
         :param turn_ids: Optional ``[batch, seq_len - 1]`` tensor of turn indices;
             ``-1`` for non-action tokens. If ``None``, all action tokens are turn ``0``.
         :type turn_ids: torch.Tensor | None
-        :return: ``(mean_loss, mean_kl, mean_pg_loss, mean_vf_loss, mean_entropy)``.
-        :rtype: tuple[float, float, float, float, float]
+        :return: Mean training metrics across PPO minibatch updates.
+        :rtype: dict[str, float]
         """
         self._prepare_vllm_for_training()
 
@@ -421,6 +433,7 @@ class PPO(LLMAlgorithm):
                 "mean_vf_loss": 0.0,
                 "mean_kl": 0.0,
                 "mean_entropy": 0.0,
+                "mean_clipfrac": 0.0,
             }
             with torch.inference_mode():
                 reference_log_probs, old_log_probs, old_values = (
@@ -439,14 +452,10 @@ class PPO(LLMAlgorithm):
                 reference_log_probs = torch.masked_fill(
                     reference_log_probs, ~action_mask_bool, 1.0
                 )
-                token_penalised_rewards = token_rewards - self.beta * (
-                    old_log_probs - reference_log_probs
-                )
-
                 returns, advantages = self._compute_gae_returns(
-                    token_penalised_rewards, old_values, action_masks, turn_ids
+                    token_rewards, old_values, action_masks, turn_ids
                 )
-                del token_rewards, token_penalised_rewards
+                del token_rewards
 
             self.actor.train()
             for _epoch_idx in range(self.update_epochs):
@@ -486,7 +495,9 @@ class PPO(LLMAlgorithm):
                     batch_log_probs = torch.masked_fill(
                         batch_log_probs, ~batch_mask_bool, 1.0
                     )
-                    kl = batch_log_probs - batch_reference_log_probs
+                    kl = self._calculate_kl_divergence(
+                        batch_log_probs, batch_reference_log_probs
+                    )
                     masked_entropy = masked_mean(
                         -batch_log_probs.detach(), batch_action_mask
                     )
@@ -498,10 +509,16 @@ class PPO(LLMAlgorithm):
                     )
                     mb_num_turns = batch_turn_ids.max().item() + 1
                     turn_pred = pool_by_turns(
-                        batch_values, batch_turn_ids, mb_num_turns
+                        batch_values,
+                        batch_turn_ids,
+                        mb_num_turns,
+                        reduction=self.turn_value_reduction,
                     )
                     turn_old = pool_by_turns(
-                        batch_old_values, batch_turn_ids, mb_num_turns
+                        batch_old_values,
+                        batch_turn_ids,
+                        mb_num_turns,
+                        reduction=self.turn_value_reduction,
                     )
                     turn_ret = pool_by_turns(
                         batch_returns, batch_turn_ids, mb_num_turns
@@ -536,6 +553,10 @@ class PPO(LLMAlgorithm):
                     clipped_ratio = torch.clamp(
                         ratio, 1 - self.clip_coef, 1 + self.clip_coef
                     )
+                    clipfrac = masked_mean(
+                        (ratio != clipped_ratio).float(),
+                        pg_mask,
+                    )
                     pg_loss = masked_mean(
                         torch.max(-adv * ratio, -adv * clipped_ratio), pg_mask
                     )
@@ -552,15 +573,15 @@ class PPO(LLMAlgorithm):
                         * self.vf_coef
                     )
 
-                    total_loss = pg_loss + vf_loss
+                    kl_loss = masked_mean(kl, batch_action_mask)
+                    total_loss = pg_loss + vf_loss + self.beta * kl_loss
 
                     self._backward_pass(total_loss)
                     clear_fused_adapter_routing(self._get_unwrapped_actor())
 
-                    learn_metrics["mean_kl"] += masked_mean(
-                        kl, batch_action_mask
-                    ).item()
+                    learn_metrics["mean_kl"] += kl_loss.item()
                     learn_metrics["mean_entropy"] += masked_entropy.mean().item()
+                    learn_metrics["mean_clipfrac"] += clipfrac.item()
                     learn_metrics["mean_pg_loss"] += pg_loss.mean().item()
                     learn_metrics["mean_vf_loss"] += vf_loss.mean().item()
                     learn_metrics["mean_loss"] += total_loss.item()
@@ -663,7 +684,12 @@ class PPO(LLMAlgorithm):
         batch_size = values.shape[0]
         num_turns = turn_ids.max().item() + 1
 
-        turn_values = pool_by_turns(values, turn_ids, num_turns)
+        turn_values = pool_by_turns(
+            values,
+            turn_ids,
+            num_turns,
+            reduction=self.turn_value_reduction,
+        )
         turn_rewards = pool_by_turns(rewards, turn_ids, num_turns)
 
         turn_advantages = torch.zeros(batch_size, num_turns, device=values.device)
@@ -700,8 +726,8 @@ class PPO(LLMAlgorithm):
 
         del turn_values, turn_advantages
 
-        token_advantages = masked_whiten(token_advantages, action_mask)
-        return token_returns, token_advantages * action_mask
+        # token_advantages = masked_whiten(token_advantages, action_mask)
+        return token_returns, token_advantages  # * action_mask
 
     def _compute_token_rewards(
         self,
@@ -726,3 +752,23 @@ class PPO(LLMAlgorithm):
             mask_t = (turn_ids == t).float()
             token_rewards += mask_t * rewards[:, t : t + 1]
         return token_rewards
+
+    def _calculate_kl_divergence(
+        self,
+        log_probs: torch.Tensor,
+        reference_log_probs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Calculate the KL divergence between the current and reference log probabilities.
+
+        :param log_probs: Current policy log probabilities.
+        :type log_probs: torch.Tensor
+        :param reference_log_probs: Reference policy log probabilities.
+        :type reference_log_probs: torch.Tensor
+        :return: Kl divergence between the current and reference log probabilities.
+        :rtype: torch.Tensor
+        """
+        return (
+            torch.exp(reference_log_probs - log_probs)
+            - (reference_log_probs - log_probs)
+            - 1
+        )

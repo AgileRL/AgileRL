@@ -1145,6 +1145,15 @@ def test_masked_stats_and_pool_by_turns_helpers():
     assert pooled.shape == (1, 2)
     assert pooled[0, 0].item() == pytest.approx(2.0)
     assert pooled[0, 1].item() == pytest.approx(5.0)
+    pooled_final = pool_by_turns(
+        token_values,
+        turn_ids,
+        num_turns=2,
+        reduction="final_value",
+    )
+    assert pooled_final.shape == (1, 2)
+    assert pooled_final[0, 0].item() == pytest.approx(3.0)
+    assert pooled_final[0, 1].item() == pytest.approx(5.0)
 
 
 def test_masked_var_unbiased_requires_at_least_two_unmasked_values():

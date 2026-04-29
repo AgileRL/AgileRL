@@ -262,11 +262,17 @@ def pool_by_turns(
     :param turn_ids: [batch, seq_len] turn index per token, -1 for non-action.
     :param num_turns: Total number of turns (max turn_id + 1).
     :param reduction: ``"mean"`` (default) for mean-pooling,
-        ``"sum"`` for sum-pooling (e.g. to aggregate log-ratios).
+        ``"sum"`` for sum-pooling (e.g. to aggregate log-ratios),
+        ``"final_value"`` to select the last token value per turn.
     :return: [batch, num_turns] aggregated values per turn.
     """
-    batch_size = token_values.shape[0]
+    batch_size, seq_len = token_values.shape
     turn_values = torch.zeros(batch_size, num_turns, device=token_values.device)
+    token_positions = (
+        torch.arange(seq_len, device=token_values.device)
+        .unsqueeze(0)
+        .expand_as(turn_ids)
+    )
     for t in range(num_turns):
         mask_t = (turn_ids == t).float()
         summed = (token_values * mask_t).sum(dim=1)
@@ -275,8 +281,28 @@ def pool_by_turns(
             turn_values[:, t] = summed / count
         elif reduction == "sum":
             turn_values[:, t] = summed
+        elif reduction == "final_value":
+            masked_positions = torch.where(
+                mask_t.bool(),
+                token_positions,
+                torch.full_like(token_positions, -1),
+            )
+            final_pos = masked_positions.max(dim=1).values
+            has_turn = final_pos >= 0
+            safe_final_pos = final_pos.clamp(min=0)
+            final_vals = token_values[
+                torch.arange(batch_size, device=token_values.device),
+                safe_final_pos,
+            ]
+            turn_values[:, t] = torch.where(
+                has_turn,
+                final_vals,
+                torch.zeros_like(final_vals),
+            )
         else:
-            msg = f"Invalid reduction: {reduction}. Must be 'mean' or 'sum'."
+            msg = (
+                f"Invalid reduction: {reduction}. Must be 'mean', 'sum', 'final_value'."
+            )
             raise ValueError(msg)
     return turn_values
 

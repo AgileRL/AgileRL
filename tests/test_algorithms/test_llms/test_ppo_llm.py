@@ -413,9 +413,15 @@ def test_llmppo_get_action_vllm_routes_through_vllm_calls():
 
 
 class _PPOStub:
-    def __init__(self, gamma: float = 1.0, gae_lambda: float = 1.0):
+    def __init__(
+        self,
+        gamma: float = 1.0,
+        gae_lambda: float = 1.0,
+        turn_value_reduction: str = "mean",
+    ):
         self.gamma = gamma
         self.gae_lambda = gae_lambda
+        self.turn_value_reduction = turn_value_reduction
 
     _compute_token_rewards = LLMPPO._compute_token_rewards
     _compute_gae_returns = LLMPPO._compute_gae_returns
@@ -470,6 +476,26 @@ def test_compute_gae_returns_padding_positions_zero_advantage():
         rewards, values, action_mask, turn_ids
     )
     assert advantages[0, 2].item() == 0.0
+
+
+def test_compute_gae_returns_turn_value_reduction_final_value_uses_last_token_value():
+    stub = _PPOStub(gamma=1.0, gae_lambda=1.0, turn_value_reduction="final_value")
+    action_mask = torch.ones(1, 4, dtype=torch.bool)
+    turn_ids = torch.tensor([[0, 0, 1, 1]])
+    values = torch.tensor([[1.0, 4.0, 2.0, 8.0]])
+    rewards = torch.tensor([[0.0, 0.0, 0.0, 0.0]])
+
+    returns, advantages = stub._compute_gae_returns(
+        rewards,
+        values,
+        action_mask,
+        turn_ids,
+    )
+
+    expected_advantages = torch.tensor([[-4.0, -4.0, -8.0, -8.0]])
+    expected_returns = torch.tensor([[0.0, 0.0, 0.0, 0.0]])
+    assert torch.allclose(advantages, expected_advantages)
+    assert torch.allclose(returns, expected_returns)
 
 
 def test_init_requires_max_output_or_max_model_len():
@@ -703,6 +729,7 @@ def test_llmppo_learns_multiturn(use_vllm):
         "mean_pg_loss",
         "mean_vf_loss",
         "mean_entropy",
+        "mean_clipfrac",
     ):
         assert key in metrics
         assert isinstance(metrics[key], float)
