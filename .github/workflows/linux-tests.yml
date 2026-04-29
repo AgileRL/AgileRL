@@ -66,9 +66,9 @@ jobs:
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
 
             - name: Run tests
-              # LLM tests are pinned to a single worker via xdist_group("llm")
-              # in tests/conftest.py, so a single pytest invocation runs the
-              # parallel and sequential portions in one pass.
+              # GPU and LLM tests are pinned to a single worker via
+              # xdist_group("gpu") in tests/conftest.py, so a single pytest
+              # invocation runs the parallel and sequential portions in one pass.
               run: uv run pytest --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
 
             - name: Generate coverage report
