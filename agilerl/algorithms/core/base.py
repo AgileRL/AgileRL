@@ -3364,6 +3364,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             self.vllm_config = VLLMConfig()
 
+        extra_llm_kwargs = {}
+        swap_space = getattr(self.vllm_config, "swap_space", None)
+        if isinstance(swap_space, (int, float)):
+            extra_llm_kwargs["swap_space"] = swap_space
+        enforce_eager = getattr(self.vllm_config, "enforce_eager", None)
+        if isinstance(enforce_eager, bool):
+            extra_llm_kwargs["enforce_eager"] = enforce_eager
+
         if self.accelerator is not None:
             if (
                 self.accelerator.num_processes % self.vllm_config.tensor_parallel_size
@@ -3411,6 +3419,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 * self.max_model_len,
                 "model_impl": "vllm",
                 "enable_sleep_mode": self.vllm_config.sleep_mode,
+                **extra_llm_kwargs,
             }
         else:
             llm_kwargs = {
@@ -3424,6 +3433,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 "max_num_batched_tokens": self.vllm_config.max_num_seqs
                 * self.max_model_len,
                 "enable_sleep_mode": self.vllm_config.sleep_mode,
+                **extra_llm_kwargs,
             }
 
         # Weight syncing via apply_model requires cloudpickle serialization

@@ -1430,6 +1430,8 @@ class VLLMConfig:
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.3
     max_num_seqs: int = 8
+    swap_space: float | None = None
+    enforce_eager: bool | None = None
     sleep_mode: bool = False
 
     def __post_init__(self) -> None:

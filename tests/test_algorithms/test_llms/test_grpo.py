@@ -331,7 +331,11 @@ def generate_grpo(
         # 0.22 keeps four parallel CI containers within total GPU capacity
         # (4 * 0.22 = 0.88) on the shared self-hosted runner.
         vllm_config = VLLMConfig(
-            gpu_memory_utilization=0.22, max_num_seqs=1, sleep_mode=sleep_mode
+            gpu_memory_utilization=0.22,
+            max_num_seqs=1,
+            sleep_mode=sleep_mode,
+            swap_space=0,
+            enforce_eager=True,
         )
 
         actor = model_factory(pretrained_model_name_or_path)
@@ -382,15 +386,6 @@ def generate_grpo(
         use_vllm=use_vllm,
         vllm_config=vllm_config,
         max_output_tokens=max_tokens,
-        # vLLM profiles its dummy forward pass against NVML free-memory
-        # readings, which round to ~1 MiB. With max_model_len ~= max_tokens
-        # the profile allocates well under that, so vLLM sees identical
-        # before/after readings and trips
-        # `assert init_snapshot.free_memory > free_gpu_memory`. A larger
-        # context window forces a few-MiB KV-cache allocation that NVML can
-        # actually detect. Doesn't affect generation length, which is bounded
-        # by max_output_tokens.
-        max_model_len=max_tokens + 2048,
         reduce_memory_peak=reduce_memory_peak,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
@@ -509,11 +504,15 @@ def test_grpo_save_load_checkpoint_vllm(
                     else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
                 ),
                 use_vllm=use_vllm,
-                vllm_config=VLLMConfig(gpu_memory_utilization=0.05, max_num_seqs=1),
+                vllm_config=VLLMConfig(
+                    gpu_memory_utilization=0.22,
+                    max_num_seqs=1,
+                    swap_space=0,
+                    enforce_eager=True,
+                ),
                 accelerator=accelerator,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 max_output_tokens=max_tokens,
-                max_model_len=max_tokens + 2048,
             )
             new_grpo.load_checkpoint(checkpoint_dir)
 
