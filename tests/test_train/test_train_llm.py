@@ -2069,7 +2069,7 @@ def test_collect_rollouts_llm_breaks_when_vector_env_has_no_active_prompts():
         "attention_mask": torch.ones(1, 3, dtype=torch.long),
     }
     mock_env = MagicMock(spec=["reset", "step", "get_trajectories"])
-    mock_env.reset.return_value = prompt
+    mock_env.reset.return_value = [prompt]
     mock_env.step.return_value = None
     mock_env.get_trajectories.return_value = (
         [torch.ones(1, 8, dtype=torch.long)],

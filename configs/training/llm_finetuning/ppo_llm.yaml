@@ -22,12 +22,12 @@ INIT_HP:
     MAX_GRAD_NORM: 1.0
     UPDATE_EPOCHS: 1
     MAX_OUTPUT_TOKENS: 64
-    TEMPERATURE: 0.9          # Higher temp for better exploration in sparse reward setting
+    TEMPERATURE: 0.7          # Higher temp for better exploration in sparse reward setting
     MAX_MODEL_LEN: 4096
     TOURN_SIZE: 2
     GAMMA: 0.99               # Higher discount for multi-turn credit assignment
     VF_COEF: 0.5              # Stronger value loss to train critic faster
-    GAE_LAMBDA: 0.9
+    GAE_LAMBDA: 0.95
     ELITISM: true
     POP_SIZE: 1
     EVAL_LOOP: 1
@@ -35,7 +35,7 @@ INIT_HP:
     MICRO_BATCH_SIZE_PER_GPU: 16
     LORA_R: 16
     LORA_ALPHA: 32
-    LORA_DROPOUT: 0.05
+    LORA_DROPOUT: 0.0
     TARGET_MODULES:
         - q_proj
         - k_proj

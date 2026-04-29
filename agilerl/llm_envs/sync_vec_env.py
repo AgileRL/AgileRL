@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any
 
-import torch
+if TYPE_CHECKING:
+    import torch
 
-from agilerl.protocols import MultiTurnEnv
-from agilerl.typing import ReasoningPrompts
-from agilerl.utils.algo_utils import stack_and_pad_experiences
+    from agilerl.protocols import MultiTurnEnv
+    from agilerl.typing import ReasoningPrompts
 
 
 @dataclass
@@ -28,7 +28,13 @@ class TrajectoryBuffer:
     """Container for synchronized rollout trajectories."""
 
     def __init__(self, batch_size: int, group_size: int):
-        """Initialize an empty trajectory buffer."""
+        """Initialize an empty trajectory buffer.
+
+        :param batch_size: Number of logical batch items.
+        :type batch_size: int
+        :param group_size: Number of grouped trajectories per batch item.
+        :type group_size: int
+        """
         if batch_size <= 0:
             msg = f"batch_size must be > 0, got {batch_size}."
             raise ValueError(msg)
@@ -56,12 +62,17 @@ class TrajectoryBuffer:
         """Return ``True`` when at least one trajectory is still active."""
         return any(not trajectory.done for trajectory in self.trajectories)
 
-    def get_prompts(self) -> ReasoningPrompts | None:
-        """Return stacked prompts for active trajectories."""
+    def get_prompts(self) -> list[ReasoningPrompts] | None:
+        """Return prompt dicts for active trajectories in stable order.
+
+        :return: Active prompt dictionaries sorted by ``(batch_idx, group_idx)``,
+            or ``None`` when all trajectories are terminal.
+        :rtype: list[ReasoningPrompts] | None
+        """
         active_trajectories = self.get_active_trajectories(sorted_by_index=True)
         if len(active_trajectories) == 0:
             return None
-        return TrajectoryBuffer._stack_active_prompts(active_trajectories)
+        return [trajectory.prompt for trajectory in active_trajectories]
 
     def get_active_trajectories(
         self,
@@ -85,7 +96,13 @@ class TrajectoryBuffer:
         return iter(self.trajectories)
 
     def reset_trajectory(self, seed: int | None, env_idx: int) -> None:
-        """Reset one trajectory in place."""
+        """Reset one trajectory in place.
+
+        :param seed: Optional reset seed passed to the wrapped environment.
+        :type seed: int | None
+        :param env_idx: Index into ``self.trajectories`` to reset.
+        :type env_idx: int
+        """
         if env_idx < 0 or env_idx >= len(self.trajectories):
             msg = (
                 "env_idx out of bounds for trajectory buffer: "
@@ -96,52 +113,6 @@ class TrajectoryBuffer:
         self.trajectories[env_idx].prompt = prompt_dict
         self.trajectories[env_idx].done = False
 
-    @staticmethod
-    def _stack_active_prompts(trajectories: list[Trajectory]) -> ReasoningPrompts:
-        """Stack prompt fields across active trajectories."""
-        if len(trajectories) == 0:
-            msg = "Cannot stack prompts from an empty trajectory list."
-            raise ValueError(msg)
-        prompt_batch = [trajectory.prompt for trajectory in trajectories]
-        stacked = cast("ReasoningPrompts", {})
-        tensor_keys = (
-            "input_ids",
-            "attention_mask",
-            "trajectory_input_ids",
-            "trajectory_attention_mask",
-            "stitch_prefix_ids",
-        )
-        for key in tensor_keys:
-            values = [prompt.get(key) for prompt in prompt_batch]
-            if all(v is None for v in values):
-                continue
-            if any(v is None for v in values):
-                msg = (
-                    f"Inconsistent prompt field '{key}' across active trajectories; "
-                    "field must be present for all trajectories or none."
-                )
-                raise ValueError(msg)
-            (stacked_tensor,) = stack_and_pad_experiences(values, padding_values=[0])
-            if "attention_mask" in key:
-                stacked_tensor = stacked_tensor.long()
-            stacked[key] = stacked_tensor
-
-        for required_key in ("input_ids", "attention_mask"):
-            if required_key not in stacked:
-                msg = f"Missing required prompt field '{required_key}'."
-                raise ValueError(msg)
-
-        initial_prompt_lengths = [
-            prompt.get("initial_prompt_len") for prompt in prompt_batch
-        ]
-        if all(v is not None for v in initial_prompt_lengths):
-            stacked["initial_prompt_len"] = torch.tensor(
-                initial_prompt_lengths,
-                dtype=torch.long,
-            )
-
-        return stacked
-
     def __getitem__(self, index: int) -> Trajectory:
         return self.trajectories[index]
 
@@ -150,7 +121,11 @@ class TrajectoryBuffer:
 
 
 class SyncMultiTurnVecEnv:
-    """Synchronous multi-turn vector environment for LLM rollouts."""
+    """Synchronous multi-turn vector environment for LLM rollouts.
+
+    Maintains ``batch_size * group_size`` independent multi-turn environments and
+    steps all active trajectories in lock-step using policy completions.
+    """
 
     def __init__(
         self,
@@ -159,7 +134,17 @@ class SyncMultiTurnVecEnv:
         group_size: int,
         env_config: dict[str, Any] | None = None,
     ):
-        """Create ``batch_size * group_size`` independent environments."""
+        """Create ``batch_size * group_size`` independent environments.
+
+        :param env_factory: Factory that builds one multi-turn environment.
+        :type env_factory: Callable[..., MultiTurnEnv]
+        :param batch_size: Number of logical batch items.
+        :type batch_size: int
+        :param group_size: Number of grouped trajectories per batch item.
+        :type group_size: int
+        :param env_config: Optional kwargs passed to ``env_factory``.
+        :type env_config: dict[str, Any] | None
+        """
         if batch_size <= 0:
             msg = f"batch_size must be > 0, got {batch_size}."
             raise ValueError(msg)
@@ -178,8 +163,17 @@ class SyncMultiTurnVecEnv:
     def reset(
         self,
         seed: int | None = None,
-    ) -> ReasoningPrompts | None:
-        """Reset all environments and initialize trajectories."""
+    ) -> list[ReasoningPrompts] | None:
+        """Reset all environments and initialize trajectories.
+
+        Seeds are assigned per batch row (same seed across groups), then prompts
+        are returned in stable ``(batch_idx, group_idx)`` order.
+
+        :param seed: Optional base seed for deterministic rollouts.
+        :type seed: int | None
+        :return: Active prompt dictionaries after reset.
+        :rtype: list[ReasoningPrompts] | None
+        """
         seed_base = seed
         for batch_idx in range(self.batch_size):
             batch_seed = None if seed_base is None else seed_base + batch_idx
@@ -201,8 +195,14 @@ class SyncMultiTurnVecEnv:
                     self.trajectories.reset_trajectory(env_idx=env_idx, seed=batch_seed)
         return self.trajectories.get_prompts()
 
-    def step(self, completion_ids: list[torch.Tensor]) -> ReasoningPrompts | None:
-        """Step each active trajectory with its corresponding completion."""
+    def step(self, completion_ids: list[torch.Tensor]) -> list[ReasoningPrompts] | None:
+        """Step each active trajectory with its corresponding completion.
+
+        :param completion_ids: One completion tensor per active trajectory.
+        :type completion_ids: list[torch.Tensor]
+        :return: Next active prompt dictionaries after stepping.
+        :rtype: list[ReasoningPrompts] | None
+        """
         active = self.trajectories.get_active_trajectories(sorted_by_index=True)
         if len(completion_ids) != len(active):
             msg = (
@@ -243,7 +243,13 @@ class SyncMultiTurnVecEnv:
         list[torch.Tensor],
         int,
     ]:
-        """Collect complete episode tensors from all trajectories."""
+        """Collect complete episode tensors from all trajectories.
+
+        :return: ``(completion_ids_list, action_masks_list, all_turn_ids,
+            all_rewards, batch_steps)`` where ``batch_steps`` is the summed
+            number of recorded turn boundaries across trajectories.
+        :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int]
+        """
         completion_ids_list: list[torch.Tensor] = []
         action_masks_list: list[torch.Tensor] = []
         all_turn_ids: list[torch.Tensor] = []

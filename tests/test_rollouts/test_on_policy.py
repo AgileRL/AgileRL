@@ -198,11 +198,13 @@ def test_collect_rollouts_llm_preserves_batch_group_ordering_batch_size_4() -> N
         """Echo prompt marker tokens into completions in row order."""
 
         def get_action(
-            self, prompts: dict[str, torch.Tensor], training: bool = True
+            self,
+            prompts: list[dict[str, torch.Tensor]],
+            training: bool = True,
         ) -> tuple[list[torch.Tensor], None]:
             """Return one completion per prompt row while preserving input order."""
             del training
-            row_tokens = prompts["input_ids"][:, 0].tolist()
+            row_tokens = [int(prompt["input_ids"][0, 0].item()) for prompt in prompts]
             completions = [
                 torch.tensor([[int(tok), int(tok) + 1]], dtype=torch.long)
                 for tok in row_tokens

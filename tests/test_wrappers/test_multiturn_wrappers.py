@@ -652,8 +652,10 @@ def test_trajectory_buffer_get_prompts_returns_none_when_no_active() -> None:
 
     prompts = buf.get_prompts()
     assert prompts is not None
-    assert prompts["input_ids"].shape[0] == 1
-    assert prompts["attention_mask"].shape[0] == 1
+    assert isinstance(prompts, list)
+    assert len(prompts) == 1
+    assert prompts[0]["input_ids"].shape == (1, 3)
+    assert prompts[0]["attention_mask"].shape == (1, 3)
 
     active_traj.done = True
     assert buf.get_prompts() is None
@@ -689,37 +691,15 @@ def test_trajectory_buffer_stack_prompt_validation() -> None:
         },
         done=False,
     )
-    stacked = TrajectoryBuffer._stack_active_prompts([a, b])
-    assert stacked["input_ids"].shape[0] == 2
-    assert stacked["initial_prompt_len"].tolist() == [2, 3]
-
-    with pytest.raises(ValueError, match="empty trajectory list"):
-        TrajectoryBuffer._stack_active_prompts([])
-
-    missing_required = Trajectory(
-        env=env,
-        batch_idx=0,
-        group_idx=0,
-        prompt={},
-        done=False,
-    )
-    with pytest.raises(ValueError, match="Missing required prompt field"):
-        TrajectoryBuffer._stack_active_prompts([missing_required])
-
-    inconsistent = Trajectory(
-        env=env,
-        batch_idx=0,
-        group_idx=1,
-        prompt={
-            "input_ids": torch.ones(1, 2, dtype=torch.long),
-            "attention_mask": torch.ones(1, 2, dtype=torch.long),
-        },
-        done=False,
-    )
-    with pytest.raises(
-        ValueError, match="Inconsistent prompt field 'trajectory_input_ids'"
-    ):
-        TrajectoryBuffer._stack_active_prompts([a, inconsistent])
+    buf = TrajectoryBuffer(batch_size=1, group_size=2)
+    buf.add_trajectory(a)
+    buf.add_trajectory(b)
+    prompts = buf.get_prompts()
+    assert prompts is not None
+    assert len(prompts) == 2
+    assert [int(p["initial_prompt_len"]) for p in prompts] == [2, 3]
+    assert prompts[0]["input_ids"].shape == (1, 2)
+    assert prompts[1]["input_ids"].shape == (1, 3)
 
 
 class _StepVariantEnv:
@@ -790,7 +770,9 @@ def test_sync_vec_env_step_happy_path_1d_and_2d_and_active_filtering() -> None:
         ]
     )
     assert prompts is not None
-    assert prompts["input_ids"].shape[0] == 1
+    assert isinstance(prompts, list)
+    assert len(prompts) == 1
+    assert prompts[0]["input_ids"].shape == (1, 4)
     assert created[0].step_shapes == [(1, 3)]
     assert created[1].step_shapes == [(1, 3)]
 

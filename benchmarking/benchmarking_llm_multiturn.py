@@ -12,7 +12,7 @@ import gem
 from huggingface_hub import snapshot_download
 import yaml
 from transformers import AutoTokenizer
-from agilerl.algorithms import LLMPPO, LLMREINFORCE, GRPO
+from agilerl.algorithms import LLMPPO, LLMREINFORCE, GRPO, CISPO, GSPO
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
@@ -24,12 +24,14 @@ from agilerl.llm_envs import (
 )
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
-ENV_NAME = "game:GuessTheNumber-v0-easy"
+ENV_NAME = "game:Sudoku-v0-easy"
 
 ALGO_REGISTRY = {
     "LLMPPO": LLMPPO,
     "LLMREINFORCE": LLMREINFORCE,
     "GRPO": GRPO,
+    "CISPO": CISPO,
+    "GSPO": GSPO,
 }
 
 
@@ -62,7 +64,7 @@ def main(init_hp, mut_p):
     vllm_config = (
         VLLMConfig(
             tensor_parallel_size=1,
-            gpu_memory_utilization=0.85,
+            gpu_memory_utilization=0.6,
             max_num_seqs=16,
             sleep_mode=True,
         )
@@ -107,7 +109,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/training/llm_finetuning/ppo_llm.yaml",
+        default="configs/training/llm_finetuning/cispo.yaml",
         help="Path to the YAML config file",
     )
     args = parser.parse_args()

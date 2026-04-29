@@ -21,9 +21,10 @@ INIT_HP:
     MAX_GRAD_NORM: 1.0
     UPDATE_EPOCHS: 1
     GROUP_SIZE: 16
-    TEMPERATURE: 0.9
-    MAX_MODEL_LEN: 1024  # Maximum context length for the model
-    MAX_OUTPUT_TOKENS: 64
+    TEMPERATURE: 0.7
+    MAX_MODEL_LEN: 4096  # Maximum context length for the model
+    # MAX_OUTPUT_TOKENS: 64
+    MICRO_BATCH_SIZE_PER_GPU: 1
     COSINE_lR_SCHEDULER:
     TOURN_SIZE: 2
     ADV_NORM: mean_std
@@ -35,4 +36,4 @@ INIT_HP:
     ELITISM: true
     POP_SIZE: 4
     EVAL_LOOP: 1
-    USE_VLLM: false
+    USE_VLLM: true
