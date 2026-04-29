@@ -2239,7 +2239,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.device = self.accelerator.device
 
             self.optimizer = None
-            # N.B. that optimizer state is reset here
+            # Rebuild the AgileRL wrapper around the optimizer owned by the
+            # DeepSpeed engine after checkpoint load.
             self.optimizer = OptimizerWrapper(
                 optimizer_cls=self._select_optim_class(),
                 networks=[self.actor],
@@ -2247,6 +2248,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 lr=self.lr,
                 lr_name="lr",
             )
+            if isinstance(self.optimizer.optimizer, DummyOptimizer) and hasattr(
+                self.actor, "optimizer"
+            ):
+                self.optimizer.optimizer = self.actor.optimizer
+                self.optimizer.optimizer_cls = type(self.actor.optimizer)
         else:
             if lora_only:
                 if self.use_separate_reference_adapter:
@@ -2328,7 +2334,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             assert self.actor is not None, (
                 "Actor is not defined, please check that the actor is defined."
             )
-            self.actor.save_checkpoint(path, tag=tag)
+            self.actor.save_checkpoint(
+                path,
+                tag=tag,
+                exclude_frozen_parameters=False,
+            )
             self.actor.set_adapter("actor")
         else:
             warnings.warn(
