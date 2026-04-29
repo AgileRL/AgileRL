@@ -417,6 +417,7 @@ def grpo_factory():
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+@patch("agilerl.algorithms.core.base.LLM", DummyVLLM)
 def test_grpo_save_load_checkpoint_vllm(
     deepspeed_env,
     grpo_factory,
@@ -541,7 +542,9 @@ def test_grpo_save_load_checkpoint_vllm(
                             == expected_class_names[attr]
                         )
                     elif attr == "llm":
-                        assert hasattr(new_grpo, attr) and isinstance(new_grpo.llm, LLM)
+                        assert hasattr(new_grpo, attr) and isinstance(
+                            new_grpo.llm, DummyVLLM
+                        )
                     elif not isinstance(expected_attrs[attr], torch.Tensor):
                         assert getattr(new_grpo, attr) == expected_attrs[attr], (
                             f"Attribute {attr} is not equal"
