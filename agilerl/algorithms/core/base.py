@@ -2348,7 +2348,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def load_checkpoint(
         self,
         path: str,
-        load_optimizer: bool = True,  # FIXME I think this should default to False
+        load_optimizer: bool = False,
         overwrite_reference_adapter: bool = False,
         overwrite_critic_adapter: bool = True,
         merge_lora_configs: bool = False,
