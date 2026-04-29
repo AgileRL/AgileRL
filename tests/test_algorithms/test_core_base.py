@@ -2900,6 +2900,46 @@ class TestDeepspeedLoad:
         expected = (not s.lora_only) and (not s.save_optimizer)
         assert (sd_spy.call_count == 1) == expected
 
+    def test_llm_deepspeed_full_load_without_optimizer_falls_back_to_ds_model_only_restore(
+        self, grpo_factory, tmp_path
+    ):
+        from pathlib import Path
+        from unittest.mock import patch
+
+        # Arrange: save a DeepSpeed full-model checkpoint with optimizer state.
+        # This shape stores model shards in save_checkpoint/ and does not inject
+        # actor_state_dict into attributes.pt.
+        saver = grpo_factory
+        _fit_deepspeed_mock(saver)
+
+        def _fake_ds_save(path_str, *args, tag="save_checkpoint", **kwargs):
+            (Path(path_str) / tag).mkdir(parents=True, exist_ok=True)
+
+        saver.actor.save_checkpoint = MagicMock(side_effect=_fake_ds_save)
+        saver.save_checkpoint(
+            str(tmp_path),
+            lora_only=False,
+            save_optimizer=True,
+        )
+
+        # Act/Assert: loading with load_optimizer=False falls back to DS
+        # model-only restore (no optimizer/lr scheduler state).
+        loader = grpo_factory
+        _fit_deepspeed_mock(loader)
+        load_ckpt_spy = MagicMock(
+            return_value=(str(tmp_path / "save_checkpoint"), None)
+        )
+        loader.actor.load_checkpoint = load_ckpt_spy
+        with (
+            patch.object(loader, "_load_model_checkpoint"),
+        ):
+            loader.load_checkpoint(str(tmp_path), load_optimizer=False)
+        assert load_ckpt_spy.call_count == 1
+        kwargs = load_ckpt_spy.call_args.kwargs
+        assert kwargs["tag"] == "save_checkpoint"
+        assert kwargs["load_optimizer_states"] is False
+        assert kwargs["load_lr_scheduler_states"] is False
+
 
 # --------------------------------------------------------------------------- #
 # ZeRO-3 gather behaviour                                                      #

@@ -95,6 +95,7 @@ def main(init_hp, mut_p):
         evaluation_interval=10,
         max_reward=1.0,
         verbose=True,
+        max_steps=300_000,
         accelerator=accelerator,
         env_factory=env_factory,
     )
@@ -107,7 +108,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/training/llm_finetuning/ppo_llm.yaml",
+        default="configs/training/llm_finetuning/cispo.yaml",
         help="Path to the YAML config file",
     )
     args = parser.parse_args()

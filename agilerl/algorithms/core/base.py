@@ -2447,11 +2447,25 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     merge_lora_configs,
                 )
             else:
-                model_ref = self._get_unwrapped_actor()
-                with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
-                    model_ref.load_state_dict(
-                        checkpoint["network_info"]["modules"]["actor_state_dict"]
+                actor_state_dict = (
+                    checkpoint.get("network_info", {})
+                    .get("modules", {})
+                    .get("actor_state_dict")
+                )
+                if actor_state_dict is None:
+                    # DeepSpeed full-model checkpoints saved with
+                    # save_optimizer=True persist module weights in the
+                    # save_checkpoint tag directory (not attributes.pt).
+                    self._load_distributed_actor(
+                        path,
+                        tag="save_checkpoint",
+                        load_optimizer_states=False,
+                        load_lr_scheduler_states=False,
                     )
+                else:
+                    model_ref = self._get_unwrapped_actor()
+                    with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
+                        model_ref.load_state_dict(actor_state_dict)
 
             self._restore_checkpoint_attributes(checkpoint)
 
@@ -3116,6 +3130,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self,
         path: str,
         tag: str = "intermediate_checkpoint",
+        load_optimizer_states: bool = True,
+        load_lr_scheduler_states: bool = True,
     ) -> None:
         """Override the load_checkpoint method to provide guidance on the correct method to use.
 
@@ -3130,8 +3146,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     str(path),
                     tag=tag,
                     load_module_strict=False,
-                    load_optimizer_states=True,
-                    load_lr_scheduler_states=True,
+                    load_optimizer_states=load_optimizer_states,
+                    load_lr_scheduler_states=load_lr_scheduler_states,
                 )
                 if load_path is None:
                     msg = (
