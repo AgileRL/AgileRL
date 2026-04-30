@@ -326,6 +326,25 @@ def _ssh_target_port(host: str) -> int | None:
     return int(port_s) if port_s.isdigit() else None
 
 
+def _ssh_connection_target(host: str, ssh_user: str | None) -> str:
+    """Build the ssh(1) destination so ``~/.ssh/config`` applies like ``ssh HOST``.
+
+    When no user is forced, use the host alias as given (e.g. ``manager-head``) instead of
+    ``$USER@manager-head``, which ignores ``User`` in ssh_config.
+    """
+    host = host.strip()
+    explicit = (ssh_user or os.environ.get("SSH_USER") or "").strip()
+    bare = _ssh_target_host(host)
+    if explicit:
+        return f"{explicit}@{bare}"
+    if "@" in host:
+        user = host.split("@", 1)[0]
+        return f"{user}@{bare}"
+    if _ssh_target_port(host) is not None:
+        return bare
+    return host
+
+
 def _is_local_swarm_host(host: str) -> bool:
     """True when install scripts run commands on this machine (not real SSH)."""
     h = _ssh_target_host(host).lower()
@@ -406,6 +425,9 @@ def _run_docker_swarm_install(
     env = _swarm_script_env()
     if ssh_user:
         env["SSH_USER"] = ssh_user
+    else:
+        # Let bundle scripts use ssh(1) Host aliases (User/IdentityFile in ~/.ssh/config).
+        env.pop("SSH_USER", None)
     if ssh_extra_opts:
         env["SSH_EXTRA_OPTS"] = ssh_extra_opts
     adv = (advertise_addr or manager).strip()
@@ -514,15 +536,10 @@ def _ssh_remote_command(
             click.echo(f"  command exited {result.returncode}", err=True)
         return
 
-    user = ssh_user or os.environ.get("SSH_USER") or os.environ.get("USER")
-    if not user:
-        msg = "Cannot determine SSH user; set --ssh-user or SSH_USER."
-        raise click.ClickException(msg)
     if not shutil.which("ssh"):
         msg = "ssh not found on PATH; required for dockerSwarm teardown."
         raise click.ClickException(msg)
 
-    ssh_host = _ssh_target_host(host)
     ssh_port = _ssh_target_port(host)
     ssh_cmd = [
         "ssh",
@@ -536,7 +553,7 @@ def _ssh_remote_command(
         ssh_cmd.extend(["-p", str(ssh_port)])
     if ssh_extra_opts:
         ssh_cmd.extend(shlex.split(ssh_extra_opts))
-    ssh_cmd.append(f"{user}@{ssh_host}")
+    ssh_cmd.append(_ssh_connection_target(host, ssh_user))
     ssh_cmd.append(remote_cmd)
     click.echo(f"  $ {' '.join(ssh_cmd)}")
     result = subprocess.run(ssh_cmd, check=False)
@@ -792,7 +809,10 @@ def build_install_command() -> click.Command:
     @click.option(
         "--ssh-user",
         default=None,
-        help="[dockerSwarm] SSH login for remote hosts.",
+        help=(
+            "[dockerSwarm] SSH login for remote hosts. "
+            "Omit to use User/Host from ~/.ssh/config (same as ``ssh HOST``)."
+        ),
     )
     @click.option(
         "--ssh-extra-opts",

@@ -8,10 +8,21 @@ import pytest
 from click import ClickException
 
 from agilerl.arena.cli_on_prem_install import (
+    _ssh_connection_target,
     _swarm_script_env,
     _validate_tun0_conf,
     _validate_wireguard_bundle,
 )
+
+
+def test_ssh_connection_target_uses_host_alias_without_ssh_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SSH_USER", raising=False)
+    assert _ssh_connection_target("op-ray-head", None) == "op-ray-head"
+    assert _ssh_connection_target("ubuntu@op-ray-head", None) == "ubuntu@op-ray-head"
+    assert _ssh_connection_target("op-ray-head", "deploy") == "deploy@op-ray-head"
+    assert _ssh_connection_target("op-ray-head:2222", None) == "op-ray-head"
 
 
 def test_swarm_script_env_sets_docker_reboot_assume_yes(
