@@ -79,19 +79,25 @@ jobs:
             - name: Run non-vLLM tests (parallel)
               run: uv run pytest -m "not vllm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
 
-            # vLLM phase: parallel across 3 vllm0..vllm2 xdist groups. vLLM tests
-            # set `kv_cache_memory_bytes` on `VLLMConfig`, which takes vLLM's
-            # early-return path in `determine_available_memory` and skips the
-            # startup memory-profiling assertion that fires when peer processes
-            # free GPU memory mid-init. With 3 concurrent vLLM workers,
-            # peak GPU usage measured ~5.7 GiB (p95 ~5.5 GiB) on the tiny test
-            # fixture — well within the runner GPU budget. Run only on the newest
-            # Python version: vLLM behavior doesn't depend on the interpreter, so
-            # re-running these tests on every matrix version just multiplies wall
-            # time and cross-container GPU contention.
-            - name: Run vLLM tests (parallel, single Python version)
-              if: matrix.python-version == '3.13'
-              run: uv run pytest -n 3 -m "vllm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
+            # vLLM phase: serialised within each matrix container (`-n 1`).
+            # vLLM tests set `kv_cache_memory_bytes` on `VLLMConfig`, which
+            # takes vLLM's early-return path in `determine_available_memory`
+            # and skips the startup memory-profiling assertion that fires when
+            # peer processes free GPU memory mid-init.
+            #
+            # Concurrency budget: all 4 matrix containers share one GPU, so
+            # the per-container budget is ~1/4 of total VRAM. Per-test peak
+            # measured ~4.4 GiB (median ~1.5 GiB), so 4 matrices × 1 vLLM
+            # worker each = ~17 GiB worst-case (peaks rarely align), which
+            # fits a 16 GiB GPU with margin in the typical case.
+            #
+            # Raising to `-n 2` per matrix is unsafe at the current matrix
+            # width: 8 concurrent vLLM procs × 4.4 GiB = ~35 GiB worst-case.
+            # The vllm0..vllm2 xdist groups in tests/conftest.py exist for
+            # future single-matrix runs (or a wider GPU); they're inert at
+            # `-n 1`.
+            - name: Run vLLM tests (serial within container)
+              run: uv run pytest -n 1 -m "vllm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
 
             - name: Combine coverage data
               run: |
