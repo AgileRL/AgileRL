@@ -40,8 +40,6 @@ jobs:
         env:
             UV_CACHE_DIR: /tmp/uv-cache
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
-            # HF cache is isolated to /tmp; tests run with HF_HUB_OFFLINE=1 (set in
-            # tests/conftest.py) and use the vendored fixture in tests/assets/tiny_llm.
             HF_HOME: /tmp/hf-cache
             TORCHINDUCTOR_CACHE_DIR: /tmp/inductor-cache
 
@@ -51,6 +49,13 @@ jobs:
               with:
                   enable-cache: true
                   python-version: ${{ matrix.python-version }}
+
+            - name: Cache HuggingFace models
+              uses: actions/cache@v4
+              with:
+                  path: /tmp/hf-cache
+                  key: hf-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+                  restore-keys: hf-${{ matrix.python-version }}-
 
             - name: Cache torch inductor compilations
               uses: actions/cache@v4
@@ -65,11 +70,28 @@ jobs:
                   uv sync --locked --all-groups --extra all
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
 
-            - name: Run tests
-              # GPU and LLM tests are pinned to a single worker via
-              # xdist_group("gpu") in tests/conftest.py, so a single pytest
-              # invocation runs the parallel and sequential portions in one pass.
-              run: uv run pytest --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
+            - name: Reset coverage data
+              run: rm -f .coverage .coverage.*
+
+            # Non-LLM phase: inherits `-n auto --dist loadgroup` from pyproject.
+            # GPU tests fan out across the 3 `gpu0..gpu2` xdist groups; CPU
+            # tests use the remaining workers.
+            - name: Run non-LLM tests (parallel)
+              run: uv run pytest -m "not llm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
+
+            # LLM phase: 4 workers, one per `llm0..llm3` xdist group. Run in a
+            # separate invocation so vLLM memory profiling is not perturbed by
+            # other GPU-touching tests.
+            - name: Run LLM tests (4 workers, exclusive GPU)
+              run: uv run pytest -n 4 -m "llm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
+
+            - name: Combine coverage data
+              run: |
+                  if ls .coverage.* >/dev/null 2>&1; then
+                      uv run coverage combine
+                  else
+                      echo "No parallel coverage shards found; skipping combine."
+                  fi
 
             - name: Generate coverage report
               run: uv run coverage xml -o coverage.xml

@@ -1716,20 +1716,25 @@ def test_get_action_grpo_vllm_multiple_gpus(
     data_batch_size,
     tensor_parallel_size: int,
 ):
-    grpo = grpo_factory(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        group_size,
-        use_separate_reference_adapter,
-        use_vllm,
-        pretrained_model_name_or_path,
-        None,
-    )
+    mock_instance = make_mock_vllm_instance(vllm.LLM)
+    with (
+        patch.object(vllm.LLM, "__init__", return_value=None),
+        patch.object(vllm.LLM, "__new__", return_value=mock_instance),
+    ):
+        grpo = grpo_factory(
+            accelerator_factory,
+            model_factory,
+            config,
+            use_deepspeed_optimizer,
+            vocab_size,
+            input_size,
+            max_tokens,
+            group_size,
+            use_separate_reference_adapter,
+            use_vllm,
+            pretrained_model_name_or_path,
+            None,
+        )
     grpo.vllm_config = VLLMConfig(
         gpu_memory_utilization=0.2,
         max_num_seqs=1,

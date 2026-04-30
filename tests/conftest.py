@@ -76,14 +76,16 @@ def pytest_collection_modifyitems(config, items):
     """Pin tests that share mutable global state to dedicated xdist workers so
     they never run in parallel with each other.
 
-    - ``gpu`` tests share a single ``gpu`` xdist group so they all land on
-      one worker, avoiding CUDA OOMs from concurrent allocations.
-    - ``llm`` tests are spread across three ``llm0``..``llm2`` xdist groups
-      so they run on three workers in parallel. vLLM profiles available GPU
-      memory during initialisation and asserts the free-memory snapshot is
-      stable; if a concurrent worker releases GPU memory mid-profile vLLM
-      aborts with ``AssertionError: Error in memory profiling`` — watch
-      for this if increasing parallelism further.
+    - ``gpu`` tests are spread across three ``gpu0``..``gpu2`` xdist groups
+      so they run on three workers in parallel alongside non-GPU tests in
+      the non-LLM phase of CI.
+    - ``llm`` tests are spread across four ``llm0``..``llm3`` xdist groups
+      so they run on four workers in parallel. CI runs them in a separate
+      pytest invocation from ``gpu``/non-LLM tests because vLLM profiles
+      available GPU memory during initialisation and asserts the
+      free-memory snapshot is stable; if a concurrent worker releases GPU
+      memory mid-profile vLLM aborts with ``AssertionError: Error in
+      memory profiling``. Keep the LLM run isolated from other GPU work.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
@@ -91,16 +93,18 @@ def pytest_collection_modifyitems(config, items):
     reads them and appends ``@group`` suffixes to nodeids for loadgroup
     scheduling.
     """
-    gpu_group = pytest.mark.xdist_group("gpu")
-    llm_groups = [pytest.mark.xdist_group(f"llm{i}") for i in range(3)]
+    gpu_groups = [pytest.mark.xdist_group(f"gpu{i}") for i in range(3)]
+    llm_groups = [pytest.mark.xdist_group(f"llm{i}") for i in range(4)]
     minari_group = pytest.mark.xdist_group("minari")
+    gpu_count = 0
     llm_count = 0
     for item in items:
         if item.get_closest_marker("llm"):
             item.add_marker(llm_groups[llm_count % len(llm_groups)])
             llm_count += 1
         elif item.get_closest_marker("gpu"):
-            item.add_marker(gpu_group)
+            item.add_marker(gpu_groups[gpu_count % len(gpu_groups)])
+            gpu_count += 1
         elif "test_minari_utils" in item.nodeid:
             item.add_marker(minari_group)
 
