@@ -77,7 +77,7 @@ class _TokenStore:
         self.refresh_token = None
 
 
-# TODO: Will need to modify with all available resources
+# Deprecated hint: tier ids are dynamic — use :meth:`ArenaClient.list_resources`.
 ArenaResource = Literal["arena-small", "arena-medium", "arena-large"]
 
 
@@ -585,8 +585,17 @@ class ArenaClient:
             params=params,
         )
 
-    def list_resources(self) -> list[dict[str, Any]]:
-        """List all resources available to the authenticated user."""
+    def list_resources(self) -> dict[str, Any]:
+        """List compute resource tiers for training (CLI resource_id values).
+
+        Calls **GET** ``/api/cli/v1/resources/list`` (see ``list_resources`` in
+        ``agilerl-platform`` ``cli.rs``). The JSON body uses camelCase:
+        ``resourceIds`` (public tier ids usable as ``resource_id`` on submit)
+        and ``tiers`` (map of id → ``numCpus``, ``numGpus``, ``gpuType``,
+        ``ramGb``, ``pricePerNodeHour``).
+
+        :returns: Unwrapped ``data`` object from the API envelope when present.
+        """
         return self._request("GET", "/api/cli/v1/resources/list")
 
     def download_experiment_metrics(
@@ -609,13 +618,38 @@ class ArenaClient:
             json={"metrics": metrics},
         )
 
-    # TODO: Check with Rob if tested
-    def stop_job(self, job_id: str) -> None:
-        """Request stopping of a running job.
+    def stop_experiment(self, experiment_name: str) -> Any:
+        """Stop a running experiment (training job) via the CLI halt path.
 
-        :param job_id: Identifier returned by :meth:`submit_job`.
+        Calls **POST** ``/api/cli/v1/experiments/jobs/stop`` (same backend as the UI
+        halt command). There is no ``POST /api/v1/jobs/stop`` on the Arena platform.
+
+        :param experiment_name: Experiment name (a.k.a. job name in the CLI).
         """
-        return self._request("POST", "api/v1/jobs/stop", params={"job_id": job_id})
+        name = experiment_name.strip()
+        if not name:
+            msg = "experiment_name must be non-empty."
+            raise ValueError(msg)
+
+        return self._request(
+            "POST",
+            "/api/cli/v1/experiments/jobs/stop",
+            json={"experiment_name": name},
+        )
+
+    def stop_job(self, job_name: str) -> Any:
+        """Deprecated. Use :meth:`stop_experiment` with the experiment (job) name.
+
+        The former URL was not a platform route; this now calls the CLI stop API.
+        """
+        import warnings
+
+        warnings.warn(
+            "ArenaClient.stop_job is deprecated; use stop_experiment(...).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.stop_experiment(job_name)
 
     # -------------------------------------------------------------------------
     ### Projects ###

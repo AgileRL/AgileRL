@@ -570,12 +570,30 @@ class TestPrepareEnvUpload:
 # ---------------------------------------------------------------------------
 
 
-class TestStopJob:
-    def test_posts_stop(self, api_key_client):
-        api_key_client._request = MagicMock(return_value=None)
-        api_key_client.stop_job("j1")
+class TestStopExperiment:
+    def test_posts_cli_stop_by_name(self, api_key_client):
+        api_key_client._request = MagicMock(return_value="Ok")
+        api_key_client.stop_experiment("my-exp")
         api_key_client._request.assert_called_once_with(
-            "POST", "api/v1/jobs/stop", params={"job_id": "j1"}
+            "POST",
+            "/api/cli/v1/experiments/jobs/stop",
+            json={"experiment_name": "my-exp"},
+        )
+
+    def test_stop_experiment_requires_non_empty_name(self, api_key_client):
+        with pytest.raises(ValueError, match="non-empty"):
+            api_key_client.stop_experiment("")
+        with pytest.raises(ValueError, match="non-empty"):
+            api_key_client.stop_experiment("   ")
+
+    def test_stop_job_deprecated_forwards_to_stop_experiment(self, api_key_client):
+        api_key_client._request = MagicMock(return_value="Ok")
+        with pytest.warns(DeprecationWarning, match="stop_experiment"):
+            api_key_client.stop_job("j1")
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/experiments/jobs/stop",
+            json={"experiment_name": "j1"},
         )
 
 

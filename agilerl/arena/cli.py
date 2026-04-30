@@ -139,6 +139,19 @@ def user_credits(
         emit_result(client.get_user_credits())
 
 
+@main.group("resources")
+def resources_group() -> None:
+    """List training compute tiers (resource_id values) available on Arena."""
+
+
+@resources_group.command("list")
+@click.pass_obj
+def resources_list(config: CommandConfig) -> None:
+    """List resource tiers: ids, specs, and credits per node-hour."""
+    with arena_client(config) as client:
+        emit_result(client.list_resources())
+
+
 @main.group("env")
 def env() -> None:
     """Manage your custom Gym / PettingZoo environments in Arena."""
@@ -518,6 +531,18 @@ def experiment_resume(
                 experiment_name=experiment_name, max_steps=max_steps
             )
         )
+
+
+@experiment.command("stop")
+@click.argument("experiment_name")
+@click.pass_obj
+def experiment_stop(
+    config: CommandConfig,
+    experiment_name: str,
+) -> None:
+    """Stop a running experiment by name (same as the platform training job name)."""
+    with arena_client(config) as client:
+        emit_result(client.stop_experiment(experiment_name))
 
 
 @experiment.command("checkpoints")
