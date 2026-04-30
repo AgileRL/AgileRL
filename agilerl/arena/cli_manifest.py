@@ -286,7 +286,7 @@ class OnPremDynamicGroup(click.Group):
             name="on-prem",
             help=(
                 "Enterprise on-prem worker clusters (from Arena capabilities). "
-                "Quick start: install bootstrap."
+                "Quick start: arena on-prem install NAME --manager HOST."
             ),
         )
         self._caps_fingerprint: str | None = None
@@ -359,11 +359,9 @@ class OnPremDynamicGroup(click.Group):
             return
 
         attach_manifest_tree(self, root)
-        install_cmd = self.commands.get("install")
-        if isinstance(install_cmd, click.Group):
-            from agilerl.arena.cli_on_prem_bootstrap import register_install_bootstrap
+        from agilerl.arena.cli_on_prem_install import register_on_prem_install
 
-            register_install_bootstrap(install_cmd)
+        register_on_prem_install(self)
 
     def list_commands(self, ctx: click.Context) -> list[str]:
         self._ensure(ctx)

@@ -1787,6 +1787,14 @@ class ArenaClient:
         if body_needed and body_obj is None:
             body_obj = {}
 
+        # Hardcoded invokes (e.g. on-prem install) pass a full payload without
+        # manifest param specs — route by HTTP method.
+        if not params_list and parsed_args:
+            if method == "GET":
+                query = {**parsed_args, **query}
+            elif method in {"POST", "PATCH", "PUT", "DELETE"} and body_obj is None:
+                body_obj = dict(parsed_args)
+
         req_kw: dict[str, Any] = {}
         if query:
             req_kw["params"] = query
