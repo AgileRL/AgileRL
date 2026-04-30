@@ -461,24 +461,25 @@ def test_dpo_test(
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     )
+    num_samples = 4
     train_dataset = Dataset.from_dict(
         {
-            "prompt": [f"Prompt {i}" for i in range(100)],
+            "prompt": [f"Prompt {i}" for i in range(num_samples)],
             "chosen": [
                 f"This prompt is better than the rejected prompt {i}"
-                for i in range(100)
+                for i in range(num_samples)
             ],
-            "rejected": [f"Bad response {i}" for i in range(100)],
+            "rejected": [f"Bad response {i}" for i in range(num_samples)],
         },
     )
     test_dataset = Dataset.from_dict(
         {
-            "prompt": [f"Prompt {i}" for i in range(100)],
+            "prompt": [f"Prompt {i}" for i in range(num_samples)],
             "chosen": [
                 f"This prompt is better than the rejected prompt {i}"
-                for i in range(100)
+                for i in range(num_samples)
             ],
-            "rejected": [f"Bad response {i}" for i in range(100)],
+            "rejected": [f"Bad response {i}" for i in range(num_samples)],
         },
     )
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
