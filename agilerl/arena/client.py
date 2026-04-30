@@ -432,6 +432,34 @@ class ArenaClient:
         payload = {"name": name, "version": version}
         return self._request("DELETE", "/api/cli/v1/environments/delete", json=payload)
 
+    def duplicate_environment_version(
+        self,
+        *,
+        name: str,
+        new_version_name: str,
+        version: str | None = None,
+    ) -> dict[str, Any]:
+        """Duplicate a custom environment version to a new version name.
+
+        Copies registered artifacts (and validation outputs) and creates a new
+        version row, same as the platform **POST**
+        ``/api/custom-gym-env-impls/{id}/copy`` flow.
+
+        :param name: Environment name.
+        :param new_version_name: New ``version_name`` for the duplicate (e.g. ``v2``).
+        :param version: Source version; when omitted, the latest version is used.
+        """
+        payload: dict[str, Any] = {
+            "name": name,
+            "new_version_name": new_version_name,
+            "version": version,
+        }
+        return self._request(
+            "POST",
+            "/api/cli/v1/environments/duplicate",
+            json=payload,
+        )
+
     # -------------------------------------------------------------------------
     ### Training Jobs ###
     # -------------------------------------------------------------------------

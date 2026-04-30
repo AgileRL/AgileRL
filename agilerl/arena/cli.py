@@ -328,6 +328,28 @@ def env_delete(
         emit_result(result)
 
 
+@env.command("duplicate")
+@click.argument("name")
+@click.argument("new_version_name")
+@click.option("--version", default=None, show_default=True)
+@click.pass_obj
+def env_duplicate(
+    config: CommandConfig,
+    name: str,
+    new_version_name: str,
+    version: str | None,
+) -> None:
+    """Copy an existing environment version to a new version name (S3 + registry)."""
+    with arena_client(config) as client:
+        emit_result(
+            client.duplicate_environment_version(
+                name=name,
+                new_version_name=new_version_name,
+                version=version,
+            ),
+        )
+
+
 @main.group("train")
 def train() -> None:
     """Submit, validate, and inspect training jobs."""
