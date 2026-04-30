@@ -820,19 +820,18 @@ class ArenaClient:
             "share this deployment name."
         )
         if len(rows) == 0:
-            raise ArenaAPIError(
-                f"No deployment found named {deployment_name!r}.",
-                cli_hint=hint,
-            )
+            msg = f"No deployment found named {deployment_name!r}."
+            raise ArenaAPIError(msg, cli_hint=hint)
         if len(rows) > 1:
-            raise ArenaAPIError(
-                f"Multiple deployments named {deployment_name!r} ({len(rows)} matches).",
-                cli_hint=hint,
+            msg = (
+                f"Multiple deployments named {deployment_name!r} ({len(rows)} matches)."
             )
+            raise ArenaAPIError(msg, cli_hint=hint)
 
         row = rows[0]
         if not isinstance(row, dict):
-            raise ArenaAPIError("Unexpected deployment list response shape.")
+            msg = "Unexpected deployment list response shape."
+            raise ArenaAPIError(msg)
         return row
 
     @staticmethod
@@ -843,20 +842,23 @@ class ArenaClient:
             spec = {}
         url = spec.get("url")
         if not isinstance(url, str) or not url.strip():
+            msg = "Deployment has no inference URL (spec.url)."
             raise ArenaAPIError(
-                "Deployment has no inference URL (spec.url).",
+                msg,
                 cli_hint="Wait until provisioning completes, then retry with --refresh.",
             )
 
         raw_key = row.get("api_key")
         if raw_key is None:
+            msg = "Deployment record had no api_key."
             raise ArenaAPIError(
-                "Deployment record had no api_key.",
+                msg,
                 cli_hint="Retry with arena login and --refresh.",
             )
         api_key = str(raw_key).strip()
         if not api_key:
-            raise ArenaAPIError("Deployment api_key was empty.")
+            msg = "Deployment api_key was empty."
+            raise ArenaAPIError(msg)
 
         return url.strip(), api_key
 
