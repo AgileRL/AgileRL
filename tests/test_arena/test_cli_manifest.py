@@ -45,7 +45,7 @@ class TestCapsAllowOnPremAtRoot:
         assert caps_allow_on_prem_at_root({"enterprise": True})
 
     def test_onprem_cli_feature_without_enterprise(self) -> None:
-        assert not caps_allow_on_prem_at_root(
+        assert caps_allow_on_prem_at_root(
             {"enterprise": False, "features": {"onPremCli": True}},
         )
 
@@ -287,28 +287,47 @@ class TestArenaRootGroupVisibility:
         assert "on-prem" in r.output
 
 
-CAP_FIXTURE = {
+CAP_FIXTURE_V2 = {
     "schemaVersion": 1,
     "enterprise": True,
     "features": {"onPremCli": True},
     "cli": {
-        "manifestSchemaVersion": 1,
+        "manifestSchemaVersion": 2,
         "root": {
             "type": "group",
             "name": "on-prem",
             "help": "root",
             "children": [
                 {
-                    "type": "command",
-                    "name": "ping",
-                    "help": "Ping",
-                    "invoke": {
-                        "method": "GET",
-                        "path": "/api/cli/v1/on-prem/provider",
-                        "responseKind": "json",
-                        "params": [],
-                    },
-                }
+                    "type": "group",
+                    "name": "providers",
+                    "help": "providers",
+                    "children": [
+                        {
+                            "type": "command",
+                            "name": "get",
+                            "help": "Get provider",
+                            "invoke": {
+                                "method": "GET",
+                                "path": "/api/cli/v1/on-prem/provider",
+                                "responseKind": "json",
+                                "params": [],
+                            },
+                        }
+                    ],
+                },
+                {
+                    "type": "group",
+                    "name": "classes",
+                    "help": "classes",
+                    "children": [],
+                },
+                {
+                    "type": "group",
+                    "name": "install",
+                    "help": "install",
+                    "children": [],
+                },
             ],
         },
     },
@@ -324,7 +343,7 @@ class TestOnPremDynamicIntegration:
         register_on_prem_manifest_group(root)
 
         client_mock = MagicMock(spec=ArenaClient)
-        client_mock.get_cli_capabilities.return_value = CAP_FIXTURE
+        client_mock.get_cli_capabilities.return_value = CAP_FIXTURE_V2
 
         build_patch = patch(
             "agilerl.arena.cli_manifest.build_client",
@@ -335,9 +354,76 @@ class TestOnPremDynamicIntegration:
         with build_patch:
             res = runner.invoke(
                 root,
-                ["on-prem", "ping", "--help"],
+                ["on-prem", "providers", "get", "--help"],
                 obj=_command_config(),
             )
         assert res.exit_code == 0
         assert client_mock.get_cli_capabilities.call_count >= 1
         assert client_mock.close.call_count >= 1
+
+    def test_install_group_includes_bootstrap(self) -> None:
+        @click.group()
+        def root() -> None:
+            """root"""
+
+        register_on_prem_manifest_group(root)
+        client_mock = MagicMock(spec=ArenaClient)
+        client_mock.get_cli_capabilities.return_value = CAP_FIXTURE_V2
+
+        with patch(
+            "agilerl.arena.cli_manifest.build_client",
+            return_value=client_mock,
+        ):
+            res = CliRunner().invoke(
+                root,
+                ["on-prem", "install", "bootstrap", "--help"],
+                obj=_command_config(),
+            )
+        assert res.exit_code == 0
+        assert "--num-nodes" in res.output
+
+
+class TestInstallBootstrap:
+    def test_bootstrap_invokes_enable_create_bundle(self) -> None:
+        from agilerl.arena.cli_on_prem_bootstrap import run_install_bootstrap
+
+        client = MagicMock(spec=ArenaClient)
+        client.invoke_manifest_command.side_effect = [
+            {},
+            {"id": 42},
+            (b"zip-bytes", "application/zip", None),
+        ]
+
+        out = Path("/tmp/arena-bootstrap-test.zip")
+        with patch(
+            "agilerl.arena.cli_on_prem_bootstrap.write_binary_atomic",
+        ) as write_mock:
+            run_install_bootstrap(
+                client,
+                name="pool",
+                num_nodes=2,
+                output=out,
+                setup_type="helm",
+                archived_type="zip",
+                cpus=4,
+                gpus=0,
+                memory="32 GB",
+                description=None,
+                enabled=True,
+                force=False,
+            )
+
+        assert client.invoke_manifest_command.call_count == 3
+        enable_call = client.invoke_manifest_command.call_args_list[0]
+        assert enable_call[0][0]["path"] == "/api/cli/v1/on-prem/enable"
+
+        create_call = client.invoke_manifest_command.call_args_list[1]
+        create_body = create_call[0][1]
+        assert create_body["name"] == "pool"
+        assert create_body["num_nodes"] == 2
+        assert create_body["metadata"]["computeResource"]["numCpus"] == 4
+
+        bundle_call = client.invoke_manifest_command.call_args_list[2]
+        assert bundle_call[0][1]["id"] == 42
+        assert bundle_call[0][1]["setupType"] == "helm"
+        write_mock.assert_called_once()

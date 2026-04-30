@@ -18,7 +18,7 @@ from agilerl.arena.output import emit_result
 logger = logging.getLogger(__name__)
 
 CAPABILITIES_SCHEMA_VERSION = 1
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 
 
 def handle_help_option(
@@ -43,10 +43,14 @@ def _capabilities_fingerprint(caps: dict[str, Any] | None) -> str:
 def caps_allow_on_prem_at_root(caps: dict[str, Any]) -> bool:
     """Whether capabilities warrant exposing ``arena on-prem`` at the CLI root.
 
-    ``on-prem`` command visibility is enterprise-only.
     Uses strict ``is True`` checks so stray truthy JSON values do not unlock the group.
     """
-    return caps.get("enterprise") is True
+    if caps.get("enterprise") is True:
+        return True
+    features = caps.get("features")
+    if isinstance(features, dict) and features.get("onPremCli") is True:
+        return True
+    return False
 
 
 def capabilities_show_on_prem_root(config: CommandConfig) -> bool | None:
@@ -280,7 +284,10 @@ class OnPremDynamicGroup(click.Group):
     def __init__(self) -> None:
         super().__init__(
             name="on-prem",
-            help="Enterprise on-prem cluster helpers (loaded from Arena capabilities).",
+            help=(
+                "Enterprise on-prem worker clusters (from Arena capabilities). "
+                "Quick start: install bootstrap."
+            ),
         )
         self._caps_fingerprint: str | None = None
 
@@ -329,10 +336,9 @@ class OnPremDynamicGroup(click.Group):
 
         if not caps_allow_on_prem_at_root(caps):
             self._register_notice(
-                "On-prem CLI manifest is not enabled for this account in capabilities "
-                "(need ``enterprise: true``). "
-                "Ask your admin to fix enterprise flags, or confirm "
-                "``GET /api/cli/v1/capabilities`` for your token.",
+                "On-prem CLI is not enabled for this account "
+                "(need ``enterprise: true`` or ``features.onPremCli: true``). "
+                "Confirm ``GET /api/cli/v1/capabilities`` for your token.",
             )
             return
 
@@ -353,6 +359,11 @@ class OnPremDynamicGroup(click.Group):
             return
 
         attach_manifest_tree(self, root)
+        install_cmd = self.commands.get("install")
+        if isinstance(install_cmd, click.Group):
+            from agilerl.arena.cli_on_prem_bootstrap import register_install_bootstrap
+
+            register_install_bootstrap(install_cmd)
 
     def list_commands(self, ctx: click.Context) -> list[str]:
         self._ensure(ctx)
