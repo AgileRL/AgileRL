@@ -20,6 +20,7 @@ if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     SupportedOnPolicyLLM = LLMPPO | LLMREINFORCE | GRPO
 
 SupportedOnPolicy = PPO
+SupportedOnPolicyLLM = LLMPPO | LLMREINFORCE | GRPO
 
 
 def _collect_rollouts(

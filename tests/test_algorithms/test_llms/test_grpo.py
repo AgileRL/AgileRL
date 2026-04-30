@@ -538,134 +538,6 @@ def test_get_action_grpo_hf_stop_iteration_device_fallback():
     assert len(action_masks) == 1
     grpo.clean_up()
 
-
-@spawn_new_process_for_each_test
-@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-@pytest.mark.parametrize("use_deepspeed_optimizer", [True])
-@pytest.mark.parametrize("use_separate_reference_adapter", [True])
-@pytest.mark.parametrize("vocab_size", [100])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize(
-    "use_vllm, pretrained_model_name_or_path",
-    [(True, TINY_LLM_FIXTURE_PATH)],
-)
-@pytest.mark.parametrize("batch_size", [1])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-@patch("agilerl.algorithms.core.base.LLM")
-def test_grpo_clean_up_vllm(
-    MockLLM,
-    deepspeed_env,
-    grpo_factory,
-    model_factory,
-    accelerator_factory,
-    batch_size,
-    config,
-    use_deepspeed_optimizer,
-    use_separate_reference_adapter,
-    vocab_size,
-    input_size,
-    max_tokens,
-    group_size,
-    use_vllm,
-    pretrained_model_name_or_path,
-    reduce_memory_peak,
-    micro_batch_size_per_gpu,
-):
-    mock_instance = MagicMock(spec=vllm.LLM)
-    mock_instance.generate = MagicMock(
-        return_value=[MagicMock(outputs=[MagicMock(text="Generated text")])],
-    )
-    mock_instance.sleep = MagicMock()
-    mock_instance.wake_up = MagicMock()
-    mock_instance.shutdown = MagicMock()
-    mock_instance.llm_engine = MagicMock()
-    mock_instance.llm_engine.model_executor = MagicMock()
-    MockLLM.return_value = mock_instance
-
-    grpo = grpo_factory(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        group_size,
-        use_separate_reference_adapter,
-        use_vllm,
-        pretrained_model_name_or_path,
-        reduce_memory_peak,
-        micro_batch_size_per_gpu,
-    )
-    grpo.clean_up()
-    assert grpo.actor is None
-    assert grpo.optimizer is None
-    assert grpo.lr_scheduler is None
-
-
-def test_get_action_grpo_hf_repeats_stitch_prefix_ids_for_grouped_training():
-    grpo = _make_cpu_grpo_for_branch_tests(group_size=3)
-    prompt = {
-        "input_ids": torch.randint(0, 64, (1, 6), device=grpo.device),
-        "attention_mask": torch.ones(1, 6, device=grpo.device),
-    }
-    prepared_prompt = {
-        "input_ids": torch.randint(0, 64, (1, 6), device=grpo.device),
-        "attention_mask": torch.ones(1, 6, device=grpo.device),
-        "stitch_prefix_ids": torch.tensor(
-            [[7, 8]], dtype=torch.long, device=grpo.device
-        ),
-        "initial_prompt_len": 2,
-    }
-    generated = torch.randint(0, 64, (grpo.group_size, 8), device=grpo.device)
-    with (
-        patch(
-            "agilerl.algorithms.grpo.prepare_prompt_hf_generate",
-            return_value=prepared_prompt,
-        ),
-        patch.object(grpo.actor, "generate", return_value=generated),
-        patch(
-            "agilerl.algorithms.grpo.stitch_completion_after_windowed_hf_generate",
-            side_effect=lambda completion_id, stitch_ids, initial_prompt_len: (
-                completion_id,
-                int(initial_prompt_len),
-            ),
-        ) as mock_stitch,
-    ):
-        grpo.get_action([prompt], training=True)
-    stitch_ids = mock_stitch.call_args.args[1]
-    assert stitch_ids.shape[0] == grpo.group_size
-    grpo.clean_up()
-
-
-@patch("agilerl.algorithms.core.base.LLM")
-def test_init_grpo_vllm_sleep_mode_calls_sleep(MockLLM, model_factory):
-    mock_instance = make_mock_vllm_instance(vllm.LLM)
-    MockLLM.return_value = mock_instance
-
-    grpo = GRPO(
-        actor_network=model_factory(TINY_LLM_FIXTURE_PATH),
-        pad_token_id=999,
-        pad_token="<pad>",
-        group_size=2,
-        use_vllm=True,
-        vllm_config=VLLMConfig(
-            gpu_memory_utilization=0.05,
-            max_num_seqs=1,
-            sleep_mode=True,
-        ),
-        max_output_tokens=8,
-        max_model_len=32,
-        wrap=False,
-        gradient_checkpointing=False,
-        device="cpu",
-    )
-    assert grpo.use_vllm
-    mock_instance.sleep.assert_called()
-
-
 @spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config",
@@ -681,7 +553,7 @@ def test_init_grpo_vllm_sleep_mode_calls_sleep(MockLLM, model_factory):
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
-    [(True, TINY_LLM_FIXTURE_PATH)],
+    [(True, "facebook/opt-125m")],
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -728,8 +600,8 @@ def test_grpo_move_model_to_vllm(
     model_ref.unmerge_adapter()
     grpo._move_model_to_vllm()
 
-    llm_prefix = "model."
-    merged_prefix = "base_model.model.model."
+    llm_prefix = "model.decoder."
+    merged_prefix = "base_model.model.model.decoder."
 
     for (
         name,
@@ -747,8 +619,8 @@ def test_grpo_move_model_to_vllm(
     # Test with original_module
     fake_named_params = [
         (
-            "base_model.model.model.layers.0.input_layernorm.weight.original_module",
-            torch.randn(8),
+            "base_model.model.model.decoder.layers.0.self_attn_layer_norm.weight.original_module",
+            torch.randn(768),
         ),
     ]
     model_ref = grpo.accelerator.unwrap_model(grpo.actor)
@@ -756,83 +628,6 @@ def test_grpo_move_model_to_vllm(
         grpo._move_model_to_vllm()
 
     grpo.clean_up()
-
-
-@spawn_new_process_for_each_test
-@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("use_separate_reference_adapter", [False])
-@pytest.mark.parametrize("vocab_size", [100])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [2])
-@pytest.mark.parametrize(
-    "use_vllm, pretrained_model_name_or_path",
-    [
-        (False, TINY_LLM_FIXTURE_PATH),
-        (True, TINY_LLM_FIXTURE_PATH),
-    ],
-)
-@pytest.mark.parametrize("training", [True, False])
-@pytest.mark.parametrize("data_batch_size", [1])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_get_action_grpo_including_vllm(
-    deepspeed_env,
-    grpo_factory,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
-    use_separate_reference_adapter,
-    pretrained_model_name_or_path,
-    vocab_size,
-    input_size,
-    max_tokens,
-    group_size,
-    use_vllm,
-    training,
-    data_batch_size,
-    reduce_memory_peak,
-    micro_batch_size_per_gpu,
-):
-    grpo = grpo_factory(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        group_size,
-        use_separate_reference_adapter,
-        use_vllm,
-        pretrained_model_name_or_path,
-        reduce_memory_peak,
-        micro_batch_size_per_gpu,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(grpo.pretrained_model_name_or_path)
-    input_text = "Write me a short story about a cat."
-    tokenized_input = torch.tensor(
-        tokenizer.encode(input_text),
-        device=grpo.device,
-    ).unsqueeze(0)
-    states = [
-        {
-            "input_ids": tokenized_input,
-            "attention_mask": torch.ones_like(tokenized_input, device=grpo.device),
-            "text": input_text,
-        }
-        for _ in range(data_batch_size)
-    ]
-
-    completion_ids, _ = grpo.get_action(states, training)
-    expected_group_size = 1 if not training else group_size
-    for ids in completion_ids:
-        assert ids.shape[0] == expected_group_size
-        assert ids.shape[1] <= max_tokens + input_size
-    if grpo.accelerator is None:
-        assert not grpo.actor.training
 
 
 @patch("agilerl.algorithms.core.base.LLM")
@@ -845,7 +640,7 @@ def test_init_grpo_warns_when_hf_generate_chunk_size_set_with_vllm(
         UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
     ):
         grpo = GRPO(
-            actor_network=model_factory(TINY_LLM_FIXTURE_PATH),
+            actor_network=model_factory("facebook/opt-125m"),
             pad_token_id=999,
             pad_token="<pad>",
             group_size=2,
@@ -880,7 +675,6 @@ def test_init_grpo_warns_when_hf_generate_chunk_size_set_with_vllm(
 )
 @pytest.mark.parametrize("training", [True, False])
 @pytest.mark.parametrize("data_batch_size", [1])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("sleep_mode", [True])
 @patch("agilerl.algorithms.core.base.LLM")
@@ -901,7 +695,6 @@ def test_get_action_grpo_vllm_sleep_mode(
     use_vllm,
     training,
     data_batch_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
     sleep_mode,
 ):
@@ -951,60 +744,6 @@ def test_get_action_grpo_vllm_sleep_mode(
         mock_generate_with_vllm_colocate.assert_called()
     mock_instance.sleep.assert_called()
     mock_instance.wake_up.assert_called()
-    grpo.clean_up()
-
-
-@spawn_new_process_for_each_test
-@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
-@pytest.mark.parametrize("use_deepspeed_optimizer", [True])
-@pytest.mark.parametrize("use_separate_reference_adapter", [True])
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize(
-    "use_vllm, pretrained_model_name_or_path",
-    [(True, TINY_LLM_FIXTURE_PATH)],
-)
-@pytest.mark.parametrize("batch_size", [1])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_grpo_test_vllm(
-    deepspeed_env,
-    grpo_factory,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
-    use_separate_reference_adapter,
-    vocab_size,
-    input_size,
-    max_tokens,
-    group_size,
-    use_vllm,
-    pretrained_model_name_or_path,
-    batch_size,
-    reduce_memory_peak,
-    micro_batch_size_per_gpu,
-):
-    grpo = grpo_factory(
-        accelerator_factory,
-        model_factory,
-        config,
-        use_deepspeed_optimizer,
-        vocab_size,
-        input_size,
-        max_tokens,
-        group_size,
-        use_separate_reference_adapter,
-        use_vllm,
-        pretrained_model_name_or_path,
-        reduce_memory_peak,
-        micro_batch_size_per_gpu,
-    )
-    env = DummyReasoningEnv(vocab_size, input_size, batch_size, device=grpo.device)
-    fitnesses = grpo.test(env)
-    assert isinstance(fitnesses, np.ndarray)
     grpo.clean_up()
 
 
@@ -2053,67 +1792,6 @@ def test_generate_with_vllm_colocate_respects_training_kwargs(
     model_factory,
 ):
     grpo = _build_grpo_for_colocate_tests(
-        grpo_factory, accelerator_factory, model_factory
-    )
-    grpo.max_model_len = 8
-    grpo.max_output_tokens = 4
-    prompts = [
-        {
-            "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
-            "attention_mask": torch.ones(1, 3, dtype=torch.long),
-        }
-    ]
-    grpo.llm.generate.return_value = [
-        SimpleNamespace(outputs=[SimpleNamespace(token_ids=[4, 5])]),
-    ]
-    with patch(
-        "agilerl.algorithms.core.base.SamplingParams",
-        side_effect=lambda **kwargs: kwargs,
-    ) as mock_sampling_params:
-        grpo._generate_with_vllm_colocate(
-            prompts=prompts,
-            group_size=1,
-            temperature=0.33,
-        )
-    kwargs = mock_sampling_params.call_args.kwargs
-    assert kwargs["n"] == 1
-    assert kwargs["temperature"] == 0.33
-    assert kwargs["max_tokens"] == 4
-    assert kwargs["top_p"] == grpo.top_p
-    assert kwargs["top_k"] == grpo.top_k
-    grpo.clean_up()
-
-
-def test_generate_with_vllm_colocate_raises_when_prompt_exceeds_model_len(
-    grpo_factory,
-    accelerator_factory,
-    model_factory,
-):
-    grpo = _build_grpo_for_colocate_tests(
-        grpo_factory, accelerator_factory, model_factory
-    )
-    grpo.max_model_len = 4
-    prompts = [
-        {
-            "input_ids": torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.long),
-            "attention_mask": torch.ones(1, 5, dtype=torch.long),
-        }
-    ]
-    with pytest.raises(ValueError, match="greater than the model length"):
-        grpo._generate_with_vllm_colocate(
-            prompts=prompts,
-            group_size=1,
-            temperature=0.7,
-        )
-    grpo.clean_up()
-
-
-def test_generate_with_vllm_colocate_tp_gather_and_slice(
-    grpo_factory,
-    accelerator_factory,
-    model_factory,
-):
-    grpo = _build_grpo_for_colocate_tests(
         grpo_factory, accelerator_factory, model_factory, tensor_parallel_size=2
     )
     prompts = [
@@ -2265,6 +1943,68 @@ def test_calculate_advantage_mean_only_branch():
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("group_size", [5])
 @pytest.mark.parametrize(
+    "rewards",
+    [
+        torch.tensor([[2, 4, 6]], dtype=torch.float32),
+    ],
+)
+def test_calculate_advantage_raises_when_rewards_not_divisible_by_group_size(
+    group_size,
+    rewards,
+):
+    stub = _GrpoMathStub(group_size=group_size)
+    with pytest.raises(ValueError) as e:
+        stub._calculate_advantage(rewards)
+    assert (
+        f"Rewards must have a total element count divisible by group_size ({group_size}); got {rewards.numel()} elements."
+        in str(e.value)
+    )
+
+
+def test_calculate_advantage_mean_only_branch():
+    stub = _GrpoMathStub(group_size=2, adv_norm="mean_only")
+    rewards = torch.tensor([[1.0, 3.0], [4.0, 10.0]], dtype=torch.float32)
+    calculated_advantage = stub._calculate_advantage(rewards)
+    expected = (rewards - rewards.mean(dim=1, keepdim=True)).flatten().unsqueeze(1)
+    assert torch.equal(calculated_advantage, expected)
+
+
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize(
+    "rewards",
+    [
+        torch.tensor([[2, 4, 6]], dtype=torch.float32),
+    ],
+)
+def test_calculate_advantage_raises_when_rewards_not_divisible_by_group_size(
+    group_size,
+    rewards,
+):
+    stub = _GrpoMathStub(group_size=group_size)
+    with pytest.raises(ValueError) as e:
+        stub._calculate_advantage(rewards)
+    assert (
+        f"Rewards must have a total element count divisible by group_size ({group_size}); got {rewards.numel()} elements."
+        in str(e.value)
+    )
+
+
+def test_calculate_advantage_mean_only_branch():
+    stub = _GrpoMathStub(group_size=2, adv_norm="mean_only")
+    rewards = torch.tensor([[1.0, 3.0], [4.0, 10.0]], dtype=torch.float32)
+    calculated_advantage = stub._calculate_advantage(rewards)
+    expected = (rewards - rewards.mean(dim=1, keepdim=True)).flatten().unsqueeze(1)
+    assert torch.equal(calculated_advantage, expected)
+
+
+@pytest.mark.parametrize("config", [deepspeed_config_stage_2])
+@pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
+@pytest.mark.parametrize("vocab_size", [1000])
+@pytest.mark.parametrize("input_size", [10])
+@pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("group_size", [5])
+@pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
@@ -2275,14 +2015,133 @@ def test_calculate_kl_divergence(
     batch_size,
 ):
     stub = _GrpoMathStub(group_size=group_size)
+    stub = _GrpoMathStub(group_size=group_size)
     normal_dist = torch.distributions.normal.Normal(0.0, 1.0)
     reference_log_probs = normal_dist.log_prob(torch.randn(batch_size))
     log_probs = normal_dist.log_prob(torch.randn(batch_size))
+    kl = stub._calculate_kl_divergence(log_probs, reference_log_probs)
     kl = stub._calculate_kl_divergence(log_probs, reference_log_probs)
     assert torch.all(kl >= 0.0)
     assert isinstance(kl, torch.Tensor)
     assert kl.shape == log_probs.shape
     assert kl.shape == reference_log_probs.shape
+
+
+class _GrpoLossStub:
+    def __init__(
+        self,
+        clip_coef_min: float,
+        clip_coef_max: float,
+        beta: float,
+        use_kl_advantage_shaping: bool,
+    ) -> None:
+        self.clip_coef_min = clip_coef_min
+        self.clip_coef_max = clip_coef_max
+        self.beta = beta
+        self.use_kl_advantage_shaping = use_kl_advantage_shaping
+
+    _calculate_kl_divergence = GRPO._calculate_kl_divergence
+    _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
+    _reduce_masked_loss = GRPO._reduce_masked_loss
+    _grpo_loss_standard = GRPO._grpo_loss_standard
+    _gspo_loss = GRPO._gspo_loss
+    _cispo_loss = GRPO._cispo_loss
+
+
+def test_grpo_loss_standard_kl_advantage_shaping_path():
+    stub = _GrpoLossStub(
+        clip_coef_min=0.8,
+        clip_coef_max=1.2,
+        beta=0.05,
+        use_kl_advantage_shaping=True,
+    )
+    mask = torch.tensor([[True, True, False], [True, True, True]])
+    log_probs = torch.tensor([[0.2, 0.3, 0.0], [0.4, 0.1, -0.2]], dtype=torch.float32)
+    old_log_probs = log_probs - 0.15
+    reference_log_probs = log_probs + 0.05
+    advantages = torch.tensor([[0.5], [-0.25]], dtype=torch.float32)
+    loss, kl = stub._grpo_loss_standard(
+        mask,
+        log_probs,
+        old_log_probs,
+        reference_log_probs,
+        advantages,
+    )
+    assert torch.isfinite(loss)
+    assert torch.isfinite(kl)
+
+
+def test_gspo_loss_path():
+    stub = _GrpoLossStub(
+        clip_coef_min=0.8,
+        clip_coef_max=1.2,
+        beta=0.05,
+        use_kl_advantage_shaping=False,
+    )
+    mask = torch.tensor([[True, True, True], [True, False, True]])
+    log_probs = torch.tensor([[0.1, 0.2, 0.0], [0.3, 0.0, -0.1]], dtype=torch.float32)
+    old_log_probs = log_probs - 0.2
+    reference_log_probs = log_probs + 0.03
+    advantages = torch.tensor([[0.75], [0.25]], dtype=torch.float32)
+    loss, kl = stub._gspo_loss(
+        mask,
+        log_probs,
+        old_log_probs,
+        reference_log_probs,
+        advantages,
+    )
+    assert torch.isfinite(loss)
+    assert torch.isfinite(kl)
+
+
+def test_cispo_loss_path():
+    stub = _GrpoLossStub(
+        clip_coef_min=0.8,
+        clip_coef_max=1.2,
+        beta=0.05,
+        use_kl_advantage_shaping=False,
+    )
+    mask = torch.tensor([[True, True, True], [True, False, True]])
+    log_probs = torch.tensor([[0.1, 0.2, 0.0], [0.3, 0.0, -0.1]], dtype=torch.float32)
+    old_log_probs = log_probs - 0.2
+    reference_log_probs = log_probs + 0.03
+    advantages = torch.tensor([[0.75], [0.25]], dtype=torch.float32)
+    loss, kl = stub._cispo_loss(
+        mask,
+        log_probs,
+        old_log_probs,
+        reference_log_probs,
+        advantages,
+    )
+    assert torch.isfinite(loss)
+    assert torch.isfinite(kl)
+
+
+def test_cispo_loss_clamps_importance_ratio_on_both_sides():
+    stub = _GrpoLossStub(
+        clip_coef_min=0.8,
+        clip_coef_max=1.2,
+        beta=0.0,
+        use_kl_advantage_shaping=False,
+    )
+    mask = torch.tensor([[True, True]])
+    log_probs = torch.tensor([[-1.0, 1.0]], dtype=torch.float32)
+    old_log_probs = torch.zeros_like(log_probs)
+    reference_log_probs = log_probs.clone()
+    advantages = torch.tensor([[1.0]], dtype=torch.float32)
+
+    loss, kl = stub._cispo_loss(
+        mask,
+        log_probs,
+        old_log_probs,
+        reference_log_probs,
+        advantages,
+    )
+
+    # exp([-1, 1]) -> [0.367..., 2.718...] then clamp to [0.8, 1.2].
+    expected_loss = torch.tensor(-0.2, dtype=torch.float32)
+    assert torch.allclose(loss, expected_loss, atol=1e-6)
+    assert torch.allclose(kl, torch.tensor(0.0, dtype=torch.float32), atol=1e-6)
 
 
 class _GrpoLossStub:
@@ -2531,6 +2390,31 @@ def test_grpo_learn(
             sleep_mode=True,
             use_liger_loss=use_liger_loss,
         )
+    if use_vllm and use_liger_loss:
+        pytest.skip("Skip vLLM learn path with liger in this mocked-call test.")
+    mock_llm_instance = make_mock_vllm_instance(vllm.LLM)
+    llm_patch_ctx = (
+        patch("agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance)
+        if use_vllm
+        else nullcontext()
+    )
+    with llm_patch_ctx:
+        grpo = grpo_factory(
+            accelerator_factory,
+            model_factory,
+            config,
+            use_deepspeed_optimizer,
+            vocab_size,
+            input_size,
+            max_tokens,
+            group_size,
+            use_separate_reference_adapter,
+            use_vllm,
+            pretrained_model_name_or_path,
+            micro_batch_size_per_gpu,
+            sleep_mode=True,
+            use_liger_loss=use_liger_loss,
+        )
     completions = [
         torch.randint(
             0,
@@ -2571,6 +2455,19 @@ def test_grpo_learn(
         mock_llm_instance.sleep.assert_called_once()
     mean_loss = learn_result["mean_loss"]
     mean_kl = learn_result["mean_kl"]
+    if use_vllm:
+        grpo._vllm_awake = True
+    with patch.object(
+        grpo,
+        "_prepare_vllm_for_training",
+        wraps=grpo._prepare_vllm_for_training,
+    ) as mock_prepare_vllm_for_training:
+        learn_result = grpo.learn((completions, action_masks, rewards))
+    assert mock_prepare_vllm_for_training.call_count == 1
+    if use_vllm:
+        mock_llm_instance.sleep.assert_called_once()
+    mean_loss = learn_result["mean_loss"]
+    mean_kl = learn_result["mean_kl"]
     assert isinstance(mean_loss, float)
     assert isinstance(mean_kl, float)
 
@@ -2588,6 +2485,161 @@ def test_grpo_learn(
 
         else:
             assert torch.equal(param, pre_learn_param)
+    grpo.clean_up()
+
+
+def _build_branch_experiences(
+    batch_size: int,
+    seq_len: int = 10,
+    vocab_size: int = 64,
+):
+    completion_ids = [
+        torch.randint(0, vocab_size, (1, seq_len), dtype=torch.long)
+        for _ in range(batch_size)
+    ]
+    action_masks = [
+        torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(batch_size)
+    ]
+    return completion_ids, action_masks
+
+
+def test_learn_raises_when_rewards_count_mismatch():
+    grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
+    completion_ids, action_masks = _build_branch_experiences(batch_size=3)
+    rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
+    with pytest.raises(
+        ValueError, match="Rewards must provide one scalar per trajectory"
+    ):
+        grpo.learn((completion_ids, action_masks, rewards))
+    grpo.clean_up()
+
+
+def test_learn_raises_when_batch_not_divisible_by_group_size():
+    grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
+    completion_ids, action_masks = _build_branch_experiences(batch_size=3)
+    rewards = torch.tensor([1.0, 0.0, -1.0], dtype=torch.float32)
+    with pytest.raises(ValueError, match="must be divisible by group_size"):
+        grpo.learn((completion_ids, action_masks, rewards))
+    grpo.clean_up()
+
+
+def test_learn_filter_whiten_clip_branch_path_with_active_subset():
+    grpo = _make_cpu_grpo_for_branch_tests(
+        group_size=2,
+        filter_zero_adv=True,
+        whiten_advantages=True,
+        adv_clip_range=0.1,
+        adv_filter_eps=0.05,
+    )
+    completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+    rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
+
+    def fake_fused_forward(ids, batch_size):
+        shape = (ids.shape[0], ids.shape[1] - 1)
+        zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+        return zeros, zeros, None
+
+    fake_advantages = torch.tensor([[0.0], [2.0], [-2.0], [0.0]], dtype=torch.float32)
+    with (
+        patch.object(grpo, "_calculate_advantage", return_value=fake_advantages),
+        patch.object(grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward),
+        patch.object(
+            grpo,
+            "_loss",
+            return_value=(
+                torch.tensor(1.0, dtype=torch.float32),
+                torch.tensor(0.1, dtype=torch.float32),
+            ),
+        ) as mock_grpo_loss,
+        patch.object(grpo, "_backward_pass", return_value=None),
+    ):
+        metrics = grpo.learn((completion_ids, action_masks, rewards))
+    processed_advantages = mock_grpo_loss.call_args.args[5]
+    assert processed_advantages.abs().max().item() <= 0.100001
+    assert metrics["mean_loss"] == pytest.approx(1.0)
+    assert metrics["mean_kl"] == pytest.approx(0.1)
+    grpo.clean_up()
+
+
+def test_learn_warns_and_returns_zeros_when_all_filtered():
+    grpo = _make_cpu_grpo_for_branch_tests(
+        group_size=2,
+        filter_zero_adv=True,
+        adv_filter_eps=0.5,
+        whiten_advantages=True,
+    )
+    completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+    rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
+    with (
+        pytest.warns(
+            UserWarning,
+            match="All samples were filtered by advantage threshold; skipping GRPO update.",
+        ),
+        patch.object(
+            grpo,
+            "_calculate_advantage",
+            return_value=torch.zeros(4, 1, dtype=torch.float32),
+        ),
+    ):
+        metrics = grpo.learn((completion_ids, action_masks, rewards))
+    assert metrics == {"mean_loss": 0.0, "mean_kl": 0.0}
+    grpo.clean_up()
+
+
+def test_learn_warns_and_returns_zeros_when_no_active_samples_after_filtering():
+    grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
+    completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+    rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
+
+    def fake_fused_forward(ids, batch_size):
+        shape = (ids.shape[0], ids.shape[1] - 1)
+        zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+        return zeros, zeros, None
+
+    with (
+        patch(
+            "agilerl.algorithms.grpo.np.arange", return_value=np.array([], dtype=int)
+        ),
+        patch.object(grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward),
+        pytest.warns(
+            UserWarning,
+            match="No active samples after filtering; skipping GRPO update.",
+        ),
+    ):
+        metrics = grpo.learn((completion_ids, action_masks, rewards))
+    assert metrics == {"mean_loss": 0.0, "mean_kl": 0.0}
+    grpo.clean_up()
+
+
+def test_learn_empty_minibatch_branch_continues_without_grpo_step():
+    grpo = _make_cpu_grpo_for_branch_tests(group_size=2, update_epochs=1)
+    grpo.rng = SimpleNamespace(shuffle=lambda _x: None)
+    completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+    rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
+
+    class EmptySlicingBatchIndices:
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, item):
+            del item
+            return np.array([], dtype=int)
+
+    def fake_fused_forward(ids, batch_size):
+        shape = (ids.shape[0], ids.shape[1] - 1)
+        zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+        return zeros, zeros, None
+
+    with (
+        patch(
+            "agilerl.algorithms.grpo.np.arange",
+            return_value=EmptySlicingBatchIndices(),
+        ),
+        patch.object(grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward),
+        patch.object(grpo, "_loss", side_effect=AssertionError("should not be called")),
+    ):
+        metrics = grpo.learn((completion_ids, action_masks, rewards))
+    assert metrics == {"mean_loss": 0.0, "mean_kl": 0.0}
     grpo.clean_up()
 
 

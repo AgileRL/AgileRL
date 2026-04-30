@@ -241,6 +241,7 @@ def test_init_dpo(
     vocab_size,
     input_size,
     max_tokens,
+    data_batch_size,
     micro_batch_size_per_gpu,
     from_name,
 ):
@@ -409,6 +410,10 @@ def test_dpo_learn(
 
     prompts = env.reset()
     pre_learn_actor_state_dict = copy.deepcopy(dpo.actor.state_dict())
+    learn_result = dpo.learn(prompts)
+    loss = learn_result["mean_loss"]
+    chosen_reward = learn_result["mean_chosen_reward"]
+    rejected_reward = learn_result["mean_rejected_reward"]
     learn_result = dpo.learn(prompts)
     loss = learn_result["mean_loss"]
     chosen_reward = learn_result["mean_chosen_reward"]

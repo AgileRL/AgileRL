@@ -2900,6 +2900,46 @@ class TestDeepspeedLoad:
         expected = (not s.lora_only) and (not s.save_optimizer)
         assert (sd_spy.call_count == 1) == expected
 
+    def test_llm_deepspeed_full_load_without_optimizer_falls_back_to_ds_model_only_restore(
+        self, grpo_factory, tmp_path
+    ):
+        from pathlib import Path
+        from unittest.mock import patch
+
+        # Arrange: save a DeepSpeed full-model checkpoint with optimizer state.
+        # This shape stores model shards in save_checkpoint/ and does not inject
+        # actor_state_dict into attributes.pt.
+        saver = grpo_factory
+        _fit_deepspeed_mock(saver)
+
+        def _fake_ds_save(path_str, *args, tag="save_checkpoint", **kwargs):
+            (Path(path_str) / tag).mkdir(parents=True, exist_ok=True)
+
+        saver.actor.save_checkpoint = MagicMock(side_effect=_fake_ds_save)
+        saver.save_checkpoint(
+            str(tmp_path),
+            lora_only=False,
+            save_optimizer=True,
+        )
+
+        # Act/Assert: loading with load_optimizer=False falls back to DS
+        # model-only restore (no optimizer/lr scheduler state).
+        loader = grpo_factory
+        _fit_deepspeed_mock(loader)
+        load_ckpt_spy = MagicMock(
+            return_value=(str(tmp_path / "save_checkpoint"), None)
+        )
+        loader.actor.load_checkpoint = load_ckpt_spy
+        with (
+            patch.object(loader, "_load_model_checkpoint"),
+        ):
+            loader.load_checkpoint(str(tmp_path), load_optimizer=False)
+        assert load_ckpt_spy.call_count == 1
+        kwargs = load_ckpt_spy.call_args.kwargs
+        assert kwargs["tag"] == "save_checkpoint"
+        assert kwargs["load_optimizer_states"] is False
+        assert kwargs["load_lr_scheduler_states"] is False
+
 
 # --------------------------------------------------------------------------- #
 # ZeRO-3 gather behaviour                                                      #
@@ -3520,7 +3560,7 @@ class TestLLMMoveModelToVllm:
         agent.llm = MagicMock()
         with gather:
             agent._move_model_to_vllm()
-        agent.llm.apply_model.assert_called_once()
+        agent.llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights.assert_called()
         agent.llm.reset_prefix_cache.assert_called_once()
 
         agent = _make_llm_agent(accelerator=None)
@@ -3536,7 +3576,7 @@ class TestLLMMoveModelToVllm:
         with gather:
             agent._move_model_to_vllm()
         inner.merge_adapter.assert_called_once()
-        agent.llm.apply_model.assert_called_once()
+        agent.llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights.assert_called()
         agent.llm.reset_prefix_cache.assert_called_once()
 
         agent = _make_llm_agent(accelerator=None)
@@ -3549,7 +3589,7 @@ class TestLLMMoveModelToVllm:
         with gather:
             agent._move_model_to_vllm()
         actor.merge_adapter.assert_called_once()
-        agent.llm.apply_model.assert_called_once()
+        agent.llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights.assert_called()
         agent.llm.reset_prefix_cache.assert_called_once()
 
 
@@ -4034,7 +4074,7 @@ class TestLLMUseReferencePolicySeparateAdapter:
 
 @pytest.mark.llm
 class TestLLMMoveModelToVllmSkipsPrefixAndOriginalModule:
-    """_move_model_to_vllm skips PEFT adapter params (lora_, original_module, etc.)."""
+    """_move_model_to_vllm skips original_module params and loads remaining weights."""
 
     def test_skips_peft_adapter_params(self):
         acc = _make_mock_accelerator()
@@ -4055,16 +4095,12 @@ class TestLLMMoveModelToVllmSkipsPrefixAndOriginalModule:
         acc.unwrap_model = MagicMock(return_value=model_ref)
         with patch("agilerl.algorithms.core.base.gather_if_zero3"):
             agent._move_model_to_vllm()
-        agent.llm.apply_model.assert_called_once()
-        call_args = agent.llm.apply_model.call_args
-        load_fn = call_args[0][0]
-        mock_model = MagicMock()
-        load_fn(mock_model)
-        mock_model.load_weights.assert_called_once()
-        loaded = mock_model.load_weights.call_args[0][0]
-        names = [n for n, _ in loaded]
-        assert len(loaded) == 2
+        load_weights = agent.llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights
+        assert load_weights.call_count == 4
+        names = [call.args[0][0][0] for call in load_weights.call_args_list]
         assert "model.layer.weight" in names
+        assert "model.layer.lora_A.actor.weight" in names
+        assert "model.layer.lora_B.actor.weight" in names
         assert "dense.weight" in names
 
 
