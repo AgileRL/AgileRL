@@ -11,7 +11,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from keycloak.exceptions import KeycloakError
 
-from agilerl.arena.auth import ArenaOAuth2, load_credentials
+from agilerl.arena.auth import (
+    ArenaOAuth2,
+    is_oauth_access_token_valid,
+    load_credentials,
+    oauth_access_token_expires_at,
+)
 from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 
 
@@ -54,6 +59,35 @@ class TestLoadCredentials:
             assert result is None
         finally:
             cred_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+
+# ---------------------------------------------------------------------------
+# JWT helpers (OAuth access tokens from Keycloak)
+# ---------------------------------------------------------------------------
+def _jwt_with_exp(exp: int) -> str:
+    import base64
+
+    def seg(obj: dict) -> str:
+        raw = json.dumps(obj, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    return f"{seg({'alg': 'none'})}.{seg({'exp': exp})}.x"
+
+
+class TestOAuthAccessTokenJwt:
+    def test_expires_at_none_for_opaque(self):
+        assert oauth_access_token_expires_at("opaque-string") is None
+
+    def test_expires_at_decodes_exp(self):
+        assert oauth_access_token_expires_at(_jwt_with_exp(1700000000)) == 1700000000.0
+
+    def test_is_valid_true_before_exp_with_skew(self):
+        with patch("agilerl.arena.auth.time.time", return_value=1000.0):
+            assert is_oauth_access_token_valid(_jwt_with_exp(2000), skew_seconds=60)
+
+    def test_is_valid_false_after_exp_skew(self):
+        with patch("agilerl.arena.auth.time.time", return_value=2000.0):
+            assert not is_oauth_access_token_valid(_jwt_with_exp(1000))
 
 
 # ---------------------------------------------------------------------------

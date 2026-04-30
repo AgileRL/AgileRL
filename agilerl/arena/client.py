@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import time
 import tarfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -11,7 +12,12 @@ from typing import Any, ClassVar, Literal, Self
 
 import httpx
 
-from agilerl.arena.auth import ArenaOAuth2, load_credentials
+from agilerl.arena.auth import (
+    ArenaOAuth2,
+    is_oauth_access_token_valid,
+    load_credentials,
+    oauth_access_token_expires_at,
+)
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
@@ -176,14 +182,44 @@ class ArenaClient:
         )
         return cls
 
-    def login(self, *, timeout: int = 300) -> None:
-        """Start the device-authorization login flow.
+    def login(self, *, timeout: int = 300, force: bool = False) -> None:
+        """Start the device-authorization login flow (or reuse a valid stored session).
 
-        Opens a browser for verification.  The call blocks until
-        the user authorizes or *timeout* seconds elapse.
+        If ``ARENA_API_KEY`` / *api_key* is set, device login is not used.
+
+        When *force* is false (default), an unexpired OAuth access token or a
+        successful refresh from ``~/.arena/credentials.json`` skips the browser
+        flow. Use *force* to always run device authorization.
         On success the tokens are persisted to
         ``~/.arena/credentials.json``.
         """
+        if self._api_key is not None:
+            logger.info("API key in use; device login not required.")
+            return
+
+        if not force:
+            if is_oauth_access_token_valid(self._tokens.access_token):
+                logger.info("Access token still valid; skipping device login.")
+                return
+
+            if self._tokens.refresh_token:
+                try:
+                    tokens = self._auth.refresh_access_token(
+                        self._tokens.refresh_token
+                    )
+                    self._tokens.access_token = tokens["access_token"]
+                    self._tokens.refresh_token = tokens.get(
+                        "refresh_token", self._tokens.refresh_token
+                    )
+                    logger.info(
+                        "Session refreshed from stored credentials; skipping device login."
+                    )
+                    return
+                except ArenaAuthError:
+                    logger.debug(
+                        "Stored refresh token rejected; starting device login.",
+                    )
+
         tokens = self._auth.device_login(timeout=timeout)
         self._tokens.access_token = tokens["access_token"]
         self._tokens.refresh_token = tokens.get("refresh_token")
@@ -1019,6 +1055,30 @@ class ArenaClient:
         if creds:
             self._tokens.access_token = creds.get("access_token")
             self._tokens.refresh_token = creds.get("refresh_token")
+            self._proactively_refresh_oauth()
+
+    def _proactively_refresh_oauth(self) -> None:
+        """If stored access token is expired (JWT ``exp``) but refresh exists, refresh once."""
+        if self._api_key is not None:
+            return
+        if not self._tokens.refresh_token or not self._tokens.access_token:
+            return
+        exp = oauth_access_token_expires_at(self._tokens.access_token)
+        if exp is None:
+            return
+        if exp > time.time() + 60:
+            return
+        try:
+            tokens = self._auth.refresh_access_token(self._tokens.refresh_token)
+        except ArenaAuthError:
+            logger.debug(
+                "Proactive token refresh failed; will retry on 401 if possible.",
+            )
+            return
+        self._tokens.access_token = tokens["access_token"]
+        self._tokens.refresh_token = tokens.get(
+            "refresh_token", self._tokens.refresh_token
+        )
 
     def _auth_headers(self) -> dict[str, str]:
         # If an API key is provided, use it for authentication.
