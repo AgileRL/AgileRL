@@ -117,9 +117,10 @@ client.validate_environment(
     entrypoint="my_env:MyCustomEnv",
 )
 
-# Train on validated custom environment
-client.submit_training_job(
-  manifest=
+# Train on validated custom environment (requires target project name)
+client.submit_experiment(
+    manifest="path/to/manifest.yaml",
+    project="my-project",
 )
 ```
 
@@ -138,7 +139,7 @@ arena env validate
     --entrypoint my_env:MyCustomEnv
 
 # Train on validated custom environment
-arena train --manifest path/to/manifest
+arena experiment submit --manifest path/to/manifest.yaml --project my-project
 ```
 
 ## Tutorials

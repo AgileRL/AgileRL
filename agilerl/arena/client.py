@@ -514,6 +514,24 @@ class ArenaClient:
             timeout=self._upload_timeout,
         ).collect()
 
+    def submit_training_job(
+        self,
+        manifest: str | os.PathLike[str] | dict[str, Any],
+        *,
+        resource_id: int | None = None,
+        num_nodes: int | None = None,
+        project: str | None = None,
+        experiment_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Submit a training job to Arena (alias for :meth:`submit_experiment`)."""
+        return self.submit_experiment(
+            manifest,
+            resource_id=resource_id,
+            num_nodes=num_nodes,
+            project=project,
+            experiment_name=experiment_name,
+        )
+
     def list_experiments(self, project: str) -> list[dict[str, Any]]:
         """List all experiments in a project.
 
@@ -543,6 +561,10 @@ class ArenaClient:
             "/api/cli/v1/experiments/jobs/resume",
             json={"experiment_name": experiment_name, "max_steps": max_steps},
         )
+
+    def resume_training_job(self, experiment_name: str, max_steps: int) -> dict[str, Any]:
+        """Resume a training job (alias for :meth:`resume_experiment`)."""
+        return self.resume_experiment(experiment_name=experiment_name, max_steps=max_steps)
 
     # TODO: Update HPO params (maybe leave for v2 if too complicated)
 
