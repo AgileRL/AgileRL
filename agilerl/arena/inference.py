@@ -9,7 +9,11 @@ from typing import Self, TypeAlias
 import httpx
 import numpy as np
 
-from agilerl.arena.exceptions import ArenaAPIError, ArenaAuthError
+from agilerl.arena.exceptions import (
+    ArenaAPIError,
+    ArenaAuthError,
+    ArenaValidationError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,11 +170,11 @@ class Agent:
 
         :param raw: JSON, base64, ``[ floats ... ]``, or JSON number scalar.
         :returns: Decoded observation (never ``None``).
-        :raises ValueError: Empty input or observation decoded to ``None``.
+        :raises ArenaValidationError: Empty input or observation decoded to ``None``.
         """
         text = raw.strip()
         if not text:
-            raise ValueError("Observation string is empty.")
+            raise ArenaValidationError("Observation string is empty.")
 
         try:
             parsed: SerializedRLData = json.loads(text)
@@ -187,7 +191,7 @@ class Agent:
             decoded = Agent.deserialize(parsed, batched=batched)
 
         if decoded is None:
-            raise ValueError("Observation JSON was null.")
+            raise ArenaValidationError("Observation JSON was null.")
         return decoded
 
     @staticmethod

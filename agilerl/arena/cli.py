@@ -35,7 +35,11 @@ def arena_client(
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
-@click.option("--api-key", default=None, help="Bearer secret: profile CLI PAT (arena_pat_…) or access token.")
+@click.option(
+    "--api-key",
+    default=None,
+    help="Bearer secret: profile CLI PAT (arena_pat_…) or access token.",
+)
 @click.option(
     "--base-url",
     default=None,
@@ -694,10 +698,7 @@ def inference_run(
 ) -> None:
     """Query a deployed model by deployment name (uses cached URL/key after first fetch)."""
     with arena_client(config) as client:
-        try:
-            obs = client.parse_inference_observation(obs_raw)
-        except ValueError as exc:
-            raise click.UsageError(str(exc)) from exc
+        obs = client.parse_inference_observation(obs_raw)
         with client.open_inference_agent(
             deployment_name,
             refresh=refresh,
