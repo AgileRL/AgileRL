@@ -1720,21 +1720,34 @@ def _build_grpo_for_colocate_tests(
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 def test_get_action_grpo_vllm_multiple_gpus(
     deepspeed_env,
+    grpo_factory,
+    accelerator_factory,
     model_factory,
+    config,
+    use_deepspeed_optimizer,
+    use_separate_reference_adapter,
+    vocab_size,
+    input_size,
+    max_tokens,
+    group_size,
+    use_vllm,
+    pretrained_model_name_or_path,
+    training,
+    data_batch_size,
     tensor_parallel_size: int,
 ):
     grpo = grpo_factory(
         accelerator_factory,
         model_factory,
-        None,
-        False,
-        100,
-        10,
-        8,
-        2,
-        False,
-        False,
-        None,
+        config,
+        use_deepspeed_optimizer,
+        vocab_size,
+        input_size,
+        max_tokens,
+        group_size,
+        use_separate_reference_adapter,
+        use_vllm,
+        pretrained_model_name_or_path,
         None,
     )
     grpo.vllm_config = VLLMConfig(
@@ -1745,7 +1758,10 @@ def test_get_action_grpo_vllm_multiple_gpus(
     grpo.llm = MagicMock()
     grpo.tp_group = "tp-group"
     grpo.device = "cpu"
-    return grpo
+    assert grpo.vllm_config.tensor_parallel_size == tensor_parallel_size
+    assert isinstance(training, bool)
+    assert data_batch_size > 0
+    grpo.clean_up()
 
 
 def test_generate_with_vllm_colocate_basic_contract(
