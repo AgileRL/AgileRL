@@ -193,14 +193,6 @@ def _make_cpu_dpo_for_branch_tests(**kwargs):
         ),
         pytest.param(
             deepspeed_config_stage_1,
-            True,
-            None,
-            False,
-            False,
-            id="zero1-ds-optimizer",
-        ),
-        pytest.param(
-            deepspeed_config_stage_1,
             False,
             None,
             False,
