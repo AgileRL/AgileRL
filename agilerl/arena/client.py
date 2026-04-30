@@ -4,7 +4,8 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable, Sequence
+import tarfile
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -94,6 +95,12 @@ class ArenaClient:
     CONFIG_DIR: ClassVar[Path] = Path.home() / ".arena"
     CONFIG_FILE: ClassVar[Path] = CONFIG_DIR / "config.json"
 
+    _CAPABILITIES_PATH: ClassVar[str] = "/api/cli/v1/capabilities"
+    _MANIFEST_ALLOWED_PATH_PREFIX: ClassVar[str] = "/api/cli/v1/on-prem"
+    _MANIFEST_ALLOWED_METHODS: ClassVar[frozenset[str]] = frozenset(
+        {"GET", "POST", "PATCH", "DELETE"}
+    )
+
     _ERROR_MAP: ClassVar[dict[str, type[ArenaAPIError]]] = {
         "/api/cli/v1/environments/create-and-validate": ArenaValidationError,
         "/api/cli/v1/environments/validate": ArenaValidationError,
@@ -120,6 +127,7 @@ class ArenaClient:
         self._tokens = _TokenStore()
         self._verbose = verbose
         self._stream_handler: Callable[[StreamEvent], None] | None = None
+        self._cli_capabilities_cache: dict[str, Any] | None = None
 
         self._http = httpx.Client(
             base_url=self._base_url,
@@ -1621,6 +1629,161 @@ class ArenaClient:
             resp.headers.get("content-type"),
             resp.headers.get("content-disposition"),
         )
+
+    def get_cli_capabilities(
+        self, *, force_refresh: bool = False
+    ) -> dict[str, Any] | None:
+        """Fetch ``GET /api/cli/v1/capabilities`` and return the ``data`` object.
+
+        Caches per client instance. Returns ``None`` when the endpoint is
+        absent (**404**), the body is empty / not JSON, the envelope cannot be
+        parsed, **schemaVersion** is unsupported, or the client has no credentials
+        (**ArenaAuthError**). Other HTTP failures raise :class:`ArenaAPIError`.
+        """
+        if self._cli_capabilities_cache is not None and not force_refresh:
+            return self._cli_capabilities_cache
+
+        try:
+            headers = self._auth_headers()
+        except ArenaAuthError:
+            self._cli_capabilities_cache = None
+            return None
+
+        try:
+            resp = self._http.request(
+                "GET",
+                self._CAPABILITIES_PATH,
+                headers=headers,
+                timeout=self._request_timeout,
+            )
+        except httpx.HTTPError:
+            self._cli_capabilities_cache = None
+            return None
+
+        if resp.status_code == 404:
+            self._cli_capabilities_cache = None
+            return None
+
+        if not resp.is_success:
+            raw = resp.text
+            raise ArenaAPIError.from_response_body(raw, status_code=resp.status_code)
+
+        try:
+            envelope = resp.json()
+        except ValueError:
+            # Empty body, HTML fallback pages, or other non-JSON success payloads.
+            self._cli_capabilities_cache = None
+            return None
+
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("ok") is not True
+            or "data" not in envelope
+        ):
+            self._cli_capabilities_cache = None
+            return None
+
+        data = envelope["data"]
+        if not isinstance(data, dict) or data.get("schemaVersion") != 1:
+            self._cli_capabilities_cache = None
+            return None
+
+        self._cli_capabilities_cache = data
+        return data
+
+    def invoke_manifest_command(
+        self,
+        invoke: Mapping[str, Any],
+        parsed_args: Mapping[str, Any],
+    ) -> Any:
+        """Dispatch a manifest ``invoke`` dict using already-parsed CLI kwargs.
+
+        Validates HTTP path (**allowlisted** prefix), method, and response
+        kind. Splits arguments into query string vs JSON body based on each
+        parameter's ``in`` field (``client`` parameters are ignored here —
+        handle those in the CLI layer). ``binary`` responses return the
+        ``(bytes, content_type, content_disposition)`` tuple from
+        :meth:`_request_raw`; ``json`` responses return unwrapped ``data``.
+        """
+        path = invoke["path"]
+        if not isinstance(path, str):
+            msg = "Manifest path must be a string."
+            raise ArenaValidationError(msg, cli_hint="Upgrade agilerl — malformed manifest.")
+        if not path.startswith(self._MANIFEST_ALLOWED_PATH_PREFIX):
+            msg = "Manifest command path is not allowlisted for this client."
+            raise ArenaValidationError(msg)
+        if ".." in path.split("/"):
+            msg = "Invalid manifest path."
+            raise ArenaValidationError(msg)
+
+        method = str(invoke["method"]).upper()
+        if method not in self._MANIFEST_ALLOWED_METHODS:
+            msg = f"Unsupported manifest HTTP method {method!r}."
+            raise ArenaValidationError(msg)
+
+        response_kind = invoke["responseKind"]
+        if response_kind not in {"json", "binary"}:
+            msg = f"Unsupported manifest responseKind {response_kind!r}."
+            raise ArenaValidationError(msg)
+
+        allowed_param_in = frozenset({"query", "body", "client"})
+        allowed_param_types = frozenset({"string", "int", "bool", "json"})
+
+        params_list = list(invoke.get("params") or [])
+        for spec in params_list:
+            pin = spec.get("in")
+            if pin not in allowed_param_in:
+                msg = f"Unsupported manifest param location {pin!r}."
+                raise ArenaValidationError(msg)
+            ptyp = spec.get("type")
+            if ptyp not in allowed_param_types:
+                msg = f"Unsupported manifest param type {ptyp!r}."
+                raise ArenaValidationError(msg)
+
+        query: dict[str, Any] = {}
+        body_obj: dict[str, Any] | None = None
+
+        for spec in params_list:
+            where = spec["in"]
+            key = spec["name"]
+            if where == "client":
+                continue
+
+            required = bool(spec["required"])
+            if key not in parsed_args:
+                if required:
+                    msg = f"Missing required manifest argument {key!r}."
+                    raise ArenaValidationError(msg)
+                continue
+
+            val = parsed_args[key]
+            if val is None:
+                if required:
+                    msg = f"Missing required manifest argument {key!r}."
+                    raise ArenaValidationError(msg)
+                continue
+
+            if where == "query":
+                query[key] = val
+            elif where == "body":
+                if body_obj is None:
+                    body_obj = {}
+                body_obj[key] = val
+
+        body_needed = any(spec["in"] == "body" for spec in params_list)
+        if body_needed and body_obj is None:
+            body_obj = {}
+
+        req_kw: dict[str, Any] = {}
+        if query:
+            req_kw["params"] = query
+        if body_obj is not None:
+            req_kw["json"] = body_obj
+
+        if response_kind == "binary":
+            return self._request_raw(method, path, **req_kw)
+
+        return self._request(method, path, **req_kw)
 
     def _open_stream(
         self,

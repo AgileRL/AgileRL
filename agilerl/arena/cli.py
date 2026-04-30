@@ -17,6 +17,8 @@ from agilerl.arena.output import (
     handle_error,
 )
 from agilerl.utils.arena_utils import sort_dataset_search_by_downloads
+from agilerl.arena.cli_manifest import register_on_prem_manifest_group
+from agilerl.arena.payloads import resolve_metrics_output_path
 
 ArenaError.enable_cli_mode()
 
@@ -990,3 +992,6 @@ def projects_get_default(config: CommandConfig) -> None:
         click.echo(project)
     else:
         click.echo("No default project set. Use 'arena projects set-default <name>'.")
+
+
+register_on_prem_manifest_group(main)
