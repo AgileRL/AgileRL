@@ -347,9 +347,7 @@ def _verify_swarm_stack(
     ssh_extra_opts: str | None,
 ) -> None:
     click.echo(f"Verifying Docker stack {stack_name!r} on {manager}…")
-    remote_cmd = (
-        f"sudo docker stack services {stack_name} --format '{{{{.Name}}}}\\t{{{{.Replicas}}}}'"
-    )
+    remote_cmd = f"sudo docker stack services {stack_name} --format '{{{{.Name}}}}\\t{{{{.Replicas}}}}'"
     _ssh_remote_command(
         manager,
         remote_cmd,
@@ -364,7 +362,9 @@ def _run_helm_post_install(bundle_root: Path) -> None:
         click.echo("Running Helm post-install validation…")
         _run_script(validate, [], env=os.environ.copy(), cwd=bundle_root)
     else:
-        click.echo("Note: bundle has no validate.sh; check pods with kubectl.", err=True)
+        click.echo(
+            "Note: bundle has no validate.sh; check pods with kubectl.", err=True
+        )
 
 
 def _warn_ignored_swarm_flags(

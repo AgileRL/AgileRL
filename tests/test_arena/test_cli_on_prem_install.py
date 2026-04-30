@@ -14,7 +14,9 @@ from agilerl.arena.cli_on_prem_install import (
 )
 
 
-def test_swarm_script_env_sets_docker_reboot_assume_yes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_swarm_script_env_sets_docker_reboot_assume_yes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.delenv("DOCKER_REBOOT_ASSUME_YES", raising=False)
     env = _swarm_script_env({"FOO": "bar"})
     assert env["DOCKER_REBOOT_ASSUME_YES"] == "1"

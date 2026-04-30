@@ -22,13 +22,6 @@ from agilerl.arena.output import (
     handle_error,
 )
 from agilerl.utils.arena_utils import sort_dataset_search_by_downloads
-from agilerl.arena.cli_manifest import register_on_prem_manifest_group
-from agilerl.arena.cli_manifest import (
-    ArenaRootGroup,
-    handle_help_option,
-    register_on_prem_manifest_group,
-)
-from agilerl.arena.payloads import resolve_metrics_output_path
 
 ArenaError.enable_cli_mode()
 
