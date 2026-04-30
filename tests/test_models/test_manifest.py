@@ -80,6 +80,26 @@ def _make_manifest(algo: dict, env: dict | None = None, **sections) -> dict:
     return m
 
 
+def test_get_validated_json_inserts_empty_optional_sections() -> None:
+    """JSON for Arena includes `{}` for optional models omitted by ``exclude_none``."""
+
+    raw = {
+        "algorithm": {
+            "name": "DQN",
+            "batch_size": 128,
+            "lr": 0.00063,
+            "tau": 0.001,
+            "double": False,
+        },
+        "environment": {"name": "LunarLander-v3", "num_envs": 16},
+        "training": {"max_steps": 1_000_000, "evo_steps": 10_000, "pop_size": 4},
+    }
+    out = TrainingManifest.get_validated(raw, mode="json")
+    assert out["mutation"] == {}
+    assert out["tournament_selection"] == {}
+    assert out["network"] == {}
+
+
 # ---------------------------------------------------------------------------
 # Load all test manifests at module level
 # ---------------------------------------------------------------------------

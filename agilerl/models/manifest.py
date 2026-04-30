@@ -166,6 +166,21 @@ EnvironmentFromManifest = Annotated[
 NetworkFromManifest = Annotated[dict[str, Any], BeforeValidator(_resolve_network)]
 
 
+def _ensure_platform_run_spec_keys(data: dict[str, Any]) -> None:
+    """Mutate *data* for Arena run-spec JSON.
+
+    Optional manifest sections use ``model_dump(..., exclude_none=True)``, so keys
+    for unset models are omitted. Rust ingest still applies ``NamedSpec`` defaults
+    when those keys exist (even as ``{}``).
+    """
+    if "mutation" not in data:
+        data["mutation"] = {}
+    if "tournament_selection" not in data:
+        data["tournament_selection"] = {}
+    if "network" not in data:
+        data["network"] = {}
+
+
 class TrainingManifest(BaseModel):
     """Pydantic model that validates a full training manifest.
 
@@ -256,11 +271,11 @@ class TrainingManifest(BaseModel):
         """
         data = TrainingManifest._load_yaml(manifest)
         validated = cls.model_validate(data)
-        return (
-            validated.model_dump(mode="json", exclude_none=True)
-            if mode == "json"
-            else validated
-        )
+        if mode == "json":
+            payload = validated.model_dump(mode="json", exclude_none=True)
+            _ensure_platform_run_spec_keys(payload)
+            return payload
+        return validated
 
 
 class ArenaManifest(TrainingManifest):
