@@ -275,6 +275,8 @@ def collect_rollouts_llm(
         and updated group seed.
     :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int]
     """
+    from agilerl.algorithms import GRPO
+
     prompts = env.reset(
         seed=group_seed,
     )

@@ -1,4 +1,5 @@
 import gc
+import os
 import random
 from importlib.util import find_spec
 
@@ -17,10 +18,16 @@ from tests.utils import (
 @pytest.fixture(autouse=True)
 def cleanup_after_test(request):
     if torch.cuda.is_available() and (num_gpus := torch.cuda.device_count()) > 0:
-        # All GPU-touching tests are pinned to one xdist worker (see
-        # tests/conftest.py), so this process owns the GPU and we can gate on
-        # the global free-memory threshold.
-        wait_for_gpu_memory_to_clear(devices=list(range(num_gpus)), threshold_ratio=0.4)
+        # Under xdist, multiple LLM workers share the same GPU, so the global
+        # free-memory threshold is meaningless — peer workers' allocations
+        # would never clear. Just release this worker's own memory and proceed.
+        # In single-process runs we can still gate on the global threshold.
+        if os.environ.get("PYTEST_XDIST_WORKER") is None:
+            wait_for_gpu_memory_to_clear(
+                devices=list(range(num_gpus)), threshold_ratio=0.4
+            )
+        else:
+            force_gpu_memory_release()
 
     yield
 
