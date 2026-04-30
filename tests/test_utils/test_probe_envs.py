@@ -444,295 +444,297 @@ def test_continuous_actions_policy_envs_simple(
             state, _ = env.reset()
 
 
-@pytest.mark.gpu
-def test_q_learning_with_probe_env():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = ConstantRewardEnv()
-    learn_steps = 100
-    algo_args = {
-        "observation_space": env.observation_space,
-        "action_space": env.action_space,
-        "lr": 1e-2,
-    }
-    memory = ReplayBuffer(
-        max_size=1000,  # Max replay buffer size
-        device=device,
-    )
-    check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
-    gc.collect()
+class TestCheckQLearningWithProbeEnv:
+    @pytest.mark.gpu
+    def test_q_learning_with_probe_env(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        env = ConstantRewardEnv()
+        learn_steps = 100
+        algo_args = {
+            "observation_space": env.observation_space,
+            "action_space": env.action_space,
+            "lr": 1e-2,
+        }
+        memory = ReplayBuffer(
+            max_size=1000,  # Max replay buffer size
+            device=device,
+        )
+        check_q_learning_with_probe_env(
+            env, DQN, algo_args, memory, learn_steps, device
+        )
+        gc.collect()
 
-
-@pytest.mark.gpu
-def test_q_learning_with_probe_env_cnn():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = ConstantRewardImageEnv()
-    learn_steps = 100
-    algo_args = {
-        "observation_space": env.observation_space,
-        "action_space": env.action_space,
-        "net_config": {
-            "encoder_config": {
-                "channel_size": [32],  # CNN channel size
-                "kernel_size": [3],  # CNN kernel size
-                "stride_size": [1],  # CNN stride size
-            },
-        },
-        "normalize_images": False,
-        "lr": 1e-2,
-    }
-    memory = ReplayBuffer(
-        max_size=1000,  # Max replay buffer size
-        device=device,
-    )
-    check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
-    gc.collect()
-
-
-@pytest.mark.gpu
-def test_q_learning_with_probe_env_dict():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = ConstantRewardDictEnv()
-    learn_steps = 100
-    algo_args = {
-        "observation_space": env.observation_space,
-        "action_space": env.action_space,
-        "net_config": {
-            "encoder_config": {
-                "mlp_config": {
-                    "hidden_size": [64],  # Network hidden size
-                },
-                "cnn_config": {
-                    "channel_size": [32],  # CNN channel size
-                    "kernel_size": [3],  # CNN kernel size
-                    "stride_size": [1],  # CNN stride size
-                },
-                "latent_dim": 16,  # Latent dimension
-            },
-        },
-        "normalize_images": False,
-        "lr": 1e-2,
-    }
-    memory = ReplayBuffer(
-        max_size=1000,  # Max replay buffer size
-        device=device,
-    )
-    check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
-    gc.collect()
-
-
-@pytest.mark.gpu
-def test_policy_q_learning_with_probe_env():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = ConstantRewardContActionsEnv()
-    learn_steps = 100
-    algo_args = {
-        "observation_space": env.observation_space,
-        "action_space": env.action_space,
-        "lr_actor": 1e-2,
-        "lr_critic": 1e-2,
-    }
-    memory = ReplayBuffer(
-        max_size=1000,  # Max replay buffer size
-        device=device,
-    )
-    check_policy_q_learning_with_probe_env(
-        env,
-        DDPG,
-        algo_args,
-        memory,
-        learn_steps,
-        device,
-    )
-    gc.collect()
-
-
-@pytest.mark.gpu
-def test_policy_q_learning_with_probe_env_cnn():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = ConstantRewardContActionsImageEnv()
-    learn_steps = 100
-    algo_args = {
-        "observation_space": env.observation_space,
-        "action_space": env.action_space,
-        "net_config": {
-            "encoder_config": {
-                "channel_size": [32],  # CNN channel size
-                "kernel_size": [3],  # CNN kernel size
-                "stride_size": [1],  # CNN stride size
-            },
-            "head_config": {
-                "hidden_size": [64],  # Network hidden size
-            },
-        },
-        "normalize_images": False,
-        "policy_freq": 2,
-        "lr_actor": 1e-2,
-        "lr_critic": 1e-2,
-    }
-    memory = ReplayBuffer(
-        max_size=1000,  # Max replay buffer size
-        device=device,
-    )
-    check_policy_q_learning_with_probe_env(
-        env,
-        DDPG,
-        algo_args,
-        memory,
-        learn_steps,
-        device,
-    )
-    gc.collect()
-
-
-@pytest.mark.gpu
-def test_policy_q_learning_with_probe_env_dict():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = ConstantRewardContActionsDictEnv()
-    learn_steps = 100
-    algo_args = {
-        "observation_space": env.observation_space,
-        "action_space": env.action_space,
-        "net_config": {
-            "encoder_config": {
-                "mlp_config": {
-                    "hidden_size": [64],  # Network hidden size
-                },
-                "latent_dim": 16,  # Latent dimension
-                "cnn_config": {
+    @pytest.mark.gpu
+    def test_q_learning_with_probe_env_cnn(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        env = ConstantRewardImageEnv()
+        learn_steps = 100
+        algo_args = {
+            "observation_space": env.observation_space,
+            "action_space": env.action_space,
+            "net_config": {
+                "encoder_config": {
                     "channel_size": [32],  # CNN channel size
                     "kernel_size": [3],  # CNN kernel size
                     "stride_size": [1],  # CNN stride size
                 },
             },
-            "head_config": {
-                "hidden_size": [64],  # Network hidden size
-            },
-        },
-        "normalize_images": False,
-        "policy_freq": 2,
-        "lr_actor": 1e-2,
-        "lr_critic": 1e-2,
-    }
-    memory = ReplayBuffer(
-        max_size=1000,  # Max replay buffer size
-        device=device,
-    )
-    check_policy_q_learning_with_probe_env(
-        env,
-        DDPG,
-        algo_args,
-        memory,
-        learn_steps,
-        device,
-    )
-    gc.collect()
+            "normalize_images": False,
+            "lr": 1e-2,
+        }
+        memory = ReplayBuffer(
+            max_size=1000,  # Max replay buffer size
+            device=device,
+        )
+        check_q_learning_with_probe_env(
+            env, DQN, algo_args, memory, learn_steps, device
+        )
+        gc.collect()
 
-
-def test_policy_on_policy_discrete_with_probe_env():
-    device = torch.device("cpu")
-    env = FixedObsPolicyEnv()
-    learn_steps = 10
-    algo_args = {
-        "observation_space": env.observation_space,
-        "action_space": env.action_space,
-        "lr": 0.01,
-    }
-    check_policy_on_policy_with_probe_env(
-        env,
-        PPO,
-        algo_args,
-        learn_steps,
-        device,
-        True,
-    )
-    gc.collect()
-
-
-def test_policy_on_policy_with_probe_env():
-    device = torch.device("cpu")
-    env = ConstantRewardContActionsEnv()
-    learn_steps = 10
-    algo_args = {
-        "observation_space": env.observation_space,
-        "action_space": env.action_space,
-        "lr": 0.01,
-    }
-    check_policy_on_policy_with_probe_env(
-        env,
-        PPO,
-        algo_args,
-        learn_steps,
-        device,
-        False,
-    )
-    gc.collect()
-
-
-@pytest.mark.gpu
-def test_policy_on_policy_with_probe_env_cnn():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = ConstantRewardContActionsImageEnv()  # FixedObsPolicyContActionsImageEnv()
-    learn_steps = 20
-    algo_args = {
-        "observation_space": env.observation_space,
-        "action_space": env.action_space,
-        "net_config": {
-            "encoder_config": {
-                "channel_size": [32],  # CNN channel size
-                "kernel_size": [3],  # CNN kernel size
-                "stride_size": [1],  # CNN stride size
-            },
-            "head_config": {
-                "hidden_size": [64],  # Network hidden size
-            },
-        },
-        "normalize_images": False,
-        "lr": 0.01,
-    }
-    check_policy_on_policy_with_probe_env(
-        env,
-        PPO,
-        algo_args,
-        learn_steps,
-        device,
-        False,
-    )
-    gc.collect()
-
-
-@pytest.mark.gpu
-def test_policy_on_policy_with_probe_env_dict():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = ConstantRewardContActionsDictEnv()  # FixedObsPolicyContActionsDictEnv()
-    learn_steps = 10
-    algo_args = {
-        "observation_space": env.observation_space,
-        "action_space": env.action_space,
-        "net_config": {
-            "encoder_config": {
-                "mlp_config": {
-                    "hidden_size": [64],  # Network hidden size
+    @pytest.mark.gpu
+    def test_q_learning_with_probe_env_dict(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        env = ConstantRewardDictEnv()
+        learn_steps = 100
+        algo_args = {
+            "observation_space": env.observation_space,
+            "action_space": env.action_space,
+            "net_config": {
+                "encoder_config": {
+                    "mlp_config": {
+                        "hidden_size": [64],  # Network hidden size
+                    },
+                    "cnn_config": {
+                        "channel_size": [32],  # CNN channel size
+                        "kernel_size": [3],  # CNN kernel size
+                        "stride_size": [1],  # CNN stride size
+                    },
+                    "latent_dim": 16,  # Latent dimension
                 },
-                "latent_dim": 16,  # Latent dimension
-                "cnn_config": {
+            },
+            "normalize_images": False,
+            "lr": 1e-2,
+        }
+        memory = ReplayBuffer(
+            max_size=1000,  # Max replay buffer size
+            device=device,
+        )
+        check_q_learning_with_probe_env(
+            env, DQN, algo_args, memory, learn_steps, device
+        )
+        gc.collect()
+
+
+class TestCheckPolicyQLearningWithProbeEnv:
+    @pytest.mark.gpu
+    def test_policy_q_learning_with_probe_env(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        env = ConstantRewardContActionsEnv()
+        learn_steps = 100
+        algo_args = {
+            "observation_space": env.observation_space,
+            "action_space": env.action_space,
+            "lr_actor": 1e-2,
+            "lr_critic": 1e-2,
+        }
+        memory = ReplayBuffer(
+            max_size=1000,  # Max replay buffer size
+            device=device,
+        )
+        check_policy_q_learning_with_probe_env(
+            env,
+            DDPG,
+            algo_args,
+            memory,
+            learn_steps,
+            device,
+        )
+        gc.collect()
+
+    @pytest.mark.gpu
+    def test_policy_q_learning_with_probe_env_cnn(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        env = ConstantRewardContActionsImageEnv()
+        learn_steps = 100
+        algo_args = {
+            "observation_space": env.observation_space,
+            "action_space": env.action_space,
+            "net_config": {
+                "encoder_config": {
                     "channel_size": [32],  # CNN channel size
                     "kernel_size": [3],  # CNN kernel size
                     "stride_size": [1],  # CNN stride size
                 },
+                "head_config": {
+                    "hidden_size": [64],  # Network hidden size
+                },
             },
-            "head_config": {
-                "hidden_size": [64],  # Network hidden size
+            "normalize_images": False,
+            "policy_freq": 2,
+            "lr_actor": 1e-2,
+            "lr_critic": 1e-2,
+        }
+        memory = ReplayBuffer(
+            max_size=1000,  # Max replay buffer size
+            device=device,
+        )
+        check_policy_q_learning_with_probe_env(
+            env,
+            DDPG,
+            algo_args,
+            memory,
+            learn_steps,
+            device,
+        )
+        gc.collect()
+
+    @pytest.mark.gpu
+    def test_policy_q_learning_with_probe_env_dict(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        env = ConstantRewardContActionsDictEnv()
+        learn_steps = 100
+        algo_args = {
+            "observation_space": env.observation_space,
+            "action_space": env.action_space,
+            "net_config": {
+                "encoder_config": {
+                    "mlp_config": {
+                        "hidden_size": [64],  # Network hidden size
+                    },
+                    "latent_dim": 16,  # Latent dimension
+                    "cnn_config": {
+                        "channel_size": [32],  # CNN channel size
+                        "kernel_size": [3],  # CNN kernel size
+                        "stride_size": [1],  # CNN stride size
+                    },
+                },
+                "head_config": {
+                    "hidden_size": [64],  # Network hidden size
+                },
             },
-        },
-        "normalize_images": False,
-        "lr": 0.01,
-    }
-    check_policy_on_policy_with_probe_env(
-        env,
-        PPO,
-        algo_args,
-        learn_steps,
-        device,
-        False,
-    )
-    gc.collect()
+            "normalize_images": False,
+            "policy_freq": 2,
+            "lr_actor": 1e-2,
+            "lr_critic": 1e-2,
+        }
+        memory = ReplayBuffer(
+            max_size=1000,  # Max replay buffer size
+            device=device,
+        )
+        check_policy_q_learning_with_probe_env(
+            env,
+            DDPG,
+            algo_args,
+            memory,
+            learn_steps,
+            device,
+        )
+        gc.collect()
+
+
+class TestCheckPolicyOnPolicyWithProbeEnv:
+    def test_policy_on_policy_discrete_with_probe_env(self):
+        device = torch.device("cpu")
+        env = FixedObsPolicyEnv()
+        learn_steps = 10
+        algo_args = {
+            "observation_space": env.observation_space,
+            "action_space": env.action_space,
+            "lr": 0.01,
+        }
+        check_policy_on_policy_with_probe_env(
+            env,
+            PPO,
+            algo_args,
+            learn_steps,
+            device,
+            True,
+        )
+        gc.collect()
+
+    def test_policy_on_policy_with_probe_env(self):
+        device = torch.device("cpu")
+        env = ConstantRewardContActionsEnv()
+        learn_steps = 10
+        algo_args = {
+            "observation_space": env.observation_space,
+            "action_space": env.action_space,
+            "lr": 0.01,
+        }
+        check_policy_on_policy_with_probe_env(
+            env,
+            PPO,
+            algo_args,
+            learn_steps,
+            device,
+            False,
+        )
+        gc.collect()
+
+    @pytest.mark.gpu
+    def test_policy_on_policy_with_probe_env_cnn(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        env = ConstantRewardContActionsImageEnv()  # FixedObsPolicyContActionsImageEnv()
+        learn_steps = 20
+        algo_args = {
+            "observation_space": env.observation_space,
+            "action_space": env.action_space,
+            "net_config": {
+                "encoder_config": {
+                    "channel_size": [32],  # CNN channel size
+                    "kernel_size": [3],  # CNN kernel size
+                    "stride_size": [1],  # CNN stride size
+                },
+                "head_config": {
+                    "hidden_size": [64],  # Network hidden size
+                },
+            },
+            "normalize_images": False,
+            "lr": 0.01,
+        }
+        check_policy_on_policy_with_probe_env(
+            env,
+            PPO,
+            algo_args,
+            learn_steps,
+            device,
+            False,
+        )
+        gc.collect()
+
+    @pytest.mark.gpu
+    def test_policy_on_policy_with_probe_env_dict(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        env = ConstantRewardContActionsDictEnv()  # FixedObsPolicyContActionsDictEnv()
+        learn_steps = 10
+        algo_args = {
+            "observation_space": env.observation_space,
+            "action_space": env.action_space,
+            "net_config": {
+                "encoder_config": {
+                    "mlp_config": {
+                        "hidden_size": [64],  # Network hidden size
+                    },
+                    "latent_dim": 16,  # Latent dimension
+                    "cnn_config": {
+                        "channel_size": [32],  # CNN channel size
+                        "kernel_size": [3],  # CNN kernel size
+                        "stride_size": [1],  # CNN stride size
+                    },
+                },
+                "head_config": {
+                    "hidden_size": [64],  # Network hidden size
+                },
+            },
+            "normalize_images": False,
+            "lr": 0.01,
+        }
+        check_policy_on_policy_with_probe_env(
+            env,
+            PPO,
+            algo_args,
+            learn_steps,
+            device,
+            False,
+        )
+        gc.collect()

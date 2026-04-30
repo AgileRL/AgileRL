@@ -61,332 +61,356 @@ def _build_gpt2_from_config(model_type, *args, **kwargs):
 #### TESTING EvolvableGPT CLASS ####
 
 
-# The model can be initialized with default parameters.
-def test_default_parameters_initialization():
-    model = EvolvableGPT()
-    assert model.n_layer == 12
-    assert model.vocab_size == 50257
-    assert model.n_embd == 768
-    assert model.n_head == 12
-    assert model.dim_feedfwd == 3072
-    assert model.block_size == 1024
-    assert model.dropout == 0.0
-    assert model.activation == "GELU"
-    assert model.layer_norm_eps == 1e-05
-    assert model.min_layers == 8
-    assert model.max_layers == 16
-    assert model.bias is True
-    assert model.device == "cpu"
+class TestEvolvableGPTInit:
+    # The model can be initialized with default parameters.
+    def test_default_parameters_initialization(self):
+        model = EvolvableGPT()
+        assert model.n_layer == 12
+        assert model.vocab_size == 50257
+        assert model.n_embd == 768
+        assert model.n_head == 12
+        assert model.dim_feedfwd == 3072
+        assert model.block_size == 1024
+        assert model.dropout == 0.0
+        assert model.activation == "GELU"
+        assert model.layer_norm_eps == 1e-05
+        assert model.min_layers == 8
+        assert model.max_layers == 16
+        assert model.bias is True
+        assert model.device == "cpu"
+
+    # The model can be initialized with custom parameters.
+    def test_custom_parameters_initialization(self):
+        model = EvolvableGPT(
+            n_layer=6,
+            vocab_size=10000,
+            n_embd=512,
+            n_head=8,
+            dim_feedfwd=2048,
+            block_size=512,
+            dropout=0.2,
+            activation="ReLU",
+            layer_norm_eps=1e-06,
+            min_layers=4,
+            max_layers=10,
+            bias=False,
+            device="cpu",
+        )
+        assert model.n_layer == 6
+        assert model.vocab_size == 10000
+        assert model.n_embd == 512
+        assert model.n_head == 8
+        assert model.dim_feedfwd == 2048
+        assert model.block_size == 512
+        assert model.dropout == 0.2
+        assert model.activation == "ReLU"
+        assert model.layer_norm_eps == 1e-06
+        assert model.min_layers == 4
+        assert model.max_layers == 10
+        assert model.bias is False
+        assert model.device == "cpu"
 
 
-# The model can be initialized with custom parameters.
-def test_custom_parameters_initialization():
-    model = EvolvableGPT(
-        n_layer=6,
-        vocab_size=10000,
-        n_embd=512,
-        n_head=8,
-        dim_feedfwd=2048,
-        block_size=512,
-        dropout=0.2,
-        activation="ReLU",
-        layer_norm_eps=1e-06,
-        min_layers=4,
-        max_layers=10,
-        bias=False,
-        device="cpu",
-    )
-    assert model.n_layer == 6
-    assert model.vocab_size == 10000
-    assert model.n_embd == 512
-    assert model.n_head == 8
-    assert model.dim_feedfwd == 2048
-    assert model.block_size == 512
-    assert model.dropout == 0.2
-    assert model.activation == "ReLU"
-    assert model.layer_norm_eps == 1e-06
-    assert model.min_layers == 4
-    assert model.max_layers == 10
-    assert model.bias is False
-    assert model.device == "cpu"
+class TestEvolvableGPTFromPretrained:
+    # The model can be loaded from a pretrained GPT model.
+    def test_pretrained_model_loading(self):
+        # Mock the upstream HF download to avoid network in CI; the test only
+        # asserts architectural properties that come from the local config table.
+        with patch(
+            "transformers.GPT2LMHeadModel.from_pretrained",
+            side_effect=_build_gpt2_from_config,
+        ):
+            model = EvolvableGPT.from_pretrained("gpt2", override_args={"dropout": 0.1})
+        assert model.n_layer == 12
+        assert model.vocab_size == 50257
+        assert model.n_embd == 768
+        assert model.n_head == 12
+        assert model.dim_feedfwd == 3072
+        assert model.block_size == 1024
+        assert model.dropout == 0.1
+        assert model.activation == "GELU"
+        assert model.layer_norm_eps == 1e-05
+        assert model.min_layers == 8
+        assert model.max_layers == 16
+        assert model.bias is True
+        assert model.device == "cpu"
 
 
-# The model can be loaded from a pretrained GPT model.
-def test_pretrained_model_loading():
-    # Mock the upstream HF download to avoid network in CI; the test only
-    # asserts architectural properties that come from the local config table.
-    with patch(
-        "transformers.GPT2LMHeadModel.from_pretrained",
-        side_effect=_build_gpt2_from_config,
-    ):
-        model = EvolvableGPT.from_pretrained("gpt2", override_args={"dropout": 0.1})
-    assert model.n_layer == 12
-    assert model.vocab_size == 50257
-    assert model.n_embd == 768
-    assert model.n_head == 12
-    assert model.dim_feedfwd == 3072
-    assert model.block_size == 1024
-    assert model.dropout == 0.1
-    assert model.activation == "GELU"
-    assert model.layer_norm_eps == 1e-05
-    assert model.min_layers == 8
-    assert model.max_layers == 16
-    assert model.bias is True
-    assert model.device == "cpu"
+class TestEvolvableGPTConfigureOptimizers:
+    # Configures optimizers for EvoGPT
+    def test_configure_optimizers(self, tiny_gpt):
+        weight_decay = 0.0
+        learning_rate = 1e-6
+        betas = (0.9, 0.999)
 
-
-# Configures optimizers for EvoGPT
-def test_configure_optimizers(tiny_gpt):
-    weight_decay = 0.0
-    learning_rate = 1e-6
-    betas = (0.9, 0.999)
-
-    optimizer = tiny_gpt.configure_optimizers(weight_decay, learning_rate, betas, "cpu")
-
-    assert isinstance(optimizer, torch.optim.AdamW)
-
-
-# The model can handle a sequence of tokens with a target for training.
-def test_sequence_with_target_handling(tiny_gpt):
-    model = tiny_gpt
-    input_sequence = torch.randint(0, model.vocab_size, (1, model.block_size))
-    target_sequence = torch.randint(0, model.vocab_size, (1, model.block_size))
-    logits, all_hidden_states, presents, loss = model(
-        input_sequence,
-        targets=target_sequence,
-    )
-    assert logits.shape[1] == model.block_size
-    assert loss is not None
-
-    tok_emb = model.transformer.wte(input_sequence)
-    t = tok_emb.size(-2)
-    past_length = 0
-    pos = torch.arange(
-        past_length,
-        t + past_length,
-        dtype=torch.long,
-        device=tok_emb.device,
-    ).unsqueeze(0)
-    logits, all_hidden_states, presents, loss = model(tok_emb=tok_emb, pos=pos)
-    assert logits.shape[1] == model.block_size
-    assert loss is None
-
-
-# The model can handle a sequence of tokens without a target for generation.
-def test_sequence_without_target_handling(tiny_gpt):
-    model = tiny_gpt
-    input_sequence = torch.randint(0, model.vocab_size, (1, model.block_size))
-    generated_sequence = model.generate(input_sequence, max_new_tokens=10, top_k=3)
-    assert generated_sequence.shape[1] == model.block_size + 10
-
-
-# Decrease block size successfully
-def test_decrease_block_size_successfully():
-    initial_block_size = 64
-    target_block_size = 32
-    model = _tiny_gpt(block_size=initial_block_size)
-    assert model.block_size == initial_block_size
-
-    # Manually override flash attention to exercise the non-flash buffer path
-    for block in model.transformer.h:
-        block.attn.flash = False
-        block.attn.register_buffer(
-            "attention_bias",
-            torch.tril(torch.ones(target_block_size, target_block_size)).view(
-                1,
-                1,
-                target_block_size,
-                target_block_size,
-            ),
+        optimizer = tiny_gpt.configure_optimizers(
+            weight_decay, learning_rate, betas, "cpu"
         )
 
-    model.crop_block_size(target_block_size)
-    assert model.block_size == target_block_size
-    assert model.transformer.wpe.weight.shape[0] == target_block_size
-    for block in model.transformer.h:
-        if hasattr(block.attn, "attention_bias"):
-            assert block.attn.attention_bias.shape[2] == target_block_size
-            assert block.attn.attention_bias.shape[3] == target_block_size
+        assert isinstance(optimizer, torch.optim.AdamW)
 
 
-# The model can estimate the MFU (Million Floating Point Operations per Second).
-def test_estimate_mfu(tiny_gpt):
-    fwdbwd_per_iter = 10
-    dt = 0.1
-    mfu = tiny_gpt.estimate_mfu(fwdbwd_per_iter, dt)
-    assert isinstance(mfu, float)
-    assert mfu >= 0.0
+class TestEvolvableGPTForward:
+    # The model can handle a sequence of tokens with a target for training.
+    def test_sequence_with_target_handling(self, tiny_gpt):
+        model = tiny_gpt
+        input_sequence = torch.randint(0, model.vocab_size, (1, model.block_size))
+        target_sequence = torch.randint(0, model.vocab_size, (1, model.block_size))
+        logits, all_hidden_states, presents, loss = model(
+            input_sequence,
+            targets=target_sequence,
+        )
+        assert logits.shape[1] == model.block_size
+        assert loss is not None
+
+        tok_emb = model.transformer.wte(input_sequence)
+        t = tok_emb.size(-2)
+        past_length = 0
+        pos = torch.arange(
+            past_length,
+            t + past_length,
+            dtype=torch.long,
+            device=tok_emb.device,
+        ).unsqueeze(0)
+        logits, all_hidden_states, presents, loss = model(tok_emb=tok_emb, pos=pos)
+        assert logits.shape[1] == model.block_size
+        assert loss is None
+
+    # The model can handle a sequence of tokens without a target for generation.
+    def test_sequence_without_target_handling(self, tiny_gpt):
+        model = tiny_gpt
+        input_sequence = torch.randint(0, model.vocab_size, (1, model.block_size))
+        generated_sequence = model.generate(input_sequence, max_new_tokens=10, top_k=3)
+        assert generated_sequence.shape[1] == model.block_size + 10
+
+    # The model can forward pass a sequence of tokens and return the logits.
+    def test_forward_pass(self, tiny_gpt):
+        model = tiny_gpt
+        input_tokens = torch.tensor([[1, 2, 3, 4, 5]])
+        B = 1
+        C = model.n_embd
+        n_head = model.n_head
+
+        k = torch.randn((B, n_head, 0, C // n_head))
+        v = torch.randn((B, n_head, 0, C // n_head))
+        past_kv = [(k, v) for _ in range(model.n_layer)]
+        logits, _, _, _ = model(input_tokens, past_key_values=past_kv)
+        assert logits.shape == (1, 5, model.vocab_size)
 
 
-# The model can generate new tokens based on an input sequence.
-def test_generate_new_tokens(tiny_gpt):
-    idx = torch.tensor([[0, 1, 2, 3, 4]])
-    max_new_tokens = 5
-    temperature = 1.0
-    top_k = None
+class TestEvolvableGPTCropBlockSize:
+    # Decrease block size successfully
+    def test_decrease_block_size_successfully(self):
+        initial_block_size = 64
+        target_block_size = 32
+        model = _tiny_gpt(block_size=initial_block_size)
+        assert model.block_size == initial_block_size
 
-    generated_tokens = tiny_gpt.generate(idx, max_new_tokens, temperature, top_k)
+        # Manually override flash attention to exercise the non-flash buffer path
+        for block in model.transformer.h:
+            block.attn.flash = False
+            block.attn.register_buffer(
+                "attention_bias",
+                torch.tril(torch.ones(target_block_size, target_block_size)).view(
+                    1,
+                    1,
+                    target_block_size,
+                    target_block_size,
+                ),
+            )
 
-    assert generated_tokens.size() == (1, 10)
-
-
-# The model can forward pass a sequence of tokens and return the logits.
-def test_forward_pass(tiny_gpt):
-    model = tiny_gpt
-    input_tokens = torch.tensor([[1, 2, 3, 4, 5]])
-    B = 1
-    C = model.n_embd
-    n_head = model.n_head
-
-    k = torch.randn((B, n_head, 0, C // n_head))
-    v = torch.randn((B, n_head, 0, C // n_head))
-    past_kv = [(k, v) for _ in range(model.n_layer)]
-    logits, _, _, _ = model(input_tokens, past_key_values=past_kv)
-    assert logits.shape == (1, 5, model.vocab_size)
-
-
-# The model can count the number of parameters.
-def test_count_parameters(tiny_gpt):
-    num_params = tiny_gpt.get_num_params()
-    assert isinstance(num_params, int)
-    assert num_params >= 0
+        model.crop_block_size(target_block_size)
+        assert model.block_size == target_block_size
+        assert model.transformer.wpe.weight.shape[0] == target_block_size
+        for block in model.transformer.h:
+            if hasattr(block.attn, "attention_bias"):
+                assert block.attn.attention_bias.shape[2] == target_block_size
+                assert block.attn.attention_bias.shape[3] == target_block_size
 
 
-# Adds a layer to transformer
-def test_add_layer(tiny_gpt):
-    initial_n_layer = tiny_gpt.n_layer
-    tiny_gpt.add_layer()
-    assert tiny_gpt.n_layer == initial_n_layer + 1
-    assert len(tiny_gpt.transformer.h) == initial_n_layer + 1
+class TestEvolvableGPTEstimateMfu:
+    # The model can estimate the MFU (Million Floating Point Operations per Second).
+    def test_estimate_mfu(self, tiny_gpt):
+        fwdbwd_per_iter = 10
+        dt = 0.1
+        mfu = tiny_gpt.estimate_mfu(fwdbwd_per_iter, dt)
+        assert isinstance(mfu, float)
+        assert mfu >= 0.0
 
 
-# Removes a layer to transformer
-def test_remove_layer():
-    # Need a model that allows removal: tiny default has min_layers=1, so use 2
-    model = _tiny_gpt(n_layer=2, min_layers=1)
-    initial_n_layer = model.n_layer
-    model.remove_layer()
-    assert model.n_layer == initial_n_layer - 1
-    assert len(model.transformer.h) == initial_n_layer - 1
+class TestEvolvableGPTGenerate:
+    # The model can generate new tokens based on an input sequence.
+    def test_generate_new_tokens(self, tiny_gpt):
+        idx = torch.tensor([[0, 1, 2, 3, 4]])
+        max_new_tokens = 5
+        temperature = 1.0
+        top_k = None
+
+        generated_tokens = tiny_gpt.generate(idx, max_new_tokens, temperature, top_k)
+
+        assert generated_tokens.size() == (1, 10)
 
 
-# Adds nodes to transformer
-def test_add_nodes(tiny_gpt):
-    initial_dim_feedfwd = tiny_gpt.dim_feedfwd
-    tiny_gpt.add_node()
-    assert tiny_gpt.dim_feedfwd > initial_dim_feedfwd
-    for block in tiny_gpt.transformer.h:
-        assert block.mlp.hidden_size[0] > initial_dim_feedfwd
+class TestEvolvableGPTGetNumParams:
+    # The model can count the number of parameters.
+    def test_count_parameters(self, tiny_gpt):
+        num_params = tiny_gpt.get_num_params()
+        assert isinstance(num_params, int)
+        assert num_params >= 0
 
 
-# Removes nodes to transformer
-def test_remove_nodes(tiny_gpt):
-    initial_dim_feedfwd = tiny_gpt.dim_feedfwd
-    tiny_gpt.remove_node()
-    assert tiny_gpt.dim_feedfwd < initial_dim_feedfwd
-    for block in tiny_gpt.transformer.h:
-        assert block.mlp.hidden_size[0] < initial_dim_feedfwd
+class TestEvolvableGPTAddLayer:
+    # Adds a layer to transformer
+    def test_add_layer(self, tiny_gpt):
+        initial_n_layer = tiny_gpt.n_layer
+        tiny_gpt.add_layer()
+        assert tiny_gpt.n_layer == initial_n_layer + 1
+        assert len(tiny_gpt.transformer.h) == initial_n_layer + 1
 
 
-# The model can set activation
-def test_activation_setter(tiny_gpt):
-    tiny_gpt.activation = "ReLU"
-    assert tiny_gpt._activation == "ReLU"
+class TestEvolvableGPTRemoveLayer:
+    # Removes a layer to transformer
+    def test_remove_layer(self):
+        # Need a model that allows removal: tiny default has min_layers=1, so use 2
+        model = _tiny_gpt(n_layer=2, min_layers=1)
+        initial_n_layer = model.n_layer
+        model.remove_layer()
+        assert model.n_layer == initial_n_layer - 1
+        assert len(model.transformer.h) == initial_n_layer - 1
 
 
-# The model can use CausalSelfAttention without flash (coverage for non-flash path)
-def test_causal_self_attention_no_flash():
-    block_size = 64
-    attn = CausalSelfAttention(96, 4, True, 0.1, block_size, device="cpu")
-    attn.flash = False
-    attn.register_buffer(
-        "attention_bias",
-        torch.tril(torch.ones(block_size, block_size)).view(
-            1,
-            1,
-            block_size,
-            block_size,
-        ),
-    )
-    x = torch.randn(2, 32, 96)
-    y, present = attn(x, attn_mask=None, is_causal=True)
-    assert y.shape == (2, 32, 96)
+class TestEvolvableGPTAddNode:
+    # Adds nodes to transformer
+    def test_add_nodes(self, tiny_gpt):
+        initial_dim_feedfwd = tiny_gpt.dim_feedfwd
+        tiny_gpt.add_node()
+        assert tiny_gpt.dim_feedfwd > initial_dim_feedfwd
+        for block in tiny_gpt.transformer.h:
+            assert block.mlp.hidden_size[0] > initial_dim_feedfwd
 
 
-# The model can clone itself.
-def test_model_clone(tiny_gpt):
-    model = tiny_gpt
-    clone = model.clone()
-    assert isinstance(clone, EvolvableGPT)
-    assert clone.n_layer == model.n_layer
-    assert clone.vocab_size == model.vocab_size
-    assert clone.n_embd == model.n_embd
-    assert clone.n_head == model.n_head
-    assert clone.dim_feedfwd == model.dim_feedfwd
-    assert clone.block_size == model.block_size
-    assert clone.dropout == model.dropout
-    assert clone.activation == model.activation
-    assert clone.layer_norm_eps == model.layer_norm_eps
-    assert clone.min_layers == model.min_layers
-    assert clone.max_layers == model.max_layers
-    assert clone.bias == model.bias
-    assert clone.device == model.device
+class TestEvolvableGPTRemoveNode:
+    # Removes nodes to transformer
+    def test_remove_nodes(self, tiny_gpt):
+        initial_dim_feedfwd = tiny_gpt.dim_feedfwd
+        tiny_gpt.remove_node()
+        assert tiny_gpt.dim_feedfwd < initial_dim_feedfwd
+        for block in tiny_gpt.transformer.h:
+            assert block.mlp.hidden_size[0] < initial_dim_feedfwd
+
+
+class TestEvolvableGPTActivation:
+    # The model can set activation
+    def test_activation_setter(self, tiny_gpt):
+        tiny_gpt.activation = "ReLU"
+        assert tiny_gpt._activation == "ReLU"
+
+
+class TestEvolvableGPTClone:
+    # The model can clone itself.
+    def test_model_clone(self, tiny_gpt):
+        model = tiny_gpt
+        clone = model.clone()
+        assert isinstance(clone, EvolvableGPT)
+        assert clone.n_layer == model.n_layer
+        assert clone.vocab_size == model.vocab_size
+        assert clone.n_embd == model.n_embd
+        assert clone.n_head == model.n_head
+        assert clone.dim_feedfwd == model.dim_feedfwd
+        assert clone.block_size == model.block_size
+        assert clone.dropout == model.dropout
+        assert clone.activation == model.activation
+        assert clone.layer_norm_eps == model.layer_norm_eps
+        assert clone.min_layers == model.min_layers
+        assert clone.max_layers == model.max_layers
+        assert clone.bias == model.bias
+        assert clone.device == model.device
 
 
 #### TESTING CAUSAL SELF ATTENTION CLASS ####
-def test_causal_self_attention_forward():
-    block_size = 1024
-    attn = CausalSelfAttention(768, 12, True, 0.1, block_size)
-    attn.flash = False
-    attn.register_buffer(
-        "attention_bias",
-        torch.tril(torch.ones(block_size, block_size)).view(
-            1,
-            1,
-            block_size,
-            block_size,
-        ),
-    )
-    B = 4  # Batch size
-    T = 128  # Sequence length
-    C = 768  # Embedding dim
-    x = torch.randint(0, 32, (B, T, C)).float()
 
-    k = torch.randn((B, 12, 0, C // 12))
-    v = torch.randn((B, 12, 0, C // 12))
-    layer_past = (k, v)
 
-    y, present = attn(x, layer_past=layer_past)
+class TestCausalSelfAttentionForward:
+    # The model can use CausalSelfAttention without flash (coverage for non-flash path)
+    def test_causal_self_attention_no_flash(self):
+        block_size = 64
+        attn = CausalSelfAttention(96, 4, True, 0.1, block_size, device="cpu")
+        attn.flash = False
+        attn.register_buffer(
+            "attention_bias",
+            torch.tril(torch.ones(block_size, block_size)).view(
+                1,
+                1,
+                block_size,
+                block_size,
+            ),
+        )
+        x = torch.randn(2, 32, 96)
+        y, present = attn(x, attn_mask=None, is_causal=True)
+        assert y.shape == (2, 32, 96)
 
-    assert isinstance(y, torch.Tensor)
-    assert isinstance(present[0], torch.Tensor)
-    assert isinstance(present[1], torch.Tensor)
+    def test_causal_self_attention_forward(self):
+        block_size = 1024
+        attn = CausalSelfAttention(768, 12, True, 0.1, block_size)
+        attn.flash = False
+        attn.register_buffer(
+            "attention_bias",
+            torch.tril(torch.ones(block_size, block_size)).view(
+                1,
+                1,
+                block_size,
+                block_size,
+            ),
+        )
+        B = 4  # Batch size
+        T = 128  # Sequence length
+        C = 768  # Embedding dim
+        x = torch.randint(0, 32, (B, T, C)).float()
+
+        k = torch.randn((B, 12, 0, C // 12))
+        v = torch.randn((B, 12, 0, C // 12))
+        layer_past = (k, v)
+
+        y, present = attn(x, layer_past=layer_past)
+
+        assert isinstance(y, torch.Tensor)
+        assert isinstance(present[0], torch.Tensor)
+        assert isinstance(present[1], torch.Tensor)
 
 
 #### TESTING MLP CLASS ####
-def test_forward_mlp():
-    input_array = np.random.rand(1, 32)
-    model = MLP(32, 0.1, 64)
 
-    output = model(input_array)
 
-    assert isinstance(output, torch.Tensor)
-    assert output.shape == (1, 32)
+class TestMLPForward:
+    def test_forward_mlp(self):
+        input_array = np.random.rand(1, 32)
+        model = MLP(32, 0.1, 64)
+
+        output = model(input_array)
+
+        assert isinstance(output, torch.Tensor)
+        assert output.shape == (1, 32)
 
 
 #### TESTING POSITIONAL ENCODING CLASS ####
-def test_pos_encoding():
-    input_tensor = torch.LongTensor([[1, 2, 4, 5]])
-    pos = PositionalEncoding(10, 3)
-    enc = pos(input_tensor)
 
-    assert enc.shape == (1, 4, 3)
+
+class TestPositionalEncodingForward:
+    def test_pos_encoding(self):
+        input_tensor = torch.LongTensor([[1, 2, 4, 5]])
+        pos = PositionalEncoding(10, 3)
+        enc = pos(input_tensor)
+
+        assert enc.shape == (1, 4, 3)
 
 
 #### TESTING TOKEN EMBEDDING CLASS ####
-def test_tok_embedding():
-    input_tensor = torch.LongTensor([[1, 2, 4, 5]])
-    tok = TokenEmbedding(10, 3)
-    emb = tok(input_tensor)
 
-    assert emb.shape == (1, 4, 3)
+
+class TestTokenEmbeddingForward:
+    def test_tok_embedding(self):
+        input_tensor = torch.LongTensor([[1, 2, 4, 5]])
+        tok = TokenEmbedding(10, 3)
+        emb = tok(input_tensor)
+
+        assert emb.shape == (1, 4, 3)

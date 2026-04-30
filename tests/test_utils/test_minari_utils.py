@@ -145,152 +145,163 @@ def test_minari_to_agile_buffer(dataset_id: str, env_id: str) -> None:
     check_delete_dataset(dataset_id)
 
 
-@pytest.mark.parametrize(
-    "dataset_id",
-    ["cartpole/test-v0"],
-)
-def test_load_minari_dataset_errors(dataset_id: str) -> None:
-    # test load a dataset absent in local
-    with pytest.raises(
-        FileNotFoundError,
-        match=f"No local Dataset found for dataset id {dataset_id}. check https://minari.farama.org/ "
-        "for more details on remote dataset. For loading a remote dataset assign remote=True",
-    ):
-        minari_utils.load_minari_dataset(dataset_id)
-
-    # test load a dataset absent in remote
-    with pytest.raises(
-        KeyError,
-        match="Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ "
-        "for more details.",
-    ):
-        minari_utils.load_minari_dataset(dataset_id, remote=True)
-
-
-@pytest.mark.parametrize(
-    "dataset_id",
-    ["D4RL/door/human-v2"],
-)
-def test_load_remote_minari_dataset(dataset_id: str) -> None:
-    dataset = minari_utils.load_minari_dataset(dataset_id, remote=True)
-
-    assert dataset is not None
-    assert isinstance(dataset, MinariDataset)
-
-    check_delete_dataset(dataset_id)
-
-
-def test_load_minari_dataset_remote_list_raises_fallback():
-    """When list_remote_datasets raises, fall back to direct download."""
-    dataset_id = "D4RL/door/human-v2"
-    mock_ds = type("MinariDataset", (), {"iterate_episodes": lambda self: iter([])})()
-
-    with (
-        patch("agilerl.utils.minari_utils.minari.list_remote_datasets") as mock_list,
-        patch("agilerl.utils.minari_utils.get_dataset_path") as mock_path,
-        patch("agilerl.utils.minari_utils.Path") as mock_path_cls,
-        patch("agilerl.utils.minari_utils.download_dataset"),
-        patch("agilerl.utils.minari_utils.load_dataset", return_value=mock_ds),
-    ):
-        mock_list.side_effect = OSError("platform-specific path issue")
-        mock_path.return_value = "/nonexistent/path"
-        mock_path_cls.return_value.exists.return_value = False
-
-        result = minari_utils.load_minari_dataset(dataset_id, remote=True)
-        assert result is mock_ds
-
-
-def test_load_minari_dataset_remote_no_accelerator_download():
-    """Remote download when accelerator is None (else branch)."""
-    dataset_id = "D4RL/door/human-v2"
-    mock_ds = type("MinariDataset", (), {"iterate_episodes": lambda self: iter([])})()
-
-    with (
-        patch("agilerl.utils.minari_utils.minari.list_remote_datasets") as mock_list,
-        patch("agilerl.utils.minari_utils.get_dataset_path") as mock_path,
-        patch("agilerl.utils.minari_utils.Path") as mock_path_cls,
-        patch("agilerl.utils.minari_utils.download_dataset") as mock_dl,
-        patch("agilerl.utils.minari_utils.load_dataset", return_value=mock_ds),
-    ):
-        mock_list.return_value = {dataset_id: None}
-        mock_path.return_value = "/nonexistent/path"
-        mock_path_cls.return_value.exists.return_value = False
-
-        result = minari_utils.load_minari_dataset(
-            dataset_id, accelerator=None, remote=True
-        )
-        mock_dl.assert_called_once_with(dataset_id)
-        assert result is mock_ds
-
-
-def test_load_minari_dataset_remote_with_accelerator_main_process():
-    dataset_id = "D4RL/door/human-v2"
-    mock_ds = type("MinariDataset", (), {"iterate_episodes": lambda self: iter([])})()
-
-    with (
-        patch("agilerl.utils.minari_utils.minari.list_remote_datasets") as mock_list,
-        patch("agilerl.utils.minari_utils.get_dataset_path") as mock_path,
-        patch("agilerl.utils.minari_utils.Path") as mock_path_cls,
-        patch("agilerl.utils.minari_utils.download_dataset") as mock_dl,
-        patch("agilerl.utils.minari_utils.load_dataset", return_value=mock_ds),
-    ):
-        mock_list.return_value = {dataset_id: None}
-        mock_path.return_value = "/nonexistent/path"
-        mock_path_cls.return_value.exists.return_value = False
-
-        acc = MagicMock(spec=Accelerator)
-        acc.is_main_process = True
-        acc.wait_for_everyone = MagicMock()
-
-        result = minari_utils.load_minari_dataset(
-            dataset_id, accelerator=acc, remote=True
-        )
-        mock_dl.assert_called_once_with(dataset_id)
-        acc.wait_for_everyone.assert_called()
-        assert result is mock_ds
-
-
-def test_load_minari_dataset_remote_worker_process():
-    """Worker process does not call download_dataset; waits for main process."""
-    dataset_id = "D4RL/door/human-v2"
-    mock_ds = type("MinariDataset", (), {"iterate_episodes": lambda self: iter([])})()
-
-    with (
-        patch("agilerl.utils.minari_utils.minari.list_remote_datasets") as mock_list,
-        patch("agilerl.utils.minari_utils.get_dataset_path") as mock_path,
-        patch("agilerl.utils.minari_utils.Path") as mock_path_cls,
-        patch("agilerl.utils.minari_utils.download_dataset") as mock_dl,
-        patch("agilerl.utils.minari_utils.load_dataset", return_value=mock_ds),
-    ):
-        mock_list.return_value = {dataset_id: None}
-        mock_path.return_value = "/nonexistent/path"
-        mock_path_cls.return_value.exists.return_value = False
-
-        acc = MagicMock(spec=Accelerator)
-        acc.is_main_process = False
-        acc.wait_for_everyone = MagicMock()
-
-        result = minari_utils.load_minari_dataset(
-            dataset_id, accelerator=acc, remote=True
-        )
-        mock_dl.assert_not_called()
-        acc.wait_for_everyone.assert_called()
-        assert result is mock_ds
-
-
-@pytest.mark.parametrize(
-    "dataset_id",
-    ["D4RL/door/human-v2"],
-)
-def test_load_remote_minari_dataset_accelerator(dataset_id: str) -> None:
-    accelerator = Accelerator()
-    dataset = minari_utils.load_minari_dataset(
-        dataset_id,
-        accelerator=accelerator,
-        remote=True,
+class TestLoadMinariDataset:
+    @pytest.mark.parametrize(
+        "dataset_id",
+        ["cartpole/test-v0"],
     )
+    def test_load_minari_dataset_errors(self, dataset_id: str) -> None:
+        # test load a dataset absent in local
+        with pytest.raises(
+            FileNotFoundError,
+            match=f"No local Dataset found for dataset id {dataset_id}. check https://minari.farama.org/ "
+            "for more details on remote dataset. For loading a remote dataset assign remote=True",
+        ):
+            minari_utils.load_minari_dataset(dataset_id)
 
-    assert dataset is not None
-    assert isinstance(dataset, MinariDataset)
+        # test load a dataset absent in remote
+        with pytest.raises(
+            KeyError,
+            match="Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ "
+            "for more details.",
+        ):
+            minari_utils.load_minari_dataset(dataset_id, remote=True)
 
-    check_delete_dataset(dataset_id)
+    @pytest.mark.parametrize(
+        "dataset_id",
+        ["D4RL/door/human-v2"],
+    )
+    def test_load_remote_minari_dataset(self, dataset_id: str) -> None:
+        dataset = minari_utils.load_minari_dataset(dataset_id, remote=True)
+
+        assert dataset is not None
+        assert isinstance(dataset, MinariDataset)
+
+        check_delete_dataset(dataset_id)
+
+    def test_load_minari_dataset_remote_list_raises_fallback(self):
+        """When list_remote_datasets raises, fall back to direct download."""
+        dataset_id = "D4RL/door/human-v2"
+        mock_ds = type(
+            "MinariDataset", (), {"iterate_episodes": lambda self: iter([])}
+        )()
+
+        with (
+            patch(
+                "agilerl.utils.minari_utils.minari.list_remote_datasets"
+            ) as mock_list,
+            patch("agilerl.utils.minari_utils.get_dataset_path") as mock_path,
+            patch("agilerl.utils.minari_utils.Path") as mock_path_cls,
+            patch("agilerl.utils.minari_utils.download_dataset"),
+            patch("agilerl.utils.minari_utils.load_dataset", return_value=mock_ds),
+        ):
+            mock_list.side_effect = OSError("platform-specific path issue")
+            mock_path.return_value = "/nonexistent/path"
+            mock_path_cls.return_value.exists.return_value = False
+
+            result = minari_utils.load_minari_dataset(dataset_id, remote=True)
+            assert result is mock_ds
+
+    def test_load_minari_dataset_remote_no_accelerator_download(self):
+        """Remote download when accelerator is None (else branch)."""
+        dataset_id = "D4RL/door/human-v2"
+        mock_ds = type(
+            "MinariDataset", (), {"iterate_episodes": lambda self: iter([])}
+        )()
+
+        with (
+            patch(
+                "agilerl.utils.minari_utils.minari.list_remote_datasets"
+            ) as mock_list,
+            patch("agilerl.utils.minari_utils.get_dataset_path") as mock_path,
+            patch("agilerl.utils.minari_utils.Path") as mock_path_cls,
+            patch("agilerl.utils.minari_utils.download_dataset") as mock_dl,
+            patch("agilerl.utils.minari_utils.load_dataset", return_value=mock_ds),
+        ):
+            mock_list.return_value = {dataset_id: None}
+            mock_path.return_value = "/nonexistent/path"
+            mock_path_cls.return_value.exists.return_value = False
+
+            result = minari_utils.load_minari_dataset(
+                dataset_id, accelerator=None, remote=True
+            )
+            mock_dl.assert_called_once_with(dataset_id)
+            assert result is mock_ds
+
+    def test_load_minari_dataset_remote_with_accelerator_main_process(self):
+        dataset_id = "D4RL/door/human-v2"
+        mock_ds = type(
+            "MinariDataset", (), {"iterate_episodes": lambda self: iter([])}
+        )()
+
+        with (
+            patch(
+                "agilerl.utils.minari_utils.minari.list_remote_datasets"
+            ) as mock_list,
+            patch("agilerl.utils.minari_utils.get_dataset_path") as mock_path,
+            patch("agilerl.utils.minari_utils.Path") as mock_path_cls,
+            patch("agilerl.utils.minari_utils.download_dataset") as mock_dl,
+            patch("agilerl.utils.minari_utils.load_dataset", return_value=mock_ds),
+        ):
+            mock_list.return_value = {dataset_id: None}
+            mock_path.return_value = "/nonexistent/path"
+            mock_path_cls.return_value.exists.return_value = False
+
+            acc = MagicMock(spec=Accelerator)
+            acc.is_main_process = True
+            acc.wait_for_everyone = MagicMock()
+
+            result = minari_utils.load_minari_dataset(
+                dataset_id, accelerator=acc, remote=True
+            )
+            mock_dl.assert_called_once_with(dataset_id)
+            acc.wait_for_everyone.assert_called()
+            assert result is mock_ds
+
+    def test_load_minari_dataset_remote_worker_process(self):
+        """Worker process does not call download_dataset; waits for main process."""
+        dataset_id = "D4RL/door/human-v2"
+        mock_ds = type(
+            "MinariDataset", (), {"iterate_episodes": lambda self: iter([])}
+        )()
+
+        with (
+            patch(
+                "agilerl.utils.minari_utils.minari.list_remote_datasets"
+            ) as mock_list,
+            patch("agilerl.utils.minari_utils.get_dataset_path") as mock_path,
+            patch("agilerl.utils.minari_utils.Path") as mock_path_cls,
+            patch("agilerl.utils.minari_utils.download_dataset") as mock_dl,
+            patch("agilerl.utils.minari_utils.load_dataset", return_value=mock_ds),
+        ):
+            mock_list.return_value = {dataset_id: None}
+            mock_path.return_value = "/nonexistent/path"
+            mock_path_cls.return_value.exists.return_value = False
+
+            acc = MagicMock(spec=Accelerator)
+            acc.is_main_process = False
+            acc.wait_for_everyone = MagicMock()
+
+            result = minari_utils.load_minari_dataset(
+                dataset_id, accelerator=acc, remote=True
+            )
+            mock_dl.assert_not_called()
+            acc.wait_for_everyone.assert_called()
+            assert result is mock_ds
+
+    @pytest.mark.parametrize(
+        "dataset_id",
+        ["D4RL/door/human-v2"],
+    )
+    def test_load_remote_minari_dataset_accelerator(self, dataset_id: str) -> None:
+        accelerator = Accelerator()
+        dataset = minari_utils.load_minari_dataset(
+            dataset_id,
+            accelerator=accelerator,
+            remote=True,
+        )
+
+        assert dataset is not None
+        assert isinstance(dataset, MinariDataset)
+
+        check_delete_dataset(dataset_id)

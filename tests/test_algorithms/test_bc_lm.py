@@ -179,9 +179,7 @@ def bc_lm_none_max_len(dataset_none_max_len, net_config):
     return BC_LM(dataset_none_max_len, net_config, device="cpu", transition_weight=0.1)
 
 
-class TestBC_LM:
-    """Test cases for BC_LM class"""
-
+class TestBC_LMInit:
     def test_initialization(self, dataset, net_config):
         """Test BC_LM initialization"""
         bc_lm = BC_LM(dataset, net_config, device="cpu", transition_weight=0.1)
@@ -193,6 +191,8 @@ class TestBC_LM:
         assert bc_lm.transition_weight == 0.1
         assert isinstance(bc_lm.model, EvolvableGPT)
 
+
+class TestBC_LMForward:
     def test_forward_with_tokens_only(self, bc_lm):
         """Test forward pass with only tokens"""
         tokens = torch.randint(0, 9, (2, 5))
@@ -281,6 +281,78 @@ class TestBC_LM:
                 (RuntimeError, TypeError, AssertionError),
             )
 
+    def test_bc_lm_empty_batch(self, bc_lm):
+        """Test BC_LM with empty batch"""
+        tokens = torch.empty(0, 5, dtype=torch.long)
+        attn_mask = torch.empty(0, 5)
+
+        # Empty batches should work fine with the current implementation
+        # The model will handle empty batches gracefully
+        logits, past_key_values = bc_lm(tokens, attn_mask)
+        assert logits.shape == (0, 5, 9)
+        assert isinstance(past_key_values, tuple)
+
+    def test_bc_lm_large_sequence(self, bc_lm):
+        """Test BC_LM with sequence longer than block_size"""
+        tokens = torch.randint(0, 9, (2, 15))  # Longer than block_size=10
+        attn_mask = torch.ones(2, 15)
+
+        with pytest.raises(AssertionError):
+            bc_lm(tokens, attn_mask)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_cuda_device(self, dataset, net_config):
+        """Test BC_LM with CUDA device"""
+        bc_lm = BC_LM(dataset, net_config, device="cuda", transition_weight=0.1)
+
+        tokens = torch.randint(0, 9, (2, 5)).cuda()
+        attn_mask = torch.ones(2, 5).cuda()
+
+        logits, past_key_values = bc_lm(tokens, attn_mask)
+
+        assert logits.device.type == "cuda"
+        assert isinstance(past_key_values, tuple)
+
+    def test_device_consistency(self, bc_lm):
+        """Test device consistency across components"""
+        tokens = torch.randint(0, 9, (2, 5))
+        attn_mask = torch.ones(2, 5)
+
+        # Move to same device as bc_lm
+        tokens = tokens.to(bc_lm.device)
+        attn_mask = attn_mask.to(bc_lm.device)
+
+        logits, past_key_values = bc_lm(tokens, attn_mask)
+
+        assert logits.device == tokens.device
+        # The device should be a torch.device object, not a string
+        assert logits.device == torch.device(bc_lm.device)
+
+    def test_memory_cleanup_after_forward(self, bc_lm):
+        """Test memory cleanup after forward pass"""
+        tokens = torch.randint(0, 9, (2, 5))
+        attn_mask = torch.ones(2, 5)
+
+        # Multiple forward passes
+        for _ in range(5):
+            logits, past_key_values = bc_lm(tokens, attn_mask)
+            del logits, past_key_values
+
+        # Should not raise memory errors
+        assert True
+
+    def test_large_batch_handling(self, bc_lm):
+        """Test handling of large batches"""
+        tokens = torch.randint(0, 9, (16, 8))  # Larger batch
+        attn_mask = torch.ones(16, 8)
+
+        logits, past_key_values = bc_lm(tokens, attn_mask)
+
+        assert logits.shape == (16, 8, 9)
+        assert isinstance(past_key_values, tuple)
+
+
+class TestBC_LMGetWeights:
     def test_get_weights_scatter(self, bc_lm):
         tokens = torch.randint(0, 9, (2, 5), dtype=torch.long)
         action_idxs = torch.tensor([[0, 1, 2, 3, 4], [1, 2, 3, 4, 0]], dtype=torch.long)
@@ -332,6 +404,30 @@ class TestBC_LM:
         assert weights.shape == tokens.shape
         assert torch.all(weights == 0.1)  # All should be transition_weight
 
+    def test_get_weights_scatter_minimal(self, bc_lm):
+        # Minimal test: n[0]=2, action_idxs[0,:2]=[1,1] so only position 1 is set to 1.0
+        tokens = torch.randint(0, 9, (1, 3), dtype=torch.long)
+        action_idxs = torch.tensor([[1, 1, 0]], dtype=torch.long)
+        weights = bc_lm.get_weights(tokens, action_idxs)
+        assert weights.shape == tokens.shape
+        # Only position 1 should be 1.0, others should be transition_weight
+        assert weights[0, 1] == 1.0
+        assert weights[0, 0] == 0.1
+        assert weights[0, 2] == 0.1
+
+    def test_get_weights_scatter_minimal_memory(self, bc_lm):
+        # Minimal test: n[0]=2, action_idxs[0,:2]=[1,1] so only position 1 is set to 1.0
+        tokens = torch.randint(0, 9, (1, 3), dtype=torch.long)
+        action_idxs = torch.tensor([[1, 1, 0]], dtype=torch.long)
+        weights = bc_lm.get_weights(tokens, action_idxs)
+        assert weights.shape == tokens.shape
+        # Only position 1 should be 1.0, others should be transition_weight
+        assert weights[0, 1] == 1.0
+        assert weights[0, 0] == 0.1
+        assert weights[0, 2] == 0.1
+
+
+class TestBC_LMAwacLoss:
     def test_awac_loss(self, bc_lm):
         """Test AWAC loss calculation"""
         tokens = torch.randint(0, 9, (2, 5))
@@ -345,6 +441,8 @@ class TestBC_LM:
         assert loss.requires_grad
         assert loss.item() > 0
 
+
+class TestBC_LMGetLoss:
     def test_get_loss(self, bc_lm):
         """Test get_loss method"""
         items = {
@@ -361,6 +459,27 @@ class TestBC_LM:
         assert isinstance(logs["loss"], tuple)
         assert len(logs["loss"]) == 2
 
+    def test_full_training_loop(self, bc_lm):
+        """Test a complete training loop"""
+        # Prepare training data
+        items = {
+            "tokens": torch.randint(0, 9, (4, 6)),
+            "attn_mask": torch.ones(4, 6),
+            "action_idxs": torch.tensor([[0, 1], [1, 2], [0, 2], [1, 3]]),
+        }
+
+        # Training step
+        loss, logs, _ = bc_lm.get_loss(items)
+
+        # Backward pass
+        loss.backward()
+
+        assert isinstance(loss, torch.Tensor)
+        assert loss.requires_grad
+        assert "loss" in logs
+
+
+class TestBC_LMPrepareInputs:
     def test_prepare_inputs_dict(self, bc_lm):
         """Test prepare_inputs with dictionary input"""
         items = {"test": "data"}
@@ -380,6 +499,8 @@ class TestBC_LM:
         assert isinstance(result, dict)
         mock_collate.assert_called_once_with(items, bc_lm.device)
 
+
+class TestBC_LMScore:
     def test_score(self, bc_lm):
         """Test score method"""
         tokens = torch.randint(0, 9, (2, 5))
@@ -391,6 +512,8 @@ class TestBC_LM:
         assert isinstance(scores, torch.Tensor)
         assert isinstance(logits, torch.Tensor)
 
+
+class TestBC_LMGetScores:
     def test_get_scores(self, bc_lm):
         """Test get_scores method"""
         items = {
@@ -403,6 +526,8 @@ class TestBC_LM:
         assert isinstance(scores, torch.Tensor)
         assert scores.shape == (2, 5, 9)
 
+
+class TestBC_LMInitialScore:
     def test_initial_score(self, bc_lm):
         """Test initial_score method"""
         items = {
@@ -421,6 +546,13 @@ class TestBC_LM:
         assert scores.shape == logits.shape
         assert scores.shape == (2, 5, 9)  # batch, seq_len, vocab_size
 
+    def test_initial_score_attribute_error(self, bc_lm):
+        items = {"tokens": torch.randint(0, 9, (2, 5)), "attn_mask": torch.ones(2, 5)}
+        with pytest.raises(AttributeError):
+            bc_lm.initial_score(items)
+
+
+class TestBC_LMNextScore:
     def test_next_score(self, bc_lm):
         """Test next_score method"""
         tokens = torch.randint(0, 9, (2,))
@@ -443,11 +575,6 @@ class TestBC_LM:
         assert scores.shape == logits.shape
         assert scores.shape == (2, 1, 9)  # batch, seq_len=1, vocab_size
 
-    def test_initial_score_attribute_error(self, bc_lm):
-        items = {"tokens": torch.randint(0, 9, (2, 5)), "attn_mask": torch.ones(2, 5)}
-        with pytest.raises(AttributeError):
-            bc_lm.initial_score(items)
-
     def test_next_score_attribute_error(self, bc_lm):
         tokens = torch.randint(0, 9, (2,))
         obs = tuple(
@@ -456,25 +583,8 @@ class TestBC_LM:
         with pytest.raises(AttributeError):
             bc_lm.next_score(tokens, obs)
 
-    def test_get_weights_scatter_minimal(self, bc_lm):
-        # Minimal test: n[0]=2, action_idxs[0,:2]=[1,1] so only position 1 is set to 1.0
-        tokens = torch.randint(0, 9, (1, 3), dtype=torch.long)
-        action_idxs = torch.tensor([[1, 1, 0]], dtype=torch.long)
-        weights = bc_lm.get_weights(tokens, action_idxs)
-        assert weights.shape == tokens.shape
-        # Only position 1 should be 1.0, others should be transition_weight
-        assert weights[0, 1] == 1.0
-        assert weights[0, 0] == 0.1
-        assert weights[0, 2] == 0.1
 
-
-class TestBC_Policy:
-    """Test cases for BC_Policy class"""
-
-    @pytest.fixture
-    def bc_policy(self, bc_lm):
-        return BC_Policy(bc_lm, "sample", temp=0.5, top_k=3)
-
+class TestBC_PolicyInit:
     def test_initialization(self, bc_lm):
         """Test BC_Policy initialization"""
         policy = BC_Policy(bc_lm, "sample", temp=0.5)
@@ -488,6 +598,13 @@ class TestBC_Policy:
         with pytest.raises(AssertionError):
             BC_Policy(bc_lm, "invalid")
 
+
+@pytest.fixture
+def bc_policy(bc_lm):
+    return BC_Policy(bc_lm, "sample", temp=0.5, top_k=3)
+
+
+class TestBC_PolicySampleRaw:
     def test_sample_raw(self, bc_policy):
         """Test sample_raw method"""
         tokens = torch.randint(0, 9, (2, 5))
@@ -533,6 +650,57 @@ class TestBC_Policy:
         assert isinstance(generations, list)
         assert isinstance(log_probs, torch.Tensor)
 
+    def test_sample_raw_long_generation(self, bc_policy):
+        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
+        attn_mask = torch.ones(1, 1, dtype=torch.float)
+
+        def term(text):
+            return False  # Never terminate
+
+        # Use max_generation_len > 1 to ensure the while loop runs
+        bc_policy.sample_raw(
+            tokens,
+            attn_mask,
+            term,
+            num_generations=1,
+            max_generation_len=2,
+        )
+
+    def test_sample_raw_termination_mask_update_minimal(self, bc_policy):
+        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
+        attn_mask = torch.ones(1, 1, dtype=torch.float)
+
+        def term(text):
+            return False
+
+        bc_policy.sample_raw(
+            tokens,
+            attn_mask,
+            term,
+            num_generations=1,
+            max_generation_len=2,
+        )
+
+    def test_sample_raw_none_max_len(self, bc_lm_none_max_len):
+        """Test sample_raw when dataset.max_len is None"""
+        policy = BC_Policy(bc_lm_none_max_len, "sample")
+        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
+        attn_mask = torch.ones(1, 1, dtype=torch.float)
+
+        def term(text):
+            return False
+
+        # This should hit the if max_length is None: max_length = self.bc_lm.model.block_size
+        policy.sample_raw(
+            tokens,
+            attn_mask,
+            term,
+            num_generations=1,
+            max_generation_len=2,
+        )
+
+
+class TestBC_PolicyBeamRaw:
     def test_beam_raw(self, bc_policy):
         """Test beam_raw method"""
         tokens = torch.randint(0, 9, (2, 5))
@@ -578,6 +746,58 @@ class TestBC_Policy:
         assert isinstance(generations, list)
         assert isinstance(scores, torch.Tensor)
 
+    def test_beam_raw_termination_mask_update(self, bc_policy):
+        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
+        attn_mask = torch.ones(1, 1, dtype=torch.float)
+
+        def term(text):
+            return False
+
+        bc_policy.kind = "beam"
+        bc_policy.generation_kwargs["beam_width"] = 1
+        bc_policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=2)
+
+    def test_beam_raw_termination_mask_update_deterministic(self, bc_policy):
+        """Deterministic test for termination_mask update path."""
+        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
+        attn_mask = torch.ones(1, 1, dtype=torch.float)
+
+        def term(text):
+            return False  # Never terminate
+
+        # Force beam search to run multiple iterations by setting a longer max_generation_len
+        bc_policy.kind = "beam"
+        bc_policy.generation_kwargs["beam_width"] = 1
+        # Run enough iterations to update termination mask.
+        bc_policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=5)
+
+    def test_beam_raw_termination_mask_update_guaranteed(self, bc_policy):
+        """Guaranteed test to hit termination_mask update in beam search"""
+        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
+        attn_mask = torch.ones(1, 1, dtype=torch.float)
+
+        def term(text):
+            return False  # Never terminate
+
+        bc_policy.kind = "beam"
+        bc_policy.generation_kwargs["beam_width"] = 1
+        # Force the while loop to run and hit the termination_mask update
+        bc_policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=3)
+
+    def test_beam_raw_none_max_len(self, bc_lm_none_max_len):
+        """Test beam_raw when dataset.max_len is None"""
+        policy = BC_Policy(bc_lm_none_max_len, "beam")
+        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
+        attn_mask = torch.ones(1, 1, dtype=torch.float)
+
+        def term(text):
+            return False
+
+        # This should hit the if max_length is None: max_length = self.bc_lm.model.block_size
+        policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=2)
+
+
+class TestBC_PolicyGenerate:
     def test_generate_sample(self, bc_policy):
         """Test generate method with sample kind"""
         items = {
@@ -628,47 +848,6 @@ class TestBC_Policy:
         generations, probs = policy.generate(items, termination_condition)
         assert isinstance(generations, list)
 
-    def test_act(self, bc_policy):
-        """Test act method"""
-        obs = MockLanguageObservation()
-
-        with patch.object(bc_policy, "generate") as mock_generate:
-            mock_generate.return_value = (
-                [("input", ["output1", "output2"])],
-                torch.tensor([[0.5, 0.3]]),
-            )
-
-            action = bc_policy.act(obs)
-
-            assert action == "output1"  # Should return the highest probability output
-            mock_generate.assert_called_once()
-
-    def test_train_eval(self, bc_policy):
-        """Test train and eval methods"""
-        # Test train mode
-        bc_policy.train()
-        assert bc_policy.bc_lm.training
-
-        # Test eval mode
-        bc_policy.eval()
-        assert not bc_policy.bc_lm.training
-
-    def test_sample_raw_long_generation(self, bc_policy):
-        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
-        attn_mask = torch.ones(1, 1, dtype=torch.float)
-
-        def term(text):
-            return False  # Never terminate
-
-        # Use max_generation_len > 1 to ensure the while loop runs
-        bc_policy.sample_raw(
-            tokens,
-            attn_mask,
-            term,
-            num_generations=1,
-            max_generation_len=2,
-        )
-
     def test_generate_invalid_kind_raises(self, bc_lm):
         policy = BC_Policy(bc_lm, "sample")
         policy.kind = "invalid"
@@ -678,16 +857,6 @@ class TestBC_Policy:
                 lambda x: True,
             )
 
-    def test_act_returns_highest_prob(self, bc_policy):
-        obs = MockLanguageObservation()
-        with patch.object(bc_policy, "generate") as mock_generate:
-            mock_generate.return_value = (
-                [("input", ["a", "b"])],
-                torch.tensor([[0.9, 0.1]]),
-            )
-            result = bc_policy.act(obs)
-            assert result == "a"
-
     def test_generate_not_implemented(self, bc_lm):
         policy = BC_Policy(bc_lm, "sample")
         policy.kind = "invalid"
@@ -696,62 +865,6 @@ class TestBC_Policy:
                 {"tokens": torch.randint(0, 9, (1, 2)), "attn_mask": torch.ones(1, 2)},
                 lambda x: True,
             )
-
-    def test_sample_raw_termination_mask_update_minimal(self, bc_policy):
-        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
-        attn_mask = torch.ones(1, 1, dtype=torch.float)
-
-        def term(text):
-            return False
-
-        bc_policy.sample_raw(
-            tokens,
-            attn_mask,
-            term,
-            num_generations=1,
-            max_generation_len=2,
-        )
-
-    def test_beam_raw_termination_mask_update(self, bc_policy):
-        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
-        attn_mask = torch.ones(1, 1, dtype=torch.float)
-
-        def term(text):
-            return False
-
-        bc_policy.kind = "beam"
-        bc_policy.generation_kwargs["beam_width"] = 1
-        bc_policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=2)
-
-    def test_sample_raw_none_max_len(self, bc_lm_none_max_len):
-        """Test sample_raw when dataset.max_len is None"""
-        policy = BC_Policy(bc_lm_none_max_len, "sample")
-        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
-        attn_mask = torch.ones(1, 1, dtype=torch.float)
-
-        def term(text):
-            return False
-
-        # This should hit the if max_length is None: max_length = self.bc_lm.model.block_size
-        policy.sample_raw(
-            tokens,
-            attn_mask,
-            term,
-            num_generations=1,
-            max_generation_len=2,
-        )
-
-    def test_beam_raw_none_max_len(self, bc_lm_none_max_len):
-        """Test beam_raw when dataset.max_len is None"""
-        policy = BC_Policy(bc_lm_none_max_len, "beam")
-        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
-        attn_mask = torch.ones(1, 1, dtype=torch.float)
-
-        def term(text):
-            return False
-
-        # This should hit the if max_length is None: max_length = self.bc_lm.model.block_size
-        policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=2)
 
     def test_generate_valid_sample(self, bc_policy):
         tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
@@ -766,20 +879,6 @@ class TestBC_Policy:
         )
         assert isinstance(generations, list)
         assert probs is not None
-
-    def test_beam_raw_termination_mask_update_deterministic(self, bc_policy):
-        """Deterministic test for termination_mask update path."""
-        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
-        attn_mask = torch.ones(1, 1, dtype=torch.float)
-
-        def term(text):
-            return False  # Never terminate
-
-        # Force beam search to run multiple iterations by setting a longer max_generation_len
-        bc_policy.kind = "beam"
-        bc_policy.generation_kwargs["beam_width"] = 1
-        # Run enough iterations to update termination mask.
-        bc_policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=5)
 
     def test_generate_valid_sample_deterministic(self, bc_policy):
         """Deterministic test for generate return path."""
@@ -814,19 +913,6 @@ class TestBC_Policy:
         assert isinstance(generations, list)
         assert probs is not None
 
-    def test_beam_raw_termination_mask_update_guaranteed(self, bc_policy):
-        """Guaranteed test to hit termination_mask update in beam search"""
-        tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
-        attn_mask = torch.ones(1, 1, dtype=torch.float)
-
-        def term(text):
-            return False  # Never terminate
-
-        bc_policy.kind = "beam"
-        bc_policy.generation_kwargs["beam_width"] = 1
-        # Force the while loop to run and hit the termination_mask update
-        bc_policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=3)
-
     def test_generate_sample_return_guaranteed(self, bc_policy):
         """Guaranteed test to hit return statement in generate for sample generation"""
         tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
@@ -860,15 +946,80 @@ class TestBC_Policy:
         assert isinstance(generations, list)
         assert probs is not None
 
+    def test_full_generation_loop(self, bc_lm):
+        """Test a complete generation loop"""
+        policy = BC_Policy(bc_lm, "sample", temp=0.5, top_k=3)
 
-class TestBC_Evaluator:
-    """Test cases for BC_Evaluator class"""
+        # Prepare input
+        items = {
+            "tokens": torch.randint(0, 9, (2, 5)),
+            "attn_mask": torch.ones(2, 5),
+        }
 
-    @pytest.fixture
-    def bc_evaluator(self, bc_lm):
-        env = MockLanguageEnvironment()
-        return BC_Evaluator(env, verbose=False, kind="sample", temp=0.5)
+        def termination_condition(text):
+            return len(text.split()) > 10
 
+        # Generate
+        generations, log_probs = policy.generate(
+            items,
+            termination_condition,
+            num_generations=2,
+        )
+
+        assert isinstance(generations, list)
+        assert len(generations) == 2
+        assert isinstance(log_probs, torch.Tensor)
+
+    def test_policy_invalid_termination_condition(self, bc_lm):
+        """Test policy with invalid termination condition"""
+        policy = BC_Policy(bc_lm, "sample")
+
+        # The termination condition is called during generation, so we need to mock the generation process
+        # to actually trigger the exception. For now, we'll test that the policy can be created without issues.
+        assert policy.kind == "sample"
+        assert policy.bc_lm == bc_lm
+
+
+class TestBC_PolicyAct:
+    def test_act(self, bc_policy):
+        """Test act method"""
+        obs = MockLanguageObservation()
+
+        with patch.object(bc_policy, "generate") as mock_generate:
+            mock_generate.return_value = (
+                [("input", ["output1", "output2"])],
+                torch.tensor([[0.5, 0.3]]),
+            )
+
+            action = bc_policy.act(obs)
+
+            assert action == "output1"  # Should return the highest probability output
+            mock_generate.assert_called_once()
+
+    def test_act_returns_highest_prob(self, bc_policy):
+        obs = MockLanguageObservation()
+        with patch.object(bc_policy, "generate") as mock_generate:
+            mock_generate.return_value = (
+                [("input", ["a", "b"])],
+                torch.tensor([[0.9, 0.1]]),
+            )
+            result = bc_policy.act(obs)
+            assert result == "a"
+
+
+class TestBC_PolicyTrainEval:
+    def test_train_eval(self, bc_policy):
+        """Test train and eval methods"""
+        # Test train mode
+        bc_policy.train()
+        assert bc_policy.bc_lm.training
+
+        # Test eval mode
+        bc_policy.eval()
+        assert not bc_policy.bc_lm.training
+
+
+class TestBC_EvaluatorInit:
     def test_initialization(self, bc_lm):
         """Test BC_Evaluator initialization"""
         env = MockLanguageEnvironment()
@@ -879,6 +1030,14 @@ class TestBC_Evaluator:
         assert evaluator.kind == "beam"
         assert evaluator.generation_kwargs == {"beam_width": 2}
 
+
+@pytest.fixture
+def bc_evaluator(bc_lm):
+    env = MockLanguageEnvironment()
+    return BC_Evaluator(env, verbose=False, kind="sample", temp=0.5)
+
+
+class TestBC_EvaluatorEvaluate:
     def test_evaluate(self, bc_evaluator, bc_lm):
         """Test evaluate method"""
         items = [
@@ -930,25 +1089,66 @@ class TestBC_Evaluator:
         results = evaluator.evaluate(bc_lm, items)
         assert isinstance(results, dict)
 
+    def test_full_evaluation_loop(self, bc_lm):
+        """Test a complete evaluation loop"""
+        env = MockLanguageEnvironment()
+        evaluator = BC_Evaluator(env, verbose=False, kind="sample", temp=0.5)
 
-class TestUtilityFunctions:
-    """Test cases for utility functions"""
+        # Prepare evaluation data
+        items = [
+            DataPoint(
+                raw_str="test",
+                tokens=[1, 2, 3],
+                state_idxs=[0, 1],
+                action_idxs=[1, 2],
+                rewards=[0.1, 0.2],
+                terminals=[0, 1],
+                utterance_state_idxs=[0, 1],
+                utterance_action_idxs=[1, 2],
+                utterance_rewards=[0.1, 0.2],
+                utterance_terminals=[0, 1],
+            ),
+        ]
 
-    def test_to_function(self):
-        """Test to function for device conversion"""
-        data = {
-            "tensor": torch.tensor([1, 2, 3]),
-            "numpy": np.array([4, 5, 6]),
-            "list": [torch.tensor([7, 8]), np.array([9, 10])],
-        }
+        # Evaluate
+        results = evaluator.evaluate(bc_lm, items)
 
-        result = to(data, torch.device("cpu"))
+        assert isinstance(results, dict)
+        assert "token_reward" in results
+        assert "env_reward" in results
 
-        assert isinstance(result["tensor"], torch.Tensor)
-        assert isinstance(result["numpy"], torch.Tensor)
-        assert isinstance(result["list"][0], torch.Tensor)
-        assert isinstance(result["list"][1], torch.Tensor)
+    def test_evaluator_empty_items(self, bc_lm):
+        """Test evaluator with empty items list"""
+        env = MockLanguageEnvironment()
+        evaluator = BC_Evaluator(env, verbose=False, kind="sample", temp=0.5)
+        items = []
 
+        # Empty items should be handled gracefully
+        results = evaluator.evaluate(bc_lm, items)
+
+        assert isinstance(results, dict)
+        assert "token_reward" in results
+        assert "env_reward" in results
+        # The evaluator should handle empty items without crashing
+
+
+def test_to_function():
+    """Test to function for device conversion"""
+    data = {
+        "tensor": torch.tensor([1, 2, 3]),
+        "numpy": np.array([4, 5, 6]),
+        "list": [torch.tensor([7, 8]), np.array([9, 10])],
+    }
+
+    result = to(data, torch.device("cpu"))
+
+    assert isinstance(result["tensor"], torch.Tensor)
+    assert isinstance(result["numpy"], torch.Tensor)
+    assert isinstance(result["list"][0], torch.Tensor)
+    assert isinstance(result["list"][1], torch.Tensor)
+
+
+class TestMapPytree:
     def test_map_pytree_dict(self):
         """Test map_pytree with dictionary"""
         data = {
@@ -1032,194 +1232,3 @@ class TestUtilityFunctions:
 
         # The function should return the original string as-is for non-tensor/numpy types
         assert result == "string"
-
-
-class TestIntegration:
-    """Integration tests for BC_LM components"""
-
-    def test_full_training_loop(self, bc_lm):
-        """Test a complete training loop"""
-        # Prepare training data
-        items = {
-            "tokens": torch.randint(0, 9, (4, 6)),
-            "attn_mask": torch.ones(4, 6),
-            "action_idxs": torch.tensor([[0, 1], [1, 2], [0, 2], [1, 3]]),
-        }
-
-        # Training step
-        loss, logs, _ = bc_lm.get_loss(items)
-
-        # Backward pass
-        loss.backward()
-
-        assert isinstance(loss, torch.Tensor)
-        assert loss.requires_grad
-        assert "loss" in logs
-
-    def test_full_generation_loop(self, bc_lm):
-        """Test a complete generation loop"""
-        policy = BC_Policy(bc_lm, "sample", temp=0.5, top_k=3)
-
-        # Prepare input
-        items = {
-            "tokens": torch.randint(0, 9, (2, 5)),
-            "attn_mask": torch.ones(2, 5),
-        }
-
-        def termination_condition(text):
-            return len(text.split()) > 10
-
-        # Generate
-        generations, log_probs = policy.generate(
-            items,
-            termination_condition,
-            num_generations=2,
-        )
-
-        assert isinstance(generations, list)
-        assert len(generations) == 2
-        assert isinstance(log_probs, torch.Tensor)
-
-    def test_full_evaluation_loop(self, bc_lm):
-        """Test a complete evaluation loop"""
-        env = MockLanguageEnvironment()
-        evaluator = BC_Evaluator(env, verbose=False, kind="sample", temp=0.5)
-
-        # Prepare evaluation data
-        items = [
-            DataPoint(
-                raw_str="test",
-                tokens=[1, 2, 3],
-                state_idxs=[0, 1],
-                action_idxs=[1, 2],
-                rewards=[0.1, 0.2],
-                terminals=[0, 1],
-                utterance_state_idxs=[0, 1],
-                utterance_action_idxs=[1, 2],
-                utterance_rewards=[0.1, 0.2],
-                utterance_terminals=[0, 1],
-            ),
-        ]
-
-        # Evaluate
-        results = evaluator.evaluate(bc_lm, items)
-
-        assert isinstance(results, dict)
-        assert "token_reward" in results
-        assert "env_reward" in results
-
-
-class TestEdgeCases:
-    """Test edge cases and error conditions"""
-
-    def test_bc_lm_empty_batch(self, bc_lm):
-        """Test BC_LM with empty batch"""
-        tokens = torch.empty(0, 5, dtype=torch.long)
-        attn_mask = torch.empty(0, 5)
-
-        # Empty batches should work fine with the current implementation
-        # The model will handle empty batches gracefully
-        logits, past_key_values = bc_lm(tokens, attn_mask)
-        assert logits.shape == (0, 5, 9)
-        assert isinstance(past_key_values, tuple)
-
-    def test_bc_lm_large_sequence(self, bc_lm):
-        """Test BC_LM with sequence longer than block_size"""
-        tokens = torch.randint(0, 9, (2, 15))  # Longer than block_size=10
-        attn_mask = torch.ones(2, 15)
-
-        with pytest.raises(AssertionError):
-            bc_lm(tokens, attn_mask)
-
-    def test_policy_invalid_termination_condition(self, bc_lm):
-        """Test policy with invalid termination condition"""
-        policy = BC_Policy(bc_lm, "sample")
-
-        # The termination condition is called during generation, so we need to mock the generation process
-        # to actually trigger the exception. For now, we'll test that the policy can be created without issues.
-        assert policy.kind == "sample"
-        assert policy.bc_lm == bc_lm
-
-    def test_evaluator_empty_items(self, bc_lm):
-        """Test evaluator with empty items list"""
-        env = MockLanguageEnvironment()
-        evaluator = BC_Evaluator(env, verbose=False, kind="sample", temp=0.5)
-        items = []
-
-        # Empty items should be handled gracefully
-        results = evaluator.evaluate(bc_lm, items)
-
-        assert isinstance(results, dict)
-        assert "token_reward" in results
-        assert "env_reward" in results
-        # The evaluator should handle empty items without crashing
-
-
-class TestDeviceHandling:
-    """Test device handling across different components"""
-
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-    def test_cuda_device(self, dataset, net_config):
-        """Test BC_LM with CUDA device"""
-        bc_lm = BC_LM(dataset, net_config, device="cuda", transition_weight=0.1)
-
-        tokens = torch.randint(0, 9, (2, 5)).cuda()
-        attn_mask = torch.ones(2, 5).cuda()
-
-        logits, past_key_values = bc_lm(tokens, attn_mask)
-
-        assert logits.device.type == "cuda"
-        assert isinstance(past_key_values, tuple)
-
-    def test_device_consistency(self, bc_lm):
-        """Test device consistency across components"""
-        tokens = torch.randint(0, 9, (2, 5))
-        attn_mask = torch.ones(2, 5)
-
-        # Move to same device as bc_lm
-        tokens = tokens.to(bc_lm.device)
-        attn_mask = attn_mask.to(bc_lm.device)
-
-        logits, past_key_values = bc_lm(tokens, attn_mask)
-
-        assert logits.device == tokens.device
-        # The device should be a torch.device object, not a string
-        assert logits.device == torch.device(bc_lm.device)
-
-
-class TestMemoryEfficiency:
-    """Test memory efficiency and cleanup"""
-
-    def test_memory_cleanup_after_forward(self, bc_lm):
-        """Test memory cleanup after forward pass"""
-        tokens = torch.randint(0, 9, (2, 5))
-        attn_mask = torch.ones(2, 5)
-
-        # Multiple forward passes
-        for _ in range(5):
-            logits, past_key_values = bc_lm(tokens, attn_mask)
-            del logits, past_key_values
-
-        # Should not raise memory errors
-        assert True
-
-    def test_large_batch_handling(self, bc_lm):
-        """Test handling of large batches"""
-        tokens = torch.randint(0, 9, (16, 8))  # Larger batch
-        attn_mask = torch.ones(16, 8)
-
-        logits, past_key_values = bc_lm(tokens, attn_mask)
-
-        assert logits.shape == (16, 8, 9)
-        assert isinstance(past_key_values, tuple)
-
-    def test_get_weights_scatter_minimal(self, bc_lm):
-        # Minimal test: n[0]=2, action_idxs[0,:2]=[1,1] so only position 1 is set to 1.0
-        tokens = torch.randint(0, 9, (1, 3), dtype=torch.long)
-        action_idxs = torch.tensor([[1, 1, 0]], dtype=torch.long)
-        weights = bc_lm.get_weights(tokens, action_idxs)
-        assert weights.shape == tokens.shape
-        # Only position 1 should be 1.0, others should be transition_weight
-        assert weights[0, 1] == 1.0
-        assert weights[0, 0] == 0.1
-        assert weights[0, 2] == 0.1

@@ -37,16 +37,36 @@ class _CacheRejectingFusedModel(_DummyFusedModel):
         super().__setattr__(name, value)
 
 
-def test_patch_lora_for_fused_forward_registers_hooks_and_cache():
-    model = _DummyFusedModel()
-    with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
-        patch_lora_for_fused_forward(model)
+class TestPatchLoraForFusedForward:
+    def test_patch_lora_for_fused_forward_registers_hooks_and_cache(self):
+        model = _DummyFusedModel()
+        with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
+            patch_lora_for_fused_forward(model)
 
-    assert hasattr(model, "_fused_lora_layers")
-    assert len(model._fused_lora_layers) == 2
-    for layer in model._fused_lora_layers:
-        assert layer._fused_adapter_routing is None
-        assert len(layer._forward_pre_hooks) >= 1
+        assert hasattr(model, "_fused_lora_layers")
+        assert len(model._fused_lora_layers) == 2
+        for layer in model._fused_lora_layers:
+            assert layer._fused_adapter_routing is None
+            assert len(layer._forward_pre_hooks) >= 1
+
+    def test_patch_lora_for_fused_forward_noops_when_loralayer_none(self):
+        model = _DummyFusedModel()
+        with patch("agilerl.algorithms.core.fused_lora.LoraLayer", None):
+            patch_lora_for_fused_forward(model)
+
+        assert not hasattr(model, "_fused_lora_layers")
+        assert not hasattr(model.lora_a, "_fused_adapter_routing")
+        assert not hasattr(model.lora_b, "_fused_adapter_routing")
+
+    def test_patch_lora_for_fused_forward_ignores_cache_assignment_errors(self):
+        model = _CacheRejectingFusedModel()
+        with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
+            patch_lora_for_fused_forward(model)
+
+        assert not hasattr(model, "_fused_lora_layers")
+        for layer in (model.lora_a, model.lora_b):
+            assert layer._fused_adapter_routing is None
+            assert len(layer._forward_pre_hooks) >= 1
 
 
 def test_set_and_clear_fused_adapter_routing_update_all_lora_layers():
@@ -63,64 +83,43 @@ def test_set_and_clear_fused_adapter_routing_update_all_lora_layers():
             assert layer._fused_adapter_routing is None
 
 
-def test_fused_lora_hook_injects_adapter_names_into_forward_kwargs():
-    model = _DummyFusedModel()
-    routing = ["actor", "critic"]
-    with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
-        patch_lora_for_fused_forward(model)
-        set_fused_adapter_routing(model, routing)
-        _ = model.lora_a(torch.ones(1, 2))
+class TestFusedRoutingPreHook:
+    def test_fused_lora_hook_injects_adapter_names_into_forward_kwargs(self):
+        model = _DummyFusedModel()
+        routing = ["actor", "critic"]
+        with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
+            patch_lora_for_fused_forward(model)
+            set_fused_adapter_routing(model, routing)
+            _ = model.lora_a(torch.ones(1, 2))
 
-    assert model.lora_a.last_adapter_names == routing
+        assert model.lora_a.last_adapter_names == routing
 
+    def test_fused_routing_pre_hook_leaves_kwargs_unchanged_without_routing(self):
+        module = _DummyLoraLayer()
+        args = (torch.ones(1, 2),)
+        kwargs = {"existing_kwarg": "present"}
 
-def test_get_cached_lora_layers_returns_empty_when_loralayer_none():
-    model = _DummyFusedModel()
-    with patch("agilerl.algorithms.core.fused_lora.LoraLayer", None):
-        layers = _get_cached_lora_layers(model)
+        returned_args, returned_kwargs = _fused_routing_pre_hook(module, args, kwargs)
 
-    assert layers == []
-    assert not hasattr(model, "_fused_lora_layers")
-
-
-def test_get_cached_lora_layers_ignores_cache_assignment_errors():
-    model = _CacheRejectingFusedModel()
-    with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
-        layers = _get_cached_lora_layers(model)
-
-    assert len(layers) == 2
-    assert all(isinstance(layer, _DummyLoraLayer) for layer in layers)
-    assert not hasattr(model, "_fused_lora_layers")
+        assert returned_args == args
+        assert returned_kwargs["existing_kwarg"] == "present"
+        assert "adapter_names" not in returned_kwargs
 
 
-def test_patch_lora_for_fused_forward_noops_when_loralayer_none():
-    model = _DummyFusedModel()
-    with patch("agilerl.algorithms.core.fused_lora.LoraLayer", None):
-        patch_lora_for_fused_forward(model)
+class TestGetCachedLoraLayers:
+    def test_get_cached_lora_layers_returns_empty_when_loralayer_none(self):
+        model = _DummyFusedModel()
+        with patch("agilerl.algorithms.core.fused_lora.LoraLayer", None):
+            layers = _get_cached_lora_layers(model)
 
-    assert not hasattr(model, "_fused_lora_layers")
-    assert not hasattr(model.lora_a, "_fused_adapter_routing")
-    assert not hasattr(model.lora_b, "_fused_adapter_routing")
+        assert layers == []
+        assert not hasattr(model, "_fused_lora_layers")
 
+    def test_get_cached_lora_layers_ignores_cache_assignment_errors(self):
+        model = _CacheRejectingFusedModel()
+        with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
+            layers = _get_cached_lora_layers(model)
 
-def test_patch_lora_for_fused_forward_ignores_cache_assignment_errors():
-    model = _CacheRejectingFusedModel()
-    with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
-        patch_lora_for_fused_forward(model)
-
-    assert not hasattr(model, "_fused_lora_layers")
-    for layer in (model.lora_a, model.lora_b):
-        assert layer._fused_adapter_routing is None
-        assert len(layer._forward_pre_hooks) >= 1
-
-
-def test_fused_routing_pre_hook_leaves_kwargs_unchanged_without_routing():
-    module = _DummyLoraLayer()
-    args = (torch.ones(1, 2),)
-    kwargs = {"existing_kwarg": "present"}
-
-    returned_args, returned_kwargs = _fused_routing_pre_hook(module, args, kwargs)
-
-    assert returned_args == args
-    assert returned_kwargs["existing_kwarg"] == "present"
-    assert "adapter_names" not in returned_kwargs
+        assert len(layers) == 2
+        assert all(isinstance(layer, _DummyLoraLayer) for layer in layers)
+        assert not hasattr(model, "_fused_lora_layers")

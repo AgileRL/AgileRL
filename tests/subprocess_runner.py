@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import functools
 import importlib.util
 import json
 import os
@@ -198,11 +199,22 @@ def main():
 
     module = import_module_from_path(args.module)
 
-    # Unwrap only one level: past spawn_new_process_for_each_test but keep
-    # any @patch wrappers intact so they inject mocks automatically.
-    test_func = getattr(module, args.test)
-    if hasattr(test_func, "__wrapped__"):
-        test_func = test_func.__wrapped__
+    # Resolve the test callable. For class-based tests the name is
+    # "ClassName.method_name"; instantiate the class and bind so that
+    # the unwrapped function still receives `self`.
+    if "." in args.test:
+        cls_name, method_name = args.test.rsplit(".", 1)
+        test_cls = getattr(module, cls_name)
+        test_func = getattr(test_cls, method_name)
+        # Unwrap only one level: past spawn_new_process_for_each_test but keep
+        # any @patch wrappers intact so they inject mocks automatically.
+        if hasattr(test_func, "__wrapped__"):
+            test_func = test_func.__wrapped__
+        test_func = functools.partial(test_func, test_cls())
+    else:
+        test_func = getattr(module, args.test)
+        if hasattr(test_func, "__wrapped__"):
+            test_func = test_func.__wrapped__
 
     fixtures = resolve_fixtures(fixture_names, module, args.test)
 

@@ -210,651 +210,1331 @@ def setup_rs_norm_multi_agent():
     return wrapper, mock_agent
 
 
-def test_set_get_state(setup_rs_norm):
-    wrapper, mock_agent = setup_rs_norm
-    state = wrapper.__getstate__()
-    wrapper_2 = RSNorm(mock_agent)
-    wrapper_2.__setstate__(state)
-    assert torch.allclose(wrapper.obs_rms.mean, wrapper_2.obs_rms.mean, atol=1e-2)
-    assert torch.allclose(wrapper.obs_rms.var, wrapper_2.obs_rms.var, atol=1e-2)
-    assert wrapper.obs_rms.epsilon == wrapper_2.obs_rms.epsilon
+class TestRSNormGetState:
+    def test_set_get_state(self, setup_rs_norm):
+        wrapper, mock_agent = setup_rs_norm
+        state = wrapper.__getstate__()
+        wrapper_2 = RSNorm(mock_agent)
+        wrapper_2.__setstate__(state)
+        assert torch.allclose(wrapper.obs_rms.mean, wrapper_2.obs_rms.mean, atol=1e-2)
+        assert torch.allclose(wrapper.obs_rms.var, wrapper_2.obs_rms.var, atol=1e-2)
+        assert wrapper.obs_rms.epsilon == wrapper_2.obs_rms.epsilon
 
 
-def test_rsnorm_device_when_agent_has_rollout_buffer(vector_space):
-    """Test device property returns 'cpu' when agent has rollout_buffer."""
-    observation_space = vector_space
-    action_space = copy.deepcopy(vector_space)
-    ppo = PPO(
-        observation_space,
-        action_space,
-        use_rollout_buffer=True,
-        num_envs=1,
-    )
-    wrapper = RSNorm(ppo)
-    assert wrapper.device == "cpu"
-
-
-def test_normalize_observation(setup_rs_norm):
-    wrapper, _ = setup_rs_norm
-    obs = torch.tensor([1.0, 2.0, 3.0])
-    wrapper.obs_rms.mean = torch.tensor([1.0, 1.0, 1.0])
-    wrapper.obs_rms.var = torch.tensor([1.0, 1.0, 1.0])
-    wrapper.obs_rms.epsilon = 1e-4
-
-    normalized_obs = wrapper._normalize_observation(obs)
-    expected_obs = (obs - wrapper.obs_rms.mean) / torch.sqrt(
-        wrapper.obs_rms.var + wrapper.obs_rms.epsilon,
-    )
-    assert torch.allclose(normalized_obs, expected_obs)
-
-
-def test_update_statistics(setup_rs_norm):
-    wrapper, _ = setup_rs_norm
-    obs = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-    wrapper.update_statistics(obs)
-
-    assert torch.allclose(
-        wrapper.obs_rms.mean,
-        torch.tensor([2.5, 3.5, 4.5]),
-        atol=1e-2,
-    )
-    assert torch.allclose(
-        wrapper.obs_rms.var,
-        torch.tensor([2.25, 2.25, 2.25]),
-        atol=1e-2,
-    )
-
-
-def test_get_action(setup_rs_norm):
-    wrapper, mock_agent = setup_rs_norm
-    obs = torch.tensor([1.0, 2.0, 3.0])
-    wrapper.get_action(obs)
-
-
-def test_learn(setup_rs_norm):
-    wrapper, mock_agent = setup_rs_norm
-    experiences = (
-        torch.tensor([1.0, 2.0, 3.0]),  # State
-        torch.tensor([0]),  # Action
-        torch.tensor([1.0]),  # Reward
-        torch.tensor([4.0, 5.0, 6.0]),  # Next state
-        torch.tensor([0]),  # Done
-    )
-    wrapper.learn(experiences)
-
-
-def test_normalize_observation_dict(setup_rs_norm_dict):
-    wrapper, _ = setup_rs_norm_dict
-    obs = {
-        "sensor1": torch.tensor([1.0, 2.0, 3.0]),
-        "sensor2": torch.tensor([1.0, 2.0]),
-    }
-    wrapper.obs_rms["sensor1"].mean = torch.tensor([1.0, 1.0, 1.0])
-    wrapper.obs_rms["sensor1"].var = torch.tensor([1.0, 1.0, 1.0])
-    wrapper.obs_rms["sensor1"].epsilon = 1e-4
-    wrapper.obs_rms["sensor2"].mean = torch.tensor([1.0, 1.0])
-    wrapper.obs_rms["sensor2"].var = torch.tensor([1.0, 1.0])
-    wrapper.obs_rms["sensor2"].epsilon = 1e-4
-
-    normalized_obs = wrapper._normalize_observation(obs)
-    expected_obs = {
-        "sensor1": (obs["sensor1"] - wrapper.obs_rms["sensor1"].mean)
-        / torch.sqrt(
-            wrapper.obs_rms["sensor1"].var + wrapper.obs_rms["sensor1"].epsilon,
-        ),
-        "sensor2": (obs["sensor2"] - wrapper.obs_rms["sensor2"].mean)
-        / torch.sqrt(
-            wrapper.obs_rms["sensor2"].var + wrapper.obs_rms["sensor2"].epsilon,
-        ),
-    }
-    assert torch.allclose(normalized_obs["sensor1"], expected_obs["sensor1"], atol=1e-2)
-    assert torch.allclose(normalized_obs["sensor2"], expected_obs["sensor2"], atol=1e-2)
-
-
-def test_update_statistics_dict(setup_rs_norm_dict):
-    wrapper, _ = setup_rs_norm_dict
-    obs = {
-        "sensor1": torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
-        "sensor2": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
-    }
-    wrapper.update_statistics(obs)
-
-    assert torch.allclose(
-        wrapper.obs_rms["sensor1"].mean,
-        torch.tensor([2.5, 3.5, 4.5]),
-        atol=1e-2,
-    )
-    assert torch.allclose(
-        wrapper.obs_rms["sensor1"].var,
-        torch.tensor([2.25, 2.25, 2.25]),
-        atol=1e-2,
-    )
-    assert torch.allclose(
-        wrapper.obs_rms["sensor2"].mean,
-        torch.tensor([2.0, 3.0]),
-        atol=1e-2,
-    )
-    assert torch.allclose(
-        wrapper.obs_rms["sensor2"].var,
-        torch.tensor([1.0, 1.0]),
-        atol=1e-2,
-    )
-
-
-def test_normalize_observation_tuple(setup_rs_norm_tuple):
-    wrapper, _ = setup_rs_norm_tuple
-    obs = (torch.tensor([1.0, 2.0, 3.0]), torch.tensor([1.0, 2.0]))
-    wrapper.obs_rms[0].mean = torch.tensor([1.0, 1.0, 1.0])
-    wrapper.obs_rms[0].var = torch.tensor([1.0, 1.0, 1.0])
-    wrapper.obs_rms[0].epsilon = 1e-4
-    wrapper.obs_rms[1].mean = torch.tensor([1.0, 1.0])
-    wrapper.obs_rms[1].var = torch.tensor([1.0, 1.0])
-    wrapper.obs_rms[1].epsilon = 1e-4
-
-    normalized_obs = wrapper._normalize_observation(obs)
-    expected_obs = (
-        (obs[0] - wrapper.obs_rms[0].mean)
-        / torch.sqrt(wrapper.obs_rms[0].var + wrapper.obs_rms[0].epsilon),
-        (obs[1] - wrapper.obs_rms[1].mean)
-        / torch.sqrt(wrapper.obs_rms[1].var + wrapper.obs_rms[1].epsilon),
-    )
-    assert torch.allclose(normalized_obs[0], expected_obs[0], atol=1e-2)
-    assert torch.allclose(normalized_obs[1], expected_obs[1], atol=1e-2)
-
-
-def test_update_statistics_tuple(setup_rs_norm_tuple):
-    wrapper, _ = setup_rs_norm_tuple
-    obs = (
-        torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
-        torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
-    )
-    wrapper.update_statistics(obs)
-
-    assert torch.allclose(
-        wrapper.obs_rms[0].mean,
-        torch.tensor([2.5, 3.5, 4.5]),
-        atol=1e-2,
-    )
-    assert torch.allclose(
-        wrapper.obs_rms[0].var,
-        torch.tensor([2.25, 2.25, 2.25]),
-        atol=1e-2,
-    )
-    assert torch.allclose(wrapper.obs_rms[1].mean, torch.tensor([2.0, 3.0]), atol=1e-2)
-    assert torch.allclose(wrapper.obs_rms[1].var, torch.tensor([1.0, 1.0]), atol=1e-2)
-
-
-def test_normalize_observation_multi_agent(setup_rs_norm_multi_agent):
-    wrapper, _ = setup_rs_norm_multi_agent
-    obs = {
-        "agent_1": torch.tensor([1.0, 2.0, 3.0]),
-        "other_agent_1": torch.tensor([1.0, 2.0]),
-    }
-    wrapper.obs_rms["agent_1"].mean = torch.tensor([1.0, 1.0, 1.0])
-    wrapper.obs_rms["agent_1"].var = torch.tensor([1.0, 1.0, 1.0])
-    wrapper.obs_rms["agent_1"].epsilon = 1e-4
-    wrapper.obs_rms["other_agent_1"].mean = torch.tensor([1.0, 1.0])
-    wrapper.obs_rms["other_agent_1"].var = torch.tensor([1.0, 1.0])
-    wrapper.obs_rms["other_agent_1"].epsilon = 1e-4
-
-    normalized_obs = wrapper._normalize_observation(obs)
-    expected_obs = {
-        "agent_1": (obs["agent_1"] - wrapper.obs_rms["agent_1"].mean)
-        / torch.sqrt(
-            wrapper.obs_rms["agent_1"].var + wrapper.obs_rms["agent_1"].epsilon,
-        ),
-        "other_agent_1": (obs["other_agent_1"] - wrapper.obs_rms["other_agent_1"].mean)
-        / torch.sqrt(
-            wrapper.obs_rms["other_agent_1"].var
-            + wrapper.obs_rms["other_agent_1"].epsilon,
-        ),
-    }
-    assert torch.allclose(normalized_obs["agent_1"], expected_obs["agent_1"], atol=1e-2)
-    assert torch.allclose(
-        normalized_obs["other_agent_1"],
-        expected_obs["other_agent_1"],
-        atol=1e-2,
-    )
-
-
-@pytest.mark.parametrize("observation_space", ["vector_space", "dict_space"])
-def test_rsnorm_get_action(observation_space, request):
-    observation_space = request.getfixturevalue(observation_space)
-    action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,))
-    agent = DDPG(observation_space, action_space)
-    wrapper = RSNorm(agent)
-    obs = wrapper.observation_space.sample()
-    action = wrapper.get_action(obs)
-    assert action.shape == (1,) + agent.action_space.shape
-
-
-@pytest.mark.parametrize(
-    "observation_space",
-    ["vector_space", "discrete_space", "multidiscrete_space", "dict_space"],
-)
-@pytest.mark.parametrize("accelerator_flag", [False, True])
-def test_rsnorm_learn(observation_space, vector_space, request, accelerator_flag):
-    accelerator = Accelerator() if accelerator_flag else None
-    observation_space = request.getfixturevalue(observation_space)
-    action_space = vector_space
-    batch_size = 4
-    policy_freq = 4
-
-    # Create an instance of the ddpg class
-    ddpg = DDPG(
-        observation_space,
-        action_space,
-        batch_size=batch_size,
-        policy_freq=policy_freq,
-        accelerator=accelerator,
-    )
-    ddpg = RSNorm(ddpg)
-
-    # Copy state dict before learning - should be different to after updating weights
-    actor = ddpg.actor
-    actor_target = ddpg.actor_target
-    actor_pre_learn_sd = copy.deepcopy(ddpg.actor.state_dict())
-    critic = ddpg.critic
-    critic_target = ddpg.critic_target
-    critic_pre_learn_sd = copy.deepcopy(ddpg.critic.state_dict())
-
-    for _i in range(policy_freq * 2):
-        # Create a batch of experiences & learn
-        device = accelerator.device if accelerator else "cpu"
-        experiences = get_experiences_batch(
+class TestRSNormDevice:
+    def test_rsnorm_device_when_agent_has_rollout_buffer(self, vector_space):
+        """Test device property returns 'cpu' when agent has rollout_buffer."""
+        observation_space = vector_space
+        action_space = copy.deepcopy(vector_space)
+        ppo = PPO(
             observation_space,
             action_space,
-            batch_size,
-            device,
+            use_rollout_buffer=True,
+            num_envs=1,
         )
-        ddpg.scores.append(0)
-        actor_loss, critic_loss = ddpg.learn(experiences)
-
-    with pytest.raises(ValueError):
-        ddpg.learn()
-
-    assert isinstance(actor_loss, float)
-    assert isinstance(critic_loss, float)
-    assert critic_loss >= 0.0
-    assert actor == ddpg.actor
-    assert actor_target == ddpg.actor_target
-    assert_not_equal_state_dict(actor_pre_learn_sd, ddpg.actor.state_dict())
-    assert_not_equal_state_dict(critic_pre_learn_sd, ddpg.critic.state_dict())
-    assert critic == ddpg.critic
-    assert critic_target == ddpg.critic_target
+        wrapper = RSNorm(ppo)
+        assert wrapper.device == "cpu"
 
 
-def test_rsnorm_learn_ppo(vector_space):
-    observation_space = vector_space
-    action_space = copy.deepcopy(vector_space)
-    ppo = PPO(observation_space, action_space, use_rollout_buffer=True, num_envs=1)
-    ppo = RSNorm(ppo)
+class TestRSNormNormalizeObservation:
+    def test_normalize_observation(self, setup_rs_norm):
+        wrapper, _ = setup_rs_norm
+        obs = torch.tensor([1.0, 2.0, 3.0])
+        wrapper.obs_rms.mean = torch.tensor([1.0, 1.0, 1.0])
+        wrapper.obs_rms.var = torch.tensor([1.0, 1.0, 1.0])
+        wrapper.obs_rms.epsilon = 1e-4
 
-    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=ppo.num_envs)
-    collect_rollouts(ppo, env, n_steps=20)
+        normalized_obs = wrapper._normalize_observation(obs)
+        expected_obs = (obs - wrapper.obs_rms.mean) / torch.sqrt(
+            wrapper.obs_rms.var + wrapper.obs_rms.epsilon,
+        )
+        assert torch.allclose(normalized_obs, expected_obs)
 
-    actor_pre_learn_sd = copy.deepcopy(ppo.actor.state_dict())
-    critic_pre_learn_sd = copy.deepcopy(ppo.critic.state_dict())
-    ppo.learn()
+    def test_normalize_observation_dict(self, setup_rs_norm_dict):
+        wrapper, _ = setup_rs_norm_dict
+        obs = {
+            "sensor1": torch.tensor([1.0, 2.0, 3.0]),
+            "sensor2": torch.tensor([1.0, 2.0]),
+        }
+        wrapper.obs_rms["sensor1"].mean = torch.tensor([1.0, 1.0, 1.0])
+        wrapper.obs_rms["sensor1"].var = torch.tensor([1.0, 1.0, 1.0])
+        wrapper.obs_rms["sensor1"].epsilon = 1e-4
+        wrapper.obs_rms["sensor2"].mean = torch.tensor([1.0, 1.0])
+        wrapper.obs_rms["sensor2"].var = torch.tensor([1.0, 1.0])
+        wrapper.obs_rms["sensor2"].epsilon = 1e-4
 
-    assert_not_equal_state_dict(actor_pre_learn_sd, ppo.actor.state_dict())
-    assert_not_equal_state_dict(critic_pre_learn_sd, ppo.critic.state_dict())
+        normalized_obs = wrapper._normalize_observation(obs)
+        expected_obs = {
+            "sensor1": (obs["sensor1"] - wrapper.obs_rms["sensor1"].mean)
+            / torch.sqrt(
+                wrapper.obs_rms["sensor1"].var + wrapper.obs_rms["sensor1"].epsilon,
+            ),
+            "sensor2": (obs["sensor2"] - wrapper.obs_rms["sensor2"].mean)
+            / torch.sqrt(
+                wrapper.obs_rms["sensor2"].var + wrapper.obs_rms["sensor2"].epsilon,
+            ),
+        }
+        assert torch.allclose(
+            normalized_obs["sensor1"], expected_obs["sensor1"], atol=1e-2
+        )
+        assert torch.allclose(
+            normalized_obs["sensor2"], expected_obs["sensor2"], atol=1e-2
+        )
+
+    def test_normalize_observation_tuple(self, setup_rs_norm_tuple):
+        wrapper, _ = setup_rs_norm_tuple
+        obs = (torch.tensor([1.0, 2.0, 3.0]), torch.tensor([1.0, 2.0]))
+        wrapper.obs_rms[0].mean = torch.tensor([1.0, 1.0, 1.0])
+        wrapper.obs_rms[0].var = torch.tensor([1.0, 1.0, 1.0])
+        wrapper.obs_rms[0].epsilon = 1e-4
+        wrapper.obs_rms[1].mean = torch.tensor([1.0, 1.0])
+        wrapper.obs_rms[1].var = torch.tensor([1.0, 1.0])
+        wrapper.obs_rms[1].epsilon = 1e-4
+
+        normalized_obs = wrapper._normalize_observation(obs)
+        expected_obs = (
+            (obs[0] - wrapper.obs_rms[0].mean)
+            / torch.sqrt(wrapper.obs_rms[0].var + wrapper.obs_rms[0].epsilon),
+            (obs[1] - wrapper.obs_rms[1].mean)
+            / torch.sqrt(wrapper.obs_rms[1].var + wrapper.obs_rms[1].epsilon),
+        )
+        assert torch.allclose(normalized_obs[0], expected_obs[0], atol=1e-2)
+        assert torch.allclose(normalized_obs[1], expected_obs[1], atol=1e-2)
+
+    def test_normalize_observation_multi_agent(self, setup_rs_norm_multi_agent):
+        wrapper, _ = setup_rs_norm_multi_agent
+        obs = {
+            "agent_1": torch.tensor([1.0, 2.0, 3.0]),
+            "other_agent_1": torch.tensor([1.0, 2.0]),
+        }
+        wrapper.obs_rms["agent_1"].mean = torch.tensor([1.0, 1.0, 1.0])
+        wrapper.obs_rms["agent_1"].var = torch.tensor([1.0, 1.0, 1.0])
+        wrapper.obs_rms["agent_1"].epsilon = 1e-4
+        wrapper.obs_rms["other_agent_1"].mean = torch.tensor([1.0, 1.0])
+        wrapper.obs_rms["other_agent_1"].var = torch.tensor([1.0, 1.0])
+        wrapper.obs_rms["other_agent_1"].epsilon = 1e-4
+
+        normalized_obs = wrapper._normalize_observation(obs)
+        expected_obs = {
+            "agent_1": (obs["agent_1"] - wrapper.obs_rms["agent_1"].mean)
+            / torch.sqrt(
+                wrapper.obs_rms["agent_1"].var + wrapper.obs_rms["agent_1"].epsilon,
+            ),
+            "other_agent_1": (
+                obs["other_agent_1"] - wrapper.obs_rms["other_agent_1"].mean
+            )
+            / torch.sqrt(
+                wrapper.obs_rms["other_agent_1"].var
+                + wrapper.obs_rms["other_agent_1"].epsilon,
+            ),
+        }
+        assert torch.allclose(
+            normalized_obs["agent_1"], expected_obs["agent_1"], atol=1e-2
+        )
+        assert torch.allclose(
+            normalized_obs["other_agent_1"],
+            expected_obs["other_agent_1"],
+            atol=1e-2,
+        )
 
 
-# Clones the agent and returns an identical agent.
-def test_rsnorm_clone_returns_identical_agent(vector_space):
-    observation_space = vector_space
-    action_space = copy.deepcopy(vector_space)
-    ddpg_norm = RSNorm(
-        DDPG(observation_space=observation_space, action_space=action_space),
+class TestRSNormUpdateStatistics:
+    def test_update_statistics(self, setup_rs_norm):
+        wrapper, _ = setup_rs_norm
+        obs = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        wrapper.update_statistics(obs)
+
+        assert torch.allclose(
+            wrapper.obs_rms.mean,
+            torch.tensor([2.5, 3.5, 4.5]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms.var,
+            torch.tensor([2.25, 2.25, 2.25]),
+            atol=1e-2,
+        )
+
+    def test_update_statistics_dict(self, setup_rs_norm_dict):
+        wrapper, _ = setup_rs_norm_dict
+        obs = {
+            "sensor1": torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+            "sensor2": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        }
+        wrapper.update_statistics(obs)
+
+        assert torch.allclose(
+            wrapper.obs_rms["sensor1"].mean,
+            torch.tensor([2.5, 3.5, 4.5]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["sensor1"].var,
+            torch.tensor([2.25, 2.25, 2.25]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["sensor2"].mean,
+            torch.tensor([2.0, 3.0]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["sensor2"].var,
+            torch.tensor([1.0, 1.0]),
+            atol=1e-2,
+        )
+
+    def test_update_statistics_tuple(self, setup_rs_norm_tuple):
+        wrapper, _ = setup_rs_norm_tuple
+        obs = (
+            torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+            torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        )
+        wrapper.update_statistics(obs)
+
+        assert torch.allclose(
+            wrapper.obs_rms[0].mean,
+            torch.tensor([2.5, 3.5, 4.5]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms[0].var,
+            torch.tensor([2.25, 2.25, 2.25]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms[1].mean, torch.tensor([2.0, 3.0]), atol=1e-2
+        )
+        assert torch.allclose(
+            wrapper.obs_rms[1].var, torch.tensor([1.0, 1.0]), atol=1e-2
+        )
+
+
+class TestRSNormGetAction:
+    def test_get_action(self, setup_rs_norm):
+        wrapper, mock_agent = setup_rs_norm
+        obs = torch.tensor([1.0, 2.0, 3.0])
+        wrapper.get_action(obs)
+
+    @pytest.mark.parametrize("observation_space", ["vector_space", "dict_space"])
+    def test_rsnorm_get_action(self, observation_space, request):
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,))
+        agent = DDPG(observation_space, action_space)
+        wrapper = RSNorm(agent)
+        obs = wrapper.observation_space.sample()
+        action = wrapper.get_action(obs)
+        assert action.shape == (1,) + agent.action_space.shape
+
+    def test_rsnorm_get_action_skips_stats_when_not_training(self, setup_rs_norm):
+        wrapper, mock_agent = setup_rs_norm
+        mock_agent.training = False
+        obs = torch.tensor([1.0, 2.0, 3.0])
+        wrapper.get_action(obs)
+        wrapper.wrapped_get_action.assert_called_once()
+
+
+class TestRSNormLearn:
+    def test_learn(self, setup_rs_norm):
+        wrapper, mock_agent = setup_rs_norm
+        experiences = (
+            torch.tensor([1.0, 2.0, 3.0]),  # State
+            torch.tensor([0]),  # Action
+            torch.tensor([1.0]),  # Reward
+            torch.tensor([4.0, 5.0, 6.0]),  # Next state
+            torch.tensor([0]),  # Done
+        )
+        wrapper.learn(experiences)
+
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["vector_space", "discrete_space", "multidiscrete_space", "dict_space"],
     )
-    ddpg = ddpg_norm.agent
-    ddpg.fitness = [200, 200, 200]
-    ddpg.scores = [94, 94, 94]
-    ddpg.steps = [2500]
-    ddpg.tensor_attribute = torch.randn(1)
-    clone = ddpg_norm.clone()
-    clone_agent = clone.agent
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
+    def test_rsnorm_learn(
+        self, observation_space, vector_space, request, accelerator_flag
+    ):
+        accelerator = Accelerator() if accelerator_flag else None
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = vector_space
+        batch_size = 4
+        policy_freq = 4
 
-    assert clone_agent.observation_space == ddpg.observation_space
-    assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.batch_size == ddpg.batch_size
-    assert clone_agent.lr_actor == ddpg.lr_actor
-    assert clone_agent.lr_critic == ddpg.lr_critic
-    assert clone_agent.learn_step == ddpg.learn_step
-    assert clone_agent.gamma == ddpg.gamma
-    assert clone_agent.tau == ddpg.tau
-    assert clone_agent.mut == ddpg.mut
-    assert clone_agent.device == ddpg.device
-    assert clone_agent.accelerator == ddpg.accelerator
-    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(),
-        ddpg.actor_target.state_dict(),
-    )
-    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(),
-        ddpg.critic_target.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(),
-        ddpg.actor_optimizer.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(),
-        ddpg.critic_optimizer.state_dict(),
-    )
-    assert clone_agent.fitness == ddpg.fitness
-    assert clone_agent.steps == ddpg.steps
-    assert clone_agent.scores == ddpg.scores
-    assert clone_agent.tensor_attribute == ddpg.tensor_attribute
-
-    accelerator = Accelerator()
-    ddpg_norm = RSNorm(
-        DDPG(
-            observation_space=observation_space,
-            action_space=action_space,
+        # Create an instance of the ddpg class
+        ddpg = DDPG(
+            observation_space,
+            action_space,
+            batch_size=batch_size,
+            policy_freq=policy_freq,
             accelerator=accelerator,
-        ),
+        )
+        ddpg = RSNorm(ddpg)
+
+        # Copy state dict before learning - should be different to after updating weights
+        actor = ddpg.actor
+        actor_target = ddpg.actor_target
+        actor_pre_learn_sd = copy.deepcopy(ddpg.actor.state_dict())
+        critic = ddpg.critic
+        critic_target = ddpg.critic_target
+        critic_pre_learn_sd = copy.deepcopy(ddpg.critic.state_dict())
+
+        for _i in range(policy_freq * 2):
+            # Create a batch of experiences & learn
+            device = accelerator.device if accelerator else "cpu"
+            experiences = get_experiences_batch(
+                observation_space,
+                action_space,
+                batch_size,
+                device,
+            )
+            ddpg.scores.append(0)
+            actor_loss, critic_loss = ddpg.learn(experiences)
+
+        with pytest.raises(ValueError):
+            ddpg.learn()
+
+        assert isinstance(actor_loss, float)
+        assert isinstance(critic_loss, float)
+        assert critic_loss >= 0.0
+        assert actor == ddpg.actor
+        assert actor_target == ddpg.actor_target
+        assert_not_equal_state_dict(actor_pre_learn_sd, ddpg.actor.state_dict())
+        assert_not_equal_state_dict(critic_pre_learn_sd, ddpg.critic.state_dict())
+        assert critic == ddpg.critic
+        assert critic_target == ddpg.critic_target
+
+    def test_rsnorm_learn_ppo(self, vector_space):
+        observation_space = vector_space
+        action_space = copy.deepcopy(vector_space)
+        ppo = PPO(observation_space, action_space, use_rollout_buffer=True, num_envs=1)
+        ppo = RSNorm(ppo)
+
+        env = DummyEnv(
+            state_size=observation_space.shape, vect=True, num_envs=ppo.num_envs
+        )
+        collect_rollouts(ppo, env, n_steps=20)
+
+        actor_pre_learn_sd = copy.deepcopy(ppo.actor.state_dict())
+        critic_pre_learn_sd = copy.deepcopy(ppo.critic.state_dict())
+        ppo.learn()
+
+        assert_not_equal_state_dict(actor_pre_learn_sd, ppo.actor.state_dict())
+        assert_not_equal_state_dict(critic_pre_learn_sd, ppo.critic.state_dict())
+
+    def test_rsnorm_learn_tensordict_experiences(self, vector_space):
+        from tensordict import TensorDict
+
+        agent = DDPG(vector_space, copy.deepcopy(vector_space), batch_size=4)
+        wrapper = RSNorm(agent)
+        batch = 4
+        td = TensorDict(
+            {
+                "obs": torch.randn(batch, *vector_space.shape),
+                "next_obs": torch.randn(batch, *vector_space.shape),
+                "action": torch.randn(batch, vector_space.shape[0]),
+                "reward": torch.ones(batch),
+                "done": torch.zeros(batch),
+            },
+            batch_size=[batch],
+        )
+        loss_info = wrapper.learn(td)
+        assert isinstance(loss_info, (tuple, dict)) or isinstance(loss_info, float)
+
+    def test_rsnorm_learn_rollout_buffer_full(self, vector_space):
+        obs_space = vector_space
+        action_space = copy.deepcopy(vector_space)
+        ppo = PPO(obs_space, action_space, use_rollout_buffer=True, num_envs=2)
+        ppo.rollout_buffer.full = True
+        ppo.rollout_buffer.pos = 10
+        wrapper = RSNorm(ppo)
+        valid_data = wrapper.agent.rollout_buffer.buffer[:10].clone()
+        valid_data["observations"] = torch.randn(10, 2, *obs_space.shape)
+        valid_data["next_observations"] = torch.randn(10, 2, *obs_space.shape)
+        wrapper.agent.rollout_buffer.buffer[:10] = valid_data
+        env = DummyEnv(state_size=obs_space.shape, vect=True, num_envs=2)
+        collect_rollouts(ppo, env, n_steps=40)
+        wrapper.agent.rollout_buffer.full = True
+        wrapper.agent.rollout_buffer.pos = 20
+        wrapper.learn()
+        assert True
+
+
+class TestRSNormClone:
+    # Clones the agent and returns an identical agent.
+    def test_rsnorm_clone_returns_identical_agent(self, vector_space):
+        observation_space = vector_space
+        action_space = copy.deepcopy(vector_space)
+        ddpg_norm = RSNorm(
+            DDPG(observation_space=observation_space, action_space=action_space),
+        )
+        ddpg = ddpg_norm.agent
+        ddpg.fitness = [200, 200, 200]
+        ddpg.scores = [94, 94, 94]
+        ddpg.steps = [2500]
+        ddpg.tensor_attribute = torch.randn(1)
+        clone = ddpg_norm.clone()
+        clone_agent = clone.agent
+
+        assert clone_agent.observation_space == ddpg.observation_space
+        assert clone_agent.action_space == ddpg.action_space
+        assert clone_agent.batch_size == ddpg.batch_size
+        assert clone_agent.lr_actor == ddpg.lr_actor
+        assert clone_agent.lr_critic == ddpg.lr_critic
+        assert clone_agent.learn_step == ddpg.learn_step
+        assert clone_agent.gamma == ddpg.gamma
+        assert clone_agent.tau == ddpg.tau
+        assert clone_agent.mut == ddpg.mut
+        assert clone_agent.device == ddpg.device
+        assert clone_agent.accelerator == ddpg.accelerator
+        assert_state_dicts_equal(
+            clone_agent.actor.state_dict(), ddpg.actor.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_target.state_dict(),
+            ddpg.actor_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic.state_dict(), ddpg.critic.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_target.state_dict(),
+            ddpg.critic_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_optimizer.state_dict(),
+            ddpg.actor_optimizer.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_optimizer.state_dict(),
+            ddpg.critic_optimizer.state_dict(),
+        )
+        assert clone_agent.fitness == ddpg.fitness
+        assert clone_agent.steps == ddpg.steps
+        assert clone_agent.scores == ddpg.scores
+        assert clone_agent.tensor_attribute == ddpg.tensor_attribute
+
+        accelerator = Accelerator()
+        ddpg_norm = RSNorm(
+            DDPG(
+                observation_space=observation_space,
+                action_space=action_space,
+                accelerator=accelerator,
+            ),
+        )
+        ddpg = ddpg_norm.agent
+        clone = ddpg_norm.clone()
+        clone_agent = clone.agent
+
+        assert clone_agent.observation_space == ddpg.observation_space
+        assert clone_agent.action_space == ddpg.action_space
+        assert clone_agent.batch_size == ddpg.batch_size
+        assert clone_agent.lr_actor == ddpg.lr_actor
+        assert clone_agent.lr_critic == ddpg.lr_critic
+        assert clone_agent.learn_step == ddpg.learn_step
+        assert clone_agent.gamma == ddpg.gamma
+        assert clone_agent.tau == ddpg.tau
+        assert clone_agent.mut == ddpg.mut
+        assert clone_agent.device == ddpg.device
+        assert clone_agent.accelerator == ddpg.accelerator
+        assert_state_dicts_equal(
+            clone_agent.actor.state_dict(), ddpg.actor.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_target.state_dict(),
+            ddpg.actor_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic.state_dict(), ddpg.critic.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_target.state_dict(),
+            ddpg.critic_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_optimizer.state_dict(),
+            ddpg.actor_optimizer.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_optimizer.state_dict(),
+            ddpg.critic_optimizer.state_dict(),
+        )
+        assert clone_agent.fitness == ddpg.fitness
+        assert clone_agent.steps == ddpg.steps
+        assert clone_agent.scores == ddpg.scores
+
+        accelerator = Accelerator()
+        ddpg_norm = RSNorm(
+            DDPG(observation_space, action_space, accelerator=accelerator, wrap=False),
+        )
+        ddpg = ddpg_norm.agent
+        clone = ddpg_norm.clone(wrap=False)
+        clone_agent = clone.agent
+
+        assert clone_agent.observation_space == ddpg.observation_space
+        assert clone_agent.action_space == ddpg.action_space
+        assert clone_agent.batch_size == ddpg.batch_size
+        assert clone_agent.lr_actor == ddpg.lr_actor
+        assert clone_agent.lr_critic == ddpg.lr_critic
+        assert clone_agent.learn_step == ddpg.learn_step
+        assert clone_agent.gamma == ddpg.gamma
+        assert clone_agent.tau == ddpg.tau
+        assert clone_agent.mut == ddpg.mut
+        assert clone_agent.device == ddpg.device
+        assert clone_agent.accelerator == ddpg.accelerator
+        assert_state_dicts_equal(
+            clone_agent.actor.state_dict(), ddpg.actor.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_target.state_dict(),
+            ddpg.actor_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic.state_dict(), ddpg.critic.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_target.state_dict(),
+            ddpg.critic_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_optimizer.state_dict(),
+            ddpg.actor_optimizer.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_optimizer.state_dict(),
+            ddpg.critic_optimizer.state_dict(),
+        )
+        assert clone_agent.fitness == ddpg.fitness
+        assert clone_agent.steps == ddpg.steps
+        assert clone_agent.scores == ddpg.scores
+
+    def test_rsnorm_clone_with_index(self, vector_space):
+        ddpg = DDPG(vector_space, copy.deepcopy(vector_space))
+        wrapper = RSNorm(ddpg)
+        clone = wrapper.clone(index=0)
+        assert clone.agent.index == 0
+
+
+class TestRSNormSaveLoadCheckpoint:
+    def test_rsnorm_save_load_checkpoint(self, tmp_path, vector_space):
+        observation_space = vector_space
+        action_space = copy.deepcopy(vector_space)
+
+        ddpg_norm = RSNorm(
+            DDPG(observation_space=observation_space, action_space=action_space),
+        )
+        checkpoint_path = os.path.join(tmp_path, "checkpoint.pth")
+        ddpg_norm.save_checkpoint(checkpoint_path)
+
+        # Load the saved checkpoint file
+        checkpoint = torch.load(checkpoint_path, pickle_module=dill, weights_only=False)
+
+        # Check if the loaded checkpoint has the correct keys
+        assert "wrapper_cls" in checkpoint
+        assert "wrapper_init_dict" in checkpoint
+        assert "wrapper_attrs" in checkpoint
+        assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+        assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+        assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
+        assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
+        assert "actor_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+        assert "critic_init_dict" in checkpoint["network_info"]["modules"]
+        assert "critic_state_dict" in checkpoint["network_info"]["modules"]
+        assert "critic_target_init_dict" in checkpoint["network_info"]["modules"]
+        assert "critic_target_state_dict" in checkpoint["network_info"]["modules"]
+        assert "critic_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+        assert "batch_size" in checkpoint
+        assert "lr_actor" in checkpoint
+        assert "lr_critic" in checkpoint
+        assert "learn_step" in checkpoint
+        assert "gamma" in checkpoint
+        assert "tau" in checkpoint
+        assert "mut" in checkpoint
+        assert "index" in checkpoint
+        assert "scores" in checkpoint
+        assert "fitness" in checkpoint
+        assert "steps" in checkpoint
+
+        # load_checkpoint
+        loaded_agent = RSNorm(DDPG(observation_space, action_space))
+        loaded_agent.load_checkpoint(checkpoint_path)
+        ddpg = ddpg_norm.agent
+
+        assert isinstance(loaded_agent, RSNorm)
+        # Check if properties and weights are loaded correctly
+        assert isinstance(ddpg.actor.encoder, EvolvableMLP)
+        assert isinstance(ddpg.actor_target.encoder, EvolvableMLP)
+        assert isinstance(ddpg.critic.encoder, EvolvableMLP)
+        assert isinstance(ddpg.critic_target.encoder, EvolvableMLP)
+        assert ddpg.lr_actor == 1e-4
+        assert ddpg.lr_critic == 1e-3
+        assert_state_dicts_equal(
+            ddpg.actor.state_dict(), ddpg.actor_target.state_dict()
+        )
+        assert_state_dicts_equal(
+            ddpg.critic.state_dict(), ddpg.critic_target.state_dict()
+        )
+        assert ddpg.batch_size == 64
+        assert ddpg.learn_step == 5
+        assert ddpg.gamma == 0.99
+        assert ddpg.tau == 1e-3
+        assert ddpg.mut is None
+        assert ddpg.index == 0
+        assert ddpg.scores == []
+        assert ddpg.fitness == []
+        assert ddpg.steps == [0]
+
+        loaded_agent = DDPG.load(checkpoint_path)
+        ddpg = loaded_agent.agent
+
+        assert isinstance(loaded_agent, RSNorm)
+        # Check if properties and weights are loaded correctly
+        assert isinstance(ddpg.actor.encoder, EvolvableMLP)
+        assert isinstance(ddpg.actor_target.encoder, EvolvableMLP)
+        assert isinstance(ddpg.critic.encoder, EvolvableMLP)
+        assert isinstance(ddpg.critic_target.encoder, EvolvableMLP)
+        assert ddpg.lr_actor == 1e-4
+        assert ddpg.lr_critic == 1e-3
+        assert_state_dicts_equal(
+            ddpg.actor.state_dict(), ddpg.actor_target.state_dict()
+        )
+        assert_state_dicts_equal(
+            ddpg.critic.state_dict(), ddpg.critic_target.state_dict()
+        )
+        assert ddpg.batch_size == 64
+        assert ddpg.learn_step == 5
+        assert ddpg.gamma == 0.99
+        assert ddpg.tau == 1e-3
+        assert ddpg.mut is None
+        assert ddpg.index == 0
+        assert ddpg.scores == []
+        assert ddpg.fitness == []
+        assert ddpg.steps == [0]
+
+
+class TestRSNormBuildRms:
+    def test_rsnorm_build_rms_dict_norm_obs_keys_none(self):
+        obs_space = spaces.Dict(
+            {
+                "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+                "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
+                "other": spaces.Box(low=-1.0, high=1.0, shape=(1,)),
+            }
+        )
+        rms = RSNorm.build_rms(obs_space, norm_obs_keys=None, device="cpu")
+        assert isinstance(rms, dict)
+        assert set(rms) == {"sensor1", "sensor2", "other"}
+
+    def test_rsnorm_build_rms_tuple_space(self):
+        obs_space = spaces.Tuple(
+            (
+                spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+                spaces.Box(low=-1.0, high=1.0, shape=(3,)),
+            )
+        )
+        rms = RSNorm.build_rms(obs_space, device="cpu")
+        assert isinstance(rms, tuple)
+        assert len(rms) == 2
+
+    def test_rsnorm_build_rms_dict_space(self):
+        obs_space = spaces.Dict(
+            {
+                "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+                "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
+            }
+        )
+        rms = RSNorm.build_rms(obs_space, device="cpu")
+        assert isinstance(rms, dict)
+        assert set(rms) == {"sensor1", "sensor2"}
+
+
+class TestAgentWrapperGetActionLearn:
+    def test_agent_wrapper_base_get_action_learn(self, vector_space):
+        from agilerl.wrappers.agent import AgentWrapper
+
+        class MinimalWrapper(AgentWrapper):
+            pass
+
+        agent = DDPG(vector_space, copy.deepcopy(vector_space), batch_size=4)
+        wrapper = MinimalWrapper(agent)
+        obs = vector_space.sample()
+        action = wrapper.get_action(obs)
+        assert action is not None
+        experiences = get_experiences_batch(vector_space, vector_space, 4, "cpu")
+        result = wrapper.learn(experiences)
+        assert result is not None
+
+
+class TestAgentWrapperSetattr:
+    @pytest.mark.parametrize(
+        "attr_name,on_agent", [("wrapper_only_attr", False), ("batch_size", True)]
     )
-    ddpg = ddpg_norm.agent
-    clone = ddpg_norm.clone()
-    clone_agent = clone.agent
-
-    assert clone_agent.observation_space == ddpg.observation_space
-    assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.batch_size == ddpg.batch_size
-    assert clone_agent.lr_actor == ddpg.lr_actor
-    assert clone_agent.lr_critic == ddpg.lr_critic
-    assert clone_agent.learn_step == ddpg.learn_step
-    assert clone_agent.gamma == ddpg.gamma
-    assert clone_agent.tau == ddpg.tau
-    assert clone_agent.mut == ddpg.mut
-    assert clone_agent.device == ddpg.device
-    assert clone_agent.accelerator == ddpg.accelerator
-    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(),
-        ddpg.actor_target.state_dict(),
-    )
-    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(),
-        ddpg.critic_target.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(),
-        ddpg.actor_optimizer.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(),
-        ddpg.critic_optimizer.state_dict(),
-    )
-    assert clone_agent.fitness == ddpg.fitness
-    assert clone_agent.steps == ddpg.steps
-    assert clone_agent.scores == ddpg.scores
-
-    accelerator = Accelerator()
-    ddpg_norm = RSNorm(
-        DDPG(observation_space, action_space, accelerator=accelerator, wrap=False),
-    )
-    ddpg = ddpg_norm.agent
-    clone = ddpg_norm.clone(wrap=False)
-    clone_agent = clone.agent
-
-    assert clone_agent.observation_space == ddpg.observation_space
-    assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.batch_size == ddpg.batch_size
-    assert clone_agent.lr_actor == ddpg.lr_actor
-    assert clone_agent.lr_critic == ddpg.lr_critic
-    assert clone_agent.learn_step == ddpg.learn_step
-    assert clone_agent.gamma == ddpg.gamma
-    assert clone_agent.tau == ddpg.tau
-    assert clone_agent.mut == ddpg.mut
-    assert clone_agent.device == ddpg.device
-    assert clone_agent.accelerator == ddpg.accelerator
-    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(),
-        ddpg.actor_target.state_dict(),
-    )
-    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(),
-        ddpg.critic_target.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(),
-        ddpg.actor_optimizer.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(),
-        ddpg.critic_optimizer.state_dict(),
-    )
-    assert clone_agent.fitness == ddpg.fitness
-    assert clone_agent.steps == ddpg.steps
-    assert clone_agent.scores == ddpg.scores
+    def test_agent_wrapper_setattr_delegates_correctly(
+        self, vector_space, attr_name, on_agent
+    ):
+        agent = DDPG(vector_space, copy.deepcopy(vector_space))
+        wrapper = RSNorm(agent)
+        setattr(wrapper, attr_name, 42)
+        target = wrapper.agent if on_agent else wrapper
+        assert getattr(target, attr_name) == 42
 
 
-def test_rsnorm_save_load_checkpoint(tmp_path, vector_space):
-    observation_space = vector_space
-    action_space = copy.deepcopy(vector_space)
-
-    ddpg_norm = RSNorm(
-        DDPG(observation_space=observation_space, action_space=action_space),
-    )
-    checkpoint_path = os.path.join(tmp_path, "checkpoint.pth")
-    ddpg_norm.save_checkpoint(checkpoint_path)
-
-    # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill, weights_only=False)
-
-    # Check if the loaded checkpoint has the correct keys
-    assert "wrapper_cls" in checkpoint
-    assert "wrapper_init_dict" in checkpoint
-    assert "wrapper_attrs" in checkpoint
-    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
-    assert "actor_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "critic_init_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_state_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_target_init_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_target_state_dict" in checkpoint["network_info"]["modules"]
-    assert "critic_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "batch_size" in checkpoint
-    assert "lr_actor" in checkpoint
-    assert "lr_critic" in checkpoint
-    assert "learn_step" in checkpoint
-    assert "gamma" in checkpoint
-    assert "tau" in checkpoint
-    assert "mut" in checkpoint
-    assert "index" in checkpoint
-    assert "scores" in checkpoint
-    assert "fitness" in checkpoint
-    assert "steps" in checkpoint
-
-    # load_checkpoint
-    loaded_agent = RSNorm(DDPG(observation_space, action_space))
-    loaded_agent.load_checkpoint(checkpoint_path)
-    ddpg = ddpg_norm.agent
-
-    assert isinstance(loaded_agent, RSNorm)
-    # Check if properties and weights are loaded correctly
-    assert isinstance(ddpg.actor.encoder, EvolvableMLP)
-    assert isinstance(ddpg.actor_target.encoder, EvolvableMLP)
-    assert isinstance(ddpg.critic.encoder, EvolvableMLP)
-    assert isinstance(ddpg.critic_target.encoder, EvolvableMLP)
-    assert ddpg.lr_actor == 1e-4
-    assert ddpg.lr_critic == 1e-3
-    assert_state_dicts_equal(ddpg.actor.state_dict(), ddpg.actor_target.state_dict())
-    assert_state_dicts_equal(ddpg.critic.state_dict(), ddpg.critic_target.state_dict())
-    assert ddpg.batch_size == 64
-    assert ddpg.learn_step == 5
-    assert ddpg.gamma == 0.99
-    assert ddpg.tau == 1e-3
-    assert ddpg.mut is None
-    assert ddpg.index == 0
-    assert ddpg.scores == []
-    assert ddpg.fitness == []
-    assert ddpg.steps == [0]
-
-    loaded_agent = DDPG.load(checkpoint_path)
-    ddpg = loaded_agent.agent
-
-    assert isinstance(loaded_agent, RSNorm)
-    # Check if properties and weights are loaded correctly
-    assert isinstance(ddpg.actor.encoder, EvolvableMLP)
-    assert isinstance(ddpg.actor_target.encoder, EvolvableMLP)
-    assert isinstance(ddpg.critic.encoder, EvolvableMLP)
-    assert isinstance(ddpg.critic_target.encoder, EvolvableMLP)
-    assert ddpg.lr_actor == 1e-4
-    assert ddpg.lr_critic == 1e-3
-    assert_state_dicts_equal(ddpg.actor.state_dict(), ddpg.actor_target.state_dict())
-    assert_state_dicts_equal(ddpg.critic.state_dict(), ddpg.critic_target.state_dict())
-    assert ddpg.batch_size == 64
-    assert ddpg.learn_step == 5
-    assert ddpg.gamma == 0.99
-    assert ddpg.tau == 1e-3
-    assert ddpg.mut is None
-    assert ddpg.index == 0
-    assert ddpg.scores == []
-    assert ddpg.fitness == []
-    assert ddpg.steps == [0]
+class TestAgentWrapperRepr:
+    def test_agent_wrapper_repr(self, vector_space):
+        agent = DDPG(vector_space, copy.deepcopy(vector_space))
+        wrapper = RSNorm(agent)
+        r = repr(wrapper)
+        assert "RSNorm" in r and "DDPG" in r
 
 
-@pytest.mark.parametrize("compile_mode", [None])
-@pytest.mark.parametrize("num_envs", [1, 2])
-def test_ippo_custom_training_with_async_env(
-    device,
-    ma_vector_space,
-    ma_discrete_space,
-    compile_mode,
-    num_envs,
-):
-    # Create async environment with agents that return observations asynchronously
-    vectorized = num_envs > 1
-    observation_spaces = ma_vector_space
-    action_spaces = ma_discrete_space
-    if vectorized:
-        # In-process sync vec env exercises the vectorised wrapper code path
-        # without paying the AsyncPettingZooVecEnv subprocess spawn cost.
-        env = make_sync_multi_agent_vec_env(
-            DummyMultiEnvAsync,
-            num_envs=num_envs,
+class TestAgentWrapperGetattr:
+    def test_agent_wrapper_getattr_delegates_to_agent(self, vector_space):
+        agent = DDPG(vector_space, copy.deepcopy(vector_space))
+        wrapper = RSNorm(agent)
+        assert wrapper.batch_size == agent.batch_size
+
+
+class TestAsyncAgentsWrapperInit:
+    def test_async_wrapper_allows_maddpg(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+        from agilerl.algorithms import MADDPG
+
+        agent_ids = ["agent_0", "agent_1"]
+        action_spaces = [
+            gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+        ]
+
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=action_spaces,
+            agent_ids=agent_ids,
+            device="cpu",
+        )
+
+        wrapper = AsyncAgentsWrapper(agent)
+        assert wrapper.agent.algo == "MADDPG"
+
+    def test_async_wrapper_allows_matd3(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+        from agilerl.algorithms import MATD3
+
+        agent_ids = ["agent_0", "agent_1"]
+        action_spaces = [
+            gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+        ]
+
+        agent = MATD3(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=action_spaces,
+            agent_ids=agent_ids,
+            device="cpu",
+        )
+
+        wrapper = AsyncAgentsWrapper(agent)
+        assert wrapper.agent.algo == "MATD3"
+
+
+class TestAsyncAgentsWrapperExtractInactiveAgents:
+    def test_async_extract_inactive_agents_dict_obs(self, ma_discrete_space):
+        dict_space = spaces.Dict(
+            {
+                "img": spaces.Box(low=0, high=1, shape=(4,)),
+                "vec": spaces.Box(low=-1, high=1, shape=(2,)),
+            }
+        )
+        agent = IPPO(
+            observation_spaces=[dict_space],
+            action_spaces=ma_discrete_space[:1],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        obs = {
+            "agent_0": {
+                "img": np.array(
+                    [[1.0, 1.0, 1.0, 1.0], [np.nan, np.nan, np.nan, np.nan]],
+                    dtype=np.float32,
+                ),
+                "vec": np.array([[1.0, 1.0], [np.nan, np.nan]], dtype=np.float32),
+            }
+        }
+        inactive, filtered = wrapper.extract_inactive_agents(obs)
+        assert "agent_0" in inactive
+
+    def test_async_extract_inactive_agents_all_inactive(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        """Test extract_inactive_agents when all agents inactive."""
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        agent = IPPO(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=agent_ids,
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        obs = {
+            "agent_0": np.full((2, 6), np.nan),
+            "agent_1": np.full((2, 6), np.nan),
+            "other_agent_0": np.full((2, 6), np.nan),
+        }
+        inactive_agents, filtered_obs = wrapper.extract_inactive_agents(obs)
+        assert len(filtered_obs) == 0
+
+    def test_async_extract_inactive_agents_ndarray_obs(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=ma_discrete_space[:2],
+            agent_ids=["agent_0", "agent_1"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        obs = {
+            "agent_0": np.array(
+                [
+                    [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                    [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan],
+                ]
+            ),
+            "agent_1": np.array([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]]),
+        }
+        inactive, filtered = wrapper.extract_inactive_agents(obs)
+        assert "agent_0" in inactive
+        assert inactive["agent_0"].shape[0] == 1
+        assert filtered["agent_0"].shape == (1, 6)
+        assert filtered["agent_1"].shape == (1, 6)
+
+    def test_async_extract_inactive_agents_tuple_obs(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        tuple_space = [
+            spaces.Tuple(
+                (
+                    spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+                    spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+                )
+            )
+        ]
+        disc_space = [spaces.Discrete(2)]
+        agent = IPPO(
+            observation_spaces=tuple_space,
+            action_spaces=disc_space,
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        obs = {
+            "agent_0": (
+                np.array([[1.0, 2.0, 3.0], [np.nan, np.nan, np.nan]]),
+                np.array([[4.0, 5.0, 6.0], [np.nan, np.nan, np.nan]]),
+            ),
+        }
+        inactive, filtered = wrapper.extract_inactive_agents(obs)
+        assert "agent_0" in inactive
+        assert isinstance(filtered["agent_0"], tuple)
+        assert len(filtered["agent_0"]) == 2
+
+    def test_async_extract_inactive_non_vectorized_skipped(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=ma_discrete_space[:1],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        obs = {"agent_0": np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])}
+        inactive, filtered = wrapper.extract_inactive_agents(obs)
+        assert len(inactive) == 0
+        assert "agent_0" in filtered
+
+
+class TestAsyncAgentsWrapperGetAction:
+    def test_async_get_action_with_inactive_float_actions(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        from gymnasium import spaces as gym_spaces
+
+        continuous_space = [
+            gym_spaces.Box(low=-1.0, high=1.0, shape=(2,)) for _ in range(2)
+        ]
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=continuous_space,
+            agent_ids=["agent_0", "agent_1"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        obs = {
+            "agent_0": np.array([[1.0] * 6, [np.nan] * 6], dtype=np.float32),
+            "agent_1": np.array([[1.0] * 6], dtype=np.float32),
+        }
+        action_dict, _, _, _ = wrapper.get_action(obs, {a: {} for a in obs})
+        assert "agent_0" in action_dict
+        assert "agent_1" in action_dict
+
+    def test_async_get_action_with_partial_inactive(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=ma_discrete_space[:2],
+            agent_ids=["agent_0", "agent_1"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        obs = {
+            "agent_0": np.array([[1.0] * 6]),
+            "agent_1": np.array([[1.0] * 6]),
+        }
+        action_dict, _, _, _ = wrapper.get_action(obs, {a: {} for a in obs})
+        assert "agent_0" in action_dict and "agent_1" in action_dict
+
+    def test_async_get_action_with_inactive_off_policy_agents(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+        from agilerl.algorithms import MADDPG
+
+        agent_ids = ["agent_0", "agent_1"]
+        action_spaces = [
+            gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+        ]
+
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=action_spaces,
+            agent_ids=agent_ids,
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+
+        obs = {
+            "agent_0": np.array([[1.0] * 6, [np.nan] * 6], dtype=np.float32),
+            "agent_1": np.array([[1.0] * 6, [1.0] * 6], dtype=np.float32),
+        }
+
+        env_action_dict, raw_action_dict = wrapper.get_action(obs)
+
+        assert "agent_0" in env_action_dict
+        assert "agent_0" in raw_action_dict
+        assert env_action_dict["agent_0"].shape[0] == 2
+        assert raw_action_dict["agent_0"].shape[0] == 2
+        assert "agent_1" in env_action_dict
+        assert "agent_1" in raw_action_dict
+
+
+class TestAsyncAgentsWrapperStackExperiences:
+    def test_async_stack_experiences_list_with_data(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=ma_discrete_space[:2],
+            agent_ids=["agent_0", "agent_1"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        experience = {
+            "agent_0": [np.random.rand(3, 6).astype(np.float32)],
+            "agent_1": [np.random.rand(3, 6).astype(np.float32)],
+        }
+        stacked = wrapper.stack_experiences(experience)
+        assert stacked["agent_0"] is not None
+        assert stacked["agent_1"] is not None
+
+    def test_async_stack_experiences_non_list_input(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        """Test stack_experiences when experience values are not lists."""
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        agent = IPPO(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=agent_ids,
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        # Single arrays (not lists) - should pass through as-is
+        experience = {
+            "agent_0": np.random.rand(5, 6),
+            "agent_1": np.random.rand(5, 6),
+            "other_agent_0": np.random.rand(5, 6),
+        }
+        stacked = wrapper.stack_experiences(experience)
+        assert "agent_0" in stacked
+        assert "agent_1" in stacked
+        assert stacked["agent_0"] is experience["agent_0"]
+        assert stacked["agent_1"] is experience["agent_1"]
+
+    def test_async_stack_experiences_empty_list(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=ma_discrete_space[:2],
+            agent_ids=["agent_0", "agent_1"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        experience = {"agent_0": [], "agent_1": [np.random.rand(2, 6)]}
+        stacked = wrapper.stack_experiences(experience)
+        assert stacked["agent_0"] is None
+        assert stacked["agent_1"] is not None
+
+
+class TestAsyncAgentsWrapperLearn:
+    @pytest.mark.parametrize("compile_mode", [None])
+    @pytest.mark.parametrize("num_envs", [1, 2])
+    def test_ippo_custom_training_with_async_env(
+        self,
+        device,
+        ma_vector_space,
+        ma_discrete_space,
+        compile_mode,
+        num_envs,
+    ):
+        # Create async environment with agents that return observations asynchronously
+        vectorized = num_envs > 1
+        observation_spaces = ma_vector_space
+        action_spaces = ma_discrete_space
+        if vectorized:
+            # In-process sync vec env exercises the vectorised wrapper code path
+            # without paying the AsyncPettingZooVecEnv subprocess spawn cost.
+            env = make_sync_multi_agent_vec_env(
+                DummyMultiEnvAsync,
+                num_envs=num_envs,
+                observation_spaces=observation_spaces,
+                action_spaces=action_spaces,
+            )
+        else:
+            env = DummyMultiEnvAsync(observation_spaces, action_spaces)
+
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+
+        # Initialize IPPO agent
+        agent = IPPO(
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
+            agent_ids=agent_ids,
+            device=device,
+            batch_size=64,
+            lr=0.001,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_coef=0.2,
+            ent_coef=0.01,
+            vf_coef=0.5,
+            torch_compiler=compile_mode,
         )
-    else:
-        env = DummyMultiEnvAsync(observation_spaces, action_spaces)
 
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        async_agent = AsyncAgentsWrapper(agent)
 
-    # Initialize IPPO agent
-    agent = IPPO(
-        observation_spaces=observation_spaces,
-        action_spaces=action_spaces,
-        agent_ids=agent_ids,
-        device=device,
-        batch_size=64,
-        lr=0.001,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_coef=0.2,
-        ent_coef=0.01,
-        vf_coef=0.5,
-        torch_compiler=compile_mode,
-    )
+        # Two iterations exercises the post-learn buffer-reset path; the original
+        # ``range(5)`` was diagnostic noise once that path was covered. The first
+        # iteration also pays the dominant ``torch.compile`` cost when enabled,
+        # so trimming further iterations is a safe runtime win.
+        for _ in range(2):
+            # Reset environment
+            observations, infos = env.reset()
 
-    async_agent = AsyncAgentsWrapper(agent)
+            states = {agent_id: [] for agent_id in agent_ids}
+            actions = {agent_id: [] for agent_id in agent_ids}
+            log_probs = {agent_id: [] for agent_id in agent_ids}
+            rewards = {agent_id: [] for agent_id in agent_ids}
+            dones = {agent_id: [] for agent_id in agent_ids}
+            values = {agent_id: [] for agent_id in agent_ids}
 
-    # Two iterations exercises the post-learn buffer-reset path; the original
-    # ``range(5)`` was diagnostic noise once that path was covered. The first
-    # iteration also pays the dominant ``torch.compile`` cost when enabled,
-    # so trimming further iterations is a safe runtime win.
-    for _ in range(2):
-        # Reset environment
+            done = {
+                agent_id: np.zeros((num_envs,), dtype=np.int8) for agent_id in agent_ids
+            }
+
+            # Collect experiences for multiple steps. ``max_steps`` must be large
+            # enough that the IPPO buffer captures sufficient transitions for the
+            # ``update_epochs=4`` learn() call to remain numerically stable
+            # (smaller buffers blew up to NaN logits).
+            max_steps = 105
+            for _ in range(max_steps):
+                # Get actions for current active agents
+                action_dict, logprob_dict, _, value_dict = async_agent.get_action(
+                    observations,
+                    infos,
+                )
+
+                # Verify actions are only for active agents
+                assert all(agent_id in observations for agent_id in action_dict)
+
+                # Step the environment
+                next_observations, reward_dict, terminated, truncated, next_infos = (
+                    env.step(action_dict)
+                )
+
+                # Store experiences for active agents
+                for agent_id in observations:
+                    states[agent_id].append(observations[agent_id])
+                    actions[agent_id].append(action_dict[agent_id])
+                    log_probs[agent_id].append(logprob_dict[agent_id])
+                    values[agent_id].append(value_dict[agent_id])
+                    dones[agent_id].append(done[agent_id])
+                    rewards[agent_id].append(reward_dict[agent_id])
+
+                next_dones = {}
+                for agent_id in terminated:
+                    term = terminated[agent_id]
+                    trunc = truncated[agent_id]
+
+                    # Process asynchronous dones
+                    if vectorized:
+                        mask = ~(np.isnan(term) | np.isnan(trunc))
+                        result = np.full_like(mask, np.nan, dtype=float)
+                        result[mask] = np.logical_or(term[mask], trunc[mask])
+
+                        next_dones[agent_id] = result
+                    else:
+                        next_dones[agent_id] = np.array(
+                            [np.logical_or(term, trunc)],
+                        ).astype(np.int8)
+
+                # Update for next step
+                observations = next_observations
+                done = next_dones
+                infos = next_infos
+
+                # Break if all agents report done
+                for _idx, agent_dones in enumerate(
+                    zip(*next_dones.values(), strict=False)
+                ):
+                    if all(agent_dones):
+                        if not vectorized:
+                            observations, info = env.reset()
+
+                        done = {
+                            agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids
+                        }
+
+            # Skip learning if no experiences collected
+            if not any(states.values()):
+                continue
+
+            # Create experience tuple for learning
+            experiences = (
+                states,
+                actions,
+                log_probs,
+                rewards,
+                dones,
+                values,
+                next_observations,  # next_states
+                next_dones,
+            )
+
+            # Train on collected experiences if we have any
+            if any(len(states[agent_id]) > 0 for agent_id in states):
+                loss_info = async_agent.learn(experiences)
+
+                # Verify that learning worked for at least one agent
+                assert any(agent_id in loss_info for agent_id in agent.shared_agent_ids)
+
+        # Final test: verify agent can handle completely different set of active agents
+        test_observations, test_infos = env.reset()
+        test_actions, _, _, _ = async_agent.get_action(test_observations, test_infos)
+        assert all(agent_id in test_observations for agent_id in test_actions)
+
+    @pytest.mark.parametrize("num_envs", [1, 2])
+    def test_maddpg_custom_training_with_async_env(
+        self,
+        device,
+        ma_vector_space,
+        encoder_mlp_config,
+        num_envs,
+    ):
+        from gymnasium import spaces as gym_spaces
+        from agilerl.algorithms import MADDPG
+
+        vectorized = num_envs > 1
+        observation_spaces = ma_vector_space
+        action_spaces = [
+            gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+            for _ in range(3)
+        ]
+
+        if vectorized:
+            # See ``test_ippo_custom_training_with_async_env`` rationale.
+            env = make_sync_multi_agent_vec_env(
+                DummyMultiEnvAsync,
+                num_envs=num_envs,
+                observation_spaces=observation_spaces,
+                action_spaces=action_spaces,
+            )
+        else:
+            env = DummyMultiEnvAsync(observation_spaces, action_spaces)
+
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+
+        agent = MADDPG(
+            observation_spaces=observation_spaces,
+            action_spaces=action_spaces,
+            agent_ids=agent_ids,
+            device=device,
+            batch_size=64,
+            net_config=encoder_mlp_config,
+        )
+        async_agent = AsyncAgentsWrapper(agent)
+
         observations, infos = env.reset()
 
         states = {agent_id: [] for agent_id in agent_ids}
         actions = {agent_id: [] for agent_id in agent_ids}
-        log_probs = {agent_id: [] for agent_id in agent_ids}
         rewards = {agent_id: [] for agent_id in agent_ids}
         dones = {agent_id: [] for agent_id in agent_ids}
-        values = {agent_id: [] for agent_id in agent_ids}
+        next_states = {}
 
         done = {
-            agent_id: np.zeros((num_envs,), dtype=np.int8) for agent_id in agent_ids
+            agent_id: np.zeros((num_envs,), dtype=np.int8)
+            if vectorized
+            else np.array([0], dtype=np.int8)
+            for agent_id in agent_ids
         }
 
-        # Collect experiences for multiple steps. ``max_steps`` must be large
-        # enough that the IPPO buffer captures sufficient transitions for the
-        # ``update_epochs=4`` learn() call to remain numerically stable
-        # (smaller buffers blew up to NaN logits).
-        max_steps = 105
+        # Original ``max_steps=40`` paid the AsyncPettingZooVecEnv per-step round
+        # trip 40x; 12 steps is sufficient to cover the multi-iteration buffer
+        # collection and post-step done handling for both vectorised and
+        # non-vectorised paths.
+        max_steps = 12
         for _ in range(max_steps):
-            # Get actions for current active agents
-            action_dict, logprob_dict, _, value_dict = async_agent.get_action(
-                observations,
-                infos,
-            )
+            env_action_dict, raw_action_dict = async_agent.get_action(observations)
 
-            # Verify actions are only for active agents
-            assert all(agent_id in observations for agent_id in action_dict)
-
-            # Step the environment
             next_observations, reward_dict, terminated, truncated, next_infos = (
-                env.step(action_dict)
+                env.step(env_action_dict)
             )
 
-            # Store experiences for active agents
             for agent_id in observations:
-                states[agent_id].append(observations[agent_id])
-                actions[agent_id].append(action_dict[agent_id])
-                log_probs[agent_id].append(logprob_dict[agent_id])
-                values[agent_id].append(value_dict[agent_id])
-                dones[agent_id].append(done[agent_id])
-                rewards[agent_id].append(reward_dict[agent_id])
+                obs_batch = np.asarray(observations[agent_id])
+                if obs_batch.ndim == 1:
+                    obs_batch = obs_batch[np.newaxis, ...]
+
+                action_batch = np.asarray(raw_action_dict[agent_id])
+                if action_batch.ndim == 1:
+                    action_batch = action_batch[np.newaxis, ...]
+
+                reward_batch = np.asarray(reward_dict[agent_id])
+                reward_batch = np.atleast_1d(reward_batch).reshape(-1, 1)
+
+                done_batch = np.asarray(done[agent_id])
+                done_batch = np.atleast_1d(done_batch).reshape(-1, 1)
+
+                batch_size = min(
+                    obs_batch.shape[0],
+                    action_batch.shape[0],
+                    reward_batch.shape[0],
+                    done_batch.shape[0],
+                )
+
+                for idx in range(batch_size):
+                    states[agent_id].append(obs_batch[idx])
+                    actions[agent_id].append(
+                        torch.as_tensor(action_batch[idx], dtype=torch.float32)
+                    )
+                    rewards[agent_id].append(
+                        torch.as_tensor(reward_batch[idx], dtype=torch.float32)
+                    )
+                    dones[agent_id].append(
+                        torch.as_tensor(done_batch[idx], dtype=torch.float32)
+                    )
 
             next_dones = {}
             for agent_id in terminated:
                 term = terminated[agent_id]
                 trunc = truncated[agent_id]
 
-                # Process asynchronous dones
                 if vectorized:
                     mask = ~(np.isnan(term) | np.isnan(trunc))
                     result = np.full_like(mask, np.nan, dtype=float)
                     result[mask] = np.logical_or(term[mask], trunc[mask])
-
                     next_dones[agent_id] = result
                 else:
                     next_dones[agent_id] = np.array(
-                        [np.logical_or(term, trunc)],
+                        [np.logical_or(term, trunc)]
                     ).astype(np.int8)
 
-            # Update for next step
             observations = next_observations
             done = next_dones
             infos = next_infos
 
-            # Break if all agents report done
-            for _idx, agent_dones in enumerate(zip(*next_dones.values(), strict=False)):
-                if all(agent_dones):
-                    if not vectorized:
-                        observations, info = env.reset()
+            if next_dones:
+                for agent_dones in zip(*next_dones.values(), strict=False):
+                    if all(agent_dones):
+                        if not vectorized:
+                            observations, infos = env.reset()
+                        done = {
+                            agent_id: np.zeros((num_envs,), dtype=np.int8)
+                            if vectorized
+                            else np.array([0], dtype=np.int8)
+                            for agent_id in agent_ids
+                        }
 
-                    done = {
-                        agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids
-                    }
+        min_len = min(len(states[agent_id]) for agent_id in agent_ids)
+        states = {agent_id: states[agent_id][:min_len] for agent_id in agent_ids}
+        actions = {agent_id: actions[agent_id][:min_len] for agent_id in agent_ids}
+        rewards = {agent_id: rewards[agent_id][:min_len] for agent_id in agent_ids}
+        dones = {agent_id: dones[agent_id][:min_len] for agent_id in agent_ids}
 
-        # Skip learning if no experiences collected
-        if not any(states.values()):
-            continue
+        experiences = (
+            states,
+            actions,
+            rewards,
+            next_states,
+            dones,
+        )
 
-        # Create experience tuple for learning
+        assert any(len(v) > 0 for v in states.values())
+        loss_info = async_agent.learn(experiences)
+        assert loss_info is not None
+
+    def test_async_learn_missing_next_state(self, ma_vector_space, ma_discrete_space):
+        """Test learn when agent has no next_state."""
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        agent = IPPO(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=agent_ids,
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        n_steps = 4
+        obs_dim = ma_vector_space[0].shape[0]
+        states = {
+            "agent_0": [np.random.rand(obs_dim) for _ in range(n_steps)],
+            "agent_1": [np.random.rand(obs_dim) for _ in range(n_steps)],
+            "other_agent_0": [np.random.rand(obs_dim) for _ in range(n_steps)],
+        }
+        actions = {
+            "agent_0": [np.array(0) for _ in range(n_steps)],
+            "agent_1": [np.array(1) for _ in range(n_steps)],
+            "other_agent_0": [np.array(0) for _ in range(n_steps)],
+        }
+        log_probs = {a: [0.1] * n_steps for a in agent_ids}
+        rewards = {a: [1.0] * n_steps for a in agent_ids}
+        dones = {
+            "agent_0": [False] * (n_steps - 1) + [True],
+            "agent_1": [False] * n_steps,
+            "other_agent_0": [False] * n_steps,
+        }
+        values = {a: [0.5] * n_steps for a in agent_ids}
+        # other_agent_0 has no next_state (not in dict) - triggers None branch
+        next_state = {
+            "agent_0": np.random.rand(obs_dim),
+            "agent_1": np.random.rand(obs_dim),
+        }
+        next_done = {
+            "agent_0": np.array(True),
+            "agent_1": np.array(False),
+            "other_agent_0": np.array(False),
+        }
+
         experiences = (
             states,
             actions,
@@ -862,639 +1542,8 @@ def test_ippo_custom_training_with_async_env(
             rewards,
             dones,
             values,
-            next_observations,  # next_states
-            next_dones,
+            next_state,
+            next_done,
         )
-
-        # Train on collected experiences if we have any
-        if any(len(states[agent_id]) > 0 for agent_id in states):
-            loss_info = async_agent.learn(experiences)
-
-            # Verify that learning worked for at least one agent
-            assert any(agent_id in loss_info for agent_id in agent.shared_agent_ids)
-
-    # Final test: verify agent can handle completely different set of active agents
-    test_observations, test_infos = env.reset()
-    test_actions, _, _, _ = async_agent.get_action(test_observations, test_infos)
-    assert all(agent_id in test_observations for agent_id in test_actions)
-
-
-@pytest.mark.parametrize("num_envs", [1, 2])
-def test_maddpg_custom_training_with_async_env(
-    device,
-    ma_vector_space,
-    encoder_mlp_config,
-    num_envs,
-):
-    from gymnasium import spaces as gym_spaces
-    from agilerl.algorithms import MADDPG
-
-    vectorized = num_envs > 1
-    observation_spaces = ma_vector_space
-    action_spaces = [
-        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
-        for _ in range(3)
-    ]
-
-    if vectorized:
-        # See ``test_ippo_custom_training_with_async_env`` rationale.
-        env = make_sync_multi_agent_vec_env(
-            DummyMultiEnvAsync,
-            num_envs=num_envs,
-            observation_spaces=observation_spaces,
-            action_spaces=action_spaces,
-        )
-    else:
-        env = DummyMultiEnvAsync(observation_spaces, action_spaces)
-
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-
-    agent = MADDPG(
-        observation_spaces=observation_spaces,
-        action_spaces=action_spaces,
-        agent_ids=agent_ids,
-        device=device,
-        batch_size=64,
-        net_config=encoder_mlp_config,
-    )
-    async_agent = AsyncAgentsWrapper(agent)
-
-    observations, infos = env.reset()
-
-    states = {agent_id: [] for agent_id in agent_ids}
-    actions = {agent_id: [] for agent_id in agent_ids}
-    rewards = {agent_id: [] for agent_id in agent_ids}
-    dones = {agent_id: [] for agent_id in agent_ids}
-    next_states = {}
-
-    done = {
-        agent_id: np.zeros((num_envs,), dtype=np.int8)
-        if vectorized
-        else np.array([0], dtype=np.int8)
-        for agent_id in agent_ids
-    }
-
-    # Original ``max_steps=40`` paid the AsyncPettingZooVecEnv per-step round
-    # trip 40x; 12 steps is sufficient to cover the multi-iteration buffer
-    # collection and post-step done handling for both vectorised and
-    # non-vectorised paths.
-    max_steps = 12
-    for _ in range(max_steps):
-        env_action_dict, raw_action_dict = async_agent.get_action(observations)
-
-        next_observations, reward_dict, terminated, truncated, next_infos = env.step(
-            env_action_dict
-        )
-
-        for agent_id in observations:
-            obs_batch = np.asarray(observations[agent_id])
-            if obs_batch.ndim == 1:
-                obs_batch = obs_batch[np.newaxis, ...]
-
-            action_batch = np.asarray(raw_action_dict[agent_id])
-            if action_batch.ndim == 1:
-                action_batch = action_batch[np.newaxis, ...]
-
-            reward_batch = np.asarray(reward_dict[agent_id])
-            reward_batch = np.atleast_1d(reward_batch).reshape(-1, 1)
-
-            done_batch = np.asarray(done[agent_id])
-            done_batch = np.atleast_1d(done_batch).reshape(-1, 1)
-
-            batch_size = min(
-                obs_batch.shape[0],
-                action_batch.shape[0],
-                reward_batch.shape[0],
-                done_batch.shape[0],
-            )
-
-            for idx in range(batch_size):
-                states[agent_id].append(obs_batch[idx])
-                actions[agent_id].append(
-                    torch.as_tensor(action_batch[idx], dtype=torch.float32)
-                )
-                rewards[agent_id].append(
-                    torch.as_tensor(reward_batch[idx], dtype=torch.float32)
-                )
-                dones[agent_id].append(
-                    torch.as_tensor(done_batch[idx], dtype=torch.float32)
-                )
-
-        next_dones = {}
-        for agent_id in terminated:
-            term = terminated[agent_id]
-            trunc = truncated[agent_id]
-
-            if vectorized:
-                mask = ~(np.isnan(term) | np.isnan(trunc))
-                result = np.full_like(mask, np.nan, dtype=float)
-                result[mask] = np.logical_or(term[mask], trunc[mask])
-                next_dones[agent_id] = result
-            else:
-                next_dones[agent_id] = np.array([np.logical_or(term, trunc)]).astype(
-                    np.int8
-                )
-
-        observations = next_observations
-        done = next_dones
-        infos = next_infos
-
-        if next_dones:
-            for agent_dones in zip(*next_dones.values(), strict=False):
-                if all(agent_dones):
-                    if not vectorized:
-                        observations, infos = env.reset()
-                    done = {
-                        agent_id: np.zeros((num_envs,), dtype=np.int8)
-                        if vectorized
-                        else np.array([0], dtype=np.int8)
-                        for agent_id in agent_ids
-                    }
-
-    min_len = min(len(states[agent_id]) for agent_id in agent_ids)
-    states = {agent_id: states[agent_id][:min_len] for agent_id in agent_ids}
-    actions = {agent_id: actions[agent_id][:min_len] for agent_id in agent_ids}
-    rewards = {agent_id: rewards[agent_id][:min_len] for agent_id in agent_ids}
-    dones = {agent_id: dones[agent_id][:min_len] for agent_id in agent_ids}
-
-    experiences = (
-        states,
-        actions,
-        rewards,
-        next_states,
-        dones,
-    )
-
-    assert any(len(v) > 0 for v in states.values())
-    loss_info = async_agent.learn(experiences)
-    assert loss_info is not None
-
-
-def test_agent_wrapper_base_get_action_learn(vector_space):
-    from agilerl.wrappers.agent import AgentWrapper
-
-    class MinimalWrapper(AgentWrapper):
-        pass
-
-    agent = DDPG(vector_space, copy.deepcopy(vector_space), batch_size=4)
-    wrapper = MinimalWrapper(agent)
-    obs = vector_space.sample()
-    action = wrapper.get_action(obs)
-    assert action is not None
-    experiences = get_experiences_batch(vector_space, vector_space, 4, "cpu")
-    result = wrapper.learn(experiences)
-    assert result is not None
-
-
-def test_rsnorm_build_rms_dict_norm_obs_keys_none():
-    obs_space = spaces.Dict(
-        {
-            "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
-            "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
-            "other": spaces.Box(low=-1.0, high=1.0, shape=(1,)),
-        }
-    )
-    rms = RSNorm.build_rms(obs_space, norm_obs_keys=None, device="cpu")
-    assert isinstance(rms, dict)
-    assert set(rms) == {"sensor1", "sensor2", "other"}
-
-
-def test_async_extract_inactive_agents_dict_obs(ma_discrete_space):
-    dict_space = spaces.Dict(
-        {
-            "img": spaces.Box(low=0, high=1, shape=(4,)),
-            "vec": spaces.Box(low=-1, high=1, shape=(2,)),
-        }
-    )
-    agent = IPPO(
-        observation_spaces=[dict_space],
-        action_spaces=ma_discrete_space[:1],
-        agent_ids=["agent_0"],
-        device="cpu",
-    )
-    wrapper = AsyncAgentsWrapper(agent)
-    obs = {
-        "agent_0": {
-            "img": np.array(
-                [[1.0, 1.0, 1.0, 1.0], [np.nan, np.nan, np.nan, np.nan]],
-                dtype=np.float32,
-            ),
-            "vec": np.array([[1.0, 1.0], [np.nan, np.nan]], dtype=np.float32),
-        }
-    }
-    inactive, filtered = wrapper.extract_inactive_agents(obs)
-    assert "agent_0" in inactive
-
-
-def test_async_get_action_with_inactive_float_actions(
-    ma_vector_space, ma_discrete_space
-):
-    from gymnasium import spaces as gym_spaces
-
-    continuous_space = [
-        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,)) for _ in range(2)
-    ]
-    agent = IPPO(
-        observation_spaces=ma_vector_space[:2],
-        action_spaces=continuous_space,
-        agent_ids=["agent_0", "agent_1"],
-        device="cpu",
-    )
-    wrapper = AsyncAgentsWrapper(agent)
-    obs = {
-        "agent_0": np.array([[1.0] * 6, [np.nan] * 6], dtype=np.float32),
-        "agent_1": np.array([[1.0] * 6], dtype=np.float32),
-    }
-    action_dict, _, _, _ = wrapper.get_action(obs, {a: {} for a in obs})
-    assert "agent_0" in action_dict
-    assert "agent_1" in action_dict
-
-
-def test_async_stack_experiences_list_with_data(ma_vector_space, ma_discrete_space):
-    agent = IPPO(
-        observation_spaces=ma_vector_space[:2],
-        action_spaces=ma_discrete_space[:2],
-        agent_ids=["agent_0", "agent_1"],
-        device="cpu",
-    )
-    wrapper = AsyncAgentsWrapper(agent)
-    experience = {
-        "agent_0": [np.random.rand(3, 6).astype(np.float32)],
-        "agent_1": [np.random.rand(3, 6).astype(np.float32)],
-    }
-    stacked = wrapper.stack_experiences(experience)
-    assert stacked["agent_0"] is not None
-    assert stacked["agent_1"] is not None
-
-
-def test_async_extract_inactive_agents_all_inactive(ma_vector_space, ma_discrete_space):
-    """Test extract_inactive_agents when all agents inactive."""
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    agent = IPPO(
-        observation_spaces=ma_vector_space,
-        action_spaces=ma_discrete_space,
-        agent_ids=agent_ids,
-        device="cpu",
-    )
-    wrapper = AsyncAgentsWrapper(agent)
-    obs = {
-        "agent_0": np.full((2, 6), np.nan),
-        "agent_1": np.full((2, 6), np.nan),
-        "other_agent_0": np.full((2, 6), np.nan),
-    }
-    inactive_agents, filtered_obs = wrapper.extract_inactive_agents(obs)
-    assert len(filtered_obs) == 0
-
-
-def test_async_stack_experiences_non_list_input(ma_vector_space, ma_discrete_space):
-    """Test stack_experiences when experience values are not lists."""
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    agent = IPPO(
-        observation_spaces=ma_vector_space,
-        action_spaces=ma_discrete_space,
-        agent_ids=agent_ids,
-        device="cpu",
-    )
-    wrapper = AsyncAgentsWrapper(agent)
-    # Single arrays (not lists) - should pass through as-is
-    experience = {
-        "agent_0": np.random.rand(5, 6),
-        "agent_1": np.random.rand(5, 6),
-        "other_agent_0": np.random.rand(5, 6),
-    }
-    stacked = wrapper.stack_experiences(experience)
-    assert "agent_0" in stacked
-    assert "agent_1" in stacked
-    assert stacked["agent_0"] is experience["agent_0"]
-    assert stacked["agent_1"] is experience["agent_1"]
-
-
-@pytest.mark.parametrize(
-    "attr_name,on_agent", [("wrapper_only_attr", False), ("batch_size", True)]
-)
-def test_agent_wrapper_setattr_delegates_correctly(vector_space, attr_name, on_agent):
-    agent = DDPG(vector_space, copy.deepcopy(vector_space))
-    wrapper = RSNorm(agent)
-    setattr(wrapper, attr_name, 42)
-    target = wrapper.agent if on_agent else wrapper
-    assert getattr(target, attr_name) == 42
-
-
-def test_rsnorm_learn_tensordict_experiences(vector_space):
-    from tensordict import TensorDict
-
-    agent = DDPG(vector_space, copy.deepcopy(vector_space), batch_size=4)
-    wrapper = RSNorm(agent)
-    batch = 4
-    td = TensorDict(
-        {
-            "obs": torch.randn(batch, *vector_space.shape),
-            "next_obs": torch.randn(batch, *vector_space.shape),
-            "action": torch.randn(batch, vector_space.shape[0]),
-            "reward": torch.ones(batch),
-            "done": torch.zeros(batch),
-        },
-        batch_size=[batch],
-    )
-    loss_info = wrapper.learn(td)
-    assert isinstance(loss_info, (tuple, dict)) or isinstance(loss_info, float)
-
-
-def test_agent_wrapper_repr(vector_space):
-    agent = DDPG(vector_space, copy.deepcopy(vector_space))
-    wrapper = RSNorm(agent)
-    r = repr(wrapper)
-    assert "RSNorm" in r and "DDPG" in r
-
-
-def test_agent_wrapper_getattr_delegates_to_agent(vector_space):
-    agent = DDPG(vector_space, copy.deepcopy(vector_space))
-    wrapper = RSNorm(agent)
-    assert wrapper.batch_size == agent.batch_size
-
-
-def test_rsnorm_clone_with_index(vector_space):
-    ddpg = DDPG(vector_space, copy.deepcopy(vector_space))
-    wrapper = RSNorm(ddpg)
-    clone = wrapper.clone(index=0)
-    assert clone.agent.index == 0
-
-
-def test_rsnorm_get_action_skips_stats_when_not_training(setup_rs_norm):
-    wrapper, mock_agent = setup_rs_norm
-    mock_agent.training = False
-    obs = torch.tensor([1.0, 2.0, 3.0])
-    wrapper.get_action(obs)
-    wrapper.wrapped_get_action.assert_called_once()
-
-
-def test_rsnorm_build_rms_tuple_space():
-    obs_space = spaces.Tuple(
-        (
-            spaces.Box(low=-1.0, high=1.0, shape=(2,)),
-            spaces.Box(low=-1.0, high=1.0, shape=(3,)),
-        )
-    )
-    rms = RSNorm.build_rms(obs_space, device="cpu")
-    assert isinstance(rms, tuple)
-    assert len(rms) == 2
-
-
-def test_rsnorm_build_rms_dict_space():
-    obs_space = spaces.Dict(
-        {
-            "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
-            "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
-        }
-    )
-    rms = RSNorm.build_rms(obs_space, device="cpu")
-    assert isinstance(rms, dict)
-    assert set(rms) == {"sensor1", "sensor2"}
-
-
-def test_rsnorm_learn_rollout_buffer_full(vector_space):
-    obs_space = vector_space
-    action_space = copy.deepcopy(vector_space)
-    ppo = PPO(obs_space, action_space, use_rollout_buffer=True, num_envs=2)
-    ppo.rollout_buffer.full = True
-    ppo.rollout_buffer.pos = 10
-    wrapper = RSNorm(ppo)
-    valid_data = wrapper.agent.rollout_buffer.buffer[:10].clone()
-    valid_data["observations"] = torch.randn(10, 2, *obs_space.shape)
-    valid_data["next_observations"] = torch.randn(10, 2, *obs_space.shape)
-    wrapper.agent.rollout_buffer.buffer[:10] = valid_data
-    env = DummyEnv(state_size=obs_space.shape, vect=True, num_envs=2)
-    collect_rollouts(ppo, env, n_steps=40)
-    wrapper.agent.rollout_buffer.full = True
-    wrapper.agent.rollout_buffer.pos = 20
-    wrapper.learn()
-    assert True
-
-
-def test_async_extract_inactive_agents_ndarray_obs(ma_vector_space, ma_discrete_space):
-    agent = IPPO(
-        observation_spaces=ma_vector_space[:2],
-        action_spaces=ma_discrete_space[:2],
-        agent_ids=["agent_0", "agent_1"],
-        device="cpu",
-    )
-    wrapper = AsyncAgentsWrapper(agent)
-    obs = {
-        "agent_0": np.array(
-            [
-                [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-                [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan],
-            ]
-        ),
-        "agent_1": np.array([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]]),
-    }
-    inactive, filtered = wrapper.extract_inactive_agents(obs)
-    assert "agent_0" in inactive
-    assert inactive["agent_0"].shape[0] == 1
-    assert filtered["agent_0"].shape == (1, 6)
-    assert filtered["agent_1"].shape == (1, 6)
-
-
-def test_async_extract_inactive_agents_tuple_obs(ma_vector_space, ma_discrete_space):
-    tuple_space = [
-        spaces.Tuple(
-            (
-                spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
-                spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
-            )
-        )
-    ]
-    disc_space = [spaces.Discrete(2)]
-    agent = IPPO(
-        observation_spaces=tuple_space,
-        action_spaces=disc_space,
-        agent_ids=["agent_0"],
-        device="cpu",
-    )
-    wrapper = AsyncAgentsWrapper(agent)
-    obs = {
-        "agent_0": (
-            np.array([[1.0, 2.0, 3.0], [np.nan, np.nan, np.nan]]),
-            np.array([[4.0, 5.0, 6.0], [np.nan, np.nan, np.nan]]),
-        ),
-    }
-    inactive, filtered = wrapper.extract_inactive_agents(obs)
-    assert "agent_0" in inactive
-    assert isinstance(filtered["agent_0"], tuple)
-    assert len(filtered["agent_0"]) == 2
-
-
-def test_async_extract_inactive_non_vectorized_skipped(
-    ma_vector_space, ma_discrete_space
-):
-    agent = IPPO(
-        observation_spaces=ma_vector_space[:1],
-        action_spaces=ma_discrete_space[:1],
-        agent_ids=["agent_0"],
-        device="cpu",
-    )
-    wrapper = AsyncAgentsWrapper(agent)
-    obs = {"agent_0": np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])}
-    inactive, filtered = wrapper.extract_inactive_agents(obs)
-    assert len(inactive) == 0
-    assert "agent_0" in filtered
-
-
-def test_async_stack_experiences_empty_list(ma_vector_space, ma_discrete_space):
-    agent = IPPO(
-        observation_spaces=ma_vector_space[:2],
-        action_spaces=ma_discrete_space[:2],
-        agent_ids=["agent_0", "agent_1"],
-        device="cpu",
-    )
-    wrapper = AsyncAgentsWrapper(agent)
-    experience = {"agent_0": [], "agent_1": [np.random.rand(2, 6)]}
-    stacked = wrapper.stack_experiences(experience)
-    assert stacked["agent_0"] is None
-    assert stacked["agent_1"] is not None
-
-
-def test_async_get_action_with_partial_inactive(ma_vector_space, ma_discrete_space):
-    agent = IPPO(
-        observation_spaces=ma_vector_space[:2],
-        action_spaces=ma_discrete_space[:2],
-        agent_ids=["agent_0", "agent_1"],
-        device="cpu",
-    )
-    wrapper = AsyncAgentsWrapper(agent)
-    obs = {
-        "agent_0": np.array([[1.0] * 6]),
-        "agent_1": np.array([[1.0] * 6]),
-    }
-    action_dict, _, _, _ = wrapper.get_action(obs, {a: {} for a in obs})
-    assert "agent_0" in action_dict and "agent_1" in action_dict
-
-
-def test_async_learn_missing_next_state(ma_vector_space, ma_discrete_space):
-    """Test learn when agent has no next_state."""
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    agent = IPPO(
-        observation_spaces=ma_vector_space,
-        action_spaces=ma_discrete_space,
-        agent_ids=agent_ids,
-        device="cpu",
-    )
-    wrapper = AsyncAgentsWrapper(agent)
-    n_steps = 4
-    obs_dim = ma_vector_space[0].shape[0]
-    states = {
-        "agent_0": [np.random.rand(obs_dim) for _ in range(n_steps)],
-        "agent_1": [np.random.rand(obs_dim) for _ in range(n_steps)],
-        "other_agent_0": [np.random.rand(obs_dim) for _ in range(n_steps)],
-    }
-    actions = {
-        "agent_0": [np.array(0) for _ in range(n_steps)],
-        "agent_1": [np.array(1) for _ in range(n_steps)],
-        "other_agent_0": [np.array(0) for _ in range(n_steps)],
-    }
-    log_probs = {a: [0.1] * n_steps for a in agent_ids}
-    rewards = {a: [1.0] * n_steps for a in agent_ids}
-    dones = {
-        "agent_0": [False] * (n_steps - 1) + [True],
-        "agent_1": [False] * n_steps,
-        "other_agent_0": [False] * n_steps,
-    }
-    values = {a: [0.5] * n_steps for a in agent_ids}
-    # other_agent_0 has no next_state (not in dict) - triggers None branch
-    next_state = {
-        "agent_0": np.random.rand(obs_dim),
-        "agent_1": np.random.rand(obs_dim),
-    }
-    next_done = {
-        "agent_0": np.array(True),
-        "agent_1": np.array(False),
-        "other_agent_0": np.array(False),
-    }
-
-    experiences = (
-        states,
-        actions,
-        log_probs,
-        rewards,
-        dones,
-        values,
-        next_state,
-        next_done,
-    )
-    loss_info = wrapper.learn(experiences)
-    assert isinstance(loss_info, dict)
-
-
-def test_async_wrapper_allows_maddpg(ma_vector_space):
-    from gymnasium import spaces as gym_spaces
-    from agilerl.algorithms import MADDPG
-
-    agent_ids = ["agent_0", "agent_1"]
-    action_spaces = [
-        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
-        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
-    ]
-
-    agent = MADDPG(
-        observation_spaces=ma_vector_space[:2],
-        action_spaces=action_spaces,
-        agent_ids=agent_ids,
-        device="cpu",
-    )
-
-    wrapper = AsyncAgentsWrapper(agent)
-    assert wrapper.agent.algo == "MADDPG"
-
-
-def test_async_wrapper_allows_matd3(ma_vector_space):
-    from gymnasium import spaces as gym_spaces
-    from agilerl.algorithms import MATD3
-
-    agent_ids = ["agent_0", "agent_1"]
-    action_spaces = [
-        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
-        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
-    ]
-
-    agent = MATD3(
-        observation_spaces=ma_vector_space[:2],
-        action_spaces=action_spaces,
-        agent_ids=agent_ids,
-        device="cpu",
-    )
-
-    wrapper = AsyncAgentsWrapper(agent)
-    assert wrapper.agent.algo == "MATD3"
-
-
-def test_async_get_action_with_inactive_off_policy_agents(ma_vector_space):
-    from gymnasium import spaces as gym_spaces
-    from agilerl.algorithms import MADDPG
-
-    agent_ids = ["agent_0", "agent_1"]
-    action_spaces = [
-        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
-        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
-    ]
-
-    agent = MADDPG(
-        observation_spaces=ma_vector_space[:2],
-        action_spaces=action_spaces,
-        agent_ids=agent_ids,
-        device="cpu",
-    )
-    wrapper = AsyncAgentsWrapper(agent)
-
-    obs = {
-        "agent_0": np.array([[1.0] * 6, [np.nan] * 6], dtype=np.float32),
-        "agent_1": np.array([[1.0] * 6, [1.0] * 6], dtype=np.float32),
-    }
-
-    env_action_dict, raw_action_dict = wrapper.get_action(obs)
-
-    assert "agent_0" in env_action_dict
-    assert "agent_0" in raw_action_dict
-    assert env_action_dict["agent_0"].shape[0] == 2
-    assert raw_action_dict["agent_0"].shape[0] == 2
-    assert "agent_1" in env_action_dict
-    assert "agent_1" in raw_action_dict
+        loss_info = wrapper.learn(experiences)
+        assert isinstance(loss_info, dict)

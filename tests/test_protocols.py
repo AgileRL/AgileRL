@@ -69,8 +69,8 @@ def action_space(network_cls: type[EvolvableNetworkProtocol]) -> gym.Space | Non
     return None
 
 
-class TestProtocols:
-    """Test that classes implement their respective protocols."""
+class TestEvolvableAlgorithmProtocol:
+    """Test that classes implement the EvolvableAlgorithm protocol."""
 
     @pytest.mark.parametrize(
         "algorithm_cls, algo_action_space",
@@ -122,6 +122,84 @@ class TestProtocols:
         assert isinstance(instance, EvolvableAlgorithmProtocol)
 
     @pytest.mark.parametrize(
+        "algo_cls,obs,act",
+        [
+            (
+                DQN,
+                generate_random_box_space(shape=(4,)),
+                generate_discrete_space(2),
+            ),
+            (
+                PPO,
+                generate_random_box_space(shape=(4,)),
+                generate_random_box_space(shape=(2,)),
+            ),
+        ],
+    )
+    def test_evolvable_algorithm_protocol_methods_executed(self, algo_cls, obs, act):
+        inst = algo_cls(obs, act)
+        EvolvableAlgorithmProtocol.unwrap_models(inst)
+        EvolvableAlgorithmProtocol.wrap_models(inst)
+        _ = EvolvableAlgorithmProtocol.get_action(inst, obs.sample())
+        _ = EvolvableAlgorithmProtocol.evolvable_attributes(inst)
+        _ = EvolvableAlgorithmProtocol.evolvable_attributes(inst, networks_only=True)
+        _ = EvolvableAlgorithmProtocol.inspect_attributes(inst)
+        _ = EvolvableAlgorithmProtocol.inspect_attributes(inst, input_args_only=True)
+        EvolvableAlgorithmProtocol.recompile(inst)
+        EvolvableAlgorithmProtocol.mutation_hook(inst)
+
+    @pytest.mark.parametrize(
+        "algo_cls,obs,act",
+        [
+            (
+                DQN,
+                generate_random_box_space(shape=(4,)),
+                generate_discrete_space(2),
+            ),
+            (
+                PPO,
+                generate_random_box_space(shape=(4,)),
+                generate_random_box_space(shape=(2,)),
+            ),
+        ],
+    )
+    def test_evolvable_algorithm_load_checkpoint_learn_test_clone(
+        self, algo_cls, obs, act, tmp_path
+    ):
+        inst = algo_cls(obs, act)
+        EvolvableAlgorithmProtocol.save_checkpoint(inst, str(tmp_path / "ckpt.pt"))
+        EvolvableAlgorithmProtocol.load_checkpoint(
+            inst, str(tmp_path / "ckpt.pt"), "cpu", None
+        )
+        _ = EvolvableAlgorithmProtocol.load(algo_cls, str(tmp_path / "ckpt.pt"))
+        exp = (
+            (
+                torch.randn(4, 4),
+                torch.randn(4, 2),
+                torch.randn(4),
+                torch.randn(4, 4),
+                torch.zeros(4, dtype=torch.bool),
+            )
+            if algo_cls is DQN
+            else (
+                torch.randn(4, 4),
+                torch.randn(4, 2),
+                torch.randn(4),
+                torch.randn(4),
+                torch.randn(4),
+                torch.randn(4),
+                torch.zeros(4, dtype=torch.bool),
+            )
+        )
+        EvolvableAlgorithmProtocol.learn(inst, exp)
+        _ = EvolvableAlgorithmProtocol.test(inst)
+        _ = EvolvableAlgorithmProtocol.clone(inst, None, False)
+
+
+class TestEvolvableNetworkProtocol:
+    """Test that classes implement the EvolvableNetwork protocol."""
+
+    @pytest.mark.parametrize(
         "network_cls",
         [
             QNetwork,
@@ -156,6 +234,33 @@ class TestProtocols:
         # Create network instance
         network = network_cls(observation_space, action_space, **kwargs)
         assert isinstance(network, EvolvableNetworkProtocol)
+
+    @pytest.mark.parametrize("network_cls", [QNetwork, ContinuousQNetwork])
+    def test_evolvable_network_protocol_methods_executed(self, network_cls):
+        obs = generate_random_box_space(shape=(4,))
+        act = (
+            generate_discrete_space(2)
+            if network_cls is QNetwork
+            else generate_random_box_space(shape=(2,))
+        )
+        net = network_cls(obs, act)
+        lat = torch.randn(2, 8)
+        x = torch.randn(2, 4)
+        _ = EvolvableNetworkProtocol.forward_head(net, lat)
+        _ = EvolvableNetworkProtocol.extract_features(net, x)
+        _ = EvolvableNetworkProtocol.add_latent_node(net, 1)
+        _ = EvolvableNetworkProtocol.remove_latent_node(net, 1)
+        EvolvableNetworkProtocol.recreate_encoder(net)
+        _ = EvolvableNetworkProtocol.initialize_hidden_state(net, 2)
+        EvolvableNetworkProtocol.init_weights_gaussian(net)
+        head_cfg = net.head_net.net_config
+        EvolvableNetworkProtocol.build_network_head(net, head_cfg)
+        enc_cfg = net.encoder_config
+        EvolvableNetworkProtocol._build_encoder(net, enc_cfg)
+
+
+class TestEvolvableModuleProtocol:
+    """Test that classes implement the EvolvableModule protocol."""
 
     @pytest.mark.parametrize(
         "module_cls",
@@ -206,46 +311,6 @@ class TestProtocols:
                 f"Mutation method {method_name} does not implement MutationMethod protocol"
             )
 
-    def test_pretrained_model_instances_implement_pretrained_model_protocol(self):
-        """Test that HuggingFace PreTrainedModel instances satisfy PreTrainedModelProtocol."""
-        pytest.importorskip("transformers")
-        from transformers import GPT2Config, GPT2LMHeadModel
-
-        config = GPT2Config(
-            vocab_size=100,
-            n_positions=64,
-            n_embd=32,
-            n_layer=1,
-            n_head=2,
-        )
-        model = GPT2LMHeadModel(config)
-        assert isinstance(model, PreTrainedModelProtocol)
-
-    def test_peft_model_instances_implement_peft_model_protocol(self):
-        """Test that PEFT PeftModel instances satisfy PeftModelProtocol."""
-        pytest.importorskip("transformers")
-        pytest.importorskip("peft")
-        from peft import LoraConfig, get_peft_model
-        from transformers import GPT2Config, GPT2LMHeadModel
-
-        config = GPT2Config(
-            vocab_size=100,
-            n_positions=64,
-            n_embd=32,
-            n_layer=1,
-            n_head=2,
-        )
-        base_model = GPT2LMHeadModel(config)
-        lora_config = LoraConfig(
-            r=4,
-            lora_alpha=8,
-            target_modules=["c_attn"],
-            lora_dropout=0.0,
-            task_type="CAUSAL_LM",
-        )
-        peft_model = get_peft_model(base_model, lora_config)
-        assert isinstance(peft_model, PeftModelProtocol)
-
     @pytest.mark.parametrize("module_cls", [EvolvableMLP, EvolvableCNN])
     def test_evolvable_module_protocol_methods_executed(self, module_cls):
         if module_cls is EvolvableMLP:
@@ -276,203 +341,24 @@ class TestProtocols:
         for m in mod.get_mutation_methods().values():
             MutationMethodProtocol.__call__(m, mod)
 
-    @pytest.mark.parametrize("network_cls", [QNetwork, ContinuousQNetwork])
-    def test_evolvable_network_protocol_methods_executed(self, network_cls):
-        obs = generate_random_box_space(shape=(4,))
-        act = (
-            generate_discrete_space(2)
-            if network_cls is QNetwork
-            else generate_random_box_space(shape=(2,))
-        )
-        net = network_cls(obs, act)
-        lat = torch.randn(2, 8)
-        x = torch.randn(2, 4)
-        _ = EvolvableNetworkProtocol.forward_head(net, lat)
-        _ = EvolvableNetworkProtocol.extract_features(net, x)
-        _ = EvolvableNetworkProtocol.add_latent_node(net, 1)
-        _ = EvolvableNetworkProtocol.remove_latent_node(net, 1)
-        EvolvableNetworkProtocol.recreate_encoder(net)
-        _ = EvolvableNetworkProtocol.initialize_hidden_state(net, 2)
-        EvolvableNetworkProtocol.init_weights_gaussian(net)
-        head_cfg = net.head_net.net_config
-        EvolvableNetworkProtocol.build_network_head(net, head_cfg)
-        enc_cfg = net.encoder_config
-        EvolvableNetworkProtocol._build_encoder(net, enc_cfg)
 
-    @pytest.mark.parametrize(
-        "algo_cls,obs,act",
-        [
-            (
-                DQN,
-                generate_random_box_space(shape=(4,)),
-                generate_discrete_space(2),
-            ),
-            (
-                PPO,
-                generate_random_box_space(shape=(4,)),
-                generate_random_box_space(shape=(2,)),
-            ),
-        ],
-    )
-    def test_evolvable_algorithm_protocol_methods_executed(self, algo_cls, obs, act):
-        inst = algo_cls(obs, act)
-        EvolvableAlgorithmProtocol.unwrap_models(inst)
-        EvolvableAlgorithmProtocol.wrap_models(inst)
-        _ = EvolvableAlgorithmProtocol.get_action(inst, obs.sample())
-        _ = EvolvableAlgorithmProtocol.evolvable_attributes(inst)
-        _ = EvolvableAlgorithmProtocol.evolvable_attributes(inst, networks_only=True)
-        _ = EvolvableAlgorithmProtocol.inspect_attributes(inst)
-        _ = EvolvableAlgorithmProtocol.inspect_attributes(inst, input_args_only=True)
-        EvolvableAlgorithmProtocol.recompile(inst)
-        EvolvableAlgorithmProtocol.mutation_hook(inst)
+class TestPreTrainedModelProtocol:
+    """Test that HuggingFace PreTrainedModel instances satisfy PreTrainedModelProtocol."""
 
-    def test_module_dict_protocol_methods_executed(self):
-        mdl = ModuleDict(
-            {"a": EvolvableMLP(num_inputs=4, num_outputs=2, hidden_size=[8])},
-        )
-        assert isinstance(mdl, ModuleDictProtocol)
-        _ = ModuleDictProtocol.__getitem__(mdl, "a")
-        _ = ModuleDictProtocol.keys(mdl)
-        _ = ModuleDictProtocol.values(mdl)
-        _ = ModuleDictProtocol.items(mdl)
-        _ = ModuleDictProtocol.modules(mdl)
-        _ = ModuleDictProtocol.get_mutation_methods(mdl)
-        ModuleDictProtocol.filter_mutation_methods(mdl, "add")
-        _ = ModuleDictProtocol.mutation_methods.fget(mdl)
-        _ = ModuleDictProtocol.layer_mutation_methods.fget(mdl)
-        _ = ModuleDictProtocol.node_mutation_methods.fget(mdl)
-
-    def test_optimizer_config_and_registry_protocols_executed(self):
-        from agilerl.algorithms.core.registry import (
-            MutationRegistry,
-            OptimizerConfig as RegistryOptimizerConfig,
-        )
-
-        opt_cfg = RegistryOptimizerConfig(
-            name="opt",
-            networks="net",
-            lr="1e-3",
-            optimizer_cls=torch.optim.Adam,
-            optimizer_kwargs={},
-        )
-        _ = OptimizerConfig.get_optimizer_cls(opt_cfg)
-        reg = MutationRegistry()
-        _ = MutationRegistryProtocol.networks(reg)
-
-    @pytest.mark.parametrize(
-        "algo_cls,obs,act",
-        [
-            (
-                DQN,
-                generate_random_box_space(shape=(4,)),
-                generate_discrete_space(2),
-            ),
-            (
-                PPO,
-                generate_random_box_space(shape=(4,)),
-                generate_random_box_space(shape=(2,)),
-            ),
-        ],
-    )
-    def test_evolvable_algorithm_load_checkpoint_learn_test_clone(
-        self, algo_cls, obs, act, tmp_path
-    ):
-        inst = algo_cls(obs, act)
-        EvolvableAlgorithmProtocol.save_checkpoint(inst, str(tmp_path / "ckpt.pt"))
-        EvolvableAlgorithmProtocol.load_checkpoint(
-            inst, str(tmp_path / "ckpt.pt"), "cpu", None
-        )
-        _ = EvolvableAlgorithmProtocol.load(algo_cls, str(tmp_path / "ckpt.pt"))
-        exp = (
-            (
-                torch.randn(4, 4),
-                torch.randn(4, 2),
-                torch.randn(4),
-                torch.randn(4, 4),
-                torch.zeros(4, dtype=torch.bool),
-            )
-            if algo_cls is DQN
-            else (
-                torch.randn(4, 4),
-                torch.randn(4, 2),
-                torch.randn(4),
-                torch.randn(4),
-                torch.randn(4),
-                torch.randn(4),
-                torch.zeros(4, dtype=torch.bool),
-            )
-        )
-        EvolvableAlgorithmProtocol.learn(inst, exp)
-        _ = EvolvableAlgorithmProtocol.test(inst)
-        _ = EvolvableAlgorithmProtocol.clone(inst, None, False)
-
-    def test_agent_wrapper_protocol_methods_executed(self):
-        from agilerl.wrappers.agent import RSNorm
-
-        obs = generate_random_box_space(shape=(4,))
-        act = generate_discrete_space(2)
-        algo = DQN(obs, act)
-        wrapper = RSNorm(algo)
-        _ = AgentWrapperProtocol.get_action(wrapper, obs.sample())
-        AgentWrapperProtocol.learn(
-            wrapper,
-            (
-                torch.randn(4, 4),
-                torch.randn(4, 1).long(),
-                torch.randn(4),
-                torch.randn(4, 4),
-                torch.zeros(4, dtype=torch.bool),
-            ),
-        )
-
-    def test_lora_config_pretrained_config_generation_config_protocols_executed(
-        self, tmp_path
-    ):
+    def test_pretrained_model_instances_implement_pretrained_model_protocol(self):
+        """Test that HuggingFace PreTrainedModel instances satisfy PreTrainedModelProtocol."""
         pytest.importorskip("transformers")
-        pytest.importorskip("peft")
-        from peft import LoraConfig
-        from transformers import GenerationConfig, GPT2Config
-
-        lora = LoraConfig(
-            r=4,
-            lora_alpha=8,
-            target_modules=["c_attn"],
-            lora_dropout=0.0,
-            task_type="CAUSAL_LM",
-        )
-        assert isinstance(lora, LoraConfigProtocol)
-        _ = lora.r
-        _ = lora.lora_alpha
-        _ = lora.target_modules
-        _ = lora.task_type
-        _ = lora.lora_dropout
+        from transformers import GPT2Config, GPT2LMHeadModel
 
         config = GPT2Config(
-            vocab_size=100, n_positions=64, n_embd=32, n_layer=1, n_head=2
+            vocab_size=100,
+            n_positions=64,
+            n_embd=32,
+            n_layer=1,
+            n_head=2,
         )
-        _ = PretrainedConfigProtocol.to_dict(config)
-        _ = PretrainedConfigProtocol.to_json_string(config)
-        PretrainedConfigProtocol.save_pretrained(config, str(tmp_path))
-        _ = PretrainedConfigProtocol.from_dict(config.to_dict())
-        _ = PretrainedConfigProtocol.from_pretrained(str(tmp_path))
-        _ = PretrainedConfigProtocol.from_json_file(str(tmp_path / "config.json"))
-
-        gen_cfg = GenerationConfig()
-        _ = gen_cfg.do_sample
-        _ = gen_cfg.temperature
-        _ = gen_cfg.pad_token_id
-
-    def test_optimizer_like_class_protocol_executed(self):
-        OptimizerLikeClass.__call__(
-            torch.optim.SGD,
-            [torch.nn.Parameter(torch.zeros(1))],
-            0.01,
-        )
-
-    def test_mutation_type_enum_values(self):
-        assert MutationType.LAYER.value == "layer"
-        assert MutationType.NODE.value == "node"
-        assert MutationType.ACTIVATION.value == "activation"
+        model = GPT2LMHeadModel(config)
+        assert isinstance(model, PreTrainedModelProtocol)
 
     def test_pretrained_and_peft_protocol_methods_executed(self, tmp_path):
         pytest.importorskip("transformers")
@@ -522,15 +408,158 @@ class TestProtocols:
         base2 = GPT2LMHeadModel(config)
         _ = PeftModelProtocol.from_pretrained(base2, str(tmp_path))
 
-    def test_protocol_type_aliases_importable(self):
-        from agilerl.protocols import (
-            DeviceType,
-            EvolvableAttributeDict,
-            EvolvableNetworkDict,
-            NumpyObsType,
-            ObservationType,
-            TorchObsType,
+
+class TestPeftModelProtocol:
+    """Test that PEFT PeftModel instances satisfy PeftModelProtocol."""
+
+    def test_peft_model_instances_implement_peft_model_protocol(self):
+        """Test that PEFT PeftModel instances satisfy PeftModelProtocol."""
+        pytest.importorskip("transformers")
+        pytest.importorskip("peft")
+        from peft import LoraConfig, get_peft_model
+        from transformers import GPT2Config, GPT2LMHeadModel
+
+        config = GPT2Config(
+            vocab_size=100,
+            n_positions=64,
+            n_embd=32,
+            n_layer=1,
+            n_head=2,
+        )
+        base_model = GPT2LMHeadModel(config)
+        lora_config = LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=["c_attn"],
+            lora_dropout=0.0,
+            task_type="CAUSAL_LM",
+        )
+        peft_model = get_peft_model(base_model, lora_config)
+        assert isinstance(peft_model, PeftModelProtocol)
+
+
+class TestModuleDictProtocol:
+    def test_module_dict_protocol_methods_executed(self):
+        mdl = ModuleDict(
+            {"a": EvolvableMLP(num_inputs=4, num_outputs=2, hidden_size=[8])},
+        )
+        assert isinstance(mdl, ModuleDictProtocol)
+        _ = ModuleDictProtocol.__getitem__(mdl, "a")
+        _ = ModuleDictProtocol.keys(mdl)
+        _ = ModuleDictProtocol.values(mdl)
+        _ = ModuleDictProtocol.items(mdl)
+        _ = ModuleDictProtocol.modules(mdl)
+        _ = ModuleDictProtocol.get_mutation_methods(mdl)
+        ModuleDictProtocol.filter_mutation_methods(mdl, "add")
+        _ = ModuleDictProtocol.mutation_methods.fget(mdl)
+        _ = ModuleDictProtocol.layer_mutation_methods.fget(mdl)
+        _ = ModuleDictProtocol.node_mutation_methods.fget(mdl)
+
+
+class TestOptimizerConfig:
+    def test_optimizer_config_and_registry_protocols_executed(self):
+        from agilerl.algorithms.core.registry import (
+            MutationRegistry,
+            OptimizerConfig as RegistryOptimizerConfig,
         )
 
-        assert NumpyObsType is not None
-        assert TorchObsType is not None
+        opt_cfg = RegistryOptimizerConfig(
+            name="opt",
+            networks="net",
+            lr="1e-3",
+            optimizer_cls=torch.optim.Adam,
+            optimizer_kwargs={},
+        )
+        _ = OptimizerConfig.get_optimizer_cls(opt_cfg)
+        reg = MutationRegistry()
+        _ = MutationRegistryProtocol.networks(reg)
+
+
+class TestAgentWrapperProtocol:
+    def test_agent_wrapper_protocol_methods_executed(self):
+        from agilerl.wrappers.agent import RSNorm
+
+        obs = generate_random_box_space(shape=(4,))
+        act = generate_discrete_space(2)
+        algo = DQN(obs, act)
+        wrapper = RSNorm(algo)
+        _ = AgentWrapperProtocol.get_action(wrapper, obs.sample())
+        AgentWrapperProtocol.learn(
+            wrapper,
+            (
+                torch.randn(4, 4),
+                torch.randn(4, 1).long(),
+                torch.randn(4),
+                torch.randn(4, 4),
+                torch.zeros(4, dtype=torch.bool),
+            ),
+        )
+
+
+class TestLoraConfigProtocol:
+    def test_lora_config_pretrained_config_generation_config_protocols_executed(
+        self, tmp_path
+    ):
+        pytest.importorskip("transformers")
+        pytest.importorskip("peft")
+        from peft import LoraConfig
+        from transformers import GenerationConfig, GPT2Config
+
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=["c_attn"],
+            lora_dropout=0.0,
+            task_type="CAUSAL_LM",
+        )
+        assert isinstance(lora, LoraConfigProtocol)
+        _ = lora.r
+        _ = lora.lora_alpha
+        _ = lora.target_modules
+        _ = lora.task_type
+        _ = lora.lora_dropout
+
+        config = GPT2Config(
+            vocab_size=100, n_positions=64, n_embd=32, n_layer=1, n_head=2
+        )
+        _ = PretrainedConfigProtocol.to_dict(config)
+        _ = PretrainedConfigProtocol.to_json_string(config)
+        PretrainedConfigProtocol.save_pretrained(config, str(tmp_path))
+        _ = PretrainedConfigProtocol.from_dict(config.to_dict())
+        _ = PretrainedConfigProtocol.from_pretrained(str(tmp_path))
+        _ = PretrainedConfigProtocol.from_json_file(str(tmp_path / "config.json"))
+
+        gen_cfg = GenerationConfig()
+        _ = gen_cfg.do_sample
+        _ = gen_cfg.temperature
+        _ = gen_cfg.pad_token_id
+
+
+class TestOptimizerLikeClass:
+    def test_optimizer_like_class_protocol_executed(self):
+        OptimizerLikeClass.__call__(
+            torch.optim.SGD,
+            [torch.nn.Parameter(torch.zeros(1))],
+            0.01,
+        )
+
+
+class TestMutationType:
+    def test_mutation_type_enum_values(self):
+        assert MutationType.LAYER.value == "layer"
+        assert MutationType.NODE.value == "node"
+        assert MutationType.ACTIVATION.value == "activation"
+
+
+def test_protocol_type_aliases_importable():
+    from agilerl.protocols import (
+        DeviceType,
+        EvolvableAttributeDict,
+        EvolvableNetworkDict,
+        NumpyObsType,
+        ObservationType,
+        TorchObsType,
+    )
+
+    assert NumpyObsType is not None
+    assert TorchObsType is not None
