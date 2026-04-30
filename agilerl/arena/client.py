@@ -100,8 +100,12 @@ class ArenaClient:
     3. Stored OAuth credentials from ``~/.arena/credentials.json``
     4. Interactive :meth:`login` (device authorization flow)
 
-    :param api_key: Static API key for bearer-token authentication.
-        When provided, OAuth login is not required.
+    For (1) and (2), the value is sent as ``Authorization: Bearer <value>``.
+    Use a **personal access token** from your Arena account profile (``arena_pat_<uuid>_<secret>``)
+    to skip OAuth device login. You can also pass a Keycloak access token in the same way
+    if you obtain one elsewhere.
+
+    :param api_key: Bearer token material (profile PAT or OAuth access token). When set, device login is not required.
     :param request_timeout: Default timeout in seconds for API requests.
     :param upload_timeout: Timeout in seconds for file-upload requests.
     """

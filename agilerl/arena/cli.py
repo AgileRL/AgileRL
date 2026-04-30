@@ -35,7 +35,7 @@ def arena_client(
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
-@click.option("--api-key", default=None, help="Arena API key.")
+@click.option("--api-key", default=None, help="Bearer secret: profile CLI PAT (arena_pat_…) or access token.")
 @click.option(
     "--base-url",
     default=None,
