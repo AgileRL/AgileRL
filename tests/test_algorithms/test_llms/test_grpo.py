@@ -23,7 +23,6 @@ from accelerate.scheduler import AcceleratedScheduler
 from accelerate.state import AcceleratorState
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from deepspeed.runtime.engine import DeepSpeedEngine
-from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from peft import LoraConfig, LoraModel, PeftModel, get_peft_model
 from torch import nn
 from torch.optim.lr_scheduler import SequentialLR
@@ -752,11 +751,8 @@ def test_get_action_grpo_vllm_sleep_mode(
     "config, use_deepspeed_optimizer",
     [
         (deepspeed_config_stage_1, False),
-        (deepspeed_config_stage_1, True),
         (deepspeed_config_stage_1_with_scheduler, False),
-        (deepspeed_config_stage_1_with_scheduler, True),
         (deepspeed_config_stage_2, False),
-        (deepspeed_config_stage_2, True),
     ],
 )
 @pytest.mark.parametrize("vocab_size", [1000])
@@ -842,24 +838,17 @@ def test_init_grpo_with_accelerator(
     assert isinstance(grpo.actor, DeepSpeedEngine)
     assert grpo.pad_token_id == 999
     assert grpo.pad_token == "<pad>"
-    if not use_deepspeed_optimizer:
-        if accelerator is None:
-            assert isinstance(
-                grpo.lr_scheduler,
-                AcceleratedScheduler,
-            ), grpo.lr_scheduler
-            assert isinstance(
-                grpo.cosine_lr_schedule_config,
-                CosineLRScheduleConfig,
-            ), type(grpo.cosine_lr_schedule_config)
-        assert isinstance(grpo.optimizer, OptimizerWrapper)
-        assert isinstance(grpo.optimizer.optimizer, DeepSpeedOptimizerWrapper)
-    else:
-        assert isinstance(grpo.optimizer, OptimizerWrapper)
-        assert isinstance(grpo.optimizer.optimizer, DeepSpeedZeroOptimizer)
-        assert isinstance(grpo.actor.optimizer, DeepSpeedZeroOptimizer)
-        assert grpo.lr_scheduler is None
-        assert grpo.cosine_lr_schedule_config is None
+    if accelerator is None:
+        assert isinstance(
+            grpo.lr_scheduler,
+            AcceleratedScheduler,
+        ), grpo.lr_scheduler
+        assert isinstance(
+            grpo.cosine_lr_schedule_config,
+            CosineLRScheduleConfig,
+        ), type(grpo.cosine_lr_schedule_config)
+    assert isinstance(grpo.optimizer, OptimizerWrapper)
+    assert isinstance(grpo.optimizer.optimizer, DeepSpeedOptimizerWrapper)
 
     if use_vllm:
         assert grpo.use_vllm

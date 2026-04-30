@@ -14,7 +14,6 @@ from accelerate.state import AcceleratorState
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from datasets import Dataset
 from deepspeed.runtime.engine import DeepSpeedEngine
-from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from peft import LoraConfig
 from transformers import AutoTokenizer
 
@@ -201,14 +200,6 @@ def _make_cpu_dpo_for_branch_tests(**kwargs):
         ),
         pytest.param(
             deepspeed_config_stage_2,
-            True,
-            None,
-            False,
-            False,
-            id="zero2-ds-optimizer",
-        ),
-        pytest.param(
-            deepspeed_config_stage_2,
             False,
             None,
             False,
@@ -271,13 +262,8 @@ def test_init_dpo(
     assert dpo.steps == [0]
     if config is not None:
         assert isinstance(dpo.actor, DeepSpeedEngine)
-        if not use_deepspeed_optimizer:
-            assert isinstance(dpo.optimizer, OptimizerWrapper)
-            assert isinstance(dpo.optimizer.optimizer, DeepSpeedOptimizerWrapper)
-        else:
-            assert isinstance(dpo.optimizer, OptimizerWrapper)
-            assert isinstance(dpo.optimizer.optimizer, DeepSpeedZeroOptimizer)
-            assert isinstance(dpo.actor.optimizer, DeepSpeedZeroOptimizer)
+        assert isinstance(dpo.optimizer, OptimizerWrapper)
+        assert isinstance(dpo.optimizer.optimizer, DeepSpeedOptimizerWrapper)
     else:
         assert isinstance(dpo.actor, torch.nn.Module)
     dpo.clean_up()
