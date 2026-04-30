@@ -22,8 +22,6 @@ from agilerl.algorithms import (
     DDPG,
     DQN,
     IPPO,
-    LLMPPO,
-    LLMREINFORCE,
     MADDPG,
     MATD3,
     PPO,

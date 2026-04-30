@@ -8,19 +8,15 @@ import numpy as np
 import torch
 from gymnasium import spaces
 
-from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import PPO
 from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType
 
-if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
+if TYPE_CHECKING:
     from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
     from agilerl.llm_envs import SyncMultiTurnVecEnv
 
-    SupportedOnPolicyLLM = LLMPPO | LLMREINFORCE | GRPO
-
 SupportedOnPolicy = PPO
-SupportedOnPolicyLLM = LLMPPO | LLMREINFORCE | GRPO
 
 
 def _collect_rollouts(
@@ -249,7 +245,7 @@ def collect_rollouts_recurrent(
 
 
 def collect_rollouts_llm(
-    agent: SupportedOnPolicyLLM,
+    agent: LLMPPO | LLMREINFORCE | GRPO,
     env: SyncMultiTurnVecEnv,
     n_steps: int,
     batch_size: int,
