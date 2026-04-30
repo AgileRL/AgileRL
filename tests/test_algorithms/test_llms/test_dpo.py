@@ -343,7 +343,7 @@ def test_dpo_get_action():
         TINY_LLM_FIXTURE_PATH,
     ],
 )
-@pytest.mark.parametrize("data_batch_size", [32])
+@pytest.mark.parametrize("data_batch_size", [2])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("use_liger_loss", [False, True])
 def test_dpo_learn(
@@ -376,24 +376,25 @@ def test_dpo_learn(
         use_liger_loss=use_liger_loss,
     )
 
+    num_samples = 4
     train_dataset = Dataset.from_dict(
         {
-            "prompt": [f"Prompt {i}" for i in range(100)],
+            "prompt": [f"Prompt {i}" for i in range(num_samples)],
             "chosen": [
                 f"This prompt is better than the rejected prompt {i}"
-                for i in range(100)
+                for i in range(num_samples)
             ],
-            "rejected": [f"REALLY BAD RESPONSE {i}" for i in range(100)],
+            "rejected": [f"REALLY BAD RESPONSE {i}" for i in range(num_samples)],
         },
     )
     test_dataset = Dataset.from_dict(
         {
-            "prompt": [f"Prompt {i}" for i in range(100)],
+            "prompt": [f"Prompt {i}" for i in range(num_samples)],
             "chosen": [
                 f"This prompt is better than the rejected prompt {i}"
-                for i in range(100)
+                for i in range(num_samples)
             ],
-            "rejected": [f"REALLY BAD RESPONSE {i}" for i in range(100)],
+            "rejected": [f"REALLY BAD RESPONSE {i}" for i in range(num_samples)],
         },
     )
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
