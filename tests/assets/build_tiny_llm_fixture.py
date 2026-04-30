@@ -6,11 +6,21 @@ under ``tests/assets/tiny_llm/`` so subsequent test runs can load the model
 offline via ``from_pretrained(<local_path>)``.
 
 Why we don't just download the upstream model: it ships with
-``hidden_size=8`` / ``num_attention_heads=4``, giving ``head_dim=2``. vLLM's
-FlexAttention backend (the only backend available on GPUs without FA2 support,
-i.e. compute capability < 8) requires ``head_dim >= 16``, so loading the
-upstream tiny model under vLLM crashes during graph compilation. We construct
-our own Qwen2 with ``head_dim=16`` instead.
+``hidden_size=8`` / ``num_attention_heads=4``, giving ``head_dim=2``. vLLM
+imposes a per-backend lower bound on ``head_dim`` that the upstream model
+violates:
+
+- **GPU FlexAttention backend** (used on GPUs without FA2, i.e. compute
+  capability < 8) requires ``head_dim >= 16``.
+- **CPU backend** (`_PagedAttention` in ``vllm/v1/attention/backends/cpu_attn.py``,
+  used on macOS / Linux-without-CUDA) only accepts head sizes from a fixed
+  whitelist: ``{32, 64, 80, 96, 112, 128, 192, 256}``. A ``head_dim`` outside
+  this set fails at runtime with ``RuntimeError: Unsupported head size: N``
+  during ``paged_attention_v1``.
+
+We construct our own Qwen2 with ``head_dim=32`` (the smallest value satisfying
+both backends) so the same fixture is usable across CI matrices and local
+macOS development.
 
 Run when transformers/safetensors compatibility shifts, or when the model
 config needs adjusting. The output directory should be committed to the repo
@@ -38,14 +48,20 @@ SIZE_BUDGET_MB = 25
 # Pin the saved version so AutoTokenizer doesn't emit the false-positive warning.
 PINNED_TRANSFORMERS_VERSION = "4.57.2"
 
-# head_dim = hidden_size // num_attention_heads must be >= 16 because
-# torch.nn.functional.flex_attention (used by vLLM on GPUs without FA2)
-# raises NotImplementedError otherwise. With tie_word_embeddings=True the
-# 151665-token Qwen vocabulary still fits the 25MB fixture budget at
-# hidden_size=32.
+# head_dim = hidden_size // num_attention_heads must satisfy BOTH backends:
+#   - vLLM GPU FlexAttention (no-FA2 GPUs):   head_dim >= 16
+#   - vLLM CPU PagedAttention (macOS, etc.):  head_dim in
+#     {32, 64, 80, 96, 112, 128, 192, 256}
+# 32 is the smallest head_dim satisfying both. To stay under the 25 MB fixture
+# budget (tokenizer alone is ~11 MB, embeddings dominate model weights at this
+# scale because tie_word_embeddings shares them with lm_head), we keep
+# hidden_size=32 and use a single head so head_dim = 32 / 1 = 32. The single-
+# head config still exercises the full Qwen2 forward/backward path; head count
+# is an implementation detail that the LLM-level tests (DPO/GRPO/SFT/REINFORCE)
+# don't probe.
 HIDDEN_SIZE = 32
-NUM_ATTENTION_HEADS = 2  # head_dim = 16
-NUM_KEY_VALUE_HEADS = 2
+NUM_ATTENTION_HEADS = 1  # head_dim = 32
+NUM_KEY_VALUE_HEADS = 1
 NUM_HIDDEN_LAYERS = 2
 INTERMEDIATE_SIZE = 64
 SEED = 0
