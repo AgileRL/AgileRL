@@ -6,8 +6,10 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from typing import Any, Literal
@@ -68,6 +70,11 @@ _DEFAULT_METADATA: dict[str, Any] = {
         "memoryBytes": "64 GiB",
     },
 }
+
+# Helm deploy is fast; gateway daemon polls Arena API on an interval (default 15s).
+_DEFAULT_GATEWAY_WAIT_HELM_SECS = 75
+# Swarm fresh-node install usually exceeds one gateway sync cycle.
+_DEFAULT_GATEWAY_WAIT_SWARM_SECS = 0
 
 
 def normalize_setup_type(setup_type: str) -> SetupKind:
@@ -228,6 +235,138 @@ def _all_hosts(manager: str, workers: tuple[str, ...]) -> list[str]:
     return out
 
 
+def _swarm_script_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Non-interactive env for remote install scripts (fresh VMs may need reboot)."""
+    env = dict(base if base is not None else os.environ)
+    env.setdefault("DOCKER_REBOOT_ASSUME_YES", "1")
+    return env
+
+
+def _wait_for_gateway_peer_registration(seconds: int) -> None:
+    if seconds <= 0:
+        return
+    click.echo(
+        f"Waiting {seconds}s for Arena on-prem gateway to register the WireGuard peer "
+        "(automatic API sync; no manual gateway steps)…"
+    )
+    time.sleep(seconds)
+
+
+def _validate_tun0_conf(path: Path) -> None:
+    if not path.is_file():
+        msg = f"Bundle missing WireGuard config {path.name}."
+        raise click.ClickException(msg)
+    text = path.read_text(encoding="utf-8")
+    required = (
+        "[Interface]",
+        "[Peer]",
+        "PrivateKey = ",
+        "PublicKey = ",
+        "PresharedKey = ",
+        "Endpoint = ",
+        "AllowedIPs = ",
+    )
+    missing = [token for token in required if token not in text]
+    if missing:
+        msg = (
+            f"Invalid {path.name} in install bundle (missing: {', '.join(missing)}). "
+            "Re-create the on-prem class or re-download the bundle."
+        )
+        raise click.ClickException(msg)
+
+
+def _validate_wireguard_bundle(bundle_root: Path, kind: SetupKind) -> None:
+    if kind == "helm":
+        values = bundle_root / "chart" / "values.yaml"
+        if not values.is_file():
+            msg = "Helm bundle missing chart/values.yaml."
+            raise click.ClickException(msg)
+        text = values.read_text(encoding="utf-8")
+        for key in (
+            "wireguard:",
+            "gatewayHost:",
+            "gatewayPublicKey:",
+            "peerPrivateKey:",
+            "peerIp:",
+            "preSharedKey:",
+        ):
+            if key not in text:
+                msg = f"Helm values.yaml missing {key!r} (WireGuard not rendered)."
+                raise click.ClickException(msg)
+    else:
+        _validate_tun0_conf(bundle_root / "config.d" / "tun0.conf")
+        stack = bundle_root / "arena-stack.yaml"
+        if not stack.is_file():
+            msg = "Docker Swarm bundle missing arena-stack.yaml."
+            raise click.ClickException(msg)
+        stack_text = stack.read_text(encoding="utf-8")
+        if "/etc/wireguard/" not in stack_text:
+            msg = "arena-stack.yaml does not mount WireGuard config (/etc/wireguard/)."
+            raise click.ClickException(msg)
+
+
+def _ssh_target_host(host: str) -> str:
+    """Hostname part of ``HOST``, ``user@HOST``, or ``HOST:PORT``."""
+    target = host.strip().split("@", 1)[-1]
+    if target.startswith("[") and "]" in target:
+        return target.split("]", 1)[0][1:]
+    if ":" in target:
+        return target.rsplit(":", 1)[0]
+    return target
+
+
+def _ssh_target_port(host: str) -> int | None:
+    target = host.strip().split("@", 1)[-1]
+    if target.startswith("[") and "]:" in target:
+        port_s = target.split("]:", 1)[1]
+    elif ":" in target and not target.startswith("["):
+        port_s = target.rsplit(":", 1)[1]
+    else:
+        return None
+    return int(port_s) if port_s.isdigit() else None
+
+
+def _is_local_swarm_host(host: str) -> bool:
+    """True when install scripts run commands on this machine (not real SSH)."""
+    h = _ssh_target_host(host).lower()
+    if h in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        short = socket.gethostname().split(".", 1)[0]
+        fqdn = socket.getfqdn()
+    except OSError:
+        return False
+    return h == short or h == fqdn or h == fqdn.split(".", 1)[0]
+
+
+def _verify_swarm_stack(
+    manager: str,
+    stack_name: str,
+    *,
+    ssh_user: str | None,
+    ssh_extra_opts: str | None,
+) -> None:
+    click.echo(f"Verifying Docker stack {stack_name!r} on {manager}…")
+    remote_cmd = (
+        f"sudo docker stack services {stack_name} --format '{{{{.Name}}}}\\t{{{{.Replicas}}}}'"
+    )
+    _ssh_remote_command(
+        manager,
+        remote_cmd,
+        ssh_user=ssh_user,
+        ssh_extra_opts=ssh_extra_opts,
+    )
+
+
+def _run_helm_post_install(bundle_root: Path) -> None:
+    validate = bundle_root / "validate.sh"
+    if validate.is_file():
+        click.echo("Running Helm post-install validation…")
+        _run_script(validate, [], env=os.environ.copy(), cwd=bundle_root)
+    else:
+        click.echo("Note: bundle has no validate.sh; check pods with kubectl.", err=True)
+
+
 def _warn_ignored_swarm_flags(
     *,
     manager: str | None,
@@ -264,7 +403,7 @@ def _run_docker_swarm_install(
     ssh_extra_opts: str | None,
     advertise_addr: str | None,
 ) -> None:
-    env = os.environ.copy()
+    env = _swarm_script_env()
     if ssh_user:
         env["SSH_USER"] = ssh_user
     if ssh_extra_opts:
@@ -310,6 +449,13 @@ def _run_docker_swarm_install(
             env=env,
             cwd=bundle_root,
         )
+    label_hosts = [manager, *worker_only]
+    _run_script(
+        bundle_root / "label-docker-swarm-gpus.sh",
+        label_hosts,
+        env=env,
+        cwd=bundle_root,
+    )
     _run_script(
         bundle_root / "deploy-arena-stack.sh",
         [manager],
@@ -360,6 +506,14 @@ def _ssh_remote_command(
     ssh_user: str | None,
     ssh_extra_opts: str | None,
 ) -> None:
+    host = host.strip()
+    if _is_local_swarm_host(host):
+        click.echo(f"  $ {remote_cmd}")
+        result = subprocess.run(["bash", "-lc", remote_cmd], check=False)
+        if result.returncode != 0:
+            click.echo(f"  command exited {result.returncode}", err=True)
+        return
+
     user = ssh_user or os.environ.get("SSH_USER") or os.environ.get("USER")
     if not user:
         msg = "Cannot determine SSH user; set --ssh-user or SSH_USER."
@@ -368,16 +522,21 @@ def _ssh_remote_command(
         msg = "ssh not found on PATH; required for dockerSwarm teardown."
         raise click.ClickException(msg)
 
+    ssh_host = _ssh_target_host(host)
+    ssh_port = _ssh_target_port(host)
     ssh_cmd = [
         "ssh",
+        "-tt",
         "-o",
         "ConnectTimeout=15",
         "-o",
         "StrictHostKeyChecking=accept-new",
     ]
+    if ssh_port is not None:
+        ssh_cmd.extend(["-p", str(ssh_port)])
     if ssh_extra_opts:
         ssh_cmd.extend(shlex.split(ssh_extra_opts))
-    ssh_cmd.append(f"{user}@{host.strip()}")
+    ssh_cmd.append(f"{user}@{ssh_host}")
     ssh_cmd.append(remote_cmd)
     click.echo(f"  $ {' '.join(ssh_cmd)}")
     result = subprocess.run(ssh_cmd, check=False)
@@ -388,9 +547,11 @@ def _ssh_remote_command(
 def _run_docker_swarm_teardown(
     *,
     manager: str,
+    workers: tuple[str, ...],
     stack_name: str,
     ssh_user: str | None,
     ssh_extra_opts: str | None,
+    leave_swarm: bool,
 ) -> None:
     click.echo(f"Removing Docker stack {stack_name!r} on {manager}…")
     _ssh_remote_command(
@@ -399,6 +560,17 @@ def _run_docker_swarm_teardown(
         ssh_user=ssh_user,
         ssh_extra_opts=ssh_extra_opts,
     )
+    if not leave_swarm:
+        return
+    hosts = _all_hosts(manager, workers)
+    click.echo("Leaving Docker Swarm on cluster hosts…")
+    for host in hosts:
+        _ssh_remote_command(
+            host,
+            "sudo docker swarm leave --force 2>/dev/null || true",
+            ssh_user=ssh_user,
+            ssh_extra_opts=ssh_extra_opts,
+        )
 
 
 def _delete_class_if_present(client: Any, name: str) -> None:
@@ -423,6 +595,7 @@ def run_on_prem_teardown(
     ssh_user: str | None = None,
     ssh_extra_opts: str | None = None,
     stack_name: str = "arena",
+    leave_swarm: bool = False,
 ) -> None:
     """Remove cluster workloads and optionally delete the Arena on-prem class."""
     kind = normalize_setup_type(setup_type)
@@ -434,9 +607,11 @@ def run_on_prem_teardown(
                 raise click.ClickException(msg)
             _run_docker_swarm_teardown(
                 manager=manager.strip(),
+                workers=workers,
                 stack_name=stack_name,
                 ssh_user=ssh_user,
                 ssh_extra_opts=ssh_extra_opts,
+                leave_swarm=leave_swarm,
             )
         else:
             _warn_ignored_swarm_flags(
@@ -495,14 +670,18 @@ def run_on_prem_install(
     ssh_extra_opts: str | None = None,
     advertise_addr: str | None = None,
     num_nodes: int | None = None,
+    wait_gateway_secs: int | None = None,
+    skip_verify: bool = False,
 ) -> None:
     """Enable on-prem, ensure class exists, download bundle, run install scripts."""
     kind = normalize_setup_type(setup_type)
 
     if kind == "dockerSwarm":
         if not manager or not manager.strip():
-            msg = """--manager is required for dockerSwarm\n
-            (SSH hostname or IP of the swarm manager)."""
+            msg = (
+                "--manager is required for dockerSwarm "
+                "(SSH hostname or IP of the swarm manager)."
+            )
             raise click.ClickException(msg)
         if not shutil.which("ssh"):
             msg = "ssh not found on PATH; required for dockerSwarm install."
@@ -531,6 +710,14 @@ def run_on_prem_install(
     )
     _ensure_class(client, name=name, num_nodes=create_nodes)
 
+    if wait_gateway_secs is None:
+        wait_gateway_secs = (
+            _DEFAULT_GATEWAY_WAIT_HELM_SECS
+            if kind == "helm"
+            else _DEFAULT_GATEWAY_WAIT_SWARM_SECS
+        )
+    _wait_for_gateway_peer_registration(wait_gateway_secs)
+
     with tempfile.TemporaryDirectory(prefix="arena-on-prem-") as tmp:
         bundle_root = _download_bundle(
             client,
@@ -538,6 +725,7 @@ def run_on_prem_install(
             setup_type=kind,
             dest_dir=Path(tmp),
         )
+        _validate_wireguard_bundle(bundle_root, kind)
         if kind == "dockerSwarm":
             assert manager is not None
             _run_docker_swarm_install(
@@ -548,8 +736,17 @@ def run_on_prem_install(
                 ssh_extra_opts=ssh_extra_opts,
                 advertise_addr=advertise_addr,
             )
+            if not skip_verify:
+                _verify_swarm_stack(
+                    manager.strip(),
+                    os.environ.get("ARENA_STACK_NAME", "arena"),
+                    ssh_user=ssh_user,
+                    ssh_extra_opts=ssh_extra_opts,
+                )
         else:
             _run_helm_install(bundle_root)
+            if not skip_verify:
+                _run_helm_post_install(bundle_root)
 
     click.echo(f"On-prem install finished for class {name!r} ({kind}).")
 
@@ -613,6 +810,21 @@ def build_install_command() -> click.Command:
         default=False,
         help="Skip POST /on-prem/enable when the provider is already enabled.",
     )
+    @click.option(
+        "--wait-gateway-secs",
+        type=click.IntRange(0),
+        default=None,
+        help=(
+            "Seconds to wait after creating the class so the Arena gateway can register "
+            "the WireGuard peer. Default: 75 for helm, 0 for dockerSwarm."
+        ),
+    )
+    @click.option(
+        "--skip-verify",
+        is_flag=True,
+        default=False,
+        help="Skip post-install stack or Helm validation.",
+    )
     @click.pass_obj
     def install_cmd(
         config: CommandConfig,
@@ -625,12 +837,15 @@ def build_install_command() -> click.Command:
         ssh_extra_opts: str | None,
         advertise_addr: str | None,
         skip_enable: bool,
+        wait_gateway_secs: int | None,
+        skip_verify: bool,
     ) -> None:
         """Install an on-prem worker cluster for CLASS_NAME.
 
         **dockerSwarm** — downloads the platform bundle and runs install-docker,
-        NVIDIA, swarm, and stack scripts on ``--manager`` and ``--workers`` via SSH
-        (see agilerl-platform ``resources/docker-swarm-setup/arena-train/SETUP.md``).
+        NVIDIA, swarm init/join, GPU node labels, and stack deploy on ``--manager``
+        and ``--workers`` via SSH (see agilerl-platform
+        ``resources/docker-swarm-setup/arena-train/SETUP.md``).
 
         **helm** — downloads the Helm chart bundle and runs ``./setup.sh`` on this
         machine; requires ``helm`` and a configured ``kubectl`` context only
@@ -652,6 +867,8 @@ def build_install_command() -> click.Command:
                 ssh_user=ssh_user,
                 ssh_extra_opts=ssh_extra_opts,
                 advertise_addr=advertise_addr,
+                wait_gateway_secs=wait_gateway_secs,
+                skip_verify=skip_verify,
             )
 
     return install_cmd
@@ -717,6 +934,12 @@ def build_teardown_command() -> click.Command:
         default=False,
         help="Also POST /on-prem/disable after teardown.",
     )
+    @click.option(
+        "--leave-swarm",
+        is_flag=True,
+        default=False,
+        help="[dockerSwarm] After stack removal, run docker swarm leave --force on all hosts.",
+    )
     @click.pass_obj
     def teardown_cmd(
         config: CommandConfig,
@@ -730,6 +953,7 @@ def build_teardown_command() -> click.Command:
         skip_cluster: bool,
         keep_class: bool,
         disable_provider: bool,
+        leave_swarm: bool,
     ) -> None:
         """Tear down an on-prem install for CLASS_NAME.
 
@@ -756,6 +980,7 @@ def build_teardown_command() -> click.Command:
                 ssh_user=ssh_user,
                 ssh_extra_opts=ssh_extra_opts,
                 stack_name=stack_name,
+                leave_swarm=leave_swarm,
             )
 
     return teardown_cmd
