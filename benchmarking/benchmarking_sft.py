@@ -4,7 +4,7 @@ Runs SFT with default hyperparameters from ``configs/training/sft.yaml``.
 For full CLI options (custom save paths, checkpoint warm-starting, eval mode),
 use the demo script instead::
 
-    python demos/demo_llm_finetuning.py sft --help
+    python demos/llm/demo_llm_finetuning.py sft --help
 
 To run (single GPU, no accelerate):
     python benchmarking/benchmarking_sft.py
@@ -36,7 +36,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_sft
 from agilerl.utils.llm_utils import compare_responses, sample_eval_prompts
-from agilerl.wrappers.llm_envs import SFTGym
+from agilerl.llm_envs import SFTGym
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "HumanLLMs/Human-Like-DPO-Dataset"

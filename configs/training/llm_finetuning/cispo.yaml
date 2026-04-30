@@ -1,0 +1,38 @@
+---
+MUTATION_PARAMS:
+    NO_MUT: 0.1                          # No mutation
+    RL_HP_MUT: 0.6                       # Learning HP mutation
+    MUT_SD: 0.1                          # Mutation strength
+    RAND_SEED: 42                        # Random seed
+    MIN_LR: 0.0000001
+    MAX_LR: 0.00001
+    MIN_BETA: 0.0001
+    MAX_BETA: 0.01
+    MIN_GROUP_SIZE: 4
+    MAX_GROUP_SIZE: 20
+
+
+INIT_HP:
+    ALGO: CISPO
+    BATCH_SIZE: 4
+    BETA: 0.001
+    LR: 0.00001
+    CLIP_COEF: 0.4
+    MAX_GRAD_NORM: 1.0
+    UPDATE_EPOCHS: 1
+    GROUP_SIZE: 16
+    TEMPERATURE: 0.7
+    MAX_MODEL_LEN: 4096  # Maximum context length for the model
+    MICRO_BATCH_SIZE_PER_GPU: 1
+    COSINE_lR_SCHEDULER:
+    TOURN_SIZE: 2
+    ADV_NORM: mean_std
+    USE_MEMORY_EFFICIENT_PARAMS: true
+    USE_KL_ADVANTAGE_SHAPING: false
+    LOSS_TYPE: cispo
+    FILTER_ZERO_ADV: false
+    USE_LIGER_LOSS: false
+    ELITISM: true
+    POP_SIZE: 1
+    EVAL_LOOP: 1
+    USE_VLLM: true

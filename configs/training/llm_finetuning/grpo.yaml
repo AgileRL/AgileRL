@@ -14,20 +14,21 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: GRPO                            # Algorithm — group relative policy optimization
-    BATCH_SIZE: 16                        # Batch size (number of prompts per step)
+    BATCH_SIZE: 4                        # Batch size (number of prompts per step)
     BETA: 1.0e-3                          # KL divergence penalty coefficient
     LR: 5.0e-6                            # Learning rate
     CLIP_COEF: 0.2                        # Surrogate clipping coefficient (PPO-style)
     MAX_GRAD_NORM: 0.1                    # Maximum norm for gradient clipping
     UPDATE_EPOCHS: 1                      # Number of training epochs per learn() call
-    GROUP_SIZE: 6                         # Number of completions sampled per prompt
+    GROUP_SIZE: 16                         # Number of completions sampled per prompt
     TEMPERATURE: 0.9                      # Sampling temperature for generation
     MAX_MODEL_LEN: 1024                   # Maximum context length for the model
     COSINE_lR_SCHEDULER:                  # Cosine LR scheduler config (null = disabled)
     TOURN_SIZE: 2                         # Tournament size for evolutionary selection
     ELITISM: true                         # Elitism in tournament selection
-    POP_SIZE: 4                           # Population size
+    POP_SIZE: 1                           # Population size
     EVAL_LOOP: 1                          # Evaluation episodes
+    USE_VLLM: true
     LORA:                                  # LoRA adapter configuration (passed to peft.LoraConfig)
         r: 16                              # LoRA rank
         lora_alpha: 64                     # LoRA scaling factor

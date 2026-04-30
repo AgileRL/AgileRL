@@ -4,7 +4,7 @@ Runs DPO with default hyperparameters from ``configs/training/dpo.yaml``.
 For full CLI options (custom save paths, checkpoint warm-starting, eval mode),
 use the demo script instead::
 
-    python demos/demo_llm_finetuning.py dpo --help
+    python demos/llm/demo_llm_finetuning.py dpo --help
 
 To run (single GPU, no accelerate):
     python benchmarking/benchmarking_dpo.py
@@ -35,7 +35,7 @@ from agilerl.algorithms.dpo import DPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_preference
-from agilerl.wrappers.llm_envs import PreferenceGym
+from agilerl.llm_envs import PreferenceGym
 from agilerl.utils.llm_utils import (
     compare_responses,
     sample_eval_prompts,
@@ -167,7 +167,7 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
 
 if __name__ == "__main__":
     save_path = f"outputs/{datetime.now().strftime('%Y%m%d_%H%M%S')}_DPO"
-    with open("configs/training/dpo.yaml") as f:
+    with open("configs/training/llm_finetuning/dpo.yaml") as f:
         config = yaml.safe_load(f)
     main(
         init_hp=config["INIT_HP"],

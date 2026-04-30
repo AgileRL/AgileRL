@@ -15,6 +15,10 @@ These changes are particularly valuable for LLM training because they reduce com
 need for a separate critic model, provide more stable gradient updates in environments with sparse or noisy rewards,
 and they simplify implementation while maintaining or improving performance.
 
+In AgileRL, GRPO can be used for single-turn reasoning tasks or multi-turn agentic finetuning. In the multi-turn case,
+rollouts are still treated as a bandit problem, with environment generated tokens masked and reward signal calculated
+from cumulative episode reward.
+
 
 Example
 -------
@@ -24,7 +28,7 @@ For more details on how to set up GRPO and use it for training, check out the :r
 .. code-block:: python
 
   from agilerl.algorithms import GRPO
-  from agilerl.wrappers.llm_envs import ReasoningGym
+  from agilerl.llm_envs import ReasoningGym
 
   model = AutoModelForCausalLM.from_pretrained(
       "Qwen/Qwen2.5-3B",
@@ -43,7 +47,6 @@ For more details on how to set up GRPO and use it for training, check out the :r
     device="cuda" if torch.cuda.is_available() else "cpu",
     batch_size=8,
     group_size=8,
-    reduce_memory_peak=True,
   )
 
 Saving and Loading Agents

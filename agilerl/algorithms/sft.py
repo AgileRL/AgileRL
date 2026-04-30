@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from accelerate import Accelerator
     from peft import LoraConfig
 
-    from agilerl.wrappers.llm_envs import SFTGym
+    from agilerl.llm_envs import SFTGym
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
@@ -68,9 +68,6 @@ class SFT(LLMAlgorithm):
     :param micro_batch_size_per_gpu: Micro-batch size for gradient accumulation.
         When None the full batch is used in a single forward pass.
     :type micro_batch_size_per_gpu: int, optional
-    :param reduce_memory_peak: Enable extra memory-reduction heuristics, defaults
-        to False
-    :type reduce_memory_peak: bool, optional
     :param device: Compute device, defaults to ``"cpu"``
     :type device: str, optional
     :param lora_config: LoRA config; when supplied the base model is wrapped with
@@ -93,6 +90,12 @@ class SFT(LLMAlgorithm):
         computation, defaults to False. Requires ``liger_kernel`` to be installed;
         pass ``False`` to fall back to the standard PyTorch path.
     :type use_liger_loss: bool, optional
+    :param use_separate_reference_adapter: Also create a ``reference`` LoRA adapter
+        alongside ``actor``. SFT does not itself use a reference policy, so this
+        defaults to ``False``; enable it when you plan to save an SFT checkpoint
+        that will be consumed by a downstream algorithm (e.g. DPO/GRPO) which
+        expects a reference adapter. Defaults to False.
+    :type use_separate_reference_adapter: bool, optional
     """
 
     def __init__(
@@ -110,7 +113,6 @@ class SFT(LLMAlgorithm):
         update_epochs: int = 1,
         calc_position_embeddings: bool = True,
         micro_batch_size_per_gpu: int | None = None,
-        reduce_memory_peak: bool = False,
         device: str = "cpu",
         lora_config: LoraConfig | None = None,
         accelerator: Accelerator | None = None,
@@ -119,6 +121,8 @@ class SFT(LLMAlgorithm):
         seed: int = 42,
         gradient_checkpointing: bool = True,
         use_liger_loss: bool = False,
+        reduce_memory_peak: bool = False,
+        use_separate_reference_adapter: bool = False,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -137,14 +141,13 @@ class SFT(LLMAlgorithm):
             lr=lr,
             max_grad_norm=max_grad_norm,
             clone=clone,
-            reduce_memory_peak=reduce_memory_peak,
             calc_position_embeddings=calc_position_embeddings,
             seed=seed,
             pad_token_id=pad_token_id,
             pad_token=pad_token,
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
-            use_separate_reference_adapter=False,
+            use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
             actor_network=actor_network,
             model_config=model_config,
@@ -156,6 +159,7 @@ class SFT(LLMAlgorithm):
             accelerator=accelerator,
             name="SFT",
             gradient_checkpointing=gradient_checkpointing,
+            reduce_memory_peak=reduce_memory_peak,
         )
         self.temperature = 0
         self.use_vllm = False
@@ -189,7 +193,7 @@ class SFT(LLMAlgorithm):
         self,
         experiences: ExperiencesType,
         training: bool = True,
-    ) -> tuple[float, float]:
+    ) -> dict[str, float]:
         """Update model parameters using cross-entropy loss on response tokens.
 
         The loss is computed only on response tokens; prompt tokens and padding
@@ -197,7 +201,7 @@ class SFT(LLMAlgorithm):
 
         :param experiences: Dict with keys ``input_ids`` (prompt + response token
             IDs), ``attention_mask``, and ``prompt_lengths`` (number of prompt
-            tokens per sample) as produced by :class:`~agilerl.wrappers.llm_envs.SFTGym`.
+            tokens per sample) as produced by :class:`~agilerl.llm_envs.SFTGym`.
         :type experiences: ExperiencesType
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
@@ -235,9 +239,12 @@ class SFT(LLMAlgorithm):
             getattr(self, "micro_batch_size_per_gpu", self.batch_size_per_process),
         )
         batch_idxs = np.arange(num_samples)
-        mean_loss = 0.0
-        mean_perplexity = 0.0
         num_updates = 0
+
+        learn_metrics = {
+            "mean_loss": 0.0,
+            "mean_perplexity": 0.0,
+        }
 
         for _ in range(self.update_epochs):
             for start in range(0, num_samples, micro_bs):
@@ -252,13 +259,13 @@ class SFT(LLMAlgorithm):
                 if training:
                     self._backward_pass(loss)
                 loss_val = loss.item()
-                mean_loss += loss_val
-                mean_perplexity += float(np.exp(min(loss_val, 100)))
+                learn_metrics["mean_loss"] += loss_val
+                learn_metrics["mean_perplexity"] += float(np.exp(min(loss_val, 100)))
                 num_updates += 1
 
-        mean_loss /= num_updates
-        mean_perplexity /= num_updates
-        return mean_loss, mean_perplexity
+        learn_metrics["mean_loss"] /= num_updates
+        learn_metrics["mean_perplexity"] /= num_updates
+        return learn_metrics
 
     def _sft_loss(
         self,
@@ -319,8 +326,8 @@ class SFT(LLMAlgorithm):
             prompts = env.reset()
             losses = []
             for _ in range(loop):
-                loss, _ = self.learn(prompts, training=False)
-                losses.append(loss)
+                metrics = self.learn(prompts, training=False)
+                losses.append(metrics["mean_loss"])
                 prompts = env.step()
             mean_fit = -float(np.mean(losses))
         self.fitness.append(mean_fit)

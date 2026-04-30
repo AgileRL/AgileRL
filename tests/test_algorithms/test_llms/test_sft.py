@@ -19,7 +19,7 @@ from transformers import AutoTokenizer
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
 from agilerl.algorithms.sft import SFT
-from agilerl.wrappers.llm_envs import SFTGym
+from agilerl.llm_envs import SFTGym
 from tests.test_algorithms.test_llms.test_grpo import (
     _patch_mps_learn_hooks,
     create_module,
@@ -190,7 +190,7 @@ def test_init_sft(
         from_name=from_name,
     )
     assert sft.batch_size_per_process == 16 if not reduce_memory_peak else 1
-    assert sft.lr == 1e-4 if use_deepspeed_optimizer else 5e-5
+    assert sft.lr == 5e-5
     assert sft.max_grad_norm == 0.1
     assert sft.update_epochs == 1
     assert sft.temperature == 0
@@ -375,11 +375,11 @@ def test_sft_learn(
     for name, param in sft.actor.named_parameters():
         if ("lora_A" in name or "lora_B" in name) and param is not None:
             param.data.normal_(mean=0, std=1.0)
-
     prompts = env.reset()
     pre_learn_actor_state_dict = copy.deepcopy(sft.actor.state_dict())
-    loss, perplexity = sft.learn(prompts)
-
+    metrics = sft.learn(prompts)
+    loss = metrics["mean_loss"]
+    perplexity = metrics["mean_perplexity"]
     assert isinstance(loss, float)
     assert isinstance(perplexity, float)
     assert perplexity >= 1.0  # perplexity is exp(loss), always >= 1
@@ -594,7 +594,6 @@ def test_sft_clean_up(
 )
 @pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-@pytest.mark.parametrize("lora_only", [False, True])
 def test_sft_save_load_checkpoint(
     deepspeed_env,
     sft_factory,
@@ -608,7 +607,6 @@ def test_sft_save_load_checkpoint(
     pretrained_model_name_or_path,
     reduce_memory_peak,
     micro_batch_size_per_gpu,
-    lora_only,
 ):
     sft = sft_factory(
         accelerator_factory,
@@ -624,7 +622,7 @@ def test_sft_save_load_checkpoint(
     )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
     with tempfile.TemporaryDirectory() as tmpdir:
-        sft.save_checkpoint(tmpdir, lora_only=lora_only)
+        sft.save_checkpoint(tmpdir)
         new_sft = SFT(
             actor_network=model_factory(pretrained_model_name_or_path),
             pad_token_id=vocab_size - 1,
@@ -632,7 +630,7 @@ def test_sft_save_load_checkpoint(
             device="cuda" if torch.cuda.is_available() else "cpu",
             accelerator=accelerator,
         )
-        new_sft.load_checkpoint(tmpdir)
+        new_sft.load_checkpoint(tmpdir, merge_lora_configs=True)
 
         for attr in EvolvableAlgorithm.inspect_attributes(sft):
             if attr.startswith("_"):
@@ -660,6 +658,12 @@ def test_sft_save_load_checkpoint(
                     getattr(new_sft, attr).__class__.__name__
                     == getattr(sft, attr).__class__.__name__
                 )
+            elif attr == "lora_config":
+                assert getattr(new_sft, attr) is not None
+                assert getattr(sft, attr) is not None
+                old_targets = set(getattr(sft, attr).target_modules)
+                new_targets = set(getattr(new_sft, attr).target_modules)
+                assert old_targets.issubset(new_targets)
             elif not isinstance(getattr(sft, attr), torch.Tensor):
                 assert getattr(new_sft, attr) == getattr(sft, attr), (
                     f"Attribute {attr} is not equal"
@@ -709,8 +713,8 @@ def test_sft_exception_on_recompile(
         reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
-    with pytest.raises(NotImplementedError):
-        sft.recompile()
+    # LLMAlgorithm.recompile() is a guarded no-op unless torch_compiler is enabled.
+    sft.recompile()
     sft.clean_up()
 
 

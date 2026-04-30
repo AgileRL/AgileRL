@@ -46,7 +46,7 @@ Dependencies
     from transformers import AutoTokenizer
     from agilerl.algorithms import GRPO
     from agilerl.training.train_llm import finetune_llm_reasoning
-    from agilerl.wrappers.llm_envs import ReasoningGym
+    from agilerl.llm_envs import ReasoningGym
 
 
 Defining our base model and dataset
@@ -89,7 +89,7 @@ become very good at taking actions to solve tasks - to develop *agency*. Since w
 with reinforcement learning, it becomes an agent through this process.
 
 We must create a reinforcement learning environment in which our agent can explore possible
-solutions and learn to optimise rewards. AgileRL provides a :class:`ReasoningGym <agilerl.wrappers.llm_envs.ReasoningGym>`
+solutions and learn to optimise rewards. AgileRL provides a :class:`ReasoningGym <agilerl.llm_envs.ReasoningGym>`
 class that wraps a Hugging Face dataset and converts it into a reinforcement learning, gymnasium-style environment.
 
 So, how does the environment know how to reward an agent for its outputs? Well, we must define a *reward_function*
@@ -229,7 +229,6 @@ training in this tutorial, we use deepspeed and accelerate.
         max_output_tokens=1024,
         batch_size=4,
         group_size=12,
-        reduce_memory_peak=True,
         accelerator=Accelerator(),
         use_vllm=True,
         vllm_config=VLLMConfig(
@@ -386,10 +385,10 @@ function and is an example of how we might choose to train our agent to exhibit 
                 ):
                     if agent.accelerator is not None:
                         unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
-                        agent.save_checkpoint(checkpoint_path, lora_only=True)
+                        agent.save_checkpoint(checkpoint_path)
                         print(f"Saved checkpoint {save_path}")
                     else:
-                        agent.save_checkpoint(checkpoint_path, lora_only=True)
+                        agent.save_checkpoint(checkpoint_path)
 
 
 Loading a Trained Agent for Inference
