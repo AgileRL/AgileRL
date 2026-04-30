@@ -18,7 +18,7 @@ from agilerl.arena.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
-from agilerl.arena.inference import Agent
+from agilerl.arena.inference import Agent, RLData
 from agilerl.arena.inference_cache import (
     load_inference_binding,
     normalized_deployment_name,
@@ -713,9 +713,7 @@ class ArenaClient:
     ### Inference ###
     # -------------------------------------------------------------------------
 
-    def deploy_agent(
-        self, experiment_name: str, checkpoint: str | None = None
-    ) -> Any:
+    def deploy_agent(self, experiment_name: str, checkpoint: str | None = None) -> Any:
         """Create an inference deployment from an experiment checkpoint."""
         return self._request(
             "POST",
@@ -855,6 +853,14 @@ class ArenaClient:
         save_inference_binding(key, url, api_key)
         return url, api_key
 
+    @staticmethod
+    def parse_inference_observation(raw: str, *, batched: bool = False) -> RLData:
+        """Turn ``--obs`` / deployment-style string into arrays for :meth:`Agent.get_action`.
+
+        Delegates to :meth:`~agilerl.arena.inference.Agent.observation_from_string`.
+        """
+        return Agent.observation_from_string(raw, batched=batched)
+
     def open_inference_agent(
         self,
         deployment_name: str,
@@ -864,7 +870,14 @@ class ArenaClient:
         project_name: str | None = None,
         timeout: int | None = None,
     ) -> Agent:
-        """Build an :class:`~agilerl.arena.inference.Agent` for a named deployment."""
+        """Build an :class:`~agilerl.arena.inference.Agent` for a named deployment.
+
+        Deployment observations use ``np.save`` bytes as base64 (nested JSON
+        structure mirrors :meth:`~agilerl.arena.inference.Agent.serialize`).
+        Use :meth:`parse_inference_observation` on the same string format as
+        request body ``obs``, then :meth:`~agilerl.arena.inference.Agent.get_action`.
+        CLI: ``arena inference run … --obs '<json-or-base64>'``.
+        """
         url, api_key = self.ensure_inference_binding(
             deployment_name,
             refresh=refresh,

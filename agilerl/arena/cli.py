@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import click
-import numpy as np
 
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig, build_client
@@ -681,6 +680,24 @@ def _numpy_leaf_jsonable(value: Any) -> Any:
     return value
 
 
+class _InferenceCliGroup(click.Group):
+    """Default subcommand ``run`` when argv does not start with a known subcommand.
+
+    Deployment literally named ``list``: use ``run list --obs ...``.
+    """
+
+    _HELP_TOKENS = frozenset(("--help", "-h"))
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        if args:
+            head = args[0]
+            if head not in self.commands and head not in self._HELP_TOKENS:
+                args.insert(0, "run")
+        return super().resolve_command(ctx, args)
+
+
 def _redact_inference_rows_for_display(
     rows: list[dict[str, Any]],
     *,
@@ -702,9 +719,13 @@ def _redact_inference_rows_for_display(
     return out
 
 
-@main.group("inference")
+@main.group("inference", cls=_InferenceCliGroup)
 def inference_cli() -> None:
-    """List deployments or call ``POST /get_action`` on a deployed agent."""
+    """List deployments or call ``POST /get_action`` (``--obs`` = JSON or base64 wire form).
+
+    Omit ``run`` to invoke ``run``; only ``list`` selects listing. For a deployment
+    named ``list``, call ``run list``.
+    """
 
 
 @inference_cli.command("list")
@@ -768,10 +789,10 @@ def inference_list(
     help="Project name (exact) — narrows duplicate deployment names.",
 )
 @click.option(
-    "--obs-npy",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    "--obs",
+    "obs_raw",
     required=True,
-    help="Observation tensor(s) as a NumPy .npy file for POST /get_action.",
+    help="Observation: JSON tree of base64 blobs (request ``obs`` field) or single base64 .npy string.",
 )
 @click.pass_obj
 def inference_run(
@@ -780,24 +801,25 @@ def inference_run(
     refresh: bool,
     experiment_name: str | None,
     project_name: str | None,
-    obs_npy: Path,
+    obs_raw: str,
 ) -> None:
     """Query a deployed model by deployment name (uses cached URL/key after first fetch)."""
     with arena_client(config) as client:
+        try:
+            obs = client.parse_inference_observation(obs_raw)
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
         with client.open_inference_agent(
             deployment_name,
             refresh=refresh,
             experiment_name=experiment_name,
             project_name=project_name,
         ) as agent:
-            obs = np.load(obs_npy, allow_pickle=False)
             status, action, next_hidden = agent.get_action(obs)
 
         hidden_out = None
         if next_hidden is not None:
-            hidden_out = {
-                k: _numpy_leaf_jsonable(v) for k, v in next_hidden.items()
-            }
+            hidden_out = {k: _numpy_leaf_jsonable(v) for k, v in next_hidden.items()}
 
         emit_result(
             {

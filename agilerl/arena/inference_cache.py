@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from agilerl.arena.auth import ArenaOAuth2, load_credentials_payload
 
 DEPLOYMENT_INFERENCE_KEY = "deployment_inference"

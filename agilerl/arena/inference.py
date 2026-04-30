@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 from typing import Self, TypeAlias
 
@@ -123,6 +124,71 @@ class Agent:
 
         # Remove the batch dimension if not batched
         return arr if batched else arr.squeeze(axis=0)
+
+    @staticmethod
+    def _is_json_number_scalar(x: object) -> bool:
+        if isinstance(x, bool):
+            return False
+        return isinstance(x, (int, float))
+
+    @staticmethod
+    def _is_numeric_json_list(obj: list) -> bool:
+        return all(Agent._is_json_number_scalar(x) for x in obj)
+
+    @staticmethod
+    def _parse_bracket_float_vector(text: str) -> np.ndarray | None:
+        """If *text* is ``[ f1 f2 ... ]`` (whitespace-separated, commas optional), return 1d float array."""
+        t = text.strip()
+        if len(t) < 2 or t[0] != "[" or t[-1] != "]":
+            return None
+        inner = t[1:-1].strip()
+        if not inner:
+            return np.array([], dtype=np.float64)
+        parts = inner.replace(",", " ").split()
+        nums: list[float] = []
+        for p in parts:
+            try:
+                nums.append(float(p))
+            except ValueError:
+                return None
+        return np.asarray(nums, dtype=np.float64)
+
+    @staticmethod
+    def observation_from_string(raw: str, *, batched: bool = False) -> RLData:
+        """Parse CLI / copy-paste observation into arrays for :meth:`get_action`.
+
+        Accepts nested JSON / base64 (:class:`SerializedRLData`), bare base64 blob,
+        JSON array of numbers, or bracket vector ``"[ f1 f2 ... ]`` (shell-style:
+        commas optional).
+
+        Whitespace trimmed from *raw*. For ``batched`` semantics see
+        :meth:`deserialize`.
+
+        :param raw: JSON, base64, ``[ floats ... ]``, or JSON number scalar.
+        :returns: Decoded observation (never ``None``).
+        :raises ValueError: Empty input or observation decoded to ``None``.
+        """
+        text = raw.strip()
+        if not text:
+            raise ValueError("Observation string is empty.")
+
+        try:
+            parsed: SerializedRLData = json.loads(text)
+        except json.JSONDecodeError:
+            vec = Agent._parse_bracket_float_vector(text)
+            if vec is not None:
+                return vec
+            decoded = Agent.deserialize(text, batched=batched)
+        else:
+            if isinstance(parsed, list) and Agent._is_numeric_json_list(parsed):
+                return np.asarray(parsed, dtype=np.float64)
+            if Agent._is_json_number_scalar(parsed):
+                return np.asarray(parsed, dtype=np.float64)
+            decoded = Agent.deserialize(parsed, batched=batched)
+
+        if decoded is None:
+            raise ValueError("Observation JSON was null.")
+        return decoded
 
     @staticmethod
     def get_batch_size(observation: RLData) -> int:
