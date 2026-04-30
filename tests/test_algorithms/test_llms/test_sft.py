@@ -13,6 +13,7 @@ from accelerate.state import AcceleratorState
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
 from datasets import Dataset
 from deepspeed.runtime.engine import DeepSpeedEngine
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from peft import LoraConfig
 from transformers import AutoTokenizer
 
@@ -141,7 +142,9 @@ def sft_factory():
     "config, use_deepspeed_optimizer",
     [
         (None, False),
+        (deepspeed_config_stage_1, True),
         (deepspeed_config_stage_1, False),
+        (deepspeed_config_stage_2, True),
         (deepspeed_config_stage_2, False),
     ],
 )
@@ -208,8 +211,13 @@ def test_init_sft(
     assert sft.steps == [0]
     if config is not None:
         assert isinstance(sft.actor, DeepSpeedEngine)
-        assert isinstance(sft.optimizer, OptimizerWrapper)
-        assert isinstance(sft.optimizer.optimizer, DeepSpeedOptimizerWrapper)
+        if not use_deepspeed_optimizer:
+            assert isinstance(sft.optimizer, OptimizerWrapper)
+            assert isinstance(sft.optimizer.optimizer, DeepSpeedOptimizerWrapper)
+        else:
+            assert isinstance(sft.optimizer, OptimizerWrapper)
+            assert isinstance(sft.optimizer.optimizer, DeepSpeedZeroOptimizer)
+            assert isinstance(sft.actor.optimizer, DeepSpeedZeroOptimizer)
     else:
         assert isinstance(sft.actor, torch.nn.Module)
     sft.clean_up()
