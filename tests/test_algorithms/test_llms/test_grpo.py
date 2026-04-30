@@ -1013,7 +1013,7 @@ def test_init_grpo_vllm_invalid_attention_backend_value_error(
     use_deepspeed_optimizer,
     config,
 ):
-    pretrained_model_name_or_path = "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"
+    pretrained_model_name_or_path = TINY_LLM_FIXTURE_PATH
     vocab_size = 1000
     max_tokens = 20
     group_size = 5
