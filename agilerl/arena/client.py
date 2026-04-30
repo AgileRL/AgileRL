@@ -556,24 +556,23 @@ class ArenaClient:
 
     def list_projects(self) -> list[dict[str, Any]]:
         """List all projects in Arena."""
-        # TODO: Modify endpoint
-        return self._request("GET", "/api/projects")
+        return self._request("GET", "/api/cli/v1/projects")
 
     def create_project(
         self, name: str, description: str | None, llm_based: bool
     ) -> dict[str, Any]:
         """Create a new project in Arena."""
-        # TODO: Modify endpoint
         return self._request(
             "POST",
-            "/api/projects/create",
+            "/api/cli/v1/projects/create",
             json={"name": name, "description": description, "llm_based": llm_based},
         )
 
     def delete_project(self, name: str) -> None:
         """Delete a project in Arena."""
-        # TODO: Modify endpoint
-        return self._request("DELETE", "/api/projects/delete", json={"name": name})
+        return self._request(
+            "DELETE", "/api/cli/v1/projects/delete", json={"name": name}
+        )
 
     # -------------------------------------------------------------------------
     ### Inference ###
