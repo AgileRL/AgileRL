@@ -4,7 +4,7 @@ import io
 import logging
 import os
 import tarfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Self
@@ -508,7 +508,6 @@ class ArenaClient:
 
     # TODO: Update HPO params (maybe leave for v2 if too complicated)
 
-    # TODO: Check with Rob
     # Should be a rich table sorted by evaluation score descending showing
     # [steps, training_score, evaluation_score, size_mb]
     def list_checkpoints(self, experiment_name: str) -> list[dict[str, Any]]:
@@ -523,6 +522,67 @@ class ArenaClient:
             "GET",
             "/api/cli/v1/experiments/jobs/checkpoints",
             params={"experiment_name": experiment_name},
+        )
+
+    def preview_experiment_metrics_csv(
+        self,
+        experiment_name: str,
+        *,
+        preview_rows: int,
+        metrics: Sequence[str] | None = None,
+        project: str | None = None,
+    ) -> tuple[bytes, str | None, str | None]:
+        """Fetch a capped CSV snippet (Arena CLI ``--metric`` / ``--preview-rows``).
+
+        Uses ``GET /api/cli/v1/experiments/metrics`` with ``preview_rows`` set.
+        Omit ``metrics`` to include all columns.
+
+        :param experiment_name: Experiment name (latest match in scope).
+        :param preview_rows: Maximum number of **data** rows in the CSV (server-capped).
+        :param metrics: Metric column names to include (repeat query param ``metric``).
+        :param project: Optional exact project name.
+        """
+        params: list[tuple[str, Any]] = [
+            ("experiment_name", experiment_name),
+            ("preview_rows", preview_rows),
+        ]
+        if project is not None:
+            params.append(("project", project))
+        if metrics:
+            for m in metrics:
+                params.extend(("metric", m))
+        return self._request_raw(
+            "GET",
+            "/api/cli/v1/experiments/metrics",
+            params=params,
+        )
+
+    def list_experiment_metric_names(
+        self,
+        experiment_name: str,
+        *,
+        project: str | None = None,
+        details: bool = False,
+    ) -> list[str] | dict[str, Any]:
+        r"""List metric column names recorded for an experiment (JSON).
+
+        For a **CSV preview** with ``--metric`` / ``--preview-rows``-style filters,
+        use :meth:`preview_experiment_metrics_csv`.
+
+        :param experiment_name: Experiment name (latest updated match in scope).
+        :param project: Optional exact project name in the current org.
+        :param details: When True, the API returns ``{\"experiment_id\", \"metrics\"}``.
+        :returns: Sorted unique metric names, or that object when ``details`` is True.
+        """
+        params: dict[str, Any] = {"experiment_name": experiment_name}
+        if project is not None:
+            params["project"] = project
+        if details:
+            params["details"] = True
+        return self._request(
+            "GET",
+            "/api/cli/v1/experiments/metrics",
+            params=params,
         )
 
     def list_resources(self) -> list[dict[str, Any]]:
@@ -545,7 +605,7 @@ class ArenaClient:
         """
         return self._request_raw(
             "POST",
-            f"/api/experiments/{experiment_name}/metrics",
+            f"/api/cli/v1/experiments/{experiment_name}/metrics",
             json={"metrics": metrics},
         )
 

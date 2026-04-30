@@ -584,8 +584,16 @@ def experiment_metrics(
             },
         )
 
-        if preview_rows > 0 and (content_type or "").startswith("text/csv"):
-            emit_csv_preview(payload, max_rows=preview_rows)
+        if preview_rows > 0:
+            preview_payload, preview_ct, _ = client.preview_experiment_metrics_csv(
+                experiment_name=experiment_name,
+                preview_rows=preview_rows,
+                metrics=metrics_list,
+            )
+            if (preview_ct or "").startswith("text/csv"):
+                emit_csv_preview(preview_payload, max_rows=preview_rows)
+            elif (content_type or "").startswith("text/csv"):
+                emit_csv_preview(payload, max_rows=preview_rows)
 
 
 @experiment.command("deploy")
