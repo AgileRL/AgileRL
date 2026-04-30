@@ -15,6 +15,7 @@ from transformers import AutoTokenizer
 from accelerate.state import AcceleratorState
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
+from tests import TINY_LLM_FIXTURE_PATH
 from agilerl.utils.algo_utils import DummyOptimizer
 from agilerl.utils.llm_utils import (
     PreferenceGym,
@@ -39,8 +40,6 @@ from agilerl.utils.llm_utils import (
     get_state_dict,
     sample_eval_prompts,
 )
-
-pytestmark = pytest.mark.llm
 
 DUMMY_CONVERSATION_TEMPLATE = [
     {
@@ -321,7 +320,7 @@ def test_reasoning_gym_init(
     use_accelerator,
 ):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     data_batch_size = 8
     env = ReasoningGym(
         train_dataset=train_dataset,
@@ -357,7 +356,7 @@ def test_reasoning_gym_step(
     eval_mode,
 ):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     data_batch_size = 8
     env = ReasoningGym(
         train_dataset=train_dataset,
@@ -386,7 +385,7 @@ def test_reasoning_gym_reset(
     reset_dataloaders,
 ):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     data_batch_size = 8
     env = ReasoningGym(
         train_dataset=train_dataset,
@@ -411,7 +410,7 @@ def test_reasoning_gym_reset_dataloaders(
     reset_dataloaders,
 ):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     data_batch_size = 8
     env = ReasoningGym(
         train_dataset=train_dataset,
@@ -440,7 +439,7 @@ def test_reasoning_gym_reset_dataloaders(
 @pytest.mark.parametrize("num_samples", [200])
 def test_reset_warning(reasoning_dataset, num_samples):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     data_batch_size = 8
     env = ReasoningGym(
         train_dataset=train_dataset,
@@ -458,7 +457,7 @@ def test_reset_warning(reasoning_dataset, num_samples):
 @pytest.mark.parametrize("num_samples", [200])
 def test_reasoning_gym_len(reasoning_dataset, num_samples):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     data_batch_size = 8
     env = ReasoningGym(
         train_dataset=train_dataset,
@@ -478,10 +477,10 @@ def test_reasoning_gym_len(reasoning_dataset, num_samples):
 def test_create_chat_collate_fn(reasoning_dataset, num_samples):
     """Test the create_chat_collate_fn method."""
     # Create a mock tokenizer
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
 
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     data_batch_size = 8
 
     env = ReasoningGym(
@@ -527,7 +526,7 @@ def test_reset_dataloaders_when_train_dataloader_exhausted(
     data_batch_size,
 ):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -552,7 +551,7 @@ def test_not_reset_dataloaders_when_test_dataloader_exhausted(
     data_batch_size,
 ):
     train_dataset, test_dataset = reasoning_dataset
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -918,7 +917,7 @@ def test_preference_gym_max_context_length_warning():
             "rejected": ["This is an answer."],
         },
     )
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     data_batch_size = 8
     with pytest.warns(
         UserWarning,
@@ -952,7 +951,7 @@ def test_reasoning_gym_max_context_length_warning():
             "answer": ["This is an answer."],
         },
     )
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     data_batch_size = 8
     with pytest.warns(
         UserWarning,

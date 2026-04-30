@@ -1446,6 +1446,13 @@ class VLLMConfig:
     :param frequency_penalty: Penalise tokens proportionally to how often they have
         appeared so far.  Passed to ``SamplingParams``, defaults to 0.0 (disabled).
     :type frequency_penalty: float, optional
+    :param kv_cache_memory_bytes: Manually specify KV cache size in bytes instead of
+        letting vLLM auto-size from ``gpu_memory_utilization``.  When set, vLLM skips
+        its startup memory-profiling assertion (which fails if other processes on the
+        same GPU release memory mid-init), making it safe to colocate multiple vLLM
+        processes on a shared GPU.  Overrides ``gpu_memory_utilization``.  Defaults
+        to None.
+    :type kv_cache_memory_bytes: int | None, optional
     """
 
     # Colocate mode parameters
@@ -1460,6 +1467,7 @@ class VLLMConfig:
     stop_sequences: list[str] | None = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
+    kv_cache_memory_bytes: int | None = None
 
     def __post_init__(self) -> None:
         if self.sleep_mode:

@@ -17,7 +17,7 @@ from tests.utils import (
     spawn_new_process_for_each_test,
 )
 
-pytestmark = pytest.mark.llm
+pytestmark = pytest.mark.vllm
 
 
 @pytest.fixture(scope="function")

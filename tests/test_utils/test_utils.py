@@ -1152,7 +1152,6 @@ def test_check_box2d_available_raises_when_box2d_missing(monkeypatch):
         _check_box2d_available("LunarLander-v2")
 
 
-@pytest.mark.llm
 def test_create_population_sft_cpu():
     """Exercise ``create_population`` SFT branch (clone after first agent)."""
     pytest.importorskip("peft")
@@ -1185,7 +1184,6 @@ def test_create_population_sft_cpu():
     assert all(isinstance(agent, SFT) for agent in pop)
 
 
-@pytest.mark.llm
 def test_create_population_dpo_cpu():
     """Exercise ``create_population`` DPO branch (clone after first agent)."""
     pytest.importorskip("peft")

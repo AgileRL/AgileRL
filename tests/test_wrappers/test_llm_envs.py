@@ -23,8 +23,6 @@ from agilerl.llm_envs import (
 )
 from tests import TINY_LLM_FIXTURE_PATH
 
-pytestmark = pytest.mark.llm
-
 DUMMY_CONVERSATION_TEMPLATE = [
     {
         "role": "system",

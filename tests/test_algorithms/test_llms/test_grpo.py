@@ -50,8 +50,6 @@ from tests.utils import (
 )
 from agilerl.utils.llm_utils import ReasoningGym
 
-pytestmark = pytest.mark.llm
-
 deepspeed_base_config = {
     "bf16": {
         "enabled": torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
@@ -339,10 +337,15 @@ def generate_grpo(
         accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
     if use_vllm:
         lora_config = None
-        # 0.22 keeps four parallel CI containers within total GPU capacity
-        # (4 * 0.22 = 0.88) on the shared self-hosted runner.
+        # kv_cache_memory_bytes pins KV cache to a tiny fixed size and skips
+        # vLLM's startup memory-profiling assertion. The assertion fails when
+        # peer processes on the shared CI GPU release memory mid-init; pinning
+        # the size makes it safe to run several vLLM processes concurrently.
+        # gpu_memory_utilization is ignored when kv_cache_memory_bytes is set,
+        # so its value here is just a fallback for other paths.
         vllm_config = VLLMConfig(
             gpu_memory_utilization=0.22,
+            kv_cache_memory_bytes=32 * 1024 * 1024,
             max_num_seqs=1,
             sleep_mode=sleep_mode,
             swap_space=0,
@@ -556,6 +559,7 @@ def test_get_action_grpo_hf_stop_iteration_device_fallback():
     "use_vllm, pretrained_model_name_or_path",
     [(True, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_move_model_to_vllm(
     deepspeed_env,
@@ -677,6 +681,7 @@ def test_init_grpo_warns_when_hf_generate_chunk_size_set_with_vllm(
         (True, TINY_LLM_FIXTURE_PATH),
     ],
 )
+@pytest.mark.gpu
 @pytest.mark.parametrize("training", [True, False])
 @pytest.mark.parametrize("data_batch_size", [1])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -785,6 +790,7 @@ def test_get_action_grpo_vllm_sleep_mode(
     "from_name",
     [True, False],
 )
+@pytest.mark.vllm
 def test_init_grpo_with_accelerator(
     deepspeed_env,
     grpo_factory,
@@ -878,6 +884,7 @@ def test_init_grpo_with_accelerator(
     "pretrained_model_name_or_path",
     [TINY_LLM_FIXTURE_PATH],
 )
+@pytest.mark.gpu
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -945,6 +952,7 @@ def test_init_grpo_vllm_with_tp_gt_one(
     "pretrained_model_name_or_path",
     [TINY_LLM_FIXTURE_PATH],
 )
+@pytest.mark.gpu
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -1004,6 +1012,7 @@ def test_init_grpo_vllm_tp_value_error(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 def test_init_grpo_vllm_invalid_attention_backend_value_error(
@@ -1058,6 +1067,7 @@ def test_init_grpo_vllm_invalid_attention_backend_value_error(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 def test_init_grpo_scheduler_warning_no_accelerator(
     deepspeed_env,
     model_factory,
@@ -1096,6 +1106,7 @@ def test_init_grpo_scheduler_warning_no_accelerator(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_batch_size_value_error(
     deepspeed_env,
@@ -1149,6 +1160,7 @@ def test_init_grpo_batch_size_value_error(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_max_model_len_and_max_output_tokens_none_error(
     deepspeed_env,
@@ -1255,6 +1267,7 @@ def test_init_grpo_cispo_warns_when_beta_nonzero():
     grpo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("loss_type", ["grpo", "gspo"])
 def test_init_grpo_non_cispo_nonzero_beta_no_warning(loss_type):
     with warnings.catch_warnings(record=True) as caught:
@@ -1277,6 +1290,7 @@ def test_init_grpo_non_cispo_nonzero_beta_no_warning(loss_type):
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_batch_size_grad_accum_error(
     deepspeed_env,
@@ -1338,6 +1352,7 @@ def test_init_grpo_batch_size_grad_accum_error(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_with_no_accelerator(
     deepspeed_env,
@@ -1401,6 +1416,7 @@ def test_init_grpo_with_no_accelerator(
     grpo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("config", [deepspeed_config_stage_3])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -1449,6 +1465,7 @@ def test_init_grpo_zero3_warning(
     grpo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -1500,6 +1517,7 @@ def test_init_grpo_lr_warning(
     grpo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -1548,6 +1566,7 @@ def test_init_grpo_max_grad_norm_warning(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("config", [deepspeed_config_stage_1_with_scheduler])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [True])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -1595,6 +1614,7 @@ def test_init_grpo_scheduler_warning(
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("use_separate_reference_adapter", [False])
@@ -1695,6 +1715,7 @@ def _build_grpo_for_colocate_tests(
     "use_vllm, pretrained_model_name_or_path",
     [(True, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.gpu
 @pytest.mark.parametrize("training", [True, False])
 @pytest.mark.parametrize("data_batch_size", [8])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
@@ -2252,6 +2273,7 @@ def test_cispo_loss_clamps_importance_ratio_on_both_sides():
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_loss(
     deepspeed_env,
@@ -2324,6 +2346,7 @@ def test_grpo_loss(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("batch_size", [6])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("use_liger_loss", [False, True])
@@ -2792,6 +2815,7 @@ def test_learn_empty_minibatch_branch_continues_without_grpo_step():
         (False, None),
     ],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_get_logprobs(
@@ -2845,6 +2869,7 @@ def test_get_logprobs(
     "use_vllm, pretrained_model_name_or_path",
     [(False, None)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_get_backward_pass_with_scheduler(
@@ -2897,6 +2922,7 @@ def test_get_backward_pass_with_scheduler(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_value_error_with_nan_loss(
@@ -2980,6 +3006,7 @@ def test_grpo_load():
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("lora_only", [False, True])
 def test_grpo_save_load_checkpoint(
@@ -3101,6 +3128,7 @@ def test_grpo_save_load_checkpoint(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_save_load_distributed_actor_no_accelerator(
@@ -3155,6 +3183,7 @@ def test_save_load_distributed_actor_no_accelerator(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_save_load_distributed_actor(
     deepspeed_env,
@@ -3271,6 +3300,7 @@ def test_grpo_save_load_distributed_actor(
     "use_vllm, pretrained_model_name_or_path",
     [(True, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_save_load_distributed_actor_vllm(
     deepspeed_env,
@@ -3384,6 +3414,7 @@ def test_grpo_save_load_distributed_actor_vllm(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_clone_with_accelerator(
     deepspeed_env,
@@ -3486,6 +3517,7 @@ def test_grpo_clone_with_accelerator(
     "use_vllm, pretrained_model_name_or_path",
     [(True, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @patch("agilerl.algorithms.core.base.LLM", DummyVLLM)
 def test_grpo_clone_with_accelerator_vllm(
@@ -3592,6 +3624,7 @@ def test_grpo_clone_with_accelerator_vllm(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_test(
@@ -3785,6 +3818,7 @@ def test_clone_llm_peft_raises_error():
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_clean_up(
@@ -3835,6 +3869,7 @@ def test_grpo_clean_up(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_preprocess_observation(
@@ -3886,6 +3921,7 @@ def test_grpo_preprocess_observation(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_load_distributed_actor_value_error(
@@ -3942,6 +3978,7 @@ def test_load_distributed_actor_value_error(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_load_distributed_actor_warning(
@@ -3983,6 +4020,7 @@ def test_load_distributed_actor_warning(
     grpo.clean_up()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
 @pytest.mark.parametrize("config", [None])
 def test_init_grpo_lora_config_warning(
@@ -4081,6 +4119,7 @@ def test_init_grpo_separate_reference_adapter_deprecation_warning(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_update_lr(
     deepspeed_env,
@@ -4161,6 +4200,7 @@ def test_grpo_update_lr(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_set_reference_policy(
     deepspeed_env,
@@ -4231,6 +4271,7 @@ def test_set_reference_policy(
     "use_vllm, pretrained_model_name_or_path",
     [(False, TINY_LLM_FIXTURE_PATH)],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
     deepspeed_env,
@@ -4316,6 +4357,7 @@ def test_grpo_ref_actor_is_same_as_actor_after_learning_reference_adapater(
         (False, TINY_LLM_FIXTURE_PATH),
     ],
 )
+@pytest.mark.vllm
 @pytest.mark.parametrize("training", [True, False])
 @pytest.mark.parametrize("data_batch_size", [4])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])

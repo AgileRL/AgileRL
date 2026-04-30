@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from agilerl import HAS_LLM_DEPENDENCIES
 import numpy as np
 import torch
 from gymnasium import spaces
@@ -12,7 +13,7 @@ from agilerl.algorithms import PPO
 from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType
 
-if TYPE_CHECKING:
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
     from agilerl.llm_envs import SyncMultiTurnVecEnv
 
@@ -275,8 +276,6 @@ def collect_rollouts_llm(
         and updated group seed.
     :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int]
     """
-    from agilerl.algorithms import GRPO
-
     prompts = env.reset(
         seed=group_seed,
     )

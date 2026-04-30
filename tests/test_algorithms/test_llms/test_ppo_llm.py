@@ -26,8 +26,6 @@ from tests.utils import (
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-pytestmark = pytest.mark.llm
-
 deepspeed_base_config = {
     "bf16": {
         "enabled": True,
@@ -1081,7 +1079,7 @@ def test_llmppo_test_method_token_observation_wrapper_branch():
     from agilerl.utils.probe_envs_llm import ConstantTargetEnv
     from agilerl.llm_envs import TokenObservationWrapper
 
-    tok = AutoTokenizer.from_pretrained("gpt2")
+    tok = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
     env = TokenObservationWrapper(

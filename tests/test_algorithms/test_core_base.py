@@ -1842,7 +1842,6 @@ class TestLLMCleanUp:
         assert agent.optimizer is None
         assert agent.lr_scheduler is None
 
-    @pytest.mark.llm
     def test_clean_up_deletes_vllm(self):
         agent = _make_llm_agent(accelerator=None)
         agent.accelerator = None
@@ -2174,7 +2173,6 @@ class TestLLMGetLmHead:
             agent._get_lm_head()
 
 
-@pytest.mark.llm
 class TestLLMConfigureVllm:
     def test_raises_when_vllm_not_installed(self):
         agent = _make_llm_agent()
@@ -2756,7 +2754,7 @@ class TestLLMDeepspeedCheckpointSave:
 
     LIMITATION: these do NOT verify DeepSpeed actually wrote correct bytes
     to disk — the real engine is mocked out. For end-to-end confidence see
-    ``TestDeepspeedSaveE2E`` below (CUDA-only, @pytest.mark.llm).
+    ``TestDeepspeedSaveE2E`` below (CUDA-only, @pytest.mark.gpu).
     These spy tests run on any machine and catch dispatch regressions.
     """
 
@@ -3008,7 +3006,7 @@ class TestLLMGatherIfZero3OnSave:
 
 
 # --------------------------------------------------------------------------- #
-# E2E DeepSpeed tests — real save/load, CUDA-only, @pytest.mark.llm           #
+# E2E DeepSpeed tests — real save/load, CUDA-only, @pytest.mark.gpu           #
 # --------------------------------------------------------------------------- #
 # These run a real Accelerator with a DeepSpeedPlugin and exercise the full
 # save/load pipeline end-to-end.
@@ -3085,7 +3083,6 @@ def llm_deepspeed_checkpoint_save(
     )
 
 
-@pytest.mark.llm
 class TestLLMDeepspeedCheckpointSave:
     """Real DeepSpeed save → assertions against bytes on disk (no spies).
 
@@ -3099,6 +3096,8 @@ class TestLLMDeepspeedCheckpointSave:
         lora_only=F, optim=T    present             absent         absent
         lora_only=F, optim=F    absent              absent         present
     """
+
+    pytestmark = pytest.mark.gpu
 
     def test_llm_deepspeed_checkpoint_save_artifacts_match_cell(
         self, llm_deepspeed_checkpoint_save
@@ -3162,7 +3161,6 @@ def llm_deepspeed_checkpoint_load(
     )
 
 
-@pytest.mark.llm
 class TestLLMDeepspeedCheckpointSaveLoad:
     """Real DeepSpeed roundtrip: stamp sentinels → save → fresh agent → load
     → assert sentinels restored. One parametrised test per concern
@@ -3172,6 +3170,8 @@ class TestLLMDeepspeedCheckpointSaveLoad:
     ``AcceleratorState._reset_state`` which invalidates the first engine.
     That's fine because the first agent is only needed for the save step.
     """
+
+    pytestmark = pytest.mark.gpu
 
     def test_llm_deepspeed_checkpoint_save_load_adapter_and_base_weight_roundtrip_e2e(
         self, llm_deepspeed_checkpoint_load
@@ -3528,7 +3528,6 @@ class TestLLMInitMiscPaths:
             mock_set_seed.assert_called()
 
 
-@pytest.mark.llm
 class TestLLMGenerateWithVllmColocate:
     def test_raises_when_sampling_params_none(self):
         agent = _make_llm_agent()
@@ -3542,7 +3541,6 @@ class TestLLMGenerateWithVllmColocate:
                 agent._generate_with_vllm_colocate([], 1, 0.9)
 
 
-@pytest.mark.llm
 class TestLLMMoveModelToVllm:
     def test_move_model_to_vllm_resolves_model_ref(self):
         """``model_ref`` from unwrap (accelerator), ``DummyEvolvable.module``, or ``actor``."""
@@ -4072,7 +4070,6 @@ class TestLLMUseReferencePolicySeparateAdapter:
         assert critic_param.requires_grad
 
 
-@pytest.mark.llm
 class TestLLMMoveModelToVllmSkipsPrefixAndOriginalModule:
     """_move_model_to_vllm skips original_module params and loads remaining weights."""
 
@@ -4265,7 +4262,6 @@ class TestLLMCloneWithDeepSpeed:
         assert result is cloned
 
 
-@pytest.mark.llm
 class TestLLMCloneWithVllm:
     """clone preserves vllm references during attribute copying."""
 
@@ -4577,7 +4573,6 @@ class TestLLMLoadAdapterWeights:
         assert not ref_param.requires_grad
 
 
-@pytest.mark.llm
 class TestLLMConfigureVllmAcceleratorPaths:
     """_configure_vllm with accelerator and various TP configurations."""
 
@@ -4966,7 +4961,6 @@ class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:
         assert "linear_2" in set(agent.lora_config.target_modules)
 
 
-@pytest.mark.llm
 class TestLLMGenerateWithVllmColocateFullPaths:
     """_generate_with_vllm_colocate produces completions and action masks."""
 
@@ -5023,7 +5017,6 @@ class TestLLMGenerateWithVllmColocateFullPaths:
         assert len(action_masks) == 2
 
 
-@pytest.mark.llm
 class TestLLMGenerateWithVllmColocateAccelerator:
     """_generate_with_vllm_colocate waits for all processes with accelerator."""
 
@@ -5074,7 +5067,6 @@ class TestLLMGenerateWithVllmColocateAccelerator:
         assert len(completion_ids) == 1
 
 
-@pytest.mark.llm
 class TestLLMGenerateWithVllmColocateTP:
     """_generate_with_vllm_colocate gathers and slices with tensor_parallel > 1."""
 

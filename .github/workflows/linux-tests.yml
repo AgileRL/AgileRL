@@ -73,17 +73,23 @@ jobs:
             - name: Reset coverage data
               run: rm -f .coverage .coverage.*
 
-            # Non-LLM phase: inherits `-n auto --dist loadgroup` from pyproject.
-            # GPU tests fan out across the 3 `gpu0..gpu2` xdist groups; CPU
-            # tests use the remaining workers.
-            - name: Run non-LLM tests (parallel)
-              run: uv run pytest -m "not llm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
+            # Non-vLLM phase: inherits `-n auto --dist loadgroup` from pyproject.
+            # `gpu`-marked tests fan out across the 3 `gpu0..gpu2` xdist groups;
+            # CPU tests use the remaining workers.
+            - name: Run non-vLLM tests (parallel)
+              run: uv run pytest -m "not vllm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
 
-            # LLM phase: 4 workers, one per `llm0..llm3` xdist group. Run in a
-            # separate invocation so vLLM memory profiling is not perturbed by
-            # other GPU-touching tests.
-            - name: Run LLM tests (4 workers, exclusive GPU)
-              run: uv run pytest -n 4 -m "llm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
+            # vLLM phase: parallel across 3 vllm0..vllm2 xdist groups. vLLM tests
+            # set `kv_cache_memory_bytes` on `VLLMConfig`, which takes vLLM's
+            # early-return path in `determine_available_memory` and skips the
+            # startup memory-profiling assertion that fires when peer processes
+            # free GPU memory mid-init. Run only on the newest Python version —
+            # vLLM behavior doesn't depend on the Python interpreter, so re-running
+            # the same vLLM tests on every matrix version just multiplies wall time
+            # and GPU contention.
+            - name: Run vLLM tests (parallel, single Python version)
+              if: matrix.python-version == '3.13'
+              run: uv run pytest -n 3 -m "vllm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
 
             - name: Combine coverage data
               run: |

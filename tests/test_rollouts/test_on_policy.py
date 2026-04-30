@@ -22,9 +22,6 @@ from tests.test_algorithms.test_llms.test_ppo_llm import _cpu_llmppo
 from tests.test_algorithms.test_llms.test_reinforce_llm import _cpu_llmreinforce
 
 
-pytestmark = pytest.mark.llm
-
-
 class _TinyTokenizer:
     def __init__(self, pad_token_id: int = 0):
         self.pad_token_id = pad_token_id

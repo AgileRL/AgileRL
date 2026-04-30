@@ -1885,7 +1885,6 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
             assert old.index == individual.index
 
 
-@pytest.mark.llm
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 @pytest.mark.parametrize(
     "use_accelerator, use_deepspeed_optimizer",
@@ -2063,7 +2062,6 @@ def test_mutation_applies_rl_hp_mutation_llm_algorithm(
         AcceleratorState._reset_state(True)
 
 
-@pytest.mark.llm
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 @pytest.mark.parametrize("mutation_type", ["architecture", "parameters", "activation"])
 @pytest.mark.parametrize("algo", ["GRPO", "DPO"])

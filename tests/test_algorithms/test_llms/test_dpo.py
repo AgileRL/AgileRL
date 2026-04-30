@@ -62,9 +62,6 @@ def make_preference_gym(
     )
 
 
-pytestmark = pytest.mark.llm
-
-
 @pytest.fixture
 def preference_dataset_factory():
     return make_preference_gym
@@ -225,6 +222,7 @@ def _make_cpu_dpo_for_branch_tests(**kwargs):
         ),
     ],
 )
+@pytest.mark.gpu
 @pytest.mark.parametrize("vocab_size", [100])
 @pytest.mark.parametrize("input_size", [10])
 @pytest.mark.parametrize("max_tokens", [20])
@@ -342,6 +340,7 @@ def test_dpo_get_action():
         TINY_LLM_FIXTURE_PATH,
     ],
 )
+@pytest.mark.gpu
 @pytest.mark.parametrize("data_batch_size", [2])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("use_liger_loss", [False, True])
@@ -455,6 +454,7 @@ def test_dpo_learn(
         TINY_LLM_FIXTURE_PATH,
     ],
 )
+@pytest.mark.gpu
 @pytest.mark.parametrize("data_batch_size", [2])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_dpo_test(
@@ -646,6 +646,7 @@ def test_dpo_clean_up(
     "pretrained_model_name_or_path",
     [TINY_LLM_FIXTURE_PATH],
 )
+@pytest.mark.gpu
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("lora_only", [False, True])
 def test_dpo_save_load_checkpoint(

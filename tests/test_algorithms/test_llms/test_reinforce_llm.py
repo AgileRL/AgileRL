@@ -25,8 +25,6 @@ from tests.utils import (
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-pytestmark = pytest.mark.llm
-
 deepspeed_base_config = {
     "bf16": {
         "enabled": True,
@@ -218,8 +216,14 @@ def generate_reinforce(
 
     if use_vllm:
         lora_config = None
+        # kv_cache_memory_bytes pins KV cache size and skips vLLM's memory-
+        # profiling assertion, which fails when peer processes on the shared
+        # CI GPU release memory mid-init. See test_grpo.generate_grpo for context.
         vllm_config = VLLMConfig(
-            gpu_memory_utilization=0.2, max_num_seqs=1, sleep_mode=sleep_mode
+            gpu_memory_utilization=0.2,
+            kv_cache_memory_bytes=32 * 1024 * 1024,
+            max_num_seqs=1,
+            sleep_mode=sleep_mode,
         )
         actor = model_factory(pretrained_model_name_or_path, add_value_head=False)
     else:

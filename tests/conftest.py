@@ -49,6 +49,15 @@ if _xdist_worker_id:
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
+# Tests that construct ``Accelerator()`` directly (instead of via the
+# ``deepspeed_env`` fixture) inherit torch's default MASTER_PORT. Parallel
+# xdist workers then race to bind the same port and one fails with
+# ``EADDRINUSE``. Give each worker a deterministic, unique MASTER_PORT here
+# so any later distributed init lands on a non-colliding port.
+if _xdist_worker_id:
+    _worker_num = int("".join(c for c in _xdist_worker_id if c.isdigit()) or "0")
+    os.environ.setdefault("MASTER_PORT", str(29500 + _worker_num))
+
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import torch  # noqa: E402
@@ -76,16 +85,17 @@ def pytest_collection_modifyitems(config, items):
     """Pin tests that share mutable global state to dedicated xdist workers so
     they never run in parallel with each other.
 
+    - ``vllm`` tests are spread across ``vllm0``..``vllm{N-1}`` xdist groups
+      so up to N vLLM tests can run concurrently. vLLM 0.13 profiles GPU
+      memory during init and asserts the snapshot is stable; the assertion
+      fires when peer processes on the same GPU release memory mid-profile.
+      Tests using vLLM set ``kv_cache_memory_bytes`` on ``VLLMConfig`` to take
+      vLLM's early-return path in ``determine_available_memory`` and bypass
+      the assertion entirely. With that fix in place, parallel vLLM init is
+      safe and only the per-process GPU-memory budget caps concurrency.
     - ``gpu`` tests are spread across three ``gpu0``..``gpu2`` xdist groups
-      so they run on three workers in parallel alongside non-GPU tests in
-      the non-LLM phase of CI.
-    - ``llm`` tests are spread across four ``llm0``..``llm3`` xdist groups
-      so they run on four workers in parallel. CI runs them in a separate
-      pytest invocation from ``gpu``/non-LLM tests because vLLM profiles
-      available GPU memory during initialisation and asserts the
-      free-memory snapshot is stable; if a concurrent worker releases GPU
-      memory mid-profile vLLM aborts with ``AssertionError: Error in
-      memory profiling``. Keep the LLM run isolated from other GPU work.
+      so they run on three workers in parallel. These don't initialise
+      real vLLM, so they're safe to run alongside each other.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
@@ -93,15 +103,15 @@ def pytest_collection_modifyitems(config, items):
     reads them and appends ``@group`` suffixes to nodeids for loadgroup
     scheduling.
     """
+    vllm_groups = [pytest.mark.xdist_group(f"vllm{i}") for i in range(3)]
     gpu_groups = [pytest.mark.xdist_group(f"gpu{i}") for i in range(3)]
-    llm_groups = [pytest.mark.xdist_group(f"llm{i}") for i in range(4)]
     minari_group = pytest.mark.xdist_group("minari")
+    vllm_count = 0
     gpu_count = 0
-    llm_count = 0
     for item in items:
-        if item.get_closest_marker("llm"):
-            item.add_marker(llm_groups[llm_count % len(llm_groups)])
-            llm_count += 1
+        if item.get_closest_marker("vllm"):
+            item.add_marker(vllm_groups[vllm_count % len(vllm_groups)])
+            vllm_count += 1
         elif item.get_closest_marker("gpu"):
             item.add_marker(gpu_groups[gpu_count % len(gpu_groups)])
             gpu_count += 1

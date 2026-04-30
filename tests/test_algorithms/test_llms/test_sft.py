@@ -58,9 +58,6 @@ def make_sft_gym(
     )
 
 
-pytestmark = pytest.mark.llm
-
-
 @pytest.fixture
 def sft_dataset_factory():
     return make_sft_gym
@@ -155,6 +152,7 @@ def sft_factory():
         TINY_LLM_FIXTURE_PATH,
     ],
 )
+@pytest.mark.gpu
 @pytest.mark.parametrize("data_batch_size", [4])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("from_name", [True, False])
@@ -259,6 +257,7 @@ def test_init_sft_model_name_none_actor_network_none(
         TINY_LLM_FIXTURE_PATH,
     ],
 )
+@pytest.mark.gpu
 @pytest.mark.parametrize("data_batch_size", [4])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_sft_get_action(
@@ -308,6 +307,7 @@ def test_sft_get_action(
         TINY_LLM_FIXTURE_PATH,
     ],
 )
+@pytest.mark.gpu
 @pytest.mark.parametrize("data_batch_size", [32])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("use_liger_loss", [False, True])
@@ -405,6 +405,7 @@ def test_sft_learn(
         TINY_LLM_FIXTURE_PATH,
     ],
 )
+@pytest.mark.gpu
 @pytest.mark.parametrize("data_batch_size", [2])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("loop", [1, 2])
@@ -571,6 +572,7 @@ def test_sft_clean_up(
     "pretrained_model_name_or_path",
     [TINY_LLM_FIXTURE_PATH],
 )
+@pytest.mark.gpu
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_sft_save_load_checkpoint(
     deepspeed_env,

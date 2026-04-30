@@ -104,8 +104,8 @@ filterwarnings = [
     "ignore::pyparsing.exceptions.PyparsingDeprecationWarning",
 ]
 markers = [
-    "llm: LLM-related tests (exclude with -m 'not llm')",
-    "gpu: tests that use a GPU when one is available (exclude with -m 'not gpu')",
+    "vllm: tests that actually instantiate vllm.LLM (exclude with -m 'not vllm'). Pinned to a single xdist worker because vLLM's GPU memory profiling fails when peer workers free memory mid-init.",
+    "gpu: tests that use a GPU (CUDA, DeepSpeed, etc.) but do NOT initialise real vLLM (exclude with -m 'not gpu'). Safe to fan out across multiple xdist workers.",
 ]
 
 [tool.coverage.run]
