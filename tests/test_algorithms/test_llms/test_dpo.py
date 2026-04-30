@@ -415,10 +415,6 @@ def test_dpo_learn(
     loss = learn_result["mean_loss"]
     chosen_reward = learn_result["mean_chosen_reward"]
     rejected_reward = learn_result["mean_rejected_reward"]
-    learn_result = dpo.learn(prompts)
-    loss = learn_result["mean_loss"]
-    chosen_reward = learn_result["mean_chosen_reward"]
-    rejected_reward = learn_result["mean_rejected_reward"]
 
     assert isinstance(loss, float)
     assert isinstance(chosen_reward, float)

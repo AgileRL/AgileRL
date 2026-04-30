@@ -1721,7 +1721,7 @@ def _build_grpo_for_colocate_tests(
 def test_get_action_grpo_vllm_multiple_gpus(
     deepspeed_env,
     model_factory,
-    tensor_parallel_size: int = 1,
+    tensor_parallel_size: int,
 ):
     grpo = grpo_factory(
         accelerator_factory,
