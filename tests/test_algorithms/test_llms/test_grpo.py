@@ -1263,18 +1263,6 @@ def test_init_grpo_vllm_tp_value_error(
 
 @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
 @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
-@pytest.mark.parametrize("use_vllm", [True])
-@pytest.mark.parametrize(
-    "pretrained_model_name_or_path",
-    [TINY_LLM_FIXTURE_PATH],
-)
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize("use_separate_reference_adapter", [True])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_grpo_vllm_invalid_attention_backend_value_error(
     deepspeed_env,
     accelerator_factory,
