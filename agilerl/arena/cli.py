@@ -18,6 +18,11 @@ from agilerl.arena.output import (
 )
 from agilerl.utils.arena_utils import sort_dataset_search_by_downloads
 from agilerl.arena.cli_manifest import register_on_prem_manifest_group
+from agilerl.arena.cli_manifest import (
+    ArenaRootGroup,
+    handle_help_option,
+    register_on_prem_manifest_group,
+)
 from agilerl.arena.payloads import resolve_metrics_output_path
 
 ArenaError.enable_cli_mode()
@@ -37,7 +42,10 @@ def arena_client(
         client.close()
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.group(
+    cls=ArenaRootGroup,
+    add_help_option=False,
+)
 @click.option(
     "--api-key",
     default=None,
@@ -68,6 +76,15 @@ def arena_client(
     default=300,
     show_default=True,
     help="Timeout in seconds for file upload requests.",
+)
+@click.option(
+    "-h",
+    "--help",
+    is_flag=True,
+    is_eager=False,
+    expose_value=False,
+    help="Show this message and exit.",
+    callback=handle_help_option,
 )
 @click.pass_context
 def main(

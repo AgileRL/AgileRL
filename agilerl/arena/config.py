@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import click
+
 from agilerl.arena.client import ArenaClient
 
 
@@ -14,6 +16,32 @@ class CommandConfig:
     client_id: str | None
     request_timeout: int
     upload_timeout: int
+
+
+def resolve_root_command_config(ctx: click.Context) -> CommandConfig:
+    """Build :class:`CommandConfig` for the Arena root group.
+
+    ``main`` normally sets ``ctx.obj``, but eager ``-h`` / ``--help`` is handled
+    during parsing before :meth:`click.Command.invoke`, so the callback has not
+    run while the help page is formatted (``list_commands``, ``get_command``).
+    Reconstruct from ``ctx.params`` so capability-driven commands appear on
+    ``arena … --help``.
+    """
+    obj = ctx.obj
+    if isinstance(obj, CommandConfig):
+        return obj
+    params = ctx.params
+    if not isinstance(params, dict):
+        params = {}
+    return CommandConfig(
+        api_key=params.get("api_key"),
+        base_url=params.get("base_url"),
+        keycloak_url=params.get("keycloak_url"),
+        realm=params.get("realm"),
+        client_id=params.get("client_id"),
+        request_timeout=params.get("request_timeout") or 30,
+        upload_timeout=params.get("upload_timeout") or 300,
+    )
 
 
 def build_client(config: CommandConfig) -> ArenaClient:

@@ -1656,7 +1656,12 @@ class ArenaClient:
                 headers=headers,
                 timeout=self._request_timeout,
             )
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "Arena CLI capabilities request failed (%s): %s",
+                self._CAPABILITIES_PATH,
+                exc,
+            )
             self._cli_capabilities_cache = None
             return None
 
@@ -1684,7 +1689,15 @@ class ArenaClient:
             return None
 
         data = envelope["data"]
-        if not isinstance(data, dict) or data.get("schemaVersion") != 1:
+        if not isinstance(data, dict):
+            self._cli_capabilities_cache = None
+            return None
+        schema_v = data.get("schemaVersion")
+        if schema_v != 1 and schema_v != "1":
+            logger.warning(
+                "Arena CLI capabilities unsupported schemaVersion=%r (need 1)",
+                schema_v,
+            )
             self._cli_capabilities_cache = None
             return None
 

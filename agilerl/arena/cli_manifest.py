@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -10,7 +11,7 @@ from typing import Any, Callable
 
 import click
 
-from agilerl.arena.config import CommandConfig
+from agilerl.arena.config import CommandConfig, build_client, resolve_root_command_config
 from agilerl.arena.exceptions import ArenaValidationError
 from agilerl.arena.output import emit_result
 
@@ -18,6 +19,75 @@ logger = logging.getLogger(__name__)
 
 CAPABILITIES_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
+
+
+def handle_help_option(
+    ctx: click.Context,
+    param: click.Parameter,
+    value: bool,
+) -> None:
+    """For use with ``is_eager=False`` so connection flags parse before ``--help``."""
+    if not value or ctx.resilient_parsing:
+        return
+    click.echo(ctx.get_help(), color=ctx.color)
+    ctx.exit()
+
+
+def _capabilities_fingerprint(caps: dict[str, Any] | None) -> str:
+    """Stable string for comparing capability payloads (detect upgrades / entitlement changes)."""
+    if caps is None:
+        return "__missing__"
+    return json.dumps(caps, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def caps_allow_on_prem_at_root(caps: dict[str, Any]) -> bool:
+    """Whether capabilities warrant exposing ``arena on-prem`` at the CLI root.
+
+    ``on-prem`` command visibility is enterprise-only.
+    Uses strict ``is True`` checks so stray truthy JSON values do not unlock the group.
+    """
+    return caps.get("enterprise") is True
+
+
+def capabilities_show_on_prem_root(config: CommandConfig) -> bool | None:
+    """Return whether ``arena on-prem`` should appear after fetching capabilities.
+
+    ``None`` means the capabilities document could not be loaded (no auth, **404**, bad JSON).
+    """
+    client = build_client(config)
+    try:
+        caps = client.get_cli_capabilities(force_refresh=True)
+    finally:
+        client.close()
+    if caps is None:
+        return None
+    return caps_allow_on_prem_at_root(caps)
+
+
+class ArenaRootGroup(click.Group):
+    """Arena CLI root: omit ``on-prem`` unless capabilities grant on-prem CLI access."""
+
+    _ON_PREM = "on-prem"
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        cmds = super().list_commands(ctx)
+        if self._hide_on_prem(ctx):
+            cmds = [c for c in cmds if c != self._ON_PREM]
+        return sorted(cmds)
+
+    def get_command(
+        self,
+        ctx: click.Context,
+        cmd_name: str,
+    ) -> click.Command | click.Group | None:
+        if cmd_name == self._ON_PREM and self._hide_on_prem(ctx):
+            return None
+        return super().get_command(ctx, cmd_name)
+
+    @staticmethod
+    def _hide_on_prem(ctx: click.Context) -> bool:
+        cfg = resolve_root_command_config(ctx)
+        return capabilities_show_on_prem_root(cfg) is not True
 
 
 def pythonize_manifest_param_name(name: str) -> str:
@@ -153,7 +223,29 @@ def build_manifest_click_command(
     for spec in reversed(param_specs):
         wrapped = _manifest_spec_to_click_option(spec)(wrapped)
 
-    return click.Command(name=name, help=help_txt or "", callback=wrapped)
+    decorator_params = getattr(wrapped, "__click_params__", [])
+    params: list[click.Parameter] = list(reversed(decorator_params))
+    if hasattr(wrapped, "__click_params__"):
+        del wrapped.__click_params__
+
+    params.append(
+        click.Option(
+            ["-h", "--help"],
+            is_flag=True,
+            expose_value=False,
+            is_eager=False,
+            help="Show this message and exit.",
+            callback=handle_help_option,
+        ),
+    )
+
+    return click.Command(
+        name=name,
+        help=help_txt or "",
+        callback=wrapped,
+        params=params,
+        add_help_option=False,
+    )
 
 
 def attach_manifest_tree(group: click.Group, node: dict[str, Any]) -> None:
@@ -179,14 +271,18 @@ def attach_manifest_tree(group: click.Group, node: dict[str, Any]) -> None:
 
 
 class OnPremDynamicGroup(click.Group):
-    """Loads on-prem subcommands from capabilities after auth (lazy)."""
+    """Loads on-prem subcommands from capabilities after auth (lazy).
+
+    Refetches capabilities when you use this group so entitlement changes (e.g. enterprise
+    promotion) are reflected without restarting the CLI process.
+    """
 
     def __init__(self) -> None:
         super().__init__(
             name="on-prem",
             help="Enterprise on-prem cluster helpers (loaded from Arena capabilities).",
         )
-        self._lazy_ready = False
+        self._caps_fingerprint: str | None = None
 
     def _register_notice(self, message: str) -> None:
         @click.command("help")
@@ -198,12 +294,6 @@ class OnPremDynamicGroup(click.Group):
         self.add_command(help_cmd, name="help")
 
     def _ensure(self, ctx: click.Context) -> None:
-        if self._lazy_ready:
-            return
-        self._lazy_ready = True
-
-        from agilerl.arena.config import build_client
-
         config = ctx.find_root().obj
         if not isinstance(config, CommandConfig):
             raise click.ClickException(
@@ -212,9 +302,16 @@ class OnPremDynamicGroup(click.Group):
 
         client = build_client(config)
         try:
-            caps = client.get_cli_capabilities()
+            caps = client.get_cli_capabilities(force_refresh=True)
         finally:
             client.close()
+
+        fp = _capabilities_fingerprint(caps)
+        if fp == self._caps_fingerprint:
+            return
+
+        self.commands.clear()
+        self._caps_fingerprint = fp
 
         if caps is None:
             self._register_notice(
@@ -230,13 +327,12 @@ class OnPremDynamicGroup(click.Group):
             )
             return
 
-        if not caps.get("features", {}).get("onPremCli"):
+        if not caps_allow_on_prem_at_root(caps):
             self._register_notice(
-                "On-prem CLI commands are hidden by the server (features.onPremCli is false). "
-                "Typical causes: your org has no Stripe billing sync row, "
-                "stripe_billing_sync.enterprise is false, and there is no on-prem provider yet. "
-                "Ask your admin to set enterprise on your org’s billing sync row (or deploy a "
-                "server build that publishes the manifest when billing sync is absent)."
+                "On-prem CLI manifest is not enabled for this account in capabilities "
+                "(need ``enterprise: true``). "
+                "Ask your admin to fix enterprise flags, or confirm "
+                "``GET /api/cli/v1/capabilities`` for your token.",
             )
             return
 

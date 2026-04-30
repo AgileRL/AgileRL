@@ -7,9 +7,12 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
 
 from agilerl.arena.cli_manifest import (
+    ArenaRootGroup,
     build_manifest_click_command,
+    caps_allow_on_prem_at_root,
     pythonize_manifest_param_name,
     register_on_prem_manifest_group,
     write_binary_atomic,
@@ -35,6 +38,33 @@ def _command_config() -> CommandConfig:
 def api_key_client() -> ArenaClient:
     with patch("agilerl.arena.auth.KeycloakOpenID"):
         return ArenaClient(api_key="test-key")
+
+
+class TestCapsAllowOnPremAtRoot:
+    def test_enterprise_true(self) -> None:
+        assert caps_allow_on_prem_at_root({"enterprise": True})
+
+    def test_onprem_cli_feature_without_enterprise(self) -> None:
+        assert not caps_allow_on_prem_at_root(
+            {"enterprise": False, "features": {"onPremCli": True}},
+        )
+
+    def test_neither(self) -> None:
+        assert not caps_allow_on_prem_at_root(
+            {"enterprise": False, "features": {"onPremCli": False}},
+        )
+
+    def test_missing_features(self) -> None:
+        assert not caps_allow_on_prem_at_root({"enterprise": False})
+
+    def test_cli_manifest_schema_without_flags(self) -> None:
+        assert not caps_allow_on_prem_at_root(
+            {
+                "enterprise": False,
+                "features": {"onPremCli": False},
+                "cli": {"manifestSchemaVersion": 1, "root": {}},
+            },
+        )
 
 
 class TestPythonizeManifestParamName:
@@ -68,6 +98,17 @@ class TestGetCliCapabilities:
         }
         with patch.object(api_key_client._http, "request", return_value=resp):
             assert api_key_client.get_cli_capabilities(force_refresh=True) is None
+
+    def test_schema_version_string_one_accepted(self, api_key_client: ArenaClient) -> None:
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {
+            "ok": True,
+            "data": {"schemaVersion": "1", "enterprise": False},
+        }
+        with patch.object(api_key_client._http, "request", return_value=resp):
+            caps = api_key_client.get_cli_capabilities(force_refresh=True)
+        assert caps == {"schemaVersion": "1", "enterprise": False}
 
 
 class TestInvokeManifestCommand:
@@ -135,7 +176,7 @@ class TestBuildManifestClickCommand:
             ],
         }
         cmd = build_manifest_click_command("get", "Fetch class", invoke)
-        runner = click.testing.CliRunner()
+        runner = CliRunner()
         result = runner.invoke(cmd, ["--help"], obj=_command_config())
         assert result.exit_code == 0
         assert "--id" in result.output
@@ -159,8 +200,96 @@ class TestRegisterOnPremManifestGroup:
         assert "on-prem" in names
 
 
+class TestArenaRootGroupVisibility:
+    @staticmethod
+    def _root_with_on_prem() -> click.Group:
+        @click.group(cls=ArenaRootGroup)
+        def root() -> None:
+            """Arena root."""
+
+        register_on_prem_manifest_group(root)
+        return root
+
+    def test_help_lists_on_prem_when_enterprise(self) -> None:
+        root = self._root_with_on_prem()
+        with patch(
+            "agilerl.arena.cli_manifest.capabilities_show_on_prem_root",
+            return_value=True,
+        ):
+            r = CliRunner().invoke(
+                root,
+                ["--help"],
+                obj=_command_config(),
+            )
+        assert r.exit_code == 0
+        assert "on-prem" in r.output
+
+    def test_help_hides_on_prem_when_not_enterprise(self) -> None:
+        root = self._root_with_on_prem()
+        with patch(
+            "agilerl.arena.cli_manifest.capabilities_show_on_prem_root",
+            return_value=False,
+        ):
+            r = CliRunner().invoke(
+                root,
+                ["--help"],
+                obj=_command_config(),
+            )
+        assert r.exit_code == 0
+        assert "on-prem" not in r.output
+
+    def test_help_hides_on_prem_when_caps_unavailable(self) -> None:
+        root = self._root_with_on_prem()
+        with patch(
+            "agilerl.arena.cli_manifest.capabilities_show_on_prem_root",
+            return_value=None,
+        ):
+            r = CliRunner().invoke(
+                root,
+                ["--help"],
+                obj=_command_config(),
+            )
+        assert r.exit_code == 0
+        assert "on-prem" not in r.output
+
+    def test_main_help_uses_argv_before_callback_for_capabilities(self) -> None:
+        """Eager ``--help`` runs before ``main`` sets ``ctx.obj``; config must come from params."""
+        from agilerl.arena.cli import main
+
+        captured: dict[str, object] = {}
+
+        def capture(cfg: CommandConfig) -> bool:
+            captured["cfg"] = cfg
+            return True
+
+        with patch(
+            "agilerl.arena.cli_manifest.capabilities_show_on_prem_root",
+            side_effect=capture,
+        ):
+            r = CliRunner().invoke(
+                main,
+                [
+                    "--base-url",
+                    "http://localhost:3001",
+                    "--keycloak-url",
+                    "http://localhost:8023",
+                    "--api-key",
+                    "arena_pat_testtoken",
+                    "--help",
+                ],
+            )
+        assert r.exit_code == 0
+        cfg = captured["cfg"]
+        assert isinstance(cfg, CommandConfig)
+        assert cfg.api_key == "arena_pat_testtoken"
+        assert cfg.base_url == "http://localhost:3001"
+        assert cfg.keycloak_url == "http://localhost:8023"
+        assert "on-prem" in r.output
+
+
 CAP_FIXTURE = {
     "schemaVersion": 1,
+    "enterprise": True,
     "features": {"onPremCli": True},
     "cli": {
         "manifestSchemaVersion": 1,
@@ -202,7 +331,7 @@ class TestOnPremDynamicIntegration:
             return_value=client_mock,
         )
 
-        runner = click.testing.CliRunner()
+        runner = CliRunner()
         with build_patch:
             res = runner.invoke(
                 root,
@@ -210,4 +339,5 @@ class TestOnPremDynamicIntegration:
                 obj=_command_config(),
             )
         assert res.exit_code == 0
-        client_mock.close.assert_called_once()
+        assert client_mock.get_cli_capabilities.call_count >= 1
+        assert client_mock.close.call_count >= 1
