@@ -86,13 +86,23 @@ def pytest_collection_modifyitems(config, items):
     they never run in parallel with each other.
 
     - ``vllm`` tests are spread across ``vllm0``..``vllm{N-1}`` xdist groups
-      so up to N vLLM tests can run concurrently. vLLM 0.13 profiles GPU
-      memory during init and asserts the snapshot is stable; the assertion
-      fires when peer processes on the same GPU release memory mid-profile.
-      Tests using vLLM set ``kv_cache_memory_bytes`` on ``VLLMConfig`` to take
-      vLLM's early-return path in ``determine_available_memory`` and bypass
-      the assertion entirely. With that fix in place, parallel vLLM init is
-      safe and only the per-process GPU-memory budget caps concurrency.
+      so up to N vLLM tests can run concurrently.
+
+      Background: vLLM's ``determine_available_memory`` profile run asserts
+      that GPU free-memory does not increase between the pre- and post-profile
+      snapshots. When peer processes on the same GPU (concurrent xdist
+      workers, or sibling CI containers sharing one GPU) release memory
+      mid-profile, the assertion fires with ``Error in memory profiling.
+      Initial free memory ... current free memory ...``.
+
+      The fix: every test factory that constructs a ``VLLMConfig`` sets
+      ``kv_cache_memory_bytes`` (a small value, e.g. 32 MiB on the tiny test
+      fixture). vLLM's ``determine_available_memory`` returns early when this
+      field is set, skipping the assertion entirely. **Without this flag,
+      these xdist groups would have to be collapsed back to a single ``vllm``
+      group (serial execution).** When adding new vLLM-using tests, make sure
+      they go through one of the existing factories — or set the flag
+      directly on the ``VLLMConfig`` they construct.
     - ``gpu`` tests are spread across three ``gpu0``..``gpu2`` xdist groups
       so they run on three workers in parallel. These don't initialise
       real vLLM, so they're safe to run alongside each other.

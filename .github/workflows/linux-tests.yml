@@ -83,10 +83,12 @@ jobs:
             # set `kv_cache_memory_bytes` on `VLLMConfig`, which takes vLLM's
             # early-return path in `determine_available_memory` and skips the
             # startup memory-profiling assertion that fires when peer processes
-            # free GPU memory mid-init. Run only on the newest Python version —
-            # vLLM behavior doesn't depend on the Python interpreter, so re-running
-            # the same vLLM tests on every matrix version just multiplies wall time
-            # and GPU contention.
+            # free GPU memory mid-init. With 3 concurrent vLLM workers,
+            # peak GPU usage measured ~5.7 GiB (p95 ~5.5 GiB) on the tiny test
+            # fixture — well within the runner GPU budget. Run only on the newest
+            # Python version: vLLM behavior doesn't depend on the interpreter, so
+            # re-running these tests on every matrix version just multiplies wall
+            # time and cross-container GPU contention.
             - name: Run vLLM tests (parallel, single Python version)
               if: matrix.python-version == '3.13'
               run: uv run pytest -n 3 -m "vllm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0

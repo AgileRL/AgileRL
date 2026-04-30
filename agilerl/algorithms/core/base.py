@@ -4600,6 +4600,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.vllm_config.quantization is not None:
             llm_kwargs["quantization"] = self.vllm_config.quantization
         if self.vllm_config.kv_cache_memory_bytes is not None:
+            # Forwards to vLLM's ``CacheConfig.kv_cache_memory_bytes``. When set,
+            # vLLM's ``determine_available_memory`` returns early and skips the
+            # memory-profiling assertion that otherwise fails when peer
+            # processes on the same GPU release memory mid-init. This is what
+            # lets the CI run multiple vLLM processes in parallel — see the
+            # ``VLLMConfig.kv_cache_memory_bytes`` docstring for details.
             llm_kwargs["kv_cache_memory_bytes"] = self.vllm_config.kv_cache_memory_bytes
         try:
             self.llm = LLM(**llm_kwargs)

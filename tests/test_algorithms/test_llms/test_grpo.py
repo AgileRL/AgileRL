@@ -337,12 +337,14 @@ def generate_grpo(
         accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
     if use_vllm:
         lora_config = None
-        # kv_cache_memory_bytes pins KV cache to a tiny fixed size and skips
-        # vLLM's startup memory-profiling assertion. The assertion fails when
-        # peer processes on the shared CI GPU release memory mid-init; pinning
-        # the size makes it safe to run several vLLM processes concurrently.
-        # gpu_memory_utilization is ignored when kv_cache_memory_bytes is set,
-        # so its value here is just a fallback for other paths.
+        # ``kv_cache_memory_bytes`` is **required** for parallel vLLM testing:
+        # it bypasses vLLM's startup memory-profiling assertion that fires
+        # when peer xdist workers (or sibling CI containers) free GPU memory
+        # mid-init. See ``VLLMConfig.kv_cache_memory_bytes`` docstring and
+        # ``tests/conftest.py:pytest_collection_modifyitems`` for the full
+        # rationale. ``gpu_memory_utilization`` is ignored when this is set;
+        # the value below is just a fallback for code paths that don't
+        # forward ``kv_cache_memory_bytes``.
         vllm_config = VLLMConfig(
             gpu_memory_utilization=0.22,
             kv_cache_memory_bytes=32 * 1024 * 1024,

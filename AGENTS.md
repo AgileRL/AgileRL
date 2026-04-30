@@ -180,6 +180,22 @@ uv run pytest tests/test_algorithms/test_dqn.py -v
 
 LLM tests are marked with `@pytest.mark.llm` and excluded by default in most CI jobs. Run them explicitly with `-m llm`.
 
+### Parallel vLLM testing — `kv_cache_memory_bytes` is load-bearing
+
+vLLM tests are split across `vllm0..vllm2` xdist groups (see `tests/conftest.py`) so up to 3 vLLM processes can initialise concurrently in the same CI container. This is only safe because **every `VLLMConfig` constructed in tests sets `kv_cache_memory_bytes`** (e.g. `32 * 1024 * 1024`).
+
+Why it's required: vLLM's `gpu_worker.determine_available_memory()` profile run asserts that GPU free-memory does not increase between the pre- and post-profile snapshots. When a peer process on the same GPU releases memory mid-profile (which happens constantly in parallel test runs and across sibling CI matrix containers sharing one GPU), the assertion fires:
+
+```
+AssertionError: Error in memory profiling. Initial free memory X GiB,
+current free memory Y GiB. This happens when other processes sharing the
+same container release GPU memory while vLLM is profiling during initialization.
+```
+
+Setting `kv_cache_memory_bytes` triggers vLLM's early-return path in `determine_available_memory` and skips the assertion entirely.
+
+**When adding a new vLLM-using test**: route it through `generate_grpo` / `generate_reinforce` (which already set the flag) or, if you build a `VLLMConfig` directly, copy the `kv_cache_memory_bytes=32 * 1024 * 1024` line and the explanatory comment. Without the flag the new test will pass locally and flake under xdist.
+
 ### Test naming convention
 
 Group tests by the source class method or free function they exercise:

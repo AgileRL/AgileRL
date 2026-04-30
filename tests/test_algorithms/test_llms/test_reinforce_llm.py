@@ -216,9 +216,12 @@ def generate_reinforce(
 
     if use_vllm:
         lora_config = None
-        # kv_cache_memory_bytes pins KV cache size and skips vLLM's memory-
-        # profiling assertion, which fails when peer processes on the shared
-        # CI GPU release memory mid-init. See test_grpo.generate_grpo for context.
+        # ``kv_cache_memory_bytes`` is **required** for parallel vLLM testing —
+        # it bypasses vLLM's startup memory-profiling assertion that fires when
+        # peer xdist workers free GPU memory mid-init. See
+        # ``VLLMConfig.kv_cache_memory_bytes`` docstring and
+        # ``tests/conftest.py:pytest_collection_modifyitems`` for the full
+        # rationale.
         vllm_config = VLLMConfig(
             gpu_memory_utilization=0.2,
             kv_cache_memory_bytes=32 * 1024 * 1024,
