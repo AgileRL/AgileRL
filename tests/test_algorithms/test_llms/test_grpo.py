@@ -2336,8 +2336,8 @@ def test_grpo_loss(
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("group_size", [6])
 @pytest.mark.parametrize(
-    "use_vllm, pretrained_model_name_or_path, reduce_memory_peak",
-    [(False, TINY_LLM_FIXTURE_PATH, True)],
+    "use_vllm, pretrained_model_name_or_path",
+    [(False, TINY_LLM_FIXTURE_PATH)],
 )
 @pytest.mark.parametrize("batch_size", [6])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
@@ -2356,12 +2356,10 @@ def test_grpo_learn(
     group_size,
     use_vllm,
     pretrained_model_name_or_path,
-    reduce_memory_peak,
     batch_size,
     micro_batch_size_per_gpu,
     use_liger_loss,
 ):
-    _ = reduce_memory_peak
     if use_vllm and use_liger_loss:
         pytest.skip("Skip vLLM learn path with liger in this mocked-call test.")
     mock_llm_instance = make_mock_vllm_instance(vllm.LLM)
@@ -2805,8 +2803,8 @@ def test_learn_empty_minibatch_branch_continues_without_grpo_step():
 @pytest.mark.parametrize(
     "use_vllm, pretrained_model_name_or_path",
     [
-        (False, TINY_LLM_FIXTURE_PATH, True),
-        (False, None, False),
+        (False, TINY_LLM_FIXTURE_PATH),
+        (False, None),
     ],
 )
 @pytest.mark.parametrize("batch_size", [1])
