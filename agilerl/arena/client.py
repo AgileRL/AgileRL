@@ -213,9 +213,11 @@ class ArenaClient:
     ### Environments ###
     # -------------------------------------------------------------------------
 
-    # TODO: Modify to optionally take in a name, in which case we
-    # list the versions for the specified environment only
-    def list_environments(self, name: str | None = None) -> list[dict[str, Any]]:
+    def list_environments(
+        self,
+        name: str | None = None,
+        include_arena: str | None = None,
+    ) -> list[dict[str, Any]]:
         """List environments available to the authenticated user.
 
         :param name: Environment name. If None, list all environments.
@@ -223,7 +225,11 @@ class ArenaClient:
         :returns: A list of environments.
         :rtype: list[dict[str, Any]]
         """
-        return self._request("GET", "/api/cli/v1/environments", params={"name": name})
+        return self._request(
+            "GET",
+            "/api/cli/v1/environments",
+            params={"name": name, "include_arena": include_arena},
+        )
 
     def environment_exists(self, name: str, version: str | None = None) -> bool:
         """Check whether an environment name/version is registered.
@@ -271,17 +277,10 @@ class ArenaClient:
             params={"name": name, "version": version},
         )
 
-        # TODO: Again, cleaner if we knew exactly what response to expect
-        if isinstance(resp, dict):
-            entrypoints = resp.get("entrypoints", [])
-            if isinstance(entrypoints, list):
-                return [str(ep) for ep in entrypoints]
-        if isinstance(resp, list):
-            return [str(ep) for ep in resp]
-        return []
+        assert type(resp) is list, "List entrypoints response should be a list"
 
-    # TODO: Need to change ambiguous entrypoint error as raised by an error like in any other situation rathen than
-    # an embedded JSON object in the message.
+        return resp
+
     def validate_environment(
         self,
         *,
@@ -399,13 +398,23 @@ class ArenaClient:
         if version is None:
             # Fetch existing versions (assuming you have a list_environments method)
             versions_data = self.list_environments(name=name)
-            version_list = [v["version"] for v in versions_data]
+            if name in versions_data:
+                versions_data = versions_data[name]
+            version_list = versions_data.keys()
 
             if not version_list:
                 logger.info(
                     "No versions found for environment '%s'. Nothing to delete.", name
                 )
                 return None
+
+            if version not in version_list:
+                logger.info(
+                    "Version '%s' not found in environment '%s'. Please specify a version to be deleted.",
+                    version,
+                    name,
+                )
+                return {"deleted": False, "name": name, "version": version}
 
             # Format and Prompt
             logger.info(
@@ -467,8 +476,6 @@ class ArenaClient:
             timeout=self._upload_timeout,
         ).collect()
 
-    # TODO: Check with Rob
-    # Should be a rich table showing [experiment name, job_id, env, algo, last_modified, status]
     def list_experiments(self, project: str) -> list[dict[str, Any]]:
         """List all experiments in a project.
 

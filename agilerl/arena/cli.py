@@ -145,13 +145,23 @@ def env() -> None:
 
 
 @env.command("list")
+@click.option("--name", default=None, hidden=False)
+@click.option(
+    "--include-arena/--no-include-arena",
+    "include_arena",
+    default=False,
+    show_default=True,
+    type=bool,
+)
 @click.pass_obj
 def env_list(
     config: CommandConfig,
+    name: str | None,
+    include_arena: bool | None,
 ) -> None:
     """List all available environments in Arena, and whether they have been validated and profiled."""
     with arena_client(config) as client:
-        emit_result(client.list_environments())
+        emit_result(client.list_environments(name=name, include_arena=include_arena))
 
 
 @env.command("exists")
@@ -168,7 +178,7 @@ def env_exists(
         emit_result(client.environment_exists(name=name, version=version))
 
 
-@env.command("list-entrypoints")
+@env.command("entrypoints")
 @click.argument("name")
 @click.option("--version", default=None, show_default=True)
 @click.pass_obj
@@ -416,6 +426,193 @@ def train_get_metrics(
             emit_csv_preview(payload, max_rows=preview_rows)
 
 
+@main.group("experiment")
+def experiment() -> None:
+    """Manage experiments (training jobs) by name."""
+
+
+@experiment.command("submit")
+@click.option(
+    "--manifest",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Path to manifest file.",
+)
+@click.option(
+    "--resource-id",
+    type=str,
+    default="arena-medium",
+    help="Arena cluster type to submit the experiment to.",
+)
+@click.option(
+    "--num-nodes",
+    type=int,
+    default=2,
+    help="Number of nodes to use for the experiment.",
+)
+@click.option(
+    "--project",
+    type=str,
+    default=None,
+    help="Project to submit the experiment to.",
+)
+@click.option(
+    "--experiment-name",
+    type=str,
+    default=None,
+    help="Name of the experiment.",
+)
+@click.pass_obj
+def experiment_submit(
+    config: CommandConfig,
+    manifest: Path,
+    resource_id: str | None,
+    num_nodes: int | None,
+    project: str | None,
+    experiment_name: str | None,
+) -> None:
+    """Submit an experiment from a manifest (training job submit API)."""
+    with arena_client(config) as client:
+        emit_result(
+            client.submit_experiment(
+                manifest=manifest,
+                resource_id=resource_id,
+                num_nodes=num_nodes,
+                project=project,
+                experiment_name=experiment_name,
+            )
+        )
+
+
+@experiment.command("list")
+@click.option(
+    "--project",
+    required=True,
+    help="Project whose experiments should be listed.",
+)
+@click.pass_obj
+def experiment_list(config: CommandConfig, project: str) -> None:
+    """List experiments in a project."""
+    with arena_client(config) as client:
+        emit_result(client.list_experiments(project=project))
+
+
+@experiment.command("resume")
+@click.argument("experiment_name")
+@click.option(
+    "--max-steps",
+    type=int,
+    required=True,
+    help="Maximum training steps for the resumed run.",
+)
+@click.pass_obj
+def experiment_resume(
+    config: CommandConfig,
+    experiment_name: str,
+    max_steps: int,
+) -> None:
+    """Resume an experiment by name."""
+    with arena_client(config) as client:
+        emit_result(
+            client.resume_experiment(
+                experiment_name=experiment_name, max_steps=max_steps
+            )
+        )
+
+
+@experiment.command("checkpoints")
+@click.argument("experiment_name")
+@click.pass_obj
+def experiment_checkpoints(
+    config: CommandConfig,
+    experiment_name: str,
+) -> None:
+    """List checkpoints for an experiment."""
+    with arena_client(config) as client:
+        emit_result(client.list_checkpoints(experiment_name=experiment_name))
+
+
+@experiment.command("metrics")
+@click.argument("experiment_name")
+@click.option(
+    "--metric",
+    "metrics",
+    multiple=True,
+    help="Metric to download. Omit to request all metrics. Repeat for multiple.",
+)
+@click.option(
+    "--output-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Destination file path. Defaults to a name derived from the experiment.",
+)
+@click.option(
+    "--preview-rows",
+    type=click.IntRange(0),
+    default=10,
+    show_default=True,
+    help="When CSV is returned, preview this many rows in a rich table.",
+)
+@click.pass_obj
+def experiment_metrics(
+    config: CommandConfig,
+    experiment_name: str,
+    metrics: tuple[str, ...],
+    output_file: Path | None,
+    preview_rows: int,
+) -> None:
+    """Download metrics for an experiment by name (CSV or zip)."""
+    with arena_client(config) as client:
+        metrics_list: list[str] | None = list(metrics) if metrics else None
+        payload, content_type, disposition = client.download_experiment_metrics(
+            experiment_name=experiment_name,
+            metrics=metrics_list,
+        )
+        target_path = resolve_metrics_output_path(
+            experiment_name=experiment_name,
+            payload=payload,
+            content_type=content_type,
+            disposition=disposition,
+            output_file=output_file,
+        )
+        target_path.write_bytes(payload)
+        emit_result(
+            {
+                "saved": str(target_path),
+                "bytes": len(payload),
+                "content_type": content_type or "unknown",
+            },
+        )
+
+        if preview_rows > 0 and (content_type or "").startswith("text/csv"):
+            emit_csv_preview(payload, max_rows=preview_rows)
+
+
+@experiment.command("deploy")
+@click.argument("experiment_name")
+@click.option(
+    "--checkpoint",
+    default=None,
+    help="Checkpoint to deploy. Omit to deploy the best checkpoint.",
+)
+@click.pass_obj
+def experiment_deploy(
+    config: CommandConfig,
+    experiment_name: str,
+    checkpoint: str | None,
+) -> None:
+    """Deploy an agent from an experiment to Arena inference."""
+    with arena_client(config) as client:
+        client.deploy_agent(experiment_name=experiment_name, checkpoint=checkpoint)
+        emit_result(
+            {
+                "deployed": True,
+                "experiment_name": experiment_name,
+                "checkpoint": checkpoint,
+            }
+        )
+
+
 @main.group("projects")
 def projects() -> None:
     """Manage your projects in Arena."""
@@ -427,7 +624,6 @@ def projects_list(config: CommandConfig) -> None:
     """List all projects in Arena."""
     with arena_client(config) as client:
         emit_result(client.list_projects())
-    """Submit, validate, and inspect training jobs."""
 
 
 @projects.command("create")
