@@ -241,7 +241,6 @@ def test_init_dpo(
     vocab_size,
     input_size,
     max_tokens,
-    data_batch_size,
     micro_batch_size_per_gpu,
     from_name,
 ):
