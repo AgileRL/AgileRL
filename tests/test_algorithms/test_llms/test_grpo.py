@@ -1655,55 +1655,32 @@ def test_init_grpo_micro_batch_size_per_gpu_division_error(
 def _build_grpo_for_colocate_tests(
     grpo_factory,
     accelerator_factory,
-    config,
-    use_deepspeed_optimizer,
-    use_separate_reference_adapter,
-    micro_batch_size_per_gpu,
-    reduce_memory_peak,
-    batch_size,
+    model_factory,
+    tensor_parallel_size: int = 1,
 ):
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    with pytest.raises(ValueError) as e:
-        gc.collect()
-        vocab_size = 1000
-        input_size = 10
-        max_tokens = 20
-        group_size = 5
-        lora_config = LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=["linear_1"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-        GRPO(
-            actor_network=create_module(
-                input_size=input_size,
-                max_tokens=max_tokens,
-                vocab_size=vocab_size,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            ),
-            lr=0.1,
-            pad_token_id=vocab_size - 1,
-            pad_token="<pad>",
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            group_size=group_size,
-            lora_config=lora_config,
-            cosine_lr_schedule_config=CosineLRScheduleConfig(
-                num_epochs=10,
-                warmup_proportion=0.05,
-            ),
-            batch_size=batch_size,
-            max_grad_norm=0.1,
-            accelerator=accelerator,
-            use_separate_reference_adapter=use_separate_reference_adapter,
-            micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-            reduce_memory_peak=reduce_memory_peak,
-        )
-    assert (
-        f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({accelerator.num_processes}) and micro_batch_size_per_gpu ({micro_batch_size_per_gpu})."
-        in str(e.value)
+    grpo = grpo_factory(
+        accelerator_factory,
+        model_factory,
+        None,
+        False,
+        100,
+        10,
+        8,
+        2,
+        False,
+        False,
+        None,
+        None,
     )
+    grpo.vllm_config = VLLMConfig(
+        gpu_memory_utilization=0.2,
+        max_num_seqs=1,
+        tensor_parallel_size=tensor_parallel_size,
+    )
+    grpo.llm = MagicMock()
+    grpo.tp_group = "tp-group"
+    grpo.device = "cpu"
+    return grpo
 
 
 @spawn_new_process_for_each_test

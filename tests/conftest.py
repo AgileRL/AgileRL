@@ -76,13 +76,14 @@ def pytest_collection_modifyitems(config, items):
     """Pin tests that share mutable global state to dedicated xdist workers so
     they never run in parallel with each other.
 
-    - ``llm`` and ``gpu`` tests share a single ``gpu`` xdist group so they
-      all land on one worker. vLLM profiles available GPU memory during
-      initialisation and asserts the free-memory snapshot is stable; if a
-      concurrent worker releases GPU memory mid-profile vLLM aborts with
-      ``AssertionError: Error in memory profiling``. Serialising every
-      GPU-touching test onto one worker keeps that snapshot consistent and
-      also avoids CUDA OOMs from concurrent allocations.
+    - ``gpu`` tests share a single ``gpu`` xdist group so they all land on
+      one worker, avoiding CUDA OOMs from concurrent allocations.
+    - ``llm`` tests are spread across three ``llm0``..``llm2`` xdist groups
+      so they run on three workers in parallel. vLLM profiles available GPU
+      memory during initialisation and asserts the free-memory snapshot is
+      stable; if a concurrent worker releases GPU memory mid-profile vLLM
+      aborts with ``AssertionError: Error in memory profiling`` — watch
+      for this if increasing parallelism further.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
@@ -91,9 +92,14 @@ def pytest_collection_modifyitems(config, items):
     scheduling.
     """
     gpu_group = pytest.mark.xdist_group("gpu")
+    llm_groups = [pytest.mark.xdist_group(f"llm{i}") for i in range(3)]
     minari_group = pytest.mark.xdist_group("minari")
+    llm_count = 0
     for item in items:
-        if item.get_closest_marker("llm") or item.get_closest_marker("gpu"):
+        if item.get_closest_marker("llm"):
+            item.add_marker(llm_groups[llm_count % len(llm_groups)])
+            llm_count += 1
+        elif item.get_closest_marker("gpu"):
             item.add_marker(gpu_group)
         elif "test_minari_utils" in item.nodeid:
             item.add_marker(minari_group)
