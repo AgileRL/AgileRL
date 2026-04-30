@@ -14,6 +14,7 @@ from agilerl.utils.ppo_value_head import (
     _resolve_hidden_size,
 )
 
+
 class DummyConfig(PretrainedConfig):
     def __init__(self, hidden_size: int = 4, vocab_size: int = 11, **kwargs):
         super().__init__(**kwargs)

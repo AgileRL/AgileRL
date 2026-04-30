@@ -4600,9 +4600,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.vllm_config.quantization is not None:
             llm_kwargs["quantization"] = self.vllm_config.quantization
         if self.vllm_config.kv_cache_memory_bytes is not None:
-            llm_kwargs["kv_cache_memory_bytes"] = (
-                self.vllm_config.kv_cache_memory_bytes
-            )
+            llm_kwargs["kv_cache_memory_bytes"] = self.vllm_config.kv_cache_memory_bytes
         try:
             self.llm = LLM(**llm_kwargs)
         except ValueError as err:

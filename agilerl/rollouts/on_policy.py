@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from agilerl import HAS_LLM_DEPENDENCIES
 import numpy as np
 import torch
 from gymnasium import spaces
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import PPO
 from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType
