@@ -538,6 +538,7 @@ def test_get_action_grpo_hf_stop_iteration_device_fallback():
     assert len(action_masks) == 1
     grpo.clean_up()
 
+
 @spawn_new_process_for_each_test
 @pytest.mark.parametrize(
     "config",
