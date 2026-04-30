@@ -18,6 +18,12 @@ from agilerl.arena.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
+from agilerl.arena.inference import Agent
+from agilerl.arena.inference_cache import (
+    load_inference_binding,
+    normalized_deployment_name,
+    save_inference_binding,
+)
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
 from agilerl.models.manifest import ArenaManifest
@@ -707,19 +713,168 @@ class ArenaClient:
     ### Inference ###
     # -------------------------------------------------------------------------
 
-    # TODO: Make endpoint for deploying an agent
-    def deploy_agent(self, experiment_name: str, checkpoint: str | None = None) -> None:
-        """Deploy an agent to Arena.
-
-        :param experiment_name: The name of the experiment to deploy an agent from.
-        :type experiment_name: str
-        :param checkpoint: The checkpoint to deploy. If None, deploy the best checkpoint.
-        :type checkpoint: str | None
-        """
+    def deploy_agent(
+        self, experiment_name: str, checkpoint: str | None = None
+    ) -> Any:
+        """Create an inference deployment from an experiment checkpoint."""
         return self._request(
             "POST",
             "/api/cli/v1/inference/deploy",
             json={"experiment_name": experiment_name, "checkpoint": checkpoint},
+        )
+
+    @staticmethod
+    def _inference_deployments_list_params(
+        *,
+        name: str | None = None,
+        experiment_name: str | None = None,
+        project_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Query string params for ``GET /api/cli/v1/inference/deployments/list``."""
+        params: dict[str, Any] = {}
+        if name is not None and name.strip():
+            params["name"] = name.strip()
+        en = experiment_name.strip() if experiment_name else ""
+        if en:
+            params["experimentName"] = en
+        pn = project_name.strip() if project_name else ""
+        if pn:
+            params["projectName"] = pn
+        return params
+
+    def list_inference_deployments(
+        self,
+        *,
+        name: str | None = None,
+        experiment_name: str | None = None,
+        project_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List inference deployments visible to the authenticated user."""
+        q = self._inference_deployments_list_params(
+            name=name,
+            experiment_name=experiment_name,
+            project_name=project_name,
+        )
+        rows = self._request(
+            "GET",
+            "/api/cli/v1/inference/deployments/list",
+            params=q or None,
+        )
+        if not isinstance(rows, list):
+            return []
+        return [r for r in rows if isinstance(r, dict)]
+
+    def fetch_deployment_for_inference(
+        self,
+        deployment_name: str,
+        *,
+        experiment_name: str | None = None,
+        project_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Load deployments visible to the user; expects exactly one row for *deployment_name*."""
+        params = self._inference_deployments_list_params(
+            name=normalized_deployment_name(deployment_name),
+            experiment_name=experiment_name,
+            project_name=project_name,
+        )
+
+        rows = self._request(
+            "GET",
+            "/api/cli/v1/inference/deployments/list",
+            params=params,
+        )
+        if not isinstance(rows, list):
+            rows = []
+
+        hint = (
+            "Pass --experiment-name and/or --project-name when multiple deployments "
+            "share this deployment name."
+        )
+        if len(rows) == 0:
+            raise ArenaAPIError(
+                f"No deployment found named {deployment_name!r}.",
+                cli_hint=hint,
+            )
+        if len(rows) > 1:
+            raise ArenaAPIError(
+                f"Multiple deployments named {deployment_name!r} ({len(rows)} matches).",
+                cli_hint=hint,
+            )
+
+        row = rows[0]
+        if not isinstance(row, dict):
+            raise ArenaAPIError("Unexpected deployment list response shape.")
+        return row
+
+    @staticmethod
+    def deployment_url_and_api_key(row: dict[str, Any]) -> tuple[str, str]:
+        """Parse ``spec.url`` and deployment ``api_key`` from an API deployment row."""
+        spec = row.get("spec")
+        if not isinstance(spec, dict):
+            spec = {}
+        url = spec.get("url")
+        if not isinstance(url, str) or not url.strip():
+            raise ArenaAPIError(
+                "Deployment has no inference URL (spec.url).",
+                cli_hint="Wait until provisioning completes, then retry with --refresh.",
+            )
+
+        raw_key = row.get("api_key")
+        if raw_key is None:
+            raise ArenaAPIError(
+                "Deployment record had no api_key.",
+                cli_hint="Retry with arena login and --refresh.",
+            )
+        api_key = str(raw_key).strip()
+        if not api_key:
+            raise ArenaAPIError("Deployment api_key was empty.")
+
+        return url.strip(), api_key
+
+    def ensure_inference_binding(
+        self,
+        deployment_name: str,
+        *,
+        refresh: bool = False,
+        experiment_name: str | None = None,
+        project_name: str | None = None,
+    ) -> tuple[str, str]:
+        """Return cached ``(url, api_key)`` or fetch from the API, persist, and return."""
+        key = normalized_deployment_name(deployment_name)
+        if not refresh:
+            cached = load_inference_binding(key)
+            if cached is not None:
+                return cached
+
+        row = self.fetch_deployment_for_inference(
+            deployment_name,
+            experiment_name=experiment_name,
+            project_name=project_name,
+        )
+        url, api_key = self.deployment_url_and_api_key(row)
+        save_inference_binding(key, url, api_key)
+        return url, api_key
+
+    def open_inference_agent(
+        self,
+        deployment_name: str,
+        *,
+        refresh: bool = False,
+        experiment_name: str | None = None,
+        project_name: str | None = None,
+        timeout: int | None = None,
+    ) -> Agent:
+        """Build an :class:`~agilerl.arena.inference.Agent` for a named deployment."""
+        url, api_key = self.ensure_inference_binding(
+            deployment_name,
+            refresh=refresh,
+            experiment_name=experiment_name,
+            project_name=project_name,
+        )
+        return Agent(
+            url,
+            api_key=api_key,
+            timeout=timeout or self._request_timeout,
         )
 
     def close(self) -> None:

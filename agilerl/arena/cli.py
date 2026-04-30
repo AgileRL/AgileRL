@@ -3,8 +3,10 @@ from __future__ import annotations
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import click
+import numpy as np
 
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig, build_client
@@ -664,6 +666,145 @@ def experiment_deploy(
                 "deployed": True,
                 "experiment_name": experiment_name,
                 "checkpoint": checkpoint,
+            }
+        )
+
+
+def _numpy_leaf_jsonable(value: Any) -> Any:
+    """Convert nested NumPy arrays (and scalars) into JSON-friendly values."""
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {k: _numpy_leaf_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return tuple(_numpy_leaf_jsonable(v) for v in value)
+    return value
+
+
+def _redact_inference_rows_for_display(
+    rows: list[dict[str, Any]],
+    *,
+    show_api_keys: bool,
+) -> list[dict[str, Any]]:
+    """Drop deployment secrets unless *show_api_keys*."""
+    if show_api_keys:
+        return rows
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        copy_row = dict(row)
+        copy_row.pop("api_key", None)
+        spec = copy_row.get("spec")
+        if isinstance(spec, dict):
+            spec_copy = dict(spec)
+            spec_copy.pop("api_key", None)
+            copy_row["spec"] = spec_copy
+        out.append(copy_row)
+    return out
+
+
+@main.group("inference")
+def inference_cli() -> None:
+    """List deployments or call ``POST /get_action`` on a deployed agent."""
+
+
+@inference_cli.command("list")
+@click.option("--name", default=None, help="Exact deployment name filter.")
+@click.option(
+    "--experiment-name",
+    "experiment_name",
+    default=None,
+    help="Exact experiment name filter.",
+)
+@click.option(
+    "--project-name",
+    "project_name",
+    default=None,
+    help="Exact project name filter.",
+)
+@click.option(
+    "--show-api-keys",
+    is_flag=True,
+    default=False,
+    help="Include deployment api_key fields (default: redacted).",
+)
+@click.pass_obj
+def inference_list(
+    config: CommandConfig,
+    name: str | None,
+    experiment_name: str | None,
+    project_name: str | None,
+    show_api_keys: bool,
+) -> None:
+    """List inference deployments you can call."""
+    with arena_client(config) as client:
+        rows = client.list_inference_deployments(
+            name=name,
+            experiment_name=experiment_name,
+            project_name=project_name,
+        )
+        emit_result(
+            _redact_inference_rows_for_display(rows, show_api_keys=show_api_keys)
+        )
+
+
+@inference_cli.command("run")
+@click.argument("deployment_name")
+@click.option(
+    "--refresh",
+    is_flag=True,
+    default=False,
+    help="Refetch deployment URL and API key from Arena instead of using the local cache.",
+)
+@click.option(
+    "--experiment-name",
+    "experiment_name",
+    default=None,
+    help="Experiment name (exact) — narrows duplicate deployment names.",
+)
+@click.option(
+    "--project-name",
+    "project_name",
+    default=None,
+    help="Project name (exact) — narrows duplicate deployment names.",
+)
+@click.option(
+    "--obs-npy",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Observation tensor(s) as a NumPy .npy file for POST /get_action.",
+)
+@click.pass_obj
+def inference_run(
+    config: CommandConfig,
+    deployment_name: str,
+    refresh: bool,
+    experiment_name: str | None,
+    project_name: str | None,
+    obs_npy: Path,
+) -> None:
+    """Query a deployed model by deployment name (uses cached URL/key after first fetch)."""
+    with arena_client(config) as client:
+        with client.open_inference_agent(
+            deployment_name,
+            refresh=refresh,
+            experiment_name=experiment_name,
+            project_name=project_name,
+        ) as agent:
+            obs = np.load(obs_npy, allow_pickle=False)
+            status, action, next_hidden = agent.get_action(obs)
+
+        hidden_out = None
+        if next_hidden is not None:
+            hidden_out = {
+                k: _numpy_leaf_jsonable(v) for k, v in next_hidden.items()
+            }
+
+        emit_result(
+            {
+                "deployment": deployment_name,
+                "status": status,
+                "action": _numpy_leaf_jsonable(action),
+                "hidden_state": hidden_out,
             }
         )
 

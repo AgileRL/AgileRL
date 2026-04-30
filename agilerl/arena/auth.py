@@ -17,6 +17,28 @@ from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 logger = logging.getLogger(__name__)
 
 
+def load_credentials_payload(
+    credentials_path: Path | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
+    """Load the raw JSON object from the credentials file (no token validation).
+
+    Used when merging OAuth tokens with other persisted keys such as
+    ``deployment_inference``.
+    """
+    path = (
+        Path(os.fspath(credentials_path)).expanduser().resolve()
+        if credentials_path is not None
+        else Path.home() / ".arena" / "credentials.json"
+    )
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
 def load_credentials(
     credentials_path: Path | os.PathLike[str] = "~/.arena/credentials.json",
 ) -> dict[str, Any] | None:
@@ -160,7 +182,9 @@ class ArenaOAuth2:
                     grant_type="urn:ietf:params:oauth:grant-type:device_code",
                     device_code=device_code,
                 )
-                ArenaOAuth2._write_credentials(tokens)
+                merged = load_credentials_payload(self.CREDENTIALS_FILE)
+                merged.update(tokens)
+                ArenaOAuth2._write_credentials(merged)
                 return tokens
             except KeycloakError as exc:
                 error = ArenaOAuth2._extract_error(exc)
@@ -197,7 +221,7 @@ class ArenaOAuth2:
                 cli_hint="Please run 'arena login' to re-authenticate.",
             ) from exc
 
-        creds = load_credentials(self.CREDENTIALS_FILE) or {}
+        creds = load_credentials_payload(self.CREDENTIALS_FILE)
         creds.update(tokens)
         ArenaOAuth2._write_credentials(creds)
         return tokens
