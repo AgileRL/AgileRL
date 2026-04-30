@@ -556,7 +556,6 @@ def test_get_action_grpo_hf_stop_iteration_device_fallback():
     "use_vllm, pretrained_model_name_or_path",
     [(True, TINY_LLM_FIXTURE_PATH)],
 )
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_grpo_move_model_to_vllm(
     deepspeed_env,
@@ -572,7 +571,6 @@ def test_grpo_move_model_to_vllm(
     group_size,
     use_vllm,
     pretrained_model_name_or_path,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     grpo = grpo_factory(
@@ -587,7 +585,6 @@ def test_grpo_move_model_to_vllm(
         use_separate_reference_adapter,
         use_vllm,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     # Change lora B so that the parameters are different
@@ -3507,7 +3504,6 @@ def test_grpo_clone_with_accelerator(
     "use_vllm, pretrained_model_name_or_path",
     [(True, TINY_LLM_FIXTURE_PATH)],
 )
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @patch("agilerl.algorithms.core.base.LLM", DummyVLLM)
 def test_grpo_clone_with_accelerator_vllm(
@@ -3525,7 +3521,6 @@ def test_grpo_clone_with_accelerator_vllm(
     use_vllm,
     pretrained_model_name_or_path,
     tmpdir,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     grpo = grpo_factory(
@@ -3540,7 +3535,6 @@ def test_grpo_clone_with_accelerator_vllm(
         use_separate_reference_adapter,
         use_vllm,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     grpo_accelerator = grpo.accelerator

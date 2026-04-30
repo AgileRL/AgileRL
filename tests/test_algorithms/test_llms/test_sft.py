@@ -75,7 +75,6 @@ def generate_sft(
     input_size,
     max_tokens,
     pretrained_model_name_or_path,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
     from_name=False,
     use_liger_loss=False,
@@ -125,7 +124,6 @@ def generate_sft(
         lora_config=lora_config,
         accelerator=accelerator,
         device="cuda" if torch.cuda.is_available() else "cpu",
-        reduce_memory_peak=reduce_memory_peak,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
         update_epochs=update_epochs,
@@ -158,7 +156,6 @@ def sft_factory():
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [4])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("from_name", [True, False])
 def test_init_sft(
@@ -173,7 +170,6 @@ def test_init_sft(
     input_size,
     max_tokens,
     data_batch_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
     from_name,
 ):
@@ -186,11 +182,10 @@ def test_init_sft(
         input_size,
         max_tokens,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
         from_name=from_name,
     )
-    assert sft.batch_size_per_process == 16 if not reduce_memory_peak else 1
+    assert sft.batch_size_per_process == 16
     assert sft.lr == 5e-5
     assert sft.max_grad_norm == 0.1
     assert sft.update_epochs == 1
@@ -225,11 +220,9 @@ def test_init_sft(
 
 
 @pytest.mark.parametrize("vocab_size", [100])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_init_sft_model_name_none_actor_network_none(
     vocab_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     with pytest.raises(
@@ -243,7 +236,6 @@ def test_init_sft_model_name_none_actor_network_none(
             pad_token="<pad>",
             accelerator=None,
             device="cuda" if torch.cuda.is_available() else "cpu",
-            reduce_memory_peak=reduce_memory_peak,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         )
 
@@ -268,7 +260,6 @@ def test_init_sft_model_name_none_actor_network_none(
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [4])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_sft_get_action(
     deepspeed_env,
@@ -282,7 +273,6 @@ def test_sft_get_action(
     input_size,
     max_tokens,
     data_batch_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     sft = sft_factory(
@@ -294,7 +284,6 @@ def test_sft_get_action(
         input_size,
         max_tokens,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     with pytest.raises(NotImplementedError):
@@ -320,7 +309,6 @@ def test_sft_get_action(
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [32])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("use_liger_loss", [False, True])
 def test_sft_learn(
@@ -335,7 +323,6 @@ def test_sft_learn(
     input_size,
     max_tokens,
     data_batch_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
     use_liger_loss,
 ):
@@ -348,7 +335,6 @@ def test_sft_learn(
         input_size,
         max_tokens,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
     )
@@ -420,7 +406,6 @@ def test_sft_learn(
     ],
 )
 @pytest.mark.parametrize("data_batch_size", [2])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 @pytest.mark.parametrize("loop", [1, 2])
 def test_sft_test(
@@ -435,7 +420,6 @@ def test_sft_test(
     input_size,
     max_tokens,
     data_batch_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
     loop,
 ):
@@ -448,7 +432,6 @@ def test_sft_test(
         input_size,
         max_tokens,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     train_dataset = Dataset.from_dict(
@@ -503,7 +486,6 @@ def test_sft_liger_unavailable_behaviour(
                 input_size=5,
                 max_tokens=10,
                 pretrained_model_name_or_path=None,
-                reduce_memory_peak=False,
                 micro_batch_size_per_gpu=None,
                 from_name=False,
                 use_liger_loss=True,
@@ -521,7 +503,6 @@ def test_sft_liger_unavailable_behaviour(
             input_size=5,
             max_tokens=10,
             pretrained_model_name_or_path=None,
-            reduce_memory_peak=False,
             micro_batch_size_per_gpu=None,
             from_name=False,
             use_liger_loss=False,
@@ -548,7 +529,6 @@ def test_sft_load():
     "pretrained_model_name_or_path",
     [TINY_LLM_FIXTURE_PATH],
 )
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_sft_clean_up(
     deepspeed_env,
@@ -561,7 +541,6 @@ def test_sft_clean_up(
     vocab_size,
     input_size,
     max_tokens,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     sft = sft_factory(
@@ -573,7 +552,6 @@ def test_sft_clean_up(
         input_size,
         max_tokens,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     sft.clean_up()
@@ -593,7 +571,6 @@ def test_sft_clean_up(
     "pretrained_model_name_or_path",
     [TINY_LLM_FIXTURE_PATH],
 )
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_sft_save_load_checkpoint(
     deepspeed_env,
@@ -606,7 +583,6 @@ def test_sft_save_load_checkpoint(
     input_size,
     max_tokens,
     pretrained_model_name_or_path,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     sft = sft_factory(
@@ -618,7 +594,6 @@ def test_sft_save_load_checkpoint(
         input_size,
         max_tokens,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     accelerator = accelerator_factory(use_deepspeed_optimizer, config)
@@ -686,7 +661,6 @@ def test_sft_save_load_checkpoint(
     "pretrained_model_name_or_path",
     [TINY_LLM_FIXTURE_PATH],
 )
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_sft_exception_on_recompile(
     deepspeed_env,
@@ -699,7 +673,6 @@ def test_sft_exception_on_recompile(
     vocab_size,
     input_size,
     max_tokens,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     sft = sft_factory(
@@ -711,7 +684,6 @@ def test_sft_exception_on_recompile(
         input_size,
         max_tokens,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     # LLMAlgorithm.recompile() is a guarded no-op unless torch_compiler is enabled.
@@ -736,7 +708,6 @@ def test_sft_no_llm_dependencies(sft_factory, model_factory, accelerator_factory
             input_size=5,
             max_tokens=10,
             pretrained_model_name_or_path=None,
-            reduce_memory_peak=False,
             micro_batch_size_per_gpu=None,
             from_name=False,
         )
@@ -755,7 +726,6 @@ def test_sft_no_llm_dependencies(sft_factory, model_factory, accelerator_factory
     [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("batch_size", [1])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_sft_get_logprobs(
     deepspeed_env,
@@ -769,7 +739,6 @@ def test_sft_get_logprobs(
     max_tokens,
     pretrained_model_name_or_path,
     batch_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     sft = sft_factory(
@@ -781,7 +750,6 @@ def test_sft_get_logprobs(
         input_size,
         max_tokens,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     ids = torch.randint(0, vocab_size, (batch_size, input_size + max_tokens)).to(
@@ -804,7 +772,6 @@ def test_sft_get_logprobs(
     [TINY_LLM_FIXTURE_PATH],
 )
 @pytest.mark.parametrize("batch_size", [1])
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_sft_backward_pass(
     deepspeed_env,
@@ -818,7 +785,6 @@ def test_sft_backward_pass(
     max_tokens,
     pretrained_model_name_or_path,
     batch_size,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     sft = sft_factory(
@@ -830,7 +796,6 @@ def test_sft_backward_pass(
         input_size,
         max_tokens,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     ids = torch.randint(0, vocab_size, (batch_size, input_size + max_tokens)).to(
@@ -852,7 +817,6 @@ def test_sft_backward_pass(
     "pretrained_model_name_or_path",
     [TINY_LLM_FIXTURE_PATH],
 )
-@pytest.mark.parametrize("reduce_memory_peak", [True])
 @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
 def test_sft_preprocess_observation(
     deepspeed_env,
@@ -865,7 +829,6 @@ def test_sft_preprocess_observation(
     vocab_size,
     input_size,
     max_tokens,
-    reduce_memory_peak,
     micro_batch_size_per_gpu,
 ):
     sft = sft_factory(
@@ -877,7 +840,6 @@ def test_sft_preprocess_observation(
         input_size,
         max_tokens,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
     )
     obs = sft.preprocess_observation(
@@ -903,7 +865,6 @@ def test_sft_learn_calls_mps_empty_cache(
         input_size=5,
         max_tokens=10,
         pretrained_model_name_or_path=None,
-        reduce_memory_peak=False,
         micro_batch_size_per_gpu=None,
         from_name=False,
     )
