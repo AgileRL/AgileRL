@@ -1,8 +1,10 @@
-"""``arena on-prem install`` — enable provider, ensure class, run platform install scripts."""
+"""``arena on-prem install`` / ``teardown`` — cluster scripts + Arena on-prem API."""
 
 from __future__ import annotations
 
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -45,6 +47,20 @@ _BUNDLE_INVOKE: dict[str, Any] = {
     "params": [],
 }
 
+_DELETE_CLASS_INVOKE: dict[str, Any] = {
+    "method": "DELETE",
+    "path": "/api/cli/v1/on-prem/classes/delete",
+    "responseKind": "json",
+    "params": [],
+}
+
+_DISABLE_INVOKE: dict[str, Any] = {
+    "method": "POST",
+    "path": "/api/cli/v1/on-prem/disable",
+    "responseKind": "json",
+    "params": [],
+}
+
 _DEFAULT_METADATA: dict[str, Any] = {
     "computeResource": {
         "numCpus": 8,
@@ -52,6 +68,7 @@ _DEFAULT_METADATA: dict[str, Any] = {
         "memoryBytes": "64 GiB",
     },
 }
+
 
 def normalize_setup_type(setup_type: str) -> SetupKind:
     """Map CLI ``--setup-type`` to a supported bundle flavor."""
@@ -178,7 +195,8 @@ def _shell_runner() -> str:
     sh = shutil.which("sh")
     if sh:
         return sh
-    raise click.ClickException("bash or sh not found on PATH; required to run install scripts.")
+    msg = "bash or sh not found on PATH; required to run install scripts."
+    raise click.ClickException(msg)
 
 
 def _run_script(
@@ -300,6 +318,154 @@ def _run_docker_swarm_install(
     )
 
 
+def _parse_helm_release_ids(bundle_root: Path) -> tuple[str, str]:
+    """Read ``clusterName`` from rendered chart values (same rules as ``setup.sh``)."""
+    values_file = bundle_root / "chart" / "values.yaml"
+    if not values_file.is_file():
+        msg = f"Helm bundle missing {values_file.name}; cannot determine release name."
+        raise click.ClickException(msg)
+    text = values_file.read_text(encoding="utf-8")
+    match = re.search(
+        r"^clusterName:\s*[\"']?([^\"'\s]+)[\"']?\s*$",
+        text,
+        re.MULTILINE,
+    )
+    cluster_name = match.group(1) if match else "arena-train"
+    release = os.environ.get("RELEASE_NAME", cluster_name)
+    namespace = os.environ.get("NAMESPACE", cluster_name)
+    return release, namespace
+
+
+def _helm_uninstall(release: str, namespace: str) -> None:
+    if not shutil.which("helm"):
+        msg = "helm not found on PATH; install Helm 3.x or use --skip-cluster."
+        raise click.ClickException(msg)
+    click.echo(f"Removing Helm release {release!r} (namespace {namespace})…")
+    result = subprocess.run(
+        ["helm", "uninstall", release, "--namespace", namespace],
+        check=False,
+    )
+    if result.returncode != 0:
+        click.echo(
+            f"  helm uninstall exited {result.returncode} "
+            "(release may already be removed).",
+            err=True,
+        )
+
+
+def _ssh_remote_command(
+    host: str,
+    remote_cmd: str,
+    *,
+    ssh_user: str | None,
+    ssh_extra_opts: str | None,
+) -> None:
+    user = ssh_user or os.environ.get("SSH_USER") or os.environ.get("USER")
+    if not user:
+        msg = "Cannot determine SSH user; set --ssh-user or SSH_USER."
+        raise click.ClickException(msg)
+    if not shutil.which("ssh"):
+        msg = "ssh not found on PATH; required for dockerSwarm teardown."
+        raise click.ClickException(msg)
+
+    ssh_cmd = [
+        "ssh",
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+    ]
+    if ssh_extra_opts:
+        ssh_cmd.extend(shlex.split(ssh_extra_opts))
+    ssh_cmd.append(f"{user}@{host.strip()}")
+    ssh_cmd.append(remote_cmd)
+    click.echo(f"  $ {' '.join(ssh_cmd)}")
+    result = subprocess.run(ssh_cmd, check=False)
+    if result.returncode != 0:
+        click.echo(f"  ssh exited {result.returncode}", err=True)
+
+
+def _run_docker_swarm_teardown(
+    *,
+    manager: str,
+    stack_name: str,
+    ssh_user: str | None,
+    ssh_extra_opts: str | None,
+) -> None:
+    click.echo(f"Removing Docker stack {stack_name!r} on {manager}…")
+    _ssh_remote_command(
+        manager,
+        f"sudo docker stack rm {stack_name}",
+        ssh_user=ssh_user,
+        ssh_extra_opts=ssh_extra_opts,
+    )
+
+
+def _delete_class_if_present(client: Any, name: str) -> None:
+    listed = client.invoke_manifest_command(_LIST_CLASSES_INVOKE, {})
+    if _class_by_name(listed, name) is None:
+        click.echo(f"No Arena resource class {name!r}; skipping API delete.")
+        return
+    click.echo(f"Deleting on-prem resource class {name!r} from Arena…")
+    client.invoke_manifest_command(_DELETE_CLASS_INVOKE, {"name": name})
+
+
+def run_on_prem_teardown(
+    client: Any,
+    *,
+    name: str,
+    setup_type: str,
+    skip_cluster: bool,
+    delete_class: bool,
+    disable_provider: bool,
+    manager: str | None = None,
+    workers: tuple[str, ...] = (),
+    ssh_user: str | None = None,
+    ssh_extra_opts: str | None = None,
+    stack_name: str = "arena",
+) -> None:
+    """Remove cluster workloads and optionally delete the Arena on-prem class."""
+    kind = normalize_setup_type(setup_type)
+
+    if not skip_cluster:
+        if kind == "dockerSwarm":
+            if not manager or not manager.strip():
+                msg = "--manager is required for dockerSwarm teardown (unless --skip-cluster)."
+                raise click.ClickException(msg)
+            _run_docker_swarm_teardown(
+                manager=manager.strip(),
+                stack_name=stack_name,
+                ssh_user=ssh_user,
+                ssh_extra_opts=ssh_extra_opts,
+            )
+        else:
+            _warn_ignored_swarm_flags(
+                manager=manager,
+                workers=workers,
+                ssh_user=ssh_user,
+                ssh_extra_opts=ssh_extra_opts,
+                advertise_addr=None,
+            )
+            with tempfile.TemporaryDirectory(prefix="arena-on-prem-teardown-") as tmp:
+                bundle_root = _download_bundle(
+                    client,
+                    class_name=name,
+                    setup_type=kind,
+                    dest_dir=Path(tmp),
+                )
+                release, namespace = _parse_helm_release_ids(bundle_root)
+                _helm_uninstall(release, namespace)
+
+    if delete_class:
+        _delete_class_if_present(client, name)
+
+    if disable_provider:
+        click.echo("Disabling on-prem provider…")
+        client.invoke_manifest_command(_DISABLE_INVOKE, {})
+
+    click.echo(f"On-prem teardown finished for class {name!r} ({kind}).")
+
+
 def _run_helm_install(bundle_root: Path) -> None:
     setup = bundle_root / "setup.sh"
     if not setup.is_file():
@@ -309,9 +475,10 @@ def _run_helm_install(bundle_root: Path) -> None:
         )
         raise click.ClickException(msg)
     if not shutil.which("helm"):
-        raise click.ClickException(
-            "helm not found on PATH; install Helm 3.x or use --setup-type dockerSwarm.",
+        msg = (
+            "helm not found on PATH; install Helm 3.x or use --setup-type dockerSwarm."
         )
+        raise click.ClickException(msg)
     click.echo("Running Helm setup (local kubectl context)…")
     _run_script(setup, [], env=os.environ.copy(), cwd=bundle_root)
 
@@ -334,14 +501,12 @@ def run_on_prem_install(
 
     if kind == "dockerSwarm":
         if not manager or not manager.strip():
-            raise click.ClickException(
-                "--manager is required for dockerSwarm "
-                "(SSH hostname or IP of the swarm manager).",
-            )
+            msg = """--manager is required for dockerSwarm\n
+            (SSH hostname or IP of the swarm manager)."""
+            raise click.ClickException(msg)
         if not shutil.which("ssh"):
-            raise click.ClickException(
-                "ssh not found on PATH; required for dockerSwarm install.",
-            )
+            msg = "ssh not found on PATH; required for dockerSwarm install."
+            raise click.ClickException(msg)
     else:
         _warn_ignored_swarm_flags(
             manager=manager,
@@ -492,7 +657,112 @@ def build_install_command() -> click.Command:
     return install_cmd
 
 
+def build_teardown_command() -> click.Command:
+    """``arena on-prem teardown`` — reverse install (cluster + optional API cleanup)."""
+
+    @click.command(
+        "teardown",
+        context_settings={"max_content_width": 100},
+    )
+    @click.argument("name")
+    @click.option(
+        "--setup-type",
+        "setup_type",
+        default="dockerSwarm",
+        show_default=True,
+        type=click.Choice(["dockerSwarm", "helm"], case_sensitive=False),
+        help="Must match how the cluster was installed.",
+    )
+    @click.option(
+        "--manager",
+        default=None,
+        help="[dockerSwarm] Swarm manager SSH host (required unless --skip-cluster).",
+    )
+    @click.option(
+        "--workers",
+        default="",
+        help="Ignored for teardown (kept for symmetry with install).",
+    )
+    @click.option(
+        "--stack-name",
+        default="arena",
+        show_default=True,
+        help="[dockerSwarm] ``docker stack rm`` name on the manager.",
+    )
+    @click.option(
+        "--ssh-user",
+        default=None,
+        help="[dockerSwarm] SSH login for the manager.",
+    )
+    @click.option(
+        "--ssh-extra-opts",
+        default=None,
+        help="[dockerSwarm] Extra ssh(1) arguments.",
+    )
+    @click.option(
+        "--skip-cluster",
+        is_flag=True,
+        default=False,
+        help="Only update Arena (delete class / disable provider); do not touch Helm or Swarm.",
+    )
+    @click.option(
+        "--keep-class",
+        is_flag=True,
+        default=False,
+        help="Remove cluster workloads but keep the Arena resource class.",
+    )
+    @click.option(
+        "--disable-provider",
+        is_flag=True,
+        default=False,
+        help="Also POST /on-prem/disable after teardown.",
+    )
+    @click.pass_obj
+    def teardown_cmd(
+        config: CommandConfig,
+        name: str,
+        setup_type: str,
+        manager: str | None,
+        workers: str,
+        stack_name: str,
+        ssh_user: str | None,
+        ssh_extra_opts: str | None,
+        skip_cluster: bool,
+        keep_class: bool,
+        disable_provider: bool,
+    ) -> None:
+        """Tear down an on-prem install for CLASS_NAME.
+
+        **helm** — ``helm uninstall`` using ``clusterName`` from the class deployment bundle
+        (same release/namespace as ``setup.sh``).
+
+        **dockerSwarm** — ``docker stack rm`` on ``--manager`` (default stack name ``arena``).
+
+        By default also deletes the Arena on-prem resource class; use ``--keep-class`` to
+        leave the class registered. Use ``--skip-cluster`` for API-only cleanup.
+        """
+        from agilerl.arena.cli import arena_client
+
+        with arena_client(config) as client:
+            run_on_prem_teardown(
+                client,
+                name=name.strip(),
+                setup_type=setup_type,
+                skip_cluster=skip_cluster,
+                delete_class=not keep_class,
+                disable_provider=disable_provider,
+                manager=manager.strip() if manager else None,
+                workers=tuple(h.strip() for h in workers.split(",") if h.strip()),
+                ssh_user=ssh_user,
+                ssh_extra_opts=ssh_extra_opts,
+                stack_name=stack_name,
+            )
+
+    return teardown_cmd
+
+
 def register_on_prem_install(on_prem_group: click.Group) -> None:
-    """Replace manifest ``install`` subgroup with ``arena on-prem install``."""
+    """Replace manifest ``install`` subgroup; register install + teardown commands."""
     on_prem_group.commands.pop("install", None)
     on_prem_group.add_command(build_install_command())
+    on_prem_group.add_command(build_teardown_command())

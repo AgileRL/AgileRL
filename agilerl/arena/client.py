@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import time
-import tarfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -1721,7 +1720,9 @@ class ArenaClient:
         path = invoke["path"]
         if not isinstance(path, str):
             msg = "Manifest path must be a string."
-            raise ArenaValidationError(msg, cli_hint="Upgrade agilerl — malformed manifest.")
+            raise ArenaValidationError(
+                msg, cli_hint="Upgrade agilerl — malformed manifest."
+            )
         if not path.startswith(self._MANIFEST_ALLOWED_PATH_PREFIX):
             msg = "Manifest command path is not allowlisted for this client."
             raise ArenaValidationError(msg)

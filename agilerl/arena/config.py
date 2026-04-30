@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-import click
+if TYPE_CHECKING:
+    import click
 
 from agilerl.arena.client import ArenaClient
 

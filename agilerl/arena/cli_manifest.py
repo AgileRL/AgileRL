@@ -6,12 +6,17 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import click
 
-from agilerl.arena.config import CommandConfig, build_client, resolve_root_command_config
+from agilerl.arena.config import (
+    CommandConfig,
+    build_client,
+    resolve_root_command_config,
+)
 from agilerl.arena.exceptions import ArenaValidationError
 from agilerl.arena.output import emit_result
 
@@ -199,7 +204,8 @@ def build_manifest_click_command(
             if val is None and not spec["required"]:
                 continue
             if val is None and spec["required"]:
-                raise click.UsageError(f"Missing required option for {spec['name']!r}.")
+                msg = f"Missing required option for {spec['name']!r}."
+                raise click.UsageError(msg)
             if spec["type"] == "json" and isinstance(val, str):
                 val = _parse_json_cli_value(val)
             parsed[spec["name"]] = val
@@ -286,7 +292,7 @@ class OnPremDynamicGroup(click.Group):
             name="on-prem",
             help=(
                 "Enterprise on-prem worker clusters (from Arena capabilities). "
-                "Quick start: arena on-prem install NAME --manager HOST."
+                "Quick start: install / teardown. See arena on-prem install --help."
             ),
         )
         self._caps_fingerprint: str | None = None
@@ -303,9 +309,8 @@ class OnPremDynamicGroup(click.Group):
     def _ensure(self, ctx: click.Context) -> None:
         config = ctx.find_root().obj
         if not isinstance(config, CommandConfig):
-            raise click.ClickException(
-                "Arena CLI internal error: missing CommandConfig on root context.",
-            )
+            msg = "Arena CLI internal error: missing CommandConfig on root context."
+            raise click.ClickException(msg)
 
         client = build_client(config)
         try:

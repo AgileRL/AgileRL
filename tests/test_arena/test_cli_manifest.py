@@ -99,7 +99,9 @@ class TestGetCliCapabilities:
         with patch.object(api_key_client._http, "request", return_value=resp):
             assert api_key_client.get_cli_capabilities(force_refresh=True) is None
 
-    def test_schema_version_string_one_accepted(self, api_key_client: ArenaClient) -> None:
+    def test_schema_version_string_one_accepted(
+        self, api_key_client: ArenaClient
+    ) -> None:
         resp = MagicMock()
         resp.status_code = 200
         resp.json.return_value = {
@@ -129,7 +131,9 @@ class TestInvokeManifestCommand:
             "responseKind": "json",
             "params": [],
         }
-        with patch.object(api_key_client, "_request", return_value={"ok": True}) as mocked:
+        with patch.object(
+            api_key_client, "_request", return_value={"ok": True}
+        ) as mocked:
             api_key_client.invoke_manifest_command(invoke, {})
         mocked.assert_called_once_with("POST", "/api/cli/v1/on-prem/enable")
 
@@ -416,8 +420,25 @@ class TestOnPremDynamicIntegration:
         assert "install-docker" in res.output
 
 
+class TestHelmReleaseIds:
+    def test_parse_cluster_name_from_values(self, tmp_path: Path) -> None:
+        from agilerl.arena.cli_on_prem_install import _parse_helm_release_ids
+
+        root = tmp_path / "bundle"
+        (root / "chart").mkdir(parents=True)
+        (root / "chart" / "values.yaml").write_text(
+            'clusterName: "my-k3d-pool"\n',
+            encoding="utf-8",
+        )
+        release, namespace = _parse_helm_release_ids(root)
+        assert release == "my-k3d-pool"
+        assert namespace == "my-k3d-pool"
+
+
 class TestResolveBundleRoot:
-    def test_finds_setup_sh_when_zip_has_arena_train_prefix(self, tmp_path: Path) -> None:
+    def test_finds_setup_sh_when_zip_has_arena_train_prefix(
+        self, tmp_path: Path
+    ) -> None:
         from agilerl.arena.cli_on_prem_install import resolve_bundle_root
 
         nested = tmp_path / "extracted" / "arena-train"
@@ -518,3 +539,41 @@ class TestOnPremInstall:
                 name="pool",
                 setup_type="dockerSwarm",
             )
+
+    def test_teardown_helm_uninstalls_and_deletes_class(self) -> None:
+        from agilerl.arena.cli_on_prem_install import run_on_prem_teardown
+
+        client = MagicMock(spec=ArenaClient)
+        client.invoke_manifest_command.side_effect = [
+            [{"name": "k8s-pool", "id": 1}],
+            {},
+        ]
+
+        with (
+            patch(
+                "agilerl.arena.cli_on_prem_install._download_bundle",
+                return_value=Path("/tmp/fake"),
+            ),
+            patch(
+                "agilerl.arena.cli_on_prem_install._parse_helm_release_ids",
+                return_value=("k8s-pool", "k8s-pool"),
+            ),
+            patch("agilerl.arena.cli_on_prem_install._helm_uninstall") as helm_mock,
+        ):
+            run_on_prem_teardown(
+                client,
+                name="k8s-pool",
+                setup_type="helm",
+                skip_cluster=False,
+                delete_class=True,
+                disable_provider=False,
+            )
+
+        helm_mock.assert_called_once_with("k8s-pool", "k8s-pool")
+        delete_call = [
+            c
+            for c in client.invoke_manifest_command.call_args_list
+            if c[0][0].get("path", "").endswith("/classes/delete")
+        ]
+        assert len(delete_call) == 1
+        assert delete_call[0][0][1] == {"name": "k8s-pool"}
