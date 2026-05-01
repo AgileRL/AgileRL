@@ -61,6 +61,7 @@ if _xdist_worker_id:
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import torch  # noqa: E402
+from accelerate.state import AcceleratorState, PartialState  # noqa: E402
 from gymnasium import spaces  # noqa: E402
 from torch import nn  # noqa: E402
 
@@ -132,6 +133,24 @@ def pytest_collection_modifyitems(config, items):
 # Only clear CUDA cache when actually needed
 @pytest.fixture(autouse=True, scope="function")
 def cleanup():
+    # Reset the process-wide ``AcceleratorState`` / ``PartialState`` singletons
+    # **before** every test. Both are accelerate's shared-state caches keyed by
+    # device, so once any test instantiates an ``Accelerator()`` the device is
+    # frozen for the rest of the worker's lifetime — a later test asking for a
+    # different device (typically ``cpu=True`` on macOS/MPS workers, set via
+    # ``ACCELERATE_USE_CPU=true`` above) then hits ``_check_initialized`` and
+    # fails with ``AcceleratorState has already been initialized ...``.
+    #
+    # Resetting at setup (vs. teardown) is robust to fixtures that swallow
+    # exceptions, tests that create accelerators inside ``with`` blocks that
+    # raise, and ordering with subdirectory conftests like
+    # ``tests/test_algorithms/test_llms/conftest.py`` that already reset on
+    # teardown — those will continue to work and just be redundant on the next
+    # test's setup. ``.clear()`` is a no-op when state is empty, so this is
+    # cheap.
+    AcceleratorState._reset_state(reset_partial_state=True)
+    PartialState._reset_state()
+
     yield
 
     # Only clear CUDA cache if CUDA was actually used
