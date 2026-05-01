@@ -4,6 +4,7 @@ import shutil
 import socket
 import sys
 import tempfile
+from importlib.util import find_spec
 
 # Give each xdist worker its own torch inductor cache dir BEFORE torch is
 # imported. Parallel workers sharing the default cache race on precompiled
@@ -162,6 +163,38 @@ def cleanup():
     # cheap.
     AcceleratorState._reset_state(reset_partial_state=True)
     PartialState._reset_state()
+
+    # Same idea, but for DeepSpeed's module-level ``_*_GROUP`` caches in
+    # ``deepspeed.utils.groups`` (and its comm backend ``ds_comm.cdb``).
+    # ``DeepSpeedEngine.__init__`` reads ``_get_sequence_data_parallel_group()``
+    # — which returns ``_SEQUENCE_DATA_PARALLEL_GROUP`` — and calls
+    # ``dist.broadcast(..., group=...)`` on it. If a previous test on this
+    # xdist worker created an Accelerator+DeepSpeedEngine, populated those
+    # caches, and was then GC'd (which tears down its ``ProcessGroup``), the
+    # next DeepSpeed init re-reads the now-stale cached ``ProcessGroup``
+    # reference and ``dist.get_global_rank`` raises ``Group <...> is not
+    # registered, please create group with torch.distributed.new_group API``
+    # because the underlying group is no longer in
+    # ``torch.distributed._world.pg_group_ranks``.
+    #
+    # Setting all module-level ``_*_GROUP`` attributes back to ``None`` and
+    # clearing ``ds_comm.cdb`` forces the next DeepSpeed init to repopulate
+    # both from scratch against the current ``torch.distributed`` state. This
+    # mirrors the existing per-vLLM-test cleanup in
+    # ``tests/test_algorithms/test_llms/conftest.py`` but applies it to **every**
+    # test, so non-vLLM DeepSpeed tests (``test_core_base.py``'s
+    # ``TestLLMDeepspeedCheckpointSaveLoad`` etc.) also get a clean slate.
+    # Gated on ``find_spec`` so it stays a no-op on Windows where DeepSpeed
+    # isn't installed (``deepspeed~=0.17.1; sys_platform != 'win32'`` in
+    # ``pyproject.toml``).
+    if find_spec("deepspeed") is not None:
+        import deepspeed.comm.comm as ds_comm
+        import deepspeed.utils.groups as ds_groups
+
+        for attr in dir(ds_groups):
+            if attr.startswith("_") and attr.endswith("_GROUP"):
+                setattr(ds_groups, attr, None)
+        ds_comm.cdb = None
 
     yield
 
