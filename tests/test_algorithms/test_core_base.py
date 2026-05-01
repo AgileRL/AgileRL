@@ -1559,6 +1559,17 @@ def _make_llm_agent(
         patch.object(LLMAlgorithm, "_configure_vllm"),
         patch.object(LLMAlgorithm, "wrap_models"),
         patch.object(EvolvableAlgorithm, "_registry_init"),
+        # ``EvolvableAlgorithm.__init__`` lazily initialises a real
+        # ``PartialState()`` (and therefore ``torch.distributed.init_process_group``)
+        # whenever the supplied accelerator reports ``num_processes > 1``. The
+        # tests below pass a ``MagicMock`` accelerator, so this real init isn't
+        # wanted and just races neighbouring xdist workers for ``MASTER_PORT``
+        # (the failure mode is ``EADDRINUSE`` on macOS CI). Stub it out: the
+        # call site only consumes ``result[0]`` to choose a seed.
+        patch(
+            "agilerl.algorithms.core.base.broadcast_object_list",
+            side_effect=lambda obj_list, from_process=0: list(obj_list),
+        ),
     ):
         agent = _StubLLMAlgorithm(
             index=0,
