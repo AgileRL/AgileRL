@@ -163,15 +163,36 @@ def test_get_normalization():
     assert isinstance(norm2, nn.BatchNorm2d)
 
 
-def test_get_activation_softmax_and_new_gelu():
-    softmax = get_activation("Softmax")
-    assert isinstance(softmax, nn.Module)
-    x = torch.randn(2, 4)
-    _ = softmax(x)
-    new_gelu = get_activation("GELU", new_gelu=True)
-    assert isinstance(new_gelu, nn.Module)
-    identity = get_activation(None)
-    assert isinstance(identity, nn.Identity)
+######### Test get_activation #########
+class TestGetActivation:
+    def test_get_activation_softmax_and_new_gelu(self):
+        softmax = get_activation("Softmax")
+        assert isinstance(softmax, nn.Module)
+        x = torch.randn(2, 4)
+        _ = softmax(x)
+        new_gelu = get_activation("GELU", new_gelu=True)
+        assert isinstance(new_gelu, nn.Module)
+        identity = get_activation(None)
+        assert isinstance(identity, nn.Identity)
+
+    def test_returns_correct_activation_function_for_all_supported_names(self):
+        activation_names = [
+            "Tanh",
+            "Identity",
+            "ReLU",
+            "ELU",
+            "Softsign",
+            "Sigmoid",
+            "GumbelSoftmax",
+            "Softplus",
+            "Softmax",
+            "LeakyReLU",
+            "PReLU",
+            "GELU",
+        ]
+        for name in activation_names:
+            activation = get_activation(name)
+            assert isinstance(activation, nn.Module)
 
 
 def test_get_pooling():
@@ -213,67 +234,51 @@ def test_create_resnet():
     assert "resnet_conv_input" in net_dict
 
 
-######### Test get_activation #########
-def test_returns_correct_activation_function_for_all_supported_names():
-    activation_names = [
-        "Tanh",
-        "Identity",
-        "ReLU",
-        "ELU",
-        "Softsign",
-        "Sigmoid",
-        "GumbelSoftmax",
-        "Softplus",
-        "Softmax",
-        "LeakyReLU",
-        "PReLU",
-        "GELU",
-    ]
-    for name in activation_names:
-        activation = get_activation(name)
-        assert isinstance(activation, nn.Module)
-
-
-@pytest.mark.parametrize(
-    "input_shape, channel_size, kernel_size, stride_size",
-    [
-        ([1, 16, 16], [32, 16], [3, 2], [1, 1]),
-    ],
-)
-def test_calc_max_kernel_sizes(input_shape, channel_size, kernel_size, stride_size):
-    mutable_kernel_sizes = MutableKernelSizes(
-        sizes=kernel_size,
-        cnn_block_type="Conv2d",
-        sample_input=torch.randn(1, 3, 32, 32),
-        rng=np.random.default_rng(42),
+######### Test MutableKernelSizes.calc_max_kernel_sizes #########
+class TestMutableKernelSizesCalcMaxKernelSizes:
+    @pytest.mark.parametrize(
+        "input_shape, channel_size, kernel_size, stride_size",
+        [
+            ([1, 16, 16], [32, 16], [3, 2], [1, 1]),
+        ],
     )
-    max_kernel_sizes = mutable_kernel_sizes.calc_max_kernel_sizes(
-        channel_size,
-        stride_size,
-        input_shape,
-    )
-    assert max_kernel_sizes == [3, 3]
+    def test_calc_max_kernel_sizes(
+        self, input_shape, channel_size, kernel_size, stride_size
+    ):
+        mutable_kernel_sizes = MutableKernelSizes(
+            sizes=kernel_size,
+            cnn_block_type="Conv2d",
+            sample_input=torch.randn(1, 3, 32, 32),
+            rng=np.random.default_rng(42),
+        )
+        max_kernel_sizes = mutable_kernel_sizes.calc_max_kernel_sizes(
+            channel_size,
+            stride_size,
+            input_shape,
+        )
+        assert max_kernel_sizes == [3, 3]
 
-
-@pytest.mark.parametrize(
-    "input_shape, channel_size, kernel_size, stride_size",
-    [
-        ([1, 3, 3], [32, 16], [1, 1], [1, 1]),
-    ],
-)
-def test_max_kernel_size_negative(input_shape, channel_size, kernel_size, stride_size):
-    mutable_kernel_sizes = MutableKernelSizes(
-        sizes=kernel_size,
-        cnn_block_type="Conv2d",
-        sample_input=torch.randn(1, 3, 32, 32),
-        rng=np.random.default_rng(42),
+    @pytest.mark.parametrize(
+        "input_shape, channel_size, kernel_size, stride_size",
+        [
+            ([1, 3, 3], [32, 16], [1, 1], [1, 1]),
+        ],
     )
-    max_kernel_sizes = mutable_kernel_sizes.calc_max_kernel_sizes(
-        channel_size,
-        stride_size,
-        input_shape,
-    )
-    assert max_kernel_sizes == [1, 1]
+    def test_max_kernel_size_negative(
+        self, input_shape, channel_size, kernel_size, stride_size
+    ):
+        mutable_kernel_sizes = MutableKernelSizes(
+            sizes=kernel_size,
+            cnn_block_type="Conv2d",
+            sample_input=torch.randn(1, 3, 32, 32),
+            rng=np.random.default_rng(42),
+        )
+        max_kernel_sizes = mutable_kernel_sizes.calc_max_kernel_sizes(
+            channel_size,
+            stride_size,
+            input_shape,
+        )
+        assert max_kernel_sizes == [1, 1]
 
 
 @pytest.mark.parametrize("output_vanish, noisy", [(True, True), (False, True)])
@@ -289,33 +294,60 @@ def test_create_mlp(output_vanish, noisy):
     assert isinstance(net, nn.Module)
 
 
-######### Test create_mlp and create_cnn########
-@pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])
-def test_create_cnn(noisy, output_vanish):
-    feature_net = create_cnn(
-        "Conv2d",
-        1,
-        [32, 32],
-        [3, 3],
-        [1, 1],
-        "feature",
-        layer_norm=True,
-    )
+######### Test create_cnn #########
+class TestCreateCnn:
+    @pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])
+    def test_create_cnn(self, noisy, output_vanish):
+        feature_net = create_cnn(
+            "Conv2d",
+            1,
+            [32, 32],
+            [3, 3],
+            [1, 1],
+            "feature",
+            layer_norm=True,
+        )
 
-    head = create_mlp(
-        10,
-        4,
-        [64, 64],
-        output_activation=None,
-        noisy=noisy,
-        name="value",
-        output_vanish=output_vanish,
-    )
+        head = create_mlp(
+            10,
+            4,
+            [64, 64],
+            output_activation=None,
+            noisy=noisy,
+            name="value",
+            output_vanish=output_vanish,
+        )
 
-    feature_net = nn.ModuleDict(feature_net)
+        feature_net = nn.ModuleDict(feature_net)
 
-    assert isinstance(head, nn.Module)
-    assert isinstance(feature_net, nn.Module)
+        assert isinstance(head, nn.Module)
+        assert isinstance(feature_net, nn.Module)
+
+    @pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])
+    def test_create_cnn_multi(self, noisy, output_vanish):
+        feature_net = create_cnn(
+            "Conv3d",
+            1,
+            [32, 32],
+            [3, 3],
+            [1, 1],
+            "feature",
+            layer_norm=True,
+        )
+        head = create_mlp(
+            10,
+            4,
+            [64, 64],
+            output_activation=None,
+            noisy=noisy,
+            name="value",
+            output_vanish=output_vanish,
+        )
+
+        feature_net = nn.ModuleDict(feature_net)
+
+        assert isinstance(head, nn.Module)
+        assert isinstance(feature_net, nn.Module)
 
 
 def test_compile_model():
@@ -338,33 +370,6 @@ def test_compile_model():
     # Test with mode=None
     result = compile_model(model, mode=None)
     assert result is model
-
-
-@pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])
-def test_create_cnn_multi(noisy, output_vanish):
-    feature_net = create_cnn(
-        "Conv3d",
-        1,
-        [32, 32],
-        [3, 3],
-        [1, 1],
-        "feature",
-        layer_norm=True,
-    )
-    head = create_mlp(
-        10,
-        4,
-        [64, 64],
-        output_activation=None,
-        noisy=noisy,
-        name="value",
-        output_vanish=output_vanish,
-    )
-
-    feature_net = nn.ModuleDict(feature_net)
-
-    assert isinstance(head, nn.Module)
-    assert isinstance(feature_net, nn.Module)
 
 
 ######### Test get_input_size_from_space #########

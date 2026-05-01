@@ -29,569 +29,610 @@ def head_config():
     return asdict(MlpNetConfig(hidden_size=[64, 64]))
 
 
-@pytest.mark.parametrize(
-    "observation_space, action_space, expect_error",
-    [
-        ("vector_space", "discrete_space", None),
-        ("dict_space", "discrete_space", None),
-        ("discrete_space", "discrete_space", None),
-        ("image_space", "discrete_space", None),
-        ("vector_space", "vector_space", ValueError),
-    ],
-)
-def test_q_network_initialization_action_space_validation(
-    observation_space,
-    action_space,
-    expect_error,
-    request,
-):
-    """QNetwork raises ValueError when action_space is not Discrete or MultiDiscrete."""
-    observation_space = request.getfixturevalue(observation_space)
-    action_space = request.getfixturevalue(action_space)
-    if expect_error is not None:
-        with pytest.raises(
-            expect_error, match="Action space must be either Discrete or MultiDiscrete"
-        ):
-            QNetwork(observation_space, action_space)
-    else:
-        network = QNetwork(observation_space, action_space)
+class TestQNetworkInit:
+    @pytest.mark.parametrize(
+        "observation_space, action_space, expect_error",
+        [
+            ("vector_space", "discrete_space", None),
+            ("dict_space", "discrete_space", None),
+            ("discrete_space", "discrete_space", None),
+            ("image_space", "discrete_space", None),
+            ("vector_space", "vector_space", ValueError),
+        ],
+    )
+    def test_q_network_initialization_action_space_validation(
+        self,
+        observation_space,
+        action_space,
+        expect_error,
+        request,
+    ):
+        """QNetwork raises ValueError when action_space is not Discrete or MultiDiscrete."""
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = request.getfixturevalue(action_space)
+        if expect_error is not None:
+            with pytest.raises(
+                expect_error,
+                match="Action space must be either Discrete or MultiDiscrete",
+            ):
+                QNetwork(observation_space, action_space)
+        else:
+            network = QNetwork(observation_space, action_space)
+            assert network.observation_space == observation_space
+
+    @pytest.mark.parametrize(
+        "observation_space, encoder_type",
+        [
+            ("dict_space", "multi_input"),
+            ("discrete_space", "mlp"),
+            ("vector_space", "mlp"),
+            ("image_space", "cnn"),
+        ],
+    )
+    def test_q_network_initialization(
+        self,
+        observation_space,
+        discrete_space,
+        encoder_type,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+
+        network = QNetwork(observation_space, discrete_space)
+
         assert network.observation_space == observation_space
 
-
-@pytest.mark.parametrize(
-    "observation_space, encoder_type",
-    [
-        ("dict_space", "multi_input"),
-        ("discrete_space", "mlp"),
-        ("vector_space", "mlp"),
-        ("image_space", "cnn"),
-    ],
-)
-def test_q_network_initialization(
-    observation_space,
-    discrete_space,
-    encoder_type,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-
-    network = QNetwork(observation_space, discrete_space)
-
-    assert network.observation_space == observation_space
-
-    if encoder_type == "multi_input":
-        assert isinstance(network.encoder, EvolvableMultiInput)
-    elif encoder_type == "mlp":
-        assert isinstance(network.encoder, EvolvableMLP)
-    elif encoder_type == "cnn":
-        assert isinstance(network.encoder, EvolvableCNN)
-
-    evolvable_modules = network.modules()
-    assert "encoder" in evolvable_modules
-    assert "head_net" in evolvable_modules
-
-
-def test_q_network_initialization_recurrent(discrete_space, vector_space):
-    action_space = discrete_space
-    observation_space = vector_space
-    network = QNetwork(observation_space, action_space, recurrent=True)
-
-    assert network.observation_space == observation_space
-    assert isinstance(network.encoder, EvolvableLSTM)
-
-    evolvable_modules = network.modules()
-    assert "encoder" in evolvable_modules
-    assert "head_net" in evolvable_modules
-
-
-@pytest.mark.parametrize("encoder_type", ["mlp", "simba"])
-def test_q_network_initialization_simba(vector_space, discrete_space, encoder_type):
-    simba = encoder_type == "simba"
-    network = QNetwork(vector_space, discrete_space, simba=simba)
-
-    assert network.observation_space == vector_space
-
-    if encoder_type == "mlp":
-        assert isinstance(network.encoder, EvolvableMLP)
-    elif encoder_type == "simba":
-        assert isinstance(network.encoder, EvolvableSimBa)
-
-    evolvable_modules = network.modules()
-    assert "encoder" in evolvable_modules
-    assert "head_net" in evolvable_modules
-
-
-@pytest.mark.parametrize(
-    "observation_space",
-    ["dict_space", "discrete_space", "vector_space", "image_space"],
-)
-def test_q_network_mutation_methods(
-    observation_space,
-    discrete_space,
-    head_config,
-    dummy_rng,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-    network = QNetwork(observation_space, discrete_space, head_config=head_config)
-    network.rng = dummy_rng
-
-    for method in network.mutation_methods:
-        new_network = network.clone()
-        getattr(new_network, method)()
-
-        if "." in method:
-            net_name = method.split(".")[0]
-            mutated_module: EvolvableModule = getattr(new_network, net_name)
-            exec_method = new_network.last_mutation_attr.split(".")[-1]
-
-            if isinstance(observation_space, (spaces.Tuple, spaces.Dict)):
-                mutated_attr = mutated_module.last_mutation_attr.split(".")[-1]
-            else:
-                mutated_attr = mutated_module.last_mutation_attr
-
-            assert mutated_attr == exec_method
-
-        if new_network.last_mutation_attr is not None:
-            # Check that architecture has changed
-            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
-
-            # Checks that parameters that are not mutated are the same
-            check_equal_params_ind(network, new_network)
-        else:
-            msg = f"Last mutation attribute is None. Expected {method} to be applied."
-            raise ValueError(
-                msg,
-            )
-
-
-@pytest.mark.parametrize(
-    "observation_space",
-    ["dict_space", "discrete_space", "vector_space", "image_space"],
-)
-def test_q_network_forward(observation_space: spaces.Space, discrete_space, request):
-    observation_space = request.getfixturevalue(observation_space)
-    network = QNetwork(observation_space, discrete_space)
-
-    x_np = observation_space.sample()
-
-    if isinstance(observation_space, spaces.Discrete):
-        x_np = (
-            F.one_hot(torch.tensor(x_np), num_classes=observation_space.n)
-            .float()
-            .numpy()
-        )
-
-    with torch.no_grad():
-        out = network(x_np)
-
-    assert isinstance(out, torch.Tensor)
-    assert out.shape == torch.Size([1, discrete_space.n])
-
-    if isinstance(observation_space, spaces.Dict):
-        x = {key: torch.tensor(value) for key, value in x_np.items()}
-    elif isinstance(observation_space, spaces.Tuple):
-        x = tuple(torch.tensor(value) for value in x_np)
-    else:
-        x = torch.tensor(x_np)
-
-    with torch.no_grad():
-        out = network(x)
-
-    assert isinstance(out, torch.Tensor)
-    assert out.shape == torch.Size([1, discrete_space.n])
-
-
-@pytest.mark.parametrize(
-    "observation_space",
-    ["dict_space", "discrete_space", "vector_space", "image_space"],
-)
-def test_q_network_clone(observation_space: spaces.Space, discrete_space, request):
-    observation_space = request.getfixturevalue(observation_space)
-    network = QNetwork(observation_space, discrete_space)
-
-    original_net_dict = dict(network.named_parameters())
-    clone = network.clone()
-    assert isinstance(clone, EvolvableNetwork)
-
-    assert_close_dict(network.init_dict, clone.init_dict)
-
-    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
-    for key, param in clone.named_parameters():
-        torch.testing.assert_close(param, original_net_dict[key])
-
-
-@pytest.mark.parametrize(
-    "observation_space, encoder_type",
-    [
-        ("dict_space", "multi_input"),
-        ("discrete_space", "mlp"),
-        ("vector_space", "mlp"),
-        ("image_space", "cnn"),
-    ],
-)
-def test_rainbow_q_network_initialization(
-    observation_space,
-    discrete_space,
-    encoder_type,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-    support = torch.linspace(-10, 10, 51)
-    network = RainbowQNetwork(observation_space, discrete_space, support)
-
-    assert network.observation_space == observation_space
-
-    if encoder_type == "multi_input":
-        assert isinstance(network.encoder, EvolvableMultiInput)
-    elif encoder_type == "mlp":
-        assert isinstance(network.encoder, EvolvableMLP)
-    elif encoder_type == "cnn":
-        assert isinstance(network.encoder, EvolvableCNN)
-
-    evolvable_modules = network.modules()
-    assert "encoder" in evolvable_modules
-    assert "head_net" in evolvable_modules
-
-
-@pytest.mark.parametrize(
-    "observation_space",
-    ["dict_space", "discrete_space", "vector_space", "image_space"],
-)
-def test_rainbow_q_network_mutation_methods(
-    observation_space,
-    discrete_space,
-    head_config,
-    dummy_rng,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-    support = torch.linspace(-10, 10, 51)
-    network = RainbowQNetwork(
-        observation_space,
-        discrete_space,
-        support,
-        head_config=head_config,
-    )
-    network.rng = dummy_rng
-    for method in network.mutation_methods:
-        new_network = network.clone()
-        getattr(new_network, method)()
-
-        if "." in method:
-            net_name = method.split(".")[0]
-            mutated_module: EvolvableModule = getattr(new_network, net_name)
-            exec_method = new_network.last_mutation_attr.split(".")[-1]
-
-            if isinstance(observation_space, (spaces.Tuple, spaces.Dict)):
-                mutated_attr = mutated_module.last_mutation_attr.split(".")[-1]
-            else:
-                mutated_attr = mutated_module.last_mutation_attr
-
-            assert mutated_attr == exec_method
-
-        if new_network.last_mutation_attr is not None:
-            # Check that architecture has changed
-            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
-
-            # Checks that parameters that are not mutated are the same
-            check_equal_params_ind(network, new_network)
-        else:
-            msg = f"Last mutation attribute is None. Expected {method} to be applied."
-            raise ValueError(
-                msg,
-            )
-
-
-@pytest.mark.parametrize(
-    "observation_space",
-    ["dict_space", "discrete_space", "vector_space", "image_space"],
-)
-def test_rainbow_q_network_forward(
-    observation_space: spaces.Space,
-    discrete_space,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-    support = torch.linspace(-10, 10, 51)
-    network = RainbowQNetwork(observation_space, discrete_space, support)
-
-    x_np = observation_space.sample()
-
-    if isinstance(observation_space, spaces.Discrete):
-        x_np = (
-            F.one_hot(torch.tensor(x_np), num_classes=observation_space.n)
-            .float()
-            .numpy()
-        )
-
-    with torch.no_grad():
-        out = network(x_np)
-
-    assert isinstance(out, torch.Tensor)
-    assert out.shape == torch.Size([1, discrete_space.n])
-
-    if isinstance(observation_space, spaces.Dict):
-        x = {key: torch.tensor(value) for key, value in x_np.items()}
-    elif isinstance(observation_space, spaces.Tuple):
-        x = tuple(torch.tensor(value) for value in x_np)
-    else:
-        x = torch.tensor(x_np)
-
-    with torch.no_grad():
-        out = network(x)
-
-    assert isinstance(out, torch.Tensor)
-    assert out.shape == torch.Size([1, discrete_space.n])
-
-
-@pytest.mark.parametrize(
-    "observation_space",
-    ["dict_space", "discrete_space", "vector_space", "image_space"],
-)
-def test_rainbow_q_network_clone(
-    observation_space: spaces.Space,
-    discrete_space,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-    support = torch.linspace(-10, 10, 51)
-    network = RainbowQNetwork(observation_space, discrete_space, support)
-
-    original_net_dict = dict(network.named_parameters())
-    clone = network.clone()
-    assert isinstance(clone, EvolvableNetwork)
-
-    assert_close_dict(network.init_dict, clone.init_dict)
-
-    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
-    for key, param in clone.named_parameters():
-        torch.testing.assert_close(param, original_net_dict[key])
-
-
-@pytest.mark.parametrize(
-    "observation_space, encoder_type",
-    [
-        ("dict_space", "multi_input"),
-        ("discrete_space", "mlp"),
-        ("vector_space", "mlp"),
-        ("image_space", "cnn"),
-    ],
-)
-def test_continuous_q_network_initialization(
-    observation_space,
-    vector_space,
-    encoder_type,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-    network = ContinuousQNetwork(observation_space, vector_space)
-
-    assert network.observation_space == observation_space
-
-    if encoder_type == "multi_input":
-        assert isinstance(network.encoder, EvolvableMultiInput)
-    elif encoder_type == "mlp":
-        assert isinstance(network.encoder, EvolvableMLP)
-    elif encoder_type == "cnn":
-        assert isinstance(network.encoder, EvolvableCNN)
-
-    evolvable_modules = network.modules()
-    assert "encoder" in evolvable_modules
-    assert "head_net" in evolvable_modules
-
-
-def test_continuous_q_network_initialization_recurrent(vector_space, discrete_space):
-    observation_space = vector_space
-    action_space = discrete_space
-    network = ContinuousQNetwork(observation_space, action_space, recurrent=True)
-
-    assert network.observation_space == observation_space
-    assert isinstance(network.encoder, EvolvableLSTM)
-
-    evolvable_modules = network.modules()
-    assert "encoder" in evolvable_modules
-    assert "head_net" in evolvable_modules
-
-
-@pytest.mark.parametrize("encoder_type", ["mlp", "simba"])
-def test_continuous_q_network_initialization_simba(
-    vector_space,
-    discrete_space,
-    encoder_type,
-):
-    simba = encoder_type == "simba"
-    network = ContinuousQNetwork(vector_space, discrete_space, simba=simba)
-
-    assert network.observation_space == vector_space
-
-    if encoder_type == "mlp":
-        assert isinstance(network.encoder, EvolvableMLP)
-    elif encoder_type == "simba":
-        assert isinstance(network.encoder, EvolvableSimBa)
-
-    evolvable_modules = network.modules()
-    assert "encoder" in evolvable_modules
-    assert "head_net" in evolvable_modules
-
-
-@pytest.mark.parametrize(
-    "observation_space",
-    ["dict_space", "discrete_space", "vector_space", "image_space"],
-)
-def test_continuous_q_network_mutation_methods(
-    observation_space,
-    vector_space,
-    head_config,
-    dummy_rng,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-    network = ContinuousQNetwork(
-        observation_space,
-        vector_space,
-        head_config=head_config,
-    )
-    network.rng = dummy_rng
-    for method in network.mutation_methods:
-        new_network = network.clone()
-        getattr(new_network, method)()
-
-        if "." in method:
-            net_name = method.split(".")[0]
-            mutated_module: EvolvableModule = getattr(new_network, net_name)
-            exec_method = new_network.last_mutation_attr.split(".")[-1]
-
-            if isinstance(observation_space, (spaces.Tuple, spaces.Dict)):
-                mutated_attr = mutated_module.last_mutation_attr.split(".")[-1]
-            else:
-                mutated_attr = mutated_module.last_mutation_attr
-
-            assert mutated_attr == exec_method
-
-        if new_network.last_mutation_attr is not None:
-            # Check that architecture has changed
-            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
-
-            # Checks that parameters that are not mutated are the same
-            check_equal_params_ind(network, new_network)
-        else:
-            msg = f"Last mutation attribute is None. Expected {method} to be applied."
-            raise ValueError(
-                msg,
-            )
-
-
-@pytest.mark.parametrize(
-    "observation_space",
-    ["dict_space", "discrete_space", "vector_space", "image_space"],
-)
-def test_continuous_q_network_forward(
-    observation_space: spaces.Space,
-    vector_space,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-    network = ContinuousQNetwork(observation_space, vector_space)
-
-    x_np = observation_space.sample()
-    actions_np = vector_space.sample()
-
-    if isinstance(observation_space, spaces.Discrete):
-        x_np = (
-            F.one_hot(torch.tensor(x_np), num_classes=observation_space.n)
-            .float()
-            .numpy()
-        )
-
-    with torch.no_grad():
-        out = network(x_np, actions_np)
-
-    assert isinstance(out, torch.Tensor)
-    assert out.shape == torch.Size([1, 1])
-
-    if isinstance(observation_space, spaces.Dict):
-        x = {key: torch.tensor(value) for key, value in x_np.items()}
-    elif isinstance(observation_space, spaces.Tuple):
-        x = tuple(torch.tensor(value) for value in x_np)
-    else:
-        x = torch.tensor(x_np)
-
-    actions = torch.tensor(actions_np)
-    with torch.no_grad():
-        out = network(x, actions)
-
-    assert isinstance(out, torch.Tensor)
-    assert out.shape == torch.Size([1, 1])
-
-
-@pytest.mark.parametrize(
-    "observation_space",
-    ["dict_space", "discrete_space", "vector_space", "image_space"],
-)
-def test_continuous_q_network_clone(
-    observation_space: spaces.Space,
-    vector_space,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-    network = ContinuousQNetwork(observation_space, vector_space)
-
-    original_net_dict = dict(network.named_parameters())
-    clone = network.clone()
-    assert isinstance(clone, EvolvableNetwork)
-
-    assert_close_dict(network.init_dict, clone.init_dict)
-
-    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
-    for key, param in clone.named_parameters():
-        torch.testing.assert_close(param, original_net_dict[key])
-
-
-def test_rainbow_q_network_head_config_net_config(discrete_space, vector_space):
-    support = torch.linspace(-10, 10, 51)
-    head_config = MlpNetConfig(
-        hidden_size=[16],
-        output_activation=None,
-        noisy=True,
-        noise_std=0.5,
-    )
-    network = RainbowQNetwork(
-        vector_space,
-        discrete_space,
-        support,
-        head_config=head_config,
-    )
-    assert network.num_actions == discrete_space.n
-
-
-def test_rainbow_q_network_head_config_dict_with_noise(discrete_space, vector_space):
-    support = torch.linspace(-10, 10, 51)
-    head_config = asdict(
-        MlpNetConfig(
-            hidden_size=[16], output_activation=None, noisy=True, noise_std=0.5
-        ),
-    )
-    network = RainbowQNetwork(
-        vector_space,
-        discrete_space,
-        support,
-        head_config=head_config,
-    )
-    assert network.num_actions == discrete_space.n
-
-
-def test_continuous_q_network_encoder_layer_norm_warning(vector_space):
-    """ContinuousQNetwork warns and disables layer_norm when encoder_config has layer_norm=True (MLP encoder)."""
-    encoder_config = asdict(MlpNetConfig(hidden_size=[64, 64], layer_norm=True))
-    with pytest.warns(
-        UserWarning,
-        match="Layer normalization is not supported for the encoder of DDPG networks",
+        if encoder_type == "multi_input":
+            assert isinstance(network.encoder, EvolvableMultiInput)
+        elif encoder_type == "mlp":
+            assert isinstance(network.encoder, EvolvableMLP)
+        elif encoder_type == "cnn":
+            assert isinstance(network.encoder, EvolvableCNN)
+
+        evolvable_modules = network.modules()
+        assert "encoder" in evolvable_modules
+        assert "head_net" in evolvable_modules
+
+    def test_q_network_initialization_recurrent(self, discrete_space, vector_space):
+        action_space = discrete_space
+        observation_space = vector_space
+        network = QNetwork(observation_space, action_space, recurrent=True)
+
+        assert network.observation_space == observation_space
+        assert isinstance(network.encoder, EvolvableLSTM)
+
+        evolvable_modules = network.modules()
+        assert "encoder" in evolvable_modules
+        assert "head_net" in evolvable_modules
+
+    @pytest.mark.parametrize("encoder_type", ["mlp", "simba"])
+    def test_q_network_initialization_simba(
+        self, vector_space, discrete_space, encoder_type
     ):
-        network = ContinuousQNetwork(
-            vector_space,
-            vector_space,
-            encoder_config=encoder_config,
+        simba = encoder_type == "simba"
+        network = QNetwork(vector_space, discrete_space, simba=simba)
+
+        assert network.observation_space == vector_space
+
+        if encoder_type == "mlp":
+            assert isinstance(network.encoder, EvolvableMLP)
+        elif encoder_type == "simba":
+            assert isinstance(network.encoder, EvolvableSimBa)
+
+        evolvable_modules = network.modules()
+        assert "encoder" in evolvable_modules
+        assert "head_net" in evolvable_modules
+
+
+class TestQNetworkMutationMethods:
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_q_network_mutation_methods(
+        self,
+        observation_space,
+        discrete_space,
+        head_config,
+        dummy_rng,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        network = QNetwork(observation_space, discrete_space, head_config=head_config)
+        network.rng = dummy_rng
+
+        for method in network.mutation_methods:
+            new_network = network.clone()
+            getattr(new_network, method)()
+
+            if "." in method:
+                net_name = method.split(".")[0]
+                mutated_module: EvolvableModule = getattr(new_network, net_name)
+                exec_method = new_network.last_mutation_attr.split(".")[-1]
+
+                if isinstance(observation_space, (spaces.Tuple, spaces.Dict)):
+                    mutated_attr = mutated_module.last_mutation_attr.split(".")[-1]
+                else:
+                    mutated_attr = mutated_module.last_mutation_attr
+
+                assert mutated_attr == exec_method
+
+            if new_network.last_mutation_attr is not None:
+                # Check that architecture has changed
+                assert_not_equal_state_dict(
+                    network.state_dict(), new_network.state_dict()
+                )
+
+                # Checks that parameters that are not mutated are the same
+                check_equal_params_ind(network, new_network)
+            else:
+                msg = (
+                    f"Last mutation attribute is None. Expected {method} to be applied."
+                )
+                raise ValueError(
+                    msg,
+                )
+
+
+class TestQNetworkForward:
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_q_network_forward(
+        self, observation_space: spaces.Space, discrete_space, request
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        network = QNetwork(observation_space, discrete_space)
+
+        x_np = observation_space.sample()
+
+        if isinstance(observation_space, spaces.Discrete):
+            x_np = (
+                F.one_hot(torch.tensor(x_np), num_classes=observation_space.n)
+                .float()
+                .numpy()
+            )
+
+        with torch.no_grad():
+            out = network(x_np)
+
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == torch.Size([1, discrete_space.n])
+
+        if isinstance(observation_space, spaces.Dict):
+            x = {key: torch.tensor(value) for key, value in x_np.items()}
+        elif isinstance(observation_space, spaces.Tuple):
+            x = tuple(torch.tensor(value) for value in x_np)
+        else:
+            x = torch.tensor(x_np)
+
+        with torch.no_grad():
+            out = network(x)
+
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == torch.Size([1, discrete_space.n])
+
+
+class TestQNetworkClone:
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_q_network_clone(
+        self, observation_space: spaces.Space, discrete_space, request
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        network = QNetwork(observation_space, discrete_space)
+
+        original_net_dict = dict(network.named_parameters())
+        clone = network.clone()
+        assert isinstance(clone, EvolvableNetwork)
+
+        assert_close_dict(network.init_dict, clone.init_dict)
+
+        assert_state_dicts_equal(clone.state_dict(), network.state_dict())
+        for key, param in clone.named_parameters():
+            torch.testing.assert_close(param, original_net_dict[key])
+
+
+class TestRainbowQNetworkInit:
+    @pytest.mark.parametrize(
+        "observation_space, encoder_type",
+        [
+            ("dict_space", "multi_input"),
+            ("discrete_space", "mlp"),
+            ("vector_space", "mlp"),
+            ("image_space", "cnn"),
+        ],
+    )
+    def test_rainbow_q_network_initialization(
+        self,
+        observation_space,
+        discrete_space,
+        encoder_type,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        support = torch.linspace(-10, 10, 51)
+        network = RainbowQNetwork(observation_space, discrete_space, support)
+
+        assert network.observation_space == observation_space
+
+        if encoder_type == "multi_input":
+            assert isinstance(network.encoder, EvolvableMultiInput)
+        elif encoder_type == "mlp":
+            assert isinstance(network.encoder, EvolvableMLP)
+        elif encoder_type == "cnn":
+            assert isinstance(network.encoder, EvolvableCNN)
+
+        evolvable_modules = network.modules()
+        assert "encoder" in evolvable_modules
+        assert "head_net" in evolvable_modules
+
+    def test_rainbow_q_network_head_config_net_config(
+        self, discrete_space, vector_space
+    ):
+        support = torch.linspace(-10, 10, 51)
+        head_config = MlpNetConfig(
+            hidden_size=[16],
+            output_activation=None,
+            noisy=True,
+            noise_std=0.5,
         )
-    # Encoder should still be built; layer_norm was forced to False
-    assert isinstance(network.encoder, EvolvableMLP)
+        network = RainbowQNetwork(
+            vector_space,
+            discrete_space,
+            support,
+            head_config=head_config,
+        )
+        assert network.num_actions == discrete_space.n
+
+    def test_rainbow_q_network_head_config_dict_with_noise(
+        self, discrete_space, vector_space
+    ):
+        support = torch.linspace(-10, 10, 51)
+        head_config = asdict(
+            MlpNetConfig(
+                hidden_size=[16], output_activation=None, noisy=True, noise_std=0.5
+            ),
+        )
+        network = RainbowQNetwork(
+            vector_space,
+            discrete_space,
+            support,
+            head_config=head_config,
+        )
+        assert network.num_actions == discrete_space.n
+
+
+class TestRainbowQNetworkMutationMethods:
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_rainbow_q_network_mutation_methods(
+        self,
+        observation_space,
+        discrete_space,
+        head_config,
+        dummy_rng,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        support = torch.linspace(-10, 10, 51)
+        network = RainbowQNetwork(
+            observation_space,
+            discrete_space,
+            support,
+            head_config=head_config,
+        )
+        network.rng = dummy_rng
+        for method in network.mutation_methods:
+            new_network = network.clone()
+            getattr(new_network, method)()
+
+            if "." in method:
+                net_name = method.split(".")[0]
+                mutated_module: EvolvableModule = getattr(new_network, net_name)
+                exec_method = new_network.last_mutation_attr.split(".")[-1]
+
+                if isinstance(observation_space, (spaces.Tuple, spaces.Dict)):
+                    mutated_attr = mutated_module.last_mutation_attr.split(".")[-1]
+                else:
+                    mutated_attr = mutated_module.last_mutation_attr
+
+                assert mutated_attr == exec_method
+
+            if new_network.last_mutation_attr is not None:
+                # Check that architecture has changed
+                assert_not_equal_state_dict(
+                    network.state_dict(), new_network.state_dict()
+                )
+
+                # Checks that parameters that are not mutated are the same
+                check_equal_params_ind(network, new_network)
+            else:
+                msg = (
+                    f"Last mutation attribute is None. Expected {method} to be applied."
+                )
+                raise ValueError(
+                    msg,
+                )
+
+
+class TestRainbowQNetworkForward:
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_rainbow_q_network_forward(
+        self,
+        observation_space: spaces.Space,
+        discrete_space,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        support = torch.linspace(-10, 10, 51)
+        network = RainbowQNetwork(observation_space, discrete_space, support)
+
+        x_np = observation_space.sample()
+
+        if isinstance(observation_space, spaces.Discrete):
+            x_np = (
+                F.one_hot(torch.tensor(x_np), num_classes=observation_space.n)
+                .float()
+                .numpy()
+            )
+
+        with torch.no_grad():
+            out = network(x_np)
+
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == torch.Size([1, discrete_space.n])
+
+        if isinstance(observation_space, spaces.Dict):
+            x = {key: torch.tensor(value) for key, value in x_np.items()}
+        elif isinstance(observation_space, spaces.Tuple):
+            x = tuple(torch.tensor(value) for value in x_np)
+        else:
+            x = torch.tensor(x_np)
+
+        with torch.no_grad():
+            out = network(x)
+
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == torch.Size([1, discrete_space.n])
+
+
+class TestRainbowQNetworkClone:
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_rainbow_q_network_clone(
+        self,
+        observation_space: spaces.Space,
+        discrete_space,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        support = torch.linspace(-10, 10, 51)
+        network = RainbowQNetwork(observation_space, discrete_space, support)
+
+        original_net_dict = dict(network.named_parameters())
+        clone = network.clone()
+        assert isinstance(clone, EvolvableNetwork)
+
+        assert_close_dict(network.init_dict, clone.init_dict)
+
+        assert_state_dicts_equal(clone.state_dict(), network.state_dict())
+        for key, param in clone.named_parameters():
+            torch.testing.assert_close(param, original_net_dict[key])
+
+
+class TestContinuousQNetworkInit:
+    @pytest.mark.parametrize(
+        "observation_space, encoder_type",
+        [
+            ("dict_space", "multi_input"),
+            ("discrete_space", "mlp"),
+            ("vector_space", "mlp"),
+            ("image_space", "cnn"),
+        ],
+    )
+    def test_continuous_q_network_initialization(
+        self,
+        observation_space,
+        vector_space,
+        encoder_type,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        network = ContinuousQNetwork(observation_space, vector_space)
+
+        assert network.observation_space == observation_space
+
+        if encoder_type == "multi_input":
+            assert isinstance(network.encoder, EvolvableMultiInput)
+        elif encoder_type == "mlp":
+            assert isinstance(network.encoder, EvolvableMLP)
+        elif encoder_type == "cnn":
+            assert isinstance(network.encoder, EvolvableCNN)
+
+        evolvable_modules = network.modules()
+        assert "encoder" in evolvable_modules
+        assert "head_net" in evolvable_modules
+
+    def test_continuous_q_network_initialization_recurrent(
+        self, vector_space, discrete_space
+    ):
+        observation_space = vector_space
+        action_space = discrete_space
+        network = ContinuousQNetwork(observation_space, action_space, recurrent=True)
+
+        assert network.observation_space == observation_space
+        assert isinstance(network.encoder, EvolvableLSTM)
+
+        evolvable_modules = network.modules()
+        assert "encoder" in evolvable_modules
+        assert "head_net" in evolvable_modules
+
+    @pytest.mark.parametrize("encoder_type", ["mlp", "simba"])
+    def test_continuous_q_network_initialization_simba(
+        self,
+        vector_space,
+        discrete_space,
+        encoder_type,
+    ):
+        simba = encoder_type == "simba"
+        network = ContinuousQNetwork(vector_space, discrete_space, simba=simba)
+
+        assert network.observation_space == vector_space
+
+        if encoder_type == "mlp":
+            assert isinstance(network.encoder, EvolvableMLP)
+        elif encoder_type == "simba":
+            assert isinstance(network.encoder, EvolvableSimBa)
+
+        evolvable_modules = network.modules()
+        assert "encoder" in evolvable_modules
+        assert "head_net" in evolvable_modules
+
+    def test_continuous_q_network_encoder_layer_norm_warning(self, vector_space):
+        """ContinuousQNetwork warns and disables layer_norm when encoder_config has layer_norm=True (MLP encoder)."""
+        encoder_config = asdict(MlpNetConfig(hidden_size=[64, 64], layer_norm=True))
+        with pytest.warns(
+            UserWarning,
+            match="Layer normalization is not supported for the encoder of DDPG networks",
+        ):
+            network = ContinuousQNetwork(
+                vector_space,
+                vector_space,
+                encoder_config=encoder_config,
+            )
+        # Encoder should still be built; layer_norm was forced to False
+        assert isinstance(network.encoder, EvolvableMLP)
+
+
+class TestContinuousQNetworkMutationMethods:
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_continuous_q_network_mutation_methods(
+        self,
+        observation_space,
+        vector_space,
+        head_config,
+        dummy_rng,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        network = ContinuousQNetwork(
+            observation_space,
+            vector_space,
+            head_config=head_config,
+        )
+        network.rng = dummy_rng
+        for method in network.mutation_methods:
+            new_network = network.clone()
+            getattr(new_network, method)()
+
+            if "." in method:
+                net_name = method.split(".")[0]
+                mutated_module: EvolvableModule = getattr(new_network, net_name)
+                exec_method = new_network.last_mutation_attr.split(".")[-1]
+
+                if isinstance(observation_space, (spaces.Tuple, spaces.Dict)):
+                    mutated_attr = mutated_module.last_mutation_attr.split(".")[-1]
+                else:
+                    mutated_attr = mutated_module.last_mutation_attr
+
+                assert mutated_attr == exec_method
+
+            if new_network.last_mutation_attr is not None:
+                # Check that architecture has changed
+                assert_not_equal_state_dict(
+                    network.state_dict(), new_network.state_dict()
+                )
+
+                # Checks that parameters that are not mutated are the same
+                check_equal_params_ind(network, new_network)
+            else:
+                msg = (
+                    f"Last mutation attribute is None. Expected {method} to be applied."
+                )
+                raise ValueError(
+                    msg,
+                )
+
+
+class TestContinuousQNetworkForward:
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_continuous_q_network_forward(
+        self,
+        observation_space: spaces.Space,
+        vector_space,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        network = ContinuousQNetwork(observation_space, vector_space)
+
+        x_np = observation_space.sample()
+        actions_np = vector_space.sample()
+
+        if isinstance(observation_space, spaces.Discrete):
+            x_np = (
+                F.one_hot(torch.tensor(x_np), num_classes=observation_space.n)
+                .float()
+                .numpy()
+            )
+
+        with torch.no_grad():
+            out = network(x_np, actions_np)
+
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == torch.Size([1, 1])
+
+        if isinstance(observation_space, spaces.Dict):
+            x = {key: torch.tensor(value) for key, value in x_np.items()}
+        elif isinstance(observation_space, spaces.Tuple):
+            x = tuple(torch.tensor(value) for value in x_np)
+        else:
+            x = torch.tensor(x_np)
+
+        actions = torch.tensor(actions_np)
+        with torch.no_grad():
+            out = network(x, actions)
+
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == torch.Size([1, 1])
+
+
+class TestContinuousQNetworkClone:
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_continuous_q_network_clone(
+        self,
+        observation_space: spaces.Space,
+        vector_space,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        network = ContinuousQNetwork(observation_space, vector_space)
+
+        original_net_dict = dict(network.named_parameters())
+        clone = network.clone()
+        assert isinstance(clone, EvolvableNetwork)
+
+        assert_close_dict(network.init_dict, clone.init_dict)
+
+        assert_state_dicts_equal(clone.state_dict(), network.state_dict())
+        for key, param in clone.named_parameters():
+            torch.testing.assert_close(param, original_net_dict[key])

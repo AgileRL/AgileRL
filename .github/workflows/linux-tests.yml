@@ -73,22 +73,20 @@ jobs:
             - name: Reset coverage data
               run: rm -f .coverage .coverage.*
 
-            - name: Run non-LLM tests (parallel)
-              run: uv run pytest -m "not llm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
-
-            - name: Run LLM tests (sequential, exclusive GPU)
-              run: uv run pytest -n0 -m "llm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
-
-            - name: Combine coverage data
-              run: |
-                  if ls .coverage.* >/dev/null 2>&1; then
-                      uv run coverage combine
-                  else
-                      echo "No parallel coverage shards found; skipping combine."
-                  fi
-
-            - name: Generate coverage report
-              run: uv run coverage xml -o coverage.xml
+            # Single phase: `-n auto --dist loadgroup` from pyproject gives 8
+            # workers on the gha-runner-scale-set node. `vllm`- and `gpu`-marked
+            # tests share the 4 `gputest0..gputest3` xdist groups defined in
+            # `tests/conftest.py`, which caps GPU-touching concurrency at 4
+            # workers regardless of -n; the remaining ~4 workers fan out across
+            # CPU-only tests. See the `pytest_collection_modifyitems` docstring
+            # for the GPU-memory and port-race rationale behind the 4-group cap.
+            #
+            # Single invocation = single coverage run; pytest-cov auto-combines
+            # the per-worker `.coverage.*` shards before writing `coverage.xml`,
+            # so we don't need a manual `coverage combine` step (which was
+            # tripping over corrupted shards under the old two-phase setup).
+            - name: Run tests
+              run: uv run pytest --exitfirst --cov=agilerl --cov-report=xml --durations=0 --durations-min=1.0
 
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3

@@ -149,3 +149,7 @@ wandb/
 
 # Cursor
 .cursor
+
+# AI assistant instructions
+CLAUDE.md
+AGENTS.md

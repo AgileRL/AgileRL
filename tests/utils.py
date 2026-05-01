@@ -89,6 +89,9 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             mp.set_start_method("spawn")
 
         all_kwargs = _build_kwargs(f, args, kwargs)
+        # Drop the bound `self` for tests defined as methods of a Test* class.
+        # The subprocess will rebind it by instantiating the class.
+        all_kwargs.pop("self", None)
         parametrized_names = _get_parametrized_names(f)
 
         param_kwargs = {k: v for k, v in all_kwargs.items() if k in parametrized_names}
@@ -104,7 +107,9 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
         env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
 
         module_file = sys.modules[f.__module__].__file__
-        test_name = f.__name__
+        # Use __qualname__ so class-based tests are addressable as
+        # "ClassName.method_name"; module-level tests stay as plain names.
+        test_name = f.__qualname__
 
         runner = str(AGILERL_PATH / "tests" / "subprocess_runner.py")
 

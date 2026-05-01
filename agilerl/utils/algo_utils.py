@@ -1446,18 +1446,45 @@ class VLLMConfig:
     :param frequency_penalty: Penalise tokens proportionally to how often they have
         appeared so far.  Passed to ``SamplingParams``, defaults to 0.0 (disabled).
     :type frequency_penalty: float, optional
+    :param kv_cache_memory_bytes: Manually pin KV cache size in bytes instead of
+        letting vLLM auto-size from ``gpu_memory_utilization``.  When set, vLLM
+        uses this exact value for the KV cache and skips the auto-sizing path
+        in ``determine_available_memory`` — but ``gpu_memory_utilization`` is
+        **still honoured** by the upfront ``free_memory >= total_memory *
+        gpu_memory_utilization`` startup check in
+        ``vllm/v1/worker/gpu_worker.py:init_device``.  When running multiple
+        vLLM processes concurrently you must keep ``gpu_memory_utilization``
+        small enough that every worker's startup check passes.
+
+        **Required for safe parallel/colocated vLLM**: vLLM's startup
+        ``determine_available_memory`` profile run asserts that GPU free-memory
+        does not increase between the pre- and post-profile snapshots.  When
+        peer processes on the same GPU release memory mid-profile (concurrent
+        xdist workers, sibling CI containers sharing one GPU), the assertion
+        fires with ``Error in memory profiling. Initial free memory ... current
+        free memory ...``.  Setting ``kv_cache_memory_bytes`` triggers vLLM's
+        early-return path in ``determine_available_memory`` and skips that
+        assertion entirely.  CI tests set this to a small value (e.g. 32 MiB)
+        on the tiny test fixture; production deployments running a single
+        vLLM should leave it unset.  Defaults to None.
+    :type kv_cache_memory_bytes: int | None, optional
     """
 
     # Colocate mode parameters
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.3
     max_num_seqs: int = 8
+    swap_space: float | None = None
+    enforce_eager: bool | None = None
     sleep_mode: bool = False
     dtype: str | None = None
     quantization: str | None = None
     stop_sequences: list[str] | None = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
+    # See class docstring above. Required to avoid vLLM's memory-profiling
+    # assertion when running multiple vLLM processes on a shared GPU.
+    kv_cache_memory_bytes: int | None = None
 
     def __post_init__(self) -> None:
         if self.sleep_mode:

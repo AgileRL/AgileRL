@@ -1,6 +1,9 @@
 ---
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
+
+# Vendored binary test fixtures; opaque to every hook here.
+exclude: ^tests/assets/tiny_llm/
 ci:
     autoupdate_branch: nightly
     skip: [codeql-python]

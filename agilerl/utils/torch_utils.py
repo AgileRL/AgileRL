@@ -123,7 +123,7 @@ def get_transformer_logs(
 
 # --------------------------------------------------------------------------- #
 # Distribution helpers (Discrete, Box, MultiDiscrete, MultiBinary)            #
-# Used by TorchDistribution in networks/distributions_experimental.py         #
+# Used by TorchDistribution in networks/distributions.py         #
 # --------------------------------------------------------------------------- #
 
 

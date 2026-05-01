@@ -3,7 +3,7 @@ import warnings
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
@@ -22,8 +22,6 @@ from agilerl.algorithms import (
     DDPG,
     DQN,
     IPPO,
-    LLMPPO,
-    LLMREINFORCE,
     MADDPG,
     MATD3,
     PPO,
@@ -41,8 +39,8 @@ from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
-if HAS_LLM_DEPENDENCIES:
-    from agilerl.algorithms import CISPO, DPO, GRPO, GSPO, SFT
+if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
+    from agilerl.algorithms import CISPO, DPO, GRPO, GSPO, LLMPPO, LLMREINFORCE, SFT
     from agilerl.utils.llm_utils import get_llm_accelerator, get_state_dict
 
 SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple

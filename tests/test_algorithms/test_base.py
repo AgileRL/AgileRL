@@ -474,680 +474,420 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
         return
 
 
-@pytest.mark.parametrize(
-    "observation_space",
-    [
-        "dict_space",
-        "tuple_space",
-        "discrete_space",
-        "vector_space",
-        "multidiscrete_space",
-    ],
-)
-@pytest.mark.parametrize(
-    "action_space",
-    ["discrete_space", "vector_space", "multidiscrete_space"],
-)
-def test_initialise_single_agent(observation_space, action_space, request):
-    obs_space = request.getfixturevalue(observation_space)
-    act_space = request.getfixturevalue(action_space)
-    agent = DummyRLAlgorithm(obs_space, act_space, index=0)
-    assert agent is not None
-
-
-@pytest.mark.parametrize(
-    "observation_space",
-    [
-        "ma_vector_space",
-        "ma_image_space",
-        "ma_discrete_space",
-        "ma_dict_space",
-    ],
-)
-@pytest.mark.parametrize(
-    "action_space",
-    [
-        "ma_discrete_space",
-        "ma_vector_space",
-    ],
-)
-@pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "agent_2"], None])
-def test_initialise_multi_agent(observation_space, action_space, agent_ids, request):
-    obs_spaces = request.getfixturevalue(observation_space)
-    act_spaces = request.getfixturevalue(action_space)
-
-    if agent_ids is None:
-        obs_spaces = {f"agent_{i}": obs_spaces[i] for i in range(len(obs_spaces))}
-        act_spaces = {f"agent_{i}": act_spaces[i] for i in range(len(act_spaces))}
-
-    agent = DummyMARLAlgorithm(obs_spaces, act_spaces, agent_ids=agent_ids, index=0)
-    assert agent is not None
-
-
-@pytest.mark.parametrize(
-    "observation_spaces, action_spaces, error_match",
-    [
-        (42, 42, "Observation spaces must be a list or dictionary"),
-        ("not_a_list", "not_a_list", "Observation spaces must be a list or dictionary"),
-    ],
-)
-def test_multi_agent_algorithm_observation_spaces_type_error(
-    observation_spaces, action_spaces, error_match
-):
-    """MultiAgentRLAlgorithm raises TypeError when observation_spaces is not list or dict."""
-    agent_ids = ["agent_0", "agent_1"]
-    with pytest.raises(TypeError, match=error_match):
-        DummyMARLAlgorithm(
-            observation_spaces,
-            action_spaces,
-            agent_ids=agent_ids,
-            index=0,
-        )
-
-
-def test_get_policy_raises_when_no_policy_registered(vector_space, discrete_space):
-    """get_policy() raises AttributeError when no policy network has been registered."""
-    agent = DummyRLAlgorithmNoPolicy(vector_space, discrete_space, index=0)
-    # Remove policy group so get_policy() has nothing to return
-    agent.registry.groups = [g for g in agent.registry.groups if not g.policy]
-    with pytest.raises(AttributeError, match="No policy network has been registered"):
-        agent.get_policy()
-
-
-def test_population_single_agent(vector_space, discrete_space):
-    population = DummyRLAlgorithm.population(10, vector_space, discrete_space)
-    assert len(population) == 10
-    for i, agent in enumerate(population):
-        assert agent.observation_space == vector_space
-        assert agent.action_space == discrete_space
-        assert agent.index == i
-
-
-def test_population_multi_agent(ma_vector_space, ma_discrete_space):
-    population = DummyMARLAlgorithm.population(
-        10,
-        ma_vector_space,
-        ma_discrete_space,
-        agent_ids=["agent_0", "agent_1", "agent_2"],
+class TestRLAlgorithmInit:
+    @pytest.mark.parametrize(
+        "observation_space",
+        [
+            "dict_space",
+            "tuple_space",
+            "discrete_space",
+            "vector_space",
+            "multidiscrete_space",
+        ],
     )
-    assert len(population) == 10
-    for i, agent in enumerate(population):
-        for j in range(len(agent.agent_ids)):
-            agent_id = agent.agent_ids[j]
-            assert agent.possible_observation_spaces[agent_id] == ma_vector_space[j]
-            assert agent.possible_action_spaces[agent_id] == ma_discrete_space[j]
-
-        assert agent.index == i
-
-
-def test_get_state_dim_returns_expected_output(vector_space, discrete_space):
-    """get_state_dim returns the same as get_input_size_from_space for observation space."""
-    with pytest.warns(DeprecationWarning, match="get_input_size_from_space"):
-        state_dim = RLAlgorithm.get_state_dim(vector_space)
-    assert state_dim == vector_space.shape
-    with pytest.warns(DeprecationWarning, match="get_input_size_from_space"):
-        state_dim_discrete = RLAlgorithm.get_state_dim(discrete_space)
-    assert state_dim_discrete == (discrete_space.n,)
-
-
-def test_get_action_dim_returns_expected_output(vector_space, discrete_space):
-    """get_action_dim returns the same as get_output_size_from_space for action space."""
-    with pytest.warns(DeprecationWarning, match="get_output_size_from_space"):
-        action_dim = RLAlgorithm.get_action_dim(discrete_space)
-    assert action_dim == discrete_space.n
-    with pytest.warns(DeprecationWarning, match="get_output_size_from_space"):
-        action_dim_box = RLAlgorithm.get_action_dim(vector_space)
-    assert action_dim_box == vector_space.shape[0]
-
-
-def test_population_with_wrapper_cls(vector_space, discrete_space):
-    """population classmethod returns wrapped agents when wrapper_cls is provided."""
-
-    class SimpleWrapper:
-        def __init__(self, agent, label="wrapped"):
-            self.agent = agent
-            self.label = label
-
-        def get_action(self, obs, **kwargs):
-            return self.agent.get_action(obs, **kwargs)
-
-        def learn(self, experiences, **kwargs):
-            return self.agent.learn(experiences, **kwargs)
-
-    population = DummyRLAlgorithm.population(
-        3,
-        vector_space,
-        discrete_space,
-        wrapper_cls=SimpleWrapper,
-        wrapper_kwargs={"label": "custom"},
+    @pytest.mark.parametrize(
+        "action_space",
+        ["discrete_space", "vector_space", "multidiscrete_space"],
     )
-    assert len(population) == 3
-    for i, wrapped in enumerate(population):
-        assert isinstance(wrapped, SimpleWrapper)
-        assert wrapped.label == "custom"
-        assert wrapped.agent.observation_space == vector_space
-        assert wrapped.agent.action_space == discrete_space
-        assert wrapped.agent.index == i
+    def test_initialise_single_agent(self, observation_space, action_space, request):
+        obs_space = request.getfixturevalue(observation_space)
+        act_space = request.getfixturevalue(action_space)
+        agent = DummyRLAlgorithm(obs_space, act_space, index=0)
+        assert agent is not None
+
+    def test_incorrect_hp_config(self, vector_space, discrete_space):
+        with pytest.raises(AttributeError):
+            hp_config = HyperparameterConfig(lr_actor=RLParameter(min=0.1, max=0.2))
+            _ = DummyRLAlgorithm(
+                vector_space,
+                discrete_space,
+                index=0,
+                hp_config=hp_config,
+            )
 
 
-@pytest.mark.parametrize(
-    "observation_space",
-    ["vector_space", "image_space", "dict_space"],
-)
-def test_preprocess_observation(observation_space, discrete_space, request):
-    obs_space = request.getfixturevalue(observation_space)
-    agent = DummyRLAlgorithm(obs_space, discrete_space, index=0)
-    observation = agent.preprocess_observation(obs_space.sample())
-    assert is_processed_observation(observation, obs_space)
-
-
-def test_reinit_optimizers_single_agent(vector_space, discrete_space):
-    agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
-    clone_agent = agent.clone()
-    clone_agent.reinit_optimizers()
-    opt_attr = clone_agent.registry.optimizers[0].name
-    new_opt = getattr(clone_agent, opt_attr)
-    old_opt = getattr(agent, opt_attr)
-
-    assert_state_dicts_equal(new_opt.state_dict(), old_opt.state_dict())
-
-
-def test_reinit_optimizers_multi_agent(ma_vector_space, ma_discrete_space):
-    agent = DummyMARLAlgorithm(
-        ma_vector_space,
-        ma_discrete_space,
-        index=0,
-        agent_ids=["agent_0", "agent_1", "agent_2"],
+class TestMultiAgentRLAlgorithmInit:
+    @pytest.mark.parametrize(
+        "observation_space",
+        [
+            "ma_vector_space",
+            "ma_image_space",
+            "ma_discrete_space",
+            "ma_dict_space",
+        ],
     )
-    clone_agent = agent.clone()
-    clone_agent.reinit_optimizers()
-    opt_attr = clone_agent.registry.optimizers[0].name
-    new_opt = getattr(clone_agent, opt_attr)
-    old_opt = getattr(agent, opt_attr)
+    @pytest.mark.parametrize(
+        "action_space",
+        [
+            "ma_discrete_space",
+            "ma_vector_space",
+        ],
+    )
+    @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "agent_2"], None])
+    def test_initialise_multi_agent(
+        self, observation_space, action_space, agent_ids, request
+    ):
+        obs_spaces = request.getfixturevalue(observation_space)
+        act_spaces = request.getfixturevalue(action_space)
 
-    assert_state_dicts_equal(new_opt.state_dict(), old_opt.state_dict())
+        if agent_ids is None:
+            obs_spaces = {f"agent_{i}": obs_spaces[i] for i in range(len(obs_spaces))}
+            act_spaces = {f"agent_{i}": act_spaces[i] for i in range(len(act_spaces))}
+
+        agent = DummyMARLAlgorithm(obs_spaces, act_spaces, agent_ids=agent_ids, index=0)
+        assert agent is not None
+
+    @pytest.mark.parametrize(
+        "observation_spaces, action_spaces, error_match",
+        [
+            (42, 42, "Observation spaces must be a list or dictionary"),
+            (
+                "not_a_list",
+                "not_a_list",
+                "Observation spaces must be a list or dictionary",
+            ),
+        ],
+    )
+    def test_multi_agent_algorithm_observation_spaces_type_error(
+        self, observation_spaces, action_spaces, error_match
+    ):
+        """MultiAgentRLAlgorithm raises TypeError when observation_spaces is not list or dict."""
+        agent_ids = ["agent_0", "agent_1"]
+        with pytest.raises(TypeError, match=error_match):
+            DummyMARLAlgorithm(
+                observation_spaces,
+                action_spaces,
+                agent_ids=agent_ids,
+                index=0,
+            )
 
 
-def test_incorrect_hp_config(vector_space, discrete_space):
-    with pytest.raises(AttributeError):
-        hp_config = HyperparameterConfig(lr_actor=RLParameter(min=0.1, max=0.2))
-        _ = DummyRLAlgorithm(
+class TestRLAlgorithmGetPolicy:
+    def test_get_policy_raises_when_no_policy_registered(
+        self, vector_space, discrete_space
+    ):
+        """get_policy() raises AttributeError when no policy network has been registered."""
+        agent = DummyRLAlgorithmNoPolicy(vector_space, discrete_space, index=0)
+        # Remove policy group so get_policy() has nothing to return
+        agent.registry.groups = [g for g in agent.registry.groups if not g.policy]
+        with pytest.raises(
+            AttributeError, match="No policy network has been registered"
+        ):
+            agent.get_policy()
+
+
+class TestRLAlgorithmPopulation:
+    def test_population_single_agent(self, vector_space, discrete_space):
+        population = DummyRLAlgorithm.population(10, vector_space, discrete_space)
+        assert len(population) == 10
+        for i, agent in enumerate(population):
+            assert agent.observation_space == vector_space
+            assert agent.action_space == discrete_space
+            assert agent.index == i
+
+    def test_population_with_wrapper_cls(self, vector_space, discrete_space):
+        """population classmethod returns wrapped agents when wrapper_cls is provided."""
+
+        class SimpleWrapper:
+            def __init__(self, agent, label="wrapped"):
+                self.agent = agent
+                self.label = label
+
+            def get_action(self, obs, **kwargs):
+                return self.agent.get_action(obs, **kwargs)
+
+            def learn(self, experiences, **kwargs):
+                return self.agent.learn(experiences, **kwargs)
+
+        population = DummyRLAlgorithm.population(
+            3,
             vector_space,
             discrete_space,
-            index=0,
-            hp_config=hp_config,
+            wrapper_cls=SimpleWrapper,
+            wrapper_kwargs={"label": "custom"},
         )
+        assert len(population) == 3
+        for i, wrapped in enumerate(population):
+            assert isinstance(wrapped, SimpleWrapper)
+            assert wrapped.label == "custom"
+            assert wrapped.agent.observation_space == vector_space
+            assert wrapped.agent.action_space == discrete_space
+            assert wrapped.agent.index == i
 
 
-def test_registry_init_raises_when_no_groups_defined(vector_space, discrete_space):
-    """AttributeError is raised when no network groups have been registered."""
-    with pytest.raises(
-        AttributeError,
-        match="No network groups have been registered in the algorithms __init__ method",
-    ):
-        NoRegistryRLAlgorithm(vector_space, discrete_space, index=0)
+class TestMultiAgentRLAlgorithmPopulation:
+    def test_population_multi_agent(self, ma_vector_space, ma_discrete_space):
+        population = DummyMARLAlgorithm.population(
+            10,
+            ma_vector_space,
+            ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "agent_2"],
+        )
+        assert len(population) == 10
+        for i, agent in enumerate(population):
+            for j in range(len(agent.agent_ids)):
+                agent_id = agent.agent_ids[j]
+                assert agent.possible_observation_spaces[agent_id] == ma_vector_space[j]
+                assert agent.possible_action_spaces[agent_id] == ma_discrete_space[j]
+
+            assert agent.index == i
 
 
-def test_registry_init_raises_when_no_policy_registered(vector_space, discrete_space):
-    """AttributeError is raised when no network group is registered as policy."""
-    with pytest.raises(
-        AttributeError,
-        match="No network group has been registered as a policy",
-    ):
-        NoPolicyRegistryRLAlgorithm(vector_space, discrete_space, index=0)
+class TestRLAlgorithmGetStateDim:
+    def test_get_state_dim_returns_expected_output(self, vector_space, discrete_space):
+        """get_state_dim returns the same as get_input_size_from_space for observation space."""
+        with pytest.warns(DeprecationWarning, match="get_input_size_from_space"):
+            state_dim = RLAlgorithm.get_state_dim(vector_space)
+        assert state_dim == vector_space.shape
+        with pytest.warns(DeprecationWarning, match="get_input_size_from_space"):
+            state_dim_discrete = RLAlgorithm.get_state_dim(discrete_space)
+        assert state_dim_discrete == (discrete_space.n,)
 
 
-def test_recompile(ma_vector_space, ma_discrete_space):
-    agent = DummyMARLAlgorithm(
-        ma_vector_space,
-        ma_discrete_space,
-        agent_ids=["agent_0", "agent_1", "agent_2"],
-        index=0,
-        torch_compiler="default",
+class TestRLAlgorithmGetActionDim:
+    def test_get_action_dim_returns_expected_output(self, vector_space, discrete_space):
+        """get_action_dim returns the same as get_output_size_from_space for action space."""
+        with pytest.warns(DeprecationWarning, match="get_output_size_from_space"):
+            action_dim = RLAlgorithm.get_action_dim(discrete_space)
+        assert action_dim == discrete_space.n
+        with pytest.warns(DeprecationWarning, match="get_output_size_from_space"):
+            action_dim_box = RLAlgorithm.get_action_dim(vector_space)
+        assert action_dim_box == vector_space.shape[0]
+
+
+class TestRLAlgorithmPreprocessObservation:
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["vector_space", "image_space", "dict_space"],
     )
-    agent.recompile()
-    assert all(
-        isinstance(mod, OptimizedModule) for mod in agent.dummy_actors.values()
-    ), agent.dummy_actors.values()
-
-    # Reset torch compilation state to prevent affecting subsequent tests
-    torch._dynamo.reset()
+    def test_preprocess_observation(self, observation_space, discrete_space, request):
+        obs_space = request.getfixturevalue(observation_space)
+        agent = DummyRLAlgorithm(obs_space, discrete_space, index=0)
+        observation = agent.preprocess_observation(obs_space.sample())
+        assert is_processed_observation(observation, obs_space)
 
 
-@pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_unwrap_models_multi_agent(compile_mode, ma_vector_space, ma_discrete_space):
-    accelerator = Accelerator()
-    agent = DummyMARLAlgorithm(
-        ma_vector_space,
-        ma_discrete_space,
-        index=0,
-        agent_ids=["agent_0", "agent_1", "other_agent_0"],
-        accelerator=accelerator,
-        torch_compiler=compile_mode,
-    )
+class TestRLAlgorithmReinitOptimizers:
+    def test_reinit_optimizers_single_agent(self, vector_space, discrete_space):
+        agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
+        clone_agent = agent.clone()
+        clone_agent.reinit_optimizers()
+        opt_attr = clone_agent.registry.optimizers[0].name
+        new_opt = getattr(clone_agent, opt_attr)
+        old_opt = getattr(agent, opt_attr)
 
-    agent.unwrap_models()
+        assert_state_dicts_equal(new_opt.state_dict(), old_opt.state_dict())
 
-    for actor in agent.dummy_actors.values():
-        assert isinstance(actor, torch.nn.Module)
 
-    # Reset torch compilation state if compilation was used
-    if compile_mode is not None:
+class TestMultiAgentRLAlgorithmReinitOptimizers:
+    def test_reinit_optimizers_multi_agent(self, ma_vector_space, ma_discrete_space):
+        agent = DummyMARLAlgorithm(
+            ma_vector_space,
+            ma_discrete_space,
+            index=0,
+            agent_ids=["agent_0", "agent_1", "agent_2"],
+        )
+        clone_agent = agent.clone()
+        clone_agent.reinit_optimizers()
+        opt_attr = clone_agent.registry.optimizers[0].name
+        new_opt = getattr(clone_agent, opt_attr)
+        old_opt = getattr(agent, opt_attr)
+
+        assert_state_dicts_equal(new_opt.state_dict(), old_opt.state_dict())
+
+
+class TestRLAlgorithmRegistryInit:
+    def test_registry_init_raises_when_no_groups_defined(
+        self, vector_space, discrete_space
+    ):
+        """AttributeError is raised when no network groups have been registered."""
+        with pytest.raises(
+            AttributeError,
+            match="No network groups have been registered in the algorithms __init__ method",
+        ):
+            NoRegistryRLAlgorithm(vector_space, discrete_space, index=0)
+
+    def test_registry_init_raises_when_no_policy_registered(
+        self, vector_space, discrete_space
+    ):
+        """AttributeError is raised when no network group is registered as policy."""
+        with pytest.raises(
+            AttributeError,
+            match="No network group has been registered as a policy",
+        ):
+            NoPolicyRegistryRLAlgorithm(vector_space, discrete_space, index=0)
+
+
+class TestMultiAgentRLAlgorithmRecompile:
+    def test_recompile(self, ma_vector_space, ma_discrete_space):
+        agent = DummyMARLAlgorithm(
+            ma_vector_space,
+            ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "agent_2"],
+            index=0,
+            torch_compiler="default",
+        )
+        agent.recompile()
+        assert all(
+            isinstance(mod, OptimizedModule) for mod in agent.dummy_actors.values()
+        ), agent.dummy_actors.values()
+
+        # Reset torch compilation state to prevent affecting subsequent tests
         torch._dynamo.reset()
 
 
-def test_unwrap_models_single_agent(vector_space, discrete_space):
-    accelerator = Accelerator()
-    agent = DummyRLAlgorithm(
-        vector_space,
-        discrete_space,
-        index=0,
-        accelerator=accelerator,
-    )
-    agent.unwrap_models()
-    assert isinstance(agent.dummy_actor, torch.nn.Module)
+class TestMultiAgentRLAlgorithmUnwrapModels:
+    @pytest.mark.parametrize("compile_mode", [None, "default"])
+    def test_unwrap_models_multi_agent(
+        self, compile_mode, ma_vector_space, ma_discrete_space
+    ):
+        accelerator = Accelerator()
+        agent = DummyMARLAlgorithm(
+            ma_vector_space,
+            ma_discrete_space,
+            index=0,
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            accelerator=accelerator,
+            torch_compiler=compile_mode,
+        )
 
-
-def test_unwrap_models_raises_without_accelerator(vector_space, discrete_space):
-    """AttributeError is raised when unwrap_models is called without an accelerator."""
-    agent = DummyRLAlgorithm(
-        vector_space,
-        discrete_space,
-        index=0,
-    )
-    assert agent.accelerator is None
-    with pytest.raises(AttributeError, match="No accelerator has been set"):
         agent.unwrap_models()
 
+        for actor in agent.dummy_actors.values():
+            assert isinstance(actor, torch.nn.Module)
 
-@pytest.mark.parametrize("with_hp_config", [False, True])
-@pytest.mark.parametrize(
-    "observation_space",
-    ["vector_space", "discrete_space", "dict_space", "multidiscrete_space"],
-)
-def test_save_load_checkpoint_single_agent(
-    tmpdir,
-    with_hp_config,
-    observation_space,
-    discrete_space,
-    request,
-):
-    obs_space = request.getfixturevalue(observation_space)
-    action_space = discrete_space
-    # Initialize the dummy agent
-    hp_config = None
-    if with_hp_config:
-        hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
-        agent = DummyRLAlgorithm(obs_space, action_space, index=0, hp_config=hp_config)
-    else:
-        agent = DummyRLAlgorithm(obs_space, action_space, index=0)
+        # Reset torch compilation state if compilation was used
+        if compile_mode is not None:
+            torch._dynamo.reset()
 
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    agent.save_checkpoint(checkpoint_path)
 
-    # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, weights_only=False)
+class TestRLAlgorithmUnwrapModels:
+    def test_unwrap_models_single_agent(self, vector_space, discrete_space):
+        accelerator = Accelerator()
+        agent = DummyRLAlgorithm(
+            vector_space,
+            discrete_space,
+            index=0,
+            accelerator=accelerator,
+        )
+        agent.unwrap_models()
+        assert isinstance(agent.dummy_actor, torch.nn.Module)
 
-    # Check if the loaded checkpoint has the correct keys
-    assert "dummy_actor_init_dict" in checkpoint["network_info"]["modules"]
-    assert "dummy_actor_state_dict" in checkpoint["network_info"]["modules"]
-    assert "dummy_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "lr" in checkpoint
-    assert "index" in checkpoint
-    assert "scores" in checkpoint
-    assert "fitness" in checkpoint
-    assert "steps" in checkpoint
+    def test_unwrap_models_raises_without_accelerator(
+        self, vector_space, discrete_space
+    ):
+        """AttributeError is raised when unwrap_models is called without an accelerator."""
+        agent = DummyRLAlgorithm(
+            vector_space,
+            discrete_space,
+            index=0,
+        )
+        assert agent.accelerator is None
+        with pytest.raises(AttributeError, match="No accelerator has been set"):
+            agent.unwrap_models()
 
-    # Create a new agent with the same hp_config if needed
-    new_agent = DummyRLAlgorithm(
-        obs_space,
-        action_space,
-        index=1,  # Different index to verify it gets overwritten
-        hp_config=hp_config,
+
+class TestRLAlgorithmLoadCheckpoint:
+    @pytest.mark.parametrize("with_hp_config", [False, True])
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["vector_space", "discrete_space", "dict_space", "multidiscrete_space"],
     )
-
-    # Load checkpoint
-    new_agent.load_checkpoint(checkpoint_path)
-
-    # Check if properties and weights are loaded correctly
-    assert isinstance(
-        new_agent.dummy_actor,
-        (EvolvableMLP, EvolvableCNN, EvolvableMultiInput),
-    )
-    assert new_agent.lr == agent.lr
-    assert_state_dicts_equal(
-        new_agent.dummy_actor.state_dict(),
-        agent.dummy_actor.state_dict(),
-    )
-    assert new_agent.index == agent.index
-    assert new_agent.scores == agent.scores
-    assert new_agent.fitness == agent.fitness
-    assert new_agent.steps == agent.steps
-
-
-@pytest.mark.parametrize("with_hp_config", [False, True])
-@pytest.mark.parametrize(
-    "observation_spaces, encoder_cls",
-    [
-        ("ma_vector_space", EvolvableMLP),
-        ("ma_image_space", EvolvableCNN),
-        ("ma_dict_space", EvolvableMultiInput),
-    ],
-)
-@pytest.mark.parametrize("accelerator_flag", [False, True])
-@pytest.mark.parametrize("compile_mode", [None])
-def test_save_load_checkpoint_multi_agent(
-    tmpdir,
-    with_hp_config,
-    observation_spaces,
-    encoder_cls,
-    ma_discrete_space,
-    accelerator_flag,
-    compile_mode,
-    request,
-):
-    accelerator = Accelerator() if accelerator_flag else None
-    # Initialize the dummy multi-agent
-    obs_spaces = request.getfixturevalue(observation_spaces)
-    agent_ids = ["agent_0", "agent_1", "agent_2"]
-    action_spaces = ma_discrete_space
-
-    hp_config = None
-    if with_hp_config:
-        hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
-
-    agent = DummyMARLAlgorithm(
-        obs_spaces,
-        action_spaces,
-        agent_ids=agent_ids,
-        index=0,
-        hp_config=hp_config,
-        accelerator=accelerator,
-        torch_compiler=compile_mode,
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    agent.save_checkpoint(checkpoint_path)
-
-    # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, weights_only=False)
-
-    # Check if the loaded checkpoint has the correct keys
-    assert "dummy_actors_init_dict" in checkpoint["network_info"]["modules"]
-    assert "dummy_actors_state_dict" in checkpoint["network_info"]["modules"]
-    assert "dummy_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
-    assert "lr" in checkpoint
-    assert "index" in checkpoint
-    assert "scores" in checkpoint
-    assert "fitness" in checkpoint
-    assert "steps" in checkpoint
-    assert "agent_ids" in checkpoint
-
-    # Create a new agent with the same hp_config if needed
-    new_agent = DummyMARLAlgorithm(
-        obs_spaces,
-        action_spaces,
-        agent_ids=agent_ids,
-        index=1,  # Different index to verify it gets overwritten
-        hp_config=hp_config,
-        accelerator=accelerator,
-        torch_compiler=compile_mode,
-    )
-
-    # Load checkpoint
-    new_agent.load_checkpoint(checkpoint_path)
-
-    # Check if properties and weights are loaded correctly
-    for agent_id in agent.agent_ids:
-        if compile_mode is not None and accelerator is None:
-            assert isinstance(new_agent.dummy_actors[agent_id], OptimizedModule)
+    def test_save_load_checkpoint_single_agent(
+        self,
+        tmpdir,
+        with_hp_config,
+        observation_space,
+        discrete_space,
+        request,
+    ):
+        obs_space = request.getfixturevalue(observation_space)
+        action_space = discrete_space
+        # Initialize the dummy agent
+        hp_config = None
+        if with_hp_config:
+            hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
+            agent = DummyRLAlgorithm(
+                obs_space, action_space, index=0, hp_config=hp_config
+            )
         else:
-            assert isinstance(new_agent.dummy_actors[agent_id], encoder_cls)
+            agent = DummyRLAlgorithm(obs_space, action_space, index=0)
 
+        # Save the checkpoint to a file
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
+
+        # Load the saved checkpoint file
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+
+        # Check if the loaded checkpoint has the correct keys
+        assert "dummy_actor_init_dict" in checkpoint["network_info"]["modules"]
+        assert "dummy_actor_state_dict" in checkpoint["network_info"]["modules"]
+        assert "dummy_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+        assert "lr" in checkpoint
+        assert "index" in checkpoint
+        assert "scores" in checkpoint
+        assert "fitness" in checkpoint
+        assert "steps" in checkpoint
+
+        # Create a new agent with the same hp_config if needed
+        new_agent = DummyRLAlgorithm(
+            obs_space,
+            action_space,
+            index=1,  # Different index to verify it gets overwritten
+            hp_config=hp_config,
+        )
+
+        # Load checkpoint
+        new_agent.load_checkpoint(checkpoint_path)
+
+        # Check if properties and weights are loaded correctly
+        assert isinstance(
+            new_agent.dummy_actor,
+            (EvolvableMLP, EvolvableCNN, EvolvableMultiInput),
+        )
+        assert new_agent.lr == agent.lr
         assert_state_dicts_equal(
-            new_agent.dummy_actors[agent_id].state_dict(),
-            agent.dummy_actors[agent_id].state_dict(),
+            new_agent.dummy_actor.state_dict(),
+            agent.dummy_actor.state_dict(),
+        )
+        assert new_agent.index == agent.index
+        assert new_agent.scores == agent.scores
+        assert new_agent.fitness == agent.fitness
+        assert new_agent.steps == agent.steps
+
+    def test_gpu_to_no_cuda_load_checkpoint_single_agent(self, tmpdir, vector_space):
+        """Test saving agent on GPU and loading checkpoint when CUDA is completely unavailable."""
+        import os
+        import subprocess
+        import sys
+
+        # Skip test if CUDA is not available
+        if not torch.cuda.is_available():
+            pytest.skip(
+                "CUDA not available, skipping GPU to no-CUDA load_checkpoint test"
+            )
+
+        # Initialize the dummy agent
+        observation_space = vector_space
+        action_space = vector_space
+        agent = DummyRLAlgorithm(
+            observation_space, action_space, index=0, device="cuda"
         )
 
-    assert new_agent.lr == agent.lr
-    assert new_agent.index == agent.index
-    assert new_agent.scores == agent.scores
-    assert new_agent.fitness == agent.fitness
-    assert new_agent.steps == agent.steps
-    assert new_agent.agent_ids == agent.agent_ids
+        # Verify agent is on GPU
+        assert next(agent.dummy_actor.parameters()).device.type == "cuda"
 
+        # Save the checkpoint to a file
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
 
-@pytest.mark.parametrize("device, with_hp_config", [("cpu", False), ("cpu", True)])
-@pytest.mark.parametrize(
-    "observation_space, encoder_cls",
-    [
-        ("vector_space", EvolvableMLP),
-        ("discrete_space", EvolvableMLP),
-        ("dict_space", EvolvableMultiInput),
-        ("multidiscrete_space", EvolvableMLP),
-    ],
-)
-@pytest.mark.parametrize("action_space", ["vector_space", "discrete_space"])
-def test_load_from_pretrained_single_agent(
-    device,
-    tmpdir,
-    with_hp_config,
-    observation_space,
-    encoder_cls,
-    action_space,
-    request,
-):
-    # Initialize the dummy agent
-    obs_space = request.getfixturevalue(observation_space)
-    act_space = request.getfixturevalue(action_space)
-    hp_config = None
-    if with_hp_config:
-        hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
-        agent = DummyRLAlgorithm(obs_space, act_space, index=0, hp_config=hp_config)
-    else:
-        agent = DummyRLAlgorithm(obs_space, act_space, index=0)
+        # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
+        # Serialize observation and action spaces
+        obs_space_init = "generate_random_box_space((4,))"
+        action_space_init = "generate_random_box_space((4,))"
 
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    agent.save_checkpoint(checkpoint_path)
-
-    # Create new agent object using the class method
-    new_agent = DummyRLAlgorithm.load(checkpoint_path, device=device)
-
-    # Check if properties and weights are loaded correctly
-    assert new_agent.observation_space == agent.observation_space
-    assert new_agent.action_space == agent.action_space
-    assert isinstance(new_agent.dummy_actor, encoder_cls)
-    assert new_agent.lr == agent.lr
-    assert_state_dicts_equal(
-        new_agent.dummy_actor.to("cpu").state_dict(),
-        agent.dummy_actor.state_dict(),
-    )
-    assert new_agent.index == agent.index
-    assert new_agent.scores == agent.scores
-    assert new_agent.fitness == agent.fitness
-    assert new_agent.steps == agent.steps
-
-
-@pytest.mark.parametrize("device, with_hp_config", [("cpu", False), ("cpu", True)])
-@pytest.mark.parametrize(
-    "observation_spaces, encoder_cls",
-    [
-        ("ma_vector_space", EvolvableMLP),
-        ("ma_image_space", EvolvableCNN),
-        ("ma_discrete_space", EvolvableMLP),
-        ("ma_dict_space", EvolvableMultiInput),
-    ],
-)
-@pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
-@pytest.mark.parametrize("accelerator_flag", [False, True])
-@pytest.mark.parametrize("compile_mode", [None])
-def test_load_from_pretrained_multi_agent(
-    device,
-    tmpdir,
-    with_hp_config,
-    observation_spaces,
-    encoder_cls,
-    action_spaces,
-    accelerator_flag,
-    compile_mode,
-    request,
-):
-    accelerator = Accelerator() if accelerator_flag else None
-    # Initialize the dummy multi-agent
-    obs_spaces = request.getfixturevalue(observation_spaces)
-    act_spaces = request.getfixturevalue(action_spaces)
-    agent_ids = ["agent_0", "agent_1", "agent_2"]
-
-    hp_config = None
-    if with_hp_config:
-        hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
-
-    agent = DummyMARLAlgorithm(
-        obs_spaces,
-        act_spaces,
-        agent_ids=agent_ids,
-        index=0,
-        hp_config=hp_config,
-        accelerator=accelerator,
-        torch_compiler=compile_mode,
-    )
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    agent.save_checkpoint(checkpoint_path)
-
-    # Create new agent object using the class method
-    new_agent = DummyMARLAlgorithm.load(
-        checkpoint_path,
-        device=device,
-        accelerator=accelerator,
-    )
-
-    # Check if properties and weights are loaded correctly
-    for _i, agent_id in enumerate(agent_ids):
-        assert (
-            new_agent.possible_observation_spaces[agent_id]
-            == agent.possible_observation_spaces[agent_id]
-        )
-        assert (
-            new_agent.possible_action_spaces[agent_id]
-            == agent.possible_action_spaces[agent_id]
-        )
-
-    for agent_id in agent.agent_ids:
-        if compile_mode is not None and accelerator is None:
-            assert isinstance(new_agent.dummy_actors[agent_id], OptimizedModule)
-        else:
-            assert isinstance(new_agent.dummy_actors[agent_id], encoder_cls)
-
-        assert_state_dicts_equal(
-            new_agent.dummy_actors[agent_id].to("cpu").state_dict(),
-            agent.dummy_actors[agent_id].state_dict(),
-        )
-
-    assert new_agent.lr == agent.lr
-    assert new_agent.index == agent.index
-    assert new_agent.scores == agent.scores
-    assert new_agent.fitness == agent.fitness
-    assert new_agent.steps == agent.steps
-    assert new_agent.agent_ids == agent.agent_ids
-
-
-def test_gpu_to_no_cuda_transfer_single_agent(tmpdir, vector_space):
-    """Test saving agent on GPU and loading when CUDA is completely unavailable."""
-    import os
-    import subprocess
-    import sys
-
-    # Skip test if CUDA is not available
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available, skipping GPU to no-CUDA transfer test")
-
-    # Initialize the dummy agent
-    observation_space = vector_space
-    action_space = vector_space
-    agent = DummyRLAlgorithm(observation_space, action_space, index=0, device="cuda")
-
-    # Verify agent is on GPU
-    assert next(agent.dummy_actor.parameters()).device.type == "cuda"
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    agent.save_checkpoint(checkpoint_path)
-
-    # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
-    test_script = f"""
-import sys
-sys.path.insert(0, "{os.getcwd()}")
-import torch
-from pathlib import Path
-from tests.test_algorithms.test_base import DummyRLAlgorithm
-
-# Verify CUDA is not available in this subprocess
-assert not torch.cuda.is_available(), "CUDA should not be available"
-
-# Load the checkpoint (should work even though it was saved on GPU)
-checkpoint_path = Path("{checkpoint_path}")
-new_agent = DummyRLAlgorithm.load(checkpoint_path, device="cpu")
-
-# Verify the agent is on CPU
-assert next(new_agent.dummy_actor.parameters()).device.type == "cpu"
-
-print("SUCCESS: GPU-saved checkpoint loaded successfully in no-CUDA environment")
-    """
-
-    script_path = Path(tmpdir) / "test_no_cuda.py"
-    with open(script_path, "w") as f:
-        f.write(test_script)
-
-    # Run the test script with CUDA_VISIBLE_DEVICES="" to hide GPU
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = ""
-
-    result = subprocess.run(
-        [sys.executable, str(script_path)],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    # Check that the subprocess succeeded
-    assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
-    assert "SUCCESS" in result.stdout
-
-
-def test_gpu_to_no_cuda_load_checkpoint_single_agent(tmpdir, vector_space):
-    """Test saving agent on GPU and loading checkpoint when CUDA is completely unavailable."""
-    import os
-    import subprocess
-    import sys
-
-    # Skip test if CUDA is not available
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available, skipping GPU to no-CUDA load_checkpoint test")
-
-    # Initialize the dummy agent
-    observation_space = vector_space
-    action_space = vector_space
-    agent = DummyRLAlgorithm(observation_space, action_space, index=0, device="cuda")
-
-    # Verify agent is on GPU
-    assert next(agent.dummy_actor.parameters()).device.type == "cuda"
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    agent.save_checkpoint(checkpoint_path)
-
-    # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
-    # Serialize observation and action spaces
-    obs_space_init = "generate_random_box_space((4,))"
-    action_space_init = "generate_random_box_space((4,))"
-
-    test_script = f"""
+        test_script = f"""
 import sys
 sys.path.insert(0, "{os.getcwd()}")
 import torch
@@ -1177,136 +917,180 @@ assert next(new_agent.dummy_actor.parameters()).device.type == "cpu"
 print("SUCCESS: GPU-saved checkpoint loaded via load_checkpoint in no-CUDA environment")
     """
 
-    script_path = Path(tmpdir) / "test_load_checkpoint_no_cuda.py"
-    with open(script_path, "w") as f:
-        f.write(test_script)
+        script_path = Path(tmpdir) / "test_load_checkpoint_no_cuda.py"
+        with open(script_path, "w") as f:
+            f.write(test_script)
 
-    # Run the test script with CUDA_VISIBLE_DEVICES="" to hide GPU
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = ""
+        # Run the test script with CUDA_VISIBLE_DEVICES="" to hide GPU
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = ""
 
-    result = subprocess.run(
-        [sys.executable, str(script_path)],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        # Check that the subprocess succeeded
+        assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
+        assert "SUCCESS" in result.stdout
+
+    def test_load_checkpoint_raises_when_registries_dont_match(
+        self, tmpdir, vector_space, discrete_space
+    ):
+        """ValueError is raised when loading a checkpoint whose registry does not match the algorithm."""
+        agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
+
+        # Load checkpoint and replace registry with one that does not match (e.g. empty)
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        checkpoint["registry"] = MutationRegistry()
+
+        mismatched_path = Path(tmpdir) / "mismatched_checkpoint.pth"
+        torch.save(checkpoint, mismatched_path, pickle_module=dill)
+
+        new_agent = DummyRLAlgorithm(vector_space, discrete_space, index=1)
+        with pytest.raises(
+            ValueError,
+            match="Loaded registry does not match the algorithm's registry",
+        ):
+            new_agent.load_checkpoint(mismatched_path)
+
+
+class TestMultiAgentRLAlgorithmLoadCheckpoint:
+    @pytest.mark.parametrize("with_hp_config", [False, True])
+    @pytest.mark.parametrize(
+        "observation_spaces, encoder_cls",
+        [
+            ("ma_vector_space", EvolvableMLP),
+            ("ma_image_space", EvolvableCNN),
+            ("ma_dict_space", EvolvableMultiInput),
+        ],
     )
-
-    # Check that the subprocess succeeded
-    assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
-    assert "SUCCESS" in result.stdout
-
-
-def test_gpu_to_no_cuda_transfer_multi_agent(tmpdir, ma_vector_space):
-    """Test saving multi-agent on GPU and loading when CUDA is completely unavailable."""
-    import os
-    import subprocess
-    import sys
-
-    # Skip test if CUDA is not available
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available, skipping GPU to no-CUDA transfer test")
-
-    # Initialize the dummy multi-agent
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    observation_spaces = ma_vector_space
-    action_spaces = ma_vector_space
-    agent = DummyMARLAlgorithm(
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
+    @pytest.mark.parametrize("compile_mode", [None])
+    def test_save_load_checkpoint_multi_agent(
+        self,
+        tmpdir,
+        with_hp_config,
         observation_spaces,
-        action_spaces,
-        agent_ids=agent_ids,
-        index=0,
-        device="cuda",
-    )
+        encoder_cls,
+        ma_discrete_space,
+        accelerator_flag,
+        compile_mode,
+        request,
+    ):
+        accelerator = Accelerator() if accelerator_flag else None
+        # Initialize the dummy multi-agent
+        obs_spaces = request.getfixturevalue(observation_spaces)
+        agent_ids = ["agent_0", "agent_1", "agent_2"]
+        action_spaces = ma_discrete_space
 
-    # Verify agents are on GPU
-    for actor in agent.dummy_actors.values():
-        assert next(actor.parameters()).device.type == "cuda"
+        hp_config = None
+        if with_hp_config:
+            hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
 
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    agent.save_checkpoint(checkpoint_path)
+        agent = DummyMARLAlgorithm(
+            obs_spaces,
+            action_spaces,
+            agent_ids=agent_ids,
+            index=0,
+            hp_config=hp_config,
+            accelerator=accelerator,
+            torch_compiler=compile_mode,
+        )
 
-    # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
-    test_script = f"""
-import sys
-sys.path.insert(0, "{os.getcwd()}")
-import torch
-from pathlib import Path
-from tests.test_algorithms.test_base import DummyMARLAlgorithm
+        # Save the checkpoint to a file
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
 
-# Verify CUDA is not available in this subprocess
-assert not torch.cuda.is_available(), "CUDA should not be available"
+        # Load the saved checkpoint file
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
 
-# Load the checkpoint (should work even though it was saved on GPU)
-checkpoint_path = Path("{checkpoint_path}")
-new_agent = DummyMARLAlgorithm.load(checkpoint_path, device="cpu")
+        # Check if the loaded checkpoint has the correct keys
+        assert "dummy_actors_init_dict" in checkpoint["network_info"]["modules"]
+        assert "dummy_actors_state_dict" in checkpoint["network_info"]["modules"]
+        assert "dummy_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+        assert "lr" in checkpoint
+        assert "index" in checkpoint
+        assert "scores" in checkpoint
+        assert "fitness" in checkpoint
+        assert "steps" in checkpoint
+        assert "agent_ids" in checkpoint
 
-# Verify all agents are on CPU
-agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-for actor in new_agent.dummy_actors.values():
-    assert next(actor.parameters()).device.type == "cpu"
+        # Create a new agent with the same hp_config if needed
+        new_agent = DummyMARLAlgorithm(
+            obs_spaces,
+            action_spaces,
+            agent_ids=agent_ids,
+            index=1,  # Different index to verify it gets overwritten
+            hp_config=hp_config,
+            accelerator=accelerator,
+            torch_compiler=compile_mode,
+        )
 
-print("SUCCESS: GPU-saved multi-agent checkpoint loaded successfully in no-CUDA environment")
-    """
+        # Load checkpoint
+        new_agent.load_checkpoint(checkpoint_path)
 
-    script_path = Path(tmpdir) / "test_no_cuda_multi.py"
-    with open(script_path, "w") as f:
-        f.write(test_script)
+        # Check if properties and weights are loaded correctly
+        for agent_id in agent.agent_ids:
+            if compile_mode is not None and accelerator is None:
+                assert isinstance(new_agent.dummy_actors[agent_id], OptimizedModule)
+            else:
+                assert isinstance(new_agent.dummy_actors[agent_id], encoder_cls)
 
-    # Run the test script with CUDA_VISIBLE_DEVICES="" to hide GPU
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = ""
+            assert_state_dicts_equal(
+                new_agent.dummy_actors[agent_id].state_dict(),
+                agent.dummy_actors[agent_id].state_dict(),
+            )
 
-    result = subprocess.run(
-        [sys.executable, str(script_path)],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+        assert new_agent.lr == agent.lr
+        assert new_agent.index == agent.index
+        assert new_agent.scores == agent.scores
+        assert new_agent.fitness == agent.fitness
+        assert new_agent.steps == agent.steps
+        assert new_agent.agent_ids == agent.agent_ids
 
-    # Check that the subprocess succeeded
-    assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
-    assert "SUCCESS" in result.stdout
+    def test_gpu_to_no_cuda_load_checkpoint_multi_agent(self, tmpdir, ma_vector_space):
+        """Test saving multi-agent on GPU and loading checkpoint when CUDA is completely unavailable."""
+        import os
+        import subprocess
+        import sys
 
+        # Skip test if CUDA is not available
+        if not torch.cuda.is_available():
+            pytest.skip(
+                "CUDA not available, skipping GPU to no-CUDA load_checkpoint test"
+            )
 
-def test_gpu_to_no_cuda_load_checkpoint_multi_agent(tmpdir, ma_vector_space):
-    """Test saving multi-agent on GPU and loading checkpoint when CUDA is completely unavailable."""
-    import os
-    import subprocess
-    import sys
+        # Initialize the dummy multi-agent
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        observation_spaces = ma_vector_space
+        action_spaces = ma_vector_space
+        agent = DummyMARLAlgorithm(
+            observation_spaces,
+            action_spaces,
+            agent_ids=agent_ids,
+            index=0,
+            device="cuda",
+        )
 
-    # Skip test if CUDA is not available
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available, skipping GPU to no-CUDA load_checkpoint test")
+        # Verify agents are on GPU
+        for actor in agent.dummy_actors.values():
+            assert next(actor.parameters()).device.type == "cuda"
 
-    # Initialize the dummy multi-agent
-    agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-    observation_spaces = ma_vector_space
-    action_spaces = ma_vector_space
-    agent = DummyMARLAlgorithm(
-        observation_spaces,
-        action_spaces,
-        agent_ids=agent_ids,
-        index=0,
-        device="cuda",
-    )
+        # Save the checkpoint to a file
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
 
-    # Verify agents are on GPU
-    for actor in agent.dummy_actors.values():
-        assert next(actor.parameters()).device.type == "cuda"
+        # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
+        obs_spaces_init = "generate_multi_agent_box_spaces(3, (4,))"
+        action_spaces_init = "generate_multi_agent_box_spaces(3, (2,))"
 
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    agent.save_checkpoint(checkpoint_path)
-
-    # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
-    obs_spaces_init = "generate_multi_agent_box_spaces(3, (4,))"
-    action_spaces_init = "generate_multi_agent_box_spaces(3, (2,))"
-
-    test_script = f"""
+        test_script = f"""
 import sys
 sys.path.insert(0, "{os.getcwd()}")
 import torch
@@ -1338,293 +1122,558 @@ for actor in new_agent.dummy_actors.values():
 print("SUCCESS: GPU-saved multi-agent checkpoint loaded via load_checkpoint in no-CUDA environment")
     """
 
-    script_path = Path(tmpdir) / "test_load_checkpoint_no_cuda_multi.py"
-    with open(script_path, "w") as f:
-        f.write(test_script)
+        script_path = Path(tmpdir) / "test_load_checkpoint_no_cuda_multi.py"
+        with open(script_path, "w") as f:
+            f.write(test_script)
 
-    # Run the test script with CUDA_VISIBLE_DEVICES="" to hide GPU
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = ""
+        # Run the test script with CUDA_VISIBLE_DEVICES="" to hide GPU
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = ""
 
-    result = subprocess.run(
-        [sys.executable, str(script_path)],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        # Check that the subprocess succeeded
+        assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
+        assert "SUCCESS" in result.stdout
+
+
+class TestRLAlgorithmLoad:
+    @pytest.mark.parametrize("device, with_hp_config", [("cpu", False), ("cpu", True)])
+    @pytest.mark.parametrize(
+        "observation_space, encoder_cls",
+        [
+            ("vector_space", EvolvableMLP),
+            ("discrete_space", EvolvableMLP),
+            ("dict_space", EvolvableMultiInput),
+            ("multidiscrete_space", EvolvableMLP),
+        ],
     )
-
-    # Check that the subprocess succeeded
-    assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
-    assert "SUCCESS" in result.stdout
-
-
-def test_missing_attribute_warning(tmpdir, vector_space):
-    action_space = vector_space
-    # Initialize the dummy agent
-    agent = DummyRLAlgorithm(vector_space, action_space, index=0)
-
-    # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    agent.save_checkpoint(checkpoint_path)
-
-    # Load and modify the checkpoint to remove an attribute
-    checkpoint = torch.load(checkpoint_path, weights_only=False)
-    checkpoint.pop("dummy_attribute")
-
-    # Save the modified checkpoint
-    modified_path = Path(tmpdir) / "modified_checkpoint.pth"
-    torch.save(checkpoint, modified_path)
-
-    # Load the modified checkpoint and check if a warning is raised
-    with pytest.warns(
-        UserWarning,
-        match="Attribute dummy_attribute not found in checkpoint",
+    @pytest.mark.parametrize("action_space", ["vector_space", "discrete_space"])
+    def test_load_from_pretrained_single_agent(
+        self,
+        device,
+        tmpdir,
+        with_hp_config,
+        observation_space,
+        encoder_cls,
+        action_space,
+        request,
     ):
-        new_agent = DummyRLAlgorithm.load(modified_path, device="cpu")
+        # Initialize the dummy agent
+        obs_space = request.getfixturevalue(observation_space)
+        act_space = request.getfixturevalue(action_space)
+        hp_config = None
+        if with_hp_config:
+            hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
+            agent = DummyRLAlgorithm(obs_space, act_space, index=0, hp_config=hp_config)
+        else:
+            agent = DummyRLAlgorithm(obs_space, act_space, index=0)
 
-    # The attribute should keep its original value
-    assert new_agent.dummy_attribute == "test_value"
+        # Save the checkpoint to a file
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
+
+        # Create new agent object using the class method
+        new_agent = DummyRLAlgorithm.load(checkpoint_path, device=device)
+
+        # Check if properties and weights are loaded correctly
+        assert new_agent.observation_space == agent.observation_space
+        assert new_agent.action_space == agent.action_space
+        assert isinstance(new_agent.dummy_actor, encoder_cls)
+        assert new_agent.lr == agent.lr
+        assert_state_dicts_equal(
+            new_agent.dummy_actor.to("cpu").state_dict(),
+            agent.dummy_actor.state_dict(),
+        )
+        assert new_agent.index == agent.index
+        assert new_agent.scores == agent.scores
+        assert new_agent.fitness == agent.fitness
+        assert new_agent.steps == agent.steps
+
+    def test_gpu_to_no_cuda_transfer_single_agent(self, tmpdir, vector_space):
+        """Test saving agent on GPU and loading when CUDA is completely unavailable."""
+        import os
+        import subprocess
+        import sys
+
+        # Skip test if CUDA is not available
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available, skipping GPU to no-CUDA transfer test")
+
+        # Initialize the dummy agent
+        observation_space = vector_space
+        action_space = vector_space
+        agent = DummyRLAlgorithm(
+            observation_space, action_space, index=0, device="cuda"
+        )
+
+        # Verify agent is on GPU
+        assert next(agent.dummy_actor.parameters()).device.type == "cuda"
+
+        # Save the checkpoint to a file
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
+
+        # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
+        test_script = f"""
+import sys
+sys.path.insert(0, "{os.getcwd()}")
+import torch
+from pathlib import Path
+from tests.test_algorithms.test_base import DummyRLAlgorithm
+
+# Verify CUDA is not available in this subprocess
+assert not torch.cuda.is_available(), "CUDA should not be available"
+
+# Load the checkpoint (should work even though it was saved on GPU)
+checkpoint_path = Path("{checkpoint_path}")
+new_agent = DummyRLAlgorithm.load(checkpoint_path, device="cpu")
+
+# Verify the agent is on CPU
+assert next(new_agent.dummy_actor.parameters()).device.type == "cpu"
+
+print("SUCCESS: GPU-saved checkpoint loaded successfully in no-CUDA environment")
+    """
+
+        script_path = Path(tmpdir) / "test_no_cuda.py"
+        with open(script_path, "w") as f:
+            f.write(test_script)
+
+        # Run the test script with CUDA_VISIBLE_DEVICES="" to hide GPU
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = ""
+
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        # Check that the subprocess succeeded
+        assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
+        assert "SUCCESS" in result.stdout
+
+    def test_missing_attribute_warning(self, tmpdir, vector_space):
+        action_space = vector_space
+        # Initialize the dummy agent
+        agent = DummyRLAlgorithm(vector_space, action_space, index=0)
+
+        # Save the checkpoint to a file
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
+
+        # Load and modify the checkpoint to remove an attribute
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        checkpoint.pop("dummy_attribute")
+
+        # Save the modified checkpoint
+        modified_path = Path(tmpdir) / "modified_checkpoint.pth"
+        torch.save(checkpoint, modified_path)
+
+        # Load the modified checkpoint and check if a warning is raised
+        with pytest.warns(
+            UserWarning,
+            match="Attribute dummy_attribute not found in checkpoint",
+        ):
+            new_agent = DummyRLAlgorithm.load(modified_path, device="cpu")
+
+        # The attribute should keep its original value
+        assert new_agent.dummy_attribute == "test_value"
 
 
-def test_load_checkpoint_raises_when_registries_dont_match(
-    tmpdir, vector_space, discrete_space
-):
-    """ValueError is raised when loading a checkpoint whose registry does not match the algorithm."""
-    agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    agent.save_checkpoint(checkpoint_path)
-
-    # Load checkpoint and replace registry with one that does not match (e.g. empty)
-    checkpoint = torch.load(checkpoint_path, weights_only=False)
-    checkpoint["registry"] = MutationRegistry()
-
-    mismatched_path = Path(tmpdir) / "mismatched_checkpoint.pth"
-    torch.save(checkpoint, mismatched_path, pickle_module=dill)
-
-    new_agent = DummyRLAlgorithm(vector_space, discrete_space, index=1)
-    with pytest.raises(
-        ValueError,
-        match="Loaded registry does not match the algorithm's registry",
+class TestMultiAgentRLAlgorithmLoad:
+    @pytest.mark.parametrize("device, with_hp_config", [("cpu", False), ("cpu", True)])
+    @pytest.mark.parametrize(
+        "observation_spaces, encoder_cls",
+        [
+            ("ma_vector_space", EvolvableMLP),
+            ("ma_image_space", EvolvableCNN),
+            ("ma_discrete_space", EvolvableMLP),
+            ("ma_dict_space", EvolvableMultiInput),
+        ],
+    )
+    @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
+    @pytest.mark.parametrize("compile_mode", [None])
+    def test_load_from_pretrained_multi_agent(
+        self,
+        device,
+        tmpdir,
+        with_hp_config,
+        observation_spaces,
+        encoder_cls,
+        action_spaces,
+        accelerator_flag,
+        compile_mode,
+        request,
     ):
-        new_agent.load_checkpoint(mismatched_path)
+        accelerator = Accelerator() if accelerator_flag else None
+        # Initialize the dummy multi-agent
+        obs_spaces = request.getfixturevalue(observation_spaces)
+        act_spaces = request.getfixturevalue(action_spaces)
+        agent_ids = ["agent_0", "agent_1", "agent_2"]
+
+        hp_config = None
+        if with_hp_config:
+            hp_config = HyperparameterConfig(lr=RLParameter(min=0.05, max=0.2))
+
+        agent = DummyMARLAlgorithm(
+            obs_spaces,
+            act_spaces,
+            agent_ids=agent_ids,
+            index=0,
+            hp_config=hp_config,
+            accelerator=accelerator,
+            torch_compiler=compile_mode,
+        )
+
+        # Save the checkpoint to a file
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
+
+        # Create new agent object using the class method
+        new_agent = DummyMARLAlgorithm.load(
+            checkpoint_path,
+            device=device,
+            accelerator=accelerator,
+        )
+
+        # Check if properties and weights are loaded correctly
+        for _i, agent_id in enumerate(agent_ids):
+            assert (
+                new_agent.possible_observation_spaces[agent_id]
+                == agent.possible_observation_spaces[agent_id]
+            )
+            assert (
+                new_agent.possible_action_spaces[agent_id]
+                == agent.possible_action_spaces[agent_id]
+            )
+
+        for agent_id in agent.agent_ids:
+            if compile_mode is not None and accelerator is None:
+                assert isinstance(new_agent.dummy_actors[agent_id], OptimizedModule)
+            else:
+                assert isinstance(new_agent.dummy_actors[agent_id], encoder_cls)
+
+            assert_state_dicts_equal(
+                new_agent.dummy_actors[agent_id].to("cpu").state_dict(),
+                agent.dummy_actors[agent_id].state_dict(),
+            )
+
+        assert new_agent.lr == agent.lr
+        assert new_agent.index == agent.index
+        assert new_agent.scores == agent.scores
+        assert new_agent.fitness == agent.fitness
+        assert new_agent.steps == agent.steps
+        assert new_agent.agent_ids == agent.agent_ids
+
+    def test_gpu_to_no_cuda_transfer_multi_agent(self, tmpdir, ma_vector_space):
+        """Test saving multi-agent on GPU and loading when CUDA is completely unavailable."""
+        import os
+        import subprocess
+        import sys
+
+        # Skip test if CUDA is not available
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available, skipping GPU to no-CUDA transfer test")
+
+        # Initialize the dummy multi-agent
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        observation_spaces = ma_vector_space
+        action_spaces = ma_vector_space
+        agent = DummyMARLAlgorithm(
+            observation_spaces,
+            action_spaces,
+            agent_ids=agent_ids,
+            index=0,
+            device="cuda",
+        )
+
+        # Verify agents are on GPU
+        for actor in agent.dummy_actors.values():
+            assert next(actor.parameters()).device.type == "cuda"
+
+        # Save the checkpoint to a file
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
+
+        # Create a subprocess that runs with CUDA_VISIBLE_DEVICES="" to simulate no GPU environment
+        test_script = f"""
+import sys
+sys.path.insert(0, "{os.getcwd()}")
+import torch
+from pathlib import Path
+from tests.test_algorithms.test_base import DummyMARLAlgorithm
+
+# Verify CUDA is not available in this subprocess
+assert not torch.cuda.is_available(), "CUDA should not be available"
+
+# Load the checkpoint (should work even though it was saved on GPU)
+checkpoint_path = Path("{checkpoint_path}")
+new_agent = DummyMARLAlgorithm.load(checkpoint_path, device="cpu")
+
+# Verify all agents are on CPU
+agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+for actor in new_agent.dummy_actors.values():
+    assert next(actor.parameters()).device.type == "cpu"
+
+print("SUCCESS: GPU-saved multi-agent checkpoint loaded successfully in no-CUDA environment")
+    """
+
+        script_path = Path(tmpdir) / "test_no_cuda_multi.py"
+        with open(script_path, "w") as f:
+            f.write(test_script)
+
+        # Run the test script with CUDA_VISIBLE_DEVICES="" to hide GPU
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = ""
+
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        # Check that the subprocess succeeded
+        assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
+        assert "SUCCESS" in result.stdout
 
 
-@pytest.mark.parametrize("flatten", [True, False])
-def test_build_net_config_homogeneous_single_level(
-    homogeneous_agent,
-    single_level_net_config,
-    flatten,
-):
-    """Test build_net_config with homogeneous setup and single-level config."""
-    result = homogeneous_agent.build_net_config(
+class TestMultiAgentRLAlgorithmBuildNetConfig:
+    @pytest.mark.parametrize("flatten", [True, False])
+    def test_build_net_config_homogeneous_single_level(
+        self,
+        homogeneous_agent,
         single_level_net_config,
-        flatten=flatten,
-    )
-
-    # Should have entries for all agents
-    assert set(result.keys()) == set(homogeneous_agent.agent_ids)
-
-    # All agents should have the same config
-    for agent_id in homogeneous_agent.agent_ids:
-        assert "encoder_config" in result[agent_id]
-        assert result[agent_id]["encoder_config"]["hidden_size"] == [8]
-        assert result[agent_id]["encoder_config"]["min_mlp_nodes"] == 8
-        assert result[agent_id]["encoder_config"]["max_mlp_nodes"] == 80
-
-
-@pytest.mark.parametrize("flatten", [True, False])
-def test_build_net_config_homogeneous_group_level(
-    homogeneous_agent,
-    homogeneous_group_net_config,
-    flatten,
-):
-    """Test build_net_config with homogeneous setup and group-level config."""
-    result = homogeneous_agent.build_net_config(
-        homogeneous_group_net_config,
-        flatten=flatten,
-    )
-
-    # Should have entries for all agents
-    assert set(result.keys()) == set(homogeneous_agent.agent_ids)
-
-    # Check if each agent has a config based on its group
-    for agent_id in homogeneous_agent.agent_ids:
-        assert "encoder_config" in result[agent_id]
-        # Since no group matches exactly, all should get default configs
-        assert "hidden_size" in result[agent_id]["encoder_config"]
-
-
-@pytest.mark.parametrize("flatten", [True, False])
-def test_build_net_config_homogeneous_agent_level(
-    homogeneous_agent,
-    homogeneous_agent_net_config,
-    flatten,
-):
-    """Test build_net_config with homogeneous setup and agent-level config."""
-    result = homogeneous_agent.build_net_config(
-        homogeneous_agent_net_config,
-        flatten=flatten,
-    )
-
-    # Should have entries for all agents
-    assert set(result.keys()) == set(homogeneous_agent.agent_ids)
-
-    # Each agent should have its specified config
-    for agent_id in homogeneous_agent.agent_ids:
-        assert "encoder_config" in result[agent_id]
-        assert (
-            result[agent_id]["encoder_config"]["hidden_size"]
-            == homogeneous_agent_net_config[agent_id]["encoder_config"]["hidden_size"]
+        flatten,
+    ):
+        """Test build_net_config with homogeneous setup and single-level config."""
+        result = homogeneous_agent.build_net_config(
+            single_level_net_config,
+            flatten=flatten,
         )
-
-
-def test_build_net_config_mixed_single_level(mixed_agent, single_level_net_config):
-    """Test build_net_config with mixed setup and single-level config."""
-    # This should raise an assertion error because we can't use single-level config with non-homogeneous setup
-    with pytest.raises(AssertionError):
-        mixed_agent.build_net_config(single_level_net_config)
-
-
-@pytest.mark.parametrize("flatten", [True, False])
-def test_build_net_config_mixed_group_level(
-    mixed_agent,
-    mixed_group_net_config,
-    flatten,
-):
-    """Test build_net_config with mixed setup and group-level config."""
-    result = mixed_agent.build_net_config(mixed_group_net_config, flatten=flatten)
-
-    # Should have entries for all agents
-    agent_ids = mixed_agent.shared_agent_ids if not flatten else mixed_agent.agent_ids
-    assert set(result.keys()) == set(agent_ids)
-
-    # Check if each agent has a config based on its group
-    for agent_id in agent_ids:
-        group_id = mixed_agent.get_group_id(agent_id) if flatten else agent_id
-        assert "encoder_config" in result[agent_id]
-        assert (
-            result[agent_id]["encoder_config"]
-            == mixed_group_net_config[group_id]["encoder_config"]
-        )
-
-
-@pytest.mark.parametrize("flatten", [True, False])
-def test_build_net_config_mixed_agent_level(
-    mixed_agent,
-    mixed_agent_net_config,
-    flatten,
-):
-    """Test build_net_config with mixed setup and agent-level config."""
-    if not flatten:
-        with pytest.raises(KeyError):
-            mixed_agent.build_net_config(mixed_agent_net_config, flatten=flatten)
-    else:
-        result = mixed_agent.build_net_config(mixed_agent_net_config, flatten=flatten)
 
         # Should have entries for all agents
-        assert set(result.keys()) == set(mixed_agent.agent_ids)
+        assert set(result.keys()) == set(homogeneous_agent.agent_ids)
 
-        # Each agent should have configs as specified, or defaults if not specified
-        for agent_id in mixed_agent.agent_ids:
+        # All agents should have the same config
+        for agent_id in homogeneous_agent.agent_ids:
+            assert "encoder_config" in result[agent_id]
+            assert result[agent_id]["encoder_config"]["hidden_size"] == [8]
+            assert result[agent_id]["encoder_config"]["min_mlp_nodes"] == 8
+            assert result[agent_id]["encoder_config"]["max_mlp_nodes"] == 80
+
+    @pytest.mark.parametrize("flatten", [True, False])
+    def test_build_net_config_homogeneous_group_level(
+        self,
+        homogeneous_agent,
+        homogeneous_group_net_config,
+        flatten,
+    ):
+        """Test build_net_config with homogeneous setup and group-level config."""
+        result = homogeneous_agent.build_net_config(
+            homogeneous_group_net_config,
+            flatten=flatten,
+        )
+
+        # Should have entries for all agents
+        assert set(result.keys()) == set(homogeneous_agent.agent_ids)
+
+        # Check if each agent has a config based on its group
+        for agent_id in homogeneous_agent.agent_ids:
+            assert "encoder_config" in result[agent_id]
+            # Since no group matches exactly, all should get default configs
+            assert "hidden_size" in result[agent_id]["encoder_config"]
+
+    @pytest.mark.parametrize("flatten", [True, False])
+    def test_build_net_config_homogeneous_agent_level(
+        self,
+        homogeneous_agent,
+        homogeneous_agent_net_config,
+        flatten,
+    ):
+        """Test build_net_config with homogeneous setup and agent-level config."""
+        result = homogeneous_agent.build_net_config(
+            homogeneous_agent_net_config,
+            flatten=flatten,
+        )
+
+        # Should have entries for all agents
+        assert set(result.keys()) == set(homogeneous_agent.agent_ids)
+
+        # Each agent should have its specified config
+        for agent_id in homogeneous_agent.agent_ids:
+            assert "encoder_config" in result[agent_id]
+            assert (
+                result[agent_id]["encoder_config"]["hidden_size"]
+                == homogeneous_agent_net_config[agent_id]["encoder_config"][
+                    "hidden_size"
+                ]
+            )
+
+    def test_build_net_config_mixed_single_level(
+        self, mixed_agent, single_level_net_config
+    ):
+        """Test build_net_config with mixed setup and single-level config."""
+        # This should raise an assertion error because we can't use single-level config with non-homogeneous setup
+        with pytest.raises(AssertionError):
+            mixed_agent.build_net_config(single_level_net_config)
+
+    @pytest.mark.parametrize("flatten", [True, False])
+    def test_build_net_config_mixed_group_level(
+        self,
+        mixed_agent,
+        mixed_group_net_config,
+        flatten,
+    ):
+        """Test build_net_config with mixed setup and group-level config."""
+        result = mixed_agent.build_net_config(mixed_group_net_config, flatten=flatten)
+
+        # Should have entries for all agents
+        agent_ids = (
+            mixed_agent.shared_agent_ids if not flatten else mixed_agent.agent_ids
+        )
+        assert set(result.keys()) == set(agent_ids)
+
+        # Check if each agent has a config based on its group
+        for agent_id in agent_ids:
+            group_id = mixed_agent.get_group_id(agent_id) if flatten else agent_id
             assert "encoder_config" in result[agent_id]
             assert (
                 result[agent_id]["encoder_config"]
-                == mixed_agent_net_config[agent_id]["encoder_config"]
+                == mixed_group_net_config[group_id]["encoder_config"]
             )
 
+    @pytest.mark.parametrize("flatten", [True, False])
+    def test_build_net_config_mixed_agent_level(
+        self,
+        mixed_agent,
+        mixed_agent_net_config,
+        flatten,
+    ):
+        """Test build_net_config with mixed setup and agent-level config."""
+        if not flatten:
+            with pytest.raises(KeyError):
+                mixed_agent.build_net_config(mixed_agent_net_config, flatten=flatten)
+        else:
+            result = mixed_agent.build_net_config(
+                mixed_agent_net_config, flatten=flatten
+            )
 
-def test_build_net_config_heterogeneous_single_level(
-    heterogeneous_agent,
-    single_level_net_config,
-):
-    """Test build_net_config with heterogeneous setup and single-level config."""
-    # This should raise an assertion error because we can't use single-level config with non-homogeneous setup
-    with pytest.raises(AssertionError):
-        heterogeneous_agent.build_net_config(single_level_net_config)
+            # Should have entries for all agents
+            assert set(result.keys()) == set(mixed_agent.agent_ids)
 
+            # Each agent should have configs as specified, or defaults if not specified
+            for agent_id in mixed_agent.agent_ids:
+                assert "encoder_config" in result[agent_id]
+                assert (
+                    result[agent_id]["encoder_config"]
+                    == mixed_agent_net_config[agent_id]["encoder_config"]
+                )
 
-def test_build_net_config_heterogeneous_agent_level(
-    heterogeneous_agent,
-    heterogeneous_agent_net_config,
-):
-    """Test build_net_config with heterogeneous setup and agent-level config."""
-    result = heterogeneous_agent.build_net_config(heterogeneous_agent_net_config)
+    def test_build_net_config_heterogeneous_single_level(
+        self,
+        heterogeneous_agent,
+        single_level_net_config,
+    ):
+        """Test build_net_config with heterogeneous setup and single-level config."""
+        # This should raise an assertion error because we can't use single-level config with non-homogeneous setup
+        with pytest.raises(AssertionError):
+            heterogeneous_agent.build_net_config(single_level_net_config)
 
-    # Should have entries for all agents
-    assert set(result.keys()) == set(heterogeneous_agent.agent_ids)
+    def test_build_net_config_heterogeneous_agent_level(
+        self,
+        heterogeneous_agent,
+        heterogeneous_agent_net_config,
+    ):
+        """Test build_net_config with heterogeneous setup and agent-level config."""
+        result = heterogeneous_agent.build_net_config(heterogeneous_agent_net_config)
 
-    # Each agent should have configs as specified
-    for agent_id in heterogeneous_agent.agent_ids:
-        assert "encoder_config" in result[agent_id]
-        assert (
-            result[agent_id]["encoder_config"]
-            == heterogeneous_agent_net_config[agent_id]["encoder_config"]
-        )
+        # Should have entries for all agents
+        assert set(result.keys()) == set(heterogeneous_agent.agent_ids)
 
+        # Each agent should have configs as specified
+        for agent_id in heterogeneous_agent.agent_ids:
+            assert "encoder_config" in result[agent_id]
+            assert (
+                result[agent_id]["encoder_config"]
+                == heterogeneous_agent_net_config[agent_id]["encoder_config"]
+            )
 
-@pytest.mark.parametrize(
-    "setup",
-    [
-        "homogeneous_agent",
-        "heterogeneous_agent",
-        "mixed_agent",
-    ],
-)
-def test_build_net_config_return_encoders(request, setup):
-    """Test that build_net_config returns unique configs when requested."""
-    agent = request.getfixturevalue(setup)
-    config_fixture = {
-        "homogeneous_agent": "homogeneous_agent_net_config",
-        "heterogeneous_agent": "heterogeneous_agent_net_config",
-        "mixed_agent": "mixed_agent_net_config",
-    }
-    setup_net_config = request.getfixturevalue(config_fixture[setup])
-
-    result, unique_configs = agent.build_net_config(
-        setup_net_config,
-        return_encoders=True,
+    @pytest.mark.parametrize(
+        "setup",
+        [
+            "homogeneous_agent",
+            "heterogeneous_agent",
+            "mixed_agent",
+        ],
     )
+    def test_build_net_config_return_encoders(self, request, setup):
+        """Test that build_net_config returns unique configs when requested."""
+        agent = request.getfixturevalue(setup)
+        config_fixture = {
+            "homogeneous_agent": "homogeneous_agent_net_config",
+            "heterogeneous_agent": "heterogeneous_agent_net_config",
+            "mixed_agent": "mixed_agent_net_config",
+        }
+        setup_net_config = request.getfixturevalue(config_fixture[setup])
 
-    # Check that the result contains configs for all agents
-    assert set(result.keys()) == set(agent.agent_ids)
-
-    # Check that unique_configs contains at least one mlp_config
-    assert "mlp_config" in unique_configs
-    if setup == "heterogeneous_agent":
-        assert "other_agent_0" in unique_configs
-        assert "other_other_agent_0" in unique_configs
-    elif setup == "mixed_agent":
-        assert "other_agent_0" in unique_configs
-
-
-@pytest.mark.parametrize("flatten", [True, False])
-def test_build_net_config_grouped_agents(mixed_agent, mixed_group_net_config, flatten):
-    """Test build_net_config with grouped_agents=True."""
-    result = mixed_agent.build_net_config(mixed_group_net_config, flatten=flatten)
-
-    # Should have entries for shared agent IDs only, not individual agents
-    agent_ids = mixed_agent.shared_agent_ids if not flatten else mixed_agent.agent_ids
-    assert set(result.keys()) == set(agent_ids)
-
-    # Each group should have its specified config or default
-    for agent_id in agent_ids:
-        group_id = mixed_agent.get_group_id(agent_id) if flatten else agent_id
-        assert "encoder_config" in result[agent_id]
-        assert (
-            result[agent_id]["encoder_config"]
-            == mixed_group_net_config[group_id]["encoder_config"]
+        result, unique_configs = agent.build_net_config(
+            setup_net_config,
+            return_encoders=True,
         )
 
+        # Check that the result contains configs for all agents
+        assert set(result.keys()) == set(agent.agent_ids)
 
-@pytest.mark.parametrize("flatten", [True, False])
-def test_build_net_config_none(homogeneous_agent, flatten):
-    """Test build_net_config with None input."""
-    result = homogeneous_agent.build_net_config(None, flatten=flatten)
+        # Check that unique_configs contains at least one mlp_config
+        assert "mlp_config" in unique_configs
+        if setup == "heterogeneous_agent":
+            assert "other_agent_0" in unique_configs
+            assert "other_other_agent_0" in unique_configs
+        elif setup == "mixed_agent":
+            assert "other_agent_0" in unique_configs
 
-    # Should have entries for all agents with default configs
-    assert set(result.keys()) == set(homogeneous_agent.agent_ids)
+    @pytest.mark.parametrize("flatten", [True, False])
+    def test_build_net_config_grouped_agents(
+        self, mixed_agent, mixed_group_net_config, flatten
+    ):
+        """Test build_net_config with grouped_agents=True."""
+        result = mixed_agent.build_net_config(mixed_group_net_config, flatten=flatten)
 
-    for agent_id in homogeneous_agent.agent_ids:
-        assert "encoder_config" in result[agent_id]
-        assert "hidden_size" in result[agent_id]["encoder_config"]
+        # Should have entries for shared agent IDs only, not individual agents
+        agent_ids = (
+            mixed_agent.shared_agent_ids if not flatten else mixed_agent.agent_ids
+        )
+        assert set(result.keys()) == set(agent_ids)
+
+        # Each group should have its specified config or default
+        for agent_id in agent_ids:
+            group_id = mixed_agent.get_group_id(agent_id) if flatten else agent_id
+            assert "encoder_config" in result[agent_id]
+            assert (
+                result[agent_id]["encoder_config"]
+                == mixed_group_net_config[group_id]["encoder_config"]
+            )
+
+    @pytest.mark.parametrize("flatten", [True, False])
+    def test_build_net_config_none(self, homogeneous_agent, flatten):
+        """Test build_net_config with None input."""
+        result = homogeneous_agent.build_net_config(None, flatten=flatten)
+
+        # Should have entries for all agents with default configs
+        assert set(result.keys()) == set(homogeneous_agent.agent_ids)
+
+        for agent_id in homogeneous_agent.agent_ids:
+            assert "encoder_config" in result[agent_id]
+            assert "hidden_size" in result[agent_id]["encoder_config"]

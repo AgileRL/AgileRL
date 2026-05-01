@@ -104,15 +104,15 @@ filterwarnings = [
     "ignore::pyparsing.exceptions.PyparsingDeprecationWarning",
 ]
 markers = [
-    "llm: LLM-related tests (exclude with -m 'not llm')",
+    "vllm: tests that actually instantiate vllm.LLM (exclude with -m 'not vllm'). Pinned to a single xdist worker because vLLM's GPU memory profiling fails when peer workers free memory mid-init.",
+    "gpu: tests that use a GPU (CUDA, DeepSpeed, etc.) but do NOT initialise real vLLM (exclude with -m 'not gpu'). Safe to fan out across multiple xdist workers.",
 ]
 
 [tool.coverage.run]
 parallel = true
 source = ["agilerl"]
-concurrency = ["multiprocessing"]
+concurrency = ["multiprocessing", "thread"]
 sigterm = true
-omit = ["agilerl/networks/distributions_experimental.py"]
 
 [tool.coverage.report]
 exclude_lines = [
@@ -147,6 +147,7 @@ exclude = ["tutorials"]
 [tool.ruff]
 target-version = "py310"
 line-length = 88
+extend-exclude = ["tests/assets/tiny_llm"]
 
 [tool.ruff.lint]
 select = ["ALL"]

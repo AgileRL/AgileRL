@@ -3,15 +3,70 @@ import os
 import shutil
 import socket
 import sys
+import tempfile
 
-import numpy as np
-import pytest
-import torch
-from gymnasium import spaces
-from torch import nn
+# Give each xdist worker its own torch inductor cache dir BEFORE torch is
+# imported. Parallel workers sharing the default cache race on precompiled
+# headers (mtime checks fail on macOS clang++ and can cause flaky rebuilds
+# elsewhere). When the CI presets TORCHINDUCTOR_CACHE_DIR for restoration,
+# we nest each worker under it so cache reuse across runs still works.
+# This is a no-op when running without xdist.
+_xdist_worker_id = os.environ.get("PYTEST_XDIST_WORKER")
+if _xdist_worker_id:
+    _inductor_base = os.environ.get("TORCHINDUCTOR_CACHE_DIR") or tempfile.gettempdir()
+    _worker_cache = os.path.join(_inductor_base, f"worker_{_xdist_worker_id}")
 
-from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from tests.helper_functions import (
+    def _writable(path: str) -> bool:
+        try:
+            os.makedirs(path, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=path, delete=True):
+                pass
+            return True
+        except OSError:
+            return False
+
+    # A stale dir left by a previous run (e.g. created inside a container as
+    # root, or with restrictive perms after a tmpwatch sweep on /var/tmp) can
+    # be unwritable by the current user, causing torch.compile to crash with
+    # PermissionError. Probe both the worker dir and the inner ``cache/``
+    # subdir torch.compile creates; wipe and retry on failure, falling back
+    # to ``mkdtemp`` so the run can always proceed.
+    _inner = os.path.join(_worker_cache, "cache")
+    if not (
+        _writable(_worker_cache) and (not os.path.exists(_inner) or _writable(_inner))
+    ):
+        shutil.rmtree(_worker_cache, ignore_errors=True)
+        if not _writable(_worker_cache):
+            _worker_cache = tempfile.mkdtemp(
+                prefix=f"torchinductor_{_xdist_worker_id}_"
+            )
+
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = _worker_cache
+
+# Force HF libs offline during tests. Any test that tries to download from the
+# Hub fails loudly instead of silently fetching (and getting CI rate-limited).
+# Tests that need an LLM use tests/assets/tiny_llm/ via TINY_LLM_FIXTURE_PATH.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+# Tests that construct ``Accelerator()`` directly (instead of via the
+# ``deepspeed_env`` fixture) inherit torch's default MASTER_PORT. Parallel
+# xdist workers then race to bind the same port and one fails with
+# ``EADDRINUSE``. Give each worker a deterministic, unique MASTER_PORT here
+# so any later distributed init lands on a non-colliding port.
+if _xdist_worker_id:
+    _worker_num = int("".join(c for c in _xdist_worker_id if c.isdigit()) or "0")
+    os.environ.setdefault("MASTER_PORT", str(29500 + _worker_num))
+
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
+import torch  # noqa: E402
+from accelerate.state import AcceleratorState, PartialState  # noqa: E402
+from gymnasium import spaces  # noqa: E402
+from torch import nn  # noqa: E402
+
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter  # noqa: E402
+from tests.helper_functions import (  # noqa: E402
     gen_multi_agent_dict_or_tuple_spaces,
     generate_dict_or_tuple_space,
     generate_discrete_space,
@@ -26,18 +81,74 @@ if not torch.cuda.is_available():
     os.environ.setdefault("ACCELERATE_USE_CPU", "true")
 
 
-def pytest_collection_modifyitems(items):
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):
     """Pin tests that share mutable global state to dedicated xdist workers so
     they never run in parallel with each other.
 
-    - ``llm``-marked tests: vLLM / DeepSpeed need exclusive GPU access.
+    - ``vllm``- and ``gpu``-marked tests share a single pool of four
+      ``gputest0``..``gputest3`` xdist groups, sized to cap **total
+      concurrent GPU-touching tests at 4** regardless of the runner's
+      CPU count. With ``--dist loadgroup`` and ``-n auto`` on the 8-core
+      Linux runner, four workers consume the GPU pool in parallel and the
+      remaining four fan out across CPU-only tests — so a single ``pytest``
+      invocation handles both. The cap is set by:
+
+      1. **GPU memory.** Each container has a dedicated ~14.6 GiB GPU. Peak
+         per-test usage: ~4.4 GiB (``test_grpo_move_model_to_vllm``), ~3.0
+         GiB (``test_grpo_learn``), ~2.5 GiB
+         (``test_grpo_clone_with_accelerator_vllm``); median ~1.5 GiB.
+         With every test factory constructing ``VLLMConfig`` with
+         ``gpu_memory_utilization≈0.2`` and
+         ``kv_cache_memory_bytes=32 * 1024 * 1024``, a vLLM worker reserves
+         ~3.2 GiB and ``gpu`` (DeepSpeed) tests use ~0.5 GiB; the worst-case
+         "4 vLLM workers + small DeepSpeed share" still fits in ~13 GiB.
+      2. **Port races.** Each worker's ``deepspeed_env`` fixture allocates a
+         free ``MASTER_PORT`` via the standard bind-to-port-0 / close /
+         return dance, which is TOCTOU. Above ~4 concurrent workers the
+         collision rate produces ``EADDRINUSE`` during
+         ``torch.distributed.init_process_group``.
+
+      ``vllm`` tests run in ``subprocess_runner.py``-spawned subprocesses, so
+      worker-process state is reset between them. ``gpu`` tests run
+      in-process and can leak DeepSpeed groups / accelerator state to the
+      next test sharing the same group; the per-fixture cleanup
+      (``AcceleratorState._reset_state(True)`` etc.) handles this in
+      practice for the test sets in this repo, but **don't add many more
+      ``gpu``-marked tests without re-checking** — DeepSpeed has no clean
+      ``destroy_process_group`` path so sharing a worker between two
+      DeepSpeed-init tests can surface ``Group <ProcessGroup ...> is not
+      registered`` or ``EADDRINUSE``-on-MASTER_PORT.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
+
+    Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
+    before xdist's own ``pytest_collection_modifyitems`` (in ``xdist/remote.py``)
+    reads them and appends ``@group`` suffixes to nodeids for loadgroup
+    scheduling.
+
+    Background on ``kv_cache_memory_bytes``: vLLM's
+    ``determine_available_memory`` profile run asserts that GPU free-memory
+    does not increase between the pre- and post-profile snapshots. When peer
+    processes on the same GPU (concurrent xdist workers, sibling CI
+    containers sharing one GPU) release memory mid-profile, the assertion
+    fires with ``Error in memory profiling. Initial free memory ... current
+    free memory ...``. Setting ``kv_cache_memory_bytes`` triggers vLLM's
+    early-return path in ``determine_available_memory`` and skips the
+    assertion entirely. When adding new vLLM-using tests, route them through
+    the existing ``generate_grpo`` / ``generate_reinforce`` factories — or
+    set both ``kv_cache_memory_bytes`` and a small ``gpu_memory_utilization``
+    on the ``VLLMConfig`` directly.
     """
-    llm_group = pytest.mark.xdist_group("llm")
+    # Single shared pool: vllm-marked + gpu-marked tests round-robin into
+    # the same 4 xdist groups, capping total GPU-test concurrency at 4
+    # regardless of -n auto's worker count. See docstring above.
+    gputest_groups = [pytest.mark.xdist_group(f"gputest{i}") for i in range(4)]
     minari_group = pytest.mark.xdist_group("minari")
+    gputest_count = 0
     for item in items:
-        if item.get_closest_marker("llm"):
-            item.add_marker(llm_group)
+        if item.get_closest_marker("vllm") or item.get_closest_marker("gpu"):
+            item.add_marker(gputest_groups[gputest_count % len(gputest_groups)])
+            gputest_count += 1
         elif "test_minari_utils" in item.nodeid:
             item.add_marker(minari_group)
 
@@ -45,6 +156,24 @@ def pytest_collection_modifyitems(items):
 # Only clear CUDA cache when actually needed
 @pytest.fixture(autouse=True, scope="function")
 def cleanup():
+    # Reset the process-wide ``AcceleratorState`` / ``PartialState`` singletons
+    # **before** every test. Both are accelerate's shared-state caches keyed by
+    # device, so once any test instantiates an ``Accelerator()`` the device is
+    # frozen for the rest of the worker's lifetime — a later test asking for a
+    # different device (typically ``cpu=True`` on macOS/MPS workers, set via
+    # ``ACCELERATE_USE_CPU=true`` above) then hits ``_check_initialized`` and
+    # fails with ``AcceleratorState has already been initialized ...``.
+    #
+    # Resetting at setup (vs. teardown) is robust to fixtures that swallow
+    # exceptions, tests that create accelerators inside ``with`` blocks that
+    # raise, and ordering with subdirectory conftests like
+    # ``tests/test_algorithms/test_llms/conftest.py`` that already reset on
+    # teardown — those will continue to work and just be redundant on the next
+    # test's setup. ``.clear()`` is a no-op when state is empty, so this is
+    # cheap.
+    AcceleratorState._reset_state(reset_partial_state=True)
+    PartialState._reset_state()
+
     yield
 
     # Only clear CUDA cache if CUDA was actually used

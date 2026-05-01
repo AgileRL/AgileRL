@@ -14,7 +14,7 @@ from agilerl.utils.sampling_utils import (
 
 
 # The function returns a tensor with the same shape as x, but with the elements indexed by idxs in the first dimension.
-def test_same_shape_with_indexed_elements():
+def test_select_batch_idxs_same_shape_with_indexed_elements():
     x = torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
     idxs = torch.tensor([0, 2])
     expected_output = torch.tensor([[1, 2, 3], [7, 8, 9]])

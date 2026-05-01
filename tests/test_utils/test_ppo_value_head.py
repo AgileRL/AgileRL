@@ -14,8 +14,6 @@ from agilerl.utils.ppo_value_head import (
     _resolve_hidden_size,
 )
 
-pytestmark = pytest.mark.llm
-
 
 class DummyConfig(PretrainedConfig):
     def __init__(self, hidden_size: int = 4, vocab_size: int = 11, **kwargs):

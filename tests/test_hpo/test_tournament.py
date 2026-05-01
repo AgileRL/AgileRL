@@ -60,289 +60,383 @@ INIT_HP = {
 }
 
 
-# Initializes the 'TournamentSelection' object with the given parameters.
-def test_initialization_with_given_parameters():
-    tournament_size = 5
-    elitism = True
-    population_size = 100
-    eval_loop = 10
+class TestTournamentSelectionInit:
+    # Initializes the 'TournamentSelection' object with the given parameters.
+    def test_with_given_parameters(self):
+        tournament_size = 5
+        elitism = True
+        population_size = 100
+        eval_loop = 10
 
-    ts = TournamentSelection(tournament_size, elitism, population_size, eval_loop)
+        ts = TournamentSelection(tournament_size, elitism, population_size, eval_loop)
 
-    assert ts.tournament_size == tournament_size
-    assert ts.elitism == elitism
-    assert ts.population_size == population_size
-    assert ts.eval_loop == eval_loop
+        assert ts.tournament_size == tournament_size
+        assert ts.elitism == elitism
+        assert ts.population_size == population_size
+        assert ts.eval_loop == eval_loop
 
-
-### Single-agent algorithms ###
-# Returns best agent and new population of agents following tournament selection.
-def test_returns_best_agent_and_new_population():
-    observation_space = generate_random_box_space((4,))
-    discrete_action_space = generate_discrete_space(2)
-    continuous_action_space = generate_random_box_space((2,))
-    net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-    device = "cpu"
-    population_size = 5
-
-    # Initialize the class
-    tournament_selection = TournamentSelection(3, True, population_size, 2)
-
-    algo_classes = {
-        "DQN": DQN,
-        "Rainbow DQN": RainbowDQN,
-        "DDPG": DDPG,
-        "TD3": TD3,
-        "PPO": PPO,
-        "CQN": CQN,
-    }
-
-    for algo in algo_classes:
-        if algo in ["TD3", "DDPG"]:
-            action_space = continuous_action_space
-        else:
-            action_space = discrete_action_space
-
-        population = create_population(
-            algo=algo,
-            observation_space=observation_space,
-            action_space=action_space,
-            net_config=net_config,
-            INIT_HP=INIT_HP,
-            population_size=population_size,
-            device=device,
-        )
-
-        population[0].fitness = [1, 2, 3]
-        population[1].fitness = [4, 5, 6]
-        population[2].fitness = [7, 8, 9]
-        population[3].fitness = [10, 11, 12]
-        population[4].fitness = [13, 14, 15]
-
-        # Call the select method
-        elite, new_population = tournament_selection.select(population)
-
-        # Check if the elite agent is the best agent in the population
-        assert elite.fitness == [13, 14, 15]
-        assert elite.index == 4
-        assert new_population[0].fitness == [13, 14, 15]
-        assert new_population[0].index == 4
-
-        # Check if the new population has the correct length
-        assert len(new_population) == population_size
-
-
-# Returns best agent and new population of agents following tournament selection without elitism.
-def test_returns_best_agent_and_new_population_without_elitism():
-    observation_space = generate_random_box_space((4,))
-    discrete_action_space = generate_discrete_space(2)
-    continuous_action_space = generate_random_box_space((2,))
-    net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-    device = "cpu"
-    population_size = 5
-
-    # Initialize the class
-    tournament_selection = TournamentSelection(3, False, population_size, 2)
-
-    algo_classes = {
-        "DQN": DQN,
-        "Rainbow DQN": RainbowDQN,
-        "DDPG": DDPG,
-        "TD3": TD3,
-        "PPO": PPO,
-        "CQN": CQN,
-    }
-
-    for algo in algo_classes:
-        if algo in ["TD3", "DDPG"]:
-            action_space = continuous_action_space
-        else:
-            action_space = discrete_action_space
-
-        population = create_population(
-            algo=algo,
-            observation_space=observation_space,
-            action_space=action_space,
-            net_config=net_config,
-            INIT_HP=INIT_HP,
-            population_size=population_size,
-            device=device,
-        )
-
-        population[0].fitness = [1, 2, 3]
-        population[1].fitness = [4, 5, 6]
-        population[2].fitness = [7, 8, 9]
-        population[3].fitness = [10, 11, 12]
-        population[4].fitness = [13, 14, 15]
-
-        # Call the select method
-        elite, new_population = tournament_selection.select(population)
-
-        # Check if the elite agent is the best agent in the population
-        assert elite.fitness == [13, 14, 15]
-        assert elite.index == 4
-
-        # Check if the new population has the correct length
-        assert len(new_population) == population_size
-
-
-### Multi-agent algorithms ###
-# Returns best agent and new population of agents following tournament selection.
-def test_returns_best_agent_and_new_population_multi_agent():
-    observation_space = generate_multi_agent_box_spaces(2, (4,))
-    action_space = generate_multi_agent_discrete_spaces(2, 2)
-    net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-    device = "cpu"
-    population_size = 5
-
-    # Initialize the class
-    tournament_selection = TournamentSelection(3, True, population_size, 2)
-
-    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
-
-    for algo in algo_classes:
-        population = create_population(
-            algo=algo,
-            observation_space=observation_space,
-            action_space=action_space,
-            net_config=net_config,
-            INIT_HP=INIT_HP,
-            population_size=population_size,
-            device=device,
-        )
-
-        population[0].fitness = [1, 2, 3]
-        population[1].fitness = [4, 5, 6]
-        population[2].fitness = [7, 8, 9]
-        population[3].fitness = [10, 11, 12]
-        population[4].fitness = [13, 14, 15]
-
-        # Call the select method
-        elite, new_population = tournament_selection.select(population)
-
-        # Check if the elite agent is the best agent in the population
-        assert elite.fitness == [13, 14, 15]
-        assert elite.index == 4
-        assert new_population[0].fitness == [13, 14, 15]
-        assert new_population[0].index == 4
-
-        # Check if the new population has the correct length
-        assert len(new_population) == population_size
-
-
-# Returns best agent and new population of agents following tournament selection without elitism.
-def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
-    observation_space = generate_multi_agent_box_spaces(2, (4,))
-    action_space = generate_multi_agent_discrete_spaces(2, 2)
-    net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-    device = "cpu"
-    population_size = 5
-
-    # Initialize the class
-    tournament_selection = TournamentSelection(3, False, population_size, 2)
-
-    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
-
-    for algo in algo_classes:
-        population = create_population(
-            algo=algo,
-            observation_space=observation_space,
-            action_space=action_space,
-            net_config=net_config,
-            INIT_HP=INIT_HP,
-            population_size=population_size,
-            device=device,
-        )
-
-        population[0].fitness = [1, 2, 3]
-        population[1].fitness = [4, 5, 6]
-        population[2].fitness = [7, 8, 9]
-        population[3].fitness = [10, 11, 12]
-        population[4].fitness = [13, 14, 15]
-
-        # Call the select method
-        elite, new_population = tournament_selection.select(population)
-
-        # Check if the elite agent is the best agent in the population
-        assert elite.fitness == [13, 14, 15]
-        assert elite.index == 4
-
-        # Check if the new population has the correct length
-        assert len(new_population) == population_size
-
-
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
-@pytest.mark.parametrize("use_accelerator", [True, False])
-@pytest.mark.parametrize("elitism", [True, False])
-@pytest.mark.parametrize("num_processes", [1, 2])
-def test_language_model_tournament(use_accelerator, elitism, num_processes):
-    tournament_selection = TournamentSelection(3, elitism, 4, 2)
-    population_size = 4
-
-    init_hp = {
-        "ALGO": "GRPO",
-        "BATCH_SIZE": 1,
-        "USE_MEMORY_EFFICIENT_PARAMS": True,
-        "BETA": 0.001,
-        "LR": 0.000005,
-        "CLIP_COEF": 0.2,
-        "MAX_GRAD_NORM": 0.1,
-        "UPDATE_EPOCHS": 1,
-        "GROUP_SIZE": 8,
-        "TEMPERATURE": 0.9,
-        "CALC_POSITION_EMBEDDINGS": True,
-        "MIN_OUTPUT_TOKENS": None,
-        "MAX_OUTPUT_TOKENS": 1024,
-        "COSINE_lR_SCHEDULER": None,
-        "TOURN_SIZE": 2,
-        "ELITISM": True,
-        "POP_SIZE": 4,
-        "EVAL_LOOP": 1,
-        "PAD_TOKEN_ID": 1000,
-    }
-    actor_network = create_module(
-        input_size=1,
-        max_tokens=1024,
-        vocab_size=1000,
-        device="cpu",
+    @pytest.mark.parametrize(
+        "tournament_size,elitism,population_size,eval_loop,match",
+        [
+            (0, True, 4, 2, "greater than zero"),
+            (2, "invalid", 4, 2, "boolean"),
+            (2, True, 0, 2, "greater than zero"),
+            (2, True, 4, 0, "greater than zero"),
+        ],
     )
-    accelerator = MagicMock(spec=Accelerator)
-    accelerator.is_main_process = True
-    accelerator.wait_for_everyone = MagicMock()
-    accelerator.state = MagicMock()
-    accelerator.state.deepspeed_plugin = MagicMock()
-    accelerator.state.deepspeed_plugin.deepspeed_config = {
-        "zero_optimization": {"stage": 1},
-    }
-    accelerator.free_memory = lambda *args: args
-    accelerator.unwrap_model = lambda arg: arg
-    accelerator.num_processes = num_processes
+    def test_validation(
+        self, tournament_size, elitism, population_size, eval_loop, match
+    ):
+        with pytest.raises(AssertionError, match=match):
+            TournamentSelection(
+                tournament_size=tournament_size,
+                elitism=elitism,
+                population_size=population_size,
+                eval_loop=eval_loop,
+            )
 
-    population = [
-        GRPO(
-            actor_network=clone_llm(actor_network, 0),
-            pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
+
+class TestTournamentSelectionSelect:
+    ### Single-agent algorithms ###
+    # Returns best agent and new population of agents following tournament selection.
+    def test_returns_best_agent_and_new_population(self):
+        observation_space = generate_random_box_space((4,))
+        discrete_action_space = generate_discrete_space(2)
+        continuous_action_space = generate_random_box_space((2,))
+        net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
+        device = "cpu"
+        population_size = 5
+
+        # Initialize the class
+        tournament_selection = TournamentSelection(3, True, population_size, 2)
+
+        algo_classes = {
+            "DQN": DQN,
+            "Rainbow DQN": RainbowDQN,
+            "DDPG": DDPG,
+            "TD3": TD3,
+            "PPO": PPO,
+            "CQN": CQN,
+        }
+
+        for algo in algo_classes:
+            if algo in ["TD3", "DDPG"]:
+                action_space = continuous_action_space
+            else:
+                action_space = discrete_action_space
+
+            population = create_population(
+                algo=algo,
+                observation_space=observation_space,
+                action_space=action_space,
+                net_config=net_config,
+                INIT_HP=INIT_HP,
+                population_size=population_size,
+                device=device,
+            )
+
+            population[0].fitness = [1, 2, 3]
+            population[1].fitness = [4, 5, 6]
+            population[2].fitness = [7, 8, 9]
+            population[3].fitness = [10, 11, 12]
+            population[4].fitness = [13, 14, 15]
+
+            # Call the select method
+            elite, new_population = tournament_selection.select(population)
+
+            # Check if the elite agent is the best agent in the population
+            assert elite.fitness == [13, 14, 15]
+            assert elite.index == 4
+            assert new_population[0].fitness == [13, 14, 15]
+            assert new_population[0].index == 4
+
+            # Check if the new population has the correct length
+            assert len(new_population) == population_size
+
+    # Returns best agent and new population of agents following tournament selection without elitism.
+    def test_returns_best_agent_and_new_population_without_elitism(self):
+        observation_space = generate_random_box_space((4,))
+        discrete_action_space = generate_discrete_space(2)
+        continuous_action_space = generate_random_box_space((2,))
+        net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
+        device = "cpu"
+        population_size = 5
+
+        # Initialize the class
+        tournament_selection = TournamentSelection(3, False, population_size, 2)
+
+        algo_classes = {
+            "DQN": DQN,
+            "Rainbow DQN": RainbowDQN,
+            "DDPG": DDPG,
+            "TD3": TD3,
+            "PPO": PPO,
+            "CQN": CQN,
+        }
+
+        for algo in algo_classes:
+            if algo in ["TD3", "DDPG"]:
+                action_space = continuous_action_space
+            else:
+                action_space = discrete_action_space
+
+            population = create_population(
+                algo=algo,
+                observation_space=observation_space,
+                action_space=action_space,
+                net_config=net_config,
+                INIT_HP=INIT_HP,
+                population_size=population_size,
+                device=device,
+            )
+
+            population[0].fitness = [1, 2, 3]
+            population[1].fitness = [4, 5, 6]
+            population[2].fitness = [7, 8, 9]
+            population[3].fitness = [10, 11, 12]
+            population[4].fitness = [13, 14, 15]
+
+            # Call the select method
+            elite, new_population = tournament_selection.select(population)
+
+            # Check if the elite agent is the best agent in the population
+            assert elite.fitness == [13, 14, 15]
+            assert elite.index == 4
+
+            # Check if the new population has the correct length
+            assert len(new_population) == population_size
+
+    ### Multi-agent algorithms ###
+    # Returns best agent and new population of agents following tournament selection.
+    def test_returns_best_agent_and_new_population_multi_agent(self):
+        observation_space = generate_multi_agent_box_spaces(2, (4,))
+        action_space = generate_multi_agent_discrete_spaces(2, 2)
+        net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
+        device = "cpu"
+        population_size = 5
+
+        # Initialize the class
+        tournament_selection = TournamentSelection(3, True, population_size, 2)
+
+        algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
+
+        for algo in algo_classes:
+            population = create_population(
+                algo=algo,
+                observation_space=observation_space,
+                action_space=action_space,
+                net_config=net_config,
+                INIT_HP=INIT_HP,
+                population_size=population_size,
+                device=device,
+            )
+
+            population[0].fitness = [1, 2, 3]
+            population[1].fitness = [4, 5, 6]
+            population[2].fitness = [7, 8, 9]
+            population[3].fitness = [10, 11, 12]
+            population[4].fitness = [13, 14, 15]
+
+            # Call the select method
+            elite, new_population = tournament_selection.select(population)
+
+            # Check if the elite agent is the best agent in the population
+            assert elite.fitness == [13, 14, 15]
+            assert elite.index == 4
+            assert new_population[0].fitness == [13, 14, 15]
+            assert new_population[0].index == 4
+
+            # Check if the new population has the correct length
+            assert len(new_population) == population_size
+
+    # Returns best agent and new population of agents following tournament selection without elitism.
+    def test_returns_best_agent_and_new_population_without_elitism_multi_agent(self):
+        observation_space = generate_multi_agent_box_spaces(2, (4,))
+        action_space = generate_multi_agent_discrete_spaces(2, 2)
+        net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
+        device = "cpu"
+        population_size = 5
+
+        # Initialize the class
+        tournament_selection = TournamentSelection(3, False, population_size, 2)
+
+        algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
+
+        for algo in algo_classes:
+            population = create_population(
+                algo=algo,
+                observation_space=observation_space,
+                action_space=action_space,
+                net_config=net_config,
+                INIT_HP=INIT_HP,
+                population_size=population_size,
+                device=device,
+            )
+
+            population[0].fitness = [1, 2, 3]
+            population[1].fitness = [4, 5, 6]
+            population[2].fitness = [7, 8, 9]
+            population[3].fitness = [10, 11, 12]
+            population[4].fitness = [13, 14, 15]
+
+            # Call the select method
+            elite, new_population = tournament_selection.select(population)
+
+            # Check if the elite agent is the best agent in the population
+            assert elite.fitness == [13, 14, 15]
+            assert elite.index == 4
+
+            # Check if the new population has the correct length
+            assert len(new_population) == population_size
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+    )
+    @pytest.mark.parametrize("use_accelerator", [True, False])
+    @pytest.mark.parametrize("elitism", [True, False])
+    @pytest.mark.parametrize("num_processes", [1, 2])
+    def test_language_model_tournament(self, use_accelerator, elitism, num_processes):
+        tournament_selection = TournamentSelection(3, elitism, 4, 2)
+        population_size = 4
+
+        init_hp = {
+            "ALGO": "GRPO",
+            "BATCH_SIZE": 1,
+            "USE_MEMORY_EFFICIENT_PARAMS": True,
+            "BETA": 0.001,
+            "LR": 0.000005,
+            "CLIP_COEF": 0.2,
+            "MAX_GRAD_NORM": 0.1,
+            "UPDATE_EPOCHS": 1,
+            "GROUP_SIZE": 2,
+            "TEMPERATURE": 0.9,
+            "CALC_POSITION_EMBEDDINGS": True,
+            "MIN_OUTPUT_TOKENS": None,
+            "MAX_OUTPUT_TOKENS": 8,
+            "COSINE_lR_SCHEDULER": None,
+            "TOURN_SIZE": 2,
+            "ELITISM": True,
+            "POP_SIZE": 4,
+            "EVAL_LOOP": 1,
+            "PAD_TOKEN_ID": 99,
+        }
+        actor_network = create_module(
+            input_size=1,
+            max_tokens=init_hp["MAX_OUTPUT_TOKENS"],
+            vocab_size=100,
+            device="cpu",
+        )
+        accelerator = MagicMock(spec=Accelerator)
+        accelerator.is_main_process = True
+        accelerator.wait_for_everyone = MagicMock()
+        accelerator.state = MagicMock()
+        accelerator.state.deepspeed_plugin = MagicMock()
+        accelerator.state.deepspeed_plugin.deepspeed_config = {
+            "zero_optimization": {"stage": 1},
+        }
+        accelerator.free_memory = lambda *args: args
+        accelerator.unwrap_model = lambda arg: arg
+        accelerator.num_processes = num_processes
+
+        population = [
+            GRPO(
+                actor_network=clone_llm(actor_network, 0),
+                pad_token_id=init_hp.get("PAD_TOKEN_ID"),
+                pad_token="<pad>",
+                hp_config=None,
+                index=idx,
+                batch_size=init_hp.get("BATCH_SIZE", 1),
+                beta=init_hp.get("BETA", 0.001),
+                lr=init_hp.get("LR", 5e-7),
+                clip_coef=init_hp.get("CLIP_COEF", 0.2),
+                max_grad_norm=init_hp.get("MAX_GRAD_NORM", 0.1),
+                update_epochs=init_hp.get("UPDATE_EPOCHS", 1),
+                group_size=init_hp.get("GROUP_SIZE", 8),
+                temperature=init_hp.get("TEMPERATURE", 0.9),
+                calc_position_embeddings=init_hp.get("CALC_POSITION_EMBEDDINGS", True),
+                use_memory_efficient_params=init_hp.get(
+                    "USE_MEMORY_EFFICIENT_PARAMS",
+                    False,
+                ),
+                max_output_tokens=init_hp.get("MAX_OUTPUT_TOKENS", 1024),
+                min_output_tokens=init_hp.get("MIN_OUTPUT_TOKENS"),
+                lora_config=LoraConfig(
+                    r=16,
+                    lora_alpha=64,
+                    target_modules=["linear_1"],
+                    task_type="CAUSAL_LM",
+                    lora_dropout=0.05,
+                ),
+                cosine_lr_schedule_config=None,
+                accelerator=None,
+                device="cpu",
+            )
+            for idx in range(init_hp.get("POP_SIZE"))
+        ]
+        for agent in population:
+            if use_accelerator:
+                agent.accelerator = accelerator
+
+        for agent in population:
+            # Create a mock clone that returns a new mock agent
+            def mock_clone(new_idx, wrap=False, _agent=agent):
+                mock_agent = MagicMock()
+                mock_agent.index = new_idx
+                mock_agent.accelerator = accelerator
+                mock_agent.clean_up = MagicMock()
+                mock_agent.fitness = _agent.fitness
+                return mock_agent
+
+            agent.clone = MagicMock(side_effect=mock_clone)
+
+        population[0].fitness = [1, 2, 3]
+        population[1].fitness = [4, 5, 6]
+        population[2].fitness = [7, 8, 9]
+        population[3].fitness = [10, 11, 12]
+
+        # Call the select method
+        elite, new_population = tournament_selection.select(population)
+
+        # Check if the elite agent is the best agent in the population
+        assert elite.fitness == [10, 11, 12]
+        assert elite.index == 3
+
+        # Check if the new population has the correct length
+        assert len(new_population) == population_size
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+    )
+    def test_detects_llm_by_type_not_algo_name(self):
+        """LLM branch selection should rely on type, not a specific algo string."""
+        tournament_selection = TournamentSelection(3, True, 1, 1)
+        actor_network = create_module(
+            input_size=1,
+            max_tokens=32,
+            vocab_size=128,
+            device="cpu",
+        )
+        agent = GRPO(
+            actor_network=actor_network,
+            pad_token_id=127,
             pad_token="<pad>",
             hp_config=None,
-            index=idx,
-            batch_size=INIT_HP.get("BATCH_SIZE", 1),
-            beta=INIT_HP.get("BETA", 0.001),
-            lr=INIT_HP.get("LR", 5e-7),
-            clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
-            max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
-            update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
-            group_size=INIT_HP.get("GROUP_SIZE", 8),
-            temperature=INIT_HP.get("TEMPERATURE", 0.9),
-            calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-            use_memory_efficient_params=INIT_HP.get(
-                "USE_MEMORY_EFFICIENT_PARAMS",
-                False,
-            ),
-            max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS", 1024),
-            min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
+            index=0,
+            batch_size=1,
+            beta=0.001,
+            lr=5e-6,
+            clip_coef=0.2,
+            max_grad_norm=0.1,
+            update_epochs=1,
+            group_size=1,
+            temperature=0.9,
+            calc_position_embeddings=True,
+            use_memory_efficient_params=True,
+            max_output_tokens=32,
+            min_output_tokens=None,
             lora_config=LoraConfig(
-                r=16,
-                lora_alpha=64,
+                r=4,
+                lora_alpha=8,
                 target_modules=["linear_1"],
                 task_type="CAUSAL_LM",
                 lora_dropout=0.05,
@@ -351,171 +445,79 @@ def test_language_model_tournament(use_accelerator, elitism, num_processes):
             accelerator=None,
             device="cpu",
         )
-        for idx in range(init_hp.get("POP_SIZE"))
-    ]
-    for agent in population:
-        if use_accelerator:
-            agent.accelerator = accelerator
+        # Simulate a different LLM algorithm label to guard against string checks.
+        agent.algo = "LLMPPO"
+        agent.fitness = [1.0]
 
-    for agent in population:
-        # Create a mock clone that returns a new mock agent
-        def mock_clone(new_idx, wrap=False, _agent=agent):
-            mock_agent = MagicMock()
-            mock_agent.index = new_idx
-            mock_agent.accelerator = accelerator
-            mock_agent.clean_up = MagicMock()
-            mock_agent.fitness = _agent.fitness
-            return mock_agent
+        with (
+            pytest.MonkeyPatch.context() as m,
+        ):
+            llm_called = {"value": False}
+            std_called = {"value": False}
 
-        agent.clone = MagicMock(side_effect=mock_clone)
+            def _llm_branch(population):
+                llm_called["value"] = True
+                return (population[0], population)
 
-    population[0].fitness = [1, 2, 3]
-    population[1].fitness = [4, 5, 6]
-    population[2].fitness = [7, 8, 9]
-    population[3].fitness = [10, 11, 12]
+            def _std_branch(population):
+                std_called["value"] = True
+                return (population[0], population)
 
-    # Call the select method
-    elite, new_population = tournament_selection.select(population)
+            m.setattr(tournament_selection, "_select_llm_agents", _llm_branch)
+            m.setattr(tournament_selection, "_select_standard_agents", _std_branch)
+            tournament_selection.select([agent])
 
-    # Check if the elite agent is the best agent in the population
-    assert elite.fitness == [10, 11, 12]
-    assert elite.index == 3
-
-    # Check if the new population has the correct length
-    assert len(new_population) == population_size
+        assert llm_called["value"] is True
+        assert std_called["value"] is False
 
 
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
-def test_tournament_detects_llm_by_type_not_algo_name():
-    """LLM branch selection should rely on type, not a specific algo string."""
-    tournament_selection = TournamentSelection(3, True, 1, 1)
-    actor_network = create_module(
-        input_size=1,
-        max_tokens=32,
-        vocab_size=128,
-        device="cpu",
+class TestTournamentSelectionTournament:
+    @pytest.mark.parametrize(
+        "fitness_values,tournament_size",
+        [
+            ([1.0, 2.0, 3.0], 2),
+            ([10.0, 5.0, 0.0], 3),
+            ([0.5, 1.0, 0.5], 2),
+        ],
     )
-    agent = GRPO(
-        actor_network=actor_network,
-        pad_token_id=127,
-        pad_token="<pad>",
-        hp_config=None,
-        index=0,
-        batch_size=1,
-        beta=0.001,
-        lr=5e-6,
-        clip_coef=0.2,
-        max_grad_norm=0.1,
-        update_epochs=1,
-        group_size=1,
-        temperature=0.9,
-        calc_position_embeddings=True,
-        use_memory_efficient_params=True,
-        max_output_tokens=32,
-        min_output_tokens=None,
-        lora_config=LoraConfig(
-            r=4,
-            lora_alpha=8,
-            target_modules=["linear_1"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        ),
-        cosine_lr_schedule_config=None,
-        accelerator=None,
-        device="cpu",
-    )
-    # Simulate a different LLM algorithm label to guard against string checks.
-    agent.algo = "LLMPPO"
-    agent.fitness = [1.0]
+    def test_returns_valid_winner_index(self, fitness_values, tournament_size):
+        import numpy as np
 
-    with (
-        pytest.MonkeyPatch.context() as m,
-    ):
-        llm_called = {"value": False}
-        std_called = {"value": False}
-
-        def _llm_branch(population):
-            llm_called["value"] = True
-            return (population[0], population)
-
-        def _std_branch(population):
-            std_called["value"] = True
-            return (population[0], population)
-
-        m.setattr(tournament_selection, "_select_llm_agents", _llm_branch)
-        m.setattr(tournament_selection, "_select_standard_agents", _std_branch)
-        tournament_selection.select([agent])
-
-    assert llm_called["value"] is True
-    assert std_called["value"] is False
-
-
-@pytest.mark.parametrize(
-    "fitness_values,tournament_size",
-    [
-        ([1.0, 2.0, 3.0], 2),
-        ([10.0, 5.0, 0.0], 3),
-        ([0.5, 1.0, 0.5], 2),
-    ],
-)
-def test_tournament_returns_valid_winner_index(fitness_values, tournament_size):
-    import numpy as np
-
-    np.random.seed(0)
-    ts = TournamentSelection(
-        tournament_size=tournament_size,
-        elitism=True,
-        population_size=len(fitness_values) + 1,
-        eval_loop=1,
-    )
-    winner = ts._tournament(fitness_values)
-    assert 0 <= winner < len(fitness_values)
-
-
-def test_tournament_elitism_returns_elite_rank_max_id():
-    import numpy as np
-
-    observation_space = generate_random_box_space((4,))
-    discrete_action_space = generate_discrete_space(2)
-    net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-    population = create_population(
-        algo="DQN",
-        observation_space=observation_space,
-        action_space=discrete_action_space,
-        net_config=net_config,
-        INIT_HP=INIT_HP,
-        population_size=4,
-        device="cpu",
-    )
-    population[0].fitness = [1, 2]
-    population[1].fitness = [3, 4]
-    population[2].fitness = [5, 6]
-    population[3].fitness = [7, 8]
-
-    ts = TournamentSelection(3, True, 4, 2)
-    elite, rank, max_id = ts._elitism(population)
-    assert elite.fitness == [7, 8]
-    assert rank.shape == (4,)
-    assert max_id == 3
-    assert elite.index == 3
-
-
-@pytest.mark.parametrize(
-    "tournament_size,elitism,population_size,eval_loop,match",
-    [
-        (0, True, 4, 2, "greater than zero"),
-        (2, "invalid", 4, 2, "boolean"),
-        (2, True, 0, 2, "greater than zero"),
-        (2, True, 4, 0, "greater than zero"),
-    ],
-)
-def test_tournament_init_validation(
-    tournament_size, elitism, population_size, eval_loop, match
-):
-    with pytest.raises(AssertionError, match=match):
-        TournamentSelection(
+        np.random.seed(0)
+        ts = TournamentSelection(
             tournament_size=tournament_size,
-            elitism=elitism,
-            population_size=population_size,
-            eval_loop=eval_loop,
+            elitism=True,
+            population_size=len(fitness_values) + 1,
+            eval_loop=1,
         )
+        winner = ts._tournament(fitness_values)
+        assert 0 <= winner < len(fitness_values)
+
+
+class TestTournamentSelectionElitism:
+    def test_returns_elite_rank_max_id(self):
+        import numpy as np
+
+        observation_space = generate_random_box_space((4,))
+        discrete_action_space = generate_discrete_space(2)
+        net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
+        population = create_population(
+            algo="DQN",
+            observation_space=observation_space,
+            action_space=discrete_action_space,
+            net_config=net_config,
+            INIT_HP=INIT_HP,
+            population_size=4,
+            device="cpu",
+        )
+        population[0].fitness = [1, 2]
+        population[1].fitness = [3, 4]
+        population[2].fitness = [5, 6]
+        population[3].fitness = [7, 8]
+
+        ts = TournamentSelection(3, True, 4, 2)
+        elite, rank, max_id = ts._elitism(population)
+        assert elite.fitness == [7, 8]
+        assert rank.shape == (4,)
+        assert max_id == 3
+        assert elite.index == 3
