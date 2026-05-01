@@ -4,7 +4,6 @@ import shutil
 import socket
 import sys
 import tempfile
-from importlib.util import find_spec
 
 # Give each xdist worker its own torch inductor cache dir BEFORE torch is
 # imported. Parallel workers sharing the default cache race on precompiled
@@ -88,11 +87,9 @@ def pytest_collection_modifyitems(config, items):
     they never run in parallel with each other.
 
     - ``vllm`` tests are spread across ``vllm0``..``vllm{N-1}`` xdist groups
-      so up to N vLLM tests can run concurrently. ``N`` is sized to be larger
-      than the worker count any current runner is likely to produce under
-      pyproject's ``-n auto`` setting, so the group count itself is never the
-      bottleneck — actual concurrency is governed by the runner's CPU count
-      and (implicitly) by GPU memory pressure.
+      so up to N vLLM tests can run concurrently. The vLLM phase has its own
+      dedicated CI step (with an explicit ``-n`` cap), so we can size N
+      generously here without affecting non-vLLM phases.
 
       Background: vLLM's ``determine_available_memory`` profile run asserts
       that GPU free-memory does not increase between the pre- and post-profile
@@ -109,9 +106,15 @@ def pytest_collection_modifyitems(config, items):
       group (serial execution).** When adding new vLLM-using tests, make sure
       they go through one of the existing factories — or set the flag
       directly on the ``VLLMConfig`` they construct.
-    - ``gpu`` tests are spread across ``gpu0``..``gpu{N-1}`` xdist groups
-      sized the same way. These don't initialise real vLLM, so they're safe
-      to run alongside each other.
+    - ``gpu`` tests are spread across three ``gpu0``..``gpu2`` xdist groups
+      so they fan out across at most three workers in parallel. **Don't bump
+      this number past the typical worker count**: with more groups than
+      workers, two ``gpu`` tests can land on the same worker and the second
+      DeepSpeed init reuses the first's still-bound ``MASTER_PORT``
+      (``EADDRINUSE``) or hits stale ``deepspeed.utils.groups`` module-level
+      caches (``Group <ProcessGroup ...> is not registered``). DeepSpeed
+      doesn't have a clean ``destroy_process_group`` path, so the practical
+      defence is to keep these tests on disjoint workers.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
@@ -119,16 +122,11 @@ def pytest_collection_modifyitems(config, items):
     reads them and appends ``@group`` suffixes to nodeids for loadgroup
     scheduling.
     """
-    # Number of xdist groups for ``vllm``- and ``gpu``-marked tests. Picked to
-    # comfortably exceed the worker count ``-n auto`` produces on typical
-    # self-hosted runners (≤ 16 cores), so test concurrency is gated by CPU
-    # count (and GPU memory) rather than by group count. Increase if runners
-    # ever ship with > 16 cores and the vLLM/GPU phases start under-utilising.
-    _N_PARALLEL_GROUPS = 16
-    vllm_groups = [
-        pytest.mark.xdist_group(f"vllm{i}") for i in range(_N_PARALLEL_GROUPS)
-    ]
-    gpu_groups = [pytest.mark.xdist_group(f"gpu{i}") for i in range(_N_PARALLEL_GROUPS)]
+    # 16 vLLM groups so the dedicated vLLM CI step can fan out as far as its
+    # explicit ``-n`` cap allows; 3 GPU groups so non-vLLM DeepSpeed tests
+    # never share a worker (see docstring above).
+    vllm_groups = [pytest.mark.xdist_group(f"vllm{i}") for i in range(16)]
+    gpu_groups = [pytest.mark.xdist_group(f"gpu{i}") for i in range(3)]
     minari_group = pytest.mark.xdist_group("minari")
     vllm_count = 0
     gpu_count = 0
@@ -163,38 +161,6 @@ def cleanup():
     # cheap.
     AcceleratorState._reset_state(reset_partial_state=True)
     PartialState._reset_state()
-
-    # Same idea, but for DeepSpeed's module-level ``_*_GROUP`` caches in
-    # ``deepspeed.utils.groups`` (and its comm backend ``ds_comm.cdb``).
-    # ``DeepSpeedEngine.__init__`` reads ``_get_sequence_data_parallel_group()``
-    # — which returns ``_SEQUENCE_DATA_PARALLEL_GROUP`` — and calls
-    # ``dist.broadcast(..., group=...)`` on it. If a previous test on this
-    # xdist worker created an Accelerator+DeepSpeedEngine, populated those
-    # caches, and was then GC'd (which tears down its ``ProcessGroup``), the
-    # next DeepSpeed init re-reads the now-stale cached ``ProcessGroup``
-    # reference and ``dist.get_global_rank`` raises ``Group <...> is not
-    # registered, please create group with torch.distributed.new_group API``
-    # because the underlying group is no longer in
-    # ``torch.distributed._world.pg_group_ranks``.
-    #
-    # Setting all module-level ``_*_GROUP`` attributes back to ``None`` and
-    # clearing ``ds_comm.cdb`` forces the next DeepSpeed init to repopulate
-    # both from scratch against the current ``torch.distributed`` state. This
-    # mirrors the existing per-vLLM-test cleanup in
-    # ``tests/test_algorithms/test_llms/conftest.py`` but applies it to **every**
-    # test, so non-vLLM DeepSpeed tests (``test_core_base.py``'s
-    # ``TestLLMDeepspeedCheckpointSaveLoad`` etc.) also get a clean slate.
-    # Gated on ``find_spec`` so it stays a no-op on Windows where DeepSpeed
-    # isn't installed (``deepspeed~=0.17.1; sys_platform != 'win32'`` in
-    # ``pyproject.toml``).
-    if find_spec("deepspeed") is not None:
-        import deepspeed.comm.comm as ds_comm
-        import deepspeed.utils.groups as ds_groups
-
-        for attr in dir(ds_groups):
-            if attr.startswith("_") and attr.endswith("_GROUP"):
-                setattr(ds_groups, attr, None)
-        ds_comm.cdb = None
 
     yield
 
