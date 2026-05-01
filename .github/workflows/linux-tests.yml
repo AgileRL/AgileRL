@@ -85,20 +85,24 @@ jobs:
             # `determine_available_memory` and skips the startup memory-profiling
             # assertion that fires when peer processes free GPU memory mid-init.
             #
-            # Concurrency: explicit `-n 3` cap (overrides pyproject's `-n auto`).
+            # Concurrency: explicit `-n 4` cap (overrides pyproject's `-n auto`).
             # Two reasons:
             # 1. GPU memory: measured peaks are ~4.4 GiB
             #    (test_grpo_move_model_to_vllm), ~3.0 GiB (test_grpo_learn),
             #    ~2.5 GiB (test_grpo_clone_with_accelerator_vllm); median ~1.5
-            #    GiB. With a 16 GiB per-container GPU, floor(16/4.4) ≈ 3 is the
-            #    safe worst-case ceiling if heavy tests align across workers.
+            #    GiB. With a 14.58 GiB per-container GPU, 4 × median ≈ 6 GiB
+            #    fits comfortably; 4 × peak ≈ 17.6 GiB would OOM if the
+            #    heaviest tests align across all four workers (rare). Drop to
+            #    `-n 3` (worst-case ceiling = floor(14.58/4.4) ≈ 3) if the
+            #    OOM rate becomes a problem.
             # 2. Port races: each worker's `deepspeed_env` fixture allocates a
             #    free MASTER_PORT via a bind-to-port-0 / close / return dance
-            #    (TOCTOU). Above ~3-4 concurrent workers the collision rate
-            #    starts producing `EADDRINUSE` failures during
-            #    `torch.distributed.init_process_group`.
+            #    (TOCTOU). The collision rate is acceptable at 4 workers; if
+            #    it starts surfacing `EADDRINUSE` failures during
+            #    `torch.distributed.init_process_group`, drop to `-n 3` or
+            #    switch `get_free_port` to a deterministic per-worker range.
             - name: Run vLLM tests (parallel across xdist groups)
-              run: uv run pytest -n 3 -m "vllm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
+              run: uv run pytest -n 4 -m "vllm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
 
             - name: Combine coverage data
               run: |
