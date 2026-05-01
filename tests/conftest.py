@@ -87,7 +87,11 @@ def pytest_collection_modifyitems(config, items):
     they never run in parallel with each other.
 
     - ``vllm`` tests are spread across ``vllm0``..``vllm{N-1}`` xdist groups
-      so up to N vLLM tests can run concurrently.
+      so up to N vLLM tests can run concurrently. ``N`` is sized to be larger
+      than the worker count any current runner is likely to produce under
+      pyproject's ``-n auto`` setting, so the group count itself is never the
+      bottleneck — actual concurrency is governed by the runner's CPU count
+      and (implicitly) by GPU memory pressure.
 
       Background: vLLM's ``determine_available_memory`` profile run asserts
       that GPU free-memory does not increase between the pre- and post-profile
@@ -104,9 +108,9 @@ def pytest_collection_modifyitems(config, items):
       group (serial execution).** When adding new vLLM-using tests, make sure
       they go through one of the existing factories — or set the flag
       directly on the ``VLLMConfig`` they construct.
-    - ``gpu`` tests are spread across three ``gpu0``..``gpu2`` xdist groups
-      so they run on three workers in parallel. These don't initialise
-      real vLLM, so they're safe to run alongside each other.
+    - ``gpu`` tests are spread across ``gpu0``..``gpu{N-1}`` xdist groups
+      sized the same way. These don't initialise real vLLM, so they're safe
+      to run alongside each other.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
@@ -114,8 +118,18 @@ def pytest_collection_modifyitems(config, items):
     reads them and appends ``@group`` suffixes to nodeids for loadgroup
     scheduling.
     """
-    vllm_groups = [pytest.mark.xdist_group(f"vllm{i}") for i in range(3)]
-    gpu_groups = [pytest.mark.xdist_group(f"gpu{i}") for i in range(3)]
+    # Number of xdist groups for ``vllm``- and ``gpu``-marked tests. Picked to
+    # comfortably exceed the worker count ``-n auto`` produces on typical
+    # self-hosted runners (≤ 16 cores), so test concurrency is gated by CPU
+    # count (and GPU memory) rather than by group count. Increase if runners
+    # ever ship with > 16 cores and the vLLM/GPU phases start under-utilising.
+    _N_PARALLEL_GROUPS = 16
+    vllm_groups = [
+        pytest.mark.xdist_group(f"vllm{i}") for i in range(_N_PARALLEL_GROUPS)
+    ]
+    gpu_groups = [
+        pytest.mark.xdist_group(f"gpu{i}") for i in range(_N_PARALLEL_GROUPS)
+    ]
     minari_group = pytest.mark.xdist_group("minari")
     vllm_count = 0
     gpu_count = 0

@@ -79,24 +79,27 @@ jobs:
             - name: Run non-vLLM tests (parallel)
               run: uv run pytest -m "not vllm" --exitfirst --cov=agilerl --cov-report= --durations=0 --durations-min=1.0
 
-            # vLLM phase: parallel across the 3 vllm0..vllm2 xdist groups
+            # vLLM phase: parallel across the vllm0..vllm{N-1} xdist groups
             # defined in tests/conftest.py. vLLM tests set `kv_cache_memory_bytes`
             # on `VLLMConfig`, which takes vLLM's early-return path in
             # `determine_available_memory` and skips the startup memory-profiling
             # assertion that fires when peer processes free GPU memory mid-init.
             #
-            # Concurrency note: this `-n 3` is the *optimistic* setting. All 4
-            # matrix containers share one GPU, so worst-case 4 × 3 = 12 concurrent
-            # vLLM procs at peak ~4.4 GiB each = ~52 GiB demanded. We rely on
-            # peaks not aligning across containers (median per-test peak is
-            # ~1.5 GiB; realistic concurrent demand ~18 GiB on a 16 GiB GPU).
-            # If CI starts OOMing, drop to `-n 1` (~17 GiB worst-case) — the
-            # safe fallback that matches our measured budget exactly. Heaviest
-            # tests by peak: test_grpo_move_model_to_vllm (~4.4 GiB),
-            # test_grpo_learn (~3.0 GiB), test_grpo_clone_with_accelerator_vllm
-            # (~2.5 GiB).
+            # Concurrency: inherits `-n auto` from pyproject.toml's addopts, so
+            # the worker count is decided by the runner's CPU count (each matrix
+            # container has its own dedicated 16 GiB GPU — no sibling-container
+            # GPU contention). The xdist group count in tests/conftest.py is
+            # sized large enough to absorb whatever `-n auto` returns on
+            # current runners. If a runner happens to have many cores and
+            # `-n auto` saturates the groups, in the worst case all heavy tests
+            # could align across workers — measured peaks are ~4.4 GiB
+            # (test_grpo_move_model_to_vllm), ~3.0 GiB (test_grpo_learn),
+            # ~2.5 GiB (test_grpo_clone_with_accelerator_vllm); median per-test
+            # is ~1.5 GiB. If CI OOMs, cap concurrency by adding an explicit
+            # `-n N` here (where N = floor(16 GiB / 4.4 GiB) ≈ 3 is the safe
+            # worst-case ceiling).
             - name: Run vLLM tests (parallel across xdist groups)
-              run: uv run pytest -n 3 -m "vllm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
+              run: uv run pytest -m "vllm" --exitfirst --cov=agilerl --cov-append --cov-report= --durations=0 --durations-min=1.0
 
             - name: Combine coverage data
               run: |
