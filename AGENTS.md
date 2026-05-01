@@ -180,28 +180,21 @@ uv run pytest tests/test_algorithms/test_dqn.py -v
 
 LLM tests are marked with `@pytest.mark.llm` and excluded by default in most CI jobs. Run them explicitly with `-m llm`.
 
-### Parallel vLLM testing — `kv_cache_memory_bytes` is load-bearing
+### Parallel vLLM testing — `kv_cache_memory_bytes` *and* `gpu_memory_utilization` are both load-bearing
 
-vLLM tests are spread across `vllm0..vllm15` xdist groups (see `tests/conftest.py`) so up to 16 vLLM processes can initialise concurrently within a single pytest invocation. The vLLM phase has its own dedicated CI step that pins concurrency with an explicit `-n 3`. Two reasons for the cap:
+vLLM tests are spread across `vllm0..vllm15` xdist groups (see `tests/conftest.py`) so up to 16 vLLM processes can initialise concurrently within a single pytest invocation. The vLLM phase has its own dedicated CI step pinned at `-n 4`. Two reasons for the cap:
 
-1. **GPU memory.** Each Python-version matrix container has a dedicated 16 GiB GPU. Measured peaks per test: ~4.4 GiB (`test_grpo_move_model_to_vllm`), ~3.0 GiB (`test_grpo_learn`), ~2.5 GiB (`test_grpo_clone_with_accelerator_vllm`); median ~1.5 GiB. Worst-case ceiling is `floor(16 / 4.4) ≈ 3`.
-2. **Port races.** Each worker's `deepspeed_env` fixture allocates a free `MASTER_PORT` via the standard bind-to-port-0 / close / return dance, which is TOCTOU. Above ~3-4 concurrent workers the collision rate produces `EADDRINUSE` failures during `torch.distributed.init_process_group`.
+1. **GPU memory.** Each Python-version matrix container has a dedicated ~14.6 GiB GPU. Measured peaks per test: ~4.4 GiB (`test_grpo_move_model_to_vllm`), ~3.0 GiB (`test_grpo_learn`), ~2.5 GiB (`test_grpo_clone_with_accelerator_vllm`); median ~1.5 GiB. `4 × median ≈ 6 GiB` fits comfortably; `4 × peak ≈ 17.6 GiB` would OOM if heavy tests align (drop to `-n 3` if that becomes routine).
+2. **Port races.** Each worker's `deepspeed_env` fixture allocates a free `MASTER_PORT` via the standard bind-to-port-0 / close / return dance, which is TOCTOU. Above ~4 concurrent workers the collision rate starts producing `EADDRINUSE` during `torch.distributed.init_process_group`.
 
-`gpu`-marked (non-vLLM) tests use a separate set of three groups (`gpu0..gpu2`) and **must not be bumped past the typical worker count** — DeepSpeed has no clean `destroy_process_group` path, so two `gpu` tests landing on the same worker reuse the previous test's still-bound `MASTER_PORT` (`EADDRINUSE`) or trip stale `deepspeed.utils.groups` module-level caches (`Group <ProcessGroup ...> is not registered`). Three groups + ~8 workers keeps every `gpu` test on its own worker.
+`gpu`-marked (non-vLLM) tests use a separate set of three groups (`gpu0..gpu2`) and **must not be bumped past the typical worker count** — DeepSpeed has no clean `destroy_process_group` path, so two `gpu` tests landing on the same worker reuse the previous test's still-bound `MASTER_PORT` (`EADDRINUSE`) or trip stale `deepspeed.utils.groups` module-level caches (`Group <ProcessGroup ...> is not registered`). Three groups + typical worker count keeps every `gpu` test on its own worker.
 
-**Every `VLLMConfig` constructed in tests sets `kv_cache_memory_bytes`** (e.g. `32 * 1024 * 1024`), and that's what makes intra-container vLLM parallelism safe at all.
+**Every `VLLMConfig` constructed in tests sets two things** that together make intra-container vLLM parallelism safe:
 
-Why it's required: vLLM's `gpu_worker.determine_available_memory()` profile run asserts that GPU free-memory does not increase between the pre- and post-profile snapshots. When a peer process on the same GPU releases memory mid-profile (which happens constantly in parallel test runs and across sibling CI matrix containers sharing one GPU), the assertion fires:
+- `kv_cache_memory_bytes=32 * 1024 * 1024` — short-circuits vLLM's `determine_available_memory` profile run, which would otherwise assert GPU free-memory is stable between pre- and post-profile snapshots and fail with `AssertionError: Error in memory profiling. Initial free memory X GiB, current free memory Y GiB` whenever a peer process releases memory mid-profile.
+- `gpu_memory_utilization=0.2`-ish (small fraction) — vLLM's `gpu_worker.init_device` runs an upfront `free_memory >= total_memory * gpu_memory_utilization` check **before** the KV-cache path. With the vLLM default `0.9`, each worker would demand ~13 GiB of the 14.6 GiB GPU, so the second concurrent worker would always fail with `Free memory on device (X/14.58 GiB) on startup is less than desired GPU memory utilization (0.9, 13.12 GiB)`. `0.2` → ~2.9 GiB per worker, leaves room for 4-5 concurrent workers.
 
-```
-AssertionError: Error in memory profiling. Initial free memory X GiB,
-current free memory Y GiB. This happens when other processes sharing the
-same container release GPU memory while vLLM is profiling during initialization.
-```
-
-Setting `kv_cache_memory_bytes` triggers vLLM's early-return path in `determine_available_memory` and skips the assertion entirely.
-
-**When adding a new vLLM-using test**: route it through `generate_grpo` / `generate_reinforce` (which already set the flag) or, if you build a `VLLMConfig` directly, copy the `kv_cache_memory_bytes=32 * 1024 * 1024` line and the explanatory comment. Without the flag the new test will pass locally and flake under xdist.
+**When adding a new vLLM-using test**: route it through `generate_grpo` / `generate_reinforce` (which already set both knobs correctly) or, if you build a `VLLMConfig` directly, copy both the `kv_cache_memory_bytes` and small `gpu_memory_utilization` values from those factories. Without either, the new test will pass locally and flake under xdist.
 
 ### Test naming convention
 

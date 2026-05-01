@@ -337,25 +337,28 @@ def generate_grpo(
         accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
     if use_vllm:
         lora_config = None
-        # ``kv_cache_memory_bytes`` is **required** for parallel vLLM testing:
-        # it bypasses vLLM's startup memory-profiling assertion that fires
-        # when peer xdist workers (or sibling CI containers) free GPU memory
-        # mid-init. See ``VLLMConfig.kv_cache_memory_bytes`` docstring and
+        # Two knobs, both load-bearing for parallel vLLM testing:
+        #
+        # ``kv_cache_memory_bytes`` pins the KV cache to a tiny fixed size and
+        # short-circuits vLLM's ``determine_available_memory`` profile-snapshot
+        # assertion (which fires when peer xdist workers free GPU memory
+        # mid-init). See ``VLLMConfig.kv_cache_memory_bytes`` docstring and
         # ``tests/conftest.py:pytest_collection_modifyitems`` for the full
         # rationale.
         #
-        # ``gpu_memory_utilization`` below is **dead config** while
-        # ``kv_cache_memory_bytes`` is set — vLLM ignores it
-        # (vllm/config/cache.py: "kv_cache_memory_bytes (when not-None)
-        # ignores gpu_memory_utilization"). Pinned to vLLM's documented
-        # default of 0.9 so future readers don't try to read meaning into a
-        # specific number. **Footgun**: if you ever remove
-        # ``kv_cache_memory_bytes`` from this config, you MUST also drop
-        # this back to a small fraction (~0.05–0.2) to leave room for peer
-        # xdist workers on the same GPU, otherwise this single instance will
-        # try to grab 90% of GPU memory and OOM the other workers.
+        # ``gpu_memory_utilization`` is **also** load-bearing — it is *not*
+        # ignored when ``kv_cache_memory_bytes`` is set. The startup check in
+        # ``vllm/v1/worker/gpu_worker.py:init_device`` asserts ``free_memory
+        # >= total_memory * gpu_memory_utilization`` *before* the KV-cache
+        # path runs. With the vLLM default of 0.9 each worker would demand
+        # ~13.1 GiB of the 14.58 GiB CI GPU, so the second concurrent worker
+        # would always fail with ``Free memory on device (X/14.58 GiB) on
+        # startup is less than desired GPU memory utilization (0.9, 13.12
+        # GiB)``. 0.22 → ~3.2 GiB per worker, so 4 concurrent workers
+        # (matching the ``-n 4`` cap on the vLLM CI step) fit in 12.8 GiB
+        # with headroom.
         vllm_config = VLLMConfig(
-            gpu_memory_utilization=0.9,
+            gpu_memory_utilization=0.22,
             kv_cache_memory_bytes=32 * 1024 * 1024,
             max_num_seqs=1,
             sleep_mode=sleep_mode,

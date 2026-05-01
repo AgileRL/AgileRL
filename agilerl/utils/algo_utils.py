@@ -1447,8 +1447,15 @@ class VLLMConfig:
         appeared so far.  Passed to ``SamplingParams``, defaults to 0.0 (disabled).
     :type frequency_penalty: float, optional
     :param kv_cache_memory_bytes: Manually pin KV cache size in bytes instead of
-        letting vLLM auto-size from ``gpu_memory_utilization``.  Overrides
-        ``gpu_memory_utilization`` (which vLLM ignores when this is set).
+        letting vLLM auto-size from ``gpu_memory_utilization``.  When set, vLLM
+        uses this exact value for the KV cache and skips the auto-sizing path
+        in ``determine_available_memory`` — but ``gpu_memory_utilization`` is
+        **still honoured** by the upfront ``free_memory >= total_memory *
+        gpu_memory_utilization`` startup check in
+        ``vllm/v1/worker/gpu_worker.py:init_device``.  When running multiple
+        vLLM processes concurrently you must keep ``gpu_memory_utilization``
+        small enough that every worker's startup check passes.
+
         **Required for safe parallel/colocated vLLM**: vLLM's startup
         ``determine_available_memory`` profile run asserts that GPU free-memory
         does not increase between the pre- and post-profile snapshots.  When
@@ -1456,7 +1463,7 @@ class VLLMConfig:
         xdist workers, sibling CI containers sharing one GPU), the assertion
         fires with ``Error in memory profiling. Initial free memory ... current
         free memory ...``.  Setting ``kv_cache_memory_bytes`` triggers vLLM's
-        early-return path in ``determine_available_memory`` and skips the
+        early-return path in ``determine_available_memory`` and skips that
         assertion entirely.  CI tests set this to a small value (e.g. 32 MiB)
         on the tiny test fixture; production deployments running a single
         vLLM should leave it unset.  Defaults to None.
