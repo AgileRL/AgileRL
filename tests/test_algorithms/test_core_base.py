@@ -4775,12 +4775,8 @@ class TestLLMMemoryEfficientParams:
         agent.zero_stage = 3
 
         with (
-            patch(
-                "agilerl.algorithms.core.base.move_params_to_gpu"
-            ) as mock_to_gpu,
-            patch(
-                "agilerl.algorithms.core.base.move_params_to_cpu"
-            ) as mock_to_cpu,
+            patch("agilerl.algorithms.core.base.move_params_to_gpu") as mock_to_gpu,
+            patch("agilerl.algorithms.core.base.move_params_to_cpu") as mock_to_cpu,
             pytest.warns(
                 UserWarning,
                 match="Memory efficient params is not yet compatible with DeepSpeed ZeRO-3",
@@ -4800,12 +4796,8 @@ class TestLLMMemoryEfficientParams:
 
         with (
             patch.object(agent, "_get_unwrapped_actor", return_value=unwrapped),
-            patch(
-                "agilerl.algorithms.core.base.move_params_to_gpu"
-            ) as mock_to_gpu,
-            patch(
-                "agilerl.algorithms.core.base.move_params_to_cpu"
-            ) as mock_to_cpu,
+            patch("agilerl.algorithms.core.base.move_params_to_gpu") as mock_to_gpu,
+            patch("agilerl.algorithms.core.base.move_params_to_cpu") as mock_to_cpu,
         ):
             with agent._memory_efficient_params():
                 mock_to_gpu.assert_called_once_with(unwrapped, "cpu")
