@@ -86,57 +86,69 @@ def pytest_collection_modifyitems(config, items):
     """Pin tests that share mutable global state to dedicated xdist workers so
     they never run in parallel with each other.
 
-    - ``vllm`` tests are spread across ``vllm0``..``vllm{N-1}`` xdist groups
-      so up to N vLLM tests can run concurrently. The vLLM phase has its own
-      dedicated CI step (with an explicit ``-n`` cap), so we can size N
-      generously here without affecting non-vLLM phases.
+    - ``vllm``- and ``gpu``-marked tests share a single pool of four
+      ``gputest0``..``gputest3`` xdist groups, sized to cap **total
+      concurrent GPU-touching tests at 4** regardless of the runner's
+      CPU count. With ``--dist loadgroup`` and ``-n auto`` on the 8-core
+      Linux runner, four workers consume the GPU pool in parallel and the
+      remaining four fan out across CPU-only tests — so a single ``pytest``
+      invocation handles both. The cap is set by:
 
-      Background: vLLM's ``determine_available_memory`` profile run asserts
-      that GPU free-memory does not increase between the pre- and post-profile
-      snapshots. When peer processes on the same GPU (concurrent xdist
-      workers, or sibling CI containers sharing one GPU) release memory
-      mid-profile, the assertion fires with ``Error in memory profiling.
-      Initial free memory ... current free memory ...``.
+      1. **GPU memory.** Each container has a dedicated ~14.6 GiB GPU. Peak
+         per-test usage: ~4.4 GiB (``test_grpo_move_model_to_vllm``), ~3.0
+         GiB (``test_grpo_learn``), ~2.5 GiB
+         (``test_grpo_clone_with_accelerator_vllm``); median ~1.5 GiB.
+         With every test factory constructing ``VLLMConfig`` with
+         ``gpu_memory_utilization≈0.2`` and
+         ``kv_cache_memory_bytes=32 * 1024 * 1024``, a vLLM worker reserves
+         ~3.2 GiB and ``gpu`` (DeepSpeed) tests use ~0.5 GiB; the worst-case
+         "4 vLLM workers + small DeepSpeed share" still fits in ~13 GiB.
+      2. **Port races.** Each worker's ``deepspeed_env`` fixture allocates a
+         free ``MASTER_PORT`` via the standard bind-to-port-0 / close /
+         return dance, which is TOCTOU. Above ~4 concurrent workers the
+         collision rate produces ``EADDRINUSE`` during
+         ``torch.distributed.init_process_group``.
 
-      The fix: every test factory that constructs a ``VLLMConfig`` sets
-      ``kv_cache_memory_bytes`` (a small value, e.g. 32 MiB on the tiny test
-      fixture). vLLM's ``determine_available_memory`` returns early when this
-      field is set, skipping the assertion entirely. **Without this flag,
-      these xdist groups would have to be collapsed back to a single ``vllm``
-      group (serial execution).** When adding new vLLM-using tests, make sure
-      they go through one of the existing factories — or set the flag
-      directly on the ``VLLMConfig`` they construct.
-    - ``gpu`` tests are spread across three ``gpu0``..``gpu2`` xdist groups
-      so they fan out across at most three workers in parallel. **Don't bump
-      this number past the typical worker count**: with more groups than
-      workers, two ``gpu`` tests can land on the same worker and the second
-      DeepSpeed init reuses the first's still-bound ``MASTER_PORT``
-      (``EADDRINUSE``) or hits stale ``deepspeed.utils.groups`` module-level
-      caches (``Group <ProcessGroup ...> is not registered``). DeepSpeed
-      doesn't have a clean ``destroy_process_group`` path, so the practical
-      defence is to keep these tests on disjoint workers.
+      ``vllm`` tests run in ``subprocess_runner.py``-spawned subprocesses, so
+      worker-process state is reset between them. ``gpu`` tests run
+      in-process and can leak DeepSpeed groups / accelerator state to the
+      next test sharing the same group; the per-fixture cleanup
+      (``AcceleratorState._reset_state(True)`` etc.) handles this in
+      practice for the test sets in this repo, but **don't add many more
+      ``gpu``-marked tests without re-checking** — DeepSpeed has no clean
+      ``destroy_process_group`` path so sharing a worker between two
+      DeepSpeed-init tests can surface ``Group <ProcessGroup ...> is not
+      registered`` or ``EADDRINUSE``-on-MASTER_PORT.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
     before xdist's own ``pytest_collection_modifyitems`` (in ``xdist/remote.py``)
     reads them and appends ``@group`` suffixes to nodeids for loadgroup
     scheduling.
+
+    Background on ``kv_cache_memory_bytes``: vLLM's
+    ``determine_available_memory`` profile run asserts that GPU free-memory
+    does not increase between the pre- and post-profile snapshots. When peer
+    processes on the same GPU (concurrent xdist workers, sibling CI
+    containers sharing one GPU) release memory mid-profile, the assertion
+    fires with ``Error in memory profiling. Initial free memory ... current
+    free memory ...``. Setting ``kv_cache_memory_bytes`` triggers vLLM's
+    early-return path in ``determine_available_memory`` and skips the
+    assertion entirely. When adding new vLLM-using tests, route them through
+    the existing ``generate_grpo`` / ``generate_reinforce`` factories — or
+    set both ``kv_cache_memory_bytes`` and a small ``gpu_memory_utilization``
+    on the ``VLLMConfig`` directly.
     """
-    # 16 vLLM groups so the dedicated vLLM CI step can fan out as far as its
-    # explicit ``-n`` cap allows; 3 GPU groups so non-vLLM DeepSpeed tests
-    # never share a worker (see docstring above).
-    vllm_groups = [pytest.mark.xdist_group(f"vllm{i}") for i in range(16)]
-    gpu_groups = [pytest.mark.xdist_group(f"gpu{i}") for i in range(3)]
+    # Single shared pool: vllm-marked + gpu-marked tests round-robin into
+    # the same 4 xdist groups, capping total GPU-test concurrency at 4
+    # regardless of -n auto's worker count. See docstring above.
+    gputest_groups = [pytest.mark.xdist_group(f"gputest{i}") for i in range(4)]
     minari_group = pytest.mark.xdist_group("minari")
-    vllm_count = 0
-    gpu_count = 0
+    gputest_count = 0
     for item in items:
-        if item.get_closest_marker("vllm"):
-            item.add_marker(vllm_groups[vllm_count % len(vllm_groups)])
-            vllm_count += 1
-        elif item.get_closest_marker("gpu"):
-            item.add_marker(gpu_groups[gpu_count % len(gpu_groups)])
-            gpu_count += 1
+        if item.get_closest_marker("vllm") or item.get_closest_marker("gpu"):
+            item.add_marker(gputest_groups[gputest_count % len(gputest_groups)])
+            gputest_count += 1
         elif "test_minari_utils" in item.nodeid:
             item.add_marker(minari_group)
 
