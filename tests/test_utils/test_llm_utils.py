@@ -725,6 +725,17 @@ class TestGatherIfZero3:
 
 
 def test_get_state_dict():
+    # ``get_state_dict`` unconditionally wraps ``model.state_dict()`` in
+    # ``gather_if_zero3(3, ...)`` (see agilerl/utils/llm_utils.py:166), which
+    # requires deepspeed at runtime regardless of whether the model is actually
+    # ZeRO-3-wrapped. On Windows deepspeed isn't installed (pyproject.toml:
+    # ``deepspeed~=0.17.1; sys_platform != 'win32'``) and the call raises
+    # ``ImportError: DeepSpeed is required for ZeRO stage 3 parameter
+    # gathering``. In production the function is gated behind
+    # ``HAS_LLM_DEPENDENCIES`` (only imported in agilerl/utils/utils.py when
+    # the LLM extras are installed), so this codepath is never reached on
+    # Windows in real usage either.
+    pytest.importorskip("deepspeed", reason="get_state_dict requires deepspeed.")
     model = nn.Linear(10, 10)
     state_dict = get_state_dict(model)
     assert isinstance(state_dict, dict)
