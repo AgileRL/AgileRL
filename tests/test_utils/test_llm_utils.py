@@ -695,6 +695,14 @@ class TestGatherIfZero3:
     @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
     def test_gather_if_zero3(self, zero_stage):
         """Test gather_if_zero3 context manager."""
+        # ``patch("deepspeed.zero.GatheredParameters", ...)`` resolves its
+        # target on ``__enter__`` (not at collection), so the patch blows up
+        # for *every* zero_stage on platforms without deepspeed (Windows: see
+        # ``deepspeed~=0.17.1; sys_platform != 'win32'`` in pyproject.toml),
+        # not just stage 3. Skip the whole parametrized test in that case;
+        # ``test_gather_if_zero3_stage_not_three_noop`` below covers the
+        # deepspeed-free stages without the patch.
+        pytest.importorskip("deepspeed", reason="gather_if_zero3 requires deepspeed.")
         params = [torch.tensor([1.0, 2.0, 3.0])]
 
         @contextmanager
