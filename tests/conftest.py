@@ -127,9 +127,7 @@ def pytest_collection_modifyitems(config, items):
     vllm_groups = [
         pytest.mark.xdist_group(f"vllm{i}") for i in range(_N_PARALLEL_GROUPS)
     ]
-    gpu_groups = [
-        pytest.mark.xdist_group(f"gpu{i}") for i in range(_N_PARALLEL_GROUPS)
-    ]
+    gpu_groups = [pytest.mark.xdist_group(f"gpu{i}") for i in range(_N_PARALLEL_GROUPS)]
     minari_group = pytest.mark.xdist_group("minari")
     vllm_count = 0
     gpu_count = 0
