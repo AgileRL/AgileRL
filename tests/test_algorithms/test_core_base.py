@@ -4597,6 +4597,44 @@ class TestLLMConfigureVllmAcceleratorPaths:
         mock_llm_cls.assert_called_once()
         acc.wait_for_everyone.assert_called()
 
+    @pytest.mark.parametrize(
+        "kv_cache_memory_bytes",
+        [None, 32 * 1024 * 1024],
+    )
+    def test_configure_vllm_forwards_kv_cache_memory_bytes(
+        self, kv_cache_memory_bytes
+    ):
+        # Guards the parallel-vLLM kwargs contract: when kv_cache_memory_bytes
+        # is set on VLLMConfig it must be forwarded into the LLM(...) call so
+        # vLLM takes the determine_available_memory early-return path; when
+        # it's None the kwarg must be omitted (vLLM auto-sizes from
+        # gpu_memory_utilization). Regressing either direction silently
+        # breaks parallel CI runs.
+        acc = _make_mock_accelerator(num_processes=1)
+        agent = _make_llm_agent(accelerator=acc)
+        vllm_config = MagicMock()
+        vllm_config.tensor_parallel_size = 1
+        vllm_config.gpu_memory_utilization = 0.22
+        vllm_config.max_num_seqs = 256
+        vllm_config.sleep_mode = False
+        vllm_config.dtype = None
+        vllm_config.quantization = None
+        vllm_config.kv_cache_memory_bytes = kv_cache_memory_bytes
+        agent.vllm_config = vllm_config
+        agent.max_model_len = 512
+        agent.pretrained_model_name_or_path = "mock-model"
+
+        with patch(
+            "agilerl.algorithms.core.base.LLM", return_value=MagicMock()
+        ) as mock_llm_cls:
+            agent._configure_vllm()
+
+        kwargs = mock_llm_cls.call_args.kwargs
+        if kv_cache_memory_bytes is None:
+            assert "kv_cache_memory_bytes" not in kwargs
+        else:
+            assert kwargs["kv_cache_memory_bytes"] == kv_cache_memory_bytes
+
     def test_configure_vllm_tp_size_gt_1(self, deepspeed_env):
         del deepspeed_env
         acc = _make_mock_accelerator(num_processes=4)
