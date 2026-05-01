@@ -1561,11 +1561,8 @@ def _make_llm_agent(
         patch.object(EvolvableAlgorithm, "_registry_init"),
         # ``EvolvableAlgorithm.__init__`` lazily initialises a real
         # ``PartialState()`` (and therefore ``torch.distributed.init_process_group``)
-        # whenever the supplied accelerator reports ``num_processes > 1``. The
-        # tests below pass a ``MagicMock`` accelerator, so this real init isn't
-        # wanted and just races neighbouring xdist workers for ``MASTER_PORT``
-        # (the failure mode is ``EADDRINUSE`` on macOS CI). Stub it out: the
-        # call site only consumes ``result[0]`` to choose a seed.
+        # whenever the supplied accelerator reports ``num_processes > 1``. This
+        # causes the failure mode ``EADDRINUSE`` on macOS CI without below line.
         patch(
             "agilerl.algorithms.core.base.broadcast_object_list",
             side_effect=lambda obj_list, from_process=0: list(obj_list),
@@ -2387,6 +2384,95 @@ class TestLLMManualMergeIntoBase:
                 peft_model=peft_model,
                 adapter_name="actor",
             )
+
+    def test_merge_adapter_raises_when_lora_bias_set_but_base_bias_missing(self):
+        """If a LoRA module declares a bias but the base layer has none, fail loudly."""
+        agent = _make_llm_agent()
+
+        class _BaseLayerNoBias:
+            def __init__(self):
+                self.weight = torch.nn.Parameter(torch.zeros(2, 2))
+
+        base_layer = _BaseLayerNoBias()
+
+        module = MagicMock(
+            spec=[
+                "lora_A",
+                "lora_B",
+                "lora_bias",
+                "lora_variant",
+                "get_base_layer",
+                "get_delta_weight",
+                "scaling",
+            ]
+        )
+        module.lora_A = {"actor": MagicMock()}
+        module.lora_B = {"actor": MagicMock()}
+        module.lora_bias = {"actor": True}
+        module.lora_variant = {}
+        module.scaling = {"actor": 1.0}
+        module.get_base_layer = MagicMock(return_value=base_layer)
+        module.get_delta_weight = MagicMock(return_value=torch.zeros(2, 2))
+
+        peft_model = MagicMock()
+        peft_model.base_model.model.modules.return_value = [module]
+
+        with pytest.raises(
+            RuntimeError,
+            match="Cannot merge LoRA bias into base layer because bias is missing",
+        ):
+            agent._merge_adapter_into_base_in_place(
+                peft_model=peft_model,
+                adapter_name="actor",
+            )
+
+    def test_merge_adapter_falls_back_to_kaiming_init_when_no_reset_method(self):
+        """LoRA modules without reset_lora_parameters get a manual A/B reset."""
+        agent = _make_llm_agent()
+
+        class _BaseLayer:
+            def __init__(self):
+                self.weight = torch.nn.Parameter(torch.zeros(4, 4))
+                self.bias = torch.nn.Parameter(torch.zeros(4))
+
+        base_layer = _BaseLayer()
+
+        lora_a = MagicMock()
+        lora_a.weight = torch.nn.Parameter(torch.full((4, 4), 0.5))
+        lora_b = MagicMock()
+        lora_b.weight = torch.nn.Parameter(torch.full((4, 4), 0.5))
+        lora_b.bias = torch.zeros(4)
+
+        module = MagicMock(
+            spec=[
+                "lora_A",
+                "lora_B",
+                "lora_bias",
+                "lora_variant",
+                "get_base_layer",
+                "get_delta_weight",
+                "scaling",
+            ]
+        )
+        module.lora_A = {"actor": lora_a}
+        module.lora_B = {"actor": lora_b}
+        module.lora_bias = {"actor": False}
+        module.lora_variant = {}
+        module.scaling = {"actor": 1.0}
+        module.get_base_layer = MagicMock(return_value=base_layer)
+        module.get_delta_weight = MagicMock(return_value=torch.zeros(4, 4))
+
+        peft_model = MagicMock()
+        peft_model.base_model.model.modules.return_value = [module]
+
+        torch.manual_seed(0)
+        agent._merge_adapter_into_base_in_place(
+            peft_model=peft_model,
+            adapter_name="actor",
+        )
+
+        assert torch.equal(lora_b.weight, torch.zeros(4, 4))
+        assert not torch.allclose(lora_a.weight, torch.full((4, 4), 0.5))
 
 
 class TestLLMGetLogprobs:
@@ -4551,6 +4637,181 @@ class TestLLMInitializeActors:
         assert mock_gpm.call_args[0][0] is dense_inner
         assert base_model.pretrained_model is peft_actor
         assert agent.actor is base_model
+
+
+class TestLLMInitializeActorsTorchCompiler:
+    """_initialize_actors handles torch_compiler / DeepSpeed / gradient_checkpointing combinations."""
+
+    def test_torch_compiler_with_deepspeed_warns_and_skips_compile(self):
+        """Setting both torch_compiler and DeepSpeed only warns; no model wrap."""
+        agent = _make_llm_agent()
+        agent.torch_compiler = "default"
+        agent._uses_deepspeed = True
+        agent.gradient_checkpointing = True
+        base_model = _make_mock_peft_actor()
+
+        with (
+            patch("agilerl.algorithms.core.base.patch_lora_for_fused_forward"),
+            patch("agilerl.algorithms.core.base.compile_model") as mock_compile,
+            patch(
+                "agilerl.algorithms.core.base.DummyEvolvable",
+                side_effect=lambda module, device: module,
+            ),
+            patch.object(agent, "use_adapter"),
+            pytest.warns(
+                UserWarning,
+                match="torch_compiler is not yet compatible with DeepSpeed",
+            ),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=False)
+
+        mock_compile.assert_not_called()
+        assert agent.gradient_checkpointing is True
+
+    def test_torch_compiler_without_deepspeed_disables_grad_checkpointing_and_compiles(
+        self,
+    ):
+        """Without DeepSpeed, gradient checkpointing is disabled and the model is compiled."""
+        agent = _make_llm_agent()
+        agent.torch_compiler = "default"
+        agent._uses_deepspeed = False
+        agent.gradient_checkpointing = True
+        base_model = _make_mock_peft_actor()
+        # Compile output must be an nn.Module: downstream code in
+        # `_initialize_actors` wraps it in OptimizerWrapper.
+        compiled = _make_mock_peft_actor()
+
+        with (
+            patch("agilerl.algorithms.core.base.patch_lora_for_fused_forward"),
+            patch(
+                "agilerl.algorithms.core.base.compile_model", return_value=compiled
+            ) as mock_compile,
+            patch(
+                "agilerl.algorithms.core.base.DummyEvolvable",
+                side_effect=lambda module, device: module,
+            ),
+            patch.object(agent, "use_adapter"),
+            pytest.warns(
+                UserWarning,
+                match="torch_compiler is incompatible with gradient_checkpointing",
+            ),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=False)
+
+        mock_compile.assert_called_once_with(base_model, "default")
+        assert agent.actor is compiled
+        assert agent.gradient_checkpointing is False
+
+
+class TestLLMCloneActorNetwork:
+    """_clone_actor_network preserves value-head weights and respects zero_stage."""
+
+    @staticmethod
+    def _make_value_head_actor():
+        class _StubValueHead:
+            def __init__(self, inner):
+                self.pretrained_model = inner
+                self.v_head = torch.nn.Linear(2, 1)
+                self.is_peft_model = False
+
+        inner = MagicMock()
+        inner.state_dict = MagicMock(return_value={"w": torch.tensor([1.0, 2.0])})
+        return _StubValueHead(inner)
+
+    def test_value_head_branch_clones_inner_peft_and_copies_v_head(self):
+        agent = _make_llm_agent(accelerator=None)
+        agent.use_value_head = True
+        agent.zero_stage = None
+        agent.actor = self._make_value_head_actor()
+        original_v_head_weight = agent.actor.v_head.weight.detach().clone()
+        cloned_inner = MagicMock()
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
+                return_value={"w": torch.tensor([1.0, 2.0])},
+            ) as mock_clone_sd,
+            patch(
+                "agilerl.algorithms.core.base.clone_llm", return_value=cloned_inner
+            ) as mock_clone_llm,
+        ):
+            cloned = agent._clone_actor_network()
+
+        mock_clone_sd.assert_called_once()
+        mock_clone_llm.assert_called_once()
+        assert "w" in mock_clone_llm.call_args.kwargs["state_dict"]
+        assert cloned is not agent.actor
+        assert cloned.pretrained_model is cloned_inner
+        assert cloned.is_peft_model is True
+        # v_head was reloaded from the original (load_state_dict copies values).
+        assert torch.equal(cloned.v_head.weight, original_v_head_weight)
+
+    def test_value_head_branch_skips_state_dict_clone_under_zero_stage_3(self):
+        agent = _make_llm_agent(accelerator=None)
+        agent.use_value_head = True
+        agent.zero_stage = 3
+        agent.actor = self._make_value_head_actor()
+        cloned_inner = MagicMock()
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.clone_tensors_for_torch_save"
+            ) as mock_clone_sd,
+            patch(
+                "agilerl.algorithms.core.base.clone_llm", return_value=cloned_inner
+            ) as mock_clone_llm,
+        ):
+            agent._clone_actor_network()
+
+        mock_clone_sd.assert_not_called()
+        assert mock_clone_llm.call_args.kwargs["state_dict"] is None
+
+
+class TestLLMMemoryEfficientParams:
+    """_memory_efficient_params context manager moves params on/off GPU outside ZeRO-3."""
+
+    def test_zero_stage_3_warns_and_yields_without_moving_params(self):
+        agent = _make_llm_agent()
+        agent.zero_stage = 3
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.move_params_to_gpu"
+            ) as mock_to_gpu,
+            patch(
+                "agilerl.algorithms.core.base.move_params_to_cpu"
+            ) as mock_to_cpu,
+            pytest.warns(
+                UserWarning,
+                match="Memory efficient params is not yet compatible with DeepSpeed ZeRO-3",
+            ),
+            agent._memory_efficient_params(),
+        ):
+            pass
+
+        mock_to_gpu.assert_not_called()
+        mock_to_cpu.assert_not_called()
+
+    def test_default_path_moves_params_to_gpu_and_back_to_cpu(self):
+        agent = _make_llm_agent()
+        agent.zero_stage = None
+        agent.device = "cpu"
+        unwrapped = MagicMock()
+
+        with (
+            patch.object(agent, "_get_unwrapped_actor", return_value=unwrapped),
+            patch(
+                "agilerl.algorithms.core.base.move_params_to_gpu"
+            ) as mock_to_gpu,
+            patch(
+                "agilerl.algorithms.core.base.move_params_to_cpu"
+            ) as mock_to_cpu,
+        ):
+            with agent._memory_efficient_params():
+                mock_to_gpu.assert_called_once_with(unwrapped, "cpu")
+                mock_to_cpu.assert_not_called()
+
+        mock_to_cpu.assert_called_once_with(unwrapped)
 
 
 class TestLLMLoadAdapterWeights:
