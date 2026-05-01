@@ -222,8 +222,19 @@ def generate_reinforce(
         # ``VLLMConfig.kv_cache_memory_bytes`` docstring and
         # ``tests/conftest.py:pytest_collection_modifyitems`` for the full
         # rationale.
+        #
+        # ``gpu_memory_utilization`` below is **dead config** while
+        # ``kv_cache_memory_bytes`` is set — vLLM ignores it
+        # (vllm/config/cache.py: "kv_cache_memory_bytes (when not-None)
+        # ignores gpu_memory_utilization"). Pinned to vLLM's documented
+        # default of 0.9 so future readers don't try to read meaning into a
+        # specific number. **Footgun**: if you ever remove
+        # ``kv_cache_memory_bytes`` from this config, you MUST also drop
+        # this back to a small fraction (~0.05–0.2) to leave room for peer
+        # xdist workers on the same GPU, otherwise this single instance will
+        # try to grab 90% of GPU memory and OOM the other workers.
         vllm_config = VLLMConfig(
-            gpu_memory_utilization=0.2,
+            gpu_memory_utilization=0.9,
             kv_cache_memory_bytes=32 * 1024 * 1024,
             max_num_seqs=1,
             sleep_mode=sleep_mode,
