@@ -4601,9 +4601,7 @@ class TestLLMConfigureVllmAcceleratorPaths:
         "kv_cache_memory_bytes",
         [None, 32 * 1024 * 1024],
     )
-    def test_configure_vllm_forwards_kv_cache_memory_bytes(
-        self, kv_cache_memory_bytes
-    ):
+    def test_configure_vllm_forwards_kv_cache_memory_bytes(self, kv_cache_memory_bytes):
         # Guards the parallel-vLLM kwargs contract: when kv_cache_memory_bytes
         # is set on VLLMConfig it must be forwarded into the LLM(...) call so
         # vLLM takes the determine_available_memory early-return path; when
