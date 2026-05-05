@@ -37,6 +37,7 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.llm_utils import (
     ReasoningGym,
+    build_completion_mask,
     normalize_reasoning_prompt_batch,
     prepare_prompt_hf_generate,
     stitch_completion_after_windowed_hf_generate,
@@ -262,9 +263,8 @@ class GRPO(LLMAlgorithm):
                 raise ValueError(msg)
             clip_coef_min = float(clip_coef[0])
             clip_coef_max = float(clip_coef[1])
-            # if clip_coef_min >= clip_coef_max:
-            #     msg = "clip_coef tuple must satisfy clip_coef_min < clip_coef_max."
-            #     raise ValueError(msg)
+            # Intentionally do not enforce clip_coef_min < clip_coef_max here to
+            # preserve existing behavior for user-provided tuple/list bounds.
         elif isinstance(clip_coef, (float, int)):
             clip_coef = float(clip_coef)
             if clip_coef < 0:
@@ -465,15 +465,13 @@ class GRPO(LLMAlgorithm):
                                 )
                             )
                             completion_ids.append(completion_id)
-                            completion_mask = torch.zeros_like(
-                                completion_id,
-                                dtype=torch.bool,
-                                device=completion_id.device,
+                            completion_masks.append(
+                                build_completion_mask(
+                                    completion_id,
+                                    full_prompt_len,
+                                    self.pad_token_id,
+                                )
                             )
-                            completion_mask[:, full_prompt_len:] = True
-                            completion_mask[completion_id == self.pad_token_id] = False
-                            completion_mask = completion_mask[:, 1:]
-                            completion_masks.append(completion_mask)
             else:
                 self._prepare_vllm_for_generation()
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
@@ -877,12 +875,6 @@ class GRPO(LLMAlgorithm):
         if not self.use_kl_advantage_shaping:
             loss = loss + self.beta * kl
         loss = self._reduce_masked_loss(loss, mask)
-        log_probs_ratio, clipped_log_probs_ratio, surrogate, clipped_surrogate = (
-            None,
-            None,
-            None,
-            None,
-        )
         return loss.mean(), kl.mean()
 
     def _gspo_loss(

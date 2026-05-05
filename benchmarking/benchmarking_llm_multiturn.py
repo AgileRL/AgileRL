@@ -9,7 +9,6 @@ if not HAS_LLM_DEPENDENCIES:
 import argparse
 
 import gem
-from huggingface_hub import snapshot_download
 import yaml
 from transformers import AutoTokenizer
 from agilerl.algorithms import LLMPPO, LLMREINFORCE, GRPO, CISPO, GSPO
@@ -18,8 +17,6 @@ from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.utils import create_population
 from agilerl.llm_envs import (
-    FormatRewardWrapper,
-    SearchTool,
     TokenObservationWrapper,
 )
 
@@ -42,7 +39,6 @@ def main(init_hp, mut_p):
         msg = f"Unknown algorithm '{algo_name}'. Supported: {', '.join(ALGO_REGISTRY)}"
         raise ValueError(msg)
 
-    actor_network = None
     model_name = MODEL_PATH
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     base_env = gem.make(ENV_NAME)

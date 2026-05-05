@@ -128,6 +128,7 @@ if TYPE_CHECKING or HAS_VLLM:
     )
     from agilerl.utils.llm_utils import (
         align_deepspeed_lr,
+        build_completion_mask,
         create_model_from_name_or_path,
         gather_if_zero3,
         get_model_name_or_path,
@@ -3424,6 +3425,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         unwrapped = self._get_unwrapped_actor()
         total = fused_ids.shape[0]
+        seq_len_out = fused_ids.shape[1] - 1
 
         position_ids = None
         if self.calc_position_embeddings:
@@ -3436,9 +3438,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             else [(s, min(s + batch_size, total)) for s in range(0, total, batch_size)]
         )
 
-        all_logprobs: list[torch.Tensor] = []
-        all_values: list[torch.Tensor] = []
-        for start, end in chunks:
+        def _process_chunk(
+            start: int, end: int
+        ) -> tuple[torch.Tensor, torch.Tensor | None]:
             set_fused_adapter_routing(unwrapped, routing[start:end])
             model_kwargs: dict = {
                 "input_ids": fused_ids[start:end],
@@ -3459,27 +3461,56 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             else:
                 logits = output.logits
                 value = None
-
             del output
+
             logits = logits / self.temperature
-
-            all_logprobs.append(
-                LLMAlgorithm._memory_efficient_logits(
-                    logits[:, :-1],
-                    fused_ids[start:end, 1:],
-                )
+            chunk_lp = LLMAlgorithm._memory_efficient_logits(
+                logits[:, :-1],
+                fused_ids[start:end, 1:],
             )
-            if self.use_value_head and value is not None:
-                all_values.append(value[:, :-1])
+            del logits
 
-        if self.use_value_head:
-            values = torch.cat(all_values, dim=0) if len(chunks) > 1 else all_values[0]
-        else:
-            values = None
-        logprobs = (
-            torch.cat(all_logprobs, dim=0) if len(chunks) > 1 else all_logprobs[0]
-        )
-        return logprobs, values
+            chunk_v = (
+                value[:, :-1] if (self.use_value_head and value is not None) else None
+            )
+            return chunk_lp, chunk_v
+
+        # Single-chunk fast path: skip the buffer + copy entirely.
+        if len(chunks) == 1:
+            return _process_chunk(0, total)
+
+        # Multi-chunk path: pre-allocate output buffers once and write each
+        # chunk in place via copy_(). Avoids holding the full list of chunk
+        # tensors plus the concatenated buffer in memory at the same time
+        # (which doubles peak memory in the torch.cat path).
+        logprobs_out: torch.Tensor | None = None
+        values_out: torch.Tensor | None = None
+
+        for start, end in chunks:
+            chunk_lp, chunk_v = _process_chunk(start, end)
+
+            # Lazy-allocate on the first chunk so we inherit dtype/device
+            # from the model output rather than guessing up front.
+            if logprobs_out is None:
+                logprobs_out = torch.empty(
+                    (total, seq_len_out),
+                    dtype=chunk_lp.dtype,
+                    device=chunk_lp.device,
+                )
+            logprobs_out[start:end].copy_(chunk_lp)
+            del chunk_lp
+
+            if chunk_v is not None:
+                if values_out is None:
+                    values_out = torch.empty(
+                        (total, seq_len_out),
+                        dtype=chunk_v.dtype,
+                        device=chunk_v.device,
+                    )
+                values_out[start:end].copy_(chunk_v)
+                del chunk_v
+
+        return logprobs_out, values_out
 
     def _fused_forward(
         self,
@@ -3796,14 +3827,19 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
             raise ImportError(msg)
 
+        max_token_cap = (
+            self.max_output_tokens
+            if self.max_output_tokens is not None
+            else self.max_model_len
+        )
+
         def _trajectory_input_ids(prompt: dict[str, Any]) -> torch.Tensor:
             return cast(
                 "torch.Tensor",
                 prompt.get("trajectory_input_ids", prompt["input_ids"]),
             )
 
-        def _token_prompt_for_vllm(prompt: dict[str, Any]) -> dict[str, list[int]]:
-            ids = _trajectory_input_ids(prompt)
+        def _token_prompt_for_vllm(ids: torch.Tensor) -> dict[str, list[int]]:
             return {"prompt_token_ids": ids.squeeze(0).tolist()}
 
         def _stitch_prefix(prompt: dict[str, Any], ref: torch.Tensor) -> torch.Tensor:
@@ -3812,7 +3848,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 return ref.new_zeros((ref.shape[0], 0))
             return cast("torch.Tensor", st)
 
-        def _vllm_max_new_tokens(model_prompt_len: int, max_token_cap: int) -> int:
+        def _vllm_max_new_tokens(model_prompt_len: int) -> int:
             room = self.max_model_len - model_prompt_len
             if room <= 0:
                 error_msg = f"Model prompt length ({model_prompt_len}) is greater than the model length ({self.max_model_len})"
@@ -3822,21 +3858,29 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 max_out = max(max_out, min(self.min_output_tokens, room))
             return min(max_out, room)
 
-        group_prompts = [prompt for prompt in prompts for _ in range(group_size)]
-        prompts_ids = [_trajectory_input_ids(p) for p in group_prompts]
-        stitch_prefixes = [
-            _stitch_prefix(p, prompts_ids[i]) for i, p in enumerate(group_prompts)
-        ]
-        token_prompts = [_token_prompt_for_vllm(p) for p in group_prompts]
-        max_token_cap = (
-            self.max_output_tokens
-            if self.max_output_tokens is not None
-            else self.max_model_len
-        )
-        max_output_tokens = [
-            _vllm_max_new_tokens(int(prompt_id.shape[1]), max_token_cap)
-            for prompt_id in prompts_ids
-        ]
+        # Compute the per-prompt work once per *unique* prompt (N items),
+        # then alias by reference across each group (N·G items). Within a
+        # GRPO group the trajectory ids, vLLM token list, max-new-tokens
+        # cap and stitch prefix are identical for every group member, so
+        # the expensive .tolist() walk and the H2D transfer below scale
+        # with the number of distinct prompts rather than the expanded
+        # vLLM batch size.
+        unique_ids = [_trajectory_input_ids(p) for p in prompts]
+        unique_tokens = [_token_prompt_for_vllm(ids) for ids in unique_ids]
+        unique_max = [_vllm_max_new_tokens(int(ids.shape[1])) for ids in unique_ids]
+        unique_stitch = [_stitch_prefix(p, ids) for p, ids in zip(prompts, unique_ids)]
+
+        # Replicate by reference for the flat vLLM batch. Entries within a
+        # group of `group_size` are aliased references to the same tensor /
+        # dict — safe because every downstream consumer (torch.cat,
+        # stitch_completion_after_windowed_vllm_generate, mask construction,
+        # tensor_parallel all_gather) is read-only w.r.t. these objects.
+        # Do not introduce in-place ops on these aliases.
+        group_prompts = [p for p in prompts for _ in range(group_size)]
+        prompts_ids = [ids for ids in unique_ids for _ in range(group_size)]
+        token_prompts = [tp for tp in unique_tokens for _ in range(group_size)]
+        max_output_tokens = [m for m in unique_max for _ in range(group_size)]
+        stitch_prefixes = [sp for sp in unique_stitch for _ in range(group_size)]
 
         if self.vllm_config.tensor_parallel_size > 1:
             orig_size = len(token_prompts)
@@ -3922,10 +3966,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             prompts_ids = all_prompts_ids[tp_slice]
             stitch_prefixes = all_stitch_prefixes[tp_slice]
 
-        prompts_ids = [p.to(self.device, non_blocking=True) for p in prompts_ids]
-        stitch_prefixes = [
-            sp.to(self.device, non_blocking=True) for sp in stitch_prefixes
+        # H2D once per unique prompt, then re-alias across the group.
+        # Group members share the same source tensor, so the previous
+        # `.to(device)` per group member did the same transfer N·G times
+        # rather than N times. Aliasing is safe for the same read-only
+        # reason called out above.
+        unique_prompts_ids_dev = [
+            prompts_ids[group_size * i].to(self.device, non_blocking=True)
+            for i in range(len(prompts))
         ]
+        unique_stitch_dev = [
+            stitch_prefixes[group_size * i].to(self.device, non_blocking=True)
+            for i in range(len(prompts))
+        ]
+        prompts_ids = [ids for ids in unique_prompts_ids_dev for _ in range(group_size)]
+        stitch_prefixes = [sp for sp in unique_stitch_dev for _ in range(group_size)]
 
         completion_ids = [
             torch.cat(
@@ -3933,7 +3988,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     torch.cat(
                         prompts_ids[group_size * i : group_size * (i + 1)],
                         dim=0,
-                    ).to(self.device),
+                    ),
                     stack_and_pad_experiences(
                         completion_ids[group_size * i : group_size * (i + 1)],
                         padding_values=[self.pad_token_id],
@@ -3958,18 +4013,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             int(cast("torch.Tensor", prompts[i]["input_ids"]).shape[1])
             for i in range(len(prompts))
         ]
-        completion_masks = []
-
-        for i, completion_id in enumerate(completion_ids):
-            completion_mask = torch.zeros_like(
-                completion_id,
-                dtype=torch.bool,
-                device=self.device,
-            )
-            completion_mask[:, num_input_tokens[i] :] = True
-            completion_mask[completion_id == self.pad_token_id] = False
-            completion_mask = completion_mask[:, 1:]
-            completion_masks.append(completion_mask)
+        completion_masks = [
+            build_completion_mask(completion_id, num_input_tokens[i], self.pad_token_id)
+            for i, completion_id in enumerate(completion_ids)
+        ]
 
         return completion_ids, completion_masks
 
