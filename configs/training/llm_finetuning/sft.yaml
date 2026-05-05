@@ -1,0 +1,47 @@
+---
+# SFT on preference-style data (prompt + chosen) with optional evolutionary HPO.
+# Pair with Human-Like / parquet workflows by setting response_column to "chosen"
+# in code; see ``configs/training/sft.yaml`` for the non-LLM-benchmark layout.
+INIT_HP:
+    ALGO: SFT                             # Algorithm — supervised fine-tuning
+    MODEL_NAME: ibm-granite/granite-3.3-2b-base  # HF id for runners that read INIT_HP
+    BATCH_SIZE: 4                         # Batch size
+    LR: 5.0e-5                            # Learning rate
+    UPDATE_EPOCHS: 1                      # Number of training epochs per learn() call
+    MAX_GRAD_NORM: 0.1                    # Maximum norm for gradient clipping
+    MAX_CONTEXT_LENGTH: 512               # Cap sequence length to save memory
+    REDUCE_MEMORY_PEAK: false             # Recompute logits in chunks to lower peak VRAM
+    CALC_POSITION_EMBEDDINGS: true        # Recalculate position embeddings after tokenization
+    USE_LIGER_LOSS: false                 # Set true on Linux with liger-kernel installed
+    SEED: 42                              # Random seed
+    TOURN_SIZE: 2                         # Tournament size for evolutionary selection
+    ELITISM: true                         # Elitism in tournament selection
+    POP_SIZE: 2                           # Population size for HPO
+    EVAL_LOOP: 1                          # Evaluation episodes per tournament
+    EVO_STEPS: 20                         # Training steps between evolution rounds
+    EVALUATION_INTERVAL: 10               # Run test eval every N training steps
+    NUM_BATCHES:                          # Batches per epoch (null = full epoch)
+    WANDB: false                          # Log with Weights and Biases
+    WANDB_API_KEY:                        # W&B API key (or set via WANDB_API_KEY env var)
+    WANDB_PROJECT: AgileRL                # W&B project name
+    WANDB_ENTITY:                         # W&B username or team (null = default entity)
+    WANDB_RUN_NAME:                       # W&B run name (null = auto-generated)
+    EVAL_N_SAMPLES: 10                    # Prompts randomly drawn from test set for comparison
+    LORA:                                  # LoRA adapter configuration (passed to peft.LoraConfig)
+        r: 16                              # LoRA rank
+        lora_alpha: 32                     # LoRA scaling factor
+        target_modules:                    # Linear layers to apply LoRA to
+            - q_proj
+            - k_proj
+            - v_proj
+            - o_proj
+        lora_dropout: 0.05                # Dropout probability for LoRA layers
+        bias: none                         # Bias training strategy ("none", "all", or "lora_only")
+
+MUTATION_PARAMS:
+    NO_MUT: 0.4                           # Probability of no mutation
+    RL_HP_MUT: 0.6                        # Probability of learning HP mutation
+    MUT_SD: 0.1                           # Mutation strength (std dev)
+    RAND_SEED: 42                         # Random seed
+    MIN_LR: 1.0e-6                        # Min learning rate for HP mutation
+    MAX_LR: 1.0e-4                        # Max learning rate for HP mutation
