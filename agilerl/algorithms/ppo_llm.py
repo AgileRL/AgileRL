@@ -25,6 +25,7 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.llm_utils import (
     ReasoningGym,
+    build_completion_mask,
     masked_mean,
     masked_whiten,
     normalize_reasoning_prompt_batch,
@@ -327,6 +328,7 @@ class PPO(LLMAlgorithm):
         self,
         obs: LLMObsType,
         training: bool = True,
+        **kwargs: Any,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Generate completion tokens for each prompt in the batch.
 
@@ -334,6 +336,8 @@ class PPO(LLMAlgorithm):
         :type obs: LLMObsType
         :param training: If ``False``, use near-deterministic decoding where applicable.
         :type training: bool
+        :param kwargs: Additional keyword arguments accepted for base-class compatibility.
+        :type kwargs: Any
         :return: Per-prompt completion token IDs and masks over generated positions.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
@@ -377,15 +381,13 @@ class PPO(LLMAlgorithm):
                                 )
                             )
                             completion_ids.append(completion_id)
-                            completion_mask = torch.zeros_like(
-                                completion_id,
-                                dtype=torch.bool,
-                                device=completion_id.device,
+                            completion_masks.append(
+                                build_completion_mask(
+                                    completion_id,
+                                    full_prompt_len,
+                                    self.pad_token_id,
+                                )
                             )
-                            completion_mask[:, full_prompt_len:] = True
-                            completion_mask[completion_id == self.pad_token_id] = False
-                            completion_mask = completion_mask[:, 1:]
-                            completion_masks.append(completion_mask)
             else:
                 self._prepare_vllm_for_generation()
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(

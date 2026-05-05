@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import torch
@@ -123,9 +124,14 @@ class TokenObservationWrapper:
     def reset(self, seed: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
         """Create a fresh episode and return the policy-ready observation plus info."""
         if seed is not None:
-            try:
+            reset_sig = inspect.signature(self._env.reset)
+            supports_seed = "seed" in reset_sig.parameters or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD
+                for p in reset_sig.parameters.values()
+            )
+            if supports_seed:
                 obs_text, info = self._env.reset(seed=seed)
-            except TypeError:
+            else:
                 obs_text, info = self._env.reset()
         else:
             obs_text, info = self._env.reset()

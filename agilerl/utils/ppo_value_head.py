@@ -169,9 +169,8 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
             last_hidden_state = last_hidden_state.to(head_dtype)
         value = self.v_head(last_hidden_state).squeeze(-1)
 
-        if return_past_key_values:
-            return (lm_logits, loss, value, base_out.past_key_values)
-        return (lm_logits, loss, value)
+        past = base_out.past_key_values if return_past_key_values else None
+        return (lm_logits, loss, value, past)
 
     def generate(self, *args: Any, **kwargs: Any):
         return self.pretrained_model.generate(*args, **kwargs)

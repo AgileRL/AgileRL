@@ -625,8 +625,13 @@ class MultiTurnEnv(Protocol):
 
     def reset(
         self, seed: int | None = None
-    ) -> tuple[str | dict[str, Any], dict[str, Any]]: ...
+    ) -> tuple[str | dict[str, Any], dict[str, Any]]:
+        pass
+
     def step(
         self, action: str | torch.Tensor, **kwargs: Any
-    ) -> tuple[str | dict[str, Any], float, bool, bool, dict[str, Any]]: ...
-    def close(self) -> None: ...
+    ) -> tuple[str | dict[str, Any], float, bool, bool, dict[str, Any]]:
+        pass
+
+    def close(self) -> None:
+        pass

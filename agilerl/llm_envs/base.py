@@ -88,7 +88,7 @@ class HuggingFaceGym(gym.Env, ABC):
         self.seed = seed
         generator = torch.Generator().manual_seed(seed)
         self.conversation_template = conversation_template
-        custom_collate_fn = self.create_collate_fn(tokenizer)
+        custom_collate_fn = HuggingFaceGym.create_collate_fn(self, tokenizer)
         dataloader_kwargs = {"collate_fn": custom_collate_fn}
         train_dataset = self._filter_dataset_by_max_context_length(
             train_dataset,

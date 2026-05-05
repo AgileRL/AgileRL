@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Any
 
 from agilerl.algorithms.grpo import GRPO, _signatures_without_loss_type
@@ -14,11 +13,9 @@ class GSPO(GRPO):
     Paper: https://arxiv.org/abs/2507.18071
     """
 
-    _init_with_gspo = partial(GRPO.__init__, loss_type="gspo")
-
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize a GSPO agent with fixed ``loss_type``."""
-        self._init_with_gspo(self, *args, **kwargs)
+        super().__init__(*args, loss_type="gspo", **kwargs)
 
 
 _GSPO_CLASS_SIG, _GSPO_INIT_SIG = _signatures_without_loss_type()

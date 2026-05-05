@@ -27,8 +27,6 @@ if HAS_LLM_DEPENDENCIES:
     from transformers.modeling_utils import PreTrainedModel
 
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
-
-    AutoTokenizer = AutoTokenizer
 else:
     AutoTokenizer = Any
     PreTrainedModel = Any
@@ -115,21 +113,28 @@ def normalize_reasoning_prompt_batch(
     if batch_size == 0:
         return []
 
-    per_sample: list[ReasoningPrompts] = []
-    for i in range(batch_size):
-        sample: ReasoningPrompts = {}
-        for key, value in prompts.items():
-            if isinstance(value, torch.Tensor):
-                if value.dim() > 0 and value.shape[0] == batch_size:
-                    sample[key] = value[i : i + 1] if value.dim() >= 2 else value[i]
-                else:
-                    sample[key] = value
-            elif isinstance(value, list) and len(value) == batch_size:
-                sample[key] = value[i]
-            else:
+    # Inspect each key once and write the per-sample slice into all output
+    # dicts in one pass, instead of repeating the isinstance/shape checks
+    # batch_size times in the inner loop.
+    result: list[ReasoningPrompts] = [{} for _ in range(batch_size)]
+    for key, value in prompts.items():
+        if (
+            isinstance(value, torch.Tensor)
+            and value.dim() > 0
+            and value.shape[0] == batch_size
+        ):
+            chunks: tuple[torch.Tensor, ...] = (
+                value.unbind(0) if value.dim() == 1 else value.split(1, dim=0)
+            )
+            for sample, chunk in zip(result, chunks):
+                sample[key] = chunk
+        elif isinstance(value, list) and len(value) == batch_size:
+            for sample, v in zip(result, value):
+                sample[key] = v
+        else:
+            for sample in result:
                 sample[key] = value
-        per_sample.append(sample)
-    return per_sample
+    return result
 
 
 @contextmanager
@@ -479,6 +484,43 @@ def stitch_completion_after_windowed_hf_generate(
         ),
         full_prompt_len,
     )
+
+
+def build_completion_mask(
+    completion_id: torch.Tensor,
+    prompt_len: int | None,
+    pad_token_id: int,
+) -> torch.Tensor:
+    """Build the boolean action mask for a completion tensor.
+
+    Returns ``True`` at positions that are (a) past the prompt and (b) not
+    pad tokens, dropping the leading position to align with the
+    next-token-prediction shift used downstream.
+
+    :param completion_id: Token tensor of shape ``(B, seq_len)`` containing
+        the prompt followed by generated tokens.
+    :type completion_id: torch.Tensor
+    :param prompt_len: Number of leading tokens to mask out (the full
+        prompt length, possibly after sliding-window stitching). ``None``
+        means "no prompt prefix" — every non-pad token is part of the
+        completion. This matches the legacy slice semantics where
+        ``mask[:, None:] = True`` set the entire dim before pads were
+        zeroed back out.
+    :type prompt_len: int | None
+    :param pad_token_id: Pad token id used to suppress padding positions.
+    :type pad_token_id: int
+    :return: Boolean mask of shape ``(B, seq_len - 1)``.
+    :rtype: torch.Tensor
+    """
+    non_pad = completion_id != pad_token_id
+    if prompt_len is None or prompt_len == 0:
+        mask = non_pad
+    else:
+        positions = torch.arange(
+            completion_id.shape[1], device=completion_id.device
+        )
+        mask = (positions.unsqueeze(0) >= prompt_len) & non_pad
+    return mask[:, 1:]
 
 
 def stitch_completion_after_windowed_vllm_generate(
