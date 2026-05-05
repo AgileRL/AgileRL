@@ -3471,9 +3471,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             del logits
 
             chunk_v = (
-                value[:, :-1]
-                if (self.use_value_head and value is not None)
-                else None
+                value[:, :-1] if (self.use_value_head and value is not None) else None
             )
             return chunk_lp, chunk_v
 
@@ -3870,9 +3868,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         unique_ids = [_trajectory_input_ids(p) for p in prompts]
         unique_tokens = [_token_prompt_for_vllm(ids) for ids in unique_ids]
         unique_max = [_vllm_max_new_tokens(int(ids.shape[1])) for ids in unique_ids]
-        unique_stitch = [
-            _stitch_prefix(p, ids) for p, ids in zip(prompts, unique_ids)
-        ]
+        unique_stitch = [_stitch_prefix(p, ids) for p, ids in zip(prompts, unique_ids)]
 
         # Replicate by reference for the flat vLLM batch. Entries within a
         # group of `group_size` are aliased references to the same tensor /
@@ -3983,12 +3979,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             stitch_prefixes[group_size * i].to(self.device, non_blocking=True)
             for i in range(len(prompts))
         ]
-        prompts_ids = [
-            ids for ids in unique_prompts_ids_dev for _ in range(group_size)
-        ]
-        stitch_prefixes = [
-            sp for sp in unique_stitch_dev for _ in range(group_size)
-        ]
+        prompts_ids = [ids for ids in unique_prompts_ids_dev for _ in range(group_size)]
+        stitch_prefixes = [sp for sp in unique_stitch_dev for _ in range(group_size)]
 
         completion_ids = [
             torch.cat(
@@ -4022,9 +4014,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             for i in range(len(prompts))
         ]
         completion_masks = [
-            build_completion_mask(
-                completion_id, num_input_tokens[i], self.pad_token_id
-            )
+            build_completion_mask(completion_id, num_input_tokens[i], self.pad_token_id)
             for i, completion_id in enumerate(completion_ids)
         ]
 

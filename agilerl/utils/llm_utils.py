@@ -516,9 +516,7 @@ def build_completion_mask(
     if prompt_len is None or prompt_len == 0:
         mask = non_pad
     else:
-        positions = torch.arange(
-            completion_id.shape[1], device=completion_id.device
-        )
+        positions = torch.arange(completion_id.shape[1], device=completion_id.device)
         mask = (positions.unsqueeze(0) >= prompt_len) & non_pad
     return mask[:, 1:]
 
