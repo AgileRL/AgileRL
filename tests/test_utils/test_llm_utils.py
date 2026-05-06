@@ -20,7 +20,6 @@ from agilerl.utils.algo_utils import DummyOptimizer
 from agilerl.utils.llm_utils import (
     PreferenceGym,
     ReasoningGym,
-    _auto_zero_stage,
     align_deepspeed_lr,
     create_llm_accelerator,
     get_llm_accelerator,
@@ -1024,41 +1023,6 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
     finally:
         # Restore original module to avoid affecting other tests
         sys.modules["agilerl.utils.llm_utils"] = original_module
-
-
-# ---------------------------------------------------------------------------
-# Tests for create_llm_accelerator / _auto_zero_stage
-# ---------------------------------------------------------------------------
-
-
-class TestAutoZeroStage:
-    def test_auto_zero_stage_none_model_size_returns_1(self):
-        assert _auto_zero_stage(4, None) == 1
-
-    def test_auto_zero_stage_small_model_returns_1(self):
-        """Model using < 60% of per-GPU VRAM -> ZeRO-1."""
-        with patch("torch.cuda.get_device_properties") as mock_props:
-            mock_props.return_value.total_mem = 24 * (1024**3)  # 24 GB
-            assert _auto_zero_stage(2, 10.0) == 1  # 10/24 ~= 0.42
-
-    def test_auto_zero_stage_medium_model_returns_2(self):
-        """Model using 60-90% of per-GPU VRAM -> ZeRO-2."""
-        with patch("torch.cuda.get_device_properties") as mock_props:
-            mock_props.return_value.total_mem = 24 * (1024**3)  # 24 GB
-            assert _auto_zero_stage(2, 17.0) == 2  # 17/24 ~= 0.71
-
-    def test_auto_zero_stage_large_model_returns_3(self):
-        """Model exceeding 90% of per-GPU VRAM -> ZeRO-3."""
-        with patch("torch.cuda.get_device_properties") as mock_props:
-            mock_props.return_value.total_mem = 24 * (1024**3)  # 24 GB
-            assert _auto_zero_stage(2, 23.0) == 3  # 23/24 ~= 0.96
-
-    def test_auto_zero_stage_device_properties_exception_returns_1(self):
-        """Fallback to ZeRO-1 when get_device_properties raises."""
-        with patch(
-            "torch.cuda.get_device_properties", side_effect=RuntimeError("no CUDA")
-        ):
-            assert _auto_zero_stage(2, 14.0) == 1
 
 
 class TestCreateLlmAccelerator:

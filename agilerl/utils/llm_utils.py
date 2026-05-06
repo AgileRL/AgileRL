@@ -387,36 +387,6 @@ def get_llm_accelerator(
     return Accelerator()
 
 
-def _auto_zero_stage(num_gpus: int, model_size_gb: float | None) -> int:
-    """Pick a ZeRO stage based on GPU count and model size.
-
-    Heuristic:
-
-    * If ``model_size_gb`` is unknown, default to ZeRO-1 (lightest
-      multi-GPU overhead, partitions only optimizer states).
-    * If the model fits comfortably in per-GPU memory (< 60% of VRAM),
-      use ZeRO-1.
-    * If the model is tight but fits (60-90% of VRAM), use ZeRO-2
-      (also partitions gradients).
-    * If the model exceeds per-GPU memory, use ZeRO-3 (also partitions
-      parameters).
-    """
-    if model_size_gb is None:
-        return 1
-
-    try:
-        per_gpu_gb = torch.cuda.get_device_properties(0).total_mem / (1024**3)
-    except Exception:
-        return 1
-
-    ratio = model_size_gb / per_gpu_gb
-    if ratio < 0.6:
-        return 1
-    if ratio < 0.9:
-        return 2
-    return 3
-
-
 def move_params_to_gpu(unwrapped_model: torch.nn.Module, device: torch.device) -> None:
     """Move params to GPU.
 
