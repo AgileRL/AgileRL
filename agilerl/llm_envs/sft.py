@@ -23,7 +23,7 @@ class SFTGym(IterablePromptBatchGym):
         test_dataset: Dataset,
         tokenizer: AutoTokenizer,
         data_batch_size_per_gpu: int = 8,
-        response_column: str = "response",
+        response_column: str = "target",
         accelerator: Accelerator | None = None,
         max_context_length: int | None = None,
         seed: int = 42,
