@@ -672,7 +672,7 @@ class PPO(LLMAlgorithm):
         :rtype: torch.Tensor
         """
         eval_context = getattr(env, "eval_mode", nullcontext)
-        with eval_context(), torch.inference_mode():
+        with eval_context(), torch.no_grad():
             if isinstance(env, ReasoningGym):
                 prompts = env.reset()
                 rewards = []

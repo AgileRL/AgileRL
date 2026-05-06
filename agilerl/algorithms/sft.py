@@ -322,7 +322,7 @@ class SFT(LLMAlgorithm):
         :return: Mean negative loss (scalar numpy array)
         :rtype: np.ndarray
         """
-        with env.eval_mode(), torch.inference_mode():
+        with env.eval_mode(), torch.no_grad():
             prompts = env.reset()
             losses = []
             for _ in range(loop):
