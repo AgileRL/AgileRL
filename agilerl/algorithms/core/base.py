@@ -24,7 +24,6 @@ from typing import (
 import dill
 import numpy as np
 import torch
-import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list, set_seed
 from gymnasium import spaces
@@ -4015,14 +4014,22 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _memory_efficient_logits(
         logits: torch.Tensor,
         index: torch.Tensor,
-        _chunk_rows: int = 1,
+        _chunk_rows: int = 8,
     ) -> torch.Tensor:
         """Calculate log probabilities for previously generated token ids.
 
-        Processes a few rows at a time so peak memory stays bounded to
-        ``(_chunk_rows, seq_len, vocab_size)`` rather than the full batch,
-        avoiding OOM on large-vocabulary models while reducing Python loop
-        overhead compared to a strict row-by-row approach.
+        Processes ``_chunk_rows`` rows at a time so peak memory stays bounded to
+        ``(_chunk_rows, seq_len, vocab_size)`` rather than the full batch, avoiding
+        OOM on large-vocabulary models while reducing Python loop overhead compared
+        to a strict row-by-row approach. Larger ``_chunk_rows`` values amortize
+        kernel-launch cost over more rows; the temporary fp32 workspace scales with
+        ``_chunk_rows * seq_len * vocab_size``, but the input ``(B, seq_len, vocab_size)``
+        logits tensor is already fully materialised so this does not raise the
+        asymptotic peak.
+
+        Logsumexp and gather run in float32 for numerical stability; results are cast
+        back to *logits* dtype (e.g. bfloat16 under mixed precision). Logits are
+        max-centered per row before ``logsumexp``, matching ``F.log_softmax`` stability.
 
         :param logits: Logits of shape ``(B, seq_len, vocab_size)``.
         :type logits: torch.Tensor
@@ -4031,30 +4038,26 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Log probabilities of the completion IDs, shape ``(B, seq_len)``.
         :rtype: torch.Tensor
         """
-        # 1. Gather the raw logits for the specific token IDs.
-        # Shape reduces from (B, seq_len, vocab_size) immediately to (B, seq_len)
-
+        orig_dtype = logits.dtype
         B = logits.shape[0]
+
+        def _logprobs_chunk(lg: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+            lg32 = lg.float()
+            max_lg = lg32.amax(dim=-1, keepdim=True)
+            shifted = lg32 - max_lg
+            target = shifted.gather(dim=-1, index=idx.unsqueeze(-1)).squeeze(-1)
+            log_z = torch.logsumexp(shifted, dim=-1)
+            return (target - log_z).to(orig_dtype)
+
         if B <= _chunk_rows:
-            return (
-                F.log_softmax(logits, dim=-1)
-                .gather(dim=-1, index=index.unsqueeze(-1))
-                .squeeze(-1)
-            )
+            return _logprobs_chunk(logits, index)
 
         per_token_logps = []
         for start in range(0, B, _chunk_rows):
             end = min(start + _chunk_rows, B)
-            target_logits_chunk = (
-                logits[start:end]
-                .gather(dim=-1, index=index[start:end].unsqueeze(-1))
-                .squeeze(-1)
+            per_token_logps.append(
+                _logprobs_chunk(logits[start:end], index[start:end]),
             )
-            log_z_chunk = torch.logsumexp(logits[start:end], dim=-1)
-            per_token_logps_chunk = (target_logits_chunk - log_z_chunk).to(
-                logits.dtype
-            )  # Do we need to upcast to float 32 here??
-            per_token_logps.append(per_token_logps_chunk)
         return torch.cat(per_token_logps, dim=0)
 
     def _configure_batch_size_per_process(

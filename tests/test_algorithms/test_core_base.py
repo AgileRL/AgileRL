@@ -1890,11 +1890,62 @@ class TestLLMMemoryEfficientLogits:
         result = LLMAlgorithm._memory_efficient_logits(logits, index)
         assert result.shape == (2, 5)
         expected = (
-            F.log_softmax(logits, dim=-1)
+            F.log_softmax(logits.float(), dim=-1)
             .gather(dim=-1, index=index.unsqueeze(-1))
             .squeeze(-1)
         )
         assert torch.allclose(result, expected)
+
+    @pytest.mark.parametrize(
+        "batch_rows,chunk_rows",
+        [
+            # B=1 hits the fast path (B <= chunk_rows), B=17 forces the chunked loop.
+            (1, 8),
+            (17, 2),
+        ],
+    )
+    def test_memory_efficient_logits_bf16_matches_fp32_log_softmax_reference(
+        self,
+        batch_rows: int,
+        chunk_rows: int,
+    ) -> None:
+        """Fast path (small B) and chunked path both match fp32 log_softmax reference."""
+        torch.manual_seed(batch_rows * 31 + chunk_rows)
+        seq, vocab = 11, 8192
+        logits_bf16 = torch.randn(
+            batch_rows,
+            seq,
+            vocab,
+            dtype=torch.bfloat16,
+        )
+        index = torch.randint(0, vocab, (batch_rows, seq))
+
+        result_bf16 = LLMAlgorithm._memory_efficient_logits(
+            logits_bf16,
+            index,
+            _chunk_rows=chunk_rows,
+        )
+        reference_fp32 = (
+            F.log_softmax(logits_bf16.float(), dim=-1)
+            .gather(dim=-1, index=index.unsqueeze(-1))
+            .squeeze(-1)
+        )
+        lg32 = logits_bf16.float()
+        max_lg = lg32.amax(dim=-1, keepdim=True)
+        shifted = lg32 - max_lg
+        stable_gather_minus_lse = shifted.gather(
+            dim=-1, index=index.unsqueeze(-1)
+        ).squeeze(-1) - torch.logsumexp(shifted, dim=-1)
+        assert torch.allclose(
+            stable_gather_minus_lse,
+            reference_fp32,
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        assert torch.equal(
+            result_bf16,
+            reference_fp32.to(torch.bfloat16),
+        )
 
 
 class TestLLMCreatePromptMasks:
