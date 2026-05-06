@@ -113,9 +113,7 @@ def normalize_reasoning_prompt_batch(
     if batch_size == 0:
         return []
 
-    # Inspect each key once and write the per-sample slice into all output
-    # dicts in one pass, instead of repeating the isinstance/shape checks
-    # batch_size times in the inner loop.
+    # Inspect each key once and write into all output dicts in one pass
     result: list[ReasoningPrompts] = [{} for _ in range(batch_size)]
     for key, value in prompts.items():
         if (

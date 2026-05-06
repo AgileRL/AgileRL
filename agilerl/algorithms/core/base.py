@@ -3859,22 +3859,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             return min(max_out, room)
 
         # Compute the per-prompt work once per *unique* prompt (N items),
-        # then alias by reference across each group (N·G items). Within a
-        # GRPO group the trajectory ids, vLLM token list, max-new-tokens
-        # cap and stitch prefix are identical for every group member, so
-        # the expensive .tolist() walk and the H2D transfer below scale
-        # with the number of distinct prompts rather than the expanded
-        # vLLM batch size.
+        # then alias by reference across each group (N·G items)
         unique_ids = [_trajectory_input_ids(p) for p in prompts]
         unique_tokens = [_token_prompt_for_vllm(ids) for ids in unique_ids]
         unique_max = [_vllm_max_new_tokens(int(ids.shape[1])) for ids in unique_ids]
         unique_stitch = [_stitch_prefix(p, ids) for p, ids in zip(prompts, unique_ids)]
 
         # Replicate by reference for the flat vLLM batch. Entries within a
-        # group of `group_size` are aliased references to the same tensor /
-        # dict — safe because every downstream consumer (torch.cat,
-        # stitch_completion_after_windowed_vllm_generate, mask construction,
-        # tensor_parallel all_gather) is read-only w.r.t. these objects.
+        # group of `group_size` are aliased references to the same tensor / dict
+        # — safe because downstream use is read-only is read-only w.r.t. these objects.
         # Do not introduce in-place ops on these aliases.
         group_prompts = [p for p in prompts for _ in range(group_size)]
         prompts_ids = [ids for ids in unique_ids for _ in range(group_size)]
@@ -3966,11 +3959,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             prompts_ids = all_prompts_ids[tp_slice]
             stitch_prefixes = all_stitch_prefixes[tp_slice]
 
-        # H2D once per unique prompt, then re-alias across the group.
-        # Group members share the same source tensor, so the previous
-        # `.to(device)` per group member did the same transfer N·G times
-        # rather than N times. Aliasing is safe for the same read-only
-        # reason called out above.
+        # Transfer fromn host-to-device once per unique prompt, then re-alias across the group.
         unique_prompts_ids_dev = [
             prompts_ids[group_size * i].to(self.device, non_blocking=True)
             for i in range(len(prompts))
