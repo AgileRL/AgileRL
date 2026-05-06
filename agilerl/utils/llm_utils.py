@@ -124,10 +124,10 @@ def normalize_reasoning_prompt_batch(
             chunks: tuple[torch.Tensor, ...] = (
                 value.unbind(0) if value.dim() == 1 else value.split(1, dim=0)
             )
-            for sample, chunk in zip(result, chunks):
+            for sample, chunk in zip(result, chunks, strict=True):
                 sample[key] = chunk
         elif isinstance(value, list) and len(value) == batch_size:
-            for sample, v in zip(result, value):
+            for sample, v in zip(result, value, strict=True):
                 sample[key] = v
         else:
             for sample in result:

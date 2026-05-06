@@ -3863,7 +3863,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         unique_ids = [_trajectory_input_ids(p) for p in prompts]
         unique_tokens = [_token_prompt_for_vllm(ids) for ids in unique_ids]
         unique_max = [_vllm_max_new_tokens(int(ids.shape[1])) for ids in unique_ids]
-        unique_stitch = [_stitch_prefix(p, ids) for p, ids in zip(prompts, unique_ids)]
+        unique_stitch = [
+            _stitch_prefix(p, ids) for p, ids in zip(prompts, unique_ids, strict=True)
+        ]
 
         # Replicate by reference for the flat vLLM batch. Entries within a
         # group of `group_size` are aliased references to the same tensor / dict
