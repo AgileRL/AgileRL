@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import warnings
 from typing import Any
 
 import torch
@@ -132,6 +133,11 @@ class TokenObservationWrapper:
             if supports_seed:
                 obs_text, info = self._env.reset(seed=seed)
             else:
+                warnings.warn(
+                    f"Wrapped env {type(self._env).__name__}.reset does not "
+                    "accept a `seed` parameter; resetting without it.",
+                    stacklevel=2,
+                )
                 obs_text, info = self._env.reset()
         else:
             obs_text, info = self._env.reset()
