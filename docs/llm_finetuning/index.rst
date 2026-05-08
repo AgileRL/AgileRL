@@ -56,3 +56,10 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
 
   .. literalinclude:: ../../tutorials/llm_finetuning/grpo_reasoning.py
       :language: python
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Topics
+
+   fused_logprobs
+   llm_checkpoints
