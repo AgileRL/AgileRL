@@ -1148,24 +1148,6 @@ class TestGRPOInit:
         assert grpo.use_kl_advantage_shaping is False
         grpo.clean_up()
 
-    @pytest.mark.skipif(
-        not HAS_LIGER_KERNEL,
-        reason="Non-grpo liger warning path requires liger-kernel availability.",
-    )
-    def test_init_grpo_liger_warns_and_falls_back_to_standard_path_for_non_grpo_loss(
-        self,
-    ):
-        with pytest.warns(
-            UserWarning,
-            match="use_liger_loss=True is only supported for loss_type='grpo'",
-        ):
-            grpo = _make_cpu_grpo_for_branch_tests(
-                use_liger_loss=True,
-                loss_type="gspo",
-            )
-        assert grpo.use_liger_loss is False
-        grpo.clean_up()
-
     def test_init_grpo_cispo_warns_when_beta_nonzero(self):
         with pytest.warns(UserWarning, match="CISPO is typically used with beta=0"):
             grpo = _make_cpu_grpo_for_branch_tests(loss_type="cispo", beta=0.1)
@@ -1735,9 +1717,9 @@ class TestGRPOInit:
             )
             with pytest.raises(
                 ImportError,
-                match=r"Liger GRPO loss was requested but `liger-kernel` is not available\. Set use_liger_loss=False\.",
+                match=r"Liger loss was requested but `liger-kernel` is not available\. Set use_liger_loss=False\.",
             ):
-                grpo._grpo_loss_liger(
+                grpo._liger_loss(
                     batch_ids=torch.ones((1, 2), dtype=torch.long),
                     action_mask=torch.ones((1, 1), dtype=torch.bool),
                     advantages=torch.ones((1,), dtype=torch.float32),
