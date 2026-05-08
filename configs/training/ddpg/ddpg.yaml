@@ -50,6 +50,7 @@ network:
         hidden_size:
             - 128
         activation: ReLU
+        layer_norm: false
         min_mlp_nodes: 64
         max_mlp_nodes: 500
 

@@ -53,6 +53,7 @@ version = "2.8.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
+    { name = "datasets" },
     { name = "dill" },
     { name = "fastrand" },
     { name = "flatten-dict" },
@@ -147,6 +148,7 @@ requires-dist = [
     { name = "accelerate", specifier = "~=1.7.0" },
     { name = "click", marker = "extra == 'all'", specifier = ">=8.3.0" },
     { name = "click", marker = "extra == 'arena'", specifier = ">=8.3.0" },
+    { name = "datasets", specifier = ">=4.4.1" },
     { name = "datasets", marker = "extra == 'all'", specifier = "==4.4.1" },
     { name = "datasets", marker = "extra == 'llm'", specifier = "==4.4.1" },
     { name = "deepspeed", marker = "sys_platform != 'win32' and extra == 'all'", specifier = "~=0.17.1" },
