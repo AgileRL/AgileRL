@@ -6,9 +6,14 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+
+if HAS_LIGER_KERNEL:
+    from agilerl.algorithms.core.fused_llm_ppo_loss import (
+        LigerFusedLinearLLMPPOFunction,
+    )
 from agilerl.protocols import (
     LoraConfigProtocol,
     MultiTurnEnv,
@@ -170,6 +175,8 @@ class REINFORCE(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
+        use_fused_linear_logprobs: bool = False,
+        use_liger_loss: bool = False,
     ) -> None:
 
         device = (
@@ -186,7 +193,7 @@ class REINFORCE(LLMAlgorithm):
             pad_token_id=pad_token_id,
             pad_token=pad_token,
             use_value_head=False,
-            use_liger_loss=False,
+            use_liger_loss=use_liger_loss,
             use_memory_efficient_params=use_memory_efficient_params,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
@@ -205,6 +212,7 @@ class REINFORCE(LLMAlgorithm):
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
             reduce_memory_peak=reduce_memory_peak,
+            use_fused_linear_logprobs=use_fused_linear_logprobs,
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
@@ -473,6 +481,27 @@ class REINFORCE(LLMAlgorithm):
 
                     batch_mask_bool = batch_action_mask.bool()
 
+                    if self.use_liger_loss:
+                        # Liger fused clipped policy loss (no (B, T, V) logits
+                        # saved for backward). KL stays a logging metric;
+                        # REINFORCE folds it into the advantage upstream.
+                        # Works for both granularities since per-turn ReBN
+                        # is already broadcast to per-token by the caller.
+                        pg_loss, metrics = self._reinforce_loss_liger(
+                            batch_ids,
+                            batch_action_mask,
+                            batch_old_log_probs,
+                            batch_reference_log_probs,
+                            batch_advantages,
+                        )
+                        self._backward_pass(pg_loss)
+                        learn_metrics["mean_kl"] += metrics["kl"]
+                        learn_metrics["mean_entropy"] += metrics["entropy"]
+                        learn_metrics["mean_pg_loss"] += metrics["pg_loss"]
+                        learn_metrics["mean_loss"] += pg_loss.item()
+                        updates += 1
+                        continue
+
                     with self.select_adapter("actor"):
                         batch_log_probs = self._get_logprobs(
                             batch_ids,
@@ -516,6 +545,106 @@ class REINFORCE(LLMAlgorithm):
         return {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
+
+    def _reinforce_loss_liger(
+        self,
+        batch_ids: torch.Tensor,
+        batch_action_mask: torch.Tensor,
+        batch_old_log_probs: torch.Tensor,
+        batch_reference_log_probs: torch.Tensor,
+        batch_advantages: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Token-level REINFORCE loss via the fused-linear PPO Function.
+
+        Captures the last hidden state via an ``lm_head`` forward-pre-hook
+        (so the full ``(B, T, V)`` logits never need to be saved for
+        backward) and invokes :class:`LigerFusedLinearLLMPPOFunction` with
+        ``beta=0`` — REINFORCE folds the KL penalty into the advantage
+        during the no-grad pass, so the gradient-time loss is pure clipped
+        policy gradient. KL is still computed inside the kernel and
+        returned as a logging metric.
+
+        :param batch_ids: ``(B, seq_len)`` token IDs for this minibatch.
+        :param batch_action_mask: ``(B, seq_len-1)`` bool mask of valid
+            action positions.
+        :param batch_old_log_probs: ``(B, seq_len-1)`` old-policy logprobs.
+        :param batch_reference_log_probs: ``(B, seq_len-1)`` reference
+            logprobs (used for the KL metric only).
+        :param batch_advantages: ``(B, seq_len-1)`` per-token advantages.
+        :return: ``(pg_loss, metrics)`` where ``metrics`` carries
+            ``kl``, ``pg_loss``, ``entropy``, ``clipfrac`` Python floats.
+        """
+        if not HAS_LIGER_KERNEL:
+            msg = (
+                "Liger REINFORCE loss was requested but `liger-kernel` is not "
+                "available. Set use_liger_loss=False."
+            )
+            raise ImportError(msg)
+
+        batch_ids = batch_ids.to(self.device)
+        mask = batch_action_mask.to(self.device).contiguous()
+        old_log_probs = batch_old_log_probs.to(self.device).contiguous()
+        ref_log_probs = batch_reference_log_probs.to(self.device).contiguous()
+        advantages = batch_advantages.to(self.device).contiguous()
+
+        lm_head = self._get_lm_head()
+        lm_head_weight = lm_head.weight
+        lm_head_bias = lm_head.bias
+
+        # Capture the input to ``lm_head`` (= last hidden state) via a
+        # forward-pre-hook so we can hand it directly to the fused kernel.
+        # Same pattern as the GRPO Liger path in ``grpo._grpo_loss_liger``.
+        def _get_hidden(input_ids, attention_mask):
+            captured: list[torch.Tensor] = []
+            hook = lm_head.register_forward_pre_hook(
+                lambda _m, inputs: captured.append(inputs[0])
+            )
+            kwargs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "use_cache": False,
+            }
+            if self.calc_position_embeddings:
+                position_ids = attention_mask.long().cumsum(-1) - 1
+                position_ids.masked_fill_(attention_mask == 0, 1)
+                kwargs["position_ids"] = position_ids
+            try:
+                self.actor(**kwargs)
+            finally:
+                hook.remove()
+            return captured[0]
+
+        attention_mask = (batch_ids != self.pad_token_id).long()
+        with self.select_adapter("actor"), self._amp_ctx():
+            self.actor.train()
+            policy_hidden = _get_hidden(batch_ids, attention_mask)  # (B, T, H)
+        target_ids = batch_ids[:, 1:].contiguous()  # (B, T-1)
+        # Hidden states are aligned with target ids: predict ids[:, 1:] from
+        # hidden[:, :-1]. Same shift the unfused path applies.
+        loss, aux = LigerFusedLinearLLMPPOFunction.apply(
+            policy_hidden[:, :-1].contiguous(),
+            lm_head_weight,
+            target_ids,
+            mask,
+            advantages,
+            lm_head_bias,
+            ref_log_probs,
+            old_log_probs,
+            0.0,  # beta — KL handled upstream via ReBN advantage
+            self.clip_coef,  # epsilon_low
+            self.clip_coef,  # epsilon_high
+            self.temperature,
+            False,  # compiled — torch.compile dynamic shapes fight Liger here
+            1,  # chunk_size
+        )
+        # aux = [kl, clipfrac, pg_loss, entropy] scalars in fp32.
+        metrics = {
+            "kl": float(aux[0].item()),
+            "clipfrac": float(aux[1].item()),
+            "pg_loss": float(aux[2].item()),
+            "entropy": float(aux[3].item()),
+        }
+        return loss, metrics
 
     def _resolve_action_granularity(self, turn_ids: torch.Tensor) -> str:
         """Resolve effective policy granularity for the current batch.

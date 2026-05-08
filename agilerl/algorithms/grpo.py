@@ -131,6 +131,10 @@ class GRPO(LLMAlgorithm):
     :type torch_compiler: str | None, optional
     :param use_liger_loss: Use Liger kernel for memory-efficient loss computation, defaults to False.
         Requires ``liger_kernel`` to be installed; pass ``False`` to fall back to the standard PyTorch path.
+        Supported for ``loss_type`` values ``'grpo'``, ``'cispo'``, and ``'gspo'``.
+        Note that the Liger path uses DAPO-style batch normalisation for ``'cispo'`` rather than
+        the per-sequence-then-batch normalisation of the standard path; numerical values will
+        differ slightly but gradient direction is equivalent.
     :type use_liger_loss: bool, optional
     :param use_kl_advantage_shaping: Apply KL-based shaping directly to token
         advantages before PPO clipping, defaults to False.
@@ -160,6 +164,16 @@ class GRPO(LLMAlgorithm):
         ``filter_zero_adv``; samples with ``|advantage| <= eps`` are
         filtered out, defaults to 0.0.
     :type adv_filter_eps: float, optional
+    :param use_fused_linear_logprobs: When ``True``, the no-grad rollout-side
+        logprob computation (old-policy and reference) skips materializing the
+        full ``(B, T, V)`` logits tensor and instead consumes hidden states
+        directly via a chunked matmul over the lm_head weight. Drops peak
+        no-grad memory by the size of the logits tensor (e.g. ~1.2 GB at
+        ``B=8, T=256, V=152k`` in bf16; the saving scales linearly with
+        ``B*T*V``). Default ``False`` preserves byte-identical behaviour to
+        the unfused path. Has no effect on the gradient-time loss path
+        (use ``use_liger_loss=True`` for that).
+    :type use_fused_linear_logprobs: bool, optional
     """
 
     def __init__(
@@ -211,6 +225,7 @@ class GRPO(LLMAlgorithm):
         filter_zero_adv: bool = False,
         adv_filter_eps: float = 0.0,
         reduce_memory_peak: bool = False,
+        use_fused_linear_logprobs: bool = False,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -252,6 +267,7 @@ class GRPO(LLMAlgorithm):
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
             reduce_memory_peak=reduce_memory_peak,
+            use_fused_linear_logprobs=use_fused_linear_logprobs,
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
@@ -328,9 +344,11 @@ class GRPO(LLMAlgorithm):
                 "regularization to the objective.",
                 stacklevel=2,
             )
-        if self.use_liger_loss and self.loss_type != "grpo":
+        _LIGER_SUPPORTED_LOSS_TYPES = frozenset({"grpo", "cispo", "gspo"})
+        if self.use_liger_loss and self.loss_type not in _LIGER_SUPPORTED_LOSS_TYPES:
             warnings.warn(
-                "use_liger_loss=True is only supported for loss_type='grpo'; "
+                "use_liger_loss=True is only supported for loss_type in "
+                "['cispo', 'grpo', 'gspo']; "
                 "falling back to standard PyTorch loss.",
                 stacklevel=2,
             )
@@ -817,7 +835,7 @@ class GRPO(LLMAlgorithm):
             reference_log_probs,
         )
         if self.use_liger_loss:
-            return self._grpo_loss_liger(
+            return self._liger_loss(
                 batch_ids,
                 batch_action_mask,
                 batch_advantages,
@@ -934,7 +952,7 @@ class GRPO(LLMAlgorithm):
         loss = self._reduce_masked_loss(loss, mask)
         return loss.mean(), kl.mean()
 
-    def _grpo_loss_liger(
+    def _liger_loss(
         self,
         batch_ids: torch.Tensor,
         action_mask: torch.Tensor,
@@ -942,7 +960,20 @@ class GRPO(LLMAlgorithm):
         old_log_probs: torch.Tensor,
         reference_log_probs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Calculate the GRPO loss using the Liger Triton-fused kernel.
+        """Calculate the loss using the Liger Triton-fused kernel.
+
+        Dispatches to the appropriate Liger ``loss_type`` /
+        ``importance_sampling_level`` combination based on
+        ``self.loss_type``:
+
+        * ``"grpo"``  → ``loss_type="grpo"``,    ``importance_sampling_level="token"``
+        * ``"cispo"`` → ``loss_type="cispo"``,   ``importance_sampling_level="token"``
+        * ``"gspo"``  → ``loss_type="grpo"``,    ``importance_sampling_level="sequence"``
+
+        CISPO note: Liger's CISPO only clips importance weights from above
+        (no lower bound), so ``epsilon_high`` is passed as the **absolute**
+        upper bound ``self.clip_coef_max`` rather than the offset
+        ``self.clip_coef_max - 1.0`` used by GRPO/GSPO.
 
         :param batch_ids: Input token IDs.
         :type batch_ids: torch.Tensor
@@ -954,15 +985,35 @@ class GRPO(LLMAlgorithm):
         :type old_log_probs: torch.Tensor
         :param reference_log_probs: Log probs from the reference policy (B, seq_len-1).
         :type reference_log_probs: torch.Tensor
-        :return: Mean loss and mean KL divergence.
+        :return: Mean loss and mean KL divergence (or clip-fraction when ``beta=0``).
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         if not HAS_LIGER_KERNEL:
             msg = (
-                "Liger GRPO loss was requested but `liger-kernel` is not available. "
+                "Liger loss was requested but `liger-kernel` is not available. "
                 "Set use_liger_loss=False."
             )
             raise ImportError(msg)
+
+        # Resolve Liger API parameters from self.loss_type.
+        if self.loss_type == "cispo":
+            liger_loss_type = "cispo"
+            importance_sampling_level = "token"
+            # Liger CISPO clamps importance weights against an *absolute* upper
+            # bound (epsilon_high = clip_coef_max), not an offset from 1.0.
+            epsilon_low = 1.0 - self.clip_coef_min  # unused by Liger CISPO
+            epsilon_high = self.clip_coef_max
+        elif self.loss_type == "gspo":
+            # GSPO is GRPO-style clipping applied at the sequence level.
+            liger_loss_type = "grpo"
+            importance_sampling_level = "sequence"
+            epsilon_low = 1.0 - self.clip_coef_min
+            epsilon_high = self.clip_coef_max - 1.0
+        else:  # "grpo"
+            liger_loss_type = "grpo"
+            importance_sampling_level = "token"
+            epsilon_low = 1.0 - self.clip_coef_min
+            epsilon_high = self.clip_coef_max - 1.0
 
         batch_ids = batch_ids.to(self.device)
         mask = action_mask.to(self.device).contiguous()  # (B, seq_len-1)
@@ -1033,22 +1084,25 @@ class GRPO(LLMAlgorithm):
             None,
             None,
             self.beta,
-            1.0 - self.clip_coef_min,
-            self.clip_coef_max - 1.0,
-            "grpo",
+            epsilon_low,
+            epsilon_high,
+            liger_loss_type,
             self.max_output_tokens,
-            "token",  # Sequence for gspo when we implement it
+            importance_sampling_level,
             None,
             None,
             self.temperature,
             None,
             True,
-            1,  # Chunk size
+            1,  # chunk_size
             None,
         )
 
         kl = aux[0]
         return loss.mean(), kl
+
+    # Backward-compatible alias kept for any external callers.
+    _grpo_loss_liger = _liger_loss
 
 
 def _signatures_without_loss_type() -> tuple[Signature, Signature]:

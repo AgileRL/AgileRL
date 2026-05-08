@@ -2052,6 +2052,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
+        use_fused_linear_logprobs: bool = False,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
@@ -2196,6 +2197,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self._warn_separate_reference_adapter_deprecation()
+        self.use_fused_linear_logprobs = use_fused_linear_logprobs
 
         selected_adapters = ("actor",)
         if use_separate_reference_adapter:
@@ -3437,6 +3439,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             else [(s, min(s + batch_size, total)) for s in range(0, total, batch_size)]
         )
 
+        # Fused-linear-logprob path: replace lm_head with nn.Identity for the
+        # no-grad forward, then compute per-token logprobs via a chunked
+        # matmul over the lm_head weight. Skips materializing (B, T, V).
+        # Only safe when grads are disabled — autograd graph would not
+        # capture the manual matmul.
+        use_fused_lp = (
+            getattr(self, "use_fused_linear_logprobs", False)
+            and not torch.is_grad_enabled()
+        )
+        if use_fused_lp:
+            lm_head = self._get_lm_head()
+            lm_head_weight = lm_head.weight
+            lm_head_bias = lm_head.bias
+
         def _process_chunk(
             start: int, end: int
         ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -3449,25 +3465,40 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if position_ids is not None:
                 model_kwargs["position_ids"] = position_ids[start:end]
 
-            with self._amp_ctx():
+            patch_ctx = (
+                self._patch_lm_head_to_identity() if use_fused_lp else nullcontext()
+            )
+            with patch_ctx, self._amp_ctx():
                 output = self.actor.forward(**model_kwargs)
 
             if isinstance(output, tuple):
                 # Value-head models may return (loss, logits, value, ...); Peft/causal
-                # paths may return shorter tuples — only index when present.
-                logits = output[0]
+                # paths may return shorter tuples — only index when present. With
+                # lm_head identity-patched, output[0] is the last hidden state.
+                first = output[0]
                 value = output[2] if len(output) > 2 else None
             else:
-                logits = output.logits
+                first = output.logits
                 value = None
             del output
 
-            logits = logits / self.temperature
-            chunk_lp = LLMAlgorithm._memory_efficient_logits(
-                logits[:, :-1],
-                fused_ids[start:end, 1:],
-            )
-            del logits
+            if use_fused_lp:
+                chunk_lp = LLMAlgorithm._fused_linear_logprobs_no_grad(
+                    first[:, :-1],
+                    lm_head_weight,
+                    lm_head_bias,
+                    fused_ids[start:end, 1:],
+                    temperature=self.temperature,
+                )
+                del first
+            else:
+                logits = first / self.temperature
+                del first
+                chunk_lp = LLMAlgorithm._memory_efficient_logits(
+                    logits[:, :-1],
+                    fused_ids[start:end, 1:],
+                )
+                del logits
 
             chunk_v = (
                 value[:, :-1] if (self.use_value_head and value is not None) else None
@@ -3659,6 +3690,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
+        use_fused_lp = (
+            getattr(self, "use_fused_linear_logprobs", False)
+            and not torch.is_grad_enabled()
+        )
         with self.select_adapter("reference" if use_reference else "actor"):
             self.actor.train(mode=not eval_mode)
             num_samples = ids.shape[0]
@@ -3668,6 +3703,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if self.calc_position_embeddings:
                 position_ids = attention_mask.long().cumsum(dim=-1) - 1
                 position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
+
+            if use_fused_lp:
+                lm_head = self._get_lm_head()
+                lm_head_weight = lm_head.weight
+                lm_head_bias = lm_head.bias
 
             # Split the sample into batches
             log_probs = []
@@ -3683,18 +3723,31 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 if self.calc_position_embeddings:
                     batch_position_ids = position_ids[batch:end_idx, :]
                     batch_model_kwargs |= {"position_ids": batch_position_ids}
-                with self._amp_ctx():
-                    output = self.actor.forward(**batch_model_kwargs)
-                logits = output[0] if isinstance(output, tuple) else output.logits
-                logits = logits / self.temperature
-
-                log_prob = LLMAlgorithm._memory_efficient_logits(
-                    logits[:, :-1],
-                    batch_ids[:, 1:],
+                patch_ctx = (
+                    self._patch_lm_head_to_identity() if use_fused_lp else nullcontext()
                 )
+                with patch_ctx, self._amp_ctx():
+                    output = self.actor.forward(**batch_model_kwargs)
+                first = output[0] if isinstance(output, tuple) else output.logits
 
+                if use_fused_lp:
+                    log_prob = LLMAlgorithm._fused_linear_logprobs_no_grad(
+                        first[:, :-1],
+                        lm_head_weight,
+                        lm_head_bias,
+                        batch_ids[:, 1:],
+                        temperature=self.temperature,
+                    )
+                else:
+                    logits = first / self.temperature
+                    log_prob = LLMAlgorithm._memory_efficient_logits(
+                        logits[:, :-1],
+                        batch_ids[:, 1:],
+                    )
+                    logits = None
+
+                first = None
                 batch_model_kwargs = None
-                logits = None
                 log_probs.append(log_prob)
         return torch.cat(log_probs, dim=0)
 
@@ -4059,6 +4112,68 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 _logprobs_chunk(logits[start:end], index[start:end]),
             )
         return torch.cat(per_token_logps, dim=0)
+
+    @staticmethod
+    def _fused_linear_logprobs_no_grad(
+        hidden: torch.Tensor,
+        lm_head_weight: torch.Tensor,
+        lm_head_bias: torch.Tensor | None,
+        target_ids: torch.Tensor,
+        temperature: float = 1.0,
+        cast_to_fp32: bool = False,
+        _chunk_rows: int = 1024,
+    ) -> torch.Tensor:
+        """Per-token target logprobs without materializing the full ``(B, T, V)``.
+
+        Tiles flat over ``(B*T)`` with workspace bounded to ``(_chunk_rows, V)``
+        per iteration. Counterpart of :meth:`_memory_efficient_logits` for
+        callers that hold hidden states and the lm_head separately. **No-grad
+        only** — gradients won't flow to ``lm_head_weight`` from this fn.
+
+        Numerical contract matches :meth:`_memory_efficient_logits` when fed
+        equivalent inputs (``logits = (hidden @ Wᵀ + b) / T``): same
+        ``cast_to_fp32`` semantics, same final-cast-back-to-input-dtype, same
+        max-shift ``gather - logsumexp`` formulation.
+
+        :param hidden: ``(B, T, H)`` last-hidden-state.
+        :param lm_head_weight: ``(V, H)``.
+        :param lm_head_bias: ``(V,)`` or ``None``.
+        :param target_ids: ``(B, T)`` (caller does the ``[:, :-1]``/``[:, 1:]``
+            shift before calling).
+        :param temperature: scalar; logits divided by this before log_softmax
+            (skipped when ``1.0``).
+        :param cast_to_fp32: when True, run the per-chunk reduction in fp32
+            then cast back. Same semantics as ``_memory_efficient_logits``.
+        :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per
+            iteration; trades launch count vs ``_chunk_rows * V`` peak.
+        :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
+        """
+        orig_dtype = hidden.dtype
+        B, T, H = hidden.shape
+        flat_h = hidden.reshape(-1, H)
+        flat_targets = target_ids.reshape(-1).to(torch.long)
+        N = flat_h.shape[0]
+        out = torch.empty(N, dtype=orig_dtype, device=hidden.device)
+        W_t = lm_head_weight.t()
+
+        for s in range(0, N, _chunk_rows):
+            e = min(s + _chunk_rows, N)
+            chunk_logits = flat_h[s:e] @ W_t
+            if lm_head_bias is not None:
+                chunk_logits.add_(lm_head_bias)
+            if temperature != 1.0:
+                chunk_logits.div_(temperature)
+            if cast_to_fp32:
+                chunk_logits = chunk_logits.float()
+            mx = chunk_logits.amax(dim=-1, keepdim=True)
+            chunk_logits.sub_(mx)
+            tgt = chunk_logits.gather(dim=-1, index=flat_targets[s:e, None]).squeeze(-1)
+            log_z = torch.logsumexp(chunk_logits, dim=-1)
+            del chunk_logits
+            result = tgt - log_z
+            out[s:e].copy_(result.to(orig_dtype) if cast_to_fp32 else result)
+
+        return out.reshape(B, T)
 
     def _configure_batch_size_per_process(
         self,
@@ -4692,25 +4807,63 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if hasattr(self.actor.optimizer, "clip_grad"):
                 self.actor.optimizer.clip_grad = self.max_grad_norm
 
-    def _get_lm_head(self):
-        """Locate the lm_head module, handling both raw and PEFT-wrapped models.
+    def _get_lm_head_parent(self) -> tuple[Any, str]:
+        """Locate the parent module owning ``lm_head`` (or ``embed_out``).
 
-        :return: The lm_head (or embed_out) linear layer.
-        :rtype: torch.nn.Module
+        Walks through value-head, PEFT, and LoRA wrappers to the inner
+        causal-LM that exposes the language-model head as an attribute.
+        Returned so that callers can both read the head (``getattr(parent,
+        attr)``) and replace it temporarily (``setattr(parent, attr, ...)``)
+        — the latter is used by the no-grad fused-linear-logprob path.
+
+        :return: ``(parent_module, attr_name)``.
         :raises AttributeError: If no lm_head can be found.
         """
         model = self.actor
+        if self.use_value_head and hasattr(model, "pretrained_model"):
+            # Value-head wrapper (e.g. AutoModelForCausalLMWithValueHead) →
+            # the PEFT/causal-LM inner model.
+            model = model.pretrained_model
         if hasattr(model, "base_model"):  # PeftModel → LoraModel
             model = model.base_model
         if hasattr(model, "model"):  # LoraModel → CausalLM
             model = model.model
         for attr in ("lm_head", "embed_out"):
             if hasattr(model, attr):
-                return getattr(model, attr)
-        err_msg = f"""Cannot find lm_head in {type(self.actor).__name__}.
-        Set use_liger_loss=False.
-        """
+                return model, attr
+        err_msg = (
+            f"Cannot find lm_head in {type(self.actor).__name__}. "
+            "Set use_liger_loss=False and use_fused_linear_logprobs=False."
+        )
         raise AttributeError(err_msg)
+
+    def _get_lm_head(self):
+        """Locate the lm_head module, handling value-head, PEFT and LoRA wrappers.
+
+        :return: The lm_head (or embed_out) linear layer.
+        :rtype: torch.nn.Module
+        :raises AttributeError: If no lm_head can be found.
+        """
+        parent, attr = self._get_lm_head_parent()
+        return getattr(parent, attr)
+
+    @contextmanager
+    def _patch_lm_head_to_identity(self):
+        """Temporarily replace ``lm_head`` with ``nn.Identity``.
+
+        With the head identity-patched, the model's ``output.logits`` becomes
+        the post-final-norm hidden state ``(B, T, H)`` instead of the full
+        ``(B, T, V)`` logits — which is what the no-grad fused-linear-logprob
+        kernel consumes directly. The original module is always restored,
+        even if the wrapped block raises.
+        """
+        model, attr = self._get_lm_head_parent()
+        original = getattr(model, attr)
+        setattr(model, attr, torch.nn.Identity())
+        try:
+            yield original
+        finally:
+            setattr(model, attr, original)
 
     def _get_unwrapped_actor(self) -> Any:
         """Return actor unwrapped from Accelerate and DummyEvolvable layers."""
