@@ -495,3 +495,141 @@ class TestLlmPpoLossFnTurnMode:
                 turn_ids=torch.tensor([[0, 0, 1, 1], [0, 1, 1, 1]]),
                 # full_turn_mask + max_turns missing
             )
+
+
+# ---------------------------------------------------------------------------
+# Autograd Function tests — only run when liger_kernel is importable.
+# Without Liger, ``LigerFusedLinearLLMPPOFunction`` resolves to ``None`` and
+# the math fn above already covers the loss formula.
+# ---------------------------------------------------------------------------
+
+from agilerl import HAS_LIGER_KERNEL  # noqa: E402
+from agilerl.algorithms.core.fused_llm_ppo_loss import (  # noqa: E402
+    LigerFusedLinearLLMPPOFunction,
+)
+
+
+@pytest.mark.skipif(
+    not HAS_LIGER_KERNEL,
+    reason="LigerFusedLinearLLMPPOFunction requires liger-kernel",
+)
+class TestLigerFusedLinearLLMPPOFunction:
+    """Drive the autograd Function on tiny shapes and assert it matches the
+    unfused reference for both forward loss and backward gradient flow."""
+
+    @staticmethod
+    def _build_inputs(B, T, V, H, *, with_ref):
+        torch.manual_seed(0)
+        hidden = torch.randn(B, T, H, dtype=torch.float32, requires_grad=True)
+        weight = torch.randn(V, H, dtype=torch.float32, requires_grad=True) * 0.02
+        target_ids = torch.randint(0, V, (B, T))
+        mask = torch.ones(B, T, dtype=torch.float32)
+        adv = torch.randn(B, T, dtype=torch.float32) * 0.1
+        old_lp = torch.randn(B, T, dtype=torch.float32) * 0.05
+        ref_lp = torch.randn(B, T, dtype=torch.float32) * 0.05 if with_ref else None
+        return hidden, weight, target_ids, mask, adv, old_lp, ref_lp
+
+    def test_forward_matches_unfused_loss_token_mode(self) -> None:
+        B, T, V, H = 2, 5, 32, 8
+        hidden, weight, ids, mask, adv, old_lp, ref_lp = self._build_inputs(
+            B, T, V, H, with_ref=True
+        )
+        loss, _ = LigerFusedLinearLLMPPOFunction.apply(
+            hidden,
+            weight,
+            ids,
+            mask,
+            adv,
+            None,  # bias
+            ref_lp,
+            old_lp,
+            0.01,  # beta
+            0.2,
+            0.2,  # epsilon_low, epsilon_high
+            1.0,  # temperature
+            False,  # compiled
+            1,  # chunk_size
+            None,
+            None,
+            None,  # turn_ids, full_turn_mask, max_turns
+        )
+        # Reference: compute loss the unfused way.
+        logits = hidden @ weight.t()
+        log_probs = torch.log_softmax(logits.float(), dim=-1)
+        ref_loss, _ = llm_ppo_loss_fn(
+            log_probs=log_probs,
+            selected_token_ids=ids,
+            attention_mask=mask,
+            advantages=adv,
+            full_attention_mask=mask,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            beta=0.01,
+        )
+        assert torch.allclose(loss, ref_loss, rtol=1e-4, atol=1e-4)
+
+    def test_backward_gradients_flow_to_hidden_and_weight(self) -> None:
+        B, T, V, H = 2, 4, 16, 8
+        hidden, weight, ids, mask, adv, old_lp, _ = self._build_inputs(
+            B, T, V, H, with_ref=False
+        )
+        loss, _ = LigerFusedLinearLLMPPOFunction.apply(
+            hidden,
+            weight,
+            ids,
+            mask,
+            adv,
+            None,
+            None,
+            old_lp,
+            0.0,
+            0.2,
+            0.2,
+            1.0,
+            False,
+            1,
+            None,
+            None,
+            None,
+        )
+        loss.backward()
+        assert hidden.grad is not None
+        assert hidden.grad.shape == hidden.shape
+        assert weight.grad is not None
+        assert weight.grad.shape == weight.shape
+        # Gradients should be non-zero (with the random advantages we set up).
+        assert hidden.grad.abs().sum() > 0
+        assert weight.grad.abs().sum() > 0
+
+    def test_turn_mode_forward_runs(self) -> None:
+        """Smoke test for the turn-mode branch in the autograd Function."""
+        B, T, V, H = 2, 6, 16, 8
+        hidden, weight, ids, mask, _, old_lp, ref_lp = self._build_inputs(
+            B, T, V, H, with_ref=True
+        )
+        max_turns = 2
+        turn_ids = torch.tensor([[0, 0, 0, 1, 1, 1], [0, 0, 1, 1, 1, 1]])
+        full_turn_mask = torch.ones(B, max_turns, dtype=torch.float32)
+        adv_turn = torch.randn(B, max_turns, dtype=torch.float32) * 0.1
+        loss, _ = LigerFusedLinearLLMPPOFunction.apply(
+            hidden,
+            weight,
+            ids,
+            mask,
+            adv_turn,
+            None,
+            ref_lp,
+            old_lp,
+            0.0,
+            0.2,
+            0.2,
+            1.0,
+            False,
+            1,
+            turn_ids,
+            full_turn_mask,
+            max_turns,
+        )
+        loss.backward()
+        assert hidden.grad is not None
+        assert weight.grad is not None

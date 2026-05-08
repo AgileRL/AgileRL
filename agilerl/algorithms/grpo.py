@@ -20,6 +20,10 @@ if TYPE_CHECKING:
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
+else:
+    # Keep the name resolvable when liger-kernel isn't installed so unit
+    # tests can patch it. ``_liger_loss`` guards against actual use.
+    LigerFusedLinearGRPOFunction = None  # type: ignore[assignment]
 
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -1093,7 +1097,7 @@ class GRPO(LLMAlgorithm):
             None,
             self.temperature,
             None,
-            True,
+            reference_log_probs is not None,  # use_ref_model
             1,  # chunk_size
             None,
         )

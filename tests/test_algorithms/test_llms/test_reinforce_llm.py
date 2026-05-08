@@ -960,3 +960,78 @@ class TestREINFORCETest:
         out = rf.test(env, loop=1)
         assert out.shape == ()
         assert rf.fitness[-1] == pytest.approx(float(out))
+
+
+# ---------------------------------------------------------------------------
+# Liger fused loss path
+# ---------------------------------------------------------------------------
+
+
+class TestReinforceLossLiger:
+    """Cover ``_reinforce_loss_liger``. The autograd Function it wraps
+    requires ``liger-kernel`` but the wrapper (lm_head pre-hook capture →
+    Liger Function call → metric unpack) is testable on CPU via mocks.
+    """
+
+    def test_raises_when_liger_unavailable(self) -> None:
+        rf = _cpu_llmreinforce()
+        ids = torch.randint(0, 50, (2, 5), dtype=torch.long)
+        mask = torch.ones(2, 4, dtype=torch.float32)
+        old_lp = torch.zeros(2, 4)
+        ref_lp = torch.zeros(2, 4)
+        adv = torch.zeros(2, 4)
+
+        with patch("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", False):
+            with pytest.raises(
+                ImportError,
+                match=r"Liger REINFORCE loss was requested.*Set use_liger_loss=False",
+            ):
+                rf._reinforce_loss_liger(ids, mask, old_lp, ref_lp, adv)
+
+    def test_drives_actor_forward_and_unpacks_metrics(self) -> None:
+        """End-to-end with mocked Liger Function: actor pre-hook captures
+        hidden state, Function returns scalar loss + 4-tuple metrics."""
+        rf = _cpu_llmreinforce(beta=0.01, clip_coef=0.2)
+        B, T = 2, 5
+        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
+        mask = torch.ones(B, T - 1, dtype=torch.float32)
+        old_lp = torch.zeros(B, T - 1)
+        ref_lp = torch.zeros(B, T - 1)
+        adv = torch.randn(B, T - 1) * 0.1
+
+        fake_loss = torch.tensor(0.42, requires_grad=True)
+        fake_aux = (
+            torch.tensor(0.05),  # kl
+            torch.tensor(0.15),  # clipfrac
+            torch.tensor(0.25),  # pg_loss
+            torch.tensor(0.35),  # entropy
+        )
+
+        with (
+            patch("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True),
+            patch(
+                "agilerl.algorithms.reinforce_llm.LigerFusedLinearLLMPPOFunction"
+            ) as mock_fn,
+        ):
+            mock_fn.apply.return_value = (fake_loss, fake_aux)
+            loss, metrics = rf._reinforce_loss_liger(
+                ids,
+                mask,
+                old_lp,
+                ref_lp,
+                adv,
+            )
+
+        mock_fn.apply.assert_called_once()
+        # REINFORCE always passes beta=0 to Liger (KL is folded into the
+        # advantage upstream); kl is reported as a metric only.
+        # Find beta in the apply args — it's the 9th positional arg
+        # (input, weight, ids, mask, advs, bias, ref_lp, old_lp, beta, ...).
+        call_args = mock_fn.apply.call_args.args
+        assert call_args[8] == 0.0  # beta
+
+        assert metrics["kl"] == pytest.approx(0.05)
+        assert metrics["clipfrac"] == pytest.approx(0.15)
+        assert metrics["pg_loss"] == pytest.approx(0.25)
+        assert metrics["entropy"] == pytest.approx(0.35)
+        assert loss is fake_loss

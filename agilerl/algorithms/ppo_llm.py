@@ -15,6 +15,10 @@ if HAS_LIGER_KERNEL:
     from agilerl.algorithms.core.fused_llm_ppo_loss import (
         LigerFusedLinearLLMPPOFunction,
     )
+else:
+    # Keep the name resolvable when liger-kernel isn't installed so unit
+    # tests can patch it. ``_ppo_loss_liger`` guards against actual use.
+    LigerFusedLinearLLMPPOFunction = None  # type: ignore[assignment]
 from agilerl.protocols import (
     LoraConfigProtocol,
     MultiTurnEnv,
