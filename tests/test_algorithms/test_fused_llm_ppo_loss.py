@@ -19,29 +19,31 @@ from agilerl.algorithms.core.fused_llm_ppo_loss import (
 )
 
 
-def test_no_liger_fallback_resolves_module_with_none_function(monkeypatch):
+def test_no_liger_fallback_resolves_module_with_none_function():
     """When ``HAS_LIGER_KERNEL=False``, the module must still import
     cleanly: the ``LigerFusedLinearPPOBase`` name is stubbed to ``object``
     so the class definition resolves, then the public symbol
     ``LigerFusedLinearLLMPPOFunction`` is reassigned to ``None`` so
     callers' ``is None`` guard fires. This branch is unreachable on
     Linux CI (Liger is installed) and is the only platform-fallback
-    path coverage source — exercise it explicitly via re-import."""
+    path coverage source — exercise it explicitly via ``importlib.reload``,
+    which preserves module identity (no stale ``sys.modules`` entries to
+    confuse later tests that imported the original module).
+    """
     import agilerl
+    import agilerl.algorithms.core.fused_llm_ppo_loss as mod
 
-    monkeypatch.setattr(agilerl, "HAS_LIGER_KERNEL", False)
-    monkeypatch.delitem(sys.modules, "agilerl.algorithms.core.fused_llm_ppo_loss")
+    original_has_liger = agilerl.HAS_LIGER_KERNEL
     try:
-        reloaded = importlib.import_module("agilerl.algorithms.core.fused_llm_ppo_loss")
-        assert reloaded.LigerFusedLinearLLMPPOFunction is None
+        agilerl.HAS_LIGER_KERNEL = False
+        importlib.reload(mod)
+        assert mod.LigerFusedLinearLLMPPOFunction is None
         # ``LigerFusedLinearPPOBase`` is the stub object base used so the
         # class body can be defined without Liger installed.
-        assert reloaded.LigerFusedLinearPPOBase is object
+        assert mod.LigerFusedLinearPPOBase is object
     finally:
-        # Re-import with the original ``HAS_LIGER_KERNEL`` to leave the
-        # module cache in its pristine state for other tests in this run.
-        sys.modules.pop("agilerl.algorithms.core.fused_llm_ppo_loss", None)
-        importlib.import_module("agilerl.algorithms.core.fused_llm_ppo_loss")
+        agilerl.HAS_LIGER_KERNEL = original_has_liger
+        importlib.reload(mod)
 
 
 @pytest.mark.parametrize(
@@ -52,23 +54,31 @@ def test_no_liger_fallback_resolves_module_with_none_function(monkeypatch):
         ("agilerl.algorithms.reinforce_llm", "LigerFusedLinearLLMPPOFunction"),
     ],
 )
-def test_no_liger_fallback_sets_symbol_to_none(
-    monkeypatch, module_path: str, symbol: str
-) -> None:
+def test_no_liger_fallback_sets_symbol_to_none(module_path: str, symbol: str) -> None:
     """Each LLM-algo module has an ``if HAS_LIGER_KERNEL: from … import
     LigerFusedLinear*; else: LigerFusedLinear* = None`` guard at the top.
     The ``else`` branch is unreachable on Linux CI (Liger installed), so
-    exercise it explicitly via module reload with ``HAS_LIGER_KERNEL=False``."""
+    exercise it via ``importlib.reload`` with ``HAS_LIGER_KERNEL=False``.
+
+    Using ``reload`` (not ``pop`` + ``import_module``) preserves module
+    identity, so other test files' captured class references — e.g.
+    ``test_ppo_llm.py``'s ``from agilerl.algorithms.ppo_llm import PPO``
+    — continue to point at the same module after this test finishes.
+    Restore is handled in the ``finally`` block, not by ``monkeypatch``,
+    so the original module state is rebuilt with the original
+    ``HAS_LIGER_KERNEL`` regardless of teardown ordering.
+    """
     import agilerl
 
-    monkeypatch.setattr(agilerl, "HAS_LIGER_KERNEL", False)
-    monkeypatch.delitem(sys.modules, module_path, raising=False)
+    mod = importlib.import_module(module_path)
+    original_has_liger = agilerl.HAS_LIGER_KERNEL
     try:
-        reloaded = importlib.import_module(module_path)
-        assert getattr(reloaded, symbol) is None
+        agilerl.HAS_LIGER_KERNEL = False
+        importlib.reload(mod)
+        assert getattr(mod, symbol) is None
     finally:
-        sys.modules.pop(module_path, None)
-        importlib.import_module(module_path)
+        agilerl.HAS_LIGER_KERNEL = original_has_liger
+        importlib.reload(mod)
 
 
 def test_llm_ppo_loss_fn_with_old_per_token_logps_none_falls_back_to_detached():
