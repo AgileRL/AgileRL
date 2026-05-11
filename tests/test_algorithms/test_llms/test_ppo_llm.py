@@ -1094,11 +1094,6 @@ class TestPPOTest:
         assert ppo.fitness[-1] == pytest.approx(float(out))
 
 
-# ---------------------------------------------------------------------------
-# Liger fused loss path
-# ---------------------------------------------------------------------------
-
-
 class TestPPOLossLiger:
     """Cover the fused-linear PPO loss method ``_ppo_loss_liger``. The
     autograd Function it wraps requires ``liger-kernel``, but the wrapper

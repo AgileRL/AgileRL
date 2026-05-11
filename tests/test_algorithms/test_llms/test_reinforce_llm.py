@@ -962,11 +962,6 @@ class TestREINFORCETest:
         assert rf.fitness[-1] == pytest.approx(float(out))
 
 
-# ---------------------------------------------------------------------------
-# Liger fused loss path
-# ---------------------------------------------------------------------------
-
-
 class TestReinforceLossLiger:
     """Cover ``_reinforce_loss_liger``. The autograd Function it wraps
     requires ``liger-kernel`` but the wrapper (lm_head pre-hook capture →
