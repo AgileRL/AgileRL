@@ -521,7 +521,10 @@ class TestLigerFusedLinearLLMPPOFunction:
     def _build_inputs(B, T, V, H, *, with_ref):
         torch.manual_seed(0)
         hidden = torch.randn(B, T, H, dtype=torch.float32, requires_grad=True)
-        weight = torch.randn(V, H, dtype=torch.float32, requires_grad=True) * 0.02
+        # Scale before setting requires_grad — otherwise the multiply
+        # makes ``weight`` a non-leaf tensor and ``weight.grad`` won't
+        # populate after backward().
+        weight = (torch.randn(V, H, dtype=torch.float32) * 0.02).requires_grad_(True)
         target_ids = torch.randint(0, V, (B, T))
         mask = torch.ones(B, T, dtype=torch.float32)
         adv = torch.randn(B, T, dtype=torch.float32) * 0.1
