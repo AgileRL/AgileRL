@@ -591,37 +591,35 @@ class REINFORCE(LLMAlgorithm):
         ref_log_probs = batch_reference_log_probs.to(self.device).contiguous()
         advantages = batch_advantages.to(self.device).contiguous()
 
+        # Identity-patch lm_head so the actor forward outputs the last hidden
+        # state (B, T, H) directly instead of computing the full (B, T, V)
+        # logits only to discard them. lm_head_weight is passed separately to
+        # LigerFusedLinearLLMPPOFunction which handles the matmul and its grad.
         lm_head = self._get_lm_head()
         lm_head_weight = lm_head.weight
         lm_head_bias = lm_head.bias
 
-        # Capture the input to ``lm_head`` (= last hidden state) via a
-        # forward-pre-hook so we can hand it directly to the fused kernel.
-        # Same pattern as the GRPO Liger path in ``grpo._grpo_loss_liger``.
-        def _get_hidden(input_ids, attention_mask):
-            captured: list[torch.Tensor] = []
-            hook = lm_head.register_forward_pre_hook(
-                lambda _m, inputs: captured.append(inputs[0])
-            )
-            kwargs = {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "use_cache": False,
-            }
-            if self.calc_position_embeddings:
-                position_ids = attention_mask.long().cumsum(-1) - 1
-                position_ids.masked_fill_(attention_mask == 0, 1)
-                kwargs["position_ids"] = position_ids
-            try:
-                self.actor(**kwargs)
-            finally:
-                hook.remove()
-            return captured[0]
-
         attention_mask = (batch_ids != self.pad_token_id).long()
-        with self.select_adapter("actor"), self._amp_ctx():
+        kwargs: dict[str, Any] = {
+            "input_ids": batch_ids,
+            "attention_mask": attention_mask,
+            "use_cache": False,
+        }
+        if self.calc_position_embeddings:
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            kwargs["position_ids"] = position_ids
+
+        with (
+            self._patch_lm_head_to_identity(),
+            self.select_adapter("actor"),
+            self._amp_ctx(),
+        ):
             self.actor.train()
-            policy_hidden = _get_hidden(batch_ids, attention_mask)  # (B, T, H)
+            actor_output = self.actor(**kwargs)
+        policy_hidden = (
+            actor_output[0] if isinstance(actor_output, tuple) else actor_output.logits
+        )  # (B, T, H)
         target_ids = batch_ids[:, 1:].contiguous()  # (B, T-1)
         # Hidden states are aligned with target ids: predict ids[:, 1:] from
         # hidden[:, :-1]. Same shift the unfused path applies.

@@ -968,21 +968,24 @@ class PPO(LLMAlgorithm):
             adv_for_liger = advantages
 
         # ---- Actor pass (Liger fused policy + KL) ----
+        # Identity-patch lm_head so the actor forward outputs the last hidden
+        # state (B, T, H) directly instead of computing the full (B, T, V)
+        # logits only to discard them. lm_head_weight is passed separately to
+        # LigerFusedLinearLLMPPOFunction which handles the matmul and its grad.
         lm_head = self._get_lm_head()
         lm_head_weight = lm_head.weight
         lm_head_bias = lm_head.bias
 
-        captured: list[torch.Tensor] = []
-        hook = lm_head.register_forward_pre_hook(
-            lambda _m, inputs: captured.append(inputs[0])
-        )
-        try:
-            with self.select_adapter("actor"), self._amp_ctx():
-                self.actor.train()
-                self.actor(**kwargs)
-        finally:
-            hook.remove()
-        policy_hidden = captured[0]  # (B, T, H)
+        with (
+            self._patch_lm_head_to_identity(),
+            self.select_adapter("actor"),
+            self._amp_ctx(),
+        ):
+            self.actor.train()
+            actor_output = self.actor(**kwargs)
+        policy_hidden = (
+            actor_output[0] if isinstance(actor_output, tuple) else actor_output.logits
+        )  # (B, T, H)
 
         target_ids = batch_ids[:, 1:].contiguous()
         loss_pg_kl, aux = LigerFusedLinearLLMPPOFunction.apply(
@@ -1010,10 +1013,18 @@ class PPO(LLMAlgorithm):
         entropy_metric = float(aux[3].item())
 
         # ---- Critic pass (unfused — value tensor is small) ----
-        with self.select_adapter("critic"), self._amp_ctx():
+        # Identity-patch lm_head here too: only critic_output[2] (the value
+        # head) is needed; the (B, T, V) logits would otherwise be materialised
+        # and immediately discarded.
+        with (
+            self._patch_lm_head_to_identity(),
+            self.select_adapter("critic"),
+            self._amp_ctx(),
+        ):
             self.actor.train()
             critic_output = self.actor(**kwargs)
-        # Value head wrappers return ``(lm_logits, loss, value)``.
+        # Value head wrappers return ``(hidden, loss, value)`` when lm_head is
+        # identity-patched; index [2] is the same value tensor either way.
         critic_value = (
             critic_output[2]
             if isinstance(critic_output, tuple)
