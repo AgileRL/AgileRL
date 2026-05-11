@@ -1,7 +1,6 @@
 import warnings
 from typing import Any, Literal
 
-import torch.distributed as dist
 from accelerate import Accelerator
 
 from agilerl.algorithms import DPO, GRPO
@@ -33,39 +32,35 @@ def _validate_finetune_args(
     expected_type: type,
     algorithm_type_error: str,
     *,
+    checkpoint_steps: int | None = None,
     algo: Literal["grpo", "dpo", "sft"],
 ) -> None:
-    if algo in ["grpo", "dpo"]:
-        if evo_steps is not None and (tournament is None or mutation is None):
-            warnings.warn(
-                "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place.",
-                stacklevel=2,
-            )
-        if (tournament is not None and mutation is not None) and evo_steps is None:
-            msg = "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
-            raise ValueError(msg)
-        if num_epochs is not None and max_steps is not None:
-            warnings.warn(
-                "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'.",
-                stacklevel=2,
-            )
-    else:
-        if evo_steps is not None and (tournament is None or mutation is None):
-            warnings.warn(
-                "'evo_steps' is set but 'tournament' or 'mutation' is None. "
-                "Evolution will not take place.",
-                stacklevel=2,
-            )
-        if (tournament is not None and mutation is not None) and evo_steps is None:
-            msg = (
-                "'evo_steps' must be set when 'tournament' and 'mutation' are not None."
-            )
-            raise ValueError(msg)
-        if num_epochs is not None and max_steps is not None:
-            warnings.warn(
-                "'num_epochs' overrides 'max_steps'.",
-                stacklevel=2,
-            )
+    if evo_steps is not None and (tournament is None or mutation is None):
+        warnings.warn(
+            "'evo_steps' is set but at least one of 'tournament' or 'mutation' "
+            "is set to None. Evolution will not take place.",
+            stacklevel=2,
+        )
+    if (tournament is not None and mutation is not None) and evo_steps is None:
+        msg = "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
+        raise ValueError(msg)
+    if num_epochs is not None and max_steps is not None:
+        warnings.warn(
+            "'num_epochs' is set but 'max_steps' is also set. "
+            "'num_epochs' will take precedence over 'max_steps'.",
+            stacklevel=2,
+        )
+
+    evo_active = (
+        evo_steps is not None and tournament is not None and mutation is not None
+    )
+    if checkpoint_steps is not None and evo_active:
+        warnings.warn(
+            "'checkpoint_steps' is set, but evolution is active ('evo_steps', "
+            "'tournament', and 'mutation'). Periodic step-based checkpoints "
+            "are skipped while evolution is enabled.",
+            stacklevel=2,
+        )
 
     if mutation is not None:
         assert mutation.architecture_mut == 0, (
@@ -90,6 +85,7 @@ def _compute_training_steps(
     num_epochs: int | None,
     env_len: int,
     effective_data_batch_size: int,
+    pop_size: int = 1,
 ) -> tuple[int, int]:
     """Compute the number of training steps."""
     if max_steps is None and num_epochs is None:
@@ -97,7 +93,8 @@ def _compute_training_steps(
     elif max_steps is None and num_epochs is not None:
         max_steps = num_epochs * env_len
     assert max_steps is not None
-    training_steps = -(max_steps // -effective_data_batch_size)
+    steps_per_iteration = effective_data_batch_size * pop_size
+    training_steps = -(max_steps // -steps_per_iteration)
     return max_steps, training_steps
 
 
@@ -110,7 +107,7 @@ def finetune_llm_reasoning(
     wb: bool = False,
     tensorboard: bool = False,
     tensorboard_log_dir: str | None = None,
-    evo_steps: int | None = 20,
+    evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
@@ -122,7 +119,7 @@ def finetune_llm_reasoning(
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-) -> None:
+) -> PopulationType:
     """Finetunes a population of GRPOs on a ReasoningGym environment.
 
     :param pop: Population of GRPOs to finetune
@@ -165,6 +162,8 @@ def finetune_llm_reasoning(
     :type max_steps: int, optional
     :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps, defaults to None
     :type num_epochs: int, optional
+    :return: The finetuned population.
+    :rtype: PopulationType
     """
     _validate_finetune_args(
         evo_steps,
@@ -175,9 +174,10 @@ def finetune_llm_reasoning(
         pop,
         GRPO,
         (
-            "The algorithm must be GRPO for reasoning-based reinforcement learning."
+            "The algorithm must be GRPO for reasoning-based reinforcement learning. "
             f"Got {type(pop[0])} instead."
         ),
+        checkpoint_steps=checkpoint_steps,
         algo="grpo",
     )
     init_hp = (
@@ -188,9 +188,7 @@ def finetune_llm_reasoning(
         if init_hp is None
         else init_hp
     )
-    data_increment = (
-        getattr(dist, "get_world_size", lambda: 1)() if dist.is_initialized() else 1
-    )
+    data_increment = accelerator.num_processes if accelerator is not None else 1
     effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
 
     if wb:
@@ -199,13 +197,8 @@ def finetune_llm_reasoning(
         init_hp["distributed_training"] = accelerator is not None
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
 
-    if max_steps is None and num_epochs is None:
-        max_steps = len(env)
-    elif max_steps is None and num_epochs is not None:
-        max_steps = num_epochs * len(env)
-
     max_steps, training_steps = _compute_training_steps(
-        max_steps, num_epochs, len(env), effective_data_batch_size
+        max_steps, num_epochs, len(env), effective_data_batch_size, len(pop)
     )
 
     pbar = default_progress_bar(max_steps, accelerator)
@@ -230,7 +223,10 @@ def finetune_llm_reasoning(
         loggers=loggers,
     )
 
-    # calling env.reset() supplies the first batch of training data
+    total_steps = 0
+    next_checkpoint_step = checkpoint_steps
+    max_steps_checkpoint_saved = False
+
     prompts = env.reset(reset_dataloaders=True)
     for i in range(training_steps):
         if accelerator is not None:
@@ -241,12 +237,9 @@ def finetune_llm_reasoning(
             agent.init_evo_step()
 
             completion_ids, action_masks = agent.get_action(prompts)
-
-            # Use the reward function stored in env.step to calculate reward
             next_prompts, rewards = env.step(completion_ids)
 
             experiences = (completion_ids, action_masks, rewards)
-
             _agg_loss, _agg_kl = agent.learn(experiences)
 
             agg_rewards = safe_aggregate_metrics(accelerator, rewards)
@@ -258,6 +251,7 @@ def finetune_llm_reasoning(
 
             agent.add_scores([float(agg_rewards)])
             agent.finalize_evo_step(env.data_batch_size_per_gpu)
+            total_steps += effective_data_batch_size
 
         prompts = next_prompts
         pbar.update(effective_data_batch_size)
@@ -292,18 +286,34 @@ def finetune_llm_reasoning(
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-
-        elif (i + 1) * effective_data_batch_size % max_steps == 0 or (
-            checkpoint_steps is not None
-            and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
-        ):
-            save_llm_checkpoint(agent, elite_path)
+        else:
+            checkpoint_due = False
+            if checkpoint_steps is not None:
+                while (
+                    next_checkpoint_step is not None
+                    and total_steps >= next_checkpoint_step
+                ):
+                    checkpoint_due = True
+                    next_checkpoint_step += checkpoint_steps
+            if total_steps >= max_steps and not max_steps_checkpoint_saved:
+                checkpoint_due = True
+                max_steps_checkpoint_saved = True
+            if checkpoint_due:
+                save_llm_checkpoint(agent, elite_path)
 
         if env.num_epochs == num_epochs:
             break
 
+    if save_elite and elite_path is not None:
+        elite = max(
+            population.agents,
+            key=lambda a: a.fitness[-1] if a.fitness else float("-inf"),
+        )
+        save_llm_checkpoint(elite, elite_path)
+
     population.finish()
     pbar.close()
+    return population.agents
 
 
 SupportedPreference = DPO
@@ -318,7 +328,7 @@ def finetune_llm_preference(
     wb: bool = False,
     tensorboard: bool = False,
     tensorboard_log_dir: str | None = None,
-    evo_steps: int | None = 20,
+    evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
@@ -329,7 +339,50 @@ def finetune_llm_preference(
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-) -> None:
+) -> PopulationType:
+    """Finetune a population of DPO agents on pairwise preference data.
+
+    :param pop: Population of DPO agents to finetune.
+    :type pop: list[DPO]
+    :param env: PreferenceGym environment wrapping the dataset.
+    :type env: PreferenceGym
+    :param init_hp: Initial hyperparameters for the population, defaults to None
+    :type init_hp: dict, optional
+    :param save_elite: Whether to save the elite model, defaults to None
+    :type save_elite: bool, optional
+    :param elite_path: Directory for checkpoints, defaults to None
+    :type elite_path: str, optional
+    :param wb: Whether to use Weights and Biases, defaults to False
+    :type wb: bool, optional
+    :param tensorboard: TensorBoard tracking, defaults to False
+    :type tensorboard: bool, optional
+    :param tensorboard_log_dir: Directory for TensorBoard logs, defaults to None
+    :type tensorboard_log_dir: str, optional
+    :param evo_steps: Number of steps between evolution, defaults to None
+    :type evo_steps: int, optional
+    :param checkpoint_steps: Number of steps between checkpoints, defaults to None
+    :type checkpoint_steps: int, optional
+    :param tournament: Tournament selection object, defaults to None
+    :type tournament: TournamentSelection, optional
+    :param mutation: Mutation object, defaults to None
+    :type mutation: Mutations, optional
+    :param wandb_api_key: Wandb API key, defaults to None
+    :type wandb_api_key: str, optional
+    :param wandb_kwargs: Additional kwargs to pass to wandb.init()
+    :type wandb_kwargs: dict, optional
+    :param evaluation_interval: Number of steps between evaluation, defaults to 10
+    :type evaluation_interval: int, optional
+    :param verbose: Whether to print verbose output, defaults to True
+    :type verbose: bool, optional
+    :param accelerator: Accelerator object, defaults to None
+    :type accelerator: Accelerator, optional
+    :param max_steps: Maximum number of steps to run, defaults to None
+    :type max_steps: int, optional
+    :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps, defaults to None
+    :type num_epochs: int, optional
+    :return: The finetuned population.
+    :rtype: PopulationType
+    """
     _validate_finetune_args(
         evo_steps,
         tournament,
@@ -339,9 +392,10 @@ def finetune_llm_preference(
         pop,
         DPO,
         (
-            "The algorithm must be DPO for preference-based reinforcement learning."
+            "The algorithm must be DPO for preference-based reinforcement learning. "
             f"Got {type(pop[0])} instead."
         ),
+        checkpoint_steps=checkpoint_steps,
         algo="dpo",
     )
     init_hp = (
@@ -362,12 +416,9 @@ def finetune_llm_preference(
         init_hp["distributed_training"] = accelerator is not None
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
 
-    if max_steps is None and num_epochs is None:
-        max_steps = len(env)
-    elif max_steps is None and num_epochs is not None:
-        max_steps = num_epochs * len(env)
-
-    training_steps = -(max_steps // -effective_data_batch_size)
+    max_steps, training_steps = _compute_training_steps(
+        max_steps, num_epochs, len(env), effective_data_batch_size, len(pop)
+    )
 
     pbar = default_progress_bar(max_steps, accelerator)
 
@@ -391,6 +442,10 @@ def finetune_llm_preference(
         loggers=loggers,
     )
 
+    total_steps = 0
+    next_checkpoint_step = checkpoint_steps
+    max_steps_checkpoint_saved = False
+
     prompts = env.reset(reset_dataloaders=True)
     for i in range(training_steps):
         if accelerator is not None:
@@ -406,6 +461,7 @@ def finetune_llm_preference(
 
             agent.add_scores([float(chosen_reward - rejected_reward)])
             agent.finalize_evo_step(env.data_batch_size_per_gpu)
+            total_steps += effective_data_batch_size
 
         prompts = next_prompts
         pbar.update(effective_data_batch_size)
@@ -441,18 +497,34 @@ def finetune_llm_preference(
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-
-        elif (i + 1) * effective_data_batch_size % max_steps == 0 or (
-            checkpoint_steps is not None
-            and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
-        ):
-            save_llm_checkpoint(agent, elite_path)
+        else:
+            checkpoint_due = False
+            if checkpoint_steps is not None:
+                while (
+                    next_checkpoint_step is not None
+                    and total_steps >= next_checkpoint_step
+                ):
+                    checkpoint_due = True
+                    next_checkpoint_step += checkpoint_steps
+            if total_steps >= max_steps and not max_steps_checkpoint_saved:
+                checkpoint_due = True
+                max_steps_checkpoint_saved = True
+            if checkpoint_due:
+                save_llm_checkpoint(agent, elite_path)
 
         if env.num_epochs == num_epochs:
             break
 
+    if save_elite and elite_path is not None:
+        elite = max(
+            population.agents,
+            key=lambda a: a.fitness[-1] if a.fitness else float("-inf"),
+        )
+        save_llm_checkpoint(elite, elite_path)
+
     population.finish()
     pbar.close()
+    return population.agents
 
 
 def finetune_llm_sft(
@@ -475,7 +547,7 @@ def finetune_llm_sft(
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-) -> None:
+) -> PopulationType:
     """Finetune a population of SFT agents on (prompt, response) pairs.
 
     Each training step draws a batch from ``env`` and minimises the cross-entropy
@@ -520,6 +592,8 @@ def finetune_llm_sft(
     :type max_steps: int, optional
     :param num_epochs: Dataset passes; overrides max_steps when set, defaults to None
     :type num_epochs: int, optional
+    :return: The finetuned population.
+    :rtype: PopulationType
     """
     _validate_finetune_args(
         evo_steps,
@@ -530,6 +604,7 @@ def finetune_llm_sft(
         pop,
         SFT,
         f"Population must contain SFT agents. Got {type(pop[0])}.",
+        checkpoint_steps=checkpoint_steps,
         algo="sft",
     )
     init_hp = (
@@ -551,7 +626,7 @@ def finetune_llm_sft(
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
 
     max_steps, training_steps = _compute_training_steps(
-        max_steps, num_epochs, len(env), effective_data_batch_size
+        max_steps, num_epochs, len(env), effective_data_batch_size, len(pop)
     )
 
     pbar = default_progress_bar(max_steps, accelerator)
@@ -576,12 +651,17 @@ def finetune_llm_sft(
         loggers=loggers,
     )
 
+    total_steps = 0
+    next_checkpoint_step = checkpoint_steps
+    max_steps_checkpoint_saved = False
+
     prompts = env.reset(reset_dataloaders=True)
     for i in range(training_steps):
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
         for agent in population.agents:
+            agent.set_reference_policy(env.num_epochs)
             agent.init_evo_step()
 
             agg_loss, _agg_perplexity = agent.learn(prompts)
@@ -589,6 +669,7 @@ def finetune_llm_sft(
 
             agent.add_scores([-agg_loss])
             agent.finalize_evo_step(env.data_batch_size_per_gpu)
+            total_steps += effective_data_batch_size
 
         prompts = next_prompts
         pbar.update(effective_data_batch_size)
@@ -621,15 +702,31 @@ def finetune_llm_sft(
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-
-        elif (i + 1) * effective_data_batch_size % max_steps == 0 or (
-            checkpoint_steps is not None
-            and (i + 1) * effective_data_batch_size % checkpoint_steps == 0
-        ):
-            save_llm_checkpoint(agent, elite_path)
+        else:
+            checkpoint_due = False
+            if checkpoint_steps is not None:
+                while (
+                    next_checkpoint_step is not None
+                    and total_steps >= next_checkpoint_step
+                ):
+                    checkpoint_due = True
+                    next_checkpoint_step += checkpoint_steps
+            if total_steps >= max_steps and not max_steps_checkpoint_saved:
+                checkpoint_due = True
+                max_steps_checkpoint_saved = True
+            if checkpoint_due:
+                save_llm_checkpoint(agent, elite_path)
 
         if env.num_epochs == num_epochs:
             break
 
+    if save_elite and elite_path is not None:
+        elite = max(
+            population.agents,
+            key=lambda a: a.fitness[-1] if a.fitness else float("-inf"),
+        )
+        save_llm_checkpoint(elite, elite_path)
+
     population.finish()
     pbar.close()
+    return population.agents

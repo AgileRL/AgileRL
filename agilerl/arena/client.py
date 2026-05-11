@@ -397,6 +397,7 @@ class ArenaClient:
             timeout=self._upload_timeout,
         ).collect()
 
+    # TODO: Check this works
     def delete_environment(self, *, name: str, version: str | None = None) -> Any:
         """Delete an environment version.
 
@@ -406,10 +407,11 @@ class ArenaClient:
         :type version: str | None
         """
         if version is None:
-            # Fetch existing versions (assuming you have a list_environments method)
+            # Fetch existing versions
             versions_data = self.list_environments(name=name)
             if name in versions_data:
                 versions_data = versions_data[name]
+
             version_list = versions_data.keys()
 
             if not version_list:
@@ -451,13 +453,12 @@ class ArenaClient:
     ) -> dict[str, Any]:
         """Duplicate a custom environment version to a new version name.
 
-        Copies registered artifacts (and validation outputs) and creates a new
-        version row, same as the platform **POST**
-        ``/api/custom-gym-env-impls/{id}/copy`` flow.
-
         :param name: Environment name.
+        :type name: str
         :param new_version_name: New ``version_name`` for the duplicate (e.g. ``v2``).
+        :type new_version_name: str
         :param version: Source version; when omitted, the latest version is used.
+        :type version: str | None
         """
         payload: dict[str, Any] = {
             "name": name,
@@ -546,8 +547,7 @@ class ArenaClient:
 
     # TODO: Update HPO params (maybe leave for v2 if too complicated)
 
-    # Should be a rich table sorted by evaluation score descending showing
-    # [steps, training_score, evaluation_score, size_mb]
+    # TODO: Check this works
     def list_checkpoints(self, experiment_name: str) -> list[dict[str, Any]]:
         """List all checkpoints for an experiment.
 
@@ -562,6 +562,7 @@ class ArenaClient:
             params={"experiment_name": experiment_name},
         )
 
+    # TODO: Check this works
     def preview_experiment_metrics_csv(
         self,
         experiment_name: str,
@@ -576,9 +577,15 @@ class ArenaClient:
         Omit ``metrics`` to include all columns.
 
         :param experiment_name: Experiment name (latest match in scope).
+        :type experiment_name: str
         :param preview_rows: Maximum number of **data** rows in the CSV (server-capped).
+        :type preview_rows: int
         :param metrics: Metric column names to include (repeat query param ``metric``).
+        :type metrics: Sequence[str] | None
         :param project: Optional exact project name.
+        :type project: str | None
+        :returns: A tuple of the metrics payload, content type, and disposition.
+        :rtype: tuple[bytes, str | None, str | None]
         """
         params: list[tuple[str, Any]] = [
             ("experiment_name", experiment_name),
@@ -608,9 +615,13 @@ class ArenaClient:
         use :meth:`preview_experiment_metrics_csv`.
 
         :param experiment_name: Experiment name (latest updated match in scope).
+        :type experiment_name: str
         :param project: Optional exact project name in the current org.
+        :type project: str | None
         :param details: When True, the API returns ``{\"experiment_id\", \"metrics\"}``.
+        :type details: bool
         :returns: Sorted unique metric names, or that object when ``details`` is True.
+        :rtype: list[str] | dict[str, Any]
         """
         params: dict[str, Any] = {"experiment_name": experiment_name}
         if project is not None:
@@ -624,15 +635,13 @@ class ArenaClient:
         )
 
     def list_resources(self) -> dict[str, Any]:
-        """List compute resource tiers for training (CLI resource_id values).
+        """List compute resource tiers for Arena training jobs.
 
-        Calls **GET** ``/api/cli/v1/resources/list`` (see ``list_resources`` in
-        ``agilerl-platform`` ``cli.rs``). The JSON body uses camelCase:
-        ``resourceIds`` (public tier ids usable as ``resource_id`` on submit)
-        and ``tiers`` (map of id → ``numCpus``, ``numGpus``, ``gpuType``,
-        ``ramGb``, ``pricePerNodeHour``).
+        Any of the listed resource IDs can be used as the `resource_id` parameter when submitting a training job
+        through `ArenaClient.submit_experiment`.
 
-        :returns: Unwrapped ``data`` object from the API envelope when present.
+        :returns: A dictionary of resource tiers.
+        :rtype: dict[str, Any]
         """
         return self._request("GET", "/api/cli/v1/resources/list")
 
@@ -675,20 +684,6 @@ class ArenaClient:
             json={"experiment_name": name},
         )
 
-    def stop_job(self, job_name: str) -> Any:
-        """Deprecated. Use :meth:`stop_experiment` with the experiment (job) name.
-
-        The former URL was not a platform route; this now calls the CLI stop API.
-        """
-        import warnings
-
-        warnings.warn(
-            "ArenaClient.stop_job is deprecated; use stop_experiment(...).",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.stop_experiment(job_name)
-
     # -------------------------------------------------------------------------
     ### Projects ###
     # -------------------------------------------------------------------------
@@ -717,14 +712,6 @@ class ArenaClient:
     ### Inference ###
     # -------------------------------------------------------------------------
 
-    def deploy_agent(self, experiment_name: str, checkpoint: str | None = None) -> Any:
-        """Create an inference deployment from an experiment checkpoint."""
-        return self._request(
-            "POST",
-            "/api/cli/v1/inference/deploy",
-            json={"experiment_name": experiment_name, "checkpoint": checkpoint},
-        )
-
     @staticmethod
     def _inference_deployments_list_params(
         *,
@@ -732,7 +719,6 @@ class ArenaClient:
         experiment_name: str | None = None,
         project_name: str | None = None,
     ) -> dict[str, Any]:
-        """Query string params for ``GET /api/cli/v1/inference/deployments/list``."""
         params: dict[str, Any] = {}
         if name is not None and name.strip():
             params["name"] = name.strip()
@@ -744,6 +730,22 @@ class ArenaClient:
             params["projectName"] = pn
         return params
 
+    def deploy_agent(self, experiment_name: str, checkpoint: str | None = None) -> Any:
+        """Create an inference deployment from an experiment checkpoint.
+
+        :param experiment_name: The name of the experiment to deploy.
+        :type experiment_name: str
+        :param checkpoint: The checkpoint to deploy. If None, deploy the best checkpoint.
+        :type checkpoint: str | None
+        :returns: A dictionary containing the deployment result.
+        :rtype: dict[str, Any]
+        """
+        return self._request(
+            "POST",
+            "/api/cli/v1/inference/deploy",
+            json={"experiment_name": experiment_name, "checkpoint": checkpoint},
+        )
+
     def list_inference_deployments(
         self,
         *,
@@ -751,7 +753,17 @@ class ArenaClient:
         experiment_name: str | None = None,
         project_name: str | None = None,
     ) -> list[dict[str, Any]]:
-        """List inference deployments visible to the authenticated user."""
+        """List inference deployments available to the user.
+
+        :param name: The name of the deployment to list.
+        :type name: str | None
+        :param experiment_name: The name of the experiment to list deployments for.
+        :type experiment_name: str | None
+        :param project_name: The name of the project to list deployments for.
+        :type project_name: str | None
+        :returns: A list of deployments.
+        :rtype: list[dict[str, Any]]
+        """
         q = self._inference_deployments_list_params(
             name=name,
             experiment_name=experiment_name,
@@ -793,19 +805,18 @@ class ArenaClient:
             "share this deployment name."
         )
         if len(rows) == 0:
-            raise ArenaAPIError(
-                f"No deployment found named {deployment_name!r}.",
-                cli_hint=hint,
-            )
+            msg = f"No deployment found named {deployment_name!r}."
+            raise ArenaAPIError(msg, cli_hint=hint)
         if len(rows) > 1:
-            raise ArenaAPIError(
-                f"Multiple deployments named {deployment_name!r} ({len(rows)} matches).",
-                cli_hint=hint,
+            msg = (
+                f"Multiple deployments named {deployment_name!r} ({len(rows)} matches)."
             )
+            raise ArenaAPIError(msg, cli_hint=hint)
 
         row = rows[0]
         if not isinstance(row, dict):
-            raise ArenaAPIError("Unexpected deployment list response shape.")
+            msg = "Unexpected deployment list response shape."
+            raise ArenaAPIError(msg)
         return row
 
     @staticmethod
@@ -816,20 +827,23 @@ class ArenaClient:
             spec = {}
         url = spec.get("url")
         if not isinstance(url, str) or not url.strip():
+            msg = "Deployment has no inference URL (spec.url)."
             raise ArenaAPIError(
-                "Deployment has no inference URL (spec.url).",
+                msg,
                 cli_hint="Wait until provisioning completes, then retry with --refresh.",
             )
 
         raw_key = row.get("api_key")
         if raw_key is None:
+            msg = "Deployment record had no api_key."
             raise ArenaAPIError(
-                "Deployment record had no api_key.",
+                msg,
                 cli_hint="Retry with arena login and --refresh.",
             )
         api_key = str(raw_key).strip()
         if not api_key:
-            raise ArenaAPIError("Deployment api_key was empty.")
+            msg = "Deployment api_key was empty."
+            raise ArenaAPIError(msg)
 
         return url.strip(), api_key
 

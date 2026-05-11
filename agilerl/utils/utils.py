@@ -32,7 +32,7 @@ from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.logger import StdOutLogger, TensorboardLogger, WandbLogger
+from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
 from agilerl.modules import EvolvableModule
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
@@ -908,7 +908,9 @@ def init_loggers(
     verbose: bool = True,
     wb: bool = False,
     tensorboard: bool = False,
+    csv: bool = False,
     tensorboard_log_dir: str | None = None,
+    csv_log_dir: str | None = None,
     accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
     wandb_kwargs: dict[str, Any] | None = None,
@@ -931,8 +933,12 @@ def init_loggers(
     :type wb: bool
     :param tensorboard: Enable TensorBoard logging, defaults to False.
     :type tensorboard: bool
+    :param csv: Enable CSV logging, defaults to False.
+    :type csv: bool
     :param tensorboard_log_dir: Directory for TensorBoard event files, defaults to None.
     :type tensorboard_log_dir: str | None
+    :param csv_log_dir: Directory for CSV files, defaults to None.
+    :type csv_log_dir: str | None
     :param accelerator: HuggingFace Accelerator for distributed training, defaults to None.
     :type accelerator: Accelerator | None
     :param wandb_api_key: API key for Weights & Biases, defaults to None.
@@ -974,6 +980,8 @@ def init_loggers(
                 accelerator=accelerator,
             )
         )
+    if csv:
+        loggers.append(CSVLogger(csv_log_dir))
 
     return loggers
 
