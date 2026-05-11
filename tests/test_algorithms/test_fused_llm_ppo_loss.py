@@ -44,6 +44,70 @@ def test_no_liger_fallback_resolves_module_with_none_function(monkeypatch):
         importlib.import_module("agilerl.algorithms.core.fused_llm_ppo_loss")
 
 
+@pytest.mark.parametrize(
+    "module_path,symbol",
+    [
+        ("agilerl.algorithms.grpo", "LigerFusedLinearGRPOFunction"),
+        ("agilerl.algorithms.ppo_llm", "LigerFusedLinearLLMPPOFunction"),
+        ("agilerl.algorithms.reinforce_llm", "LigerFusedLinearLLMPPOFunction"),
+    ],
+)
+def test_no_liger_fallback_sets_symbol_to_none(
+    monkeypatch, module_path: str, symbol: str
+) -> None:
+    """Each LLM-algo module has an ``if HAS_LIGER_KERNEL: from … import
+    LigerFusedLinear*; else: LigerFusedLinear* = None`` guard at the top.
+    The ``else`` branch is unreachable on Linux CI (Liger installed), so
+    exercise it explicitly via module reload with ``HAS_LIGER_KERNEL=False``."""
+    import agilerl
+
+    monkeypatch.setattr(agilerl, "HAS_LIGER_KERNEL", False)
+    monkeypatch.delitem(sys.modules, module_path, raising=False)
+    try:
+        reloaded = importlib.import_module(module_path)
+        assert getattr(reloaded, symbol) is None
+    finally:
+        sys.modules.pop(module_path, None)
+        importlib.import_module(module_path)
+
+
+def test_llm_ppo_loss_fn_with_old_per_token_logps_none_falls_back_to_detached():
+    """``llm_ppo_loss_fn`` allows ``old_per_token_logps=None`` for callers
+    that forgot to pass it — fallback uses the current logprobs detached
+    (ratio == 1, gradient still well-defined). Covers the
+    ``if old_per_token_logps is None`` branch in the math fn."""
+    torch.manual_seed(0)
+    B, T, V = 2, 4, 16
+    raw = torch.randn(B, T, V, requires_grad=True)
+    log_probs = torch.log_softmax(raw, dim=-1)
+    target_ids = torch.randint(0, V, (B, T))
+    mask = torch.ones(B, T, dtype=torch.float32)
+    adv = torch.randn(B, T) * 0.1
+
+    loss_with_none, metrics_with_none = llm_ppo_loss_fn(
+        log_probs=log_probs,
+        selected_token_ids=target_ids,
+        attention_mask=mask,
+        advantages=adv,
+        full_attention_mask=mask,
+        old_per_token_logps=None,
+        beta=0.0,
+    )
+
+    # When old_per_token_logps falls back to per_token_logps.detach(),
+    # ratio is exp(0) == 1 everywhere; clipped_ratio is also 1; both
+    # max(-adv * ratio, -adv * clipped_ratio) terms equal -adv. Loss
+    # reduces to -adv.mean() (all tokens unmasked).
+    expected_pg = (-adv).mean()
+    assert torch.allclose(loss_with_none, expected_pg, rtol=1e-5, atol=1e-5)
+    # clipfrac is zero — ratio == clipped_ratio everywhere
+    assert metrics_with_none[1].item() == 0.0
+    # Gradient still flows back to the raw input (detach only on the
+    # old-policy side; the current logprobs retain grad).
+    loss_with_none.backward()
+    assert raw.grad is not None
+
+
 def _unfused_reference(
     log_probs: torch.Tensor,
     target_ids: torch.Tensor,

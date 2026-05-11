@@ -353,12 +353,12 @@ class LigerFusedLinearLLMPPOFunction(LigerFusedLinearPPOBase):
                 for metric in chunk_metrics:
                     if metric.ndim == 0:
                         aggregated_metrics.append(torch.zeros((), device=metric.device))
-                    else:
+                    else:  # pragma: no cover -- llm_ppo_loss_fn only returns scalars
                         aggregated_metrics.append([])  # type: ignore[arg-type]
             for i, metric in enumerate(chunk_metrics):
                 if metric.ndim == 0:
                     aggregated_metrics[i].add_(metric)
-                else:
+                else:  # pragma: no cover -- llm_ppo_loss_fn only returns scalars
                     aggregated_metrics[i].append(metric)  # type: ignore[union-attr]
 
         chunks = max(1, _input.shape[0] // chunk_size)
@@ -399,7 +399,7 @@ class LigerFusedLinearLLMPPOFunction(LigerFusedLinearPPOBase):
 
         final_metrics: list[torch.Tensor] = []
         for metric in aggregated_metrics:
-            if isinstance(metric, list):
+            if isinstance(metric, list):  # pragma: no cover -- scalars only
                 final_metrics.append(torch.cat(metric, dim=0))
             else:
                 final_metrics.append(metric)
