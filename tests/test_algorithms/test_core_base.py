@@ -2297,6 +2297,49 @@ class TestFusedLinearLogprobsIntegration:
         assert spy.called
         assert spy.call_args.kwargs["cast_to_fp32"] is cast_to_fp32
 
+    @pytest.mark.parametrize("cast_to_fp32", [True, False])
+    @pytest.mark.parametrize("use_fused", [True, False])
+    def test_cast_logprobs_to_fp32_threaded_into_fused_model_pass(
+        self, cast_to_fp32: bool, use_fused: bool
+    ) -> None:
+        """``self.cast_logprobs_to_fp32`` also flows through the other
+        call site (``_fused_model_pass``), which is what
+        ``_fused_forward`` / ``_fused_forward_no_grad`` go through. Covers
+        both fused-linear-logprob and unfused branches of that method."""
+        torch.manual_seed(4)
+        B, T, H, V = 2, 4, 8, 64
+        agent, _ = self._build_agent(V, H, use_fused=use_fused)
+        agent.cast_logprobs_to_fp32 = cast_to_fp32
+
+        # ``_fused_model_pass`` calls ``set_fused_adapter_routing`` and
+        # ``_get_unwrapped_actor`` — stub both since the tiny test actor
+        # isn't a real PEFT model.
+        agent._get_unwrapped_actor = lambda: agent.actor
+        fused_ids = torch.randint(1, V, (B, T))
+        fused_mask = torch.ones_like(fused_ids)
+        routing = ["actor"] * B
+
+        target_kernel = (
+            "_fused_linear_logprobs_no_grad"
+            if use_fused
+            else "_memory_efficient_logits"
+        )
+        with (
+            patch(
+                "agilerl.algorithms.core.base.set_fused_adapter_routing",
+                lambda *a, **kw: None,
+            ),
+            patch.object(
+                LLMAlgorithm,
+                target_kernel,
+                wraps=getattr(LLMAlgorithm, target_kernel),
+            ) as spy,
+        ):
+            with torch.no_grad():
+                agent._fused_model_pass(fused_ids, fused_mask, routing)
+        assert spy.called
+        assert spy.call_args.kwargs["cast_to_fp32"] is cast_to_fp32
+
 
 class TestLLMCreatePromptMasks:
     def test_creates_correct_mask(self):
