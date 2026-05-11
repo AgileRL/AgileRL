@@ -7,6 +7,9 @@ benchmarks since Liger is a CUDA-leaning dependency.
 
 from __future__ import annotations
 
+import importlib
+import sys
+
 import pytest
 import torch
 
@@ -14,6 +17,31 @@ from agilerl.algorithms.core.fused_llm_ppo_loss import (
     _k3_kl,
     llm_ppo_loss_fn,
 )
+
+
+def test_no_liger_fallback_resolves_module_with_none_function(monkeypatch):
+    """When ``HAS_LIGER_KERNEL=False``, the module must still import
+    cleanly: the ``LigerFusedLinearPPOBase`` name is stubbed to ``object``
+    so the class definition resolves, then the public symbol
+    ``LigerFusedLinearLLMPPOFunction`` is reassigned to ``None`` so
+    callers' ``is None`` guard fires. This branch is unreachable on
+    Linux CI (Liger is installed) and is the only platform-fallback
+    path coverage source — exercise it explicitly via re-import."""
+    import agilerl
+
+    monkeypatch.setattr(agilerl, "HAS_LIGER_KERNEL", False)
+    monkeypatch.delitem(sys.modules, "agilerl.algorithms.core.fused_llm_ppo_loss")
+    try:
+        reloaded = importlib.import_module("agilerl.algorithms.core.fused_llm_ppo_loss")
+        assert reloaded.LigerFusedLinearLLMPPOFunction is None
+        # ``LigerFusedLinearPPOBase`` is the stub object base used so the
+        # class body can be defined without Liger installed.
+        assert reloaded.LigerFusedLinearPPOBase is object
+    finally:
+        # Re-import with the original ``HAS_LIGER_KERNEL`` to leave the
+        # module cache in its pristine state for other tests in this run.
+        sys.modules.pop("agilerl.algorithms.core.fused_llm_ppo_loss", None)
+        importlib.import_module("agilerl.algorithms.core.fused_llm_ppo_loss")
 
 
 def _unfused_reference(
