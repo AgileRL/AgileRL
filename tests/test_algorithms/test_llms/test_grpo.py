@@ -1731,6 +1731,84 @@ class TestGRPOInit:
         AcceleratorState._reset_state(True)
 
 
+class TestGRPOLigerLossDispatch:
+    """Cover the ``loss_type`` -> Liger-API dispatch table in
+    :meth:`GRPO._liger_loss`. Each branch sets up ``liger_loss_type`` /
+    ``importance_sampling_level`` / ``epsilon_*`` differently. We don't
+    care about the actual Liger call result — patch ``_get_lm_head`` and
+    ``LigerFusedLinearGRPOFunction.apply`` so the test stays CPU-only and
+    runs whether or not ``liger-kernel`` is installed."""
+
+    @pytest.mark.parametrize(
+        "loss_type,expected_liger_loss_type,expected_is_level,expected_eps_high",
+        [
+            ("cispo", "cispo", "token", "clip_coef_max"),
+            ("gspo", "grpo", "sequence", "clip_coef_max - 1.0"),
+        ],
+    )
+    def test_liger_loss_dispatches_per_loss_type(
+        self,
+        loss_type: str,
+        expected_liger_loss_type: str,
+        expected_is_level: str,
+        expected_eps_high: str,
+    ) -> None:
+        grpo = _make_cpu_grpo_for_branch_tests(loss_type=loss_type, beta=0.0)
+        fake_lm_head = nn.Linear(8, 16, bias=True)
+        fake_loss = torch.tensor(0.5, requires_grad=True)
+        fake_aux = (torch.tensor(0.1), torch.tensor(0.0))
+
+        with (
+            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+            patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
+            patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),  # noqa: avoid touching the actor's forward
+            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
+            patch.object(
+                LLMAlgorithm,
+                "select_adapter",
+                lambda self, name: nullcontext(),
+            ),
+        ):
+            mock_fn.apply.return_value = (fake_loss, fake_aux)
+            # Provide a stand-in for the pre-hook capture mechanism: when the
+            # actor is called inside ``_get_hidden``, immediately invoke the
+            # registered pre-hook with a fake hidden-state tensor so the
+            # captured list is populated.
+            hidden = torch.randn(1, 2, 8, requires_grad=True)
+
+            def _fake_actor_call(**kwargs):
+                # Fire each forward-pre-hook on the fake lm_head so the
+                # capture list gets populated.
+                for hook in fake_lm_head._forward_pre_hooks.values():
+                    hook(fake_lm_head, (hidden,))
+                return MagicMock()
+
+            grpo.actor.side_effect = _fake_actor_call
+
+            grpo._liger_loss(
+                batch_ids=torch.ones((1, 2), dtype=torch.long),
+                action_mask=torch.ones((1, 1), dtype=torch.bool),
+                advantages=torch.ones((1,), dtype=torch.float32),
+                old_log_probs=torch.zeros((1, 1), dtype=torch.float32),
+                reference_log_probs=torch.zeros((1, 1), dtype=torch.float32),
+            )
+
+        # Inspect the kwargs passed to ``LigerFusedLinearGRPOFunction.apply``.
+        # ``apply`` takes positional args in a fixed order — pluck the ones we
+        # care about by index based on ``_liger_loss``'s call signature:
+        # (hidden, weight, target_ids, mask, adv, bias, ref, old, None,
+        #  None, None, beta, epsilon_low, epsilon_high, liger_loss_type,
+        #  max_output_tokens, importance_sampling_level, ...).
+        call_args = mock_fn.apply.call_args
+        positional = call_args.args
+        assert positional[14] == expected_liger_loss_type
+        assert positional[16] == expected_is_level
+        if expected_eps_high == "clip_coef_max":
+            assert positional[13] == grpo.clip_coef_max
+        else:  # "clip_coef_max - 1.0"
+            assert positional[13] == pytest.approx(grpo.clip_coef_max - 1.0)
+
+
 class TestGRPOGetAction:
     def test_get_action_grpo_hf_path_contract(
         self,

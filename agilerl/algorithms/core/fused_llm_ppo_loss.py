@@ -317,7 +317,7 @@ class LigerFusedLinearLLMPPOFunction(LigerFusedLinearPPOBase):
                 turn_ids_chunk=turn_ids_chunk,
             )
 
-        if compiled:
+        if compiled:  # pragma: no cover -- requires torch.compile warmup
             fused_fwd_bwd = torch.compile(fused_fwd_bwd)
 
         def accumulate_chunk(

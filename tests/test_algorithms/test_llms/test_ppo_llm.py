@@ -1230,3 +1230,59 @@ class TestPPOLossLiger:
         assert call_args[-3] is not None  # turn_ids
         assert call_args[-2] is not None  # full_turn_mask
         assert call_args[-1] == 2  # max_turns
+
+
+class TestPPOLearnWithLiger:
+    """Cover the ``if self.use_liger_loss:`` branch inside ``learn()``.
+    The branch calls ``_ppo_loss_liger`` once per minibatch, runs
+    backward, and accumulates the four ``aux`` metrics + ``vf_loss``.
+    We stub ``_ppo_loss_liger`` to a fake (loss, metrics) tuple so the
+    test stays CPU-only and doesn't require ``liger-kernel``."""
+
+    def test_learn_use_liger_loss_drives_ppo_loss_liger(self, monkeypatch):
+        # ``use_liger_loss=True`` would normally trip the construct-time
+        # ``HAS_LIGER_KERNEL`` guard and fall back to ``False``. Patch the
+        # flag in both modules so PPO accepts the kwarg as-is.
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        monkeypatch.setattr("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True)
+        ppo = _cpu_llmppo(lr_actor=0.05, update_epochs=1, use_liger_loss=True)
+        assert ppo.use_liger_loss is True
+
+        fake_loss = torch.tensor(0.42, requires_grad=True)
+        fake_metrics = {
+            "kl": 0.1,
+            "entropy": 0.2,
+            "clipfrac": 0.3,
+            "pg_loss": 0.4,
+            "vf_loss": 0.5,
+        }
+        # Stub the inner loss fn — keeps the test CPU-only and isolates
+        # the use_liger_loss=True branch in learn() from the
+        # actor/critic Liger forwards.
+        ppo._ppo_loss_liger = MagicMock(return_value=(fake_loss, fake_metrics))
+        # ``clear_fused_adapter_routing`` walks the actor — stub it.
+        monkeypatch.setattr(
+            "agilerl.algorithms.ppo_llm.clear_fused_adapter_routing",
+            lambda actor: None,
+        )
+
+        vocab = 100
+        inp, mtok = 10, 8
+        seq_len = inp + mtok
+        b = 1
+        completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(b)]
+        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(b)]
+        turn_ids = torch.tensor(
+            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
+            dtype=torch.long,
+        )[:, : seq_len - 1]
+        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
+
+        learn_out = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+
+        # The Liger branch was actually exercised (not the fallback path).
+        assert ppo._ppo_loss_liger.call_count >= 1
+        # And its returned scalars made it into the aggregated metrics.
+        assert learn_out["mean_loss"] == pytest.approx(0.42, rel=1e-6)
+        assert learn_out["mean_kl"] == pytest.approx(0.1, rel=1e-6)
+        assert learn_out["mean_vf_loss"] == pytest.approx(0.5, rel=1e-6)

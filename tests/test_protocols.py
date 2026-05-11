@@ -563,3 +563,24 @@ def test_protocol_type_aliases_importable():
 
     assert NumpyObsType is not None
     assert TorchObsType is not None
+
+
+class TestMultiTurnEnvProtocol:
+    """Cover the ``pass`` bodies of :class:`agilerl.protocols.MultiTurnEnv`
+    protocol methods. A subclass that doesn't override them inherits the
+    base implementation (the bare ``pass``), so invoking the inherited
+    methods runs those statements and registers coverage."""
+
+    def test_protocol_default_method_bodies_execute(self):
+        from agilerl.protocols import MultiTurnEnv
+
+        class _PassthroughEnv(MultiTurnEnv):
+            max_turns = 1
+
+        env = _PassthroughEnv()
+        # Each call executes the inherited ``pass`` body in the protocol
+        # method. Returns ``None`` (the implicit return after ``pass``);
+        # the line gets covered regardless.
+        assert env.reset(seed=0) is None
+        assert env.step(action="noop") is None
+        assert env.close() is None

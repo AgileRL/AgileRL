@@ -1030,3 +1030,43 @@ class TestReinforceLossLiger:
         assert metrics["pg_loss"] == pytest.approx(0.25)
         assert metrics["entropy"] == pytest.approx(0.35)
         assert loss is fake_loss
+
+
+class TestREINFORCELearnWithLiger:
+    """Cover the ``if self.use_liger_loss:`` branch inside REINFORCE
+    ``learn()``. Stubs ``_reinforce_loss_liger`` to a fake (loss,
+    metrics) tuple so the test stays CPU-only."""
+
+    def test_learn_use_liger_loss_drives_reinforce_loss_liger(self, monkeypatch):
+        # Force the construct-time HAS_LIGER_KERNEL guard to allow
+        # ``use_liger_loss=True`` even on environments without
+        # ``liger-kernel`` installed.
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        monkeypatch.setattr("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True)
+        rf = _cpu_llmreinforce(lr=0.05, update_epochs=1, use_liger_loss=True)
+        assert rf.use_liger_loss is True
+
+        fake_loss = torch.tensor(0.3, requires_grad=True)
+        fake_metrics = {"kl": 0.05, "entropy": 0.15, "pg_loss": 0.25}
+        # Stub the inner loss fn — isolates the use_liger_loss=True
+        # branch in learn() from the actor Liger forward.
+        rf._reinforce_loss_liger = MagicMock(return_value=(fake_loss, fake_metrics))
+
+        vocab = 100
+        inp, mtok = 10, 8
+        seq_len = inp + mtok
+        b = 1
+        completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(b)]
+        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(b)]
+        turn_ids = torch.tensor(
+            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
+            dtype=torch.long,
+        )[:, : seq_len - 1]
+        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
+
+        learn_out = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+
+        assert rf._reinforce_loss_liger.call_count >= 1
+        assert learn_out["mean_loss"] == pytest.approx(0.3, rel=1e-6)
+        assert learn_out["mean_kl"] == pytest.approx(0.05, rel=1e-6)
+        assert learn_out["mean_pg_loss"] == pytest.approx(0.25, rel=1e-6)

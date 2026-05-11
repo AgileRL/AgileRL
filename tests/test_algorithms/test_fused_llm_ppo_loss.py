@@ -738,3 +738,38 @@ class TestLigerFusedLinearLLMPPOFunction:
         loss.backward()
         assert hidden.grad is not None
         assert weight.grad is not None
+
+    def test_backward_with_bias_accumulates_grad_bias(self) -> None:
+        """When the lm_head has a bias, the chunked backward must
+        accumulate ``grad_bias`` alongside ``grad_input`` and
+        ``grad_weight``. Covers the ``if grad_bias is not None`` branch
+        in the chunk-accumulator."""
+        B, T, V, H = 2, 4, 16, 8
+        hidden, weight, ids, mask, adv, old_lp, _ = self._build_inputs(
+            B, T, V, H, with_ref=False
+        )
+        bias = (torch.randn(V, dtype=torch.float32) * 0.02).requires_grad_(True)
+        loss, _ = LigerFusedLinearLLMPPOFunction.apply(
+            hidden,
+            weight,
+            ids,
+            mask,
+            adv,
+            bias,
+            None,
+            old_lp,
+            0.0,
+            0.2,
+            0.2,
+            1.0,
+            False,
+            1,
+            None,
+            None,
+            None,
+        )
+        loss.backward()
+        assert bias.grad is not None
+        assert bias.grad.shape == bias.shape
+        # With random advantages the bias gradient should be non-zero.
+        assert bias.grad.abs().sum() > 0
