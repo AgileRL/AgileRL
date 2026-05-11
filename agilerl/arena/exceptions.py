@@ -96,6 +96,14 @@ class ArenaError(Exception):
         return body
 
 
+class ArenaFileNotFoundError(ArenaError, FileNotFoundError):
+    """Raised when a path required for Arena upload or env prep is missing."""
+
+
+class ArenaImportError(ArenaError, ImportError):
+    """Raised when optional Arena dependencies are not installed."""
+
+
 class ArenaAuthError(ArenaError):
     """Raised when authentication fails or credentials are missing/expired."""
 
@@ -211,7 +219,7 @@ class ArenaAPIError(ArenaError):
 
 
 class ArenaValidationError(ArenaAPIError):
-    """Raised when server-side environment validation fails."""
+    """Raised when environment validation fails or client arguments are invalid."""
 
     _label = "ValidationError"
 

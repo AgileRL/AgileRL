@@ -15,6 +15,7 @@ from agilerl.arena.auth import ArenaOAuth2, load_credentials
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
+    ArenaFileNotFoundError,
     ArenaTrainingError,
     ArenaValidationError,
 )
@@ -44,7 +45,7 @@ def prepare_env_upload(source: str | os.PathLike[str] | bytes) -> tuple[str, byt
     :type source: str | os.PathLike[str] | bytes
     :returns: The name and bytes of the prepared environment.
     :rtype: tuple[str, bytes]
-    :raises FileNotFoundError: If *source* is a path that does not exist.
+    :raises ArenaFileNotFoundError: If *source* is a path that does not exist.
     """
     if isinstance(source, bytes):
         return ("environment.tar.gz", source)
@@ -63,7 +64,7 @@ def prepare_env_upload(source: str | os.PathLike[str] | bytes) -> tuple[str, byt
         return (path.name, path.read_bytes())
 
     msg = f"Source path not found: {path}"
-    raise FileNotFoundError(msg)
+    raise ArenaFileNotFoundError(msg)
 
 
 @dataclass(slots=True)
@@ -339,7 +340,7 @@ class ArenaClient:
                 "To validate an environment on Arena, either the name of an already "
                 "registered environment or the source of a custom environment must be provided."
             )
-            raise ValueError(msg)
+            raise ArenaValidationError(msg)
 
         if source is not None:
             if version is None:
@@ -515,6 +516,24 @@ class ArenaClient:
             timeout=self._upload_timeout,
         ).collect()
 
+    def submit_training_job(
+        self,
+        manifest: str | os.PathLike[str] | dict[str, Any],
+        *,
+        resource_id: int | None = None,
+        num_nodes: int | None = None,
+        project: str | None = None,
+        experiment_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Submit a training job to Arena (alias for :meth:`submit_experiment`)."""
+        return self.submit_experiment(
+            manifest,
+            resource_id=resource_id,
+            num_nodes=num_nodes,
+            project=project,
+            experiment_name=experiment_name,
+        )
+
     def list_experiments(self, project: str) -> list[dict[str, Any]]:
         """List all experiments in a project.
 
@@ -543,6 +562,14 @@ class ArenaClient:
             "POST",
             "/api/cli/v1/experiments/jobs/resume",
             json={"experiment_name": experiment_name, "max_steps": max_steps},
+        )
+
+    def resume_training_job(
+        self, experiment_name: str, max_steps: int
+    ) -> dict[str, Any]:
+        """Resume a training job (alias for :meth:`resume_experiment`)."""
+        return self.resume_experiment(
+            experiment_name=experiment_name, max_steps=max_steps
         )
 
     # TODO: Update HPO params (maybe leave for v2 if too complicated)
@@ -676,7 +703,7 @@ class ArenaClient:
         name = experiment_name.strip()
         if not name:
             msg = "experiment_name must be non-empty."
-            raise ValueError(msg)
+            raise ArenaValidationError(msg)
 
         return self._request(
             "POST",
@@ -959,7 +986,7 @@ class ArenaClient:
             env_cfg = Path(os.fspath(env_config)).expanduser().resolve()
             if not env_cfg.is_file():
                 msg = f"Upload file not found: {env_cfg}"
-                raise FileNotFoundError(msg)
+                raise ArenaFileNotFoundError(msg)
             files["env_config"] = (
                 env_cfg.name,
                 env_cfg.read_bytes(),
@@ -973,7 +1000,7 @@ class ArenaClient:
             reqs = Path(os.fspath(requirements)).expanduser().resolve()
             if not reqs.is_file():
                 msg = f"Upload file not found: {reqs}"
-                raise FileNotFoundError(msg)
+                raise ArenaFileNotFoundError(msg)
             files["requirements"] = (reqs.name, reqs.read_bytes(), "text/plain")
         else:
             files["requirements"] = ("requirements.txt", b"", "text/plain")

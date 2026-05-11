@@ -14,6 +14,7 @@ from agilerl.arena.client import ArenaClient, _TokenStore, prepare_env_upload
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
+    ArenaFileNotFoundError,
     ArenaTrainingError,
     ArenaValidationError,
 )
@@ -502,7 +503,7 @@ class TestValidateEnvironment:
         assert files["requirements"] == ("requirements.txt", b"", "text/plain")
 
     def test_source_missing_path_raises(self, api_key_client):
-        with pytest.raises(FileNotFoundError, match="not found"):
+        with pytest.raises(ArenaFileNotFoundError, match="not found"):
             api_key_client.validate_environment(
                 name="MyEnv",
                 source="/nonexistent/path.tar.gz",
@@ -561,7 +562,7 @@ class TestPrepareEnvUpload:
         assert data is raw
 
     def test_missing_path_raises(self):
-        with pytest.raises(FileNotFoundError, match="not found"):
+        with pytest.raises(ArenaFileNotFoundError, match="not found"):
             prepare_env_upload("/does/not/exist.tar.gz")
 
 
@@ -581,9 +582,9 @@ class TestStopExperiment:
         )
 
     def test_stop_experiment_requires_non_empty_name(self, api_key_client):
-        with pytest.raises(ValueError, match="non-empty"):
+        with pytest.raises(ArenaValidationError, match="non-empty"):
             api_key_client.stop_experiment("")
-        with pytest.raises(ValueError, match="non-empty"):
+        with pytest.raises(ArenaValidationError, match="non-empty"):
             api_key_client.stop_experiment("   ")
 
     def test_stop_job_deprecated_forwards_to_stop_experiment(self, api_key_client):

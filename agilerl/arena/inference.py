@@ -9,7 +9,11 @@ from typing import Self, TypeAlias
 import httpx
 import numpy as np
 
-from agilerl.arena.exceptions import ArenaAPIError, ArenaAuthError
+from agilerl.arena.exceptions import (
+    ArenaAPIError,
+    ArenaAuthError,
+    ArenaValidationError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +140,13 @@ class Agent:
         return all(Agent._is_json_number_scalar(x) for x in obj)
 
     @staticmethod
+    def _parse_float_token(token: str) -> float | None:
+        try:
+            return float(token)
+        except ValueError:
+            return None
+
+    @staticmethod
     def _parse_bracket_float_vector(text: str) -> np.ndarray | None:
         """If *text* is ``[ f1 f2 ... ]`` (whitespace-separated, commas optional), return 1d float array."""
         t = text.strip()
@@ -147,10 +158,10 @@ class Agent:
         parts = inner.replace(",", " ").split()
         nums: list[float] = []
         for p in parts:
-            try:
-                nums.append(float(p))
-            except ValueError:
+            f = Agent._parse_float_token(p)
+            if f is None:
                 return None
+            nums.append(f)
         return np.asarray(nums, dtype=np.float64)
 
     @staticmethod
@@ -166,11 +177,12 @@ class Agent:
 
         :param raw: JSON, base64, ``[ floats ... ]``, or JSON number scalar.
         :returns: Decoded observation (never ``None``).
-        :raises ValueError: Empty input or observation decoded to ``None``.
+        :raises ArenaValidationError: Empty input or observation decoded to ``None``.
         """
         text = raw.strip()
         if not text:
-            raise ValueError("Observation string is empty.")
+            msg = "Observation string is empty."
+            raise ArenaValidationError(msg)
 
         try:
             parsed: SerializedRLData = json.loads(text)
@@ -187,7 +199,8 @@ class Agent:
             decoded = Agent.deserialize(parsed, batched=batched)
 
         if decoded is None:
-            raise ValueError("Observation JSON was null.")
+            msg = "Observation JSON was null."
+            raise ArenaValidationError(msg)
         return decoded
 
     @staticmethod

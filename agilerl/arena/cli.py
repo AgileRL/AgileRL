@@ -35,7 +35,11 @@ def arena_client(
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
-@click.option("--api-key", default=None, help="Bearer secret: profile CLI PAT (arena_pat_…) or access token.")
+@click.option(
+    "--api-key",
+    default=None,
+    help="Bearer secret: profile CLI PAT (arena_pat_…) or access token.",
+)
 @click.option(
     "--base-url",
     default=None,
@@ -349,117 +353,6 @@ def env_duplicate(
                 version=version,
             ),
         )
-
-
-@main.group("train")
-def train() -> None:
-    """Submit, validate, and inspect training jobs."""
-
-
-@train.command("submit")
-@click.option(
-    "--manifest",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    required=True,
-    help="Path to manifest file.",
-)
-@click.option(
-    "--resource-id",
-    type=str,
-    default="arena-medium",
-    help="Arena cluster type to submit the training job to.",
-)
-@click.option(
-    "--num-nodes",
-    type=int,
-    default=2,
-    help="Number of nodes to use for the training job.",
-)
-@click.option(
-    "--project",
-    type=str,
-    default=None,
-    help="Project to submit the training job to.",
-)
-@click.option(
-    "--experiment-name",
-    type=str,
-    default=None,
-    help="Name of the experiment to submit the training job to.",
-)
-@click.pass_obj
-def train_submit(
-    config: CommandConfig,
-    manifest: Path,
-    resource_id: int | None,
-    num_nodes: int | None,
-    project: str | None,
-    experiment_name: str | None,
-) -> None:
-    """Submit a training job from manifest and/or existing training job IDs."""
-    with arena_client(config) as client:
-        client.submit_training_job(
-            manifest=manifest,
-            resource_id=resource_id,
-            num_nodes=num_nodes,
-            project=project,
-            experiment_name=experiment_name,
-        )
-
-
-@train.command("get-metrics")
-@click.argument("experiment_id", type=int)
-@click.option(
-    "--metric",
-    "metrics",
-    multiple=True,
-    required=True,
-    help="Metric to download. Repeat for multiple metrics.",
-)
-@click.option(
-    "--output-file",
-    type=click.Path(dir_okay=False, path_type=Path),
-    default=None,
-    help="Destination file path. Defaults to ./experiment_<id>_metrics.csv (or .zip).",
-)
-@click.option(
-    "--preview-rows",
-    type=click.IntRange(0),
-    default=10,
-    show_default=True,
-    help="When CSV is returned, preview this many rows in a rich table.",
-)
-@click.pass_obj
-def train_get_metrics(
-    config: CommandConfig,
-    experiment_id: int,
-    metrics: tuple[str, ...],
-    output_file: Path | None,
-    preview_rows: int,
-) -> None:
-    """Download metrics data for an experiment as CSV (or zip)."""
-    with arena_client(config) as client:
-        payload, content_type, disposition = client.download_experiment_metrics(
-            experiment_id=experiment_id, metrics=list(metrics)
-        )
-        target_path = resolve_metrics_output_path(
-            experiment_id=experiment_id,
-            payload=payload,
-            content_type=content_type,
-            disposition=disposition,
-            output_file=output_file,
-        )
-        target_path.write_bytes(payload)
-        emit_result(
-            {
-                "saved": str(target_path),
-                "bytes": len(payload),
-                "content_type": content_type or "unknown",
-            },
-        )
-
-        if preview_rows > 0 and (content_type or "").startswith("text/csv"):
-            emit_csv_preview(payload, max_rows=preview_rows)
 
 
 @main.group("experiment")
@@ -805,10 +698,7 @@ def inference_run(
 ) -> None:
     """Query a deployed model by deployment name (uses cached URL/key after first fetch)."""
     with arena_client(config) as client:
-        try:
-            obs = client.parse_inference_observation(obs_raw)
-        except ValueError as exc:
-            raise click.UsageError(str(exc)) from exc
+        obs = client.parse_inference_observation(obs_raw)
         with client.open_inference_agent(
             deployment_name,
             refresh=refresh,
