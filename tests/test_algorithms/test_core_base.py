@@ -1947,6 +1947,29 @@ class TestLLMMemoryEfficientLogits:
             reference_fp32.to(torch.bfloat16),
         )
 
+    def test_memory_efficient_logits_cast_to_fp32_false_stays_in_input_dtype(
+        self,
+    ) -> None:
+        """``cast_to_fp32=False`` runs the reduction in input dtype throughout
+        and matches a hand-rolled bf16 ``gather - logsumexp``."""
+        torch.manual_seed(0)
+        seq, vocab = 7, 2048
+        logits_bf16 = torch.randn(3, seq, vocab, dtype=torch.bfloat16)
+        index = torch.randint(0, vocab, (3, seq))
+
+        result = LLMAlgorithm._memory_efficient_logits(
+            logits_bf16,
+            index,
+            cast_to_fp32=False,
+        )
+        max_lg = logits_bf16.amax(dim=-1, keepdim=True)
+        shifted = logits_bf16 - max_lg
+        target = shifted.gather(dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
+        log_z = torch.logsumexp(shifted, dim=-1)
+        ref_bf16 = target - log_z
+        assert result.dtype == torch.bfloat16
+        assert torch.equal(result, ref_bf16)
+
 
 class TestFusedLinearLogprobsNoGrad:
     """Cover the chunked matmul + max-shift gather/logsumexp kernel that
@@ -2226,6 +2249,53 @@ class TestFusedLinearLogprobsIntegration:
         ) as spy:
             agent._get_logprobs(ids, batch_size=B, use_reference=False, eval_mode=True)
         spy.assert_not_called()
+
+    @pytest.mark.parametrize("cast_to_fp32", [True, False])
+    def test_cast_logprobs_to_fp32_threaded_into_fused_kernel(
+        self, cast_to_fp32: bool
+    ) -> None:
+        """``self.cast_logprobs_to_fp32`` flows into the fused-no-grad
+        kernel call so toggling it controls the reduction precision."""
+        torch.manual_seed(2)
+        B, T, H, V = 2, 4, 8, 64
+        agent, _ = self._build_agent(V, H, use_fused=True)
+        agent.cast_logprobs_to_fp32 = cast_to_fp32
+        ids = torch.randint(1, V, (B, T))
+        with patch.object(
+            LLMAlgorithm,
+            "_fused_linear_logprobs_no_grad",
+            wraps=LLMAlgorithm._fused_linear_logprobs_no_grad,
+        ) as spy:
+            with torch.no_grad():
+                agent._get_logprobs(
+                    ids, batch_size=B, use_reference=False, eval_mode=True
+                )
+        assert spy.called
+        assert spy.call_args.kwargs["cast_to_fp32"] is cast_to_fp32
+
+    @pytest.mark.parametrize("cast_to_fp32", [True, False])
+    def test_cast_logprobs_to_fp32_threaded_into_unfused_kernel(
+        self, cast_to_fp32: bool
+    ) -> None:
+        """``self.cast_logprobs_to_fp32`` flows into the unfused
+        ``_memory_efficient_logits`` call too — the two paths share the
+        same regime."""
+        torch.manual_seed(3)
+        B, T, H, V = 2, 4, 8, 64
+        agent, _ = self._build_agent(V, H, use_fused=False)
+        agent.cast_logprobs_to_fp32 = cast_to_fp32
+        ids = torch.randint(1, V, (B, T))
+        with patch.object(
+            LLMAlgorithm,
+            "_memory_efficient_logits",
+            wraps=LLMAlgorithm._memory_efficient_logits,
+        ) as spy:
+            with torch.no_grad():
+                agent._get_logprobs(
+                    ids, batch_size=B, use_reference=False, eval_mode=True
+                )
+        assert spy.called
+        assert spy.call_args.kwargs["cast_to_fp32"] is cast_to_fp32
 
 
 class TestLLMCreatePromptMasks:

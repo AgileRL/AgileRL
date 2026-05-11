@@ -2015,6 +2015,19 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :param reduce_memory_peak: Deprecated. Previously hinted peak-memory batching;
         ignored. Configure ``micro_batch_size_per_gpu`` and DeepSpeed instead.
     :type reduce_memory_peak: bool, optional
+    :param cast_logprobs_to_fp32: When ``True`` (the default), the per-token
+        log-probability reduction (``amax`` / ``gather`` / ``logsumexp``)
+        runs in fp32 before being cast back to the input dtype. Applies
+        uniformly to both the unfused ``(B, T, V)`` path
+        (:meth:`_memory_efficient_logits`) and the fused linear log-prob
+        path (:meth:`_fused_linear_logprobs_no_grad`) so the two paths
+        produce numerically equivalent log-probs. Setting ``False`` keeps
+        the entire reduction in the input dtype — measurably faster and
+        lower peak memory on the unfused path, but introduces a per-token
+        bf16 quantisation error (~0.1 at ``V≈128k``) which biases PPO/GRPO
+        importance-sampling ratios. Only flip to ``False`` if you have
+        verified bf16 is acceptable for your vocab/shape.
+    :type cast_logprobs_to_fp32: bool, optional
     """
 
     _separate_reference_adapter_deprecation_emitted = False
@@ -2053,6 +2066,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
         use_fused_linear_logprobs: bool = False,
+        cast_logprobs_to_fp32: bool = True,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
@@ -2198,6 +2212,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self._warn_separate_reference_adapter_deprecation()
         self.use_fused_linear_logprobs = use_fused_linear_logprobs
+        self.cast_logprobs_to_fp32 = cast_logprobs_to_fp32
 
         selected_adapters = ("actor",)
         if use_separate_reference_adapter:
@@ -3489,6 +3504,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     lm_head_bias,
                     fused_ids[start:end, 1:],
                     temperature=self.temperature,
+                    cast_to_fp32=self.cast_logprobs_to_fp32,
                 )
                 del first
             else:
@@ -3497,6 +3513,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 chunk_lp = LLMAlgorithm._memory_efficient_logits(
                     logits[:, :-1],
                     fused_ids[start:end, 1:],
+                    cast_to_fp32=self.cast_logprobs_to_fp32,
                 )
                 del logits
 
@@ -3737,12 +3754,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         lm_head_bias,
                         batch_ids[:, 1:],
                         temperature=self.temperature,
+                        cast_to_fp32=self.cast_logprobs_to_fp32,
                     )
                 else:
                     logits = first / self.temperature
                     log_prob = LLMAlgorithm._memory_efficient_logits(
                         logits[:, :-1],
                         batch_ids[:, 1:],
+                        cast_to_fp32=self.cast_logprobs_to_fp32,
                     )
                     logits = None
 
@@ -4067,6 +4086,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _memory_efficient_logits(
         logits: torch.Tensor,
         index: torch.Tensor,
+        cast_to_fp32: bool = True,
         _chunk_rows: int = 8,
     ) -> torch.Tensor:
         """Calculate log probabilities for previously generated token ids.
@@ -4075,19 +4095,26 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         ``(_chunk_rows, seq_len, vocab_size)`` rather than the full batch, avoiding
         OOM on large-vocabulary models while reducing Python loop overhead compared
         to a strict row-by-row approach. Larger ``_chunk_rows`` values amortize
-        kernel-launch cost over more rows; the temporary fp32 workspace scales with
-        ``_chunk_rows * seq_len * vocab_size``, but the input ``(B, seq_len, vocab_size)``
-        logits tensor is already fully materialised so this does not raise the
-        asymptotic peak.
+        kernel-launch cost over more rows.
 
-        Logsumexp and gather run in float32 for numerical stability; results are cast
-        back to *logits* dtype (e.g. bfloat16 under mixed precision). Logits are
-        max-centered per row before ``logsumexp``, matching ``F.log_softmax`` stability.
+        With ``cast_to_fp32=True`` (the default), the per-chunk reduction
+        (``amax`` / ``gather`` / ``logsumexp``) runs in fp32 then casts the
+        ``(B, seq_len)`` output back to *logits* dtype. Matches the precision
+        of ``F.log_softmax`` over the same inputs to within the final bf16
+        cast. With ``cast_to_fp32=False`` the reduction stays in *logits*
+        dtype throughout — faster and lower peak (no fp32 workspace) at the
+        cost of bf16-quantisation error in the reduction.
+
+        Logits are max-centered per row before ``logsumexp``, matching
+        ``F.log_softmax`` stability either way.
 
         :param logits: Logits of shape ``(B, seq_len, vocab_size)``.
         :type logits: torch.Tensor
         :param index: Token IDs of shape ``(B, seq_len)``.
         :type index: torch.Tensor
+        :param cast_to_fp32: Promote each chunk to fp32 before the reduction.
+            Default ``True``.
+        :type cast_to_fp32: bool
         :return: Log probabilities of the completion IDs, shape ``(B, seq_len)``.
         :rtype: torch.Tensor
         """
@@ -4095,12 +4122,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         B = logits.shape[0]
 
         def _logprobs_chunk(lg: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-            lg32 = lg.float()
-            max_lg = lg32.amax(dim=-1, keepdim=True)
-            shifted = lg32 - max_lg
+            if cast_to_fp32:
+                lg = lg.float()
+            max_lg = lg.amax(dim=-1, keepdim=True)
+            shifted = lg - max_lg
             target = shifted.gather(dim=-1, index=idx.unsqueeze(-1)).squeeze(-1)
             log_z = torch.logsumexp(shifted, dim=-1)
-            return (target - log_z).to(orig_dtype)
+            result = target - log_z
+            return result.to(orig_dtype) if cast_to_fp32 else result
 
         if B <= _chunk_rows:
             return _logprobs_chunk(logits, index)
@@ -4120,10 +4149,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         lm_head_bias: torch.Tensor | None,
         target_ids: torch.Tensor,
         temperature: float = 1.0,
-        cast_to_fp32: bool = False,
+        cast_to_fp32: bool = True,
         _chunk_rows: int = 1024,
     ) -> torch.Tensor:
-        """Per-token target logprobs without materializing the full ``(B, T, V)``.
+        """Per-token target logprobs without materializing the full ``(B, T, V)``
+        logits tensor.
 
         Tiles flat over ``(B*T)`` with workspace bounded to ``(_chunk_rows, V)``
         per iteration. Counterpart of :meth:`_memory_efficient_logits` for
@@ -4133,7 +4163,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         Numerical contract matches :meth:`_memory_efficient_logits` when fed
         equivalent inputs (``logits = (hidden @ Wᵀ + b) / T``): same
         ``cast_to_fp32`` semantics, same final-cast-back-to-input-dtype, same
-        max-shift ``gather - logsumexp`` formulation.
+        max-shift ``gather - logsumexp`` formulation. Default ``cast_to_fp32=True``
+        keeps the two paths bit-comparable.
 
         :param hidden: ``(B, T, H)`` last-hidden-state.
         :param lm_head_weight: ``(V, H)``.
@@ -4142,8 +4173,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             shift before calling).
         :param temperature: scalar; logits divided by this before log_softmax
             (skipped when ``1.0``).
-        :param cast_to_fp32: when True, run the per-chunk reduction in fp32
-            then cast back. Same semantics as ``_memory_efficient_logits``.
+        :param cast_to_fp32: when True (default), run the per-chunk reduction
+            in fp32 then cast back. Same semantics as
+            :meth:`_memory_efficient_logits`.
         :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per
             iteration; trades launch count vs ``_chunk_rows * V`` peak.
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.

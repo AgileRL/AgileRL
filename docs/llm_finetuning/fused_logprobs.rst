@@ -72,7 +72,7 @@ processes them ``_chunk_rows`` at a time:
 
 Peak workspace drops from ``(B, T, V)`` to ``(_chunk_rows, V)`` — typically
 30–50× smaller. The result is byte-identical (or within bf16 quantisation
-noise when ``cast_to_fp32=False``) to the unfused path.
+noise when ``cast_logprobs_to_fp32=False``) to the unfused path.
 
 No-grad path: ``use_fused_linear_logprobs``
 -------------------------------------------
@@ -342,6 +342,33 @@ same hardware:
      - 15.18 GB
      - 7.18 GB
      - −8.00 GB (−53%)
+
+Numerical precision: ``cast_logprobs_to_fp32``
+----------------------------------------------
+
+Both the unfused (``_memory_efficient_logits``) and fused
+(``_fused_linear_logprobs_no_grad``) per-token log-prob kernels share a
+single ``cast_logprobs_to_fp32`` knob on ``LLMAlgorithm``. It controls
+whether the per-chunk reduction (``amax`` / ``gather`` / ``logsumexp``)
+runs in fp32 or stays in the input dtype.
+
+* **Default ``True``** — promotes each chunk to fp32 before the
+  reduction and casts the ``(B, T)`` output back to the input dtype.
+  Numerically matches ``F.log_softmax`` to within the final bf16 cast
+  (~0.03 max abs error per token on Qwen-3B, V≈152k).
+* **``False``** — runs the reduction in input dtype throughout. On
+  bf16 inputs this introduces ~0.06–0.11 max abs error per token at
+  large vocab (V≥128k), which biases PPO/GRPO importance-sampling
+  ratios by up to ~1.1× before any policy update has happened. Only
+  flip to ``False`` after verifying it's acceptable for your training
+  signal.
+
+The flag applies uniformly to both rollout-side (under ``no_grad``) and
+gradient-time (unfused) log-prob computation, so the two paths are kept
+in the same numerical regime. The Liger gradient-time path
+(:class:`LigerFusedLinearLLMPPOFunction` / Liger's stock
+``LigerFusedLinearGRPOFunction``) does its reduction inside the triton
+kernel and is unaffected by this flag.
 
 When *not* to enable
 --------------------
