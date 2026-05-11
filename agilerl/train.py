@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
+from typing import Any
 
 import torch
 from accelerate import Accelerator
@@ -110,6 +111,18 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Print training metrics output.",
     )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default=None,
+        help="Custom Weights & Biases project name.",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="Custom Weights & Biases run name.",
+    )
     return parser.parse_args()
 
 
@@ -138,10 +151,17 @@ def main() -> None:
         args.device,
     )
 
+    wandb_kwargs: dict[str, Any] = {}
+    if args.wandb_project:
+        wandb_kwargs["project"] = args.wandb_project
+    if args.wandb_run_name:
+        wandb_kwargs.setdefault("addl_args", {})["name"] = args.wandb_run_name
+
     # Train the population of agents
     _population, last_fitnesses = trainer.train(
         wb=args.wb,
         wandb_api_key=args.wandb_api_key,
+        wandb_kwargs=wandb_kwargs or None,
         tensorboard=args.tensorboard,
         tensorboard_log_dir=args.tensorboard_log_dir,
         checkpoint_steps=args.checkpoint_steps,

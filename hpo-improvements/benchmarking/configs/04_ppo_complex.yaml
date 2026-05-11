@@ -1,0 +1,94 @@
+---
+algorithm:
+    name: PPO
+    batch_size: 128
+    lr: 0.001
+    learn_step: 250
+    gamma: 0.99
+    gae_lambda: 0.95
+    action_std_init: 0.6
+    clip_coef: 0.2
+    ent_coef: 0.01
+    vf_coef: 0.5
+    max_grad_norm: 0.5
+    target_kl:
+    update_epochs: 4
+    share_encoders: true
+
+environment:
+    name: ALE/Breakout-v5
+    num_envs: 6
+
+mutation:
+    probabilities:
+        no_mut: 0.4
+        arch_mut: 0.2
+        new_layer: 0.2
+        params_mut: 0.2
+        act_mut: 0.0
+        rl_hp_mut: 0.2
+    rl_hp_selection:
+        lr:
+            min: 0.0001
+            max: 0.01
+        batch_size:
+            min: 8
+            max: 1024
+        learn_step:
+            min: 256
+            max: 8192
+        ent_coef:
+            min: 0.001
+            max: 0.1
+        update_epochs:
+            min: 1
+            max: 10
+    mutation_sd: 0.1
+    rand_seed: 42
+
+network:
+    latent_dim: 256
+    min_latent_dim: 128
+    max_latent_dim: 512
+    arch: cnn
+    encoder_config:
+        min_channel_size: 32
+        max_channel_size: 256
+        activation: ReLU
+        layer_norm: false
+        init_layers: true
+        channel_size:
+            - 32
+            - 64
+            - 128
+        kernel_size:
+            - 8
+            - 4
+            - 3
+        stride_size:
+            - 4
+            - 2
+            - 1
+    head_config:
+        min_hidden_layers: 1
+        max_hidden_layers: 3
+        min_mlp_nodes: 128
+        max_mlp_nodes: 512
+        hidden_size:
+            - 256
+        activation: ReLU
+        output_activation:
+        layer_norm: false
+        init_layers: true
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true
+
+training:
+    max_steps: 2_000_000
+    target_score: 250.0
+    pop_size: 4
+    evo_steps: 1_000
+    eval_steps:
+    eval_loop: 1
