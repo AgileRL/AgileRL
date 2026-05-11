@@ -31,7 +31,12 @@ from agilerl import HAS_LIGER_KERNEL
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.chunked_loss.fused_linear_ppo import LigerFusedLinearPPOBase
 else:
-    LigerFusedLinearLLMPPOFunction = None  # type: ignore[assignment]
+    # Stub so the class definition below resolves at import time on platforms
+    # without liger-kernel (macOS, Windows). The module-level reassignment
+    # at the bottom of this file then sets the public ``LigerFusedLinearLLMPPOFunction``
+    # to ``None``, which callers check via ``is None`` before invoking
+    # ``LigerFusedLinearLLMPPOFunction.apply(...)``.
+    LigerFusedLinearPPOBase = object  # type: ignore[assignment,misc]
 
 
 def _k3_kl(log_p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
@@ -421,3 +426,10 @@ class LigerFusedLinearLLMPPOFunction(LigerFusedLinearPPOBase):
             None,  # full_turn_mask
             None,  # max_turns
         )
+
+
+if not HAS_LIGER_KERNEL:
+    # The class above is defined against an ``object`` stub on platforms
+    # without liger-kernel so the module imports cleanly. Replace the
+    # public symbol with ``None`` so callers' ``is None`` guard fires.
+    LigerFusedLinearLLMPPOFunction = None  # type: ignore[assignment,misc]

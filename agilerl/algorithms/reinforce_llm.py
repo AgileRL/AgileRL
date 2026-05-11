@@ -434,34 +434,33 @@ class REINFORCE(LLMAlgorithm):
             }
             updates = 0
 
-            with torch.inference_mode():
-                reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
-                    completion_ids,
-                    batch_size,
-                )
+            reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
+                completion_ids,
+                batch_size,
+            )
 
-                token_rewards = self._compute_token_rewards(
-                    action_masks, rewards_2d, turn_ids
-                )
+            token_rewards = self._compute_token_rewards(
+                action_masks, rewards_2d, turn_ids
+            )
 
-                old_log_probs = torch.masked_fill(old_log_probs, ~action_mask_bool, 1.0)
-                reference_log_probs = torch.masked_fill(
-                    reference_log_probs, ~action_mask_bool, 1.0
-                )
-                token_penalised_rewards = token_rewards - self.beta * (
-                    old_log_probs - reference_log_probs
-                )
+            old_log_probs = torch.masked_fill(old_log_probs, ~action_mask_bool, 1.0)
+            reference_log_probs = torch.masked_fill(
+                reference_log_probs, ~action_mask_bool, 1.0
+            )
+            token_penalised_rewards = token_rewards - self.beta * (
+                old_log_probs - reference_log_probs
+            )
 
-                if action_granularity == "token":
-                    advantages = self._compute_rebn_advantages_token(
-                        token_penalised_rewards,
-                        action_masks,
-                    )
-                else:
-                    advantages = self._compute_rebn_advantages(
-                        token_penalised_rewards, action_masks, turn_ids
-                    )
-                del token_rewards, token_penalised_rewards
+            if action_granularity == "token":
+                advantages = self._compute_rebn_advantages_token(
+                    token_penalised_rewards,
+                    action_masks,
+                )
+            else:
+                advantages = self._compute_rebn_advantages(
+                    token_penalised_rewards, action_masks, turn_ids
+                )
+            del token_rewards, token_penalised_rewards
 
             self.actor.train()
             for _epoch_idx in range(self.update_epochs):

@@ -474,34 +474,33 @@ class PPO(LLMAlgorithm):
                 "mean_entropy": 0.0,
                 "mean_clipfrac": 0.0,
             }
-            with torch.inference_mode():
-                reference_log_probs, old_log_probs, old_values = (
-                    self._fused_forward_no_grad(
-                        completion_ids,
-                        batch_size=batch_size,
-                    )
+            reference_log_probs, old_log_probs, old_values = (
+                self._fused_forward_no_grad(
+                    completion_ids,
+                    batch_size=batch_size,
                 )
-                old_values = torch.masked_fill(old_values, ~action_mask_bool, 0.0)
+            )
+            old_values = torch.masked_fill(old_values, ~action_mask_bool, 0.0)
 
-                token_rewards = self._compute_token_rewards(
-                    action_masks, rewards_2d, turn_ids
-                )
+            token_rewards = self._compute_token_rewards(
+                action_masks, rewards_2d, turn_ids
+            )
 
-                old_log_probs = torch.masked_fill(old_log_probs, ~action_mask_bool, 1.0)
-                reference_log_probs = torch.masked_fill(
-                    reference_log_probs, ~action_mask_bool, 1.0
+            old_log_probs = torch.masked_fill(old_log_probs, ~action_mask_bool, 1.0)
+            reference_log_probs = torch.masked_fill(
+                reference_log_probs, ~action_mask_bool, 1.0
+            )
+            if ppo_granularity == "token":
+                returns, advantages = self._compute_gae_returns_token(
+                    token_rewards,
+                    old_values,
+                    action_masks,
                 )
-                if ppo_granularity == "token":
-                    returns, advantages = self._compute_gae_returns_token(
-                        token_rewards,
-                        old_values,
-                        action_masks,
-                    )
-                else:
-                    returns, advantages = self._compute_gae_returns(
-                        token_rewards, old_values, action_masks, turn_ids
-                    )
-                del token_rewards
+            else:
+                returns, advantages = self._compute_gae_returns(
+                    token_rewards, old_values, action_masks, turn_ids
+                )
+            del token_rewards
 
             self.actor.train()
             for _epoch_idx in range(self.update_epochs):
