@@ -1,4 +1,4 @@
-"""Fused linear PPO/REINFORCE loss with per-token / per-turn advantages.
+"""Fused linear PPO-style policy gradient loss with per-token / per-turn advantages.
 
 Liger's ``LigerFusedLinearGRPOFunction`` only handles GRPO's
 per-trajectory scalar advantage. LLMPPO carries ``(B, T)`` per-token
@@ -12,9 +12,9 @@ the loss + accumulates ``grad_input``/``grad_weight`` and is then freed,
 so the gradient-time ``(B, T, V)`` logits tensor is never materialized.
 PPO's value-head loss runs outside this fusion (the value tensor is small).
 
-The math sits in :func:`llm_ppo_loss_fn` at module top level so it's
+The math sits in :func:`llm_policy_loss_fn` at module top level so it's
 unit-testable without Liger installed. The autograd Function
-:class:`LigerFusedLinearLLMPPOFunction` resolves only when
+:class:`LigerFusedLinearPolicyLossFunction` resolves only when
 ``liger-kernel`` is importable, inherits ``chunk_forward`` and
 ``backward`` from Liger's base, and overrides ``forward`` minimally to
 slice ``turn_ids`` alongside the other chunked inputs.
@@ -33,9 +33,9 @@ if HAS_LIGER_KERNEL or TYPE_CHECKING:
 else:
     # Stub so the class definition below resolves at import time on platforms
     # without liger-kernel (macOS, Windows). The module-level reassignment
-    # at the bottom of this file then sets the public ``LigerFusedLinearLLMPPOFunction``
+    # at the bottom of this file then sets the public ``LigerFusedLinearPolicyLossFunction``
     # to ``None``, which callers check via ``is None`` before invoking
-    # ``LigerFusedLinearLLMPPOFunction.apply(...)``.
+    # ``LigerFusedLinearPolicyLossFunction.apply(...)``.
     LigerFusedLinearPPOBase = object  # type: ignore[assignment,misc]
 
 
@@ -48,7 +48,7 @@ def _k3_kl(log_p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
     return torch.exp(log_p - log_q) - (log_p - log_q) - 1.0
 
 
-def llm_ppo_loss_fn(
+def llm_policy_loss_fn(
     log_probs: torch.Tensor,
     selected_token_ids: torch.Tensor,
     attention_mask: torch.Tensor,
@@ -66,7 +66,7 @@ def llm_ppo_loss_fn(
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
     """Per-chunk policy + KL loss with per-token or per-turn ratio clipping.
 
-    :class:`LigerFusedLinearLLMPPOFunction` autograd Function below wraps
+    :class:`LigerFusedLinearPolicyLossFunction` autograd Function below wraps
     this fn behind a chunked forward+backward.
 
     Branches:
@@ -200,7 +200,7 @@ def llm_ppo_loss_fn(
     return chunk_loss, [kl_metric, clipfrac_metric, pg_loss_metric, entropy_metric]
 
 
-class LigerFusedLinearLLMPPOFunction(LigerFusedLinearPPOBase):
+class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
     """Fused linear PPO-style policy loss with per-token or per-turn ratios.
 
     Inherits ``chunk_forward`` (matmul + log-softmax) and ``backward``
@@ -250,7 +250,6 @@ class LigerFusedLinearLLMPPOFunction(LigerFusedLinearPPOBase):
         aggregated_metrics: list[torch.Tensor] = []
 
         full_attention_mask = attention_mask
-        ppo_loss_fn = llm_ppo_loss_fn
 
         def _compute_chunk_loss(
             input_chunk,
@@ -269,7 +268,7 @@ class LigerFusedLinearLLMPPOFunction(LigerFusedLinearPPOBase):
                 bias=bias_local,
                 temperature=temperature,
             )
-            return ppo_loss_fn(
+            return llm_policy_loss_fn(
                 log_probs=log_probs,
                 selected_token_ids=selected_token_ids_chunk,
                 attention_mask=attention_mask_chunk,
@@ -353,12 +352,12 @@ class LigerFusedLinearLLMPPOFunction(LigerFusedLinearPPOBase):
                 for metric in chunk_metrics:
                     if metric.ndim == 0:
                         aggregated_metrics.append(torch.zeros((), device=metric.device))
-                    else:  # pragma: no cover -- llm_ppo_loss_fn only returns scalars
+                    else:  # pragma: no cover -- llm_policy_loss_fn only returns scalars
                         aggregated_metrics.append([])  # type: ignore[arg-type]
             for i, metric in enumerate(chunk_metrics):
                 if metric.ndim == 0:
                     aggregated_metrics[i].add_(metric)
-                else:  # pragma: no cover -- llm_ppo_loss_fn only returns scalars
+                else:  # pragma: no cover -- llm_policy_loss_fn only returns scalars
                     aggregated_metrics[i].append(metric)  # type: ignore[union-attr]
 
         chunks = max(1, _input.shape[0] // chunk_size)
@@ -432,4 +431,4 @@ if not HAS_LIGER_KERNEL:
     # The class above is defined against an ``object`` stub on platforms
     # without liger-kernel so the module imports cleanly. Replace the
     # public symbol with ``None`` so callers' ``is None`` guard fires.
-    LigerFusedLinearLLMPPOFunction = None  # type: ignore[assignment,misc]
+    LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment,misc]

@@ -1159,7 +1159,7 @@ class TestPPOLossLiger:
         with (
             patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True),
             patch(
-                "agilerl.algorithms.ppo_llm.LigerFusedLinearLLMPPOFunction"
+                "agilerl.algorithms.ppo_llm.LigerFusedLinearPolicyLossFunction"
             ) as mock_fn,
         ):
             mock_fn.apply.return_value = (fake_loss, fake_aux)
@@ -1208,7 +1208,7 @@ class TestPPOLossLiger:
         with (
             patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True),
             patch(
-                "agilerl.algorithms.ppo_llm.LigerFusedLinearLLMPPOFunction"
+                "agilerl.algorithms.ppo_llm.LigerFusedLinearPolicyLossFunction"
             ) as mock_fn,
         ):
             mock_fn.apply.return_value = (fake_loss, fake_aux)

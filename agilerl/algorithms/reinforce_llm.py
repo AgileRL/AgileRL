@@ -11,13 +11,13 @@ from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 
 if HAS_LIGER_KERNEL:
-    from agilerl.algorithms.core.fused_llm_ppo_loss import (
-        LigerFusedLinearLLMPPOFunction,
+    from agilerl.algorithms.core.fused_llm_policy_loss import (
+        LigerFusedLinearPolicyLossFunction,
     )
 else:
     # Keep the name resolvable when liger-kernel isn't installed so unit
     # tests can patch it. ``_reinforce_loss_liger`` guards against actual use.
-    LigerFusedLinearLLMPPOFunction = None  # type: ignore[assignment]
+    LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
 from agilerl.protocols import (
     LoraConfigProtocol,
     MultiTurnEnv,
@@ -563,7 +563,7 @@ class REINFORCE(LLMAlgorithm):
 
         Captures the last hidden state via an ``lm_head`` forward-pre-hook
         (so the full ``(B, T, V)`` logits never need to be saved for
-        backward) and invokes :class:`LigerFusedLinearLLMPPOFunction` with
+        backward) and invokes :class:`LigerFusedLinearPolicyLossFunction` with
         ``beta=0`` — REINFORCE folds the KL penalty into the advantage
         during the no-grad pass, so the gradient-time loss is pure clipped
         policy gradient. KL is still computed inside the kernel and
@@ -595,7 +595,7 @@ class REINFORCE(LLMAlgorithm):
         # Identity-patch lm_head so the actor forward outputs the last hidden
         # state (B, T, H) directly instead of computing the full (B, T, V)
         # logits only to discard them. lm_head_weight is passed separately to
-        # LigerFusedLinearLLMPPOFunction which handles the matmul and its grad.
+        # LigerFusedLinearPolicyLossFunction which handles the matmul and its grad.
         lm_head = self._get_lm_head()
         lm_head_weight = lm_head.weight
         lm_head_bias = lm_head.bias
@@ -624,7 +624,7 @@ class REINFORCE(LLMAlgorithm):
         target_ids = batch_ids[:, 1:].contiguous()  # (B, T-1)
         # Hidden states are aligned with target ids: predict ids[:, 1:] from
         # hidden[:, :-1]. Same shift the unfused path applies.
-        loss, aux = LigerFusedLinearLLMPPOFunction.apply(
+        loss, aux = LigerFusedLinearPolicyLossFunction.apply(
             policy_hidden[:, :-1].contiguous(),
             lm_head_weight,
             target_ids,

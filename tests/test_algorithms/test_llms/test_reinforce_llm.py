@@ -1005,7 +1005,7 @@ class TestReinforceLossLiger:
         with (
             patch("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True),
             patch(
-                "agilerl.algorithms.reinforce_llm.LigerFusedLinearLLMPPOFunction"
+                "agilerl.algorithms.reinforce_llm.LigerFusedLinearPolicyLossFunction"
             ) as mock_fn,
         ):
             mock_fn.apply.return_value = (fake_loss, fake_aux)

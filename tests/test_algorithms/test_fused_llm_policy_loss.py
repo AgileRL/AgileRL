@@ -1,6 +1,6 @@
-"""Tests for ``agilerl.algorithms.core.fused_llm_ppo_loss``.
+"""Tests for ``agilerl.algorithms.core.fused_llm_policy_loss``.
 
-The math in :func:`llm_ppo_loss_fn` is testable without ``liger_kernel``
+The math in :func:`llm_policy_loss_fn` is testable without ``liger_kernel``
 installed. End-to-end autograd-Function tests live in the GPU-box
 benchmarks since Liger is a CUDA-leaning dependency.
 """
@@ -13,9 +13,9 @@ import sys
 import pytest
 import torch
 
-from agilerl.algorithms.core.fused_llm_ppo_loss import (
+from agilerl.algorithms.core.fused_llm_policy_loss import (
     _k3_kl,
-    llm_ppo_loss_fn,
+    llm_policy_loss_fn,
 )
 
 
@@ -23,7 +23,7 @@ def test_no_liger_fallback_resolves_module_with_none_function():
     """When ``HAS_LIGER_KERNEL=False``, the module must still import
     cleanly: the ``LigerFusedLinearPPOBase`` name is stubbed to ``object``
     so the class definition resolves, then the public symbol
-    ``LigerFusedLinearLLMPPOFunction`` is reassigned to ``None`` so
+    ``LigerFusedLinearPolicyLossFunction`` is reassigned to ``None`` so
     callers' ``is None`` guard fires. This branch is unreachable on
     Linux CI (Liger is installed) and is the only platform-fallback
     path coverage source — exercise it explicitly via ``importlib.reload``,
@@ -31,13 +31,13 @@ def test_no_liger_fallback_resolves_module_with_none_function():
     confuse later tests that imported the original module).
     """
     import agilerl
-    import agilerl.algorithms.core.fused_llm_ppo_loss as mod
+    import agilerl.algorithms.core.fused_llm_policy_loss as mod
 
     original_has_liger = agilerl.HAS_LIGER_KERNEL
     try:
         agilerl.HAS_LIGER_KERNEL = False
         importlib.reload(mod)
-        assert mod.LigerFusedLinearLLMPPOFunction is None
+        assert mod.LigerFusedLinearPolicyLossFunction is None
         # ``LigerFusedLinearPPOBase`` is the stub object base used so the
         # class body can be defined without Liger installed.
         assert mod.LigerFusedLinearPPOBase is object
@@ -50,8 +50,8 @@ def test_no_liger_fallback_resolves_module_with_none_function():
     "module_path,symbol",
     [
         ("agilerl.algorithms.grpo", "LigerFusedLinearGRPOFunction"),
-        ("agilerl.algorithms.ppo_llm", "LigerFusedLinearLLMPPOFunction"),
-        ("agilerl.algorithms.reinforce_llm", "LigerFusedLinearLLMPPOFunction"),
+        ("agilerl.algorithms.ppo_llm", "LigerFusedLinearPolicyLossFunction"),
+        ("agilerl.algorithms.reinforce_llm", "LigerFusedLinearPolicyLossFunction"),
     ],
 )
 def test_no_liger_fallback_sets_symbol_to_none(module_path: str, symbol: str) -> None:
@@ -81,8 +81,8 @@ def test_no_liger_fallback_sets_symbol_to_none(module_path: str, symbol: str) ->
         importlib.reload(mod)
 
 
-def test_llm_ppo_loss_fn_with_old_per_token_logps_none_falls_back_to_detached():
-    """``llm_ppo_loss_fn`` allows ``old_per_token_logps=None`` for callers
+def test_llm_policy_loss_fn_with_old_per_token_logps_none_falls_back_to_detached():
+    """``llm_policy_loss_fn`` allows ``old_per_token_logps=None`` for callers
     that forgot to pass it — fallback uses the current logprobs detached
     (ratio == 1, gradient still well-defined). Covers the
     ``if old_per_token_logps is None`` branch in the math fn."""
@@ -94,7 +94,7 @@ def test_llm_ppo_loss_fn_with_old_per_token_logps_none_falls_back_to_detached():
     mask = torch.ones(B, T, dtype=torch.float32)
     adv = torch.randn(B, T) * 0.1
 
-    loss_with_none, metrics_with_none = llm_ppo_loss_fn(
+    loss_with_none, metrics_with_none = llm_policy_loss_fn(
         log_probs=log_probs,
         selected_token_ids=target_ids,
         attention_mask=mask,
@@ -181,7 +181,7 @@ class TestLlmPpoLossFn:
         ref_loss, ref_m = _unfused_reference(
             log_probs, target_ids, mask, adv, old_log_probs, ref_log_probs, eps, beta
         )
-        fused_loss, metrics = llm_ppo_loss_fn(
+        fused_loss, metrics = llm_policy_loss_fn(
             log_probs=log_probs,
             selected_token_ids=target_ids,
             attention_mask=mask,
@@ -222,7 +222,7 @@ class TestLlmPpoLossFn:
             epsilon=0.2,
             beta=0.0,
         )
-        fused_loss, metrics = llm_ppo_loss_fn(
+        fused_loss, metrics = llm_policy_loss_fn(
             log_probs=log_probs,
             selected_token_ids=target_ids,
             attention_mask=mask,
@@ -253,7 +253,7 @@ class TestLlmPpoLossFn:
         old_log_probs = torch.randn(B, T) * 0.05
         ref_log_probs = torch.randn(B, T) * 0.05
 
-        single, _ = llm_ppo_loss_fn(
+        single, _ = llm_policy_loss_fn(
             log_probs=log_probs,
             selected_token_ids=target_ids,
             attention_mask=mask,
@@ -267,7 +267,7 @@ class TestLlmPpoLossFn:
         # Split into 3 chunks of 2 samples each.
         chunk_sum = torch.zeros((), dtype=single.dtype)
         for s, e in [(0, 2), (2, 4), (4, 6)]:
-            chunk_loss, _ = llm_ppo_loss_fn(
+            chunk_loss, _ = llm_policy_loss_fn(
                 log_probs=log_probs[s:e],
                 selected_token_ids=target_ids[s:e],
                 attention_mask=mask[s:e],
@@ -291,7 +291,7 @@ class TestLlmPpoLossFn:
         adv = torch.randn(B, T) * 0.1
         old_log_probs = torch.randn(B, T) * 0.05
 
-        fused_loss, metrics = llm_ppo_loss_fn(
+        fused_loss, metrics = llm_policy_loss_fn(
             log_probs=log_probs,
             selected_token_ids=target_ids,
             attention_mask=mask,
@@ -321,7 +321,7 @@ class TestLlmPpoLossFn:
         ).squeeze(-1)
         old_log_probs = per_token_logps.detach() - 1.0  # ratio ≈ e ≫ 1.2
 
-        _, metrics = llm_ppo_loss_fn(
+        _, metrics = llm_policy_loss_fn(
             log_probs=log_probs,
             selected_token_ids=target_ids,
             attention_mask=mask,
@@ -465,7 +465,7 @@ class TestLlmPpoLossFnTurnMode:
             eps,
             beta,
         )
-        fused_loss, metrics = llm_ppo_loss_fn(
+        fused_loss, metrics = llm_policy_loss_fn(
             log_probs=log_probs,
             selected_token_ids=target_ids,
             attention_mask=token_mask,
@@ -500,7 +500,7 @@ class TestLlmPpoLossFnTurnMode:
             ref_lp,
         ) = self._build_turn_inputs(B, T, V, max_turns, seed=11)
 
-        single, _ = llm_ppo_loss_fn(
+        single, _ = llm_policy_loss_fn(
             log_probs=log_probs,
             selected_token_ids=target_ids,
             attention_mask=token_mask,
@@ -515,7 +515,7 @@ class TestLlmPpoLossFnTurnMode:
         )
         chunked_total = torch.zeros((), dtype=single.dtype)
         for s, e in [(0, 2), (2, 4), (4, 6)]:
-            chunk_loss, _ = llm_ppo_loss_fn(
+            chunk_loss, _ = llm_policy_loss_fn(
                 log_probs=log_probs[s:e],
                 selected_token_ids=target_ids[s:e],
                 attention_mask=token_mask[s:e],
@@ -565,7 +565,7 @@ class TestLlmPpoLossFnTurnMode:
             epsilon=0.2,
             beta=0.01,
         )
-        fused_loss, _ = llm_ppo_loss_fn(
+        fused_loss, _ = llm_policy_loss_fn(
             log_probs=log_probs,
             selected_token_ids=target_ids,
             attention_mask=token_mask,
@@ -587,7 +587,7 @@ class TestLlmPpoLossFnTurnMode:
         is a programming error and should raise."""
         log_probs = torch.log_softmax(torch.randn(2, 4, 16), dim=-1)
         with pytest.raises(ValueError, match="turn-mode"):
-            llm_ppo_loss_fn(
+            llm_policy_loss_fn(
                 log_probs=log_probs,
                 selected_token_ids=torch.randint(0, 16, (2, 4)),
                 attention_mask=torch.ones(2, 4),
@@ -601,21 +601,21 @@ class TestLlmPpoLossFnTurnMode:
 
 # ---------------------------------------------------------------------------
 # Autograd Function tests — only run when liger_kernel is importable.
-# Without Liger, ``LigerFusedLinearLLMPPOFunction`` resolves to ``None`` and
+# Without Liger, ``LigerFusedLinearPolicyLossFunction`` resolves to ``None`` and
 # the math fn above already covers the loss formula.
 # ---------------------------------------------------------------------------
 
 from agilerl import HAS_LIGER_KERNEL  # noqa: E402
-from agilerl.algorithms.core.fused_llm_ppo_loss import (  # noqa: E402
-    LigerFusedLinearLLMPPOFunction,
+from agilerl.algorithms.core.fused_llm_policy_loss import (  # noqa: E402
+    LigerFusedLinearPolicyLossFunction,
 )
 
 
 @pytest.mark.skipif(
     not HAS_LIGER_KERNEL,
-    reason="LigerFusedLinearLLMPPOFunction requires liger-kernel",
+    reason="LigerFusedLinearPolicyLossFunction requires liger-kernel",
 )
-class TestLigerFusedLinearLLMPPOFunction:
+class TestLigerFusedLinearPolicyLossFunction:
     """Drive the autograd Function on tiny shapes and assert it matches the
     unfused reference for both forward loss and backward gradient flow."""
 
@@ -639,7 +639,7 @@ class TestLigerFusedLinearLLMPPOFunction:
         hidden, weight, ids, mask, adv, old_lp, ref_lp = self._build_inputs(
             B, T, V, H, with_ref=True
         )
-        loss, _ = LigerFusedLinearLLMPPOFunction.apply(
+        loss, _ = LigerFusedLinearPolicyLossFunction.apply(
             hidden,
             weight,
             ids,
@@ -661,7 +661,7 @@ class TestLigerFusedLinearLLMPPOFunction:
         # Reference: compute loss the unfused way.
         logits = hidden @ weight.t()
         log_probs = torch.log_softmax(logits.float(), dim=-1)
-        ref_loss, _ = llm_ppo_loss_fn(
+        ref_loss, _ = llm_policy_loss_fn(
             log_probs=log_probs,
             selected_token_ids=ids,
             attention_mask=mask,
@@ -678,7 +678,7 @@ class TestLigerFusedLinearLLMPPOFunction:
         hidden, weight, ids, mask, adv, old_lp, _ = self._build_inputs(
             B, T, V, H, with_ref=False
         )
-        loss, _ = LigerFusedLinearLLMPPOFunction.apply(
+        loss, _ = LigerFusedLinearPolicyLossFunction.apply(
             hidden,
             weight,
             ids,
@@ -716,7 +716,7 @@ class TestLigerFusedLinearLLMPPOFunction:
         turn_ids = torch.tensor([[0, 0, 0, 1, 1, 1], [0, 0, 1, 1, 1, 1]])
         full_turn_mask = torch.ones(B, max_turns, dtype=torch.float32)
         adv_turn = torch.randn(B, max_turns, dtype=torch.float32) * 0.1
-        loss, _ = LigerFusedLinearLLMPPOFunction.apply(
+        loss, _ = LigerFusedLinearPolicyLossFunction.apply(
             hidden,
             weight,
             ids,
@@ -749,7 +749,7 @@ class TestLigerFusedLinearLLMPPOFunction:
             B, T, V, H, with_ref=False
         )
         bias = (torch.randn(V, dtype=torch.float32) * 0.02).requires_grad_(True)
-        loss, _ = LigerFusedLinearLLMPPOFunction.apply(
+        loss, _ = LigerFusedLinearPolicyLossFunction.apply(
             hidden,
             weight,
             ids,

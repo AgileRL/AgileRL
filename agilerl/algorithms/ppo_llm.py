@@ -12,13 +12,13 @@ from agilerl.algorithms.core.fused_lora import clear_fused_adapter_routing
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 
 if HAS_LIGER_KERNEL:
-    from agilerl.algorithms.core.fused_llm_ppo_loss import (
-        LigerFusedLinearLLMPPOFunction,
+    from agilerl.algorithms.core.fused_llm_policy_loss import (
+        LigerFusedLinearPolicyLossFunction,
     )
 else:
     # Keep the name resolvable when liger-kernel isn't installed so unit
     # tests can patch it. ``_ppo_loss_liger`` guards against actual use.
-    LigerFusedLinearLLMPPOFunction = None  # type: ignore[assignment]
+    LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
 from agilerl.protocols import (
     LoraConfigProtocol,
     MultiTurnEnv,
@@ -888,7 +888,7 @@ class PPO(LLMAlgorithm):
         :meth:`_fused_forward`):
 
         1. **Actor pass** under ``select_adapter("actor")``. ``lm_head``
-           pre-hook captures hidden states; :class:`LigerFusedLinearLLMPPOFunction`
+           pre-hook captures hidden states; :class:`LigerFusedLinearPolicyLossFunction`
            computes the chunked policy + KL loss without ever materializing
            ``(B, T, V)`` for the autograd graph.
         2. **Critic pass** under ``select_adapter("critic")``. Standard
@@ -972,7 +972,7 @@ class PPO(LLMAlgorithm):
         # Identity-patch lm_head so the actor forward outputs the last hidden
         # state (B, T, H) directly instead of computing the full (B, T, V)
         # logits only to discard them. lm_head_weight is passed separately to
-        # LigerFusedLinearLLMPPOFunction which handles the matmul and its grad.
+        # LigerFusedLinearPolicyLossFunction which handles the matmul and its grad.
         lm_head = self._get_lm_head()
         lm_head_weight = lm_head.weight
         lm_head_bias = lm_head.bias
@@ -989,7 +989,7 @@ class PPO(LLMAlgorithm):
         )  # (B, T, H)
 
         target_ids = batch_ids[:, 1:].contiguous()
-        loss_pg_kl, aux = LigerFusedLinearLLMPPOFunction.apply(
+        loss_pg_kl, aux = LigerFusedLinearPolicyLossFunction.apply(
             policy_hidden[:, :-1].contiguous(),
             lm_head_weight,
             target_ids,
