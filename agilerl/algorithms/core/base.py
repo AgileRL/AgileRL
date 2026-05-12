@@ -1979,8 +1979,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :type pad_token_id: int
     :param pad_token: The pad token.
     :type pad_token: str
-    :param use_liger_loss: Whether to use Liger loss.
-    :type use_liger_loss: bool
+    :param use_liger_loss: Whether to use Liger loss. When ``None`` (the
+        subclass default), resolves to ``True`` if ``liger-kernel`` is
+        importable and ``False`` otherwise. Passing ``True`` explicitly
+        without ``liger-kernel`` installed warns and falls back to ``False``.
+    :type use_liger_loss: bool | None
     :param lora_config: The LoRA config.
     :type lora_config: LoraConfigProtocol | None
     :param use_separate_reference_adapter: Whether to use a separate reference adapter.
@@ -2015,7 +2018,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :param reduce_memory_peak: Deprecated. Previously hinted peak-memory batching;
         ignored. Configure ``micro_batch_size_per_gpu`` and DeepSpeed instead.
     :type reduce_memory_peak: bool, optional
-    :param cast_logprobs_to_fp32: When ``True`` (the default), the per-token
+    :param cast_logprobs_to_fp32: When ``True``, the per-token
         log-probability reduction (``amax`` / ``gather`` / ``logsumexp``)
         runs in fp32 before being cast back to the input dtype. Applies
         uniformly to both the unfused ``(B, T, V)`` path
@@ -2023,21 +2026,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         path (:meth:`_fused_linear_logprobs_no_grad`) so the two paths
         produce numerically equivalent log-probs.
 
-        **Memory cost of the default**: zero net change vs prior
-        behaviour on the *unfused* path (it already promoted to fp32
-        unconditionally — this flag only exposes that promotion). On the
-        *fused* path the default flipped from bf16 to fp32 for
-        consistency, costing ~6 MB extra peak at ``B=8, T=2048,
-        V≈152k`` (the chunked kernel keeps the fp32 workspace bounded to
-        ``chunk_rows * V``).
+        Defaults to ``None``, which resolves to the resolved value of
+        ``use_liger_loss``. Rationale: Liger users have already escaped
+        the ``(B, T, V)`` materialization, so the fp32 fused workspace
+        is bounded to ``chunk_rows * V`` (~6 MB at ``B=8, T=2048,
+        V≈152k``) and matches Liger's own internal fp32 math. Non-Liger
+        users hit the unfused grad path where the fp32 chunk workspace
+        sits on top of the full bf16 logits — costing ~10 GB extra peak
+        at the same shapes — so the default flips to ``False`` for them.
 
-        Setting ``False`` keeps the entire reduction in the input dtype —
-        measurably faster and ~18 GB lower peak on the *unfused* path,
-        but introduces a per-token bf16 quantisation error (~0.1 at
-        ``V≈128k``) which biases PPO/GRPO importance-sampling ratios.
-        Only flip to ``False`` if you have verified bf16 is acceptable
-        for your vocab/shape.
-    :type cast_logprobs_to_fp32: bool, optional
+        Setting ``False`` introduces a per-token bf16 quantisation error
+        (~0.1 at ``V≈128k``) which can bias PPO/GRPO importance-sampling
+        ratios. Set ``True`` explicitly if you have verified you have
+        memory headroom and want the precision.
+    :type cast_logprobs_to_fp32: bool | None, optional
     """
 
     _separate_reference_adapter_deprecation_emitted = False
@@ -2054,7 +2056,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         seed: int,
         pad_token_id: int,
         pad_token: str,
-        use_liger_loss: bool,
+        use_liger_loss: bool | None,
         lora_config: LoraConfig | None,
         use_separate_reference_adapter: bool = False,
         lr_critic: float | None = None,
@@ -2075,8 +2077,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
-        use_fused_linear_logprobs: bool = False,
-        cast_logprobs_to_fp32: bool = True,
+        use_fused_linear_logprobs: bool | None = None,
+        cast_logprobs_to_fp32: bool | None = None,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
@@ -2088,13 +2090,34 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 DeprecationWarning,
                 stacklevel=2,
             )
-        if use_liger_loss and not HAS_LIGER_KERNEL:
+        if use_liger_loss is None:
+            # Subclass default. Opt in automatically when Liger is
+            # available; users can still pass False explicitly.
+            use_liger_loss = HAS_LIGER_KERNEL
+        elif use_liger_loss and not HAS_LIGER_KERNEL:
             warnings.warn(
                 "use_liger_loss=True requested, but `liger-kernel` is not available on this platform/environment. "
                 "Falling back to standard loss.",
                 stacklevel=2,
             )
             use_liger_loss = False
+
+        if cast_logprobs_to_fp32 is None:
+            # Tie default fp32 casting to whether Liger is actually in use.
+            # Non-Liger users pay ~10 GB fp32 workspace per call on the unfused
+            # ``(B, T, V)`` logits path; Liger users only see the small fused
+            # rollout-side workspace, so fp32 precision is effectively free
+            # and matches Liger's own internal fp32 math.
+            cast_logprobs_to_fp32 = use_liger_loss
+        if use_fused_linear_logprobs is None:
+            # Tie default to use_liger_loss too. Without Liger the peak sits
+            # on the grad-time ``(B, T, V)`` materialization regardless, so
+            # fusing the no-grad rollout pass doesn't lower overall peak —
+            # and would force every model to expose a discoverable lm_head.
+            # Liger users have already escaped the grad-time materialization
+            # via the fused loss, so fusing the rollout side compounds the
+            # win cleanly.
+            use_fused_linear_logprobs = use_liger_loss
 
         if model_name is None and actor_network is None:
             msg = "At least one of model_name or actor_network must be provided."
@@ -4097,18 +4120,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         logits: torch.Tensor,
         index: torch.Tensor,
         cast_to_fp32: bool = True,
-        _chunk_rows: int = 8,
+        _chunk_rows: int = 1,
     ) -> torch.Tensor:
         """Calculate log probabilities for previously generated token ids.
 
         Processes ``_chunk_rows`` rows at a time so peak memory stays bounded to
         ``(_chunk_rows, seq_len, vocab_size)`` rather than the full batch, avoiding
-        OOM on large-vocabulary models while reducing Python loop overhead compared
-        to a strict row-by-row approach. Larger ``_chunk_rows`` values amortize
-        kernel-launch cost over more rows.
+        OOM on large-vocabulary models. Default ``_chunk_rows=1`` minimizes the
+        fp32 workspace at the cost of more kernel launches; raise to amortize
+        launch overhead when memory headroom allows.
 
-        With ``cast_to_fp32=True`` (the default), the per-chunk reduction
-        (``amax`` / ``gather`` / ``logsumexp``) runs in fp32 then casts the
+        With ``cast_to_fp32=True``, the per-chunk reduction (``amax`` /
+        ``gather`` / ``logsumexp``) runs in fp32 then casts the
         ``(B, seq_len)`` output back to *logits* dtype. Matches the precision
         of ``F.log_softmax`` over the same inputs to within the final bf16
         cast. With ``cast_to_fp32=False`` the reduction stays in *logits*
@@ -4123,7 +4146,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param index: Token IDs of shape ``(B, seq_len)``.
         :type index: torch.Tensor
         :param cast_to_fp32: Promote each chunk to fp32 before the reduction.
-            Default ``True``.
         :type cast_to_fp32: bool
         :return: Log probabilities of the completion IDs, shape ``(B, seq_len)``.
         :rtype: torch.Tensor

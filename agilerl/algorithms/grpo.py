@@ -133,13 +133,16 @@ class GRPO(LLMAlgorithm):
     :type gradient_checkpointing: bool, optional
     :param torch_compiler: Torch compile mode (e.g. ``'default'``), defaults to None
     :type torch_compiler: str | None, optional
-    :param use_liger_loss: Use Liger kernel for memory-efficient loss computation, defaults to False.
-        Requires ``liger_kernel`` to be installed; pass ``False`` to fall back to the standard PyTorch path.
-        Supported for ``loss_type`` values ``'grpo'``, ``'cispo'``, and ``'gspo'``.
-        Note that the Liger path uses DAPO-style batch normalisation for ``'cispo'`` rather than
-        the per-sequence-then-batch normalisation of the standard path; numerical values will
-        differ slightly but gradient direction is equivalent.
-    :type use_liger_loss: bool, optional
+    :param use_liger_loss: Use Liger kernel for memory-efficient loss
+        computation. Defaults to ``None``, which resolves to ``True`` when
+        ``liger-kernel`` is installed and ``False`` otherwise. Pass ``False``
+        explicitly to force the standard PyTorch path. Supported for
+        ``loss_type`` values ``'grpo'``, ``'cispo'``, and ``'gspo'``. Note
+        that the Liger path uses DAPO-style batch normalisation for
+        ``'cispo'`` rather than the per-sequence-then-batch normalisation of
+        the standard path; numerical values will differ slightly but
+        gradient direction is equivalent.
+    :type use_liger_loss: bool | None, optional
     :param use_kl_advantage_shaping: Apply KL-based shaping directly to token
         advantages before PPO clipping, defaults to False.
     :type use_kl_advantage_shaping: bool, optional
@@ -169,15 +172,15 @@ class GRPO(LLMAlgorithm):
         filtered out, defaults to 0.0.
     :type adv_filter_eps: float, optional
     :param use_fused_linear_logprobs: When ``True``, the no-grad rollout-side
-        logprob computation (old-policy and reference) skips materializing the
-        full ``(B, T, V)`` logits tensor and instead consumes hidden states
-        directly via a chunked matmul over the lm_head weight. Drops peak
-        no-grad memory by the size of the logits tensor (e.g. ~1.2 GB at
-        ``B=8, T=256, V=152k`` in bf16; the saving scales linearly with
-        ``B*T*V``). Default ``False`` preserves byte-identical behaviour to
-        the unfused path. Has no effect on the gradient-time loss path
-        (use ``use_liger_loss=True`` for that).
-    :type use_fused_linear_logprobs: bool, optional
+        logprob computation (old-policy and reference) skips materializing
+        the full ``(B, T, V)`` logits tensor and instead consumes hidden
+        states directly via a chunked matmul over the lm_head weight.
+        Defaults to ``None``, which resolves to the resolved value of
+        ``use_liger_loss``: without Liger the gradient-time path already
+        materializes ``(B, T, V)`` so fusing the rollout doesn't lower
+        overall peak; with Liger the rollout fusion complements the
+        grad-time memory saving.
+    :type use_fused_linear_logprobs: bool | None, optional
     """
 
     def __init__(
@@ -219,7 +222,7 @@ class GRPO(LLMAlgorithm):
         seed: int = 42,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
-        use_liger_loss: bool = False,
+        use_liger_loss: bool | None = None,
         use_kl_advantage_shaping: bool = False,
         adv_norm: str = "mean_std",
         loss_type: Literal["grpo", "gspo", "cispo"] = "grpo",
@@ -229,8 +232,8 @@ class GRPO(LLMAlgorithm):
         filter_zero_adv: bool = False,
         adv_filter_eps: float = 0.0,
         reduce_memory_peak: bool = False,
-        use_fused_linear_logprobs: bool = False,
-        cast_logprobs_to_fp32: bool = True,
+        use_fused_linear_logprobs: bool | None = None,
+        cast_logprobs_to_fp32: bool | None = None,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"

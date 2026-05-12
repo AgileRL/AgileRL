@@ -87,9 +87,10 @@ class SFT(LLMAlgorithm):
         memory, defaults to True
     :type gradient_checkpointing: bool, optional
     :param use_liger_loss: Use Liger kernel for memory-efficient cross-entropy loss
-        computation, defaults to False. Requires ``liger_kernel`` to be installed;
-        pass ``False`` to fall back to the standard PyTorch path.
-    :type use_liger_loss: bool, optional
+        computation. Defaults to ``None``, which resolves to ``True`` when
+        ``liger-kernel`` is installed and ``False`` otherwise. Pass ``False``
+        explicitly to force the standard PyTorch path.
+    :type use_liger_loss: bool | None, optional
     :param use_separate_reference_adapter: Also create a ``reference`` LoRA adapter
         alongside ``actor``. SFT does not itself use a reference policy, so this
         defaults to ``False``; enable it when you plan to save an SFT checkpoint
@@ -120,7 +121,7 @@ class SFT(LLMAlgorithm):
         clone: bool = False,
         seed: int = 42,
         gradient_checkpointing: bool = True,
-        use_liger_loss: bool = False,
+        use_liger_loss: bool | None = None,
         reduce_memory_peak: bool = False,
         use_separate_reference_adapter: bool = False,
     ) -> None:

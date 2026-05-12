@@ -10,9 +10,19 @@ that tensor alone can dominate GPU memory, even though many algorithms only
 need the log-probability of the **token that was actually chosen** at each
 position—a much smaller ``(batch, sequence length)`` result.
 
-AgileRL offers two **optional** speed/memory switches. Both default to
-``False``. They are meant to implement the same training objective as the
-standard code, up to normal floating-point differences.
+AgileRL offers two **optional** speed/memory switches. They are meant to
+implement the same training objective as the standard code, up to normal
+floating-point differences.
+
+* ``use_liger_loss`` defaults to ``None``, which resolves to ``True`` when
+  ``liger-kernel`` is importable and ``False`` otherwise. Pass ``False``
+  explicitly to force the standard path even when Liger is installed.
+* ``use_fused_linear_logprobs`` defaults to ``None``, which resolves to the
+  same value as the resolved ``use_liger_loss``. Without Liger the
+  gradient-time path already materializes the full ``(B, T, V)`` logits, so
+  fusing the no-grad rollout alone wouldn't lower overall peak — and would
+  force the model to expose a discoverable ``lm_head``. Pass ``True``
+  explicitly to fuse only the rollout side without enabling Liger.
 
 .. list-table::
    :header-rows: 1
@@ -34,19 +44,26 @@ standard code, up to normal floating-point differences.
        GSPO family).
 
 ``use_fused_linear_logprobs`` is pure AgileRL code and does **not** require
-``liger-kernel``. ``use_liger_loss`` **does** require ``liger-kernel``; if it is
-missing you get a warning and the flag is turned off. If you use ``use_liger_loss``
+``liger-kernel``. ``use_liger_loss`` **does** require ``liger-kernel``; if you
+explicitly pass ``True`` without it installed you get a warning and the flag
+is turned off. Leaving it at the default ``None`` simply opts out of the
+fused loss when Liger is missing — no warning. If you use ``use_liger_loss``
 with LoRA, ``lm_head`` is excluded from LoRA adapters (with a warning) because
 the fused kernel expects a single full head weight matrix.
 
-``cast_logprobs_to_fp32`` (on ``LLMAlgorithm``, default ``True``) controls
-whether the **chunked log-prob reductions** in the standard and
-``use_fused_linear_logprobs`` paths run the numerically sensitive ``logsumexp`` /
-gather steps in fp32, then cast back. That stays closer to a textbook
-``log_softmax`` and keeps rollout vs. trainer log-probs consistent. Setting it
-to ``False`` can save a bit of work but may shift log-probs enough to change
-importance-sampling ratios on large vocabs in low precision (e.g. bf16). The
-Liger gradient-time kernels use their own fused math and **ignore** this flag.
+``cast_logprobs_to_fp32`` (on ``LLMAlgorithm``) controls whether the
+**chunked log-prob reductions** in the standard and
+``use_fused_linear_logprobs`` paths run the numerically sensitive
+``logsumexp`` / gather steps in fp32, then cast back. It defaults to ``None``,
+which resolves to the same value as the resolved ``use_liger_loss``: Liger
+users get fp32 (consistent with Liger's own gradient-time math and cheap
+because the fused rollout workspace is small), while non-Liger users get
+bf16 to avoid a ~10 GB fp32 chunk workspace landing on top of the full
+``(B, T, V)`` bf16 logits on the unfused grad path. Set ``True`` explicitly
+if you want fp32 precision and have the memory headroom; set ``False`` to
+force bf16 even with Liger. Note that the Liger gradient-time kernels use
+their own fused math and **ignore** this flag for the loss backward — it
+only governs the rollout-side log-prob reductions.
 
 Usage
 -----
@@ -55,13 +72,14 @@ Usage
 
     from agilerl.algorithms import GRPO, CISPO, GSPO, LLMPPO, LLMREINFORCE
 
-    agent = GRPO(..., use_fused_linear_logprobs=True)   # no-grad rollout path
-    agent = LLMPPO(..., use_liger_loss=True)             # gradient-time policy loss
+    # Both fused paths are on by default when liger-kernel is installed.
+    agent = GRPO(...)
 
+    # Force the standard PyTorch paths even if Liger is available.
     agent = GRPO(
         ...,
-        use_liger_loss=True,
-        use_fused_linear_logprobs=True,
+        use_liger_loss=False,
+        use_fused_linear_logprobs=False,
     )
 
 Tiny batches (only a few hundred tokens total) may not see much benefit from

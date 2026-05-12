@@ -179,9 +179,9 @@ class REINFORCE(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
-        use_fused_linear_logprobs: bool = False,
-        cast_logprobs_to_fp32: bool = True,
-        use_liger_loss: bool = False,
+        use_fused_linear_logprobs: bool | None = None,
+        cast_logprobs_to_fp32: bool | None = None,
+        use_liger_loss: bool | None = None,
     ) -> None:
 
         device = (

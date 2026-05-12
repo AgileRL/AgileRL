@@ -417,6 +417,9 @@ def generate_grpo(
         max_model_len=max_tokens + 5,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
+        # DummyEvolvable lacks an lm_head, so disable the fused-linear-logprobs
+        # path when no real HF model is provided.
+        use_fused_linear_logprobs=pretrained_model_name_or_path is not None,
     )
     return grpo
 
