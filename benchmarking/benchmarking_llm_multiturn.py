@@ -22,7 +22,8 @@ from agilerl.llm_envs import (
 )
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
-ENV_NAME = "game:Sudoku-v0-easy"
+# Temporary: match legacy multiturn benchmark task (easier sparse-reward sanity check).
+ENV_NAME = "game:GuessTheNumber-v0-easy"
 
 ALGO_REGISTRY = {
     "LLMPPO": LLMPPO,
@@ -67,12 +68,15 @@ def main(
 
     accelerator = create_llm_accelerator()
 
+    pop_size = init_hp.get("POP_SIZE", 1)
+    vllm_sleep = pop_size == 1
+
     vllm_config = (
         VLLMConfig(
             tensor_parallel_size=1,
             gpu_memory_utilization=0.45,
             max_num_seqs=16,
-            sleep_mode=True,
+            sleep_mode=vllm_sleep,
         )
         if init_hp.get("USE_VLLM", False)
         else None
@@ -81,7 +85,7 @@ def main(
         algo=algo_name,
         net_config=None,
         INIT_HP=init_hp,
-        population_size=init_hp.get("POP_SIZE", 1),
+        population_size=pop_size,
         accelerator=accelerator,
         tokenizer=tokenizer,
         model_name=model_name,
