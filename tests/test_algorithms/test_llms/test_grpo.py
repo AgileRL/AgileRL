@@ -3522,6 +3522,10 @@ class TestGRPOSaveLoadCheckpoint:
                 use_vllm=use_vllm,
                 accelerator=accelerator,
                 use_separate_reference_adapter=use_separate_reference_adapter,
+                # Match the saved agent's setting so the constructor doesn't
+                # mutate ``lora_config`` differently (``use_liger_loss=True``
+                # adds ``exclude_modules=["lm_head"]``).
+                use_liger_loss=grpo.use_liger_loss,
             )
             new_grpo.load_checkpoint(tmpdir, merge_lora_configs=False)
 

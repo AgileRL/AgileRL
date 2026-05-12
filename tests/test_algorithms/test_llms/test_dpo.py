@@ -701,6 +701,10 @@ class TestDPOSaveLoadCheckpoint:
                 accelerator=accelerator,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 lora_config=copy.deepcopy(dpo.lora_config),
+                # Match the saved agent's setting so the constructor doesn't
+                # mutate ``lora_config`` differently (``use_liger_loss=True``
+                # adds ``exclude_modules=["lm_head"]``).
+                use_liger_loss=dpo.use_liger_loss,
             )
             new_dpo.load_checkpoint(tmpdir)
 
