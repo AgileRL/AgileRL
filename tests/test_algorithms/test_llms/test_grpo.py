@@ -1731,6 +1731,29 @@ class TestGRPOInit:
         AcceleratorState._reset_state(True)
 
 
+class TestGRPOClipCoefTuple:
+    """Cover the ``clip_coef`` tuple/list unpacking branch in
+    :meth:`GRPO.__init__` (``clip_coef_min = float(clip_coef[0])`` etc).
+    Default tests pass ``clip_coef`` as a single float, so this branch
+    was otherwise uncovered."""
+
+    def test_tuple_clip_coef_unpacks_into_min_and_max(self) -> None:
+        grpo = _make_cpu_grpo_for_branch_tests(clip_coef=(0.15, 0.25))
+        assert grpo.clip_coef_min == pytest.approx(0.15)
+        assert grpo.clip_coef_max == pytest.approx(0.25)
+
+    def test_list_clip_coef_unpacks_into_min_and_max(self) -> None:
+        grpo = _make_cpu_grpo_for_branch_tests(clip_coef=[0.1, 0.3])
+        assert grpo.clip_coef_min == pytest.approx(0.1)
+        assert grpo.clip_coef_max == pytest.approx(0.3)
+
+    def test_wrong_length_tuple_raises(self) -> None:
+        with pytest.raises(
+            ValueError, match="clip_coef tuple must contain exactly two values"
+        ):
+            _make_cpu_grpo_for_branch_tests(clip_coef=(0.1,))
+
+
 class TestGRPOLigerLossDispatch:
     """Cover the ``loss_type`` -> Liger-API dispatch table in
     :meth:`GRPO._liger_loss`. Each branch sets up ``liger_loss_type`` /
