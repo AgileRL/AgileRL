@@ -3492,10 +3492,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # matmul over the lm_head weight. Skips materializing (B, T, V).
         # Only safe when grads are disabled — autograd graph would not
         # capture the manual matmul.
-        use_fused_lp = (
-            getattr(self, "use_fused_linear_logprobs", False)
-            and not torch.is_grad_enabled()
-        )
+        use_fused_lp = self.use_fused_linear_logprobs and not torch.is_grad_enabled()
         if use_fused_lp:
             lm_head = self._get_lm_head()
             lm_head_weight = lm_head.weight
@@ -3740,10 +3737,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
-        use_fused_lp = (
-            getattr(self, "use_fused_linear_logprobs", False)
-            and not torch.is_grad_enabled()
-        )
+        use_fused_lp = self.use_fused_linear_logprobs and not torch.is_grad_enabled()
         with self.select_adapter("reference" if use_reference else "actor"):
             self.actor.train(mode=not eval_mode)
             num_samples = ids.shape[0]
