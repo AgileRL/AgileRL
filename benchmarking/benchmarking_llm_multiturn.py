@@ -22,7 +22,6 @@ from agilerl.llm_envs import (
 )
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
-# Temporary: match legacy multiturn benchmark task (easier sparse-reward sanity check).
 ENV_NAME = "game:GuessTheNumber-v0-easy"
 
 ALGO_REGISTRY = {
