@@ -2021,12 +2021,22 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         uniformly to both the unfused ``(B, T, V)`` path
         (:meth:`_memory_efficient_logits`) and the fused linear log-prob
         path (:meth:`_fused_linear_logprobs_no_grad`) so the two paths
-        produce numerically equivalent log-probs. Setting ``False`` keeps
-        the entire reduction in the input dtype — measurably faster and
-        lower peak memory on the unfused path, but introduces a per-token
-        bf16 quantisation error (~0.1 at ``V≈128k``) which biases PPO/GRPO
-        importance-sampling ratios. Only flip to ``False`` if you have
-        verified bf16 is acceptable for your vocab/shape.
+        produce numerically equivalent log-probs.
+
+        **Memory cost of the default**: zero net change vs prior
+        behaviour on the *unfused* path (it already promoted to fp32
+        unconditionally — this flag only exposes that promotion). On the
+        *fused* path the default flipped from bf16 to fp32 for
+        consistency, costing ~6 MB extra peak at ``B=8, T=2048,
+        V≈152k`` (the chunked kernel keeps the fp32 workspace bounded to
+        ``chunk_rows * V``).
+
+        Setting ``False`` keeps the entire reduction in the input dtype —
+        measurably faster and ~18 GB lower peak on the *unfused* path,
+        but introduces a per-token bf16 quantisation error (~0.1 at
+        ``V≈128k``) which biases PPO/GRPO importance-sampling ratios.
+        Only flip to ``False`` if you have verified bf16 is acceptable
+        for your vocab/shape.
     :type cast_logprobs_to_fp32: bool, optional
     """
 
