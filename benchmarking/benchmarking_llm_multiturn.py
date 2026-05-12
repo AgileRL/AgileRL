@@ -7,6 +7,7 @@ if not HAS_LLM_DEPENDENCIES:
     )
 
 import argparse
+import os
 
 import gem
 import yaml
@@ -32,7 +33,16 @@ ALGO_REGISTRY = {
 }
 
 
-def main(init_hp, mut_p):
+def main(
+    init_hp,
+    mut_p,
+    *,
+    wb: bool,
+    wandb_api_key: str | None,
+    wandb_project: str,
+    wandb_entity: str | None,
+    wandb_run_name: str | None,
+):
     algo_name = init_hp["ALGO"]
     algo_cls = ALGO_REGISTRY.get(algo_name)
     if algo_cls is None:
@@ -60,7 +70,7 @@ def main(init_hp, mut_p):
     vllm_config = (
         VLLMConfig(
             tensor_parallel_size=1,
-            gpu_memory_utilization=0.6,
+            gpu_memory_utilization=0.45,
             max_num_seqs=16,
             sleep_mode=True,
         )
@@ -82,7 +92,11 @@ def main(init_hp, mut_p):
         pop=pop,
         max_turns=max_turns,
         init_hp=init_hp,
-        wb=True,
+        wb=wb,
+        wandb_api_key=wandb_api_key,
+        wandb_project=wandb_project,
+        wandb_entity=wandb_entity,
+        wandb_run_name=wandb_run_name,
         save_elite=True,
         elite_path="saved_llms",
         evo_steps=None,
@@ -104,8 +118,31 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/training/llm_finetuning/cispo.yaml",
+        default="configs/training/llm_finetuning/ppo_llm.yaml",
         help="Path to the YAML config file",
+    )
+    parser.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Disable Weights & Biases logging",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default=os.environ.get("WANDB_PROJECT", "AgileRL"),
+        help="W&B project (default: AgileRL or $WANDB_PROJECT)",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        type=str,
+        default=os.environ.get("WANDB_ENTITY"),
+        help="W&B entity / team (optional; fallback $WANDB_ENTITY)",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=os.environ.get("WANDB_RUN_NAME"),
+        help="W&B run name (optional; fallback $WANDB_RUN_NAME)",
     )
     args = parser.parse_args()
 
@@ -113,4 +150,13 @@ if __name__ == "__main__":
         config = yaml.safe_load(file)
     init_hp = config["INIT_HP"]
     mut_p = config["MUTATION_PARAMS"]
-    main(init_hp, mut_p)
+    wandb_key = os.environ.get("WANDB_API_KEY")
+    main(
+        init_hp,
+        mut_p,
+        wb=not args.no_wandb,
+        wandb_api_key=wandb_key,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_run_name=args.wandb_run_name,
+    )
