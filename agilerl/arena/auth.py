@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
@@ -15,6 +17,43 @@ from keycloak.exceptions import KeycloakError
 from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_ACCESS_SKEW_SECONDS = 60
+
+
+def oauth_access_token_expires_at(access_token: str | None) -> float | None:
+    """Return JWT ``exp`` claim as Unix timestamp, or ``None`` if not a decodable JWT."""
+    if not access_token or "." not in access_token:
+        return None
+    try:
+        _h, payload_b64, *_rest = access_token.split(".")
+        pad = "=" * (-len(payload_b64) % 4)
+        raw = base64.urlsafe_b64decode(payload_b64 + pad)
+        payload = json.loads(raw.decode("utf-8"))
+        exp = payload.get("exp")
+        if exp is None:
+            return None
+        return float(exp)
+    except (
+        json.JSONDecodeError,
+        ValueError,
+        UnicodeDecodeError,
+        binascii.Error,
+        KeyError,
+    ):
+        return None
+
+
+def is_oauth_access_token_valid(
+    access_token: str | None,
+    *,
+    skew_seconds: int = _DEFAULT_ACCESS_SKEW_SECONDS,
+) -> bool:
+    """True if *access_token* is a JWT and ``exp`` is after now (plus *skew_seconds*)."""
+    exp = oauth_access_token_expires_at(access_token)
+    if exp is None:
+        return False
+    return exp > time.time() + skew_seconds
 
 
 def load_credentials_payload(

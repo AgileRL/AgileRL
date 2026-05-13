@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -11,6 +12,7 @@ import httpx
 import pytest
 
 from agilerl.arena.client import ArenaClient, _TokenStore, prepare_env_upload
+from agilerl.arena.auth import ArenaOAuth2
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
@@ -20,6 +22,16 @@ from agilerl.arena.exceptions import (
 )
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
+
+
+def _jwt_with_exp(exp: int) -> str:
+    import base64
+
+    def seg(obj: dict) -> str:
+        raw = json.dumps(obj, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    return f"{seg({'alg': 'none'})}.{seg({'exp': exp})}.x"
 
 
 def _mock_ndjson_stream(result: dict | None = None) -> MagicMock:
@@ -173,6 +185,64 @@ class TestArenaClientLogin:
         assert client._tokens.access_token == "at"
         assert client._tokens.refresh_token == "rt"
         client._auth.device_login.assert_called_once_with(timeout=60)
+
+    def test_login_skips_device_when_jwt_still_valid(self, unauthenticated_client):
+        client = unauthenticated_client
+        client._tokens.access_token = _jwt_with_exp(int(time.time()) + 3600)
+        client._tokens.refresh_token = "rt"
+        client._auth.device_login = MagicMock()
+        client.login()
+        client._auth.device_login.assert_not_called()
+
+    def test_login_refreshes_when_jwt_expired(self, unauthenticated_client):
+        client = unauthenticated_client
+        client._tokens.access_token = _jwt_with_exp(int(time.time()) - 120)
+        client._tokens.refresh_token = "rt"
+        client._auth.device_login = MagicMock()
+        client._auth.refresh_access_token = MagicMock(
+            return_value={"access_token": "new_at", "refresh_token": "new_rt"}
+        )
+        client.login()
+        client._auth.device_login.assert_not_called()
+        client._auth.refresh_access_token.assert_called_once_with("rt")
+        assert client._tokens.access_token == "new_at"
+        assert client._tokens.refresh_token == "new_rt"
+
+    def test_login_force_runs_device_even_when_valid(self, unauthenticated_client):
+        client = unauthenticated_client
+        client._tokens.access_token = _jwt_with_exp(int(time.time()) + 3600)
+        tokens = {"access_token": "from_dev", "refresh_token": "rt2"}
+        client._auth.device_login = MagicMock(return_value=tokens)
+        client.login(force=True)
+        client._auth.device_login.assert_called_once()
+
+    def test_login_noop_with_api_key(self, api_key_client):
+        client = api_key_client
+        client._auth.device_login = MagicMock()
+        client.login()
+        client._auth.device_login.assert_not_called()
+
+    @patch("agilerl.arena.client.load_credentials")
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_restore_session_proactively_refreshes_expired_jwt(
+        self, _kc, mock_load_credentials
+    ):
+        past = int(time.time()) - 120
+        mock_load_credentials.return_value = {
+            "access_token": _jwt_with_exp(past),
+            "refresh_token": "stored_rt",
+        }
+        with patch.object(ArenaOAuth2, "refresh_access_token") as mock_refresh:
+            mock_refresh.return_value = {
+                "access_token": "refreshed_at",
+                "refresh_token": "refreshed_rt",
+            }
+            env = {k: v for k, v in os.environ.items() if k != "ARENA_API_KEY"}
+            with patch.dict(os.environ, env, clear=True):
+                client = ArenaClient()
+        mock_refresh.assert_called_once_with("stored_rt")
+        assert client._tokens.access_token == "refreshed_at"
+        assert client._tokens.refresh_token == "refreshed_rt"
 
 
 class TestArenaClientLogout:
