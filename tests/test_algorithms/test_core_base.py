@@ -1883,11 +1883,11 @@ class TestLLMBackwardPass:
         assert agent.lr == 5e-5
 
 
-class TestLLMMemoryEfficientLogits:
-    def test_memory_efficient_logits_computes_log_probs(self):
+class TestLLMLogprobsFromLogits:
+    def test_logprobs_from_logits_computes_log_probs(self):
         logits = torch.randn(2, 5, 10)
         index = torch.randint(0, 10, (2, 5))
-        result = LLMAlgorithm._memory_efficient_logits(logits, index)
+        result = LLMAlgorithm._logprobs_from_logits(logits, index)
         assert result.shape == (2, 5)
         expected = (
             F.log_softmax(logits.float(), dim=-1)
@@ -1904,7 +1904,7 @@ class TestLLMMemoryEfficientLogits:
             (17, 2),
         ],
     )
-    def test_memory_efficient_logits_bf16_matches_fp32_log_softmax_reference(
+    def test_logprobs_from_logits_bf16_matches_fp32_log_softmax_reference(
         self,
         batch_rows: int,
         chunk_rows: int,
@@ -1920,7 +1920,7 @@ class TestLLMMemoryEfficientLogits:
         )
         index = torch.randint(0, vocab, (batch_rows, seq))
 
-        result_bf16 = LLMAlgorithm._memory_efficient_logits(
+        result_bf16 = LLMAlgorithm._logprobs_from_logits(
             logits_bf16,
             index,
             _chunk_rows=chunk_rows,
@@ -1947,7 +1947,7 @@ class TestLLMMemoryEfficientLogits:
             reference_fp32.to(torch.bfloat16),
         )
 
-    def test_memory_efficient_logits_cast_to_fp32_false_stays_in_input_dtype(
+    def test_logprobs_from_logits_cast_to_fp32_false_stays_in_input_dtype(
         self,
     ) -> None:
         """``cast_to_fp32=False`` runs the reduction in input dtype throughout
@@ -1957,7 +1957,7 @@ class TestLLMMemoryEfficientLogits:
         logits_bf16 = torch.randn(3, seq, vocab, dtype=torch.bfloat16)
         index = torch.randint(0, vocab, (3, seq))
 
-        result = LLMAlgorithm._memory_efficient_logits(
+        result = LLMAlgorithm._logprobs_from_logits(
             logits_bf16,
             index,
             cast_to_fp32=False,
@@ -1971,7 +1971,7 @@ class TestLLMMemoryEfficientLogits:
         assert torch.equal(result, ref_bf16)
 
 
-class TestFusedLinearLogprobsNoGrad:
+class TestLogprobsFromHiddenFused:
     """Cover the chunked matmul + max-shift gather/logsumexp kernel that
     replaces ``hidden @ Wᵀ → log_softmax → gather`` without ever
     materializing the full ``(B, T, V)`` logits tensor.
@@ -1988,7 +1988,7 @@ class TestFusedLinearLogprobsNoGrad:
         targets = torch.randint(0, V, (B, T))
         temperature = 0.7
 
-        result = LLMAlgorithm._fused_linear_logprobs_no_grad(
+        result = LLMAlgorithm._logprobs_from_hidden_fused(
             hidden,
             weight,
             bias,
@@ -2019,7 +2019,7 @@ class TestFusedLinearLogprobsNoGrad:
         weight = torch.randn(V, H, dtype=torch.bfloat16) * 0.02
         targets = torch.randint(0, V, (B, T))
 
-        result = LLMAlgorithm._fused_linear_logprobs_no_grad(
+        result = LLMAlgorithm._logprobs_from_hidden_fused(
             hidden,
             weight,
             None,
@@ -2046,7 +2046,7 @@ class TestFusedLinearLogprobsNoGrad:
         weight = torch.randn(V, H, dtype=torch.bfloat16) * 0.02
         targets = torch.randint(0, V, (B, T))
 
-        big = LLMAlgorithm._fused_linear_logprobs_no_grad(
+        big = LLMAlgorithm._logprobs_from_hidden_fused(
             hidden,
             weight,
             None,
@@ -2055,7 +2055,7 @@ class TestFusedLinearLogprobsNoGrad:
             cast_to_fp32=True,
             _chunk_rows=10_000,  # > B*T=27 → single chunk
         )
-        small = LLMAlgorithm._fused_linear_logprobs_no_grad(
+        small = LLMAlgorithm._logprobs_from_hidden_fused(
             hidden,
             weight,
             None,
@@ -2075,7 +2075,7 @@ class TestFusedLinearLogprobsNoGrad:
         weight = torch.randn(V, H, dtype=torch.float32) * 0.05
         targets = torch.randint(0, V, (B, T))
 
-        result = LLMAlgorithm._fused_linear_logprobs_no_grad(
+        result = LLMAlgorithm._logprobs_from_hidden_fused(
             hidden,
             weight,
             None,
@@ -2100,7 +2100,7 @@ class TestFusedLinearLogprobsNoGrad:
         targets = torch.randint(0, V, (B, T))
         temperature = 2.5
 
-        result = LLMAlgorithm._fused_linear_logprobs_no_grad(
+        result = LLMAlgorithm._logprobs_from_hidden_fused(
             hidden, weight, None, targets, temperature=temperature
         )
         logits = (hidden @ weight.t()) / temperature
@@ -2188,7 +2188,7 @@ class TestFusedLinearLogprobsIntegration:
     """End-to-end: ``use_fused_linear_logprobs=True`` produces logprobs
     numerically equivalent to the unfused path on the same model under
     ``torch.no_grad()``. Exercises ``_get_lm_head_parent``,
-    ``_patch_lm_head_to_identity``, and ``_fused_linear_logprobs_no_grad``
+    ``_patch_lm_head_to_identity``, and ``_logprobs_from_hidden_fused``
     via ``_get_logprobs``.
     """
 
@@ -2244,8 +2244,8 @@ class TestFusedLinearLogprobsIntegration:
         ids = torch.randint(1, V, (B, T))
         with patch.object(
             LLMAlgorithm,
-            "_fused_linear_logprobs_no_grad",
-            wraps=LLMAlgorithm._fused_linear_logprobs_no_grad,
+            "_logprobs_from_hidden_fused",
+            wraps=LLMAlgorithm._logprobs_from_hidden_fused,
         ) as spy:
             agent._get_logprobs(ids, batch_size=B, use_reference=False, eval_mode=True)
         spy.assert_not_called()
@@ -2263,8 +2263,8 @@ class TestFusedLinearLogprobsIntegration:
         ids = torch.randint(1, V, (B, T))
         with patch.object(
             LLMAlgorithm,
-            "_fused_linear_logprobs_no_grad",
-            wraps=LLMAlgorithm._fused_linear_logprobs_no_grad,
+            "_logprobs_from_hidden_fused",
+            wraps=LLMAlgorithm._logprobs_from_hidden_fused,
         ) as spy:
             with torch.no_grad():
                 agent._get_logprobs(
@@ -2278,7 +2278,7 @@ class TestFusedLinearLogprobsIntegration:
         self, cast_to_fp32: bool
     ) -> None:
         """``self.cast_logprobs_to_fp32`` flows into the unfused
-        ``_memory_efficient_logits`` call too — the two paths share the
+        ``_logprobs_from_logits`` call too — the two paths share the
         same regime."""
         torch.manual_seed(3)
         B, T, H, V = 2, 4, 8, 64
@@ -2287,8 +2287,8 @@ class TestFusedLinearLogprobsIntegration:
         ids = torch.randint(1, V, (B, T))
         with patch.object(
             LLMAlgorithm,
-            "_memory_efficient_logits",
-            wraps=LLMAlgorithm._memory_efficient_logits,
+            "_logprobs_from_logits",
+            wraps=LLMAlgorithm._logprobs_from_logits,
         ) as spy:
             with torch.no_grad():
                 agent._get_logprobs(
@@ -2320,9 +2320,7 @@ class TestFusedLinearLogprobsIntegration:
         routing = ["actor"] * B
 
         target_kernel = (
-            "_fused_linear_logprobs_no_grad"
-            if use_fused
-            else "_memory_efficient_logits"
+            "_logprobs_from_hidden_fused" if use_fused else "_logprobs_from_logits"
         )
         with (
             patch(
@@ -2926,7 +2924,7 @@ class TestLLMGetLogprobs:
         agent.pad_token_id = 0
         ids = torch.randint(1, 50, (2, 10))
         with patch.object(
-            LLMAlgorithm, "_memory_efficient_logits", return_value=torch.randn(2, 9)
+            LLMAlgorithm, "_logprobs_from_logits", return_value=torch.randn(2, 9)
         ):
             result = agent._get_logprobs(ids, batch_size=4)
         assert result.shape[0] == 2

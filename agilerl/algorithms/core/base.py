@@ -2021,8 +2021,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         log-probability reduction (``amax`` / ``gather`` / ``logsumexp``)
         runs in fp32 before being cast back to the input dtype. Applies
         uniformly to both the unfused ``(B, T, V)`` path
-        (:meth:`_memory_efficient_logits`) and the fused linear log-prob
-        path (:meth:`_fused_linear_logprobs_no_grad`) so the two paths
+        (:meth:`_logprobs_from_logits`) and the fused linear log-prob
+        path (:meth:`_logprobs_from_hidden_fused`) so the two paths
         produce numerically equivalent log-probs.
 
         The default preserves prior behaviour exactly: the unfused path
@@ -3502,7 +3502,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             del output
 
             if use_fused_lp:
-                chunk_lp = LLMAlgorithm._fused_linear_logprobs_no_grad(
+                chunk_lp = LLMAlgorithm._logprobs_from_hidden_fused(
                     first[:, :-1],
                     lm_head_weight,
                     lm_head_bias,
@@ -3514,7 +3514,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             else:
                 logits = first / self.temperature
                 del first
-                chunk_lp = LLMAlgorithm._memory_efficient_logits(
+                chunk_lp = LLMAlgorithm._logprobs_from_logits(
                     logits[:, :-1],
                     fused_ids[start:end, 1:],
                     cast_to_fp32=self.cast_logprobs_to_fp32,
@@ -3749,7 +3749,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 first = output[0] if isinstance(output, tuple) else output.logits
 
                 if use_fused_lp:
-                    log_prob = LLMAlgorithm._fused_linear_logprobs_no_grad(
+                    log_prob = LLMAlgorithm._logprobs_from_hidden_fused(
                         first[:, :-1],
                         lm_head_weight,
                         lm_head_bias,
@@ -3759,7 +3759,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     )
                 else:
                     logits = first / self.temperature
-                    log_prob = LLMAlgorithm._memory_efficient_logits(
+                    log_prob = LLMAlgorithm._logprobs_from_logits(
                         logits[:, :-1],
                         batch_ids[:, 1:],
                         cast_to_fp32=self.cast_logprobs_to_fp32,
@@ -4084,7 +4084,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return completion_ids, completion_masks
 
     @staticmethod
-    def _memory_efficient_logits(
+    def _logprobs_from_logits(
         logits: torch.Tensor,
         index: torch.Tensor,
         cast_to_fp32: bool = True,
@@ -4143,7 +4143,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return torch.cat(per_token_logps, dim=0)
 
     @staticmethod
-    def _fused_linear_logprobs_no_grad(
+    def _logprobs_from_hidden_fused(
         hidden: torch.Tensor,
         lm_head_weight: torch.Tensor,
         lm_head_bias: torch.Tensor | None,
@@ -4156,11 +4156,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         logits tensor.
 
         Tiles flat over ``(B*T)`` with workspace bounded to ``(_chunk_rows, V)``
-        per iteration. Counterpart of :meth:`_memory_efficient_logits` for
+        per iteration. Counterpart of :meth:`_logprobs_from_logits` for
         callers that hold hidden states and the lm_head separately. **No-grad
         only** — gradients won't flow to ``lm_head_weight`` from this fn.
 
-        Numerical contract matches :meth:`_memory_efficient_logits` when fed
+        Numerical contract matches :meth:`_logprobs_from_logits` when fed
         equivalent inputs (``logits = (hidden @ Wᵀ + b) / T``): same
         ``cast_to_fp32`` semantics, same final-cast-back-to-input-dtype, same
         max-shift ``gather - logsumexp`` formulation. Default ``cast_to_fp32=True``
@@ -4175,7 +4175,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             (skipped when ``1.0``).
         :param cast_to_fp32: when True (default), run the per-chunk reduction
             in fp32 then cast back. Same semantics as
-            :meth:`_memory_efficient_logits`.
+            :meth:`_logprobs_from_logits`.
         :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per
             iteration; trades launch count vs ``_chunk_rows * V`` peak.
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
