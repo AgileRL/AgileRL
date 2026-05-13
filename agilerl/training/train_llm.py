@@ -1,5 +1,6 @@
 import csv
 import os
+import time
 import warnings
 from collections.abc import Callable
 from typing import Any
@@ -1206,6 +1207,7 @@ def finetune_llm_multiturn(
     verbose: bool = True,
     accelerator: Accelerator | None = None,
     log_csv: bool = False,
+    max_wall_seconds: float | None = None,
 ) -> PopulationType:
     """Finetune a population of LLMPPO agents on a multi-turn environment.
 
@@ -1254,6 +1256,8 @@ def finetune_llm_multiturn(
     :type verbose: bool, optional
     :param accelerator: Hugging Face Accelerate instance, defaults to None.
     :type accelerator: Accelerator, optional
+    :param max_wall_seconds: Stop after this wall-clock duration (seconds); ``None`` disables.
+    :type max_wall_seconds: float | None
     :return: The finetuned population (same list object, possibly mutated in place).
     :rtype: PopulationType
     """
@@ -1341,7 +1345,18 @@ def finetune_llm_multiturn(
     max_steps_checkpoint_saved = False
     group_size = getattr(pop[0], "group_size", 1)
     rollout_env = SyncMultiTurnVecEnv(env_factory, batch_size, group_size, env_config)
+    wall_deadline = (
+        time.monotonic() + max_wall_seconds
+        if max_wall_seconds is not None and max_wall_seconds > 0
+        else None
+    )
     while total_steps < max_steps:
+        if wall_deadline is not None and time.monotonic() >= wall_deadline:
+            if accelerator is None or accelerator.is_main_process:
+                print(
+                    f"\nStopping multiturn training: wall time limit ({max_wall_seconds}s) reached.",
+                )
+            break
         agent_metrics_dict = {}
         iteration_steps = 0
         for agent_idx, agent in enumerate(pop):

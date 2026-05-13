@@ -38,6 +38,7 @@ from agilerl.utils.llm_utils import (
     gather_if_zero3,
     get_state_dict,
     sample_eval_prompts,
+    calculate_k3_kl,
 )
 
 DUMMY_CONVERSATION_TEMPLATE = [
@@ -1219,33 +1220,11 @@ def test_get_model_name_or_path_and_align_deepspeed_lr_helpers():
     ] == pytest.approx(2e-3)
 
 
-class TestLigerDPOWithAlphaBackward:
-    def test_liger_dpo_with_alpha_backward_returns_sixteen_outputs_with_trailing_nones(
-        self,
-    ) -> None:
-        """``_LigerDPOWithAlpha.backward`` forwards to the base, keeps four grads, pads twelve ``None``."""
-        from agilerl import HAS_LIGER_KERNEL
-
-        if not HAS_LIGER_KERNEL:
-            pytest.skip("liger-kernel not installed")
-
-        import agilerl.algorithms.core.llm_ops.fused_loss as fused_dpo_mod
-        from liger_kernel.chunked_loss.fused_linear_preference import (
-            LigerFusedLinearPreferenceBase,
-        )
-
-        def fake_parent_backward(ctx, grad_output):
-            return tuple(range(16))
-
-        with patch.object(
-            LigerFusedLinearPreferenceBase,
-            "backward",
-            staticmethod(fake_parent_backward),
-        ):
-            out = fused_dpo_mod._LigerDPOWithAlpha.backward(
-                MagicMock(), torch.tensor(1.0)
-            )
-
-        assert len(out) == 16
-        assert out[:4] == (0, 1, 2, 3)
-        assert out[4:] == (None,) * 12
+def test_k3_helper_matches_torch() -> None:
+    """K3 estimator helper is the same formula Liger ships."""
+    torch.manual_seed(5)
+    log_p = torch.randn(3, 4) * 0.1
+    log_q = torch.randn(3, 4) * 0.1
+    # Reference: torch implementation of the same formula.
+    ref = torch.exp(log_p - log_q) - (log_p - log_q) - 1.0
+    assert torch.allclose(calculate_k3_kl(log_p, log_q), ref)

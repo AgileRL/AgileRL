@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
+from agilerl.utils.llm_utils import calculate_k3_kl
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
@@ -867,7 +868,7 @@ class GRPO(LLMAlgorithm):
         :return: Mean loss and mean KL divergence.
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
-        kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
+        kl = calculate_k3_kl(log_probs, reference_log_probs)
         advantages = self._apply_kl_advantage_shaping(advantages, kl, mask)
         token_log_ratio = log_probs - old_log_probs
         log_probs_ratio = torch.exp(token_log_ratio)
@@ -892,7 +893,7 @@ class GRPO(LLMAlgorithm):
         advantages: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate GSPO sequence-level ratio clipped loss."""
-        kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
+        kl = calculate_k3_kl(log_probs, reference_log_probs)
         advantages = self._apply_kl_advantage_shaping(advantages, kl, mask)
 
         token_log_ratio = log_probs - old_log_probs
@@ -925,7 +926,7 @@ class GRPO(LLMAlgorithm):
         advantages: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate CISPO-style clamped-ratio weighted log-prob objective."""
-        kl = self._calculate_kl_divergence(log_probs, reference_log_probs)
+        kl = calculate_k3_kl(log_probs, reference_log_probs)
         advantages = self._apply_kl_advantage_shaping(advantages, kl, mask)
 
         log_ratio = log_probs - old_log_probs

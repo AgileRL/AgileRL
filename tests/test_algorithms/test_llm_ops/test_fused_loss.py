@@ -3,7 +3,7 @@
 ``fused_loss`` requires ``liger-kernel`` at import time, so this whole
 file is gated: on platforms without Liger, the module-level import-skip
 below short-circuits collection and all tests are skipped. The
-underlying math (``_k3_kl`` / ``llm_policy_loss_fn``) is plain-tensor
+underlying math (``llm_policy_loss_fn``) is plain-tensor
 PyTorch; only the autograd Functions need Liger to run.
 """
 
@@ -22,10 +22,13 @@ if not HAS_LIGER_KERNEL:
         "fused_loss tests require liger-kernel; skipping on this platform.",
         allow_module_level=True,
     )
-
-from agilerl.algorithms.core.llm_ops.fused_loss import (  # noqa: E402
-    _k3_kl,
+from liger_kernel.chunked_loss.fused_linear_preference import (
+    LigerFusedLinearPreferenceBase,
+)
+from agilerl.algorithms.core.llm_ops.fused_loss import (
     llm_policy_loss_fn,
+    LigerFusedLinearPolicyLossFunction,
+    _LigerDPOWithAlpha,
 )
 
 
@@ -334,15 +337,6 @@ class TestLlmPpoLossFn:
         )
         assert metrics[1].item() > 0.0  # clipfrac
 
-    def test_k3_helper_matches_torch(self) -> None:
-        """K3 estimator helper is the same formula Liger ships."""
-        torch.manual_seed(5)
-        log_p = torch.randn(3, 4) * 0.1
-        log_q = torch.randn(3, 4) * 0.1
-        # Reference: torch implementation of the same formula.
-        ref = torch.exp(log_p - log_q) - (log_p - log_q) - 1.0
-        assert torch.allclose(_k3_kl(log_p, log_q), ref)
-
 
 def _unfused_turn_reference(
     log_probs: torch.Tensor,
@@ -599,25 +593,6 @@ class TestLlmPpoLossFnTurnMode:
             )
 
 
-# ---------------------------------------------------------------------------
-# Autograd Function tests — only run when liger_kernel is importable.
-# ``fused_llm_policy_loss`` raises at import time without Liger, so gate
-# the import on ``HAS_LIGER_KERNEL``; the math fn above already covers
-# the loss formula on no-Liger platforms.
-# ---------------------------------------------------------------------------
-
-from agilerl import HAS_LIGER_KERNEL  # noqa: E402
-
-if HAS_LIGER_KERNEL:
-    from agilerl.algorithms.core.llm_ops.fused_loss import (  # noqa: E402
-        LigerFusedLinearPolicyLossFunction,
-    )
-
-
-@pytest.mark.skipif(
-    not HAS_LIGER_KERNEL,
-    reason="LigerFusedLinearPolicyLossFunction requires liger-kernel",
-)
 class TestLigerFusedLinearPolicyLossFunction:
     """Drive the autograd Function on tiny shapes and assert it matches the
     unfused reference for both forward loss and backward gradient flow."""
@@ -776,3 +751,24 @@ class TestLigerFusedLinearPolicyLossFunction:
         assert bias.grad.shape == bias.shape
         # With random advantages the bias gradient should be non-zero.
         assert bias.grad.abs().sum() > 0
+
+
+class TestLigerDPOWithAlphaBackward:
+    def test_liger_dpo_with_alpha_backward_returns_sixteen_outputs_with_trailing_nones(
+        self,
+    ) -> None:
+        """``_LigerDPOWithAlpha.backward`` forwards to the base, keeps four grads, pads twelve ``None``."""
+
+        def fake_parent_backward(ctx, grad_output):
+            return tuple(range(16))
+
+        with patch.object(
+            LigerFusedLinearPreferenceBase,
+            "backward",
+            staticmethod(fake_parent_backward),
+        ):
+            out = _LigerDPOWithAlpha.backward(MagicMock(), torch.tensor(1.0))
+
+        assert len(out) == 16
+        assert out[:4] == (0, 1, 2, 3)
+        assert out[4:] == (None,) * 12

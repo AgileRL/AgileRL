@@ -12,13 +12,11 @@ the loss + accumulates ``grad_input``/``grad_weight`` and is then freed,
 so the gradient-time ``(B, T, V)`` logits tensor is never materialized.
 PPO's value-head loss runs outside this fusion (the value tensor is small).
 
-The per-chunk math (:func:`llm_policy_loss_fn`) and the K3 KL-divergence
-estimator (:func:`_k3_kl`) live in this same module — both are Liger-free
-plain-tensor functions and are imported by the rest of the codebase
-regardless of whether Liger is installed. The Liger autograd Function
-itself (:class:`LigerFusedLinearPolicyLossFunction`) is only fully
-defined when ``liger-kernel`` is available; without it the public symbol
-resolves to ``None`` so callers' ``is None`` guard fires.
+The per-chunk math (:func:`llm_policy_loss_fn`) lives in this module;
+the K3 KL-divergence estimator it uses (:func:`calculate_k3_kl`) is canonically
+defined in :mod:`agilerl.utils.llm_utils` and re-exported here for
+backward-compatible imports. This module requires ``liger-kernel`` at
+import time — gate on :data:`agilerl.HAS_LIGER_KERNEL` before importing.
 """
 
 from __future__ import annotations
@@ -41,16 +39,7 @@ from liger_kernel.chunked_loss.fused_linear_preference import (
     LigerFusedLinearPreferenceBase,
 )
 
-
-def _k3_kl(log_p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
-    """K3 estimator of ``KL[q || p]`` (Schulman 2020).
-
-    Identical to the helper in Liger's ``grpo_loss.k3_loss_fn`` —
-    duplicated here so the rest of the codebase (notably
-    :meth:`LLMAlgorithm._calculate_kl_divergence`) can use the same math
-    without depending on Liger at import time.
-    """
-    return torch.exp(log_p - log_q) - (log_p - log_q) - 1.0
+from agilerl.utils.llm_utils import calculate_k3_kl
 
 
 def llm_policy_loss_fn(
@@ -126,7 +115,7 @@ def llm_policy_loss_fn(
     # both branches (matches the unfused PPO/REINFORCE convention).
     kl_div: torch.Tensor | None = None
     if ref_per_token_logps is not None:
-        kl_div = _k3_kl(ref_per_token_logps, per_token_logps)
+        kl_div = calculate_k3_kl(ref_per_token_logps, per_token_logps)
 
     token_global_count = full_attention_mask.float().sum().clamp(min=1.0)
 

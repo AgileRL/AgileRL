@@ -3771,36 +3771,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 log_probs.append(log_prob)
         return torch.cat(log_probs, dim=0)
 
-    def _calculate_kl_divergence(
-        self,
-        log_probs: torch.Tensor,
-        reference_log_probs: torch.Tensor,
-    ) -> torch.Tensor:
-        """K3 KL-divergence estimator between current and reference policies.
-
-        Implements the Schulman 2020 K3 estimator
-        ``exp(log_p - log_q) - (log_p - log_q) - 1`` with
-        ``log_p = reference_log_probs``, ``log_q = log_probs`` — i.e.
-        an estimate of ``KL[π_current || π_reference]``. Always-positive
-        and lower-variance than the naive ``log_q - log_p`` estimator.
-
-        Shared by PPO/REINFORCE/GRPO. The Liger-fused autograd Function
-        in :mod:`agilerl.algorithms.core.llm_ops.fused_loss` has its own
-        copy of this math (``_k3_kl``) because that module gates on
-        ``HAS_LIGER_KERNEL`` at import time and base.py must remain
-        importable on platforms without ``liger-kernel``.
-
-        :param log_probs: Current policy log probabilities, any shape.
-        :type log_probs: torch.Tensor
-        :param reference_log_probs: Reference policy log probabilities, same
-            shape as ``log_probs``.
-        :type reference_log_probs: torch.Tensor
-        :return: Per-element KL estimate (same shape as inputs).
-        :rtype: torch.Tensor
-        """
-        diff = reference_log_probs - log_probs
-        return torch.exp(diff) - diff - 1.0
-
     def _backward_pass(self, loss: torch.Tensor) -> None:
         """Perform a backward pass and optimizer step.
 

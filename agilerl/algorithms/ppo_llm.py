@@ -35,6 +35,7 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.llm_utils import (
     ReasoningGym,
     build_completion_mask,
+    calculate_k3_kl,
     masked_mean,
     masked_whiten,
     normalize_reasoning_prompt_batch,
@@ -566,9 +567,7 @@ class PPO(LLMAlgorithm):
                     batch_log_probs = torch.masked_fill(
                         batch_log_probs, ~batch_mask_bool, 1.0
                     )
-                    kl = self._calculate_kl_divergence(
-                        batch_log_probs, batch_reference_log_probs
-                    )
+                    kl = calculate_k3_kl(batch_log_probs, batch_reference_log_probs)
                     masked_entropy = masked_mean(
                         -batch_log_probs.detach(), batch_action_mask
                     )

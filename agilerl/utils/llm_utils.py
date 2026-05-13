@@ -803,3 +803,13 @@ def compare_responses(
                 break
 
     print(f"\n{'═' * width}\n")
+
+
+def calculate_k3_kl(log_p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
+    """K3 estimator of ``KL[q || p]`` (Schulman 2020).
+
+    ``exp(log_p - log_q) - (log_p - log_q) - 1`` — always-positive,
+    lower-variance than the naive ``log_p - log_q`` estimator.
+    """
+    diff = log_p - log_q
+    return torch.exp(diff) - diff - 1.0

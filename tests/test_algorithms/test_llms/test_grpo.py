@@ -495,7 +495,6 @@ class _GrpoMathStub:
         self.adv_norm = adv_norm
 
     _calculate_advantage = GRPO._calculate_advantage
-    _calculate_kl_divergence = GRPO._calculate_kl_divergence
 
 
 class _GrpoLossStub:
@@ -511,48 +510,11 @@ class _GrpoLossStub:
         self.beta = beta
         self.use_kl_advantage_shaping = use_kl_advantage_shaping
 
-    _calculate_kl_divergence = GRPO._calculate_kl_divergence
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _reduce_masked_loss = GRPO._reduce_masked_loss
     _grpo_loss_standard = GRPO._grpo_loss_standard
     _gspo_loss = GRPO._gspo_loss
     _cispo_loss = GRPO._cispo_loss
-
-
-class _GrpoLossStub:
-    def __init__(
-        self,
-        clip_coef_min: float,
-        clip_coef_max: float,
-        beta: float,
-        use_kl_advantage_shaping: bool,
-    ) -> None:
-        self.clip_coef_min = clip_coef_min
-        self.clip_coef_max = clip_coef_max
-        self.beta = beta
-        self.use_kl_advantage_shaping = use_kl_advantage_shaping
-
-    _calculate_kl_divergence = GRPO._calculate_kl_divergence
-    _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
-    _reduce_masked_loss = GRPO._reduce_masked_loss
-    _grpo_loss_standard = GRPO._grpo_loss_standard
-    _gspo_loss = GRPO._gspo_loss
-    _cispo_loss = GRPO._cispo_loss
-
-
-def _build_branch_experiences(
-    batch_size: int,
-    seq_len: int = 10,
-    vocab_size: int = 64,
-):
-    completion_ids = [
-        torch.randint(0, vocab_size, (1, seq_len), dtype=torch.long)
-        for _ in range(batch_size)
-    ]
-    action_masks = [
-        torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(batch_size)
-    ]
-    return completion_ids, action_masks
 
 
 def _build_branch_experiences(
@@ -2328,107 +2290,8 @@ class TestGRPOCalculateAdvantage:
         expected = (rewards - rewards.mean(dim=1, keepdim=True)).flatten().unsqueeze(1)
         assert torch.equal(calculated_advantage, expected)
 
-    @pytest.mark.parametrize("group_size", [5])
-    @pytest.mark.parametrize(
-        "rewards",
-        [
-            torch.tensor([[2, 4, 6]], dtype=torch.float32),
-        ],
-    )
-    def test_calculate_advantage_raises_when_rewards_not_divisible_by_group_size(
-        self,
-        group_size,
-        rewards,
-    ):
-        stub = _GrpoMathStub(group_size=group_size)
-        with pytest.raises(ValueError) as e:
-            stub._calculate_advantage(rewards)
-        assert (
-            f"Rewards must have a total element count divisible by group_size ({group_size}); got {rewards.numel()} elements."
-            in str(e.value)
-        )
-
-    def test_calculate_advantage_mean_only_branch(self):
-        stub = _GrpoMathStub(group_size=2, adv_norm="mean_only")
-        rewards = torch.tensor([[1.0, 3.0], [4.0, 10.0]], dtype=torch.float32)
-        calculated_advantage = stub._calculate_advantage(rewards)
-        expected = (rewards - rewards.mean(dim=1, keepdim=True)).flatten().unsqueeze(1)
-        assert torch.equal(calculated_advantage, expected)
-
-    @pytest.mark.parametrize("group_size", [5])
-    @pytest.mark.parametrize(
-        "rewards",
-        [
-            torch.tensor([[2, 4, 6]], dtype=torch.float32),
-        ],
-    )
-    def test_calculate_advantage_raises_when_rewards_not_divisible_by_group_size(
-        self,
-        group_size,
-        rewards,
-    ):
-        stub = _GrpoMathStub(group_size=group_size)
-        with pytest.raises(ValueError) as e:
-            stub._calculate_advantage(rewards)
-        assert (
-            f"Rewards must have a total element count divisible by group_size ({group_size}); got {rewards.numel()} elements."
-            in str(e.value)
-        )
-
-    def test_calculate_advantage_mean_only_branch(self):
-        stub = _GrpoMathStub(group_size=2, adv_norm="mean_only")
-        rewards = torch.tensor([[1.0, 3.0], [4.0, 10.0]], dtype=torch.float32)
-        calculated_advantage = stub._calculate_advantage(rewards)
-        expected = (rewards - rewards.mean(dim=1, keepdim=True)).flatten().unsqueeze(1)
-        assert torch.equal(calculated_advantage, expected)
-
-
-class TestGRPOCalculateKlDivergence:
-    @pytest.mark.parametrize("group_size", [5])
-    @pytest.mark.parametrize("batch_size", [1])
-    def test_calculate_kl_divergence(
-        self,
-        group_size,
-        batch_size,
-    ):
-        stub = _GrpoMathStub(group_size=group_size)
-        stub = _GrpoMathStub(group_size=group_size)
-        normal_dist = torch.distributions.normal.Normal(0.0, 1.0)
-        reference_log_probs = normal_dist.log_prob(torch.randn(batch_size))
-        log_probs = normal_dist.log_prob(torch.randn(batch_size))
-        kl = stub._calculate_kl_divergence(log_probs, reference_log_probs)
-        kl = stub._calculate_kl_divergence(log_probs, reference_log_probs)
-        assert torch.all(kl >= 0.0)
-        assert isinstance(kl, torch.Tensor)
-        assert kl.shape == log_probs.shape
-        assert kl.shape == reference_log_probs.shape
-
 
 class TestGRPOGrpoLossStandard:
-    def test_grpo_loss_standard_kl_advantage_shaping_path(self):
-        stub = _GrpoLossStub(
-            clip_coef_min=0.8,
-            clip_coef_max=1.2,
-            beta=0.05,
-            use_kl_advantage_shaping=True,
-        )
-        mask = torch.tensor([[True, True, False], [True, True, True]])
-        log_probs = torch.tensor(
-            [[0.2, 0.3, 0.0], [0.4, 0.1, -0.2]], dtype=torch.float32
-        )
-        old_log_probs = log_probs - 0.15
-        reference_log_probs = log_probs + 0.05
-        advantages = torch.tensor([[0.5], [-0.25]], dtype=torch.float32)
-        loss, kl = stub._grpo_loss_standard(
-            mask,
-            log_probs,
-            old_log_probs,
-            reference_log_probs,
-            advantages,
-        )
-        assert torch.isfinite(loss)
-        assert torch.isfinite(kl)
-
     def test_grpo_loss_standard_kl_advantage_shaping_path(self):
         stub = _GrpoLossStub(
             clip_coef_min=0.8,
@@ -2479,82 +2342,8 @@ class TestGRPOGspoLoss:
         assert torch.isfinite(loss)
         assert torch.isfinite(kl)
 
-    def test_gspo_loss_path(self):
-        stub = _GrpoLossStub(
-            clip_coef_min=0.8,
-            clip_coef_max=1.2,
-            beta=0.05,
-            use_kl_advantage_shaping=False,
-        )
-        mask = torch.tensor([[True, True, True], [True, False, True]])
-        log_probs = torch.tensor(
-            [[0.1, 0.2, 0.0], [0.3, 0.0, -0.1]], dtype=torch.float32
-        )
-        old_log_probs = log_probs - 0.2
-        reference_log_probs = log_probs + 0.03
-        advantages = torch.tensor([[0.75], [0.25]], dtype=torch.float32)
-        loss, kl = stub._gspo_loss(
-            mask,
-            log_probs,
-            old_log_probs,
-            reference_log_probs,
-            advantages,
-        )
-        assert torch.isfinite(loss)
-        assert torch.isfinite(kl)
-
 
 class TestGRPOCispoLoss:
-    def test_cispo_loss_path(self):
-        stub = _GrpoLossStub(
-            clip_coef_min=0.8,
-            clip_coef_max=1.2,
-            beta=0.05,
-            use_kl_advantage_shaping=False,
-        )
-        mask = torch.tensor([[True, True, True], [True, False, True]])
-        log_probs = torch.tensor(
-            [[0.1, 0.2, 0.0], [0.3, 0.0, -0.1]], dtype=torch.float32
-        )
-        old_log_probs = log_probs - 0.2
-        reference_log_probs = log_probs + 0.03
-        advantages = torch.tensor([[0.75], [0.25]], dtype=torch.float32)
-        loss, kl = stub._cispo_loss(
-            mask,
-            log_probs,
-            old_log_probs,
-            reference_log_probs,
-            advantages,
-        )
-        assert torch.isfinite(loss)
-        assert torch.isfinite(kl)
-
-    def test_cispo_loss_clamps_importance_ratio_on_both_sides(self):
-        stub = _GrpoLossStub(
-            clip_coef_min=0.8,
-            clip_coef_max=1.2,
-            beta=0.0,
-            use_kl_advantage_shaping=False,
-        )
-        mask = torch.tensor([[True, True]])
-        log_probs = torch.tensor([[-1.0, 1.0]], dtype=torch.float32)
-        old_log_probs = torch.zeros_like(log_probs)
-        reference_log_probs = log_probs.clone()
-        advantages = torch.tensor([[1.0]], dtype=torch.float32)
-
-        loss, kl = stub._cispo_loss(
-            mask,
-            log_probs,
-            old_log_probs,
-            reference_log_probs,
-            advantages,
-        )
-
-        # exp([-1, 1]) -> [0.367..., 2.718...] then clamp to [0.8, 1.2].
-        expected_loss = torch.tensor(-0.2, dtype=torch.float32)
-        assert torch.allclose(loss, expected_loss, atol=1e-6)
-        assert torch.allclose(kl, torch.tensor(0.0, dtype=torch.float32), atol=1e-6)
-
     def test_cispo_loss_path(self):
         stub = _GrpoLossStub(
             clip_coef_min=0.8,
@@ -2836,151 +2625,6 @@ class TestGRPOLearn:
 
             else:
                 assert torch.equal(param, pre_learn_param)
-        grpo.clean_up()
-
-    def test_learn_raises_when_rewards_count_mismatch(self):
-        grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
-        completion_ids, action_masks = _build_branch_experiences(batch_size=3)
-        rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
-        with pytest.raises(
-            ValueError, match="Rewards must provide one scalar per trajectory"
-        ):
-            grpo.learn((completion_ids, action_masks, rewards))
-        grpo.clean_up()
-
-    def test_learn_raises_when_batch_not_divisible_by_group_size(self):
-        grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
-        completion_ids, action_masks = _build_branch_experiences(batch_size=3)
-        rewards = torch.tensor([1.0, 0.0, -1.0], dtype=torch.float32)
-        with pytest.raises(ValueError, match="must be divisible by group_size"):
-            grpo.learn((completion_ids, action_masks, rewards))
-        grpo.clean_up()
-
-    def test_learn_filter_whiten_clip_branch_path_with_active_subset(self):
-        grpo = _make_cpu_grpo_for_branch_tests(
-            group_size=2,
-            filter_zero_adv=True,
-            whiten_advantages=True,
-            adv_clip_range=0.1,
-            adv_filter_eps=0.05,
-        )
-        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
-        rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
-
-        def fake_fused_forward(ids, batch_size):
-            shape = (ids.shape[0], ids.shape[1] - 1)
-            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
-            return zeros, zeros, None
-
-        fake_advantages = torch.tensor(
-            [[0.0], [2.0], [-2.0], [0.0]], dtype=torch.float32
-        )
-        with (
-            patch.object(grpo, "_calculate_advantage", return_value=fake_advantages),
-            patch.object(
-                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
-            ),
-            patch.object(
-                grpo,
-                "_loss",
-                return_value=(
-                    torch.tensor(1.0, dtype=torch.float32),
-                    torch.tensor(0.1, dtype=torch.float32),
-                ),
-            ) as mock_grpo_loss,
-            patch.object(grpo, "_backward_pass", return_value=None),
-        ):
-            metrics = grpo.learn((completion_ids, action_masks, rewards))
-        processed_advantages = mock_grpo_loss.call_args.args[5]
-        assert processed_advantages.abs().max().item() <= 0.100001
-        assert metrics["mean_loss"] == pytest.approx(1.0)
-        assert metrics["mean_kl"] == pytest.approx(0.1)
-        grpo.clean_up()
-
-    def test_learn_warns_and_returns_zeros_when_all_filtered(self):
-        grpo = _make_cpu_grpo_for_branch_tests(
-            group_size=2,
-            filter_zero_adv=True,
-            adv_filter_eps=0.5,
-            whiten_advantages=True,
-        )
-        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
-        rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
-        with (
-            pytest.warns(
-                UserWarning,
-                match="All samples were filtered by advantage threshold; skipping GRPO update.",
-            ),
-            patch.object(
-                grpo,
-                "_calculate_advantage",
-                return_value=torch.zeros(4, 1, dtype=torch.float32),
-            ),
-        ):
-            metrics = grpo.learn((completion_ids, action_masks, rewards))
-        assert metrics == {"mean_loss": 0.0, "mean_kl": 0.0}
-        grpo.clean_up()
-
-    def test_learn_warns_and_returns_zeros_when_no_active_samples_after_filtering(self):
-        grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
-        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
-        rewards = torch.tensor([1.0, 0.0, -1.0, 2.0], dtype=torch.float32)
-
-        def fake_fused_forward(ids, batch_size):
-            shape = (ids.shape[0], ids.shape[1] - 1)
-            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
-            return zeros, zeros, None
-
-        with (
-            patch(
-                "agilerl.algorithms.grpo.np.arange",
-                return_value=np.array([], dtype=int),
-            ),
-            patch.object(
-                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
-            ),
-            pytest.warns(
-                UserWarning,
-                match="No active samples after filtering; skipping GRPO update.",
-            ),
-        ):
-            metrics = grpo.learn((completion_ids, action_masks, rewards))
-        assert metrics == {"mean_loss": 0.0, "mean_kl": 0.0}
-        grpo.clean_up()
-
-    def test_learn_empty_minibatch_branch_continues_without_grpo_step(self):
-        grpo = _make_cpu_grpo_for_branch_tests(group_size=2, update_epochs=1)
-        grpo.rng = SimpleNamespace(shuffle=lambda _x: None)
-        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
-        rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
-
-        class EmptySlicingBatchIndices:
-            def __len__(self):
-                return 1
-
-            def __getitem__(self, item):
-                del item
-                return np.array([], dtype=int)
-
-        def fake_fused_forward(ids, batch_size):
-            shape = (ids.shape[0], ids.shape[1] - 1)
-            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
-            return zeros, zeros, None
-
-        with (
-            patch(
-                "agilerl.algorithms.grpo.np.arange",
-                return_value=EmptySlicingBatchIndices(),
-            ),
-            patch.object(
-                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
-            ),
-            patch.object(
-                grpo, "_loss", side_effect=AssertionError("should not be called")
-            ),
-        ):
-            metrics = grpo.learn((completion_ids, action_masks, rewards))
-        assert metrics == {"mean_loss": 0.0, "mean_kl": 0.0}
         grpo.clean_up()
 
     def test_learn_raises_when_rewards_count_mismatch(self):
