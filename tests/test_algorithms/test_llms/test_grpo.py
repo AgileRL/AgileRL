@@ -447,6 +447,10 @@ def _make_cpu_grpo_for_branch_tests(**kwargs):
         "gradient_checkpointing": False,
         "accelerator": None,
         "device": "cpu",
+        # Pin so the unfused learn() path is exercised by default
+        # regardless of liger-kernel availability. Liger-specific tests
+        # override this.
+        "use_liger_loss": False,
     }
     defaults.update(kwargs)
     return GRPO(**defaults)

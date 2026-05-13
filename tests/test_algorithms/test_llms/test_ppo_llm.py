@@ -188,6 +188,10 @@ def _cpu_llmppo(**kwargs):
         "beta": 0.01,
         "seed": 0,
         "device": device,
+        # Pin to False so the unfused learn() path is exercised by default
+        # regardless of whether liger-kernel is installed. Liger-specific
+        # tests override this to True.
+        "use_liger_loss": False,
     }
     defaults.update(kwargs)
     return LLMPPO(**defaults)
@@ -281,6 +285,9 @@ def generate_ppo(
         max_model_len=max_tokens + 5,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_memory_efficient_params=use_memory_efficient_params,
+        # Pin so the unfused learn() path is exercised by default
+        # regardless of liger-kernel availability.
+        use_liger_loss=False,
     )
     return ppo
 

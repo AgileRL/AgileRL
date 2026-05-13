@@ -164,6 +164,10 @@ def _make_cpu_dpo_for_branch_tests(**kwargs):
         "wrap": False,
         "gradient_checkpointing": False,
         "device": "cpu",
+        # Pin so the unfused learn() path is exercised by default
+        # regardless of liger-kernel availability. Liger-specific tests
+        # override this.
+        "use_liger_loss": False,
     }
     defaults.update(kwargs)
     return DPO(**defaults)

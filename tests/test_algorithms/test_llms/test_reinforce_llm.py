@@ -183,6 +183,9 @@ def _cpu_llmreinforce(**kwargs):
         "beta": 0.01,
         "seed": 0,
         "device": device,
+        # Pin so the unfused learn() path is exercised by default
+        # regardless of liger-kernel availability.
+        "use_liger_loss": False,
     }
     defaults.update(kwargs)
     return REINFORCE(**defaults)
@@ -282,6 +285,9 @@ def generate_reinforce(
         max_model_len=max_tokens + 5,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_memory_efficient_params=use_memory_efficient_params,
+        # Pin so the unfused learn() path is exercised by default
+        # regardless of liger-kernel availability.
+        use_liger_loss=False,
     )
     return reinforce
 
