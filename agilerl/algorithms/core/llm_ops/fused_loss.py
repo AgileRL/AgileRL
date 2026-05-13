@@ -23,8 +23,6 @@ resolves to ``None`` so callers' ``is None`` guard fires.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import torch
 
 from agilerl import HAS_LIGER_KERNEL
@@ -42,6 +40,7 @@ from liger_kernel.chunked_loss.fused_linear_ppo import LigerFusedLinearPPOBase
 from liger_kernel.chunked_loss.fused_linear_preference import (
     LigerFusedLinearPreferenceBase,
 )
+
 
 def _k3_kl(log_p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
     """K3 estimator of ``KL[q || p]`` (Schulman 2020).
