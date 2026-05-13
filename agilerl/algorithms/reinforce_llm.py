@@ -9,6 +9,7 @@ from accelerate import Accelerator
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.llm_envs import ReasoningGym
 from agilerl.protocols import (
     LoraConfigProtocol,
     MultiTurnEnv,
@@ -23,7 +24,6 @@ from agilerl.utils.algo_utils import (
     stack_and_pad_experiences,
 )
 from agilerl.utils.llm_utils import (
-    ReasoningGym,
     aggregate_metrics_dict,
     masked_mean,
     normalize_reasoning_prompt_batch,

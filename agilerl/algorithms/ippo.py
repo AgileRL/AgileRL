@@ -376,10 +376,8 @@ class IPPO(MultiAgentRLAlgorithm):
         )
 
         # Register metrics to keep track of during training
-        self.metrics.register("total_loss")
-        self.metrics.register("policy_loss")
-        self.metrics.register("value_loss")
-        self.metrics.register("entropy_loss")
+        for metric_name in ("total_loss", "policy_loss", "value_loss", "entropy_loss"):
+            self.metrics.register(metric_name)
 
     def process_infos(
         self,
@@ -752,10 +750,12 @@ class IPPO(MultiAgentRLAlgorithm):
 
         num_samples = experiences[4].size(0)
         batch_idxs = np.arange(num_samples)
-        mean_loss = 0.0
-        mean_pg_loss = 0.0
-        mean_vf_loss = 0.0
-        mean_ent_loss = 0.0
+        learn_metrics = {
+            "total_loss": 0.0,
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy_loss": 0.0,
+        }
         approx_kl = torch.tensor(float("inf"))
         for _ in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
@@ -845,26 +845,25 @@ class IPPO(MultiAgentRLAlgorithm):
                     clip_grad_norm_(critic.parameters(), self.max_grad_norm)
                     critic_optimizer.step()
 
-                    mean_loss += actor_loss.item() + critic_loss.item()
-                    mean_pg_loss += pg_loss.item()
-                    mean_vf_loss += v_loss.item()
-                    mean_ent_loss += entropy_loss.item()
+                    learn_metrics["total_loss"] += (
+                        actor_loss.item() + critic_loss.item()
+                    )
+                    learn_metrics["policy_loss"] += pg_loss.item()
+                    learn_metrics["value_loss"] += v_loss.item()
+                    learn_metrics["entropy_loss"] += entropy_loss.item()
 
+            # Early stopping for the epoch if KL divergence target is exceeded
             if self.target_kl is not None and approx_kl > self.target_kl:
                 break
 
-        mean_loss /= num_samples * self.update_epochs
-        mean_pg_loss /= num_samples * self.update_epochs
-        mean_vf_loss /= num_samples * self.update_epochs
-        mean_ent_loss /= num_samples * self.update_epochs
-
         # Log metrics
-        self.metrics.log("total_loss", agent_id, mean_loss)
-        self.metrics.log("policy_loss", agent_id, mean_pg_loss)
-        self.metrics.log("value_loss", agent_id, mean_vf_loss)
-        self.metrics.log("entropy_loss", agent_id, mean_ent_loss)
+        learn_metrics = {
+            k: v / (num_samples * self.update_epochs) for k, v in learn_metrics.items()
+        }
+        for key, value in learn_metrics.items():
+            self.metrics.log(key, agent_id, value)
 
-        return mean_loss
+        return learn_metrics["total_loss"]
 
     def test(
         self,

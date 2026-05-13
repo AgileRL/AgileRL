@@ -650,10 +650,12 @@ class PPO(RLAlgorithm):
         batch_size = self.batch_size
         num_samples = self.rollout_buffer.size()
         indices = np.arange(num_samples)
-        mean_loss = 0.0
-        mean_policy_loss = 0.0
-        mean_v_loss = 0.0
-        mean_entropy_loss = 0.0
+        learn_metrics = {
+            "loss": 0.0,
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy_loss": 0.0,
+        }
         approx_kl_divs = []
         for _ in range(self.update_epochs):
             np.random.shuffle(indices)
@@ -729,24 +731,22 @@ class PPO(RLAlgorithm):
 
                 self.optimizer.step()
 
-                mean_loss += loss.item()
-                mean_policy_loss += policy_loss.item()
-                mean_v_loss += v_loss.item()
-                mean_entropy_loss += entropy_loss.item()
+                learn_metrics["loss"] += loss.item()
+                learn_metrics["policy_loss"] += policy_loss.item()
+                learn_metrics["value_loss"] += v_loss.item()
+                learn_metrics["entropy_loss"] += entropy_loss.item()
 
+            # Early stopping for the epoch if KL divergence target is exceeded
             if self.target_kl is not None and np.mean(approx_kl_divs) > self.target_kl:
-                break  # Early stopping for the epoch if KL divergence target is exceeded
+                break
 
+        # Log metrics
         divisor = num_samples * self.update_epochs
-        mean_loss /= divisor
-        mean_policy_loss /= divisor
-        mean_v_loss /= divisor
-        mean_entropy_loss /= divisor
-        self.metrics.log("total_loss", mean_loss)
-        self.metrics.log("policy_loss", mean_policy_loss)
-        self.metrics.log("value_loss", mean_v_loss)
-        self.metrics.log("entropy_loss", mean_entropy_loss)
-        return mean_loss
+        learn_metrics = {k: v / divisor for k, v in learn_metrics.items()}
+        for key, value in learn_metrics.items():
+            self.metrics.log(key, value)
+
+        return learn_metrics["loss"]
 
     def _learn_from_rollout_buffer_bptt(self) -> float:
         """Learning procedure using truncated BPTT for recurrent networks.

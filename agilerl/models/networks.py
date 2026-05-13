@@ -25,7 +25,7 @@ def normalize_manifest_network(data: Any) -> Any:
     """
     if not isinstance(data, dict):
         return data
-    data = dict(data)
+
     arch = data.pop("arch", None)
     if arch and "encoder_config" in data:
         data["encoder_config"] = dict(data["encoder_config"])

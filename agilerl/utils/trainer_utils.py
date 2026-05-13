@@ -29,6 +29,7 @@ from agilerl.components.replay_buffer import (
 )
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.llm_envs import PreferenceGym, ReasoningGym, SFTGym
 from agilerl.models.algo import (
     AlgoSpecT,
     MultiAgentRLAlgorithmSpec,
@@ -38,7 +39,6 @@ from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.typing import GymEnvType, PzEnvType
 from agilerl.wrappers.learning import BanditEnv
-from agilerl.wrappers.llm_envs import PreferenceGym, ReasoningGym, SFTGym
 
 if TYPE_CHECKING:
     import torch

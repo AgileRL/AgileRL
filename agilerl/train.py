@@ -2,9 +2,9 @@
 
 Example usage::
 
-    python train.py configs/training/ppo/ppo.yaml
-    python train.py configs/training/dqn/dqn.yaml --device cuda
-    python train.py configs/training/ddpg/ddpg.yaml --wb --checkpoint 50
+    agilerl train configs/training/ppo/ppo.yaml
+    agilerl train configs/training/dqn/dqn.yaml --device cuda
+    agilerl train configs/training/ddpg/ddpg.yaml --wb --checkpoint-steps 50
 """
 
 from __future__ import annotations
@@ -33,10 +33,8 @@ def parse_args() -> argparse.Namespace:
         description="Run local evolutionary RL training from a manifest.",
     )
     parser.add_argument(
-        "-m",
-        "--manifest",
+        "manifest",
         type=Path,
-        required=True,
         help="Path to a YAML/JSON training manifest.",
     )
     parser.add_argument(

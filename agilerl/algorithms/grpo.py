@@ -16,13 +16,12 @@ if TYPE_CHECKING:
     from accelerate import Accelerator
     from peft import LoraConfig
 
-    from agilerl.llm_envs import ReasoningGym
-
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
 
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.llm_envs import ReasoningGym
 from agilerl.protocols import (
     MultiTurnEnv,
     PeftModelProtocol,
@@ -36,7 +35,6 @@ from agilerl.utils.algo_utils import (
     stack_and_pad_experiences,
 )
 from agilerl.utils.llm_utils import (
-    ReasoningGym,
     aggregate_metrics_dict,
     normalize_reasoning_prompt_batch,
     prepare_prompt_hf_generate,
