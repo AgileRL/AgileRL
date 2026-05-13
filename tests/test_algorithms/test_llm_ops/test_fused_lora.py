@@ -3,7 +3,7 @@ from unittest.mock import patch
 import torch
 from torch import nn
 
-from agilerl.algorithms.core.fused_lora import (
+from agilerl.algorithms.core.llm_ops.fused_lora import (
     _fused_routing_pre_hook,
     _get_cached_lora_layers,
     clear_fused_adapter_routing,
@@ -40,7 +40,9 @@ class _CacheRejectingFusedModel(_DummyFusedModel):
 class TestPatchLoraForFusedForward:
     def test_patch_lora_for_fused_forward_registers_hooks_and_cache(self):
         model = _DummyFusedModel()
-        with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
             patch_lora_for_fused_forward(model)
 
         assert hasattr(model, "_fused_lora_layers")
@@ -51,7 +53,7 @@ class TestPatchLoraForFusedForward:
 
     def test_patch_lora_for_fused_forward_noops_when_loralayer_none(self):
         model = _DummyFusedModel()
-        with patch("agilerl.algorithms.core.fused_lora.LoraLayer", None):
+        with patch("agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", None):
             patch_lora_for_fused_forward(model)
 
         assert not hasattr(model, "_fused_lora_layers")
@@ -60,7 +62,9 @@ class TestPatchLoraForFusedForward:
 
     def test_patch_lora_for_fused_forward_ignores_cache_assignment_errors(self):
         model = _CacheRejectingFusedModel()
-        with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
             patch_lora_for_fused_forward(model)
 
         assert not hasattr(model, "_fused_lora_layers")
@@ -72,7 +76,7 @@ class TestPatchLoraForFusedForward:
 def test_set_and_clear_fused_adapter_routing_update_all_lora_layers():
     model = _DummyFusedModel()
     routing = ["actor", "critic"]
-    with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
+    with patch("agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer):
         patch_lora_for_fused_forward(model)
         set_fused_adapter_routing(model, routing)
         for layer in model._fused_lora_layers:
@@ -87,7 +91,9 @@ class TestFusedRoutingPreHook:
     def test_fused_lora_hook_injects_adapter_names_into_forward_kwargs(self):
         model = _DummyFusedModel()
         routing = ["actor", "critic"]
-        with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
             patch_lora_for_fused_forward(model)
             set_fused_adapter_routing(model, routing)
             _ = model.lora_a(torch.ones(1, 2))
@@ -109,7 +115,7 @@ class TestFusedRoutingPreHook:
 class TestGetCachedLoraLayers:
     def test_get_cached_lora_layers_returns_empty_when_loralayer_none(self):
         model = _DummyFusedModel()
-        with patch("agilerl.algorithms.core.fused_lora.LoraLayer", None):
+        with patch("agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", None):
             layers = _get_cached_lora_layers(model)
 
         assert layers == []
@@ -117,7 +123,9 @@ class TestGetCachedLoraLayers:
 
     def test_get_cached_lora_layers_ignores_cache_assignment_errors(self):
         model = _CacheRejectingFusedModel()
-        with patch("agilerl.algorithms.core.fused_lora.LoraLayer", _DummyLoraLayer):
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
             layers = _get_cached_lora_layers(model)
 
         assert len(layers) == 2

@@ -188,6 +188,10 @@ def _cpu_llmppo(**kwargs):
         "beta": 0.01,
         "seed": 0,
         "device": device,
+        # Pin to False so the unfused learn() path is exercised by default
+        # regardless of whether liger-kernel is installed. Liger-specific
+        # tests override this to True.
+        "use_liger_loss": False,
     }
     defaults.update(kwargs)
     return LLMPPO(**defaults)
@@ -281,6 +285,9 @@ def generate_ppo(
         max_model_len=max_tokens + 5,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_memory_efficient_params=use_memory_efficient_params,
+        # Pin so the unfused learn() path is exercised by default
+        # regardless of liger-kernel availability.
+        use_liger_loss=False,
     )
     return ppo
 
@@ -1092,3 +1099,197 @@ class TestPPOTest:
         out = ppo.test(env, loop=1)
         assert out.shape == ()
         assert ppo.fitness[-1] == pytest.approx(float(out))
+
+
+class TestPPOLossLiger:
+    """Cover the fused-linear PPO loss method ``_ppo_loss_liger``. The
+    autograd Function it wraps requires ``liger-kernel``, but the wrapper
+    itself (build args → forward → unpack metrics → critic value loss) is
+    testable via a mocked Liger Function on CPU.
+    """
+
+    def test_raises_when_liger_unavailable(self) -> None:
+        """``_ppo_loss_liger`` raises ImportError when HAS_LIGER_KERNEL is
+        False, with a message instructing the user to disable the flag."""
+        ppo = _cpu_llmppo()
+        ids = torch.randint(0, 50, (2, 5), dtype=torch.long)
+        mask = torch.ones(2, 4, dtype=torch.float32)
+        old_lp = torch.zeros(2, 4)
+        ref_lp = torch.zeros(2, 4)
+        returns = torch.zeros(2, 4)
+        adv = torch.zeros(2, 4)
+        old_values = torch.zeros(2, 4)
+        turn_ids = torch.zeros(2, 4, dtype=torch.long)
+
+        with patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", False):
+            with pytest.raises(
+                ImportError,
+                match=r"Liger PPO loss was requested.*Set use_liger_loss=False",
+            ):
+                ppo._ppo_loss_liger(
+                    ids,
+                    mask,
+                    old_lp,
+                    ref_lp,
+                    returns,
+                    adv,
+                    old_values,
+                    turn_ids,
+                    "token",
+                )
+
+    def test_token_mode_drives_actor_and_critic_forwards(self) -> None:
+        """End-to-end: with the Liger Function mocked, ``_ppo_loss_liger``
+        runs both the actor pre-hook capture and the critic forward, and
+        returns the right metric dict shape."""
+        ppo = _cpu_llmppo(beta=0.01, clip_coef=0.2, vf_coef=0.5)
+        B, T = 2, 5
+        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
+        mask = torch.ones(B, T - 1, dtype=torch.float32)
+        old_lp = torch.zeros(B, T - 1)
+        ref_lp = torch.zeros(B, T - 1)
+        returns = torch.zeros(B, T - 1)
+        adv = torch.randn(B, T - 1) * 0.1
+        old_values = torch.zeros(B, T - 1)
+        turn_ids = torch.zeros(B, T - 1, dtype=torch.long)
+
+        # Mock the Liger Function so we don't need liger-kernel installed.
+        # Returns a scalar loss and the four metric scalars the wrapper unpacks.
+        fake_loss = torch.tensor(0.5, requires_grad=True)
+        fake_aux = (
+            torch.tensor(0.1),  # kl
+            torch.tensor(0.2),  # clipfrac
+            torch.tensor(0.3),  # pg_loss
+            torch.tensor(0.4),  # entropy
+        )
+
+        with (
+            patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True),
+            patch(
+                "agilerl.algorithms.ppo_llm.LigerFusedLinearPolicyLossFunction"
+            ) as mock_fn,
+        ):
+            mock_fn.apply.return_value = (fake_loss, fake_aux)
+            total_loss, metrics = ppo._ppo_loss_liger(
+                ids,
+                mask,
+                old_lp,
+                ref_lp,
+                returns,
+                adv,
+                old_values,
+                turn_ids,
+                "token",
+            )
+
+        # Liger Function called exactly once for the actor pass.
+        mock_fn.apply.assert_called_once()
+        # Metric keys/values come from the (mocked) auxiliary tuple +
+        # the (real) value-head loss computed outside the fusion.
+        assert metrics["kl"] == pytest.approx(0.1)
+        assert metrics["clipfrac"] == pytest.approx(0.2)
+        assert metrics["pg_loss"] == pytest.approx(0.3)
+        assert metrics["entropy"] == pytest.approx(0.4)
+        assert "vf_loss" in metrics
+        # total_loss = fake_loss (0.5) + vf_loss (real, computed from values)
+        assert isinstance(total_loss, torch.Tensor)
+
+    def test_turn_mode_passes_turn_args_to_liger(self) -> None:
+        """Turn-granularity passes ``turn_ids`` and ``max_turns`` into the
+        Liger Function and uses pooled per-turn advantages."""
+        ppo = _cpu_llmppo(beta=0.0, action_granularity="turn")
+        B, T = 2, 6
+        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
+        mask = torch.ones(B, T - 1, dtype=torch.float32)
+        old_lp = torch.zeros(B, T - 1)
+        ref_lp = torch.zeros(B, T - 1)
+        returns = torch.zeros(B, T - 1)
+        adv = torch.randn(B, T - 1) * 0.1
+        old_values = torch.zeros(B, T - 1)
+        # Two turns per sample: first half = turn 0, second half = turn 1.
+        turn_ids = torch.tensor([[0, 0, 0, 1, 1], [0, 0, 1, 1, 1]], dtype=torch.long)
+
+        fake_loss = torch.tensor(0.5, requires_grad=True)
+        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
+
+        with (
+            patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True),
+            patch(
+                "agilerl.algorithms.ppo_llm.LigerFusedLinearPolicyLossFunction"
+            ) as mock_fn,
+        ):
+            mock_fn.apply.return_value = (fake_loss, fake_aux)
+            ppo._ppo_loss_liger(
+                ids,
+                mask,
+                old_lp,
+                ref_lp,
+                returns,
+                adv,
+                old_values,
+                turn_ids,
+                "turn",
+            )
+
+        # Last three positional args (turn_ids, full_turn_mask, max_turns)
+        # must be non-None in turn mode.
+        call_args = mock_fn.apply.call_args.args
+        assert call_args[-3] is not None  # turn_ids
+        assert call_args[-2] is not None  # full_turn_mask
+        assert call_args[-1] == 2  # max_turns
+
+
+class TestPPOLearnWithLiger:
+    """Cover the ``if self.use_liger_loss:`` branch inside ``learn()``.
+    The branch calls ``_ppo_loss_liger`` once per minibatch, runs
+    backward, and accumulates the four ``aux`` metrics + ``vf_loss``.
+    We stub ``_ppo_loss_liger`` to a fake (loss, metrics) tuple so the
+    test stays CPU-only and doesn't require ``liger-kernel``."""
+
+    def test_learn_use_liger_loss_drives_ppo_loss_liger(self, monkeypatch):
+        # ``use_liger_loss=True`` would normally trip the construct-time
+        # ``HAS_LIGER_KERNEL`` guard and fall back to ``False``. Patch the
+        # flag in both modules so PPO accepts the kwarg as-is.
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        monkeypatch.setattr("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True)
+        ppo = _cpu_llmppo(lr_actor=0.05, update_epochs=1, use_liger_loss=True)
+        assert ppo.use_liger_loss is True
+
+        fake_loss = torch.tensor(0.42, requires_grad=True)
+        fake_metrics = {
+            "kl": 0.1,
+            "entropy": 0.2,
+            "clipfrac": 0.3,
+            "pg_loss": 0.4,
+            "vf_loss": 0.5,
+        }
+        # Stub the inner loss fn — keeps the test CPU-only and isolates
+        # the use_liger_loss=True branch in learn() from the
+        # actor/critic Liger forwards.
+        ppo._ppo_loss_liger = MagicMock(return_value=(fake_loss, fake_metrics))
+        # ``clear_fused_adapter_routing`` walks the actor — stub it.
+        monkeypatch.setattr(
+            "agilerl.algorithms.ppo_llm.clear_fused_adapter_routing",
+            lambda actor: None,
+        )
+
+        vocab = 100
+        inp, mtok = 10, 8
+        seq_len = inp + mtok
+        b = 1
+        completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(b)]
+        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(b)]
+        turn_ids = torch.tensor(
+            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
+            dtype=torch.long,
+        )[:, : seq_len - 1]
+        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
+
+        learn_out = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+
+        # The Liger branch was actually exercised (not the fallback path).
+        assert ppo._ppo_loss_liger.call_count >= 1
+        # And its returned scalars made it into the aggregated metrics.
+        assert learn_out["mean_loss"] == pytest.approx(0.42, rel=1e-6)
+        assert learn_out["mean_kl"] == pytest.approx(0.1, rel=1e-6)
+        assert learn_out["mean_vf_loss"] == pytest.approx(0.5, rel=1e-6)

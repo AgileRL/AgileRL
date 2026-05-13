@@ -14,17 +14,28 @@ MUTATION_PARAMS:
 
 INIT_HP:
     ALGO: GRPO
-    # Larger batch ⇒ more spread in episode returns under sampling (GRPO batch-relative adv).
     BATCH_SIZE: 16
-    BETA: 0.0005
-    LR: 0.0003
+    BETA: 1.0e-3
+    LR: 5.0e-6
     CLIP_COEF: 0.2
-    MAX_GRAD_NORM: 0.2
-    UPDATE_EPOCHS: 2
+    MAX_GRAD_NORM: 0.1
+    UPDATE_EPOCHS: 1
     GROUP_SIZE: 1
-    TEMPERATURE: 0.85
+    TEMPERATURE: 0.9
     MAX_MODEL_LEN: 2048
+    MAX_OUTPUT_TOKENS: 64
     TOURN_SIZE: 2
     ELITISM: true
     POP_SIZE: 4
     EVAL_LOOP: 1
+    USE_VLLM: true
+    MICRO_BATCH_SIZE_PER_GPU: 4
+    TARGET_MODULES:
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+    LORA_R: 16
+    LORA_ALPHA: 64
+    LORA_DROPOUT: 0.05
+    LORA_BIAS: none

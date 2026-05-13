@@ -160,14 +160,6 @@ class TestAutoModelForCausalLMWithValueHeadForward:
         assert isinstance(loss, torch.Tensor)
         assert values.shape == (2, 5)
 
-    def test_returns_past_key_values_when_requested(self):
-        model = DummyPretrainedModel(include_past=True)
-        wrapped = AutoModelForCausalLMWithValueHead(model)
-        input_ids = torch.randint(0, model.config.vocab_size, (2, 4))
-        out = wrapped(input_ids=input_ids, return_past_key_values=True)
-        assert len(out) == 4
-        assert out[3] is not None
-
     def test_raises_when_hidden_states_missing(self):
         model = DummyPretrainedModel(return_hidden_states=False)
         wrapped = AutoModelForCausalLMWithValueHead(model)

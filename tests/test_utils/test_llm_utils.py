@@ -20,7 +20,6 @@ from agilerl.utils.algo_utils import DummyOptimizer
 from agilerl.utils.llm_utils import (
     PreferenceGym,
     ReasoningGym,
-    _auto_zero_stage,
     align_deepspeed_lr,
     create_llm_accelerator,
     get_llm_accelerator,
@@ -39,6 +38,7 @@ from agilerl.utils.llm_utils import (
     gather_if_zero3,
     get_state_dict,
     sample_eval_prompts,
+    calculate_k3_kl,
 )
 
 DUMMY_CONVERSATION_TEMPLATE = [
@@ -1026,41 +1026,6 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
         sys.modules["agilerl.utils.llm_utils"] = original_module
 
 
-# ---------------------------------------------------------------------------
-# Tests for create_llm_accelerator / _auto_zero_stage
-# ---------------------------------------------------------------------------
-
-
-class TestAutoZeroStage:
-    def test_auto_zero_stage_none_model_size_returns_1(self):
-        assert _auto_zero_stage(4, None) == 1
-
-    def test_auto_zero_stage_small_model_returns_1(self):
-        """Model using < 60% of per-GPU VRAM -> ZeRO-1."""
-        with patch("torch.cuda.get_device_properties") as mock_props:
-            mock_props.return_value.total_mem = 24 * (1024**3)  # 24 GB
-            assert _auto_zero_stage(2, 10.0) == 1  # 10/24 ~= 0.42
-
-    def test_auto_zero_stage_medium_model_returns_2(self):
-        """Model using 60-90% of per-GPU VRAM -> ZeRO-2."""
-        with patch("torch.cuda.get_device_properties") as mock_props:
-            mock_props.return_value.total_mem = 24 * (1024**3)  # 24 GB
-            assert _auto_zero_stage(2, 17.0) == 2  # 17/24 ~= 0.71
-
-    def test_auto_zero_stage_large_model_returns_3(self):
-        """Model exceeding 90% of per-GPU VRAM -> ZeRO-3."""
-        with patch("torch.cuda.get_device_properties") as mock_props:
-            mock_props.return_value.total_mem = 24 * (1024**3)  # 24 GB
-            assert _auto_zero_stage(2, 23.0) == 3  # 23/24 ~= 0.96
-
-    def test_auto_zero_stage_device_properties_exception_returns_1(self):
-        """Fallback to ZeRO-1 when get_device_properties raises."""
-        with patch(
-            "torch.cuda.get_device_properties", side_effect=RuntimeError("no CUDA")
-        ):
-            assert _auto_zero_stage(2, 14.0) == 1
-
-
 class TestCreateLlmAccelerator:
     def test_create_llm_accelerator_no_gpus_returns_none(self):
         with patch("torch.cuda.device_count", return_value=0):
@@ -1255,30 +1220,11 @@ def test_get_model_name_or_path_and_align_deepspeed_lr_helpers():
     ] == pytest.approx(2e-3)
 
 
-class TestLigerDPOWithAlphaBackward:
-    def test_liger_dpo_with_alpha_backward_returns_sixteen_outputs_with_trailing_nones(
-        self,
-    ) -> None:
-        """``_LigerDPOWithAlpha.backward`` forwards to the base, keeps four grads, pads twelve ``None``."""
-        from agilerl import HAS_LIGER_KERNEL
-
-        if not HAS_LIGER_KERNEL:
-            pytest.skip("liger-kernel not installed")
-
-        import agilerl.utils.llm_utils as llm_utils_mod
-
-        def fake_parent_backward(ctx, grad_output):
-            return tuple(range(16))
-
-        with patch.object(
-            llm_utils_mod.LigerFusedLinearPreferenceBase,
-            "backward",
-            staticmethod(fake_parent_backward),
-        ):
-            out = llm_utils_mod._LigerDPOWithAlpha.backward(
-                MagicMock(), torch.tensor(1.0)
-            )
-
-        assert len(out) == 16
-        assert out[:4] == (0, 1, 2, 3)
-        assert out[4:] == (None,) * 12
+def test_k3_helper_matches_torch() -> None:
+    """K3 estimator helper is the same formula Liger ships."""
+    torch.manual_seed(5)
+    log_p = torch.randn(3, 4) * 0.1
+    log_q = torch.randn(3, 4) * 0.1
+    # Reference: torch implementation of the same formula.
+    ref = torch.exp(log_p - log_q) - (log_p - log_q) - 1.0
+    assert torch.allclose(calculate_k3_kl(log_p, log_q), ref)

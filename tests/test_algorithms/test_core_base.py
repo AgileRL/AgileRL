@@ -1883,18 +1883,460 @@ class TestLLMBackwardPass:
         assert agent.lr == 5e-5
 
 
-class TestLLMMemoryEfficientLogits:
-    def test_memory_efficient_logits_computes_log_probs(self):
+class TestLLMLogprobsFromLogits:
+    def test_logprobs_from_logits_computes_log_probs(self):
         logits = torch.randn(2, 5, 10)
         index = torch.randint(0, 10, (2, 5))
-        result = LLMAlgorithm._memory_efficient_logits(logits, index)
+        result = LLMAlgorithm._logprobs_from_logits(logits, index)
         assert result.shape == (2, 5)
         expected = (
-            F.log_softmax(logits, dim=-1)
+            F.log_softmax(logits.float(), dim=-1)
             .gather(dim=-1, index=index.unsqueeze(-1))
             .squeeze(-1)
         )
         assert torch.allclose(result, expected)
+
+    @pytest.mark.parametrize(
+        "batch_rows,chunk_rows",
+        [
+            # B=1 hits the fast path (B <= chunk_rows), B=17 forces the chunked loop.
+            (1, 8),
+            (17, 2),
+        ],
+    )
+    def test_logprobs_from_logits_bf16_matches_fp32_log_softmax_reference(
+        self,
+        batch_rows: int,
+        chunk_rows: int,
+    ) -> None:
+        """Fast path (small B) and chunked path both match fp32 log_softmax reference."""
+        torch.manual_seed(batch_rows * 31 + chunk_rows)
+        seq, vocab = 11, 8192
+        logits_bf16 = torch.randn(
+            batch_rows,
+            seq,
+            vocab,
+            dtype=torch.bfloat16,
+        )
+        index = torch.randint(0, vocab, (batch_rows, seq))
+
+        result_bf16 = LLMAlgorithm._logprobs_from_logits(
+            logits_bf16,
+            index,
+            _chunk_rows=chunk_rows,
+        )
+        reference_fp32 = (
+            F.log_softmax(logits_bf16.float(), dim=-1)
+            .gather(dim=-1, index=index.unsqueeze(-1))
+            .squeeze(-1)
+        )
+        lg32 = logits_bf16.float()
+        max_lg = lg32.amax(dim=-1, keepdim=True)
+        shifted = lg32 - max_lg
+        stable_gather_minus_lse = shifted.gather(
+            dim=-1, index=index.unsqueeze(-1)
+        ).squeeze(-1) - torch.logsumexp(shifted, dim=-1)
+        assert torch.allclose(
+            stable_gather_minus_lse,
+            reference_fp32,
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        assert torch.equal(
+            result_bf16,
+            reference_fp32.to(torch.bfloat16),
+        )
+
+    def test_logprobs_from_logits_cast_to_fp32_false_stays_in_input_dtype(
+        self,
+    ) -> None:
+        """``cast_to_fp32=False`` runs the reduction in input dtype throughout
+        and matches a hand-rolled bf16 ``gather - logsumexp``."""
+        torch.manual_seed(0)
+        seq, vocab = 7, 2048
+        logits_bf16 = torch.randn(3, seq, vocab, dtype=torch.bfloat16)
+        index = torch.randint(0, vocab, (3, seq))
+
+        result = LLMAlgorithm._logprobs_from_logits(
+            logits_bf16,
+            index,
+            cast_to_fp32=False,
+        )
+        max_lg = logits_bf16.amax(dim=-1, keepdim=True)
+        shifted = logits_bf16 - max_lg
+        target = shifted.gather(dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
+        log_z = torch.logsumexp(shifted, dim=-1)
+        ref_bf16 = target - log_z
+        assert result.dtype == torch.bfloat16
+        assert torch.equal(result, ref_bf16)
+
+
+class TestLogprobsFromHiddenFused:
+    """Cover the chunked matmul + max-shift gather/logsumexp kernel that
+    replaces ``hidden @ Wᵀ → log_softmax → gather`` without ever
+    materializing the full ``(B, T, V)`` logits tensor.
+    """
+
+    def test_matches_log_softmax_reference_fp32(self) -> None:
+        """fp32 reduction matches a stock ``log_softmax + gather`` over
+        the materialized logits within bf16 quantisation noise."""
+        torch.manual_seed(0)
+        B, T, H, V = 4, 11, 64, 8192
+        hidden = torch.randn(B, T, H, dtype=torch.bfloat16)
+        weight = torch.randn(V, H, dtype=torch.bfloat16) * 0.02
+        bias = torch.randn(V, dtype=torch.bfloat16)
+        targets = torch.randint(0, V, (B, T))
+        temperature = 0.7
+
+        result = LLMAlgorithm._logprobs_from_hidden_fused(
+            hidden,
+            weight,
+            bias,
+            targets,
+            temperature=temperature,
+            cast_to_fp32=True,
+        )
+        # Reference: stock log_softmax + gather over the materialized logits,
+        # promoted to fp32 to match the fused kernel's reduction precision.
+        logits = (hidden @ weight.t() + bias) / temperature
+        ref = (
+            F.log_softmax(logits.float(), dim=-1)
+            .gather(dim=-1, index=targets.unsqueeze(-1))
+            .squeeze(-1)
+            .to(torch.bfloat16)
+        )
+        assert result.shape == (B, T)
+        assert result.dtype == torch.bfloat16
+        assert torch.equal(result, ref)
+
+    def test_keeps_input_dtype_when_cast_disabled(self) -> None:
+        """``cast_to_fp32=False`` keeps bf16 throughout — the reduction
+        runs in input dtype, matching a hand-rolled bf16
+        ``gather - logsumexp``."""
+        torch.manual_seed(1)
+        B, T, H, V = 4, 7, 64, 4096
+        hidden = torch.randn(B, T, H, dtype=torch.bfloat16)
+        weight = torch.randn(V, H, dtype=torch.bfloat16) * 0.02
+        targets = torch.randint(0, V, (B, T))
+
+        result = LLMAlgorithm._logprobs_from_hidden_fused(
+            hidden,
+            weight,
+            None,
+            targets,
+            temperature=1.0,
+            cast_to_fp32=False,
+        )
+        # Reference: gather - logsumexp in bf16 (no fp32 promotion).
+        logits = hidden @ weight.t()
+        max_lg = logits.amax(dim=-1, keepdim=True)
+        shifted = logits - max_lg
+        target = shifted.gather(dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
+        log_z = torch.logsumexp(shifted, dim=-1)
+        ref = target - log_z
+        assert result.dtype == torch.bfloat16
+        assert torch.equal(result, ref)
+
+    def test_chunked_matches_unchunked(self) -> None:
+        """Output is independent of ``_chunk_rows`` — covers the loop
+        boundary path."""
+        torch.manual_seed(2)
+        B, T, H, V = 3, 9, 32, 2048
+        hidden = torch.randn(B, T, H, dtype=torch.bfloat16)
+        weight = torch.randn(V, H, dtype=torch.bfloat16) * 0.02
+        targets = torch.randint(0, V, (B, T))
+
+        big = LLMAlgorithm._logprobs_from_hidden_fused(
+            hidden,
+            weight,
+            None,
+            targets,
+            temperature=0.5,
+            cast_to_fp32=True,
+            _chunk_rows=10_000,  # > B*T=27 → single chunk
+        )
+        small = LLMAlgorithm._logprobs_from_hidden_fused(
+            hidden,
+            weight,
+            None,
+            targets,
+            temperature=0.5,
+            cast_to_fp32=True,
+            _chunk_rows=4,  # forces multiple chunks
+        )
+        assert torch.equal(big, small)
+
+    def test_no_bias_path_fp32(self) -> None:
+        """``bias=None`` skips the add and still matches a stock
+        log_softmax + gather reference."""
+        torch.manual_seed(3)
+        B, T, H, V = 2, 5, 16, 512
+        hidden = torch.randn(B, T, H, dtype=torch.float32)
+        weight = torch.randn(V, H, dtype=torch.float32) * 0.05
+        targets = torch.randint(0, V, (B, T))
+
+        result = LLMAlgorithm._logprobs_from_hidden_fused(
+            hidden,
+            weight,
+            None,
+            targets,
+            temperature=1.0,
+            cast_to_fp32=False,
+        )
+        logits = hidden @ weight.t()
+        ref = (
+            F.log_softmax(logits, dim=-1)
+            .gather(dim=-1, index=targets.unsqueeze(-1))
+            .squeeze(-1)
+        )
+        assert torch.allclose(result, ref, rtol=1e-5, atol=1e-5)
+
+    def test_temperature_scaling_applied_once(self) -> None:
+        """Temperature folds into logits exactly once before log_softmax."""
+        torch.manual_seed(4)
+        B, T, H, V = 2, 6, 16, 1024
+        hidden = torch.randn(B, T, H, dtype=torch.float32)
+        weight = torch.randn(V, H, dtype=torch.float32) * 0.05
+        targets = torch.randint(0, V, (B, T))
+        temperature = 2.5
+
+        result = LLMAlgorithm._logprobs_from_hidden_fused(
+            hidden, weight, None, targets, temperature=temperature
+        )
+        logits = (hidden @ weight.t()) / temperature
+        ref = (
+            F.log_softmax(logits, dim=-1)
+            .gather(dim=-1, index=targets.unsqueeze(-1))
+            .squeeze(-1)
+        )
+        assert torch.allclose(result, ref, rtol=1e-5, atol=1e-5)
+
+
+class TestGetLmHeadParentAndPatch:
+    """Cover ``_get_lm_head_parent`` (which walks value-head / PEFT / LoRA
+    wrappers) and ``_patch_lm_head_to_identity`` (the swap-and-restore
+    context manager used by the no-grad fused-linear-logprob path).
+    """
+
+    def _agent_with_real_lm_head(self):
+        agent = _make_llm_agent()
+        # Mock PEFT actor exposes ``base_model.model`` (MagicMock children).
+        # Replace its ``lm_head`` with a real ``nn.Linear`` so ``setattr``
+        # has somewhere deterministic to swap.
+        real_lm_head = torch.nn.Linear(8, 32)
+        agent.actor.base_model.model.lm_head = real_lm_head
+        return agent, real_lm_head
+
+    def test_get_lm_head_parent_returns_parent_and_attr(self) -> None:
+        agent, real = self._agent_with_real_lm_head()
+        parent, attr = agent._get_lm_head_parent()
+        assert getattr(parent, attr) is real
+        assert attr == "lm_head"
+
+    def test_patch_restores_on_normal_exit(self) -> None:
+        agent, original = self._agent_with_real_lm_head()
+        with agent._patch_lm_head_to_identity():
+            assert isinstance(agent.actor.base_model.model.lm_head, torch.nn.Identity)
+        assert agent.actor.base_model.model.lm_head is original
+
+    def test_patch_restores_on_exception(self) -> None:
+        agent, original = self._agent_with_real_lm_head()
+        with pytest.raises(RuntimeError, match="boom"):
+            with agent._patch_lm_head_to_identity():
+                raise RuntimeError("boom")
+        assert agent.actor.base_model.model.lm_head is original
+
+
+class _TinyCausalLM(torch.nn.Module):
+    """Minimal HF-style causal LM (embedding → linear body → lm_head)
+    used by the integration tests below to exercise the lm_head→Identity
+    monkey-patch against a real ``nn.Linear`` head.
+    """
+
+    def __init__(self, vocab_size: int, hidden_size: int) -> None:
+        super().__init__()
+        self.embed = torch.nn.Embedding(vocab_size, hidden_size)
+        self.body = torch.nn.Linear(hidden_size, hidden_size)
+        self.lm_head = torch.nn.Linear(hidden_size, vocab_size, bias=False)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        **_: object,
+    ) -> SimpleNamespace:
+        x = self.embed(input_ids)
+        x = self.body(x)
+        return SimpleNamespace(logits=self.lm_head(x))
+
+
+class _TinyPeftWrapper(torch.nn.Module):
+    """Stand-in for the ``PeftModel → LoraModel → CausalLM`` walk that
+    ``_get_lm_head_parent`` traverses.
+    """
+
+    def __init__(self, inner: _TinyCausalLM) -> None:
+        super().__init__()
+        self.base_model = torch.nn.Module()
+        self.base_model.model = inner
+
+    def forward(self, **kwargs: object) -> SimpleNamespace:
+        return self.base_model.model(**kwargs)
+
+
+class TestFusedLinearLogprobsIntegration:
+    """End-to-end: ``use_fused_linear_logprobs=True`` produces logprobs
+    numerically equivalent to the unfused path on the same model under
+    ``torch.no_grad()``. Exercises ``_get_lm_head_parent``,
+    ``_patch_lm_head_to_identity``, and ``_logprobs_from_hidden_fused``
+    via ``_get_logprobs``.
+    """
+
+    def _build_agent(
+        self, vocab_size: int, hidden_size: int, *, use_fused: bool
+    ) -> tuple[LLMAlgorithm, _TinyPeftWrapper]:
+        agent = _make_llm_agent()
+        actor = _TinyPeftWrapper(_TinyCausalLM(vocab_size, hidden_size))
+        actor.eval()
+        agent.actor = actor
+        agent.use_fused_linear_logprobs = use_fused
+        agent.use_value_head = False
+        agent.temperature = 0.7
+        agent.calc_position_embeddings = False
+        agent.pad_token_id = 0
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _noop_select(_name: str):
+            yield
+
+        agent.select_adapter = _noop_select
+        return agent, actor
+
+    def test_fused_matches_unfused_under_no_grad(self) -> None:
+        torch.manual_seed(0)
+        B, T, H, V = 3, 7, 16, 256
+        agent, actor = self._build_agent(V, H, use_fused=False)
+        ids = torch.randint(1, V, (B, T))
+
+        with torch.no_grad():
+            lp_unfused = agent._get_logprobs(
+                ids, batch_size=B, use_reference=False, eval_mode=True
+            )
+            agent.use_fused_linear_logprobs = True
+            lp_fused = agent._get_logprobs(
+                ids, batch_size=B, use_reference=False, eval_mode=True
+            )
+
+        assert lp_unfused.shape == (B, T - 1)
+        assert lp_fused.shape == (B, T - 1)
+        assert torch.allclose(lp_unfused, lp_fused, rtol=1e-5, atol=1e-5)
+        # lm_head restored after the patched call (try/finally teardown).
+        assert isinstance(actor.base_model.model.lm_head, torch.nn.Linear)
+
+    def test_fused_path_skipped_when_grad_enabled(self) -> None:
+        """Gradient-time call sites keep the unfused path even with the
+        flag on. Verified by spying on the kernel."""
+        torch.manual_seed(1)
+        B, T, H, V = 2, 5, 8, 128
+        agent, _ = self._build_agent(V, H, use_fused=True)
+        ids = torch.randint(1, V, (B, T))
+        with patch.object(
+            LLMAlgorithm,
+            "_logprobs_from_hidden_fused",
+            wraps=LLMAlgorithm._logprobs_from_hidden_fused,
+        ) as spy:
+            agent._get_logprobs(ids, batch_size=B, use_reference=False, eval_mode=True)
+        spy.assert_not_called()
+
+    @pytest.mark.parametrize("cast_to_fp32", [True, False])
+    def test_cast_logprobs_to_fp32_threaded_into_fused_kernel(
+        self, cast_to_fp32: bool
+    ) -> None:
+        """``self.cast_logprobs_to_fp32`` flows into the fused-no-grad
+        kernel call so toggling it controls the reduction precision."""
+        torch.manual_seed(2)
+        B, T, H, V = 2, 4, 8, 64
+        agent, _ = self._build_agent(V, H, use_fused=True)
+        agent.cast_logprobs_to_fp32 = cast_to_fp32
+        ids = torch.randint(1, V, (B, T))
+        with patch.object(
+            LLMAlgorithm,
+            "_logprobs_from_hidden_fused",
+            wraps=LLMAlgorithm._logprobs_from_hidden_fused,
+        ) as spy:
+            with torch.no_grad():
+                agent._get_logprobs(
+                    ids, batch_size=B, use_reference=False, eval_mode=True
+                )
+        assert spy.called
+        assert spy.call_args.kwargs["cast_to_fp32"] is cast_to_fp32
+
+    @pytest.mark.parametrize("cast_to_fp32", [True, False])
+    def test_cast_logprobs_to_fp32_threaded_into_unfused_kernel(
+        self, cast_to_fp32: bool
+    ) -> None:
+        """``self.cast_logprobs_to_fp32`` flows into the unfused
+        ``_logprobs_from_logits`` call too — the two paths share the
+        same regime."""
+        torch.manual_seed(3)
+        B, T, H, V = 2, 4, 8, 64
+        agent, _ = self._build_agent(V, H, use_fused=False)
+        agent.cast_logprobs_to_fp32 = cast_to_fp32
+        ids = torch.randint(1, V, (B, T))
+        with patch.object(
+            LLMAlgorithm,
+            "_logprobs_from_logits",
+            wraps=LLMAlgorithm._logprobs_from_logits,
+        ) as spy:
+            with torch.no_grad():
+                agent._get_logprobs(
+                    ids, batch_size=B, use_reference=False, eval_mode=True
+                )
+        assert spy.called
+        assert spy.call_args.kwargs["cast_to_fp32"] is cast_to_fp32
+
+    @pytest.mark.parametrize("cast_to_fp32", [True, False])
+    @pytest.mark.parametrize("use_fused", [True, False])
+    def test_cast_logprobs_to_fp32_threaded_into_fused_model_pass(
+        self, cast_to_fp32: bool, use_fused: bool
+    ) -> None:
+        """``self.cast_logprobs_to_fp32`` also flows through the other
+        call site (``_fused_model_pass``), which is what
+        ``_fused_forward`` / ``_fused_forward_no_grad`` go through. Covers
+        both fused-linear-logprob and unfused branches of that method."""
+        torch.manual_seed(4)
+        B, T, H, V = 2, 4, 8, 64
+        agent, _ = self._build_agent(V, H, use_fused=use_fused)
+        agent.cast_logprobs_to_fp32 = cast_to_fp32
+
+        # ``_fused_model_pass`` calls ``set_fused_adapter_routing`` and
+        # ``_get_unwrapped_actor`` — stub both since the tiny test actor
+        # isn't a real PEFT model.
+        agent._get_unwrapped_actor = lambda: agent.actor
+        fused_ids = torch.randint(1, V, (B, T))
+        fused_mask = torch.ones_like(fused_ids)
+        routing = ["actor"] * B
+
+        target_kernel = (
+            "_logprobs_from_hidden_fused" if use_fused else "_logprobs_from_logits"
+        )
+        with (
+            patch(
+                "agilerl.algorithms.core.base.set_fused_adapter_routing",
+                lambda *a, **kw: None,
+            ),
+            patch.object(
+                LLMAlgorithm,
+                target_kernel,
+                wraps=getattr(LLMAlgorithm, target_kernel),
+            ) as spy,
+        ):
+            with torch.no_grad():
+                agent._fused_model_pass(fused_ids, fused_mask, routing)
+        assert spy.called
+        assert spy.call_args.kwargs["cast_to_fp32"] is cast_to_fp32
 
 
 class TestLLMCreatePromptMasks:
@@ -2482,7 +2924,7 @@ class TestLLMGetLogprobs:
         agent.pad_token_id = 0
         ids = torch.randint(1, 50, (2, 10))
         with patch.object(
-            LLMAlgorithm, "_memory_efficient_logits", return_value=torch.randn(2, 9)
+            LLMAlgorithm, "_logprobs_from_logits", return_value=torch.randn(2, 9)
         ):
             result = agent._get_logprobs(ids, batch_size=4)
         assert result.shape[0] == 2

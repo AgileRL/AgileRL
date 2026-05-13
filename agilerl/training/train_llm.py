@@ -1,3 +1,4 @@
+import time
 import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
@@ -18,11 +19,15 @@ from agilerl.utils.utils import (
     save_llm_checkpoint,
     tournament_selection_and_mutation,
 )
-from agilerl.wrappers.llm_envs import PreferenceGym, ReasoningGym, SFTGym
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import LLMPPO, LLMREINFORCE
-    from agilerl.llm_envs import SyncMultiTurnVecEnv
+    from agilerl.llm_envs import (
+        PreferenceGym,
+        ReasoningGym,
+        SFTGym,
+        SyncMultiTurnVecEnv,
+    )
     from agilerl.protocols import MultiTurnEnv
     from agilerl.rollouts.on_policy import collect_rollouts_llm
     from agilerl.utils.algo_utils import stack_and_pad_experiences
@@ -842,6 +847,7 @@ def finetune_llm_multiturn(
     wandb_kwargs: dict[str, Any] | None = None,
     eval_fn: "Callable[[LLMPPO | LLMREINFORCE | GRPO], float] | None" = None,
     evaluation_interval: int = 50,
+    max_wall_seconds: float | None = None,
     max_reward: float | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
@@ -890,13 +896,15 @@ def finetune_llm_multiturn(
     :type eval_fn: Callable, optional
     :param evaluation_interval: How often to run ``eval_fn``.
     :type evaluation_interval: int
+    :param max_wall_seconds: Stop after this wall-clock duration (seconds); ``None`` disables.
+    :type max_wall_seconds: float | None
     :param max_reward: If set, adds accuracy metric vs this threshold.
     :type max_reward: float, optional
     :param verbose: Progress bar and periodic train summaries, defaults to True.
     :type verbose: bool
     :param accelerator: Hugging Face Accelerate instance, defaults to None.
     :type accelerator: Accelerator, optional
-    :return: The finetuned population.
+    :return: The finetuned population (same list object, possibly mutated in place).
     :rtype: PopulationType
     """
     _validate_finetune_args(
@@ -978,11 +986,20 @@ def finetune_llm_multiturn(
     rollout_env = SyncMultiTurnVecEnv(env_factory, batch_size, group_size, env_config)
     group_seed = np.random.randint(0, 1_000_000)
     i = 0
-
+    wall_deadline = (
+        time.monotonic() + max_wall_seconds
+        if max_wall_seconds is not None and max_wall_seconds > 0
+        else None
+    )
     while total_steps < max_steps:
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        if wall_deadline is not None and time.monotonic() >= wall_deadline:
+            if accelerator is None or accelerator.is_main_process:
+                print(
+                    f"\nStopping multiturn training: wall time limit ({max_wall_seconds}s) reached.",
+                )
+            break
 
+        # Collect rollouts and learn
         for agent in population.agents:
             agent.init_evo_step()
 

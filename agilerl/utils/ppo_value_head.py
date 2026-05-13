@@ -140,7 +140,6 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
         input_ids: torch.Tensor | None = None,
         past_key_values: Any = None,
         attention_mask: torch.Tensor | None = None,
-        return_past_key_values: bool = False,
         **kwargs: Any,
     ):
         if past_key_values is not None:
@@ -169,8 +168,6 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
             last_hidden_state = last_hidden_state.to(head_dtype)
         value = self.v_head(last_hidden_state).squeeze(-1)
 
-        if return_past_key_values:
-            return (lm_logits, loss, value, base_out.past_key_values)
         return (lm_logits, loss, value)
 
     def generate(self, *args: Any, **kwargs: Any):

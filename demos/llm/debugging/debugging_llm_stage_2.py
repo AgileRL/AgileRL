@@ -133,7 +133,7 @@ def enable_reinforce_style_advantages(agent: LLMPPO) -> None:
 
                 output = self.actor.pretrained_model.forward(**model_kwargs)
                 logits = output[0] if isinstance(output, tuple) else output.logits
-                log_prob = self._memory_efficient_logits(
+                log_prob = self._logprobs_from_logits(
                     logits[:, :-1],
                     batch_ids[:, 1:],
                 )

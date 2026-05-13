@@ -23,7 +23,7 @@ from agilerl.utils.algo_utils import get_experiences_samples
 from agilerl.utils.llm_utils import aggregate_metrics_dict
 
 if HAS_LIGER_KERNEL:
-    from agilerl.utils.llm_utils import _LigerDPOWithAlpha
+    from agilerl.algorithms.core.llm_ops.fused_loss import _LigerDPOWithAlpha
 
 
 class DPO(LLMAlgorithm):
@@ -78,9 +78,11 @@ class DPO(LLMAlgorithm):
     :type gradient_checkpointing: bool, optional
     :param torch_compiler: Torch compile mode (e.g. ``'default'``), defaults to None
     :type torch_compiler: str | None, optional
-    :param use_liger_loss: Use Liger kernel for memory-efficient loss computation, defaults to False.
-        Requires ``liger_kernel`` to be installed; pass ``False`` to fall back to the standard PyTorch path.
-        When ``training=False`` the standard path is always used regardless of this flag.
+    :param use_liger_loss: Use Liger kernel for memory-efficient loss
+        computation. Defaults to ``False``. Pass ``True`` to opt in
+        (requires ``liger-kernel`` to be installed; warns and falls back
+        to ``False`` otherwise). When ``training=False`` the standard
+        path is always used regardless of this flag.
     :type use_liger_loss: bool, optional
     :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
         adapter whose weights are frozen snapshots of the actor used for the
@@ -117,6 +119,7 @@ class DPO(LLMAlgorithm):
         torch_compiler: str | None = None,
         use_liger_loss: bool = False,
         reduce_memory_peak: bool = False,
+        cast_logprobs_to_fp32: bool = True,
         use_separate_reference_adapter: bool = True,
     ) -> None:
         resolved_device = (
@@ -155,6 +158,7 @@ class DPO(LLMAlgorithm):
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
             reduce_memory_peak=reduce_memory_peak,
+            cast_logprobs_to_fp32=cast_logprobs_to_fp32,
             use_separate_reference_adapter=use_separate_reference_adapter,
         )
         self.beta = beta
