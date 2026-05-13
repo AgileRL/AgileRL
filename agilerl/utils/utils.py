@@ -787,6 +787,11 @@ def create_population(
                 actor_network=act,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                use_fused_linear_logprobs=INIT_HP.get(
+                    "USE_FUSED_LINEAR_LOGPROBS",
+                    INIT_HP.get("USE_FUSED_LINEAR", False),
+                ),
+                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
                 use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
                 adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
                 loss_type=INIT_HP.get("LOSS_TYPE", "grpo"),
@@ -989,6 +994,11 @@ def create_population(
                 actor_network=act,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                use_fused_linear_logprobs=INIT_HP.get(
+                    "USE_FUSED_LINEAR_LOGPROBS",
+                    INIT_HP.get("USE_FUSED_LINEAR", False),
+                ),
+                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -1060,6 +1070,12 @@ def create_population(
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                use_fused_linear_logprobs=INIT_HP.get(
+                    "USE_FUSED_LINEAR_LOGPROBS",
+                    INIT_HP.get("USE_FUSED_LINEAR", False),
+                ),
+                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)

@@ -619,6 +619,109 @@ class TestCreatePopulation:
         assert first_kw["accelerator"] is acc0
         assert second_kw["accelerator"] is acc1
 
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES,
+        reason="agilerl[llm] not installed",
+    )
+    @pytest.mark.parametrize(
+        "algo,patch_target",
+        [
+            ("GRPO", "agilerl.utils.utils.GRPO"),
+            ("LLMPPO", "agilerl.utils.utils.LLMPPO"),
+            ("LLMREINFORCE", "agilerl.utils.utils.LLMREINFORCE"),
+        ],
+    )
+    def test_llm_population_threads_liger_and_logprob_flags(
+        self, vector_space, algo, patch_target
+    ):
+        """``USE_LIGER_LOSS`` / ``USE_FUSED_LINEAR_LOGPROBS`` / ``CAST_LOGPROBS_TO_FP32``
+        are forwarded from ``INIT_HP`` to the algo constructor for every LLM RL
+        branch in ``create_population`` (GRPO/CISPO/GSPO, LLMPPO, LLMREINFORCE)."""
+        init_hp = {
+            "BATCH_SIZE": 2,
+            "LR": 1e-5,
+            "BETA": 0.01,
+            "MAX_GRAD_NORM": 0.5,
+            "UPDATE_EPOCHS": 1,
+            "MAX_MODEL_LEN": 64,
+            "USE_VLLM": False,
+            "GRADIENT_CHECKPOINTING": False,
+            "USE_LIGER_LOSS": True,
+            "USE_FUSED_LINEAR_LOGPROBS": True,
+            "CAST_LOGPROBS_TO_FP32": False,
+        }
+        actor = MagicMock(name="actor_network")
+        actor.state_dict.return_value = {"w": torch.tensor([1.0])}
+        mock_agent = MagicMock(name=f"{algo}_agent")
+
+        with patch(patch_target, return_value=mock_agent) as mock_cls:
+            create_population(
+                algo=algo,
+                observation_space=vector_space,
+                action_space=copy.deepcopy(vector_space),
+                net_config=None,
+                INIT_HP=init_hp,
+                hp_config=None,
+                population_size=1,
+                device="cpu",
+                accelerator=None,
+                actor_network=actor,
+                algo_kwargs={
+                    "pad_token_id": 999,
+                    "pad_token": "<pad>",
+                    "use_vllm": False,
+                },
+            )
+
+        call_kw = mock_cls.call_args.kwargs
+        assert call_kw["use_liger_loss"] is True
+        assert call_kw["use_fused_linear_logprobs"] is True
+        assert call_kw["cast_logprobs_to_fp32"] is False
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES,
+        reason="agilerl[llm] not installed",
+    )
+    def test_llm_population_fused_linear_alias_falls_back(self, vector_space):
+        """The legacy ``USE_FUSED_LINEAR`` key still wires through to
+        ``use_fused_linear_logprobs`` when the canonical key is absent."""
+        init_hp = {
+            "BATCH_SIZE": 2,
+            "LR": 1e-5,
+            "BETA": 0.01,
+            "MAX_GRAD_NORM": 0.5,
+            "UPDATE_EPOCHS": 1,
+            "MAX_MODEL_LEN": 64,
+            "USE_VLLM": False,
+            "GRADIENT_CHECKPOINTING": False,
+            "USE_FUSED_LINEAR": True,
+        }
+        actor = MagicMock(name="actor_network")
+        actor.state_dict.return_value = {"w": torch.tensor([1.0])}
+        mock_agent = MagicMock(name="grpo_agent")
+
+        with patch("agilerl.utils.utils.GRPO", return_value=mock_agent) as mock_cls:
+            create_population(
+                algo="GRPO",
+                observation_space=vector_space,
+                action_space=copy.deepcopy(vector_space),
+                net_config=None,
+                INIT_HP=init_hp,
+                hp_config=None,
+                population_size=1,
+                device="cpu",
+                accelerator=None,
+                actor_network=actor,
+                algo_kwargs={
+                    "pad_token_id": 999,
+                    "pad_token": "<pad>",
+                    "use_vllm": False,
+                },
+            )
+
+        call_kw = mock_cls.call_args.kwargs
+        assert call_kw["use_fused_linear_logprobs"] is True
+
     def test_sft_cpu(self):
         """Exercise ``create_population`` SFT branch (clone after first agent)."""
         pytest.importorskip("peft")
