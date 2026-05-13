@@ -200,9 +200,9 @@ class PPO(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
-        use_fused_linear_logprobs: bool | None = None,
-        cast_logprobs_to_fp32: bool | None = None,
-        use_liger_loss: bool | None = None,
+        use_fused_linear_logprobs: bool = False,
+        cast_logprobs_to_fp32: bool = True,
+        use_liger_loss: bool = False,
     ) -> None:
 
         device = (
@@ -1130,23 +1130,3 @@ class PPO(LLMAlgorithm):
             mask_t = (turn_ids == t).float()
             token_rewards += mask_t * rewards[:, t : t + 1]
         return token_rewards
-
-    def _calculate_kl_divergence(
-        self,
-        log_probs: torch.Tensor,
-        reference_log_probs: torch.Tensor,
-    ) -> torch.Tensor:
-        """Calculate the KL divergence between the current and reference log probabilities.
-
-        :param log_probs: Current policy log probabilities.
-        :type log_probs: torch.Tensor
-        :param reference_log_probs: Reference policy log probabilities.
-        :type reference_log_probs: torch.Tensor
-        :return: Kl divergence between the current and reference log probabilities.
-        :rtype: torch.Tensor
-        """
-        return (
-            torch.exp(reference_log_probs - log_probs)
-            - (reference_log_probs - log_probs)
-            - 1
-        )

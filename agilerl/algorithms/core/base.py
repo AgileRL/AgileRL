@@ -34,6 +34,7 @@ from torch.optim import AdamW
 from typing_extensions import Self
 
 from agilerl import HAS_DEEPSPEED, HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES, HAS_VLLM
+from agilerl.algorithms.core.llm_policy_loss import _k3_kl
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -1979,11 +1980,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :type pad_token_id: int
     :param pad_token: The pad token.
     :type pad_token: str
-    :param use_liger_loss: Whether to use Liger loss. When ``None`` (the
-        subclass default), resolves to ``True`` if ``liger-kernel`` is
-        importable and ``False`` otherwise. Passing ``True`` explicitly
-        without ``liger-kernel`` installed warns and falls back to ``False``.
-    :type use_liger_loss: bool | None
+    :param use_liger_loss: Whether to use Liger loss. Defaults to ``False``.
+        Passing ``True`` without ``liger-kernel`` installed warns and falls
+        back to ``False``.
+    :type use_liger_loss: bool
     :param lora_config: The LoRA config.
     :type lora_config: LoraConfigProtocol | None
     :param use_separate_reference_adapter: Whether to use a separate reference adapter.
@@ -2018,7 +2018,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :param reduce_memory_peak: Deprecated. Previously hinted peak-memory batching;
         ignored. Configure ``micro_batch_size_per_gpu`` and DeepSpeed instead.
     :type reduce_memory_peak: bool, optional
-    :param cast_logprobs_to_fp32: When ``True``, the per-token
+    :param cast_logprobs_to_fp32: When ``True`` (the default), the per-token
         log-probability reduction (``amax`` / ``gather`` / ``logsumexp``)
         runs in fp32 before being cast back to the input dtype. Applies
         uniformly to both the unfused ``(B, T, V)`` path
@@ -2026,20 +2026,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         path (:meth:`_fused_linear_logprobs_no_grad`) so the two paths
         produce numerically equivalent log-probs.
 
-        Defaults to ``None``, which resolves to the resolved value of
-        ``use_liger_loss``. Rationale: Liger users have already escaped
-        the ``(B, T, V)`` materialization, so the fp32 fused workspace
-        is bounded to ``chunk_rows * V`` (~6 MB at ``B=8, T=2048,
-        V≈152k``) and matches Liger's own internal fp32 math. Non-Liger
-        users hit the unfused grad path where the fp32 chunk workspace
-        sits on top of the full bf16 logits — costing ~10 GB extra peak
-        at the same shapes — so the default flips to ``False`` for them.
+        The default preserves prior behaviour exactly: the unfused path
+        was already promoting to fp32 unconditionally before this flag
+        existed. The flag exposes that promotion as configurable.
 
         Setting ``False`` introduces a per-token bf16 quantisation error
         (~0.1 at ``V≈128k``) which can bias PPO/GRPO importance-sampling
-        ratios. Set ``True`` explicitly if you have verified you have
-        memory headroom and want the precision.
-    :type cast_logprobs_to_fp32: bool | None, optional
+        ratios. Use only if you've verified bf16 is acceptable for your
+        vocab/shape — it saves ~18 GB on the unfused path at ``B=8,
+        T=2048, V≈152k``, ~6 MB on the fused path.
+    :type cast_logprobs_to_fp32: bool, optional
     """
 
     _separate_reference_adapter_deprecation_emitted = False
@@ -2077,8 +2073,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
-        use_fused_linear_logprobs: bool | None = None,
-        cast_logprobs_to_fp32: bool | None = None,
+        use_fused_linear_logprobs: bool = False,
+        cast_logprobs_to_fp32: bool = True,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
@@ -2090,34 +2086,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 DeprecationWarning,
                 stacklevel=2,
             )
-        if use_liger_loss is None:
-            # Subclass default. Opt in automatically when Liger is
-            # available; users can still pass False explicitly.
-            use_liger_loss = HAS_LIGER_KERNEL
-        elif use_liger_loss and not HAS_LIGER_KERNEL:
+        if use_liger_loss and not HAS_LIGER_KERNEL:
             warnings.warn(
                 "use_liger_loss=True requested, but `liger-kernel` is not available on this platform/environment. "
                 "Falling back to standard loss.",
                 stacklevel=2,
             )
             use_liger_loss = False
-
-        if cast_logprobs_to_fp32 is None:
-            # Tie default fp32 casting to whether Liger is actually in use.
-            # Non-Liger users pay ~10 GB fp32 workspace per call on the unfused
-            # ``(B, T, V)`` logits path; Liger users only see the small fused
-            # rollout-side workspace, so fp32 precision is effectively free
-            # and matches Liger's own internal fp32 math.
-            cast_logprobs_to_fp32 = use_liger_loss
-        if use_fused_linear_logprobs is None:
-            # Tie default to use_liger_loss too. Without Liger the peak sits
-            # on the grad-time ``(B, T, V)`` materialization regardless, so
-            # fusing the no-grad rollout pass doesn't lower overall peak —
-            # and would force every model to expose a discoverable lm_head.
-            # Liger users have already escaped the grad-time materialization
-            # via the fused loss, so fusing the rollout side compounds the
-            # win cleanly.
-            use_fused_linear_logprobs = use_liger_loss
 
         if model_name is None and actor_network is None:
             msg = "At least one of model_name or actor_network must be provided."
@@ -3796,6 +3771,35 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 batch_model_kwargs = None
                 log_probs.append(log_prob)
         return torch.cat(log_probs, dim=0)
+
+    def _calculate_kl_divergence(
+        self,
+        log_probs: torch.Tensor,
+        reference_log_probs: torch.Tensor,
+    ) -> torch.Tensor:
+        """K3 KL-divergence estimator between current and reference policies.
+
+        Implements the Schulman 2020 K3 estimator
+        ``exp(log_p - log_q) - (log_p - log_q) - 1`` with
+        ``log_p = reference_log_probs``, ``log_q = log_probs`` — i.e.
+        an estimate of ``KL[π_current || π_reference]``. Always-positive
+        and lower-variance than the naive ``log_q - log_p`` estimator.
+
+        Shared by PPO/REINFORCE/GRPO. Identical math (with the same
+        argument convention) is also exposed as a plain-tensor helper at
+        :func:`agilerl.algorithms.core.llm_policy_loss._k3_kl` for the
+        Liger-fused autograd Function (which can't import ``LLMAlgorithm``
+        without circular imports).
+
+        :param log_probs: Current policy log probabilities, any shape.
+        :type log_probs: torch.Tensor
+        :param reference_log_probs: Reference policy log probabilities, same
+            shape as ``log_probs``.
+        :type reference_log_probs: torch.Tensor
+        :return: Per-element KL estimate (same shape as inputs).
+        :rtype: torch.Tensor
+        """
+        return _k3_kl(reference_log_probs, log_probs)
 
     def _backward_pass(self, loss: torch.Tensor) -> None:
         """Perform a backward pass and optimizer step.

@@ -134,15 +134,15 @@ class GRPO(LLMAlgorithm):
     :param torch_compiler: Torch compile mode (e.g. ``'default'``), defaults to None
     :type torch_compiler: str | None, optional
     :param use_liger_loss: Use Liger kernel for memory-efficient loss
-        computation. Defaults to ``None``, which resolves to ``True`` when
-        ``liger-kernel`` is installed and ``False`` otherwise. Pass ``False``
-        explicitly to force the standard PyTorch path. Supported for
-        ``loss_type`` values ``'grpo'``, ``'cispo'``, and ``'gspo'``. Note
-        that the Liger path uses DAPO-style batch normalisation for
-        ``'cispo'`` rather than the per-sequence-then-batch normalisation of
-        the standard path; numerical values will differ slightly but
-        gradient direction is equivalent.
-    :type use_liger_loss: bool | None, optional
+        computation. Defaults to ``False``. Pass ``True`` to opt in
+        (requires ``liger-kernel`` to be installed; warns and falls back
+        to ``False`` otherwise). Supported for ``loss_type`` values
+        ``'grpo'``, ``'cispo'``, and ``'gspo'``. Note that the Liger path
+        uses DAPO-style batch normalisation for ``'cispo'`` rather than
+        the per-sequence-then-batch normalisation of the standard path;
+        numerical values will differ slightly but gradient direction is
+        equivalent.
+    :type use_liger_loss: bool, optional
     :param use_kl_advantage_shaping: Apply KL-based shaping directly to token
         advantages before PPO clipping, defaults to False.
     :type use_kl_advantage_shaping: bool, optional
@@ -175,12 +175,11 @@ class GRPO(LLMAlgorithm):
         logprob computation (old-policy and reference) skips materializing
         the full ``(B, T, V)`` logits tensor and instead consumes hidden
         states directly via a chunked matmul over the lm_head weight.
-        Defaults to ``None``, which resolves to the resolved value of
-        ``use_liger_loss``: without Liger the gradient-time path already
-        materializes ``(B, T, V)`` so fusing the rollout doesn't lower
-        overall peak; with Liger the rollout fusion complements the
-        grad-time memory saving.
-    :type use_fused_linear_logprobs: bool | None, optional
+        Defaults to ``False``. Pairs best with ``use_liger_loss=True``,
+        since without Liger the gradient-time path still materializes
+        ``(B, T, V)`` and fusing only the rollout doesn't lower overall
+        peak.
+    :type use_fused_linear_logprobs: bool, optional
     """
 
     def __init__(
@@ -222,7 +221,7 @@ class GRPO(LLMAlgorithm):
         seed: int = 42,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
-        use_liger_loss: bool | None = None,
+        use_liger_loss: bool = False,
         use_kl_advantage_shaping: bool = False,
         adv_norm: str = "mean_std",
         loss_type: Literal["grpo", "gspo", "cispo"] = "grpo",
@@ -232,8 +231,8 @@ class GRPO(LLMAlgorithm):
         filter_zero_adv: bool = False,
         adv_filter_eps: float = 0.0,
         reduce_memory_peak: bool = False,
-        use_fused_linear_logprobs: bool | None = None,
-        cast_logprobs_to_fp32: bool | None = None,
+        use_fused_linear_logprobs: bool = False,
+        cast_logprobs_to_fp32: bool = True,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -735,26 +734,6 @@ class GRPO(LLMAlgorithm):
                 rewards.std(dim=1, keepdim=True) + eps
             )
         return advantage.flatten().unsqueeze(1)
-
-    def _calculate_kl_divergence(
-        self,
-        log_probs: torch.Tensor,
-        reference_log_probs: torch.Tensor,
-    ) -> torch.Tensor:
-        """Calculate the KL divergence between the current and reference log probabilities.
-
-        :param log_probs: Current policy log probabilities.
-        :type log_probs: torch.Tensor
-        :param reference_log_probs: Reference policy log probabilities.
-        :type reference_log_probs: torch.Tensor
-        :return: Kl divergence between the current and reference log probabilities.
-        :rtype: torch.Tensor
-        """
-        return (
-            torch.exp(reference_log_probs - log_probs)
-            - (reference_log_probs - log_probs)
-            - 1
-        )
 
     def _resolve_standard_loss_fn(
         self,
