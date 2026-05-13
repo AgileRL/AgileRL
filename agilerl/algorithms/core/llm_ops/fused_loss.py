@@ -29,6 +29,19 @@ import torch
 
 from agilerl import HAS_LIGER_KERNEL
 
+if not HAS_LIGER_KERNEL:
+    msg = (
+        "Liger fused loss functions are only available when liger-kernel "
+        "is installed. Check ``HAS_LIGER_KERNEL`` before importing or "
+        "using this module."
+    )
+    raise ImportError(msg)
+
+from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOFunction
+from liger_kernel.chunked_loss.fused_linear_ppo import LigerFusedLinearPPOBase
+from liger_kernel.chunked_loss.fused_linear_preference import (
+    LigerFusedLinearPreferenceBase,
+)
 
 def _k3_kl(log_p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
     """K3 estimator of ``KL[q || p]`` (Schulman 2020).
@@ -191,20 +204,6 @@ def llm_policy_loss_fn(
         ).sum() / token_global_count
 
     return chunk_loss, [kl_metric, clipfrac_metric, pg_loss_metric, entropy_metric]
-
-
-# ---------------------------------------------------------------------------
-# Liger autograd Function — only fully defined when ``liger-kernel`` is
-# available. Stubs the base class to ``object`` on no-Liger platforms so
-# the class body resolves at import time; the public symbol is then
-# reassigned to ``None`` at the bottom so callers' ``is None`` guard fires.
-# ---------------------------------------------------------------------------
-
-
-if HAS_LIGER_KERNEL or TYPE_CHECKING:
-    from liger_kernel.chunked_loss.fused_linear_ppo import LigerFusedLinearPPOBase
-else:
-    LigerFusedLinearPPOBase = object  # type: ignore[assignment,misc]
 
 
 class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
@@ -434,8 +433,64 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         )
 
 
-if not HAS_LIGER_KERNEL:
-    # The class above is defined against an ``object`` stub on platforms
-    # without liger-kernel so the module imports cleanly. Replace the
-    # public symbol with ``None`` so callers' ``is None`` guard fires.
-    LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment,misc]
+class _LigerDPOWithAlpha(LigerFusedLinearPreferenceBase):
+    """Thin wrapper that exposes ``alpha`` for NLL scaling.
+
+    ``LigerFusedLinearDPOFunction`` passes ``compute_nll_loss`` as a bool
+    but never forwards ``alpha`` to the base class (which defaults to 1.0).
+    This subclass reuses the DPO preference loss and adds ``alpha`` so the
+    fused kernel correctly scales the NLL component.
+    """
+
+    preference_loss_fn = (
+        staticmethod(LigerFusedLinearDPOFunction.preference_loss_fn)
+        if HAS_LIGER_KERNEL
+        else None
+    )
+
+    @classmethod
+    def forward(
+        cls,
+        ctx,
+        _input,
+        weight,
+        target,
+        bias=None,
+        ref_input=None,
+        ref_weight=None,
+        ref_bias=None,
+        ignore_index=-100,
+        beta=0.1,
+        alpha=1.0,
+        compute_nll_loss=True,
+        compiled=True,
+        use_ref_model=True,
+        average_log_prob=False,
+        chunk_size=1,
+        loss_type="sigmoid",
+    ):
+        return LigerFusedLinearPreferenceBase.forward(
+            cls=cls,
+            ctx=ctx,
+            _input=_input,
+            weight=weight,
+            target=target,
+            bias=bias,
+            ignore_index=ignore_index,
+            alpha=alpha,
+            beta=beta,
+            compute_nll_loss=compute_nll_loss,
+            compiled=compiled,
+            use_ref_model=use_ref_model,
+            ref_input=ref_input,
+            ref_weight=ref_weight,
+            ref_bias=ref_bias,
+            average_log_prob=average_log_prob,
+            chunk_size=chunk_size,
+            loss_type=loss_type,
+        )
+
+    @staticmethod
+    def backward(ctx, *grad_output):
+        grads = LigerFusedLinearPreferenceBase.backward(ctx, grad_output)[:4]
+        return (*grads, *(None,) * 12)

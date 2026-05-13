@@ -34,7 +34,6 @@ from torch.optim import AdamW
 from typing_extensions import Self
 
 from agilerl import HAS_DEEPSPEED, HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES, HAS_VLLM
-from agilerl.algorithms.core.llm_ops.fused_policy_loss import _k3_kl
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -3785,11 +3784,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         an estimate of ``KL[π_current || π_reference]``. Always-positive
         and lower-variance than the naive ``log_q - log_p`` estimator.
 
-        Shared by PPO/REINFORCE/GRPO. Identical math (with the same
-        argument convention) is also exposed as a plain-tensor helper at
-        :func:`agilerl.algorithms.core.llm_ops.fused_policy_loss._k3_kl` for the
-        Liger-fused autograd Function (which can't import ``LLMAlgorithm``
-        without circular imports).
+        Shared by PPO/REINFORCE/GRPO. The Liger-fused autograd Function
+        in :mod:`agilerl.algorithms.core.llm_ops.fused_loss` has its own
+        copy of this math (``_k3_kl``) because that module gates on
+        ``HAS_LIGER_KERNEL`` at import time and base.py must remain
+        importable on platforms without ``liger-kernel``.
 
         :param log_probs: Current policy log probabilities, any shape.
         :type log_probs: torch.Tensor
@@ -3799,7 +3798,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Per-element KL estimate (same shape as inputs).
         :rtype: torch.Tensor
         """
-        return _k3_kl(reference_log_probs, log_probs)
+        diff = reference_log_probs - log_probs
+        return torch.exp(diff) - diff - 1.0
 
     def _backward_pass(self, loss: torch.Tensor) -> None:
         """Perform a backward pass and optimizer step.

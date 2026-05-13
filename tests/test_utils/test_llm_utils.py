@@ -1229,7 +1229,7 @@ class TestLigerDPOWithAlphaBackward:
         if not HAS_LIGER_KERNEL:
             pytest.skip("liger-kernel not installed")
 
-        import agilerl.algorithms.core.llm_ops.fused_dpo_loss as fused_dpo_mod
+        import agilerl.algorithms.core.llm_ops.fused_loss as fused_dpo_mod
         from liger_kernel.chunked_loss.fused_linear_preference import (
             LigerFusedLinearPreferenceBase,
         )

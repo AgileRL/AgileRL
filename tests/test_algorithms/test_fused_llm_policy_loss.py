@@ -1,10 +1,10 @@
-"""Tests for ``agilerl.algorithms.core.llm_ops.fused_policy_loss`` and
-``agilerl.algorithms.core.llm_ops.fused_policy_loss``.
+"""Tests for ``agilerl.algorithms.core.llm_ops.fused_loss``.
 
-The math in :func:`llm_policy_loss_fn` lives in the Liger-free
-``llm_policy_loss`` module and is testable everywhere. End-to-end
-autograd-Function tests are gated on ``HAS_LIGER_KERNEL`` since the
-fused module fails fast at import time without ``liger-kernel``.
+``fused_loss`` requires ``liger-kernel`` at import time, so this whole
+file is gated: on platforms without Liger, the module-level import-skip
+below short-circuits collection and all tests are skipped. The
+underlying math (``_k3_kl`` / ``llm_policy_loss_fn``) is plain-tensor
+PyTorch; only the autograd Functions need Liger to run.
 """
 
 from __future__ import annotations
@@ -15,36 +15,35 @@ import sys
 import pytest
 import torch
 
-from agilerl.algorithms.core.llm_ops.fused_policy_loss import (
+from agilerl import HAS_LIGER_KERNEL
+
+if not HAS_LIGER_KERNEL:
+    pytest.skip(
+        "fused_loss tests require liger-kernel; skipping on this platform.",
+        allow_module_level=True,
+    )
+
+from agilerl.algorithms.core.llm_ops.fused_loss import (  # noqa: E402
     _k3_kl,
     llm_policy_loss_fn,
 )
 
 
-def test_no_liger_fused_module_imports_with_symbol_none():
-    """When ``HAS_LIGER_KERNEL=False``, ``fused_policy_loss`` must still
-    import cleanly so that downstream modules (notably ``LLMAlgorithm``)
-    can pull in the plain-tensor helpers ``_k3_kl`` and
-    ``llm_policy_loss_fn`` without depending on Liger. The Liger
-    autograd Function is gated: ``LigerFusedLinearPolicyLossFunction``
-    resolves to ``None`` so callers' ``is None`` guard fires.
+def test_no_liger_fused_module_raises_import_error(monkeypatch):
+    """When ``HAS_LIGER_KERNEL=False``, importing ``fused_loss`` raises
+    a clear ``ImportError`` rather than silently exposing broken
+    autograd Functions. Exercise the guard by patching the flag and
+    forcing a fresh import. A failed module body never enters
+    ``sys.modules``, so the cached real module survives untouched.
     """
     import agilerl
-    import agilerl.algorithms.core.llm_ops.fused_policy_loss as mod
 
-    original_has_liger = agilerl.HAS_LIGER_KERNEL
-    try:
-        agilerl.HAS_LIGER_KERNEL = False
-        importlib.reload(mod)
-        assert mod.LigerFusedLinearPolicyLossFunction is None
-        # Plain-tensor helpers must still be importable.
-        assert callable(mod._k3_kl)
-        assert callable(mod.llm_policy_loss_fn)
-        # Stub base class is ``object`` on no-Liger platforms.
-        assert mod.LigerFusedLinearPPOBase is object
-    finally:
-        agilerl.HAS_LIGER_KERNEL = original_has_liger
-        importlib.reload(mod)
+    monkeypatch.setattr(agilerl, "HAS_LIGER_KERNEL", False)
+    mod_name = "agilerl.algorithms.core.llm_ops.fused_loss"
+    monkeypatch.delitem(sys.modules, mod_name, raising=False)
+
+    with pytest.raises(ImportError, match="liger-kernel"):
+        importlib.import_module(mod_name)
 
 
 @pytest.mark.parametrize(
@@ -610,7 +609,7 @@ class TestLlmPpoLossFnTurnMode:
 from agilerl import HAS_LIGER_KERNEL  # noqa: E402
 
 if HAS_LIGER_KERNEL:
-    from agilerl.algorithms.core.llm_ops.fused_policy_loss import (  # noqa: E402
+    from agilerl.algorithms.core.llm_ops.fused_loss import (  # noqa: E402
         LigerFusedLinearPolicyLossFunction,
     )
 

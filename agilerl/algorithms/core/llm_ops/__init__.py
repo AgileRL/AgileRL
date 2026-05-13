@@ -1,21 +1,32 @@
 """LLM-specific fused-kernel ops (Liger and LoRA).
 
-Public surface re-exported from sibling modules so callers can use either
-``from agilerl.algorithms.core.llm_ops import LigerFusedLinearPolicyLossFunction``
-or the fully-qualified submodule path.
+The ``fused_lora`` helpers are always available; ``fused_loss``
+(``LigerFusedLinearPolicyLossFunction``, ``_LigerDPOWithAlpha``,
+``llm_policy_loss_fn``, ``_k3_kl``) requires ``liger-kernel`` at import
+time, so it is gated on :data:`agilerl.HAS_LIGER_KERNEL`. Without Liger
+the public symbols resolve to ``None`` so callers' ``is None`` guard
+fires.
 """
 
-from agilerl.algorithms.core.llm_ops.fused_dpo_loss import _LigerDPOWithAlpha
+from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms.core.llm_ops.fused_lora import (
     clear_fused_adapter_routing,
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
 )
-from agilerl.algorithms.core.llm_ops.fused_policy_loss import (
-    LigerFusedLinearPolicyLossFunction,
-    _k3_kl,
-    llm_policy_loss_fn,
-)
+
+if HAS_LIGER_KERNEL:
+    from agilerl.algorithms.core.llm_ops.fused_loss import (
+        LigerFusedLinearPolicyLossFunction,
+        _k3_kl,
+        _LigerDPOWithAlpha,
+        llm_policy_loss_fn,
+    )
+else:
+    LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
+    _LigerDPOWithAlpha = None  # type: ignore[assignment]
+    _k3_kl = None  # type: ignore[assignment]
+    llm_policy_loss_fn = None  # type: ignore[assignment]
 
 __all__ = [
     "LigerFusedLinearPolicyLossFunction",
