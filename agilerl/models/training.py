@@ -47,8 +47,6 @@ class ReplayBufferSpec(BaseModel):
     :type n_step_buffer: bool
     :param n_step_buffer_args: The arguments for the n-step replay buffer. Defaults to NStepBufferArgs.
     :type n_step_buffer_args: NStepBufferArgs
-    :param combined_buffers: Whether to use combined buffers. Defaults to False.
-    :type combined_buffers: bool
     :param per_buffer: Whether to use the prioritized experience replay buffer. Defaults to False.
     :type per_buffer: bool
     :param per_buffer_args: The arguments for the prioritized experience replay buffer. Defaults to PerBufferArgs.
@@ -61,7 +59,6 @@ class ReplayBufferSpec(BaseModel):
         default=100_000, ge=1, validation_alias=AliasChoices("max_size", "memory_size")
     )
     standard_buffer: bool = Field(default=True)
-    combined_buffers: bool = Field(default=False)
     n_step_buffer: bool = Field(default=False)
     n_step_buffer_args: NStepBufferArgs = Field(default_factory=NStepBufferArgs)
     per_buffer: bool = Field(default=False)
@@ -122,6 +119,37 @@ class ReplayBufferSpec(BaseModel):
             **buffer_args,
         )
 
+    def init_n_step_buffer(
+        self, algo_spec: AlgoSpecT, device: str | torch.device = "cpu"
+    ) -> BufferT | None:
+        """Initialize the n-step replay buffer for combined PER + n-step setups.
+
+        Returns ``None`` unless both ``per_buffer`` and ``n_step_buffer`` are
+        ``True``.
+
+        :param algo_spec: Algorithm specification.
+        :type algo_spec: AlgoSpecT
+        :param device: Device.
+        :type device: str | torch.device
+        :returns: A :class:`MultiStepReplayBuffer` or ``None``.
+        :rtype: BufferT | None
+        """
+        if not (self.per_buffer and self.n_step_buffer):
+            return None
+
+        from agilerl.components.replay_buffer import MultiStepReplayBuffer
+
+        if not hasattr(algo_spec, "gamma"):
+            msg = "Gamma must be specified for N-step buffer"
+            raise ValueError(msg)
+
+        return MultiStepReplayBuffer(
+            max_size=self.max_size,
+            device=device,
+            n_step=self.n_step_buffer_args.n_step,
+            gamma=algo_spec.gamma,
+        )
+
 
 class TrainingSpec(BaseModel):
     """Pydantic model for AgileRL training arguments.
@@ -162,6 +190,9 @@ class TrainingSpec(BaseModel):
     :type num_epochs: int | None
     :param episode_steps: Number of steps to train for each episode (only applicable for bandits).
     :type episode_steps: int
+    :param sum_scores: Whether to sum sub-agent scores (only applicable for multi-agent).
+        Typically ``True`` for cooperative environments. Defaults to ``True``.
+    :type sum_scores: bool
     :param reporting_interval: Number of steps between reporting.
     :type reporting_interval: int
     :param experience_sharing: Whether to share experiences between agents.
@@ -200,6 +231,9 @@ class TrainingSpec(BaseModel):
 
     # Bandit-specific training parameters
     episode_steps: int = Field(default=500, ge=1)
+
+    # Multi-agent specific training parameters
+    sum_scores: bool = Field(default=True)
 
     # NOTE: The following are only applicable to Arena training
     reporting_interval: int = Field(default=1024, ge=1)

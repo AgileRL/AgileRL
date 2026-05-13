@@ -1,8 +1,10 @@
 import random
+import sys
 from numbers import Number
 from typing import Any
 
 import numpy as np
+import pytest
 import torch
 from gymnasium import spaces
 from tensordict import TensorDict
@@ -11,6 +13,11 @@ from torch import nn
 from agilerl.components.data import Transition
 from agilerl.modules import EvolvableModule
 from agilerl.typing import NumpyObsType, TorchObsType
+
+skip_torch_compile_on_windows_cpu = pytest.mark.skipif(
+    sys.platform == "win32" and not torch.cuda.is_available(),
+    reason="torch.compile inductor backend on CPU/Windows requires MSVC (cl.exe)",
+)
 
 
 def assert_state_dicts_equal(

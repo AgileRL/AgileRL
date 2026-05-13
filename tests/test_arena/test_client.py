@@ -389,7 +389,9 @@ class TestEnvironmentListMethods:
         )
         result = api_key_client.list_environments()
         api_key_client._request.assert_called_once_with(
-            "GET", "/api/cli/v1/environments", params={"name": None}
+            "GET",
+            "/api/cli/v1/environments",
+            params={"name": None, "include_arena": None},
         )
         assert "MyEnv" in result
 
@@ -579,22 +581,6 @@ class TestStopExperiment:
             "POST",
             "/api/cli/v1/experiments/jobs/stop",
             json={"experiment_name": "my-exp"},
-        )
-
-    def test_stop_experiment_requires_non_empty_name(self, api_key_client):
-        with pytest.raises(ArenaValidationError, match="non-empty"):
-            api_key_client.stop_experiment("")
-        with pytest.raises(ArenaValidationError, match="non-empty"):
-            api_key_client.stop_experiment("   ")
-
-    def test_stop_job_deprecated_forwards_to_stop_experiment(self, api_key_client):
-        api_key_client._request = MagicMock(return_value="Ok")
-        with pytest.warns(DeprecationWarning, match="stop_experiment"):
-            api_key_client.stop_job("j1")
-        api_key_client._request.assert_called_once_with(
-            "POST",
-            "/api/cli/v1/experiments/jobs/stop",
-            json={"experiment_name": "j1"},
         )
 
 

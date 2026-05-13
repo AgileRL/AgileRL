@@ -109,6 +109,8 @@ celerybeat.pid
 # Environments
 .env
 .vscode/
+.cursor/
+.claude/
 .venv*/
 venv/
 env.bak/
@@ -148,3 +150,7 @@ wandb/
 
 # Cursor
 .cursor
+
+# AI assistant instructions
+CLAUDE.md
+AGENTS.md

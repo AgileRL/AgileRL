@@ -91,8 +91,6 @@ def train_off_policy(
     eps_end: float = 0.1,
     eps_decay: float = 0.995,
     target: float | None = None,
-    n_step: bool = False,
-    per: bool = False,
     n_step_memory: MultiStepReplayBuffer | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
@@ -145,10 +143,6 @@ def train_off_policy(
     :type eps_decay: float, optional
     :param target: Target score for early stopping, defaults to None
     :type target: float, optional
-    :param n_step: Use multi-step experience replay buffer, defaults to False
-    :type n_step: bool, optional
-    :param per: Using prioritized experience replay buffer, defaults to False
-    :type per: bool, optional
     :param n_step_memory: Multi-step Experience Replay Buffer to be used alongside Prioritized
         ERB, defaults to None
     :type n_step_memory: object, optional
@@ -199,10 +193,11 @@ def train_off_policy(
             target,
             (float, int),
         ), "Target score must be a float or an integer."
-    assert isinstance(n_step, bool), "'n_step' must be a boolean."
-    assert isinstance(per, bool), "'per' must be a boolean."
+
+    per = isinstance(memory, PrioritizedReplayBuffer)
     if checkpoint is not None:
         assert isinstance(checkpoint, int), "Checkpoint must be an integer."
+
     assert isinstance(
         wb,
         bool,

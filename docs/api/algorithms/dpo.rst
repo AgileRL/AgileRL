@@ -21,7 +21,7 @@ Example
 .. code-block:: python
 
   from agilerl.algorithms import DPO
-  from agilerl.wrappers.llm_envs import PreferenceGym
+  from agilerl.llm_envs import PreferenceGym
   from accelerate import Accelerator
   from datasets import load_dataset
   from peft import get_peft_model
@@ -64,7 +64,6 @@ Example
     beta=0.001,
     update_epochs=1,
     seed=42,
-    reduce_memory_peak=True,
     accelerator=accelerator,
   )
 

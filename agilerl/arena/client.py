@@ -693,22 +693,15 @@ class ArenaClient:
         )
 
     def stop_experiment(self, experiment_name: str) -> Any:
-        """Stop a running experiment (training job) via the CLI halt path.
+        """Stop a running experiment in Arena.
 
-        Calls **POST** ``/api/cli/v1/experiments/jobs/stop`` (same backend as the UI
-        halt command). There is no ``POST /api/v1/jobs/stop`` on the Arena platform.
-
-        :param experiment_name: Experiment name (a.k.a. job name in the CLI).
+        :param experiment_name: Experiment name to halt.
+        :type experiment_name: str
         """
-        name = experiment_name.strip()
-        if not name:
-            msg = "experiment_name must be non-empty."
-            raise ArenaValidationError(msg)
-
         return self._request(
             "POST",
             "/api/cli/v1/experiments/jobs/stop",
-            json={"experiment_name": name},
+            json={"experiment_name": experiment_name.strip()},
         )
 
     # -------------------------------------------------------------------------
@@ -716,13 +709,27 @@ class ArenaClient:
     # -------------------------------------------------------------------------
 
     def list_projects(self) -> list[dict[str, Any]]:
-        """List all projects in Arena."""
+        """List all projects in Arena for the authenticated user.
+
+        :returns: A list of projects.
+        :rtype: list[dict[str, Any]]
+        """
         return self._request("GET", "/api/cli/v1/projects")
 
     def create_project(
         self, name: str, description: str | None, llm_based: bool
     ) -> dict[str, Any]:
-        """Create a new project in Arena."""
+        """Create a new project in Arena.
+
+        :param name: The name of the project to create.
+        :type name: str
+        :param description: The description of the project to create.
+        :type description: str | None
+        :param llm_based: Whether the project is based on an LLM.
+        :type llm_based: bool
+        :returns: A dictionary containing the project creation result.
+        :rtype: dict[str, Any]
+        """
         return self._request(
             "POST",
             "/api/cli/v1/projects/create",
@@ -730,7 +737,11 @@ class ArenaClient:
         )
 
     def delete_project(self, name: str) -> None:
-        """Delete a project in Arena."""
+        """Delete a project in Arena.
+
+        :param name: The name of the project to delete.
+        :type name: str
+        """
         return self._request(
             "DELETE", "/api/cli/v1/projects/delete", json={"name": name}
         )

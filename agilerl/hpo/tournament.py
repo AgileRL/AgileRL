@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-from typing import TypeVar
-
 import numpy as np
 from accelerate.utils import broadcast_object_list
 
-from agilerl.algorithms.core.base import (
-    LLMAlgorithm,
-    MultiAgentRLAlgorithm,
-    RLAlgorithm,
-)
+from agilerl.algorithms.core.base import EvolvableAlgorithm, LLMAlgorithm
 
-AlgoT = TypeVar("AlgoT", bound=RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm)
+PopulationT = list[EvolvableAlgorithm]
 
 
 class TournamentSelection:
@@ -69,14 +63,14 @@ class TournamentSelection:
 
     def _elitism(
         self,
-        population: list[AlgoT],
-    ) -> tuple[AlgoT, np.ndarray, int]:
+        population: PopulationT,
+    ) -> tuple[EvolvableAlgorithm, np.ndarray, int]:
         """Perform elitism selection given a population of agents.
 
         :param population: Population of agents
-        :type population: list[AlgoT]
+        :type population: PopulationT
         :return: Elite member of population, rank array, and max id
-        :rtype: tuple[AlgoT, np.ndarray, int]
+        :rtype: tuple[EvolvableAlgorithm, np.ndarray, int]
         """
         last_fitness = [self._scalar_fitness(indi.fitness[-1]) for indi in population]
         rank = np.argsort(last_fitness).argsort()
@@ -87,17 +81,17 @@ class TournamentSelection:
 
     def select(
         self,
-        population: list[AlgoT],
-    ) -> tuple[AlgoT, list[AlgoT]]:
+        population: PopulationT,
+    ) -> tuple[EvolvableAlgorithm, PopulationT]:
         """Select the best agent and new population of agents following tournament selection.
 
         :param population: Population of agents
-        :type population: list[AlgoT]
+        :type population: PopulationT
         :return: Elite agent and new population
-        :rtype: tuple[AlgoT, list[AlgoT]]
+        :rtype: tuple[EvolvableAlgorithm, PopulationT]
         """
         if self.language_model is None:
-            self.language_model = population[0].algo == "GRPO"
+            self.language_model = isinstance(population[0], LLMAlgorithm)
 
         return (
             self._select_llm_agents(population)
@@ -107,16 +101,16 @@ class TournamentSelection:
 
     def _select_standard_agents(
         self,
-        population: list[AlgoT],
-    ) -> tuple[AlgoT, list[AlgoT]]:
+        population: PopulationT,
+    ) -> tuple[EvolvableAlgorithm, PopulationT]:
         """Return best agent and new population of agents following tournament selection. Used for
         a population of :class:`RLAlgorithm <agilerl.algorithms.core.RLAlgorithm>` or
         :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.MultiAgentRLAlgorithm>` agents.
 
         :param population: Population of agents
-        :type population: list[AlgoT]
+        :type population: PopulationT
         :return: Elite agent and new population
-        :rtype: tuple[AlgoT, list[AlgoT]]
+        :rtype: tuple[EvolvableAlgorithm, PopulationT]
         """
         elite, rank, max_id = self._elitism(population)
         new_population = []
@@ -137,15 +131,15 @@ class TournamentSelection:
 
     def _select_llm_agents(
         self,
-        population: list[AlgoT],
-    ) -> tuple[AlgoT, list[AlgoT]]:
+        population: PopulationT,
+    ) -> tuple[LLMAlgorithm, PopulationT]:
         """Return best agent and new population of agents following tournament selection. Used for
         a population of :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param population: Population of agents
-        :type population: list[AlgoT]
+        :type population: PopulationT
         :return: Elite agent and new population
-        :rtype: tuple[AlgoT, list[AlgoT]]
+        :rtype: tuple[LLMAlgorithm, PopulationT]
         """
         accelerator = population[0].accelerator
         new_population_idxs = []

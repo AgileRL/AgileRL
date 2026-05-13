@@ -9,7 +9,7 @@ from transformers import AutoTokenizer
 from agilerl.algorithms import GRPO
 from agilerl.training.train_llm import finetune_llm_reasoning
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.wrappers.llm_envs import ReasoningGym
+from agilerl.llm_envs import ReasoningGym
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"

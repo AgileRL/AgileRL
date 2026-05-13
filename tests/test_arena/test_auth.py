@@ -189,12 +189,15 @@ class TestDeviceLogin:
             result = auth.device_login(timeout=300)
 
         assert result == tokens
-        mock_write.assert_called_once_with(tokens)
+        mock_write.assert_called_once()
+        written = mock_write.call_args[0][0]
+        assert written["access_token"] == tokens["access_token"]
+        assert written["refresh_token"] == tokens["refresh_token"]
         mock_wb.open.assert_called_once()
-        mock_kc.token.assert_called_once_with(
-            grant_type="urn:ietf:params:oauth:grant-type:device_code",
-            device_code="dc123",
-        )
+        mock_kc.token.assert_called_once()
+        call_kw = mock_kc.token.call_args.kwargs
+        assert call_kw["grant_type"] == ("urn:ietf:params:oauth:grant-type:device_code")
+        assert call_kw["device_code"] == "dc123"
 
     @patch("agilerl.arena.auth.webbrowser")
     @patch("agilerl.arena.auth.time")

@@ -8,6 +8,8 @@ from torch import nn
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
+from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.core.optimizer_wrapper import init_llm_optimizer
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules import EvolvableModule, ModuleDict
 
@@ -1103,6 +1105,71 @@ class TestOptimizerWrapper:
 
         assert count == 3
 
+    def test_llm_param_groups_optimizer_wrapper(self):
+        """Single module with actor/critic param groups (LLM PPO style)."""
+
+        class _Net(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.actor_linear = nn.Linear(2, 1, bias=False)
+                self.critic_linear = nn.Linear(2, 1, bias=False)
+                self.v_head = nn.Module()
+                self.v_head.summary = nn.Linear(2, 1, bias=False)
+
+        net = _Net()
+        wrap = OptimizerWrapper(
+            torch.optim.Adam,
+            net,
+            lr=0.01,
+            lr_critic=0.02,
+            is_llm_optimizer=True,
+            network_names=["actor"],
+            lr_name=("lr_actor", "lr_critic"),
+            optimizer_kwargs={"eps": 1e-8},
+        )
+
+        assert wrap.is_llm_optimizer is True
+        assert wrap.lr_critic == 0.02
+        assert wrap.lr_name == ("lr_actor", "lr_critic")
+        assert len(wrap.optimizer.param_groups) == 2
+        assert wrap.optimizer.param_groups[0]["group"] == "actor"
+        assert wrap.optimizer.param_groups[0]["lr"] == 0.01
+        assert wrap.optimizer.param_groups[1]["group"] == "critic"
+        assert wrap.optimizer.param_groups[1]["lr"] == 0.02
+
+        ckpt = wrap.checkpoint_dict("optimizer")
+        assert ckpt["optimizer_is_llm_optimizer"] is True
+        assert ckpt["optimizer_lr"] == ("lr_actor", "lr_critic")
+
+        state = wrap.state_dict()
+        wrap2 = OptimizerWrapper(
+            torch.optim.Adam,
+            net,
+            lr=0.05,
+            lr_critic=0.06,
+            is_llm_optimizer=True,
+            network_names=["actor"],
+            lr_name=("lr_actor", "lr_critic"),
+            optimizer_kwargs={"eps": 1e-8},
+        )
+        wrap2.load_state_dict(state)
+        assert wrap2.optimizer.state_dict() == wrap.optimizer.state_dict()
+
+    def test_update_lr_respects_actor_critic_groups(self):
+        class _Net(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.actor_linear = nn.Linear(1, 1, bias=False)
+                self.critic_linear = nn.Linear(1, 1, bias=False)
+                self.v_head = nn.Module()
+                self.v_head.summary = nn.Linear(1, 1, bias=False)
+
+        net = _Net()
+        opt = init_llm_optimizer(net, torch.optim.Adam, 0.1, {}, lr_critic=0.2)
+        LLMAlgorithm.update_lr(opt, lr=(0.3, 0.4))
+        assert opt.param_groups[0]["lr"] == 0.3
+        assert opt.param_groups[1]["lr"] == 0.4
+
 
 def test_optimizer_wrapper_fallback_peft_type_when_no_llm_dependencies():
     """Test that optimizer_wrapper sets PeftModel to string when HAS_LLM_DEPENDENCIES is False."""
@@ -1332,3 +1399,145 @@ def test_optimizer_cls_names_single_vs_multiagent():
     assert isinstance(names, dict)
     assert set(names.keys()) == {"net_0", "net_1"}
     assert all(v == "Adam" for v in names.values())
+
+
+def test_llm_param_groups_rejects_moduledict_networks():
+    networks = ModuleDict(
+        {"agent_0": MockEvolvableNetwork(name="agent_0")},
+    )
+    with pytest.raises(
+        TypeError,
+        match="is_llm_optimizer=True does not support ModuleDict networks\\.",
+    ):
+        OptimizerWrapper(
+            torch.optim.Adam,
+            networks,
+            0.001,
+            is_llm_optimizer=True,
+            network_names=["networks"],
+            lr_name=("lr_actor", "lr_critic"),
+        )
+
+
+def test_llm_param_groups_requires_single_network():
+    net_a = MockEvolvableNetwork(name="a")
+    net_b = MockEvolvableNetwork(name="b")
+    with pytest.raises(
+        ValueError,
+        match="is_llm_optimizer=True expects exactly one network module\\.",
+    ):
+        OptimizerWrapper(
+            torch.optim.Adam,
+            [net_a, net_b],
+            0.001,
+            is_llm_optimizer=True,
+            network_names=["actor"],
+            lr_name=("lr_actor", "lr_critic"),
+        )
+
+
+def test_llm_param_groups_requires_network_names_and_lr_name():
+    class _Net(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.actor_linear = nn.Linear(2, 1, bias=False)
+            self.critic_linear = nn.Linear(2, 1, bias=False)
+            self.v_head = nn.Module()
+            self.v_head.summary = nn.Linear(2, 1, bias=False)
+
+    with pytest.raises(
+        ValueError,
+        match="is_llm_optimizer=True requires explicit network_names and lr_name=\\('lr_actor', 'lr_critic'\\)\\.",
+    ):
+        OptimizerWrapper(
+            torch.optim.Adam,
+            _Net(),
+            0.001,
+            is_llm_optimizer=True,
+        )
+
+
+def test_getattr_dunder_name_raises_attribute_error():
+    network = MockEvolvableNetwork()
+    wrapper = OptimizerWrapper(
+        torch.optim.Adam,
+        network,
+        0.001,
+        network_names=["network"],
+        lr_name="lr",
+    )
+    with pytest.raises(AttributeError, match="__deepcopy__"):
+        wrapper.__getattr__("__deepcopy__")
+
+
+def test_getattr_missing_optimizer_attribute_has_clean_error():
+    wrapper = object.__new__(OptimizerWrapper)
+    with pytest.raises(
+        AttributeError,
+        match="OptimizerWrapper' object has no attribute 'anything'",
+    ):
+        _ = wrapper.anything
+
+
+def test_repr_includes_llm_param_group_fields():
+    class _Net(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.actor_linear = nn.Linear(2, 1, bias=False)
+            self.critic_linear = nn.Linear(2, 1, bias=False)
+            self.v_head = nn.Module()
+            self.v_head.summary = nn.Linear(2, 1, bias=False)
+
+    wrap = OptimizerWrapper(
+        torch.optim.Adam,
+        _Net(),
+        lr=0.01,
+        lr_critic=0.02,
+        is_llm_optimizer=True,
+        network_names=["actor"],
+        lr_name=("lr_actor", "lr_critic"),
+    )
+    text = repr(wrap)
+    assert "is_llm_optimizer=True" in text
+    assert "lr_critic=0.02" in text
+
+
+def test_init_llm_optimizer_enables_lora_actor_and_critic_params():
+    class _Net(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.actor_lora_weight = nn.Parameter(
+                torch.ones(2, 2),
+                requires_grad=False,
+            )
+            self.critic_lora_weight = nn.Parameter(
+                torch.ones(2, 2),
+                requires_grad=False,
+            )
+            self.other_weight = nn.Parameter(torch.ones(2, 2), requires_grad=False)
+            self.v_head = nn.Module()
+            self.v_head.summary = nn.Linear(2, 1, bias=False)
+
+    net = _Net()
+    _ = init_llm_optimizer(net, torch.optim.Adam, 0.01, {}, lr_critic=0.02)
+
+    assert net.actor_lora_weight.requires_grad is True
+    assert net.critic_lora_weight.requires_grad is True
+    assert net.other_weight.requires_grad is False
+
+
+def test_optimizer_wrapper_infers_parent_container_from_constructor_stack():
+    class _Container:
+        def __init__(self) -> None:
+            self.lr = 0.001
+            self.network = MockEvolvableNetwork()
+            self.wrapper = OptimizerWrapper(
+                torch.optim.Adam,
+                self.network,
+                self.lr,
+            )
+
+    container = _Container()
+
+    assert container.wrapper.network_names == ["network"]
+    assert container.wrapper.lr_name == "lr"

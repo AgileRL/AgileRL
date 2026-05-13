@@ -1,14 +1,16 @@
 import warnings
-from typing import Any, Literal
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Literal
 
+import numpy as np
 from accelerate import Accelerator
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import DPO, GRPO
 from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.typing import PopulationType
 from agilerl.utils.llm_utils import safe_aggregate_metrics
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -18,8 +20,18 @@ from agilerl.utils.utils import (
 )
 from agilerl.wrappers.llm_envs import PreferenceGym, ReasoningGym, SFTGym
 
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from agilerl.algorithms import LLMPPO, LLMREINFORCE
+    from agilerl.llm_envs import SyncMultiTurnVecEnv
+    from agilerl.protocols import MultiTurnEnv
+    from agilerl.rollouts.on_policy import collect_rollouts_llm
+    from agilerl.utils.algo_utils import stack_and_pad_experiences
+
+if TYPE_CHECKING:
+    SupportedReasoning = GRPO | LLMPPO | LLMREINFORCE
+    SupportedMultiturn = LLMPPO | LLMREINFORCE | GRPO
+
 InitDictType = dict[str, Any] | None
-SupportedReasoning = GRPO
 
 
 def _validate_finetune_args(
@@ -28,12 +40,12 @@ def _validate_finetune_args(
     mutation: Mutations | None,
     num_epochs: int | None,
     max_steps: int | None,
-    pop: PopulationType,
-    expected_type: type,
+    pop: list[Any],
+    expected_type: type | tuple[type, ...],
     algorithm_type_error: str,
     *,
     checkpoint_steps: int | None = None,
-    algo: Literal["grpo", "dpo", "sft"],
+    algo: Literal["grpo", "dpo", "sft", "multiturn"],
 ) -> None:
     if evo_steps is not None and (tournament is None or mutation is None):
         warnings.warn(
@@ -98,9 +110,63 @@ def _compute_training_steps(
     return max_steps, training_steps
 
 
+def _resolve_training_envs(
+    pop: list[Any],
+    env: ReasoningGym | PreferenceGym | None,
+    env_fn: Callable[[], ReasoningGym | PreferenceGym] | None,
+) -> tuple[list[ReasoningGym | PreferenceGym], bool]:
+    """Resolve shared or per-agent training environments.
+
+    :param pop: Population of agents being trained.
+    :type pop: PopulationType
+    :param env: Shared environment instance.
+    :type env: ReasoningGym | PreferenceGym | None
+    :param env_fn: Factory that creates one environment per agent.
+    :type env_fn: Callable[[], ReasoningGym | PreferenceGym] | None
+    :return: Environment list (aligned with population) and whether env_fn mode is active.
+    :rtype: tuple[list, bool]
+    """
+    if env is not None and env_fn is not None:
+        msg = "Provide exactly one of 'env' or 'env_fn', not both."
+        raise ValueError(msg)
+    if env is None and env_fn is None:
+        msg = "Either 'env' or 'env_fn' must be provided."
+        raise ValueError(msg)
+
+    if env_fn is not None:
+        return [env_fn() for _ in pop], True
+
+    if len(pop) > 1:
+        warnings.warn(
+            "A shared 'env' is being used with multiple agents. This can introduce "
+            "fairness bias; prefer 'env_fn' for per-agent environments.",
+            stacklevel=2,
+        )
+    assert env is not None
+    return [env], False
+
+
+def _num_epochs_reached(
+    envs: list[ReasoningGym | PreferenceGym], num_epochs: int | None
+) -> bool:
+    """Check whether all active environments have reached the epoch budget."""
+    if num_epochs is None:
+        return False
+    epoch_counts = [getattr(e, "num_epochs", None) for e in envs]
+    if not all(isinstance(c, int) for c in epoch_counts):
+        return False
+    return all(c >= num_epochs for c in epoch_counts)
+
+
+# ---------------------------------------------------------------------------
+# Public training entry points
+# ---------------------------------------------------------------------------
+
+
 def finetune_llm_reasoning(
-    pop: list[SupportedReasoning],
-    env: ReasoningGym,
+    pop: "list[SupportedReasoning]",
+    env: ReasoningGym | None = None,
+    env_fn: Callable[[], ReasoningGym] | None = None,
     init_hp: dict[str, Any] | None = None,
     save_elite: bool | None = None,
     elite_path: str | None = None,
@@ -119,13 +185,16 @@ def finetune_llm_reasoning(
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-) -> PopulationType:
-    """Finetunes a population of GRPOs on a ReasoningGym environment.
+) -> "list[SupportedReasoning]":
+    """Finetunes a population of GRPO/LLMPPO/LLMREINFORCE agents on a ReasoningGym.
 
-    :param pop: Population of GRPOs to finetune
-    :type pop: list[GRPO]
-    :param env: ReasoningGym environment to finetune on
-    :type env: ReasoningGym
+    :param pop: Population of reasoning RL agents to finetune.
+    :type pop: list[GRPO | LLMPPO | LLMREINFORCE]
+    :param env: Shared ReasoningGym environment. Mutually exclusive with ``env_fn``.
+    :type env: ReasoningGym | None
+    :param env_fn: Factory that creates one ReasoningGym per agent. Mutually exclusive
+        with ``env``.
+    :type env_fn: Callable[[], ReasoningGym] | None
     :param init_hp: Initial hyperparameters for the population
     :type init_hp: dict, optional
     :param save_elite: Whether to save the elite model, defaults to None
@@ -160,11 +229,14 @@ def finetune_llm_reasoning(
     :type accelerator: Accelerator, optional
     :param max_steps: Maximum number of steps to run, defaults to None
     :type max_steps: int, optional
-    :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps, defaults to None
+    :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps,
+        defaults to None
     :type num_epochs: int, optional
     :return: The finetuned population.
     :rtype: PopulationType
     """
+    envs, uses_env_fn = _resolve_training_envs(pop=pop, env=env, env_fn=env_fn)
+
     _validate_finetune_args(
         evo_steps,
         tournament,
@@ -172,10 +244,10 @@ def finetune_llm_reasoning(
         num_epochs,
         max_steps,
         pop,
-        GRPO,
+        (GRPO, LLMPPO, LLMREINFORCE),
         (
-            "The algorithm must be GRPO for reasoning-based reinforcement learning. "
-            f"Got {type(pop[0])} instead."
+            "The algorithm must be GRPO, LLMPPO, or LLMREINFORCE for reasoning-based "
+            f"reinforcement learning. Got {type(pop[0])} instead."
         ),
         checkpoint_steps=checkpoint_steps,
         algo="grpo",
@@ -189,7 +261,7 @@ def finetune_llm_reasoning(
         else init_hp
     )
     data_increment = accelerator.num_processes if accelerator is not None else 1
-    effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
+    effective_data_batch_size = data_increment * envs[0].data_batch_size_per_gpu
 
     if wb:
         init_hp["effective_data_batch_size"] = effective_data_batch_size
@@ -198,14 +270,14 @@ def finetune_llm_reasoning(
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
 
     max_steps, training_steps = _compute_training_steps(
-        max_steps, num_epochs, len(env), effective_data_batch_size, len(pop)
+        max_steps, num_epochs, len(envs[0]), effective_data_batch_size, len(pop)
     )
 
     pbar = default_progress_bar(max_steps, accelerator)
 
     loggers = init_loggers(
         algo=init_hp.get("ALGO", "GRPO"),
-        env_name=env.name,
+        env_name=envs[0].name,
         pbar=pbar,
         verbose=verbose,
         wb=wb,
@@ -227,20 +299,27 @@ def finetune_llm_reasoning(
     next_checkpoint_step = checkpoint_steps
     max_steps_checkpoint_saved = False
 
-    prompts = env.reset(reset_dataloaders=True)
+    if uses_env_fn:
+        prompts_by_agent = [e.reset(reset_dataloaders=True) for e in envs]
+    else:
+        prompts = envs[0].reset(reset_dataloaders=True)
+
     for i in range(training_steps):
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
-        for agent in population.agents:
-            agent.set_reference_policy(env.num_epochs)
+        for agent_idx, agent in enumerate(population.agents):
+            training_env = envs[agent_idx] if uses_env_fn else envs[0]
+            current_prompts = prompts_by_agent[agent_idx] if uses_env_fn else prompts
+
+            agent.set_reference_policy(training_env.num_epochs)
             agent.init_evo_step()
 
-            completion_ids, action_masks = agent.get_action(prompts)
-            next_prompts, rewards = env.step(completion_ids)
+            completion_ids, action_masks = agent.get_action(current_prompts)
+            next_prompts_i, rewards = training_env.step(completion_ids)
 
             experiences = (completion_ids, action_masks, rewards)
-            _agg_loss, _agg_kl = agent.learn(experiences)
+            agent.learn(experiences)
 
             agg_rewards = safe_aggregate_metrics(accelerator, rewards)
 
@@ -250,24 +329,24 @@ def finetune_llm_reasoning(
                 agent.metrics.log("accuracy", agg_accuracy)
 
             agent.add_scores([float(agg_rewards)])
-            agent.finalize_evo_step(env.data_batch_size_per_gpu)
+            agent.finalize_evo_step(training_env.data_batch_size_per_gpu)
             total_steps += effective_data_batch_size
 
-        prompts = next_prompts
+            if uses_env_fn:
+                prompts_by_agent[agent_idx] = next_prompts_i
+            else:
+                prompts = next_prompts_i
+
         pbar.update(effective_data_batch_size)
         population.increment_evo_step()
 
-        # Evaluate periodically
         if (i + 1) % evaluation_interval == 0:
-            for agent in population.agents:
-                agent.test(env)
+            for idx, agent in enumerate(population.agents):
+                agent.test(envs[idx] if uses_env_fn else envs[0])
             if accelerator is not None:
                 accelerator.wait_for_everyone()
-
-            # Report metrics and clear accumulators -> clear metrics after reporting
             population.report_metrics(clear=True)
 
-        # Tournament selection and population mutation
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
@@ -277,7 +356,7 @@ def finetune_llm_reasoning(
                         population=population.agents,
                         tournament=tournament,
                         mutation=mutation,
-                        env_name=env.name,
+                        env_name=envs[0].name,
                         accelerator=accelerator,
                         language_model=True,
                         elite_path=elite_path,
@@ -301,7 +380,7 @@ def finetune_llm_reasoning(
             if checkpoint_due:
                 save_llm_checkpoint(agent, elite_path)
 
-        if env.num_epochs == num_epochs:
+        if _num_epochs_reached(envs, num_epochs):
             break
 
     if save_elite and elite_path is not None:
@@ -316,12 +395,10 @@ def finetune_llm_reasoning(
     return population.agents
 
 
-SupportedPreference = DPO
-
-
 def finetune_llm_preference(
-    pop: list[SupportedPreference],
-    env: PreferenceGym,
+    pop: list[DPO],
+    env: PreferenceGym | None = None,
+    env_fn: Callable[[], PreferenceGym] | None = None,
     init_hp: dict[str, Any] | None = None,
     save_elite: bool | None = None,
     elite_path: str | None = None,
@@ -339,13 +416,16 @@ def finetune_llm_preference(
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-) -> PopulationType:
+) -> list[DPO]:
     """Finetune a population of DPO agents on pairwise preference data.
 
     :param pop: Population of DPO agents to finetune.
     :type pop: list[DPO]
-    :param env: PreferenceGym environment wrapping the dataset.
-    :type env: PreferenceGym
+    :param env: Shared PreferenceGym environment. Mutually exclusive with ``env_fn``.
+    :type env: PreferenceGym | None
+    :param env_fn: Factory that creates one PreferenceGym per agent. Mutually exclusive
+        with ``env``.
+    :type env_fn: Callable[[], PreferenceGym] | None
     :param init_hp: Initial hyperparameters for the population, defaults to None
     :type init_hp: dict, optional
     :param save_elite: Whether to save the elite model, defaults to None
@@ -378,11 +458,14 @@ def finetune_llm_preference(
     :type accelerator: Accelerator, optional
     :param max_steps: Maximum number of steps to run, defaults to None
     :type max_steps: int, optional
-    :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps, defaults to None
+    :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps,
+        defaults to None
     :type num_epochs: int, optional
     :return: The finetuned population.
     :rtype: PopulationType
     """
+    envs, uses_env_fn = _resolve_training_envs(pop=pop, env=env, env_fn=env_fn)
+
     _validate_finetune_args(
         evo_steps,
         tournament,
@@ -408,7 +491,7 @@ def finetune_llm_preference(
     )
 
     data_increment = accelerator.num_processes if accelerator is not None else 1
-    effective_data_batch_size = data_increment * env.data_batch_size_per_gpu
+    effective_data_batch_size = data_increment * envs[0].data_batch_size_per_gpu
 
     if wb:
         init_hp["effective_data_batch_size"] = effective_data_batch_size
@@ -417,14 +500,14 @@ def finetune_llm_preference(
         init_hp["model_name"] = pop[0].pretrained_model_name_or_path
 
     max_steps, training_steps = _compute_training_steps(
-        max_steps, num_epochs, len(env), effective_data_batch_size, len(pop)
+        max_steps, num_epochs, len(envs[0]), effective_data_batch_size, len(pop)
     )
 
     pbar = default_progress_bar(max_steps, accelerator)
 
     loggers = init_loggers(
         algo=init_hp.get("ALGO", "DPO"),
-        env_name=env.name,
+        env_name=envs[0].name,
         pbar=pbar,
         verbose=verbose,
         wb=wb,
@@ -446,39 +529,46 @@ def finetune_llm_preference(
     next_checkpoint_step = checkpoint_steps
     max_steps_checkpoint_saved = False
 
-    prompts = env.reset(reset_dataloaders=True)
+    if uses_env_fn:
+        prompts_by_agent = [e.reset(reset_dataloaders=True) for e in envs]
+    else:
+        prompts = envs[0].reset(reset_dataloaders=True)
+
     for i in range(training_steps):
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
-        for agent in population.agents:
-            agent.set_reference_policy(env.num_epochs)
+        for agent_idx, agent in enumerate(population.agents):
+            training_env = envs[agent_idx] if uses_env_fn else envs[0]
+            current_prompts = prompts_by_agent[agent_idx] if uses_env_fn else prompts
+
+            agent.set_reference_policy(training_env.num_epochs)
             agent.init_evo_step()
 
-            # learn() aggregates and logs loss/chosen/rejected/margin to metrics
-            _, chosen_reward, rejected_reward = agent.learn(prompts)
-            next_prompts = env.step()
+            _, chosen_reward, rejected_reward = agent.learn(current_prompts)
+            next_prompts_i = training_env.step()
 
             agent.add_scores([float(chosen_reward - rejected_reward)])
-            agent.finalize_evo_step(env.data_batch_size_per_gpu)
+            agent.finalize_evo_step(training_env.data_batch_size_per_gpu)
             total_steps += effective_data_batch_size
 
-        prompts = next_prompts
+            if uses_env_fn:
+                prompts_by_agent[agent_idx] = next_prompts_i
+            else:
+                prompts = next_prompts_i
+
         pbar.update(effective_data_batch_size)
         population.increment_evo_step()
 
-        # Evaluate periodically
         if (i + 1) % evaluation_interval == 0:
-            for agent in population.agents:
-                agent.test(env)
+            for idx, agent in enumerate(population.agents):
+                agent.test(envs[idx] if uses_env_fn else envs[0])
 
             if accelerator is not None:
                 accelerator.wait_for_everyone()
 
-            # Report metrics and clear accumulators -> clear metrics after reporting
             population.report_metrics(clear=True)
 
-        # Tournament selection and population mutation
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
@@ -488,7 +578,7 @@ def finetune_llm_preference(
                         population=population.agents,
                         tournament=tournament,
                         mutation=mutation,
-                        env_name=env.name,
+                        env_name=envs[0].name,
                         accelerator=accelerator,
                         language_model=True,
                         elite_path=elite_path,
@@ -512,7 +602,7 @@ def finetune_llm_preference(
             if checkpoint_due:
                 save_llm_checkpoint(agent, elite_path)
 
-        if env.num_epochs == num_epochs:
+        if _num_epochs_reached(envs, num_epochs):
             break
 
     if save_elite and elite_path is not None:
@@ -547,7 +637,7 @@ def finetune_llm_sft(
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-) -> PopulationType:
+) -> list[SFT]:
     """Finetune a population of SFT agents on (prompt, response) pairs.
 
     Each training step draws a batch from ``env`` and minimises the cross-entropy
@@ -719,6 +809,286 @@ def finetune_llm_sft(
 
         if env.num_epochs == num_epochs:
             break
+
+    if save_elite and elite_path is not None:
+        elite = max(
+            population.agents,
+            key=lambda a: a.fitness[-1] if a.fitness else float("-inf"),
+        )
+        save_llm_checkpoint(elite, elite_path)
+
+    population.finish()
+    pbar.close()
+    return population.agents
+
+
+def finetune_llm_multiturn(
+    pop: "list[SupportedMultiturn]",
+    max_turns: int,
+    env_factory: "Callable[[], MultiTurnEnv]",
+    env_config: dict[str, Any] | None = None,
+    init_hp: dict[str, Any] | None = None,
+    max_steps: int = 32768,
+    save_elite: bool | None = None,
+    elite_path: str | None = None,
+    wb: bool = False,
+    tensorboard: bool = False,
+    tensorboard_log_dir: str | None = None,
+    evo_steps: int | None = None,
+    checkpoint_steps: int | None = None,
+    tournament: TournamentSelection | None = None,
+    mutation: Mutations | None = None,
+    wandb_api_key: str | None = None,
+    wandb_kwargs: dict[str, Any] | None = None,
+    eval_fn: "Callable[[LLMPPO | LLMREINFORCE | GRPO], float] | None" = None,
+    evaluation_interval: int = 50,
+    max_reward: float | None = None,
+    verbose: bool = True,
+    accelerator: Accelerator | None = None,
+) -> "list[SupportedMultiturn]":
+    """Finetune a population of agents on a multi-turn environment.
+
+    Collects token-level episodes via ``SyncMultiTurnVecEnv`` and
+    ``collect_rollouts_llm``, then runs turn-level updates (PPO/REINFORCE with
+    ``turn_ids``, or GRPO without).
+
+    :param pop: Population of LLMPPO, LLMREINFORCE, or GRPO agents.
+    :type pop: PopulationType
+    :param max_turns: Maximum interaction turns per episode.
+    :type max_turns: int
+    :param env_factory: Factory returning a fresh multi-turn env for each rollout.
+    :type env_factory: Callable[[], MultiTurnEnv]
+    :param env_config: Configuration for the environment factory.
+    :type env_config: dict[str, Any], optional
+    :param init_hp: Initial hyperparameters.
+    :type init_hp: dict, optional
+    :param max_steps: Progress-bar budget in sample steps, defaults to 32768.
+    :type max_steps: int
+    :param save_elite: Whether to save the elite checkpoint, defaults to None.
+    :type save_elite: bool, optional
+    :param elite_path: Directory for checkpoints, defaults to None.
+    :type elite_path: str, optional
+    :param wb: Whether to log to Weights and Biases, defaults to False.
+    :type wb: bool
+    :param tensorboard: TensorBoard tracking, defaults to False.
+    :type tensorboard: bool
+    :param tensorboard_log_dir: Directory for TensorBoard logs, defaults to None.
+    :type tensorboard_log_dir: str, optional
+    :param evo_steps: Steps between evolution (requires tournament and mutation).
+    :type evo_steps: int, optional
+    :param checkpoint_steps: Save checkpoint every N outer iterations when no evolution.
+    :type checkpoint_steps: int, optional
+    :param tournament: Tournament selection for evolution, defaults to None.
+    :type tournament: TournamentSelection, optional
+    :param mutation: Mutation operator for evolution, defaults to None.
+    :type mutation: Mutations, optional
+    :param wandb_api_key: W&B API key, defaults to None.
+    :type wandb_api_key: str, optional
+    :param wandb_kwargs: Additional kwargs to pass to wandb.init()
+    :type wandb_kwargs: dict, optional
+    :param eval_fn: Optional ``(agent) -> float`` evaluated on the main process.
+    :type eval_fn: Callable, optional
+    :param evaluation_interval: How often to run ``eval_fn``.
+    :type evaluation_interval: int
+    :param max_reward: If set, adds accuracy metric vs this threshold.
+    :type max_reward: float, optional
+    :param verbose: Progress bar and periodic train summaries, defaults to True.
+    :type verbose: bool
+    :param accelerator: Hugging Face Accelerate instance, defaults to None.
+    :type accelerator: Accelerator, optional
+    :return: The finetuned population.
+    :rtype: PopulationType
+    """
+    _validate_finetune_args(
+        evo_steps,
+        tournament,
+        mutation,
+        None,
+        max_steps,
+        pop,
+        (LLMPPO, LLMREINFORCE, GRPO),
+        (
+            "The algorithm must be LLMPPO, LLMREINFORCE, or GRPO for multi-turn "
+            f"finetuning. Got {type(pop[0])} instead."
+        ),
+        checkpoint_steps=checkpoint_steps,
+        algo="multiturn",
+    )
+
+    if init_hp is None:
+        init_hp = {
+            "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
+            "ALGO": pop[0].algo,
+        }
+
+    batch_size = init_hp.get("BATCH_SIZE", pop[0].batch_size)
+    for agent in pop:
+        if isinstance(agent, GRPO):
+            group_size = getattr(agent, "group_size", 1)
+            if batch_size > group_size and batch_size % group_size != 0:
+                msg = (
+                    f"Batch size ({batch_size}) must be divisible by "
+                    f"group_size ({group_size}) for GRPO."
+                )
+                raise ValueError(msg)
+            if batch_size < group_size and group_size % batch_size != 0:
+                msg = (
+                    f"Group size ({group_size}) must be divisible by "
+                    f"batch size ({batch_size}) for GRPO."
+                )
+                raise ValueError(msg)
+
+    data_increment = accelerator.num_processes if accelerator is not None else 1
+    effective_data_batch_size = data_increment * batch_size
+    env_name = init_hp.get("env_name", "multiturn")
+
+    if wb:
+        init_hp["effective_data_batch_size"] = effective_data_batch_size
+        init_hp["batch_size"] = batch_size
+        init_hp["distributed_training"] = accelerator is not None
+        init_hp["model_name"] = pop[0].pretrained_model_name_or_path
+        init_hp["max_turns"] = max_turns
+
+    pbar = default_progress_bar(max_steps, accelerator)
+
+    loggers = init_loggers(
+        algo=init_hp.get("ALGO", "LLMPPO"),
+        env_name=env_name,
+        pbar=pbar,
+        verbose=verbose,
+        wb=wb,
+        tensorboard=tensorboard,
+        tensorboard_log_dir=tensorboard_log_dir,
+        accelerator=accelerator,
+        wandb_api_key=wandb_api_key,
+        wandb_kwargs=wandb_kwargs,
+        init_hyperparams=init_hp,
+    )
+
+    population = Population(
+        agents=pop,
+        accelerator=accelerator,
+        loggers=loggers,
+    )
+
+    total_steps = 0
+    next_checkpoint_step = checkpoint_steps
+    max_steps_checkpoint_saved = False
+    group_size = getattr(pop[0], "group_size", 1)
+    rollout_env = SyncMultiTurnVecEnv(env_factory, batch_size, group_size, env_config)
+    group_seed = np.random.randint(0, 1_000_000)
+    i = 0
+
+    while total_steps < max_steps:
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+
+        for agent in population.agents:
+            agent.init_evo_step()
+
+            (
+                completion_ids_list,
+                action_masks_list,
+                all_turn_ids,
+                all_rewards,
+                batch_steps,
+                group_seed,
+            ) = collect_rollouts_llm(
+                agent=agent,
+                env=rollout_env,
+                n_steps=max_turns,
+                batch_size=batch_size,
+                group_size=group_size,
+                group_seed=group_seed,
+            )
+
+            normalized_rewards = [
+                reward.unsqueeze(0) if reward.dim() == 1 else reward
+                for reward in all_rewards
+            ]
+            (turn_ids_padded,) = stack_and_pad_experiences(
+                all_turn_ids, padding_values=[-1]
+            )
+            (rewards_2d,) = stack_and_pad_experiences(
+                normalized_rewards, padding_values=[0.0]
+            )
+            rewards_2d = rewards_2d.float()
+
+            episode_scores = (
+                rewards_2d.sum(dim=1) if rewards_2d.dim() > 1 else rewards_2d
+            )
+            mean_score = episode_scores.mean().to(agent.device)
+
+            experiences = (completion_ids_list, action_masks_list, rewards_2d)
+            learn_kwargs = (
+                {"turn_ids": turn_ids_padded}
+                if isinstance(agent, (LLMREINFORCE, LLMPPO))
+                else {}
+            )
+            agent.learn(experiences, **learn_kwargs)
+
+            agg_score = safe_aggregate_metrics(accelerator, mean_score)
+
+            if max_reward is not None:
+                accuracy = (
+                    (episode_scores >= max_reward).float().mean().to(agent.device)
+                )
+                agg_accuracy = safe_aggregate_metrics(accelerator, accuracy)
+                agent.metrics.log("accuracy", agg_accuracy)
+
+            effective_batch_steps = batch_steps * data_increment
+            agent.add_scores([float(agg_score)])
+            agent.finalize_evo_step(batch_size)
+            total_steps += effective_batch_steps
+
+        pbar.update(effective_batch_steps // len(population.agents))
+        population.increment_evo_step()
+
+        if (i + 1) % evaluation_interval == 0:
+            if eval_fn is not None:
+                for agent in population.agents:
+                    eval_score = eval_fn(agent)
+                    agent.metrics.log("eval_score", float(eval_score))
+
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+
+            population.report_metrics(clear=True)
+
+        if tournament and mutation is not None:
+            if (i + 1) % evo_steps == 0:
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+                population.update(
+                    tournament_selection_and_mutation(
+                        population=population.agents,
+                        tournament=tournament,
+                        mutation=mutation,
+                        env_name=env_name,
+                        accelerator=accelerator,
+                        language_model=True,
+                        elite_path=elite_path,
+                        save_elite=save_elite,
+                    ),
+                )
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+        else:
+            checkpoint_due = False
+            if checkpoint_steps is not None:
+                while (
+                    next_checkpoint_step is not None
+                    and total_steps >= next_checkpoint_step
+                ):
+                    checkpoint_due = True
+                    next_checkpoint_step += checkpoint_steps
+            if total_steps >= max_steps and not max_steps_checkpoint_saved:
+                checkpoint_due = True
+                max_steps_checkpoint_saved = True
+            if checkpoint_due:
+                save_llm_checkpoint(agent, elite_path)
+
+        i += 1
 
     if save_elite and elite_path is not None:
         elite = max(

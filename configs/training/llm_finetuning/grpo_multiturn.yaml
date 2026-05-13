@@ -1,0 +1,30 @@
+---
+MUTATION_PARAMS:
+    NO_MUT: 0.1
+    RL_HP_MUT: 0.6
+    MUT_SD: 0.1
+    RAND_SEED: 42
+    MIN_LR: 0.0000001
+    MAX_LR: 0.00001
+    MIN_BETA: 0.0001
+    MAX_BETA: 0.01
+    MIN_GROUP_SIZE: 1
+    MAX_GROUP_SIZE: 1
+
+
+INIT_HP:
+    ALGO: GRPO
+    # Larger batch ⇒ more spread in episode returns under sampling (GRPO batch-relative adv).
+    BATCH_SIZE: 16
+    BETA: 0.0005
+    LR: 0.0003
+    CLIP_COEF: 0.2
+    MAX_GRAD_NORM: 0.2
+    UPDATE_EPOCHS: 2
+    GROUP_SIZE: 1
+    TEMPERATURE: 0.85
+    MAX_MODEL_LEN: 2048
+    TOURN_SIZE: 2
+    ELITISM: true
+    POP_SIZE: 4
+    EVAL_LOOP: 1

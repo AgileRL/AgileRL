@@ -32,35 +32,35 @@ First, we look at SFT, then DPO, then combine them in a pipeline SFT->DPO+NLL an
 Getting Started
 ---------------
 
-The unified demo script ``demos/demo_llm_finetuning.py`` supports both SFT and DPO
+The unified demo script ``demos/llm/demo_llm_finetuning.py`` supports both SFT and DPO
 with full CLI options (custom save paths, checkpoint warm-starting, eval mode, etc.).
-Run ``python demos/demo_llm_finetuning.py --help`` to see all available flags.
+Run ``python demos/llm/demo_llm_finetuning.py --help`` to see all available flags.
 Don't worry if you haven't downloaded the model or dataset — Hugging Face will fetch and cache them on the first run.
 
 Train SFT and save the LoRA adapter:
 
 .. code-block:: bash
 
-    python demos/demo_llm_finetuning.py sft --save-path outputs/sft --no-timestamp
+    python demos/llm/demo_llm_finetuning.py sft --save-path outputs/sft --no-timestamp
 
 Train DPO from the base model:
 
 .. code-block:: bash
 
-    python demos/demo_llm_finetuning.py dpo --save-path outputs/dpo --no-timestamp
+    python demos/llm/demo_llm_finetuning.py dpo --save-path outputs/dpo --no-timestamp
 
 Warm-start DPO from a prior SFT checkpoint:
 
 .. code-block:: bash
 
-    python demos/demo_llm_finetuning.py dpo --load-path outputs/sft/actor --save-path outputs/sft_dpo --no-timestamp
+    python demos/llm/demo_llm_finetuning.py dpo --load-path outputs/sft/actor --save-path outputs/sft_dpo --no-timestamp
 
 Evaluate a saved checkpoint interactively:
 
 .. code-block:: bash
 
-    python demos/demo_llm_finetuning.py sft --eval --load-path outputs/sft/actor
-    python demos/demo_llm_finetuning.py dpo --eval --load-path outputs/dpo/actor
+    python demos/llm/demo_llm_finetuning.py sft --eval --load-path outputs/sft/actor
+    python demos/llm/demo_llm_finetuning.py dpo --eval --load-path outputs/dpo/actor
 
 Minimal benchmarking scripts (no CLI args, default configs) are also available at
 ``benchmarking/benchmarking_sft.py`` and ``benchmarking/benchmarking_dpo.py``.

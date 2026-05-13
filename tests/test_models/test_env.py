@@ -12,6 +12,7 @@ from agilerl.models.env import (
     GymEnvSpec,
     LLMEnvSpec,
     LLMEnvType,
+    OfflineEnvSpec,
     PzEnvSpec,
 )
 
@@ -533,3 +534,462 @@ class FakeBandit:
         assert restored.entrypoint == "my_module:MyBandit"
         assert restored.config == {"n_arms": 5}
         assert restored.features is None
+
+
+# ---------------------------------------------------------------------------
+# LLM SFT
+# ---------------------------------------------------------------------------
+class TestLLMEnvSpecSFT:
+    def test_sft_spec_valid_construction(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.SFT,
+            dataset="my_dataset.parquet",
+            response_column="answer",
+        )
+        assert spec.env_type == LLMEnvType.SFT
+        assert spec.dataset == "my_dataset.parquet"
+        assert spec.response_column == "answer"
+        assert spec.reward_file_path is None
+
+    def test_sft_default_response_column(self):
+        spec = LLMEnvSpec(env_type=LLMEnvType.SFT, dataset="ds")
+        assert spec.response_column == "response"
+
+    @patch.object(LLMEnvSpec, "_load_dataset")
+    def test_sft_make_env_creates_sft_gym(self, mock_load):
+        mock_train_ds = MagicMock()
+        mock_test_ds = MagicMock()
+        mock_load.return_value = (mock_train_ds, mock_test_ds)
+        mock_tokenizer = MagicMock()
+
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.SFT,
+            dataset="sft_data.parquet",
+            response_column="completion",
+        )
+
+        with patch("agilerl.wrappers.llm_envs.SFTGym") as MockGym:
+            MockGym.return_value = "sft_gym"
+            result = spec.make_env(tokenizer=mock_tokenizer)
+
+        assert result == "sft_gym"
+        MockGym.assert_called_once()
+        call_kwargs = MockGym.call_args.kwargs
+        assert call_kwargs["train_dataset"] is mock_train_ds
+        assert call_kwargs["test_dataset"] is mock_test_ds
+        assert call_kwargs["response_column"] == "completion"
+
+    def test_sft_rejects_reward_file_path(self):
+        with pytest.raises(ValueError, match="not supported for SFT"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.SFT,
+                dataset="ds",
+                reward_file_path="reward.py",
+            )
+
+    def test_preference_rejects_reward_file_path(self):
+        with pytest.raises(ValueError, match="not supported for preference"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.PREFERENCE,
+                dataset="ds",
+                reward_file_path="reward.py",
+            )
+
+    def test_dataset_alias_name(self):
+        spec = LLMEnvSpec.model_validate(
+            {
+                "name": "my_dataset",
+                "env_type": "reasoning",
+                "reward_file_path": "r.py",
+                "reward_fn_name": "fn",
+                "prompt_template": {"role": "user", "content": "{q}"},
+            }
+        )
+        assert spec.dataset == "my_dataset"
+
+
+# ---------------------------------------------------------------------------
+# GymEnvSpec – make_single_env + extra_wrappers
+# ---------------------------------------------------------------------------
+class TestGymEnvSpecSingleEnv:
+    def test_make_single_env_registered(self):
+        spec = GymEnvSpec(name="CartPole-v1")
+        env = spec.make_single_env()
+        try:
+            assert hasattr(env, "reset")
+            assert hasattr(env, "step")
+        finally:
+            env.close()
+
+    def test_make_single_env_custom(self, tmp_path):
+        _write_module(
+            tmp_path,
+            "single_env_mod",
+            """\
+class SingleEnv:
+    def __init__(self, val=0):
+        self.val = val
+""",
+        )
+        spec = GymEnvSpec(
+            name="unused",
+            entrypoint="single_env_mod:SingleEnv",
+            path=str(tmp_path),
+            config={"val": 42},
+        )
+        env = spec.make_single_env()
+        assert env.val == 42
+
+    def test_make_env_extra_wrappers(self):
+        spec = GymEnvSpec(name="CartPole-v1", num_envs=2)
+
+        with patch("agilerl.utils.utils.make_vect_envs") as mock_make:
+            mock_make.return_value = "vec_env"
+            spec.make_env(extra_wrappers=["SomeWrapper"])
+
+        assert mock_make.call_args.kwargs["extra_wrappers"] == ["SomeWrapper"]
+
+
+# ---------------------------------------------------------------------------
+# PzEnvSpec – make_single_env + error paths + extra_wrappers
+# ---------------------------------------------------------------------------
+class TestPzEnvSpecSingleEnv:
+    def test_make_single_env_custom(self, tmp_path):
+        _write_module(
+            tmp_path,
+            "pz_single_mod",
+            """\
+class PzSingleEnv:
+    def __init__(self, size=0):
+        self.size = size
+""",
+        )
+        spec = PzEnvSpec(
+            name="unused",
+            entrypoint="pz_single_mod:PzSingleEnv",
+            path=str(tmp_path),
+            config={"size": 7},
+        )
+        env = spec.make_single_env()
+        assert env.size == 7
+
+    def test_make_single_env_module_missing_parallel_env(self, tmp_path, monkeypatch):
+        _write_module(
+            tmp_path,
+            "pz_no_parallel",
+            """\
+class SomeEnv:
+    pass
+""",
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        spec = PzEnvSpec(name="pz_no_parallel", num_envs=1)
+        with pytest.raises(AttributeError, match="no 'parallel_env'"):
+            spec.make_single_env()
+
+    def test_make_env_extra_wrappers(self, tmp_path):
+        _write_module(
+            tmp_path,
+            "pz_ew",
+            """\
+class PzEw:
+    pass
+""",
+        )
+        spec = PzEnvSpec(
+            name="unused",
+            num_envs=1,
+            entrypoint="pz_ew:PzEw",
+            path=str(tmp_path),
+        )
+
+        with patch("agilerl.utils.utils.make_multi_agent_vect_envs") as mock_make:
+            mock_make.return_value = "pz_vec"
+            spec.make_env(extra_wrappers=["Wrapper"])
+
+        assert mock_make.call_args.kwargs["extra_wrappers"] == ["Wrapper"]
+
+
+# ---------------------------------------------------------------------------
+# OfflineEnvSpec
+# ---------------------------------------------------------------------------
+class TestOfflineEnvSpec:
+    def test_requires_dataset_source(self):
+        with pytest.raises(ValueError, match="requires either"):
+            OfflineEnvSpec(name="CartPole-v1")
+
+    def test_valid_with_dataset_path(self):
+        spec = OfflineEnvSpec(name="CartPole-v1", dataset_path="/tmp/data.h5")
+        assert spec.dataset_path == "/tmp/data.h5"
+        assert spec.minari_dataset_id is None
+
+    def test_valid_with_minari_id(self):
+        spec = OfflineEnvSpec(name="CartPole-v1", minari_dataset_id="cartpole-v0")
+        assert spec.minari_dataset_id == "cartpole-v0"
+        assert spec.dataset_path is None
+
+    def test_valid_with_remote(self):
+        spec = OfflineEnvSpec(
+            name="CartPole-v1",
+            minari_dataset_id="cartpole-v0",
+            remote=True,
+        )
+        assert spec.remote is True
+
+    def test_inherits_gym_fields(self):
+        spec = OfflineEnvSpec(
+            name="CartPole-v1",
+            dataset_path="/tmp/data.h5",
+            num_envs=4,
+            sync=True,
+        )
+        assert spec.num_envs == 4
+        assert spec.sync is True
+
+
+# ---------------------------------------------------------------------------
+# BanditEnvSpec – parquet loading + serializer
+# ---------------------------------------------------------------------------
+class TestBanditEnvSpecExtended:
+    def test_parquet_loading(self, tmp_path):
+        import pandas as pd
+
+        features = pd.DataFrame(np.random.randn(10, 3).astype(np.float32))
+        targets = pd.DataFrame(np.random.randint(0, 2, size=(10, 1)))
+        feat_path = tmp_path / "features.parquet"
+        tgt_path = tmp_path / "targets.parquet"
+        features.to_parquet(feat_path)
+        targets.to_parquet(tgt_path)
+
+        spec = BanditEnvSpec(
+            features=str(feat_path),
+            targets=str(tgt_path),
+        )
+        env = spec.make_env()
+        assert hasattr(env, "arms")
+        state = env.reset()
+        assert state is not None
+
+    def test_serializer_with_dataframe(self):
+        import pandas as pd
+
+        features = pd.DataFrame(np.random.randn(5, 2))
+        targets = pd.DataFrame(np.random.randint(0, 2, size=(5, 1)))
+        spec = BanditEnvSpec(features=features, targets=targets)
+        data = spec.model_dump(mode="json")
+        assert data["features"] is None
+        assert data["targets"] is None
+
+
+# ---------------------------------------------------------------------------
+# LLM Multiturn
+# ---------------------------------------------------------------------------
+class TestLLMEnvSpecMultiturn:
+    """Verify LLMEnvSpec validation and factory creation for multiturn."""
+
+    def test_multiturn_requires_env_name_or_entrypoint(self):
+        with pytest.raises(ValueError, match="Exactly one of env_name or entrypoint"):
+            LLMEnvSpec(env_type=LLMEnvType.MULTITURN, max_turns=5)
+
+    def test_multiturn_rejects_both_env_name_and_entrypoint(self):
+        with pytest.raises(ValueError, match="Exactly one of env_name or entrypoint"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.MULTITURN,
+                env_name="game:Test-v0",
+                entrypoint="my_mod:make",
+                max_turns=5,
+            )
+
+    def test_env_config_rejected_with_env_name(self):
+        with pytest.raises(ValueError, match="env_config is only used with entrypoint"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.MULTITURN,
+                env_name="game:Test-v0",
+                env_config={"difficulty": "easy"},
+                max_turns=5,
+            )
+
+    def test_multiturn_valid_spec_gem(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            env_name="game:GuessTheNumber-v0-easy",
+            max_turns=10,
+        )
+        assert spec.env_type == LLMEnvType.MULTITURN
+        assert spec.max_turns == 10
+        assert spec.env_name == "game:GuessTheNumber-v0-easy"
+        assert spec.name == "game:GuessTheNumber-v0-easy"
+
+    def test_multiturn_valid_spec_entrypoint(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            entrypoint="my_mod:MyEnv",
+            env_config={"difficulty": "easy"},
+            max_turns=10,
+        )
+        assert spec.env_type == LLMEnvType.MULTITURN
+        assert spec.entrypoint == "my_mod:MyEnv"
+        assert spec.env_config == {"difficulty": "easy"}
+        assert spec.name == "my_mod:MyEnv"
+
+    def test_multiturn_max_turns_optional(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            env_name="game:GuessTheNumber-v0-easy",
+        )
+        assert spec.max_turns is None
+
+    def test_multiturn_make_env_raises(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            env_name="game:GuessTheNumber-v0-easy",
+            max_turns=5,
+        )
+        with pytest.raises(TypeError, match="make_multiturn_env_factory"):
+            spec.make_env(tokenizer=MagicMock())
+
+    def test_gem_missing_gives_helpful_error(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            env_name="game:Test-v0",
+            max_turns=5,
+        )
+        with (
+            patch.dict("sys.modules", {"gem": None}),
+            pytest.raises(ImportError, match="pip install gem-llm"),
+        ):
+            spec.make_multiturn_env_factory(MagicMock())
+
+    def test_gem_factory_creates_wrapper(self):
+        mock_env = MagicMock()
+        mock_gem = MagicMock()
+        mock_gem.make = MagicMock(return_value=mock_env)
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            env_name="game:Test-v0",
+            max_turns=5,
+        )
+
+        mock_wrapper_cls = MagicMock()
+        mock_wrapper_cls.return_value = MagicMock()
+
+        with (
+            patch.dict("sys.modules", {"gem": mock_gem}),
+            patch("agilerl.llm_envs.TokenObservationWrapper", mock_wrapper_cls),
+        ):
+            factory = spec.make_multiturn_env_factory(
+                mock_tokenizer, max_model_len=512, max_output_tokens=128
+            )
+            assert callable(factory)
+            factory()
+
+        mock_gem.make.assert_called_with("game:Test-v0")
+        mock_wrapper_cls.assert_called_once_with(
+            env=mock_env,
+            tokenizer=mock_tokenizer,
+            max_turns=5,
+            pad_id=0,
+            apply_chat_template=True,
+            max_model_len=512,
+            max_output_tokens=128,
+        )
+
+    def test_entrypoint_factory_creates_wrapper(self):
+        mock_env = MagicMock()
+        mock_constructor = MagicMock(return_value=mock_env)
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            entrypoint="my_mod:MyEnv",
+            env_config={"difficulty": "easy"},
+            max_turns=5,
+        )
+
+        mock_wrapper_cls = MagicMock()
+        mock_wrapper_cls.return_value = MagicMock()
+
+        with (
+            patch(
+                "agilerl.models.env.resolve_entrypoint_target",
+                return_value=mock_constructor,
+            ),
+            patch("agilerl.llm_envs.TokenObservationWrapper", mock_wrapper_cls),
+        ):
+            factory = spec.make_multiturn_env_factory(
+                mock_tokenizer, max_model_len=512, max_output_tokens=128
+            )
+            assert callable(factory)
+            factory()
+
+        mock_constructor.assert_called_with(difficulty="easy")
+        mock_wrapper_cls.assert_called_once_with(
+            env=mock_env,
+            tokenizer=mock_tokenizer,
+            max_turns=5,
+            pad_id=0,
+            apply_chat_template=True,
+            max_model_len=512,
+            max_output_tokens=128,
+        )
+
+    def test_gem_factory_probes_max_turns(self):
+        mock_env = MagicMock()
+        mock_env.max_turns = 7
+        mock_gem = MagicMock()
+        mock_gem.make = MagicMock(return_value=mock_env)
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            env_name="game:Test-v0",
+        )
+        assert spec.max_turns is None
+
+        with patch.dict("sys.modules", {"gem": mock_gem}):
+            spec.make_multiturn_env_factory(mock_tokenizer)
+
+        assert spec.max_turns == 7
+
+    def test_entrypoint_factory_probes_max_turns(self):
+        mock_env = MagicMock()
+        mock_env.max_turns = 12
+        mock_constructor = MagicMock(return_value=mock_env)
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.pad_token_id = 0
+
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            entrypoint="my_mod:MyEnv",
+        )
+        assert spec.max_turns is None
+
+        with patch(
+            "agilerl.models.env.resolve_entrypoint_target",
+            return_value=mock_constructor,
+        ):
+            spec.make_multiturn_env_factory(mock_tokenizer)
+
+        assert spec.max_turns == 12
+
+    def test_dataset_still_required_for_reasoning(self):
+        with pytest.raises(ValueError, match="dataset is required"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.REASONING,
+                reward_file_path="r.py",
+                reward_fn_name="fn",
+                prompt_template={"user_0": "Q: {question}"},
+            )
+
+    def test_dataset_not_required_for_multiturn(self):
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            env_name="game:Test-v0",
+        )
+        assert spec.dataset is None

@@ -196,119 +196,236 @@ def test_specifiedtokenreward_base_class():
     assert reward == [12.0, 2.0, 2.0]
 
 
-def test_list_rl_dataset_base_class():
-    List_RL_Dataset.__abstractmethods__ = set()
-    GeneralDataset.__abstractmethods__ = set()
+class TestListRLDataset:
+    def test_list_rl_dataset_base_class(self):
+        List_RL_Dataset.__abstractmethods__ = set()
+        GeneralDataset.__abstractmethods__ = set()
 
-    class LangObs(Language_Observation):
-        def to_sequence(self, **kwargs):
-            return [("test", 1), ("test", None)], True
+        class LangObs(Language_Observation):
+            def to_sequence(self, **kwargs):
+                return [("test", 1), ("test", None)], True
 
-        def __str__(self):
-            return "LangObs"
+            def __str__(self):
+                return "LangObs"
 
-    lang_obs = LangObs()
-    tokenizer = WordleTokenizer()
-    token_reward = ConstantTokenReward(1)
-    meta = None
+        lang_obs = LangObs()
+        tokenizer = WordleTokenizer()
+        token_reward = ConstantTokenReward(1)
+        meta = None
 
-    rl_ds = List_RL_Dataset(tokenizer, token_reward, 10)
-    rl_ds.get_item(0)
-    rl_ds.size()
+        rl_ds = List_RL_Dataset(tokenizer, token_reward, 10)
+        rl_ds.get_item(0)
+        rl_ds.size()
 
-    dp = DataPoint.from_obs(lang_obs, tokenizer, token_reward, meta)
-    _ = DataPoint.from_obs(lang_obs, tokenizer, token_reward, 1)
+        dp = DataPoint.from_obs(lang_obs, tokenizer, token_reward, meta)
+        _ = DataPoint.from_obs(lang_obs, tokenizer, token_reward, 1)
 
-    reward = dp.get_token_reward(lang_obs, tokenizer, token_reward)
+        reward = dp.get_token_reward(lang_obs, tokenizer, token_reward)
 
-    ds = GeneralDataset(rl_ds, None)
-    len_ds = ds.__len__()
-    item_ds = ds.__getitem__(0)
-    collate_ds = ds.collate([dp])
-    collate_simple_ds = ds.collate_simple(None)
+        ds = GeneralDataset(rl_ds, None)
+        len_ds = ds.__len__()
+        item_ds = ds.__getitem__(0)
+        collate_ds = ds.collate([dp])
+        collate_simple_ds = ds.collate_simple(None)
 
-    assert isinstance(reward, list)
-    assert len_ds is None
-    assert item_ds is None
-    assert isinstance(collate_ds, dict)
-    assert collate_simple_ds is None
+        assert isinstance(reward, list)
+        assert len_ds is None
+        assert item_ds is None
+        assert isinstance(collate_ds, dict)
+        assert collate_simple_ds is None
+
+    def test_list_rl_dataset_iter(self):
+        class DummyListDataset(List_RL_Dataset):
+            def __init__(self):
+                super().__init__(
+                    WordleTokenizer(), ConstantTokenReward(0), max_len=None
+                )
+                self.items = [
+                    DataPoint(
+                        raw_str="a",
+                        tokens=[1],
+                        state_idxs=[0],
+                        action_idxs=[],
+                        rewards=[],
+                        terminals=[1],
+                        utterance_state_idxs=[0],
+                        utterance_action_idxs=[],
+                        utterance_rewards=[],
+                        utterance_terminals=[1],
+                    ),
+                    DataPoint(
+                        raw_str="b",
+                        tokens=[2],
+                        state_idxs=[0],
+                        action_idxs=[],
+                        rewards=[],
+                        terminals=[0],
+                        utterance_state_idxs=[0],
+                        utterance_action_idxs=[],
+                        utterance_rewards=[],
+                        utterance_terminals=[0],
+                    ),
+                ]
+
+            def get_item(self, idx):
+                return self.items[idx]
+
+            def size(self):
+                return len(self.items)
+
+        dataset = DummyListDataset()
+        out = list(dataset)
+
+        assert len(out) == 2
+        assert out[0].raw_str == "a"
+        assert out[1].raw_str == "b"
 
 
-def test_dp_from_obs():
-    class LangObs(Language_Observation):
-        def to_sequence(self, **kwargs):
-            return [("test", None)], True
+class TestDataPointFromObs:
+    def test_dp_from_obs(self):
+        class LangObs(Language_Observation):
+            def to_sequence(self, **kwargs):
+                return [("test", None)], True
 
-        def __str__(self):
-            return "LangObs"
+            def __str__(self):
+                return "LangObs"
 
-        def metadata(self):
-            return {"test": 1}
+            def metadata(self):
+                return {"test": 1}
 
-    lang_obs = LangObs()
-    tokenizer = WordleTokenizer()
-    token_reward = ConstantTokenReward(1)
-    meta = {"test": 1}
+        lang_obs = LangObs()
+        tokenizer = WordleTokenizer()
+        token_reward = ConstantTokenReward(1)
+        meta = {"test": 1}
 
-    dp = DataPoint.from_obs(lang_obs, tokenizer, token_reward, meta)
+        dp = DataPoint.from_obs(lang_obs, tokenizer, token_reward, meta)
 
-    assert isinstance(dp, DataPoint)
+        assert isinstance(dp, DataPoint)
 
-    class LangObs(Language_Observation):
-        def to_sequence(self, **kwargs):
-            return [("test", None)], True
+        class LangObs(Language_Observation):
+            def to_sequence(self, **kwargs):
+                return [("test", None)], True
 
-        def __str__(self):
-            return "LangObs"
+            def __str__(self):
+                return "LangObs"
 
-        def metadata(self):
-            return {"test": 1}
+            def metadata(self):
+                return {"test": 1}
 
-    lang_obs = LangObs()
-    tokenizer = WordleTokenizer()
-    token_reward = ConstantTokenReward(1)
-    meta = None
+        lang_obs = LangObs()
+        tokenizer = WordleTokenizer()
+        token_reward = ConstantTokenReward(1)
+        meta = None
 
-    dp = DataPoint.from_obs(lang_obs, tokenizer, token_reward, meta)
+        dp = DataPoint.from_obs(lang_obs, tokenizer, token_reward, meta)
 
-    assert isinstance(dp, DataPoint)
+        assert isinstance(dp, DataPoint)
+
+    def test_dp_from_obs_empty_sequence_non_terminal(self):
+        class EmptyLangObs(Language_Observation):
+            def to_sequence(self, **kwargs):
+                return [], False
+
+            def __str__(self):
+                return "EmptyLangObs"
+
+        lang_obs = EmptyLangObs()
+        tokenizer = WordleTokenizer()
+        token_reward = ConstantTokenReward(1)
+
+        dp = DataPoint.from_obs(lang_obs, tokenizer, token_reward, meta=None)
+
+        assert isinstance(dp, DataPoint)
+        assert dp.raw_str == tokenizer.id_to_token(tokenizer.boa_token_id)
+        assert dp.action_idxs == []
+        assert dp.rewards == []
+        assert dp.terminals == [0]
 
 
-def test_iterable_rl_dataset_base_class():
-    Iterable_RL_Dataset.__abstractmethods__ = set()
-    GeneralIterDataset.__abstractmethods__ = set()
+class TestIterableRLDataset:
+    def test_iterable_rl_dataset_base_class(self):
+        Iterable_RL_Dataset.__abstractmethods__ = set()
+        GeneralIterDataset.__abstractmethods__ = set()
 
-    class LangObs(Language_Observation):
-        def to_sequence(self, **kwargs):
-            return [("test", 1), ("test", 2), ("test", None)], True
+        class LangObs(Language_Observation):
+            def to_sequence(self, **kwargs):
+                return [("test", 1), ("test", 2), ("test", None)], True
 
-        def __str__(self):
-            return "LangObs"
+            def __str__(self):
+                return "LangObs"
 
-    lang_obs = LangObs()
-    tokenizer = WordleTokenizer()
-    token_reward = ConstantTokenReward(1)
-    meta = None
+        lang_obs = LangObs()
+        tokenizer = WordleTokenizer()
+        token_reward = ConstantTokenReward(1)
+        meta = None
 
-    iter_rl_ds = Iterable_RL_Dataset(tokenizer, token_reward, 10)
-    iter_rl_ds.sample_item()
+        iter_rl_ds = Iterable_RL_Dataset(tokenizer, token_reward, 10)
+        iter_rl_ds.sample_item()
 
-    dp = DataPoint.from_obs(lang_obs, tokenizer, token_reward, meta)
-    _ = DataPoint.from_obs(lang_obs, tokenizer, token_reward, 1)
+        dp = DataPoint.from_obs(lang_obs, tokenizer, token_reward, meta)
+        _ = DataPoint.from_obs(lang_obs, tokenizer, token_reward, 1)
 
-    reward = dp.get_token_reward(lang_obs, tokenizer, token_reward)
+        reward = dp.get_token_reward(lang_obs, tokenizer, token_reward)
 
-    ds = GeneralIterDataset(iter_rl_ds, None)
-    iter_ds = ds.__iter__()
-    next_ds = ds.__next__()
-    collate_ds = ds.collate([dp])
-    collate_simple_ds = ds.collate_simple(None)
+        ds = GeneralIterDataset(iter_rl_ds, None)
+        iter_ds = ds.__iter__()
+        next_ds = ds.__next__()
+        collate_ds = ds.collate([dp])
+        collate_simple_ds = ds.collate_simple(None)
 
-    assert isinstance(reward, list)
-    assert iter_ds == ds
-    assert next_ds is None
-    assert isinstance(collate_ds, dict)
-    assert collate_simple_ds is None
+        assert isinstance(reward, list)
+        assert iter_ds == ds
+        assert next_ds is None
+        assert isinstance(collate_ds, dict)
+        assert collate_simple_ds is None
+
+    def test_iterable_rl_dataset_iter(self):
+        class DummyIterableDataset(Iterable_RL_Dataset):
+            def __init__(self):
+                super().__init__(
+                    WordleTokenizer(), ConstantTokenReward(0), max_len=None
+                )
+                self.idx = 0
+                self.items = [
+                    DataPoint(
+                        raw_str="x",
+                        tokens=[1],
+                        state_idxs=[0],
+                        action_idxs=[],
+                        rewards=[],
+                        terminals=[0],
+                        utterance_state_idxs=[0],
+                        utterance_action_idxs=[],
+                        utterance_rewards=[],
+                        utterance_terminals=[0],
+                    ),
+                    DataPoint(
+                        raw_str="y",
+                        tokens=[2],
+                        state_idxs=[0],
+                        action_idxs=[],
+                        rewards=[],
+                        terminals=[1],
+                        utterance_state_idxs=[0],
+                        utterance_action_idxs=[],
+                        utterance_rewards=[],
+                        utterance_terminals=[1],
+                    ),
+                ]
+
+            def sample_item(self):
+                item = self.items[self.idx % len(self.items)]
+                self.idx += 1
+                return item
+
+        dataset = DummyIterableDataset()
+        iterator = iter(dataset)
+
+        first = next(iterator)
+        second = next(iterator)
+
+        assert first.raw_str == "x"
+        assert second.raw_str == "y"
 
 
 def test_tokenizer_base_class():
@@ -337,116 +454,3 @@ def test_rl_dataset_base_iter():
     iterator = dataset.__iter__()
 
     assert iterator is None
-
-
-def test_list_rl_dataset_iter():
-    class DummyListDataset(List_RL_Dataset):
-        def __init__(self):
-            super().__init__(WordleTokenizer(), ConstantTokenReward(0), max_len=None)
-            self.items = [
-                DataPoint(
-                    raw_str="a",
-                    tokens=[1],
-                    state_idxs=[0],
-                    action_idxs=[],
-                    rewards=[],
-                    terminals=[1],
-                    utterance_state_idxs=[0],
-                    utterance_action_idxs=[],
-                    utterance_rewards=[],
-                    utterance_terminals=[1],
-                ),
-                DataPoint(
-                    raw_str="b",
-                    tokens=[2],
-                    state_idxs=[0],
-                    action_idxs=[],
-                    rewards=[],
-                    terminals=[0],
-                    utterance_state_idxs=[0],
-                    utterance_action_idxs=[],
-                    utterance_rewards=[],
-                    utterance_terminals=[0],
-                ),
-            ]
-
-        def get_item(self, idx):
-            return self.items[idx]
-
-        def size(self):
-            return len(self.items)
-
-    dataset = DummyListDataset()
-    out = list(dataset)
-
-    assert len(out) == 2
-    assert out[0].raw_str == "a"
-    assert out[1].raw_str == "b"
-
-
-def test_iterable_rl_dataset_iter():
-    class DummyIterableDataset(Iterable_RL_Dataset):
-        def __init__(self):
-            super().__init__(WordleTokenizer(), ConstantTokenReward(0), max_len=None)
-            self.idx = 0
-            self.items = [
-                DataPoint(
-                    raw_str="x",
-                    tokens=[1],
-                    state_idxs=[0],
-                    action_idxs=[],
-                    rewards=[],
-                    terminals=[0],
-                    utterance_state_idxs=[0],
-                    utterance_action_idxs=[],
-                    utterance_rewards=[],
-                    utterance_terminals=[0],
-                ),
-                DataPoint(
-                    raw_str="y",
-                    tokens=[2],
-                    state_idxs=[0],
-                    action_idxs=[],
-                    rewards=[],
-                    terminals=[1],
-                    utterance_state_idxs=[0],
-                    utterance_action_idxs=[],
-                    utterance_rewards=[],
-                    utterance_terminals=[1],
-                ),
-            ]
-
-        def sample_item(self):
-            item = self.items[self.idx % len(self.items)]
-            self.idx += 1
-            return item
-
-    dataset = DummyIterableDataset()
-    iterator = iter(dataset)
-
-    first = next(iterator)
-    second = next(iterator)
-
-    assert first.raw_str == "x"
-    assert second.raw_str == "y"
-
-
-def test_dp_from_obs_empty_sequence_non_terminal():
-    class EmptyLangObs(Language_Observation):
-        def to_sequence(self, **kwargs):
-            return [], False
-
-        def __str__(self):
-            return "EmptyLangObs"
-
-    lang_obs = EmptyLangObs()
-    tokenizer = WordleTokenizer()
-    token_reward = ConstantTokenReward(1)
-
-    dp = DataPoint.from_obs(lang_obs, tokenizer, token_reward, meta=None)
-
-    assert isinstance(dp, DataPoint)
-    assert dp.raw_str == tokenizer.id_to_token(tokenizer.boa_token_id)
-    assert dp.action_idxs == []
-    assert dp.rewards == []
-    assert dp.terminals == [0]

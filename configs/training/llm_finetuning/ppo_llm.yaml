@@ -1,0 +1,47 @@
+---
+MUTATION_PARAMS:
+    NO_MUT: 0.1
+    RL_HP_MUT: 0.6
+    MUT_SD: 0.1
+    RAND_SEED: 42
+    MIN_LR: 0.0000001
+    MAX_LR: 0.00001
+    MIN_BETA: 0.0001
+    MAX_BETA: 0.01
+    MIN_GROUP_SIZE: 4
+    MAX_GROUP_SIZE: 12
+
+
+INIT_HP:
+    ALGO: LLMPPO
+    BATCH_SIZE: 32
+    BETA: 0.001                # KL penalty — keeps policy close to reference
+    LR_ACTOR: 0.000005       # 5e-6 — good for LoRA on 0.5B instruct model
+    LR_CRITIC: 0.00005       # 1e-5 — value head learns faster
+    CLIP_COEF: 0.2
+    MAX_GRAD_NORM: 1.0
+    UPDATE_EPOCHS: 1
+    MAX_OUTPUT_TOKENS: 64
+    TEMPERATURE: 0.7          # Higher temp for better exploration in sparse reward setting
+    MAX_MODEL_LEN: 4096
+    TOURN_SIZE: 2
+    GAMMA: 1.0              # Higher discount for multi-turn credit assignment
+    VF_COEF: 0.5              # Stronger value loss to train critic faster
+    GAE_LAMBDA: 1.0
+    ELITISM: true
+    POP_SIZE: 1
+    EVAL_LOOP: 1
+    USE_VLLM: true
+    MICRO_BATCH_SIZE_PER_GPU: 16
+    ACTION_GRANULARITY: turn
+    LORA_R: 16
+    LORA_ALPHA: 32
+    LORA_DROPOUT: 0.0
+    TARGET_MODULES:
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+        - up_proj
+        - down_proj
+        - gate_proj

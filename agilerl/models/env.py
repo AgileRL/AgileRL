@@ -42,6 +42,7 @@ class LLMEnvType(str, Enum):
     REASONING = "reasoning"
     PREFERENCE = "preference"
     SFT = "sft"
+    MULTITURN = "multiturn"
 
     def __str__(self) -> str:
         return str(self.value)
@@ -310,15 +311,29 @@ class LLMEnvSpec(BaseModel):
     :param reward_file_path: Path to a Python file containing the reward
         function.  Required for reasoning environments.
     :type reward_file_path: str | None
-    :param dataset: Path to a Parquet dataset file or a HuggingFace dataset. Required.
+    :param dataset: Path to a Parquet dataset file or a HuggingFace dataset.
+        Required for reasoning/preference/sft environments.
     :type dataset: str
+    :param env_name: GEM environment id (e.g. ``"game:Sudoku-v0-easy"``).
+        Mutually exclusive with ``entrypoint``.
+    :type env_name: str | None
+    :param entrypoint: Dotted path to a callable that returns a
+        :class:`~agilerl.protocols.MultiTurnEnv`.  Mutually exclusive with
+        ``env_name``.
+    :type entrypoint: str | None
+    :param env_config: Keyword arguments forwarded to the entrypoint callable.
+        Only used when ``entrypoint`` is set.
+    :type env_config: dict[str, Any] | None
+    :param max_turns: Maximum interaction turns per episode.  If ``None``
+        for multiturn environments, the value is probed from the environment.
+    :type max_turns: int | None
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     env_type: LLMEnvType
-    dataset: str = Field(
-        ..., min_length=1, validation_alias=AliasChoices("dataset", "name")
+    dataset: str | None = Field(
+        default=None, validation_alias=AliasChoices("dataset", "name")
     )
     columns: dict[str, str] | None = Field(default=None)
     prompt_template: dict[str, Any] | None = Field(default=None)
@@ -328,6 +343,12 @@ class LLMEnvSpec(BaseModel):
     reward_fn_name: str | None = Field(default=None)
     response_column: str = Field(default="response")
 
+    # Multi-turn specific fields
+    env_name: str | None = Field(default=None)
+    entrypoint: str | None = Field(default=None)
+    env_config: dict[str, Any] | None = Field(default=None)
+    max_turns: int | None = Field(default=None, ge=1)
+
     # These fields are overridden given the rest of the training configuration
     data_batch_size_per_gpu: int = Field(default=8, ge=1, exclude=True)
     return_raw_completions: bool = Field(default=False, exclude=True)
@@ -336,12 +357,19 @@ class LLMEnvSpec(BaseModel):
 
     @property
     def name(self) -> str:
-        """Alias for ``dataset``."""
-        return self.dataset
+        """Human-readable name: dataset path, GEM env name, or entrypoint."""
+        if self.dataset is not None:
+            return self.dataset
+        if self.env_name is not None:
+            return self.env_name
+        return self.entrypoint or "multiturn"
 
     @model_validator(mode="after")
     def _validate_reasoning_fields(self) -> Self:
         if self.env_type == LLMEnvType.REASONING:
+            if self.dataset is None:
+                msg = "dataset is required for reasoning environments"
+                raise ValueError(msg)
             if self.reward_file_path is None:
                 msg = "reward_file_path is required for reasoning environments"
                 raise ValueError(msg)
@@ -355,16 +383,40 @@ class LLMEnvSpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_preference_fields(self) -> Self:
-        if self.env_type == LLMEnvType.PREFERENCE and self.reward_file_path is not None:
-            msg = "Reward file path has been specified, but is not supported for preference environments."
-            raise ValueError(msg)
+        if self.env_type == LLMEnvType.PREFERENCE:
+            if self.dataset is None:
+                msg = "dataset is required for preference environments"
+                raise ValueError(msg)
+            if self.reward_file_path is not None:
+                msg = "Reward file path has been specified, but is not supported for preference environments."
+                raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
     def _validate_sft_fields(self) -> Self:
-        if self.env_type == LLMEnvType.SFT and self.reward_file_path is not None:
-            msg = "Reward file path has been specified, but is not supported for SFT environments."
-            raise ValueError(msg)
+        if self.env_type == LLMEnvType.SFT:
+            if self.dataset is None:
+                msg = "dataset is required for SFT environments"
+                raise ValueError(msg)
+            if self.reward_file_path is not None:
+                msg = "Reward file path has been specified, but is not supported for SFT environments."
+                raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_multiturn_fields(self) -> Self:
+        if self.env_type == LLMEnvType.MULTITURN:
+            has_gem = self.env_name is not None
+            has_ep = self.entrypoint is not None
+            if has_gem == has_ep:
+                msg = (
+                    "Exactly one of env_name or entrypoint is required "
+                    "for multiturn environments."
+                )
+                raise ValueError(msg)
+            if self.env_config is not None and not has_ep:
+                msg = "env_config is only used with entrypoint, not env_name."
+                raise ValueError(msg)
         return self
 
     def _load_dataset_hf(self) -> tuple[Dataset, Dataset]:
@@ -409,13 +461,23 @@ class LLMEnvSpec(BaseModel):
     ) -> ReasoningGym | PreferenceGym | SFTGym:
         """Make the environment for the LLM agent.
 
+        For multiturn environments, use :meth:`make_multiturn_env_factory`
+        instead — the training loop needs a factory, not a single env.
+
         :param tokenizer: The tokenizer.
         :type tokenizer: Any
         :param accelerator: The accelerator.
         :type accelerator: Accelerator | None
         :return: The reasoning or preference gym environment.
-        :rtype: ReasoningGym | PreferenceGym
+        :rtype: ReasoningGym | PreferenceGym | SFTGym
         """
+        if self.env_type == LLMEnvType.MULTITURN:
+            msg = (
+                "Multiturn environments cannot be constructed with make_env(). "
+                "Use make_multiturn_env_factory() instead."
+            )
+            raise TypeError(msg)
+
         train_ds, test_ds = self._load_dataset()
 
         if self.env_type == LLMEnvType.REASONING:
@@ -426,6 +488,83 @@ class LLMEnvSpec(BaseModel):
             return self._make_sft_env(train_ds, test_ds, tokenizer, accelerator)
         msg = f"Invalid environment type: {self.env_type}"
         raise ValueError(msg)
+
+    def make_multiturn_env_factory(
+        self,
+        tokenizer: Any,
+        *,
+        max_model_len: int | None = None,
+        max_output_tokens: int | None = None,
+    ) -> Callable[[], Any]:
+        """Build a factory that creates wrapped multi-turn env instances.
+
+        Each call to the returned factory creates a fresh
+        :class:`~agilerl.llm_envs.TokenObservationWrapper`.  The underlying
+        environment is either a GEM environment (``env_name``) or a custom
+        class resolved from ``entrypoint``.
+
+        If :attr:`max_turns` is ``None``, it is probed from a temporary
+        environment instance and stored back on the spec.
+
+        :param tokenizer: The tokenizer (shared across all instances).
+        :type tokenizer: Any
+        :param max_model_len: Maximum model context length for sliding-window
+            prompt truncation inside the wrapper.
+        :type max_model_len: int | None
+        :param max_output_tokens: Maximum newly generated tokens per turn.
+        :type max_output_tokens: int | None
+        :returns: A zero-argument callable that creates a wrapped env.
+        :rtype: Callable[[], TokenObservationWrapper]
+        """
+        from agilerl.llm_envs import TokenObservationWrapper
+
+        if self.env_name is not None:
+            try:
+                import gem
+            except ImportError:
+                msg = (
+                    f"The 'gem-llm' package is required to use env_name={self.env_name!r}. "
+                    "Install it with: pip install gem-llm"
+                )
+                raise ImportError(msg) from None
+
+            env_name = self.env_name
+
+            def _make_raw_env() -> Any:
+                return gem.make(env_name)
+        else:
+            constructor = resolve_entrypoint_target(self.entrypoint)
+            if not callable(constructor):
+                msg = f"Entrypoint '{self.entrypoint}' resolved to non-callable object."
+                raise TypeError(msg)
+            cfg = self.env_config or {}
+
+            def _make_raw_env() -> Any:
+                return constructor(**cfg)
+
+        max_turns = self.max_turns
+        if max_turns is None:
+            probe = _make_raw_env()
+            max_turns = probe.max_turns
+            if hasattr(probe, "close"):
+                probe.close()
+            self.max_turns = max_turns
+
+        pad_id = tokenizer.pad_token_id
+
+        def _factory() -> TokenObservationWrapper:
+            env = _make_raw_env()
+            return TokenObservationWrapper(
+                env=env,
+                tokenizer=tokenizer,
+                max_turns=max_turns,
+                pad_id=pad_id,
+                apply_chat_template=True,
+                max_model_len=max_model_len,
+                max_output_tokens=max_output_tokens,
+            )
+
+        return _factory
 
     def _make_reasoning_env(
         self,

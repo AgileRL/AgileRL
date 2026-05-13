@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import functools
 import importlib.util
 import json
 import os
@@ -26,6 +27,7 @@ import numpy as np
 import torch
 from _pytest.outcomes import Skipped
 from accelerate.state import AcceleratorState
+from torch._inductor.utils import fresh_cache
 
 from tests.utils import force_gpu_memory_release, wait_for_gpu_memory_to_clear
 
@@ -45,7 +47,6 @@ def setup_deepspeed_env():
         "RANK": "0",
         "LOCAL_RANK": "0",
         "WORLD_SIZE": "1",
-        "PYTORCH_ALLOC_CONF": "expandable_segments:True",
         "CUDA_VISIBLE_DEVICES": "0",
     }
     for key, value in env_vars.items():
@@ -147,7 +148,7 @@ def resolve_fixtures(fixture_names, test_module, test_name):
             setup_deepspeed_env()
             fixtures[name] = None
         elif name == "accelerator_factory":
-            from tests.test_algorithms.test_llms.conftest import generate_accelerator
+            from tests.test_algorithms.conftest import generate_accelerator
 
             fixtures[name] = generate_accelerator
         elif name == "model_factory":
@@ -156,6 +157,10 @@ def resolve_fixtures(fixture_names, test_module, test_name):
             fixtures[name] = generate_model
         elif name == "grpo_factory":
             fixtures[name] = getattr(test_module, "generate_grpo")
+        elif name == "ppo_factory":
+            fixtures[name] = getattr(test_module, "generate_ppo")
+        elif name == "reinforce_factory":
+            fixtures[name] = getattr(test_module, "generate_reinforce")
         elif name == "dpo_factory":
             fixtures[name] = getattr(test_module, "generate_dpo")
         elif name == "preference_dataset_factory":
@@ -194,11 +199,22 @@ def main():
 
     module = import_module_from_path(args.module)
 
-    # Unwrap only one level: past spawn_new_process_for_each_test but keep
-    # any @patch wrappers intact so they inject mocks automatically.
-    test_func = getattr(module, args.test)
-    if hasattr(test_func, "__wrapped__"):
-        test_func = test_func.__wrapped__
+    # Resolve the test callable. For class-based tests the name is
+    # "ClassName.method_name"; instantiate the class and bind so that
+    # the unwrapped function still receives `self`.
+    if "." in args.test:
+        cls_name, method_name = args.test.rsplit(".", 1)
+        test_cls = getattr(module, cls_name)
+        test_func = getattr(test_cls, method_name)
+        # Unwrap only one level: past spawn_new_process_for_each_test but keep
+        # any @patch wrappers intact so they inject mocks automatically.
+        if hasattr(test_func, "__wrapped__"):
+            test_func = test_func.__wrapped__
+        test_func = functools.partial(test_func, test_cls())
+    else:
+        test_func = getattr(module, args.test)
+        if hasattr(test_func, "__wrapped__"):
+            test_func = test_func.__wrapped__
 
     fixtures = resolve_fixtures(fixture_names, module, args.test)
 
@@ -207,10 +223,12 @@ def main():
     set_seed()
     wait_for_gpu_memory()
 
-    try:
-        test_func(**kwargs)
-    finally:
-        cleanup_after_test(args.test)
+    with fresh_cache():
+        # NOTE try: finally with cleanup_after_test(args.test) removed to avoid vllm errors for now
+        try:
+            test_func(**kwargs)
+        finally:
+            cleanup_after_test(args.test)
 
 
 if __name__ == "__main__":

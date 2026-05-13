@@ -93,7 +93,6 @@ class TestReplayBufferSpecValidation:
         spec = ReplayBufferSpec()
         assert spec.max_size == 100_000
         assert spec.standard_buffer is True
-        assert spec.combined_buffers is False
         assert spec.n_step_buffer is False
         assert isinstance(spec.n_step_buffer_args, NStepBufferArgs)
         assert spec.per_buffer is False
@@ -144,10 +143,6 @@ class TestReplayBufferSpecValidation:
             per_buffer_args=PerBufferArgs(alpha=0.9),
         )
         assert spec.per_buffer_args.alpha == 0.9
-
-    def test_combined_buffers_flag(self):
-        spec = ReplayBufferSpec(combined_buffers=True)
-        assert spec.combined_buffers is True
 
     def test_from_dict(self):
         spec = ReplayBufferSpec.model_validate(

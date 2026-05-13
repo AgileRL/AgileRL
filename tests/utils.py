@@ -10,7 +10,7 @@ import sys
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 from typing_extensions import ParamSpec
@@ -89,6 +89,9 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             mp.set_start_method("spawn")
 
         all_kwargs = _build_kwargs(f, args, kwargs)
+        # Drop the bound `self` for tests defined as methods of a Test* class.
+        # The subprocess will rebind it by instantiating the class.
+        all_kwargs.pop("self", None)
         parametrized_names = _get_parametrized_names(f)
 
         param_kwargs = {k: v for k, v in all_kwargs.items() if k in parametrized_names}
@@ -104,7 +107,9 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
         env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
 
         module_file = sys.modules[f.__module__].__file__
-        test_name = f.__name__
+        # Use __qualname__ so class-based tests are addressable as
+        # "ClassName.method_name"; module-level tests stay as plain names.
+        test_name = f.__qualname__
 
         runner = str(AGILERL_PATH / "tests" / "subprocess_runner.py")
 
@@ -160,6 +165,62 @@ def get_physical_device_indices(devices: list[int]) -> list[int]:
     visible_indices = [int(x) for x in visible_devices.split(",")]
     index_mapping = {i: physical for i, physical in enumerate(visible_indices)}
     return [index_mapping[i] for i in devices if i in index_mapping]
+
+
+def assert_vllm_get_action_contract(
+    completion_ids: list[torch.Tensor],
+    action_masks: list[torch.Tensor],
+    batch_size: int,
+    prompt_len: int,
+    pad_token_id: int,
+) -> None:
+    """Assert stable shape/mask invariants for vLLM get_action outputs.
+
+    :param completion_ids: Generated completion tensors, one per prompt.
+    :type completion_ids: list[torch.Tensor]
+    :param action_masks: Action masks aligned to completion tensors.
+    :type action_masks: list[torch.Tensor]
+    :param batch_size: Expected number of prompt entries.
+    :type batch_size: int
+    :param prompt_len: Expected prompt token length before generation.
+    :type prompt_len: int
+    :param pad_token_id: Pad token id used for mask checks.
+    :type pad_token_id: int
+    :return: None
+    :rtype: None
+    """
+    assert len(completion_ids) == batch_size
+    assert len(action_masks) == batch_size
+    for completion_id, action_mask in zip(completion_ids, action_masks, strict=True):
+        assert completion_id.dim() == 2
+        assert action_mask.dim() == 2
+        assert completion_id.shape[1] > prompt_len
+        assert action_mask.shape[1] == completion_id.shape[1] - 1
+        assert action_mask.dtype == torch.bool
+        pad_positions = completion_id[:, 1:] == pad_token_id
+        assert not action_mask[pad_positions].any()
+
+
+def make_mock_vllm_instance(llm_spec: type[Any] | None = None) -> Any:
+    """Create a configured vLLM mock instance for unit tests.
+
+    :param llm_spec: Optional class/type used as the mock spec.
+    :type llm_spec: type[Any] | None
+    :return: Mock instance with common vLLM methods and nested engine attributes.
+    :rtype: Any
+    """
+    from unittest.mock import MagicMock
+
+    mock_instance = MagicMock(spec=llm_spec) if llm_spec is not None else MagicMock()
+    mock_instance.generate = MagicMock(
+        return_value=[MagicMock(outputs=[MagicMock(text="Generated text")])],
+    )
+    mock_instance.sleep = MagicMock()
+    mock_instance.wake_up = MagicMock()
+    mock_instance.shutdown = MagicMock()
+    mock_instance.llm_engine = MagicMock()
+    mock_instance.llm_engine.model_executor = MagicMock()
+    return mock_instance
 
 
 def force_gpu_memory_release() -> None:

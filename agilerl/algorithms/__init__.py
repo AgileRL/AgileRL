@@ -33,8 +33,12 @@ __all__ = [
 ]
 
 if HAS_LLM_DEPENDENCIES:
+    from .cispo import CISPO
     from .dpo import DPO
     from .grpo import GRPO
+    from .gspo import GSPO
+    from .ppo_llm import PPO as LLMPPO
+    from .reinforce_llm import REINFORCE as LLMREINFORCE
     from .sft import SFT
 
-    __all__ += ["DPO", "GRPO", "SFT"]
+    __all__ += ["CISPO", "DPO", "GRPO", "GSPO", "LLMPPO", "LLMREINFORCE", "SFT"]

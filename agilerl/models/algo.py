@@ -273,6 +273,7 @@ class AlgorithmSpec(BaseModel):
         training: TrainingSpec,
         env_spec: EnvSpecT,
         memory: ReplayBufferT = None,
+        n_step_memory: ReplayBufferT = None,
     ) -> dict[str, Any]:
         """Return additional kwargs for the training loop.
 
@@ -282,6 +283,8 @@ class AlgorithmSpec(BaseModel):
         :type env_spec: EnvSpecT
         :param memory: Replay buffer instance.
         :type memory: ReplayBufferT | None
+        :param n_step_memory: N-step replay buffer for combined PER + n-step setups.
+        :type n_step_memory: ReplayBufferT | None
         :returns: Extra keyword arguments for the training function.
         :rtype: dict[str, Any]
         """
@@ -318,6 +321,14 @@ class AlgorithmSpec(BaseModel):
 
         if self.off_policy:
             kwargs["learning_delay"] = training.learning_delay
+            if training.eps_start is not None:
+                kwargs["eps_start"] = training.eps_start
+            if training.eps_end is not None:
+                kwargs["eps_end"] = training.eps_end
+            if training.eps_decay is not None:
+                kwargs["eps_decay"] = training.eps_decay
+            if n_step_memory is not None:
+                kwargs["n_step_memory"] = n_step_memory
         elif self.offline:
             if env_spec.minari_dataset_id is not None:
                 kwargs["minari_dataset_id"] = env_spec.minari_dataset_id
@@ -326,6 +337,12 @@ class AlgorithmSpec(BaseModel):
                 import h5py
 
                 kwargs["dataset"] = h5py.File(env_spec.dataset_path, "r")
+
+        if self.bandit:
+            kwargs["episode_steps"] = training.episode_steps
+
+        if self.agent_type == AgentType.MultiAgent:
+            kwargs["sum_scores"] = training.sum_scores
 
         return kwargs
 

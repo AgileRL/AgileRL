@@ -1,16 +1,16 @@
 ---
 algorithm:
-    name: GRPO
-    batch_size: 6
-    beta: 0.001
+    name: GRPO                            # Algorithm — group relative policy optimization
+    batch_size: 6                         # Batch size (number of prompts per step)
+    beta: 0.001                           # KL divergence penalty coefficient
     lr: 0.000005
-    clip_coef: 0.2
-    max_grad_norm: 0.1
+    clip_coef: 0.2                         # Surrogate clipping coefficient (PPO-style)
+    max_grad_norm: 0.1                     # Maximum norm for gradient clipping
     update_epochs: 1
-    group_size: 2
-    temperature: 0.9
+    group_size: 2                         # Number of completions sampled per prompt
+    temperature: 0.9                       # Sampling temperature for generation
     use_vllm: false
-    vllm_config:
+    vllm_config:                          # VLLM config
         tensor_parallel_size: 1
         gpu_memory_utilization: 0.3
         max_num_seqs: 8

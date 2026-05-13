@@ -1,6 +1,9 @@
 ---
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
+
+# Vendored binary test fixtures; opaque to every hook here.
+exclude: ^tests/assets/tiny_llm/
 ci:
     autoupdate_branch: nightly
     skip: [codeql-python]
@@ -32,7 +35,7 @@ repos:
                 - --skip=*.css,*.js,*.map,*.scss,*.svg
                 - --ignore-words-list=magent,pres,roate
     - repo: https://github.com/astral-sh/ruff-pre-commit
-      rev: v0.15.11
+      rev: v0.15.12
       hooks:
           - id: ruff
             name: Ruff Linter
@@ -47,7 +50,7 @@ repos:
 
     - repo: https://github.com/astral-sh/uv-pre-commit
       # uv version.
-      rev: 0.11.7
+      rev: 0.11.8
       hooks:
           - id: uv-lock
 

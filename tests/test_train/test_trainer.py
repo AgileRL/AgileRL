@@ -236,6 +236,110 @@ class TestGetTrainingKwargs:
         )
         assert kwargs["env_name"] == "CartPole-v1"
 
+    def test_off_policy_epsilon_forwarded(self, gym_env_spec):
+        spec = DQNSpec()
+        training = TrainingSpec(
+            max_steps=100,
+            evo_steps=50,
+            pop_size=2,
+            eps_start=0.5,
+            eps_end=0.05,
+            eps_decay=0.99,
+        )
+        buffer = ReplayBuffer(max_size=100, device="cpu")
+        kwargs = spec.get_training_kwargs(
+            training=training, env_spec=gym_env_spec, memory=buffer
+        )
+        assert kwargs["eps_start"] == 0.5
+        assert kwargs["eps_end"] == 0.05
+        assert kwargs["eps_decay"] == 0.99
+
+    def test_off_policy_epsilon_omitted_when_none(self, training_spec, gym_env_spec):
+        spec = DQNSpec()
+        buffer = ReplayBuffer(max_size=100, device="cpu")
+        kwargs = spec.get_training_kwargs(
+            training=training_spec, env_spec=gym_env_spec, memory=buffer
+        )
+        assert "eps_start" not in kwargs
+        assert "eps_end" not in kwargs
+        assert "eps_decay" not in kwargs
+
+    def test_off_policy_n_step_memory_forwarded(self, training_spec, gym_env_spec):
+        spec = DQNSpec()
+        buffer = ReplayBuffer(max_size=100, device="cpu")
+        n_step_buf = MagicMock()
+        kwargs = spec.get_training_kwargs(
+            training=training_spec,
+            env_spec=gym_env_spec,
+            memory=buffer,
+            n_step_memory=n_step_buf,
+        )
+        assert kwargs["n_step_memory"] is n_step_buf
+
+    def test_off_policy_no_n_step_memory_when_none(self, training_spec, gym_env_spec):
+        spec = DQNSpec()
+        buffer = ReplayBuffer(max_size=100, device="cpu")
+        kwargs = spec.get_training_kwargs(
+            training=training_spec, env_spec=gym_env_spec, memory=buffer
+        )
+        assert "n_step_memory" not in kwargs
+
+    def test_bandit_episode_steps_forwarded(self, gym_env_spec):
+        from agilerl.models import NeuralUCBSpec
+
+        spec = NeuralUCBSpec()
+        training = TrainingSpec(
+            max_steps=100,
+            evo_steps=50,
+            pop_size=2,
+            episode_steps=250,
+        )
+        buffer = ReplayBuffer(max_size=100, device="cpu")
+        kwargs = spec.get_training_kwargs(
+            training=training, env_spec=gym_env_spec, memory=buffer
+        )
+        assert kwargs["episode_steps"] == 250
+
+    def test_multi_agent_sum_scores_forwarded(self, gym_env_spec):
+        from agilerl.models import MADDPGSpec
+
+        spec = MADDPGSpec()
+        training = TrainingSpec(
+            max_steps=100,
+            evo_steps=50,
+            pop_size=2,
+            sum_scores=False,
+        )
+        buffer = ReplayBuffer(max_size=100, device="cpu")
+        kwargs = spec.get_training_kwargs(
+            training=training, env_spec=gym_env_spec, memory=buffer
+        )
+        assert kwargs["sum_scores"] is False
+
+    def test_multi_agent_sum_scores_defaults_true(self, gym_env_spec):
+        from agilerl.models import MADDPGSpec
+
+        spec = MADDPGSpec()
+        training = TrainingSpec(max_steps=100, evo_steps=50, pop_size=2)
+        buffer = ReplayBuffer(max_size=100, device="cpu")
+        kwargs = spec.get_training_kwargs(
+            training=training, env_spec=gym_env_spec, memory=buffer
+        )
+        assert kwargs["sum_scores"] is True
+
+    def test_on_policy_has_no_paradigm_specific_kwargs(
+        self, training_spec, ppo_spec, gym_env_spec
+    ):
+        kwargs = ppo_spec.get_training_kwargs(
+            training=training_spec, env_spec=gym_env_spec
+        )
+        assert "memory" not in kwargs
+        assert "learning_delay" not in kwargs
+        assert "eps_start" not in kwargs
+        assert "episode_steps" not in kwargs
+        assert "sum_scores" not in kwargs
+        assert "n_step_memory" not in kwargs
+
 
 # ---------------------------------------------------------------------------
 # LocalTrainer
@@ -1066,9 +1170,10 @@ class TestLLMLocalTrainer:
             ) as mock_create_pop,
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
-            from agilerl.models.env import LLMEnvSpec
+            from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
             env_spec = MagicMock(spec=LLMEnvSpec)
+            env_spec.env_type = LLMEnvType.PREFERENCE
             trainer = LocalTrainer(
                 algorithm=dpo_spec,
                 environment=env_spec,
@@ -1114,10 +1219,11 @@ class TestLLMLocalTrainer:
     # -- _make_env dispatches to LLMEnvSpec.make_env() ----------------------
 
     def test_make_env_dispatches_to_llm_env_spec(self, dpo_spec):
-        from agilerl.models.env import LLMEnvSpec
+        from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_env = MagicMock()
         mock_llm_env_spec = MagicMock(spec=LLMEnvSpec)
+        mock_llm_env_spec.env_type = LLMEnvType.PREFERENCE
         mock_llm_env_spec.make_env.return_value = mock_env
         mock_tokenizer = MagicMock()
 
@@ -1937,3 +2043,128 @@ class TestLocalTrainerTrainKwargs:
         assert trainer.training_spec.checkpoint_steps == 50
         assert trainer.training_spec.checkpoint_path == "/tmp/ckpt"
         assert trainer.training_spec.overwrite_checkpoints is True
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn LLM support
+# ---------------------------------------------------------------------------
+
+
+class TestGRPOSpecMultiturn:
+    """Verify GRPOSpec returns the correct training function."""
+
+    def test_single_turn_training_fn(self):
+        from agilerl.training.train_llm import finetune_llm_reasoning
+
+        fn = _GRPOSpec.get_training_fn()
+        assert fn is finetune_llm_reasoning
+
+    def test_multiturn_training_fn(self):
+        from agilerl.training.train_llm import finetune_llm_multiturn
+
+        fn = _GRPOSpec.get_training_fn(multiturn=True)
+        assert fn is finetune_llm_multiturn
+
+
+class TestLocalTrainerMultiturn:
+    """Verify LocalTrainer wires multiturn LLM training correctly."""
+
+    POP_SIZE = 1
+
+    def _training(self):
+        return TrainingSpec(max_steps=100, evo_steps=10, pop_size=self.POP_SIZE)
+
+    def test_construction_multiturn(self, grpo_spec):
+        from agilerl.models.env import LLMEnvSpec, LLMEnvType
+
+        mock_pop = [MagicMock()]
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 50256
+        mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_tokenizer.pad_token_id = 50256
+
+        env_spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            env_name="game:GuessTheNumber-v0-easy",
+            max_turns=5,
+        )
+
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=mock_pop,
+            ),
+            patch.object(
+                LLMEnvSpec,
+                "make_multiturn_env_factory",
+                return_value=MagicMock(),
+            ) as mock_factory_method,
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            trainer = LocalTrainer(
+                algorithm=grpo_spec,
+                environment=env_spec,
+                training=self._training(),
+            )
+
+        assert trainer._multiturn is True
+        assert trainer.env is None
+        assert trainer.env_factory is not None
+        mock_factory_method.assert_called_once()
+        from agilerl.training.train_llm import finetune_llm_multiturn
+
+        assert trainer.train_fn is finetune_llm_multiturn
+
+    def test_train_delegates_multiturn_kwargs(self, grpo_spec):
+        from agilerl.models.env import LLMEnvSpec, LLMEnvType
+
+        mock_pop = [MagicMock()]
+        mock_tokenizer = MagicMock(eos_token_id=0, eos_token="<eos>", pad_token_id=0)
+        mock_train_fn = MagicMock(return_value=mock_pop)
+        mock_env_factory = MagicMock()
+
+        env_spec = LLMEnvSpec(
+            env_type=LLMEnvType.MULTITURN,
+            env_name="game:Test-v0",
+            max_turns=8,
+            max_reward=1.0,
+        )
+
+        with (
+            patch(
+                "agilerl.training.trainer.AutoTokenizer", create=True
+            ) as mock_auto_tok,
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=mock_pop,
+            ),
+            patch.object(
+                LLMEnvSpec,
+                "make_multiturn_env_factory",
+                return_value=mock_env_factory,
+            ),
+            patch.object(
+                type(grpo_spec),
+                "get_training_fn",
+                return_value=mock_train_fn,
+            ),
+            patch.object(LocalTrainer, "to_manifest", return_value={}),
+        ):
+            mock_auto_tok.from_pretrained.return_value = mock_tokenizer
+            trainer = LocalTrainer(
+                algorithm=grpo_spec,
+                environment=env_spec,
+                training=self._training(),
+            )
+            trainer.train()
+
+        mock_train_fn.assert_called_once()
+        call_kwargs = mock_train_fn.call_args[1]
+        assert call_kwargs["env_factory"] is mock_env_factory
+        assert call_kwargs["max_turns"] == 8
+        assert call_kwargs["pop"] is mock_pop
+        assert call_kwargs["max_steps"] == 100
+        assert "env" not in call_kwargs

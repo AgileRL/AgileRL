@@ -544,30 +544,29 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
         return inactive_agents, obs
 
-    def stack_experiences(self, experiences: ExperiencesType) -> ExperiencesType:
+    def stack_experiences(
+        self, experiences: ExperiencesType | list[ExperiencesType]
+    ) -> ExperiencesType:
         """Stacks the experiences.
 
         :param experiences: Experiences from the environment
-        :type experiences: ExperiencesType
-        """
-        if isinstance(experiences, tuple):
-            return tuple(self.stack_experiences(exp) for exp in experiences)
+        :type experiences: ExperiencesType | list[ExperiencesType]
 
-        if not isinstance(experiences, dict):
+        :return: Stacked experiences
+        :rtype: ExperiencesType
+        """
+        if isinstance(experiences, dict):
+            return {
+                key: self.stack_experiences(val) for key, val in experiences.items()
+            }
+
+        if not isinstance(experiences, list):
             return experiences
 
-        stacked_experience = {}
-        for agent_id, inp in experiences.items():
-            if isinstance(inp, list):
-                stacked_exp = (
-                    stack_experiences(inp, to_torch=False)[0] if len(inp) > 0 else None
-                )
-            else:
-                stacked_exp = inp
+        if len(experiences) > 0:
+            return stack_experiences(experiences, to_torch=False)[0]
 
-            stacked_experience[agent_id] = stacked_exp
-
-        return stacked_experience
+        return None
 
     def _insert_placeholder_actions(
         self,
@@ -608,36 +607,36 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         self,
         experiences: ExperiencesType,
     ) -> ExperiencesType:
-        """Align async off-policy experiences for MADDPG/MATD3.
-
-        Expected format:
-            (states, actions, rewards, next_states, dones)
-        """
-        states, actions, rewards, next_states, dones = experiences
+        """Align async off-policy experiences."""
+        obs = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_obs = experiences["next_obs"]
+        dones = experiences["done"]
 
         all_agent_ids = (
-            set(states.keys())
+            set(obs.keys())
             | set(actions.keys())
             | set(rewards.keys())
-            | set(next_states.keys())
+            | set(next_obs.keys())
             | set(dones.keys())
         )
 
-        aligned_states = {}
+        aligned_obs = {}
         aligned_actions = {}
         aligned_rewards = {}
-        aligned_next_states = {}
+        aligned_next_obs = {}
         aligned_dones = {}
 
         for agent_id in all_agent_ids:
-            agent_states = states.get(agent_id)
+            agent_obs = obs.get(agent_id)
             agent_actions = actions.get(agent_id)
             agent_rewards = rewards.get(agent_id)
-            agent_next_states = next_states.get(agent_id)
+            agent_next_obs = next_obs.get(agent_id)
             agent_dones = dones.get(agent_id)
 
             if (
-                agent_states is None
+                agent_obs is None
                 or agent_actions is None
                 or agent_rewards is None
                 or agent_dones is None
@@ -645,45 +644,45 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
                 continue
 
             # If next_states is missing or all NaN, infer it from the state sequence.
-            missing_next_state = agent_next_states is None or (
-                isinstance(agent_next_states, np.ndarray)
-                and np.isnan(agent_next_states).all()
+            missing_next_obs = agent_next_obs is None or (
+                isinstance(agent_next_obs, np.ndarray)
+                and np.isnan(agent_next_obs).all()
             )
 
-            if missing_next_state:
-                if len(agent_states) <= 1:
+            if missing_next_obs:
+                if len(agent_obs) <= 1:
                     continue
 
-                aligned_states[agent_id] = agent_states[:-1]
+                aligned_obs[agent_id] = agent_obs[:-1]
                 aligned_actions[agent_id] = agent_actions[:-1]
                 aligned_rewards[agent_id] = agent_rewards[:-1]
                 aligned_dones[agent_id] = agent_dones[:-1]
-                aligned_next_states[agent_id] = agent_states[1:]
+                aligned_next_obs[agent_id] = agent_obs[1:]
             else:
                 # If lengths differ, trim all fields to the shortest length.
                 min_len = min(
-                    len(agent_states),
+                    len(agent_obs),
                     len(agent_actions),
                     len(agent_rewards),
-                    len(agent_next_states),
+                    len(agent_next_obs),
                     len(agent_dones),
                 )
                 if min_len == 0:
                     continue
 
-                aligned_states[agent_id] = agent_states[:min_len]
+                aligned_obs[agent_id] = agent_obs[:min_len]
                 aligned_actions[agent_id] = agent_actions[:min_len]
                 aligned_rewards[agent_id] = agent_rewards[:min_len]
-                aligned_next_states[agent_id] = agent_next_states[:min_len]
+                aligned_next_obs[agent_id] = agent_next_obs[:min_len]
                 aligned_dones[agent_id] = agent_dones[:min_len]
 
-        return (
-            aligned_states,
-            aligned_actions,
-            aligned_rewards,
-            aligned_next_states,
-            aligned_dones,
-        )
+        return {
+            "obs": aligned_obs,
+            "action": aligned_actions,
+            "reward": aligned_rewards,
+            "next_obs": aligned_next_obs,
+            "done": aligned_dones,
+        }
 
     def get_action(
         self,

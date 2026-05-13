@@ -25,6 +25,7 @@ from agilerl.models.env import (
     BanditEnvSpec,
     GymEnvSpec,
     LLMEnvSpec,
+    LLMEnvType,
     OfflineEnvSpec,
     PzEnvSpec,
 )
@@ -334,7 +335,29 @@ class LocalTrainer(Trainer):
         self.memory = build_replay_buffer_from_spec(
             self.algorithm_spec, self.replay_buffer_spec, self.device
         )
-        self.train_fn = self.algorithm_spec.get_training_fn()
+        self.n_step_memory = (
+            self.replay_buffer_spec.init_n_step_buffer(self.algorithm_spec, self.device)
+            if self.replay_buffer_spec is not None
+            else None
+        )
+        self._multiturn = (
+            isinstance(self.env_spec, LLMEnvSpec)
+            and self.env_spec.env_type == LLMEnvType.MULTITURN
+        )
+
+        # Multi-turn LLM training requires an env factory rather than an instantiated environment.
+        if self._multiturn:
+            max_model_len = getattr(self.algorithm_spec, "max_model_len", None)
+            max_output_tokens = getattr(self.algorithm_spec, "max_output_tokens", None)
+            self.env_factory = self.env_spec.make_multiturn_env_factory(
+                self.tokenizer,
+                max_model_len=max_model_len,
+                max_output_tokens=max_output_tokens,
+            )
+            self.train_fn = self.algorithm_spec.get_training_fn(multiturn=True)
+        else:
+            self.env_factory = None
+            self.train_fn = self.algorithm_spec.get_training_fn()
 
     def _make_tokenizer(self) -> AutoTokenizer:
         """Create the tokenizer for the LLM algorithm.
@@ -373,6 +396,9 @@ class LocalTrainer(Trainer):
         :rtype: GymEnvType | PzEnvType | LLMEnvType | BanditEnv
         """
         if isinstance(self.env_spec, LLMEnvSpec):
+            if self.env_spec.env_type == LLMEnvType.MULTITURN:
+                return None
+
             # Some LLMEnvSpec fields are dependent on the algo configuration
             self.env_spec.return_raw_completions = getattr(
                 self.algorithm_spec, "use_vllm", False
@@ -464,7 +490,6 @@ class LocalTrainer(Trainer):
         manifest = self.to_manifest()
         kwargs: dict[str, Any] = {
             "pop": self.population,
-            "env": self.env,
             "init_hp": manifest,
             "max_steps": self.training_spec.max_steps,
             "evo_steps": self.training_spec.evo_steps,
@@ -481,6 +506,12 @@ class LocalTrainer(Trainer):
             "wandb_kwargs": wandb_kwargs,
         }
 
+        if self._multiturn:
+            kwargs["env_factory"] = self.env_factory
+            kwargs["max_turns"] = self.env_spec.max_turns
+        else:
+            kwargs["env"] = self.env
+
         # Add checkpointing arguments to the training spec
         self.training_spec.checkpoint_steps = checkpoint_steps
         self.training_spec.checkpoint_path = checkpoint_path
@@ -492,6 +523,7 @@ class LocalTrainer(Trainer):
                 training=self.training_spec,
                 env_spec=self.env_spec,
                 memory=self.memory,
+                n_step_memory=self.n_step_memory,
             )
         )
         return self.train_fn(**kwargs)

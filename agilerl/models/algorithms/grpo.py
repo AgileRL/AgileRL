@@ -41,12 +41,18 @@ class GRPOSpec(LLMAlgorithmSpec):
         return self
 
     @staticmethod
-    def get_training_fn() -> Callable[..., Any]:
+    def get_training_fn(*, multiturn: bool = False) -> Callable[..., Any]:
         """Get the training function for GRPO.
 
+        :param multiturn: If ``True``, return the multi-turn training
+            function instead of the single-turn reasoning function.
+        :type multiturn: bool
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.train_llm import finetune_llm_reasoning
+        from agilerl.training.train_llm import (
+            finetune_llm_multiturn,
+            finetune_llm_reasoning,
+        )
 
-        return finetune_llm_reasoning
+        return finetune_llm_multiturn if multiturn else finetune_llm_reasoning
