@@ -22,7 +22,7 @@ from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import get_experiences_samples
 
 if HAS_LIGER_KERNEL:
-    from agilerl.utils.llm_utils import _LigerDPOWithAlpha
+    from agilerl.algorithms.core.llm_ops.fused_dpo_loss import _LigerDPOWithAlpha
 
 
 class DPO(LLMAlgorithm):

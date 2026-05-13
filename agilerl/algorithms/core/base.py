@@ -34,7 +34,7 @@ from torch.optim import AdamW
 from typing_extensions import Self
 
 from agilerl import HAS_DEEPSPEED, HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES, HAS_VLLM
-from agilerl.algorithms.core.llm_policy_loss import _k3_kl
+from agilerl.algorithms.core.llm_ops.fused_policy_loss import _k3_kl
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
@@ -121,7 +121,7 @@ if TYPE_CHECKING or HAS_DEEPSPEED:
 if TYPE_CHECKING or HAS_VLLM:
     from vllm import LLM, SamplingParams
 
-    from agilerl.algorithms.core.fused_lora import (
+    from agilerl.algorithms.core.llm_ops.fused_lora import (
         clear_fused_adapter_routing,
         patch_lora_for_fused_forward,
         set_fused_adapter_routing,
@@ -3787,7 +3787,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         Shared by PPO/REINFORCE/GRPO. Identical math (with the same
         argument convention) is also exposed as a plain-tensor helper at
-        :func:`agilerl.algorithms.core.llm_policy_loss._k3_kl` for the
+        :func:`agilerl.algorithms.core.llm_ops.fused_policy_loss._k3_kl` for the
         Liger-fused autograd Function (which can't import ``LLMAlgorithm``
         without circular imports).
 

@@ -8,11 +8,11 @@ from accelerate import Accelerator
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
-from agilerl.algorithms.core.fused_lora import clear_fused_adapter_routing
+from agilerl.algorithms.core.llm_ops.fused_lora import clear_fused_adapter_routing
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 
 if HAS_LIGER_KERNEL:
-    from agilerl.algorithms.core.fused_llm_policy_loss import (
+    from agilerl.algorithms.core.llm_ops.fused_policy_loss import (
         LigerFusedLinearPolicyLossFunction,
     )
 else:

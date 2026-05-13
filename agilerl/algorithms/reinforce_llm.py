@@ -11,7 +11,7 @@ from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 
 if HAS_LIGER_KERNEL:
-    from agilerl.algorithms.core.fused_llm_policy_loss import (
+    from agilerl.algorithms.core.llm_ops.fused_policy_loss import (
         LigerFusedLinearPolicyLossFunction,
     )
 else:

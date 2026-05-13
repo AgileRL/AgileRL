@@ -1,5 +1,5 @@
-"""Tests for ``agilerl.algorithms.core.llm_policy_loss`` and
-``agilerl.algorithms.core.fused_llm_policy_loss``.
+"""Tests for ``agilerl.algorithms.core.llm_ops.fused_policy_loss`` and
+``agilerl.algorithms.core.llm_ops.fused_policy_loss``.
 
 The math in :func:`llm_policy_loss_fn` lives in the Liger-free
 ``llm_policy_loss`` module and is testable everywhere. End-to-end
@@ -15,28 +15,36 @@ import sys
 import pytest
 import torch
 
-from agilerl.algorithms.core.llm_policy_loss import (
+from agilerl.algorithms.core.llm_ops.fused_policy_loss import (
     _k3_kl,
     llm_policy_loss_fn,
 )
 
 
-def test_no_liger_fused_module_raises_import_error(monkeypatch):
-    """``fused_llm_policy_loss`` requires ``liger-kernel`` and fails fast
-    at import time without it. Exercise the guard by forcing
-    ``HAS_LIGER_KERNEL=False`` and triggering a fresh import. Works on
-    both Liger-present (Linux CI) and Liger-absent (macOS dev) machines:
-    a failed module body never enters ``sys.modules``, so the cached
-    real module — if any — survives untouched.
+def test_no_liger_fused_module_imports_with_symbol_none():
+    """When ``HAS_LIGER_KERNEL=False``, ``fused_policy_loss`` must still
+    import cleanly so that downstream modules (notably ``LLMAlgorithm``)
+    can pull in the plain-tensor helpers ``_k3_kl`` and
+    ``llm_policy_loss_fn`` without depending on Liger. The Liger
+    autograd Function is gated: ``LigerFusedLinearPolicyLossFunction``
+    resolves to ``None`` so callers' ``is None`` guard fires.
     """
     import agilerl
+    import agilerl.algorithms.core.llm_ops.fused_policy_loss as mod
 
-    monkeypatch.setattr(agilerl, "HAS_LIGER_KERNEL", False)
-    mod_name = "agilerl.algorithms.core.fused_llm_policy_loss"
-    monkeypatch.delitem(sys.modules, mod_name, raising=False)
-
-    with pytest.raises(ImportError, match="liger-kernel"):
-        importlib.import_module(mod_name)
+    original_has_liger = agilerl.HAS_LIGER_KERNEL
+    try:
+        agilerl.HAS_LIGER_KERNEL = False
+        importlib.reload(mod)
+        assert mod.LigerFusedLinearPolicyLossFunction is None
+        # Plain-tensor helpers must still be importable.
+        assert callable(mod._k3_kl)
+        assert callable(mod.llm_policy_loss_fn)
+        # Stub base class is ``object`` on no-Liger platforms.
+        assert mod.LigerFusedLinearPPOBase is object
+    finally:
+        agilerl.HAS_LIGER_KERNEL = original_has_liger
+        importlib.reload(mod)
 
 
 @pytest.mark.parametrize(
@@ -602,7 +610,7 @@ class TestLlmPpoLossFnTurnMode:
 from agilerl import HAS_LIGER_KERNEL  # noqa: E402
 
 if HAS_LIGER_KERNEL:
-    from agilerl.algorithms.core.fused_llm_policy_loss import (  # noqa: E402
+    from agilerl.algorithms.core.llm_ops.fused_policy_loss import (  # noqa: E402
         LigerFusedLinearPolicyLossFunction,
     )
 

@@ -1229,17 +1229,20 @@ class TestLigerDPOWithAlphaBackward:
         if not HAS_LIGER_KERNEL:
             pytest.skip("liger-kernel not installed")
 
-        import agilerl.utils.llm_utils as llm_utils_mod
+        import agilerl.algorithms.core.llm_ops.fused_dpo_loss as fused_dpo_mod
+        from liger_kernel.chunked_loss.fused_linear_preference import (
+            LigerFusedLinearPreferenceBase,
+        )
 
         def fake_parent_backward(ctx, grad_output):
             return tuple(range(16))
 
         with patch.object(
-            llm_utils_mod.LigerFusedLinearPreferenceBase,
+            LigerFusedLinearPreferenceBase,
             "backward",
             staticmethod(fake_parent_backward),
         ):
-            out = llm_utils_mod._LigerDPOWithAlpha.backward(
+            out = fused_dpo_mod._LigerDPOWithAlpha.backward(
                 MagicMock(), torch.tensor(1.0)
             )
 
