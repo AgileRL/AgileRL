@@ -2052,7 +2052,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         seed: int,
         pad_token_id: int,
         pad_token: str,
-        use_liger_loss: bool | None,
+        use_liger_loss: bool,
         lora_config: LoraConfig | None,
         use_separate_reference_adapter: bool = False,
         lr_critic: float | None = None,
