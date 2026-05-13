@@ -75,10 +75,12 @@ class DummyPreferenceDataset(Dataset):
 class DummySFTDataset(Dataset):
     def __init__(self, num_samples: int) -> None:
         self.prompt = [f"This is prompt {i}." for i in range(num_samples)]
-        self.response = [f"This is response {i}." for i in range(num_samples)]
+        self.target = [f"This is response {i}." for i in range(num_samples)]
+        # SFTGym's default ``response_column`` is "target"; the output
+        # batch is still keyed under "response" regardless of input name.
         self.features = {
             "prompt": self.prompt,
-            "response": self.response,
+            "target": self.target,
         }
         self.info = Info("dummy_sft_dataset")
 
@@ -88,7 +90,7 @@ class DummySFTDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, str]:
         return {
             "prompt": self.prompt[index],
-            "response": self.response[index],
+            "target": self.target[index],
         }
 
 
@@ -999,13 +1001,13 @@ class TestSFTGymInit:
                     "This is a prompt that is longer than the max context length. This prompt really is a lot longer than the other one.",
                     "short",
                 ],
-                "response": ["a", "b"],
+                "target": ["a", "b"],
             },
         )
         test_dataset = HFDataset.from_dict(
             {
                 "prompt": ["ok"],
-                "response": ["a"],
+                "target": ["a"],
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
@@ -1025,8 +1027,8 @@ class TestSFTGymInit:
     def test_sft_gym_init_missing_features(self):
         """SFTGym raises AssertionError when dataset lacks required features."""
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        good_dataset = HFDataset.from_dict({"prompt": ["p"], "response": ["r"]})
-        # Has "prompt" (so super().__init__ filter works) but missing "response"
+        good_dataset = HFDataset.from_dict({"prompt": ["p"], "target": ["r"]})
+        # Has "prompt" (so super().__init__ filter works) but missing "target"
         bad_dataset = HFDataset.from_dict({"prompt": ["p"], "other": ["o"]})
         with pytest.raises(AssertionError, match="must contain"):
             SFTGym(

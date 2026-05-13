@@ -164,6 +164,10 @@ def _make_cpu_dpo_for_branch_tests(**kwargs):
         "wrap": False,
         "gradient_checkpointing": False,
         "device": "cpu",
+        # Pin so the unfused learn() path is exercised by default
+        # regardless of liger-kernel availability. Liger-specific tests
+        # override this.
+        "use_liger_loss": False,
     }
     defaults.update(kwargs)
     return DPO(**defaults)
@@ -701,6 +705,10 @@ class TestDPOSaveLoadCheckpoint:
                 accelerator=accelerator,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 lora_config=copy.deepcopy(dpo.lora_config),
+                # Match the saved agent's setting so the constructor doesn't
+                # mutate ``lora_config`` differently (``use_liger_loss=True``
+                # adds ``exclude_modules=["lm_head"]``).
+                use_liger_loss=dpo.use_liger_loss,
             )
             new_dpo.load_checkpoint(tmpdir)
 

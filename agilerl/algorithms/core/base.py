@@ -24,7 +24,6 @@ from typing import (
 import dill
 import numpy as np
 import torch
-import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list, set_seed
 from gymnasium import spaces
@@ -121,13 +120,14 @@ if TYPE_CHECKING or HAS_DEEPSPEED:
 if TYPE_CHECKING or HAS_VLLM:
     from vllm import LLM, SamplingParams
 
-    from agilerl.algorithms.core.fused_lora import (
+    from agilerl.algorithms.core.llm_ops.fused_lora import (
         clear_fused_adapter_routing,
         patch_lora_for_fused_forward,
         set_fused_adapter_routing,
     )
     from agilerl.utils.llm_utils import (
         align_deepspeed_lr,
+        build_completion_mask,
         create_model_from_name_or_path,
         gather_if_zero3,
         get_model_name_or_path,
@@ -1979,7 +1979,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :type pad_token_id: int
     :param pad_token: The pad token.
     :type pad_token: str
-    :param use_liger_loss: Whether to use Liger loss.
+    :param use_liger_loss: Whether to use Liger loss. Defaults to ``False``.
+        Passing ``True`` without ``liger-kernel`` installed warns and falls
+        back to ``False``.
     :type use_liger_loss: bool
     :param lora_config: The LoRA config.
     :type lora_config: LoraConfigProtocol | None
@@ -2015,6 +2017,24 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :param reduce_memory_peak: Deprecated. Previously hinted peak-memory batching;
         ignored. Configure ``micro_batch_size_per_gpu`` and DeepSpeed instead.
     :type reduce_memory_peak: bool, optional
+    :param cast_logprobs_to_fp32: When ``True`` (the default), the per-token
+        log-probability reduction (``amax`` / ``gather`` / ``logsumexp``)
+        runs in fp32 before being cast back to the input dtype. Applies
+        uniformly to both the unfused ``(B, T, V)`` path
+        (:meth:`_logprobs_from_logits`) and the fused linear log-prob
+        path (:meth:`_logprobs_from_hidden_fused`) so the two paths
+        produce numerically equivalent log-probs.
+
+        The default preserves prior behaviour exactly: the unfused path
+        was already promoting to fp32 unconditionally before this flag
+        existed. The flag exposes that promotion as configurable.
+
+        Setting ``False`` introduces a per-token bf16 quantisation error
+        (~0.1 at ``V≈128k``) which can bias PPO/GRPO importance-sampling
+        ratios. Use only if you've verified bf16 is acceptable for your
+        vocab/shape — it saves ~18 GB on the unfused path at ``B=8,
+        T=2048, V≈152k``, ~6 MB on the fused path.
+    :type cast_logprobs_to_fp32: bool, optional
     """
 
     _separate_reference_adapter_deprecation_emitted = False
@@ -2052,6 +2072,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
+        use_fused_linear_logprobs: bool = False,
+        cast_logprobs_to_fp32: bool = True,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
@@ -2196,6 +2218,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self._warn_separate_reference_adapter_deprecation()
+        self.use_fused_linear_logprobs = use_fused_linear_logprobs
+        self.cast_logprobs_to_fp32 = cast_logprobs_to_fp32
 
         selected_adapters = ("actor",)
         if use_separate_reference_adapter:
@@ -3424,6 +3448,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         unwrapped = self._get_unwrapped_actor()
         total = fused_ids.shape[0]
+        seq_len_out = fused_ids.shape[1] - 1
 
         position_ids = None
         if self.calc_position_embeddings:
@@ -3436,9 +3461,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             else [(s, min(s + batch_size, total)) for s in range(0, total, batch_size)]
         )
 
-        all_logprobs: list[torch.Tensor] = []
-        all_values: list[torch.Tensor] = []
-        for start, end in chunks:
+        # Fused-linear-logprob path: replace lm_head with nn.Identity for the
+        # no-grad forward, then compute per-token logprobs via a chunked
+        # matmul over the lm_head weight. Skips materializing (B, T, V).
+        # Only safe when grads are disabled — autograd graph would not
+        # capture the manual matmul.
+        use_fused_lp = self.use_fused_linear_logprobs and not torch.is_grad_enabled()
+        if use_fused_lp:
+            lm_head = self._get_lm_head()
+            lm_head_weight = lm_head.weight
+            lm_head_bias = lm_head.bias
+
+        def _process_chunk(
+            start: int, end: int
+        ) -> tuple[torch.Tensor, torch.Tensor | None]:
             set_fused_adapter_routing(unwrapped, routing[start:end])
             model_kwargs: dict = {
                 "input_ids": fused_ids[start:end],
@@ -3448,38 +3484,84 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if position_ids is not None:
                 model_kwargs["position_ids"] = position_ids[start:end]
 
-            with self._amp_ctx():
+            patch_ctx = (
+                self._patch_lm_head_to_identity() if use_fused_lp else nullcontext()
+            )
+            with patch_ctx, self._amp_ctx():
                 output = self.actor.forward(**model_kwargs)
 
             if isinstance(output, tuple):
                 # Value-head models may return (loss, logits, value, ...); Peft/causal
-                # paths may return shorter tuples — only index when present.
-                logits = output[0]
+                # paths may return shorter tuples — only index when present. With
+                # lm_head identity-patched, output[0] is the last hidden state.
+                first = output[0]
                 value = output[2] if len(output) > 2 else None
             else:
-                logits = output.logits
+                first = output.logits
                 value = None
-
             del output
-            logits = logits / self.temperature
 
-            all_logprobs.append(
-                LLMAlgorithm._memory_efficient_logits(
+            if use_fused_lp:
+                chunk_lp = LLMAlgorithm._logprobs_from_hidden_fused(
+                    first[:, :-1],
+                    lm_head_weight,
+                    lm_head_bias,
+                    fused_ids[start:end, 1:],
+                    temperature=self.temperature,
+                    cast_to_fp32=self.cast_logprobs_to_fp32,
+                )
+                del first
+            else:
+                logits = first / self.temperature
+                del first
+                chunk_lp = LLMAlgorithm._logprobs_from_logits(
                     logits[:, :-1],
                     fused_ids[start:end, 1:],
+                    cast_to_fp32=self.cast_logprobs_to_fp32,
                 )
-            )
-            if self.use_value_head and value is not None:
-                all_values.append(value[:, :-1])
+                del logits
 
-        if self.use_value_head:
-            values = torch.cat(all_values, dim=0) if len(chunks) > 1 else all_values[0]
-        else:
-            values = None
-        logprobs = (
-            torch.cat(all_logprobs, dim=0) if len(chunks) > 1 else all_logprobs[0]
-        )
-        return logprobs, values
+            chunk_v = (
+                value[:, :-1] if (self.use_value_head and value is not None) else None
+            )
+            return chunk_lp, chunk_v
+
+        # Single-chunk fast path: skip the buffer + copy entirely.
+        if len(chunks) == 1:
+            return _process_chunk(0, total)
+
+        # Multi-chunk path: pre-allocate output buffers once and write each
+        # chunk in place via copy_(). Avoids holding the full list of chunk
+        # tensors plus the concatenated buffer in memory at the same time
+        # (which doubles peak memory in the torch.cat path).
+        logprobs_out: torch.Tensor | None = None
+        values_out: torch.Tensor | None = None
+
+        for start, end in chunks:
+            chunk_lp, chunk_v = _process_chunk(start, end)
+
+            # Lazy-allocate on the first chunk so we inherit dtype/device
+            # from the model output rather than guessing up front.
+            if logprobs_out is None:
+                logprobs_out = torch.empty(
+                    (total, seq_len_out),
+                    dtype=chunk_lp.dtype,
+                    device=chunk_lp.device,
+                )
+            logprobs_out[start:end].copy_(chunk_lp)
+            del chunk_lp
+
+            if chunk_v is not None:
+                if values_out is None:
+                    values_out = torch.empty(
+                        (total, seq_len_out),
+                        dtype=chunk_v.dtype,
+                        device=chunk_v.device,
+                    )
+                values_out[start:end].copy_(chunk_v)
+                del chunk_v
+
+        return logprobs_out, values_out
 
     def _fused_forward(
         self,
@@ -3629,6 +3711,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
+        use_fused_lp = self.use_fused_linear_logprobs and not torch.is_grad_enabled()
         with self.select_adapter("reference" if use_reference else "actor"):
             self.actor.train(mode=not eval_mode)
             num_samples = ids.shape[0]
@@ -3638,6 +3721,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if self.calc_position_embeddings:
                 position_ids = attention_mask.long().cumsum(dim=-1) - 1
                 position_ids.masked_fill_(mask=(attention_mask == 0), value=1)
+
+            if use_fused_lp:
+                lm_head = self._get_lm_head()
+                lm_head_weight = lm_head.weight
+                lm_head_bias = lm_head.bias
 
             # Split the sample into batches
             log_probs = []
@@ -3653,18 +3741,33 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 if self.calc_position_embeddings:
                     batch_position_ids = position_ids[batch:end_idx, :]
                     batch_model_kwargs |= {"position_ids": batch_position_ids}
-                with self._amp_ctx():
-                    output = self.actor.forward(**batch_model_kwargs)
-                logits = output[0] if isinstance(output, tuple) else output.logits
-                logits = logits / self.temperature
-
-                log_prob = LLMAlgorithm._memory_efficient_logits(
-                    logits[:, :-1],
-                    batch_ids[:, 1:],
+                patch_ctx = (
+                    self._patch_lm_head_to_identity() if use_fused_lp else nullcontext()
                 )
+                with patch_ctx, self._amp_ctx():
+                    output = self.actor.forward(**batch_model_kwargs)
+                first = output[0] if isinstance(output, tuple) else output.logits
 
+                if use_fused_lp:
+                    log_prob = LLMAlgorithm._logprobs_from_hidden_fused(
+                        first[:, :-1],
+                        lm_head_weight,
+                        lm_head_bias,
+                        batch_ids[:, 1:],
+                        temperature=self.temperature,
+                        cast_to_fp32=self.cast_logprobs_to_fp32,
+                    )
+                else:
+                    logits = first / self.temperature
+                    log_prob = LLMAlgorithm._logprobs_from_logits(
+                        logits[:, :-1],
+                        batch_ids[:, 1:],
+                        cast_to_fp32=self.cast_logprobs_to_fp32,
+                    )
+                    logits = None
+
+                first = None
                 batch_model_kwargs = None
-                logits = None
                 log_probs.append(log_prob)
         return torch.cat(log_probs, dim=0)
 
@@ -3796,14 +3899,19 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
             raise ImportError(msg)
 
+        max_token_cap = (
+            self.max_output_tokens
+            if self.max_output_tokens is not None
+            else self.max_model_len
+        )
+
         def _trajectory_input_ids(prompt: dict[str, Any]) -> torch.Tensor:
             return cast(
                 "torch.Tensor",
                 prompt.get("trajectory_input_ids", prompt["input_ids"]),
             )
 
-        def _token_prompt_for_vllm(prompt: dict[str, Any]) -> dict[str, list[int]]:
-            ids = _trajectory_input_ids(prompt)
+        def _token_prompt_for_vllm(ids: torch.Tensor) -> dict[str, list[int]]:
             return {"prompt_token_ids": ids.squeeze(0).tolist()}
 
         def _stitch_prefix(prompt: dict[str, Any], ref: torch.Tensor) -> torch.Tensor:
@@ -3812,7 +3920,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 return ref.new_zeros((ref.shape[0], 0))
             return cast("torch.Tensor", st)
 
-        def _vllm_max_new_tokens(model_prompt_len: int, max_token_cap: int) -> int:
+        def _vllm_max_new_tokens(model_prompt_len: int) -> int:
             room = self.max_model_len - model_prompt_len
             if room <= 0:
                 error_msg = f"Model prompt length ({model_prompt_len}) is greater than the model length ({self.max_model_len})"
@@ -3822,21 +3930,24 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 max_out = max(max_out, min(self.min_output_tokens, room))
             return min(max_out, room)
 
-        group_prompts = [prompt for prompt in prompts for _ in range(group_size)]
-        prompts_ids = [_trajectory_input_ids(p) for p in group_prompts]
-        stitch_prefixes = [
-            _stitch_prefix(p, prompts_ids[i]) for i, p in enumerate(group_prompts)
+        # Compute the per-prompt work once per *unique* prompt (N items),
+        # then alias by reference across each group (N·G items)
+        unique_ids = [_trajectory_input_ids(p) for p in prompts]
+        unique_tokens = [_token_prompt_for_vllm(ids) for ids in unique_ids]
+        unique_max = [_vllm_max_new_tokens(int(ids.shape[1])) for ids in unique_ids]
+        unique_stitch = [
+            _stitch_prefix(p, ids) for p, ids in zip(prompts, unique_ids, strict=True)
         ]
-        token_prompts = [_token_prompt_for_vllm(p) for p in group_prompts]
-        max_token_cap = (
-            self.max_output_tokens
-            if self.max_output_tokens is not None
-            else self.max_model_len
-        )
-        max_output_tokens = [
-            _vllm_max_new_tokens(int(prompt_id.shape[1]), max_token_cap)
-            for prompt_id in prompts_ids
-        ]
+
+        # Replicate by reference for the flat vLLM batch. Entries within a
+        # group of `group_size` are aliased references to the same tensor / dict
+        # — safe because downstream use is read-only is read-only w.r.t. these objects.
+        # Do not introduce in-place ops on these aliases.
+        group_prompts = [p for p in prompts for _ in range(group_size)]
+        prompts_ids = [ids for ids in unique_ids for _ in range(group_size)]
+        token_prompts = [tp for tp in unique_tokens for _ in range(group_size)]
+        max_output_tokens = [m for m in unique_max for _ in range(group_size)]
+        stitch_prefixes = [sp for sp in unique_stitch for _ in range(group_size)]
 
         if self.vllm_config.tensor_parallel_size > 1:
             orig_size = len(token_prompts)
@@ -3922,10 +4033,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             prompts_ids = all_prompts_ids[tp_slice]
             stitch_prefixes = all_stitch_prefixes[tp_slice]
 
-        prompts_ids = [p.to(self.device, non_blocking=True) for p in prompts_ids]
-        stitch_prefixes = [
-            sp.to(self.device, non_blocking=True) for sp in stitch_prefixes
+        # Transfer fromn host-to-device once per unique prompt, then re-alias across the group.
+        unique_prompts_ids_dev = [
+            prompts_ids[group_size * i].to(self.device, non_blocking=True)
+            for i in range(len(prompts))
         ]
+        unique_stitch_dev = [
+            stitch_prefixes[group_size * i].to(self.device, non_blocking=True)
+            for i in range(len(prompts))
+        ]
+        prompts_ids = [ids for ids in unique_prompts_ids_dev for _ in range(group_size)]
+        stitch_prefixes = [sp for sp in unique_stitch_dev for _ in range(group_size)]
 
         completion_ids = [
             torch.cat(
@@ -3933,7 +4051,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     torch.cat(
                         prompts_ids[group_size * i : group_size * (i + 1)],
                         dim=0,
-                    ).to(self.device),
+                    ),
                     stack_and_pad_experiences(
                         completion_ids[group_size * i : group_size * (i + 1)],
                         padding_values=[self.pad_token_id],
@@ -3958,66 +4076,136 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             int(cast("torch.Tensor", prompts[i]["input_ids"]).shape[1])
             for i in range(len(prompts))
         ]
-        completion_masks = []
-
-        for i, completion_id in enumerate(completion_ids):
-            completion_mask = torch.zeros_like(
-                completion_id,
-                dtype=torch.bool,
-                device=self.device,
-            )
-            completion_mask[:, num_input_tokens[i] :] = True
-            completion_mask[completion_id == self.pad_token_id] = False
-            completion_mask = completion_mask[:, 1:]
-            completion_masks.append(completion_mask)
+        completion_masks = [
+            build_completion_mask(completion_id, num_input_tokens[i], self.pad_token_id)
+            for i, completion_id in enumerate(completion_ids)
+        ]
 
         return completion_ids, completion_masks
 
     @staticmethod
-    def _memory_efficient_logits(
+    def _logprobs_from_logits(
         logits: torch.Tensor,
         index: torch.Tensor,
+        cast_to_fp32: bool = True,
         _chunk_rows: int = 1,
     ) -> torch.Tensor:
         """Calculate log probabilities for previously generated token ids.
 
-        Processes a few rows at a time so peak memory stays bounded to
-        ``(_chunk_rows, seq_len, vocab_size)`` rather than the full batch,
-        avoiding OOM on large-vocabulary models while reducing Python loop
-        overhead compared to a strict row-by-row approach.
+        Processes ``_chunk_rows`` rows at a time so peak memory stays bounded to
+        ``(_chunk_rows, seq_len, vocab_size)`` rather than the full batch, avoiding
+        OOM on large-vocabulary models. Default ``_chunk_rows=1`` minimizes the
+        fp32 workspace at the cost of more kernel launches; raise to amortize
+        launch overhead when memory headroom allows.
+
+        With ``cast_to_fp32=True``, the per-chunk reduction (``amax`` /
+        ``gather`` / ``logsumexp``) runs in fp32 then casts the
+        ``(B, seq_len)`` output back to *logits* dtype. Matches the precision
+        of ``F.log_softmax`` over the same inputs to within the final bf16
+        cast. With ``cast_to_fp32=False`` the reduction stays in *logits*
+        dtype throughout — faster and lower peak (no fp32 workspace) at the
+        cost of bf16-quantisation error in the reduction.
+
+        Logits are max-centered per row before ``logsumexp``, matching
+        ``F.log_softmax`` stability either way.
 
         :param logits: Logits of shape ``(B, seq_len, vocab_size)``.
         :type logits: torch.Tensor
         :param index: Token IDs of shape ``(B, seq_len)``.
         :type index: torch.Tensor
+        :param cast_to_fp32: Promote each chunk to fp32 before the reduction.
+        :type cast_to_fp32: bool
         :return: Log probabilities of the completion IDs, shape ``(B, seq_len)``.
         :rtype: torch.Tensor
         """
-        # 1. Gather the raw logits for the specific token IDs.
-        # Shape reduces from (B, seq_len, vocab_size) immediately to (B, seq_len)
-
+        orig_dtype = logits.dtype
         B = logits.shape[0]
+
+        def _logprobs_chunk(lg: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+            if cast_to_fp32:
+                lg = lg.float()
+            max_lg = lg.amax(dim=-1, keepdim=True)
+            shifted = lg - max_lg
+            target = shifted.gather(dim=-1, index=idx.unsqueeze(-1)).squeeze(-1)
+            log_z = torch.logsumexp(shifted, dim=-1)
+            result = target - log_z
+            return result.to(orig_dtype) if cast_to_fp32 else result
+
         if B <= _chunk_rows:
-            return (
-                F.log_softmax(logits, dim=-1)
-                .gather(dim=-1, index=index.unsqueeze(-1))
-                .squeeze(-1)
-            )
+            return _logprobs_chunk(logits, index)
 
         per_token_logps = []
         for start in range(0, B, _chunk_rows):
             end = min(start + _chunk_rows, B)
-            target_logits_chunk = (
-                logits[start:end]
-                .gather(dim=-1, index=index[start:end].unsqueeze(-1))
-                .squeeze(-1)
+            per_token_logps.append(
+                _logprobs_chunk(logits[start:end], index[start:end]),
             )
-            log_z_chunk = torch.logsumexp(logits[start:end], dim=-1)
-            per_token_logps_chunk = (target_logits_chunk - log_z_chunk).to(
-                logits.dtype
-            )  # Do we need to upcast to float 32 here??
-            per_token_logps.append(per_token_logps_chunk)
         return torch.cat(per_token_logps, dim=0)
+
+    @staticmethod
+    def _logprobs_from_hidden_fused(
+        hidden: torch.Tensor,
+        lm_head_weight: torch.Tensor,
+        lm_head_bias: torch.Tensor | None,
+        target_ids: torch.Tensor,
+        temperature: float = 1.0,
+        cast_to_fp32: bool = True,
+        _chunk_rows: int = 1024,
+    ) -> torch.Tensor:
+        """Per-token target logprobs without materializing the full ``(B, T, V)``
+        logits tensor.
+
+        Tiles flat over ``(B*T)`` with workspace bounded to ``(_chunk_rows, V)``
+        per iteration. Counterpart of :meth:`_logprobs_from_logits` for
+        callers that hold hidden states and the lm_head separately. **No-grad
+        only** — gradients won't flow to ``lm_head_weight`` from this fn.
+
+        Numerical contract matches :meth:`_logprobs_from_logits` when fed
+        equivalent inputs (``logits = (hidden @ Wᵀ + b) / T``): same
+        ``cast_to_fp32`` semantics, same final-cast-back-to-input-dtype, same
+        max-shift ``gather - logsumexp`` formulation. Default ``cast_to_fp32=True``
+        keeps the two paths bit-comparable.
+
+        :param hidden: ``(B, T, H)`` last-hidden-state.
+        :param lm_head_weight: ``(V, H)``.
+        :param lm_head_bias: ``(V,)`` or ``None``.
+        :param target_ids: ``(B, T)`` (caller does the ``[:, :-1]``/``[:, 1:]``
+            shift before calling).
+        :param temperature: scalar; logits divided by this before log_softmax
+            (skipped when ``1.0``).
+        :param cast_to_fp32: when True (default), run the per-chunk reduction
+            in fp32 then cast back. Same semantics as
+            :meth:`_logprobs_from_logits`.
+        :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per
+            iteration; trades launch count vs ``_chunk_rows * V`` peak.
+        :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
+        """
+        orig_dtype = hidden.dtype
+        B, T, H = hidden.shape
+        flat_h = hidden.reshape(-1, H)
+        flat_targets = target_ids.reshape(-1).to(torch.long)
+        N = flat_h.shape[0]
+        out = torch.empty(N, dtype=orig_dtype, device=hidden.device)
+        W_t = lm_head_weight.t()
+
+        for s in range(0, N, _chunk_rows):
+            e = min(s + _chunk_rows, N)
+            chunk_logits = flat_h[s:e] @ W_t
+            if lm_head_bias is not None:
+                chunk_logits.add_(lm_head_bias)
+            if temperature != 1.0:
+                chunk_logits.div_(temperature)
+            if cast_to_fp32:
+                chunk_logits = chunk_logits.float()
+            mx = chunk_logits.amax(dim=-1, keepdim=True)
+            chunk_logits.sub_(mx)
+            tgt = chunk_logits.gather(dim=-1, index=flat_targets[s:e, None]).squeeze(-1)
+            log_z = torch.logsumexp(chunk_logits, dim=-1)
+            del chunk_logits
+            result = tgt - log_z
+            out[s:e].copy_(result.to(orig_dtype) if cast_to_fp32 else result)
+
+        return out.reshape(B, T)
 
     def _configure_batch_size_per_process(
         self,
@@ -4651,25 +4839,63 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if hasattr(self.actor.optimizer, "clip_grad"):
                 self.actor.optimizer.clip_grad = self.max_grad_norm
 
-    def _get_lm_head(self):
-        """Locate the lm_head module, handling both raw and PEFT-wrapped models.
+    def _get_lm_head_parent(self) -> tuple[Any, str]:
+        """Locate the parent module owning ``lm_head`` (or ``embed_out``).
 
-        :return: The lm_head (or embed_out) linear layer.
-        :rtype: torch.nn.Module
+        Walks through value-head, PEFT, and LoRA wrappers to the inner
+        causal-LM that exposes the language-model head as an attribute.
+        Returned so that callers can both read the head (``getattr(parent,
+        attr)``) and replace it temporarily (``setattr(parent, attr, ...)``)
+        — the latter is used by the no-grad fused-linear-logprob path.
+
+        :return: ``(parent_module, attr_name)``.
         :raises AttributeError: If no lm_head can be found.
         """
         model = self.actor
+        if self.use_value_head and hasattr(model, "pretrained_model"):
+            # Value-head wrapper (e.g. AutoModelForCausalLMWithValueHead) →
+            # the PEFT/causal-LM inner model.
+            model = model.pretrained_model
         if hasattr(model, "base_model"):  # PeftModel → LoraModel
             model = model.base_model
         if hasattr(model, "model"):  # LoraModel → CausalLM
             model = model.model
         for attr in ("lm_head", "embed_out"):
             if hasattr(model, attr):
-                return getattr(model, attr)
-        err_msg = f"""Cannot find lm_head in {type(self.actor).__name__}.
-        Set use_liger_loss=False.
-        """
+                return model, attr
+        err_msg = (
+            f"Cannot find lm_head in {type(self.actor).__name__}. "
+            "Set use_liger_loss=False and use_fused_linear_logprobs=False."
+        )
         raise AttributeError(err_msg)
+
+    def _get_lm_head(self):
+        """Locate the lm_head module, handling value-head, PEFT and LoRA wrappers.
+
+        :return: The lm_head (or embed_out) linear layer.
+        :rtype: torch.nn.Module
+        :raises AttributeError: If no lm_head can be found.
+        """
+        parent, attr = self._get_lm_head_parent()
+        return getattr(parent, attr)
+
+    @contextmanager
+    def _patch_lm_head_to_identity(self):
+        """Temporarily replace ``lm_head`` with ``nn.Identity``.
+
+        With the head identity-patched, the model's ``output.logits`` becomes
+        the post-final-norm hidden state ``(B, T, H)`` instead of the full
+        ``(B, T, V)`` logits — which is what the no-grad fused-linear-logprob
+        kernel consumes directly. The original module is always restored,
+        even if the wrapped block raises.
+        """
+        model, attr = self._get_lm_head_parent()
+        original = getattr(model, attr)
+        setattr(model, attr, torch.nn.Identity())
+        try:
+            yield original
+        finally:
+            setattr(model, attr, original)
 
     def _get_unwrapped_actor(self) -> Any:
         """Return actor unwrapped from Accelerate and DummyEvolvable layers."""

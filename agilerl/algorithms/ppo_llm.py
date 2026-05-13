@@ -6,10 +6,19 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
-from agilerl.algorithms.core.fused_lora import clear_fused_adapter_routing
+from agilerl.algorithms.core.llm_ops.fused_lora import clear_fused_adapter_routing
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+
+if HAS_LIGER_KERNEL:
+    from agilerl.algorithms.core.llm_ops.fused_loss import (
+        LigerFusedLinearPolicyLossFunction,
+    )
+else:
+    # Keep the name resolvable when liger-kernel isn't installed so unit
+    # tests can patch it. ``_ppo_loss_liger`` guards against actual use.
+    LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
 from agilerl.protocols import (
     LoraConfigProtocol,
     MultiTurnEnv,
@@ -25,6 +34,8 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.llm_utils import (
     ReasoningGym,
+    build_completion_mask,
+    calculate_k3_kl,
     masked_mean,
     masked_whiten,
     normalize_reasoning_prompt_batch,
@@ -190,6 +201,9 @@ class PPO(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
+        use_fused_linear_logprobs: bool = False,
+        cast_logprobs_to_fp32: bool = True,
+        use_liger_loss: bool = False,
     ) -> None:
 
         device = (
@@ -209,7 +223,7 @@ class PPO(LLMAlgorithm):
             use_value_head=True,
             use_vllm=use_vllm,
             vllm_config=vllm_config,
-            use_liger_loss=False,
+            use_liger_loss=use_liger_loss,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
@@ -226,6 +240,8 @@ class PPO(LLMAlgorithm):
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
             reduce_memory_peak=reduce_memory_peak,
+            use_fused_linear_logprobs=use_fused_linear_logprobs,
+            cast_logprobs_to_fp32=cast_logprobs_to_fp32,
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
@@ -327,6 +343,7 @@ class PPO(LLMAlgorithm):
         self,
         obs: LLMObsType,
         training: bool = True,
+        **kwargs: Any,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Generate completion tokens for each prompt in the batch.
 
@@ -334,6 +351,8 @@ class PPO(LLMAlgorithm):
         :type obs: LLMObsType
         :param training: If ``False``, use near-deterministic decoding where applicable.
         :type training: bool
+        :param kwargs: Additional keyword arguments accepted for base-class compatibility.
+        :type kwargs: Any
         :return: Per-prompt completion token IDs and masks over generated positions.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
@@ -377,15 +396,13 @@ class PPO(LLMAlgorithm):
                                 )
                             )
                             completion_ids.append(completion_id)
-                            completion_mask = torch.zeros_like(
-                                completion_id,
-                                dtype=torch.bool,
-                                device=completion_id.device,
+                            completion_masks.append(
+                                build_completion_mask(
+                                    completion_id,
+                                    full_prompt_len,
+                                    self.pad_token_id,
+                                )
                             )
-                            completion_mask[:, full_prompt_len:] = True
-                            completion_mask[completion_id == self.pad_token_id] = False
-                            completion_mask = completion_mask[:, 1:]
-                            completion_masks.append(completion_mask)
             else:
                 self._prepare_vllm_for_generation()
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
@@ -458,34 +475,33 @@ class PPO(LLMAlgorithm):
                 "mean_entropy": 0.0,
                 "mean_clipfrac": 0.0,
             }
-            with torch.inference_mode():
-                reference_log_probs, old_log_probs, old_values = (
-                    self._fused_forward_no_grad(
-                        completion_ids,
-                        batch_size=batch_size,
-                    )
+            reference_log_probs, old_log_probs, old_values = (
+                self._fused_forward_no_grad(
+                    completion_ids,
+                    batch_size=batch_size,
                 )
-                old_values = torch.masked_fill(old_values, ~action_mask_bool, 0.0)
+            )
+            old_values = torch.masked_fill(old_values, ~action_mask_bool, 0.0)
 
-                token_rewards = self._compute_token_rewards(
-                    action_masks, rewards_2d, turn_ids
-                )
+            token_rewards = self._compute_token_rewards(
+                action_masks, rewards_2d, turn_ids
+            )
 
-                old_log_probs = torch.masked_fill(old_log_probs, ~action_mask_bool, 1.0)
-                reference_log_probs = torch.masked_fill(
-                    reference_log_probs, ~action_mask_bool, 1.0
+            old_log_probs = torch.masked_fill(old_log_probs, ~action_mask_bool, 1.0)
+            reference_log_probs = torch.masked_fill(
+                reference_log_probs, ~action_mask_bool, 1.0
+            )
+            if ppo_granularity == "token":
+                returns, advantages = self._compute_gae_returns_token(
+                    token_rewards,
+                    old_values,
+                    action_masks,
                 )
-                if ppo_granularity == "token":
-                    returns, advantages = self._compute_gae_returns_token(
-                        token_rewards,
-                        old_values,
-                        action_masks,
-                    )
-                else:
-                    returns, advantages = self._compute_gae_returns(
-                        token_rewards, old_values, action_masks, turn_ids
-                    )
-                del token_rewards
+            else:
+                returns, advantages = self._compute_gae_returns(
+                    token_rewards, old_values, action_masks, turn_ids
+                )
+            del token_rewards
 
             self.actor.train()
             for _epoch_idx in range(self.update_epochs):
@@ -517,6 +533,32 @@ class PPO(LLMAlgorithm):
 
                     batch_mask_bool = batch_action_mask.bool()
 
+                    if self.use_liger_loss:
+                        # Liger fused policy + KL (no (B, T, V) logits saved
+                        # for backward) plus an unfused critic pass for the
+                        # value loss. See :meth:`_ppo_loss_liger`.
+                        total_loss, metrics = self._ppo_loss_liger(
+                            batch_ids,
+                            batch_action_mask,
+                            batch_old_log_probs,
+                            batch_reference_log_probs,
+                            batch_returns,
+                            batch_advantages,
+                            batch_old_values,
+                            batch_turn_ids,
+                            ppo_granularity,
+                        )
+                        self._backward_pass(total_loss)
+                        clear_fused_adapter_routing(self._get_unwrapped_actor())
+                        learn_metrics["mean_kl"] += metrics["kl"]
+                        learn_metrics["mean_entropy"] += metrics["entropy"]
+                        learn_metrics["mean_clipfrac"] += metrics["clipfrac"]
+                        learn_metrics["mean_pg_loss"] += metrics["pg_loss"]
+                        learn_metrics["mean_vf_loss"] += metrics["vf_loss"]
+                        learn_metrics["mean_loss"] += total_loss.item()
+                        updates += 1
+                        continue
+
                     # Fused forward: actor logprobs + critic values in one pass.
                     batch_log_probs, batch_values = self._fused_forward(
                         batch_ids,
@@ -525,9 +567,7 @@ class PPO(LLMAlgorithm):
                     batch_log_probs = torch.masked_fill(
                         batch_log_probs, ~batch_mask_bool, 1.0
                     )
-                    kl = self._calculate_kl_divergence(
-                        batch_log_probs, batch_reference_log_probs
-                    )
+                    kl = calculate_k3_kl(batch_log_probs, batch_reference_log_probs)
                     masked_entropy = masked_mean(
                         -batch_log_probs.detach(), batch_action_mask
                     )
@@ -670,7 +710,7 @@ class PPO(LLMAlgorithm):
         :rtype: torch.Tensor
         """
         eval_context = getattr(env, "eval_mode", nullcontext)
-        with eval_context(), torch.inference_mode():
+        with eval_context():
             if isinstance(env, ReasoningGym):
                 prompts = env.reset()
                 rewards = []
@@ -829,6 +869,212 @@ class PPO(LLMAlgorithm):
             token_advantages = masked_whiten(token_advantages, action_mask)
         return token_returns, token_advantages * mask
 
+    def _ppo_loss_liger(
+        self,
+        batch_ids: torch.Tensor,
+        batch_action_mask: torch.Tensor,
+        batch_old_log_probs: torch.Tensor,
+        batch_reference_log_probs: torch.Tensor,
+        batch_returns: torch.Tensor,
+        batch_advantages: torch.Tensor,
+        batch_old_values: torch.Tensor,
+        batch_turn_ids: torch.Tensor,
+        ppo_granularity: str,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """PPO loss via the fused-linear PPO Function (token + turn modes).
+
+        Two body forwards (matching the doubled-forward shape of
+        :meth:`_fused_forward`):
+
+        1. **Actor pass** under ``select_adapter("actor")``. ``lm_head``
+           pre-hook captures hidden states; :class:`LigerFusedLinearPolicyLossFunction`
+           computes the chunked policy + KL loss without ever materializing
+           ``(B, T, V)`` for the autograd graph.
+        2. **Critic pass** under ``select_adapter("critic")``. Standard
+           forward through the value head; value loss computed with the
+           token-level clipped formulation in token mode and the turn-level
+           clipped formulation in turn mode. The ``(B, T, 1)`` value tensor
+           is small — fusion buys nothing here.
+
+        Granularity dispatch:
+
+        * ``ppo_granularity == "token"``: per-token policy loss inside the
+          Liger Function; per-token clipped value loss outside.
+        * ``ppo_granularity == "turn"`` and ``self.turn_level_clip``:
+          token log-ratios are scatter-pooled into per-turn log-ratios
+          inside the Liger Function; turn-level advantages and clipping
+          + per-turn value loss outside.
+        * ``ppo_granularity == "turn"`` and not ``self.turn_level_clip``:
+          per-token policy loss (broadcast turn advantages to tokens up
+          front); per-turn value loss outside.
+
+        :return: ``(total_loss, metrics)`` with ``metrics`` keying scalar
+            Python floats: ``kl``, ``pg_loss``, ``vf_loss``, ``clipfrac``,
+            ``entropy``.
+        """
+        if not HAS_LIGER_KERNEL:
+            msg = (
+                "Liger PPO loss was requested but `liger-kernel` is not "
+                "available. Set use_liger_loss=False."
+            )
+            raise ImportError(msg)
+
+        batch_ids = batch_ids.to(self.device)
+        mask = batch_action_mask.to(self.device).contiguous()
+        old_log_probs = batch_old_log_probs.to(self.device).contiguous()
+        ref_log_probs = batch_reference_log_probs.to(self.device).contiguous()
+        advantages = batch_advantages.to(self.device).contiguous()
+        returns = batch_returns.to(self.device).contiguous()
+        old_values = batch_old_values.to(self.device).contiguous()
+        turn_ids = batch_turn_ids.to(self.device).contiguous()
+        mask_bool = mask.bool()
+
+        attention_mask = (batch_ids != self.pad_token_id).long()
+        kwargs: dict[str, Any] = {
+            "input_ids": batch_ids,
+            "attention_mask": attention_mask,
+            "use_cache": False,
+        }
+        if self.calc_position_embeddings:
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            kwargs["position_ids"] = position_ids
+
+        # Build turn-mode args once if needed: shape advantages, build the
+        # global turn mask + max_turns. These are derived from
+        # ``batch_turn_ids`` so chunks see globally-consistent denominators.
+        is_turn_clip = ppo_granularity == "turn" and self.turn_level_clip
+        turn_ids_arg: torch.Tensor | None = None
+        full_turn_mask: torch.Tensor | None = None
+        max_turns: int | None = None
+        if ppo_granularity == "turn":
+            max_turns = int(turn_ids.max().item()) + 1
+            # Per-(sample, turn) existence mask: at least one action token
+            # in this sample falls into this turn.
+            full_turn_mask = torch.zeros(
+                turn_ids.shape[0], max_turns, device=self.device
+            )
+            for t in range(max_turns):
+                full_turn_mask[:, t] = (turn_ids == t).any(dim=1).float()
+
+        if is_turn_clip:
+            # Liger fn expects per-turn advantages of shape ``(B, max_turns)``.
+            # PPO already computes per-token advantages; pool by turn-mean
+            # to recover the per-turn signal (the unfused path does the
+            # same via ``pool_by_turns(batch_advantages, ...)``).
+            adv_for_liger = pool_by_turns(advantages, turn_ids, max_turns)
+            turn_ids_arg = turn_ids
+        else:
+            adv_for_liger = advantages
+
+        # ---- Actor pass (Liger fused policy + KL) ----
+        # Identity-patch lm_head so the actor forward outputs the last hidden
+        # state (B, T, H) directly instead of computing the full (B, T, V)
+        # logits only to discard them. lm_head_weight is passed separately to
+        # LigerFusedLinearPolicyLossFunction which handles the matmul and its grad.
+        lm_head = self._get_lm_head()
+        lm_head_weight = lm_head.weight
+        lm_head_bias = lm_head.bias
+
+        with (
+            self._patch_lm_head_to_identity(),
+            self.select_adapter("actor"),
+            self._amp_ctx(),
+        ):
+            self.actor.train()
+            actor_output = self.actor(**kwargs)
+        policy_hidden = (
+            actor_output[0] if isinstance(actor_output, tuple) else actor_output.logits
+        )  # (B, T, H)
+
+        target_ids = batch_ids[:, 1:].contiguous()
+        loss_pg_kl, aux = LigerFusedLinearPolicyLossFunction.apply(
+            policy_hidden[:, :-1].contiguous(),
+            lm_head_weight,
+            target_ids,
+            mask,
+            adv_for_liger,
+            lm_head_bias,
+            ref_log_probs,
+            old_log_probs,
+            self.beta,
+            self.clip_coef,  # epsilon_low
+            self.clip_coef,  # epsilon_high
+            self.temperature,
+            False,  # compiled — torch.compile dynamic shapes fight Liger here
+            1,  # chunk_size
+            turn_ids_arg,
+            full_turn_mask,
+            max_turns,
+        )
+        kl_metric = float(aux[0].item())
+        clipfrac_metric = float(aux[1].item())
+        pg_loss_metric = float(aux[2].item())
+        entropy_metric = float(aux[3].item())
+
+        # ---- Critic pass (unfused — value tensor is small) ----
+        # Identity-patch lm_head here too: only critic_output[2] (the value
+        # head) is needed; the (B, T, V) logits would otherwise be materialised
+        # and immediately discarded.
+        with (
+            self._patch_lm_head_to_identity(),
+            self.select_adapter("critic"),
+            self._amp_ctx(),
+        ):
+            self.actor.train()
+            critic_output = self.actor(**kwargs)
+        # Value head wrappers return ``(hidden, loss, value)`` when lm_head is
+        # identity-patched; index [2] is the same value tensor either way.
+        critic_value = (
+            critic_output[2]
+            if isinstance(critic_output, tuple)
+            else critic_output.value
+        )
+        # Align with the unfused path's ``[:, :-1]`` shift.
+        batch_values = critic_value[:, :-1]
+        batch_values = torch.masked_fill(batch_values, ~mask_bool, 0.0)
+        if ppo_granularity == "turn":
+            # Per-turn clipped value loss — same formula as the unfused
+            # turn branch in :meth:`learn`.
+            turn_pred = pool_by_turns(
+                batch_values,
+                turn_ids,
+                max_turns,
+                reduction=self.turn_value_reduction,
+            )
+            turn_old = pool_by_turns(
+                old_values,
+                turn_ids,
+                max_turns,
+                reduction=self.turn_value_reduction,
+            )
+            turn_ret = pool_by_turns(returns, turn_ids, max_turns)
+            vf_unclipped = (turn_ret - turn_pred).pow(2)
+            clipped_turn_values = turn_old + torch.clamp(
+                turn_pred - turn_old, -self.clip_coef, self.clip_coef
+            )
+            vf_clipped = (turn_ret - clipped_turn_values).pow(2)
+            vf_loss = (
+                0.5
+                * (torch.max(vf_unclipped, vf_clipped) * full_turn_mask).sum()
+                / full_turn_mask.sum().clamp(min=1)
+                * self.vf_coef
+            )
+        else:
+            vf_loss = self._compute_vf_loss_token(
+                batch_values, old_values, returns, mask
+            )
+
+        total_loss = loss_pg_kl + vf_loss
+        metrics = {
+            "kl": kl_metric,
+            "clipfrac": clipfrac_metric,
+            "pg_loss": pg_loss_metric,
+            "vf_loss": float(vf_loss.item()),
+            "entropy": entropy_metric,
+        }
+        return total_loss, metrics
+
     def _compute_vf_loss_token(
         self,
         values: torch.Tensor,
@@ -883,23 +1129,3 @@ class PPO(LLMAlgorithm):
             mask_t = (turn_ids == t).float()
             token_rewards += mask_t * rewards[:, t : t + 1]
         return token_rewards
-
-    def _calculate_kl_divergence(
-        self,
-        log_probs: torch.Tensor,
-        reference_log_probs: torch.Tensor,
-    ) -> torch.Tensor:
-        """Calculate the KL divergence between the current and reference log probabilities.
-
-        :param log_probs: Current policy log probabilities.
-        :type log_probs: torch.Tensor
-        :param reference_log_probs: Reference policy log probabilities.
-        :type reference_log_probs: torch.Tensor
-        :return: Kl divergence between the current and reference log probabilities.
-        :rtype: torch.Tensor
-        """
-        return (
-            torch.exp(reference_log_probs - log_probs)
-            - (reference_log_probs - log_probs)
-            - 1
-        )

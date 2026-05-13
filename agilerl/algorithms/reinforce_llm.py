@@ -6,9 +6,18 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+
+if HAS_LIGER_KERNEL:
+    from agilerl.algorithms.core.llm_ops.fused_loss import (
+        LigerFusedLinearPolicyLossFunction,
+    )
+else:
+    # Keep the name resolvable when liger-kernel isn't installed so unit
+    # tests can patch it. ``_reinforce_loss_liger`` guards against actual use.
+    LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
 from agilerl.protocols import (
     LoraConfigProtocol,
     MultiTurnEnv,
@@ -24,6 +33,7 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.llm_utils import (
     ReasoningGym,
+    build_completion_mask,
     masked_mean,
     normalize_reasoning_prompt_batch,
     pool_by_turns,
@@ -169,6 +179,9 @@ class REINFORCE(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
+        use_fused_linear_logprobs: bool = False,
+        cast_logprobs_to_fp32: bool = True,
+        use_liger_loss: bool = False,
     ) -> None:
 
         device = (
@@ -185,7 +198,7 @@ class REINFORCE(LLMAlgorithm):
             pad_token_id=pad_token_id,
             pad_token=pad_token,
             use_value_head=False,
-            use_liger_loss=False,
+            use_liger_loss=use_liger_loss,
             use_memory_efficient_params=use_memory_efficient_params,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
@@ -204,6 +217,8 @@ class REINFORCE(LLMAlgorithm):
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,
             reduce_memory_peak=reduce_memory_peak,
+            use_fused_linear_logprobs=use_fused_linear_logprobs,
+            cast_logprobs_to_fp32=cast_logprobs_to_fp32,
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
@@ -285,6 +300,7 @@ class REINFORCE(LLMAlgorithm):
         self,
         obs: LLMObsType,
         training: bool = True,
+        **kwargs: Any,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Generate completion tokens for each prompt in the batch.
 
@@ -292,6 +308,9 @@ class REINFORCE(LLMAlgorithm):
         :type obs: LLMObsType
         :param training: If ``False``, use near-deterministic decoding where applicable.
         :type training: bool
+        :param kwargs: Additional keyword arguments accepted for base-class
+            signature compatibility. Unused in this implementation.
+        :type kwargs: Any
         :return: Per-prompt completion token IDs and masks over generated positions.
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """
@@ -335,15 +354,13 @@ class REINFORCE(LLMAlgorithm):
                                 )
                             )
                             completion_ids.append(completion_id)
-                            completion_mask = torch.zeros_like(
-                                completion_id,
-                                dtype=torch.bool,
-                                device=completion_id.device,
+                            completion_masks.append(
+                                build_completion_mask(
+                                    completion_id,
+                                    full_prompt_len,
+                                    self.pad_token_id,
+                                )
                             )
-                            completion_mask[:, full_prompt_len:] = True
-                            completion_mask[completion_id == self.pad_token_id] = False
-                            completion_mask = completion_mask[:, 1:]
-                            completion_masks.append(completion_mask)
             else:
                 self._prepare_vllm_for_generation()
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
@@ -417,34 +434,33 @@ class REINFORCE(LLMAlgorithm):
             }
             updates = 0
 
-            with torch.inference_mode():
-                reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
-                    completion_ids,
-                    batch_size,
-                )
+            reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
+                completion_ids,
+                batch_size,
+            )
 
-                token_rewards = self._compute_token_rewards(
-                    action_masks, rewards_2d, turn_ids
-                )
+            token_rewards = self._compute_token_rewards(
+                action_masks, rewards_2d, turn_ids
+            )
 
-                old_log_probs = torch.masked_fill(old_log_probs, ~action_mask_bool, 1.0)
-                reference_log_probs = torch.masked_fill(
-                    reference_log_probs, ~action_mask_bool, 1.0
-                )
-                token_penalised_rewards = token_rewards - self.beta * (
-                    old_log_probs - reference_log_probs
-                )
+            old_log_probs = torch.masked_fill(old_log_probs, ~action_mask_bool, 1.0)
+            reference_log_probs = torch.masked_fill(
+                reference_log_probs, ~action_mask_bool, 1.0
+            )
+            token_penalised_rewards = token_rewards - self.beta * (
+                old_log_probs - reference_log_probs
+            )
 
-                if action_granularity == "token":
-                    advantages = self._compute_rebn_advantages_token(
-                        token_penalised_rewards,
-                        action_masks,
-                    )
-                else:
-                    advantages = self._compute_rebn_advantages(
-                        token_penalised_rewards, action_masks, turn_ids
-                    )
-                del token_rewards, token_penalised_rewards
+            if action_granularity == "token":
+                advantages = self._compute_rebn_advantages_token(
+                    token_penalised_rewards,
+                    action_masks,
+                )
+            else:
+                advantages = self._compute_rebn_advantages(
+                    token_penalised_rewards, action_masks, turn_ids
+                )
+            del token_rewards, token_penalised_rewards
 
             self.actor.train()
             for _epoch_idx in range(self.update_epochs):
@@ -469,6 +485,27 @@ class REINFORCE(LLMAlgorithm):
                     )
 
                     batch_mask_bool = batch_action_mask.bool()
+
+                    if self.use_liger_loss:
+                        # Liger fused clipped policy loss (no (B, T, V) logits
+                        # saved for backward). KL stays a logging metric;
+                        # REINFORCE folds it into the advantage upstream.
+                        # Works for both granularities since per-turn ReBN
+                        # is already broadcast to per-token by the caller.
+                        pg_loss, metrics = self._reinforce_loss_liger(
+                            batch_ids,
+                            batch_action_mask,
+                            batch_old_log_probs,
+                            batch_reference_log_probs,
+                            batch_advantages,
+                        )
+                        self._backward_pass(pg_loss)
+                        learn_metrics["mean_kl"] += metrics["kl"]
+                        learn_metrics["mean_entropy"] += metrics["entropy"]
+                        learn_metrics["mean_pg_loss"] += metrics["pg_loss"]
+                        learn_metrics["mean_loss"] += pg_loss.item()
+                        updates += 1
+                        continue
 
                     with self.select_adapter("actor"):
                         batch_log_probs = self._get_logprobs(
@@ -514,6 +551,104 @@ class REINFORCE(LLMAlgorithm):
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
 
+    def _reinforce_loss_liger(
+        self,
+        batch_ids: torch.Tensor,
+        batch_action_mask: torch.Tensor,
+        batch_old_log_probs: torch.Tensor,
+        batch_reference_log_probs: torch.Tensor,
+        batch_advantages: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Token-level REINFORCE loss via the fused-linear PPO Function.
+
+        Captures the last hidden state via an ``lm_head`` forward-pre-hook
+        (so the full ``(B, T, V)`` logits never need to be saved for
+        backward) and invokes :class:`LigerFusedLinearPolicyLossFunction` with
+        ``beta=0`` — REINFORCE folds the KL penalty into the advantage
+        during the no-grad pass, so the gradient-time loss is pure clipped
+        policy gradient. KL is still computed inside the kernel and
+        returned as a logging metric.
+
+        :param batch_ids: ``(B, seq_len)`` token IDs for this minibatch.
+        :param batch_action_mask: ``(B, seq_len-1)`` bool mask of valid
+            action positions.
+        :param batch_old_log_probs: ``(B, seq_len-1)`` old-policy logprobs.
+        :param batch_reference_log_probs: ``(B, seq_len-1)`` reference
+            logprobs (used for the KL metric only).
+        :param batch_advantages: ``(B, seq_len-1)`` per-token advantages.
+        :return: ``(pg_loss, metrics)`` where ``metrics`` carries
+            ``kl``, ``pg_loss``, ``entropy``, ``clipfrac`` Python floats.
+        """
+        if not HAS_LIGER_KERNEL:
+            msg = (
+                "Liger REINFORCE loss was requested but `liger-kernel` is not "
+                "available. Set use_liger_loss=False."
+            )
+            raise ImportError(msg)
+
+        batch_ids = batch_ids.to(self.device)
+        mask = batch_action_mask.to(self.device).contiguous()
+        old_log_probs = batch_old_log_probs.to(self.device).contiguous()
+        ref_log_probs = batch_reference_log_probs.to(self.device).contiguous()
+        advantages = batch_advantages.to(self.device).contiguous()
+
+        # Identity-patch lm_head so the actor forward outputs the last hidden
+        # state (B, T, H) directly instead of computing the full (B, T, V)
+        # logits only to discard them. lm_head_weight is passed separately to
+        # LigerFusedLinearPolicyLossFunction which handles the matmul and its grad.
+        lm_head = self._get_lm_head()
+        lm_head_weight = lm_head.weight
+        lm_head_bias = lm_head.bias
+
+        attention_mask = (batch_ids != self.pad_token_id).long()
+        kwargs: dict[str, Any] = {
+            "input_ids": batch_ids,
+            "attention_mask": attention_mask,
+            "use_cache": False,
+        }
+        if self.calc_position_embeddings:
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            kwargs["position_ids"] = position_ids
+
+        with (
+            self._patch_lm_head_to_identity(),
+            self.select_adapter("actor"),
+            self._amp_ctx(),
+        ):
+            self.actor.train()
+            actor_output = self.actor(**kwargs)
+        policy_hidden = (
+            actor_output[0] if isinstance(actor_output, tuple) else actor_output.logits
+        )  # (B, T, H)
+        target_ids = batch_ids[:, 1:].contiguous()  # (B, T-1)
+        # Hidden states are aligned with target ids: predict ids[:, 1:] from
+        # hidden[:, :-1]. Same shift the unfused path applies.
+        loss, aux = LigerFusedLinearPolicyLossFunction.apply(
+            policy_hidden[:, :-1].contiguous(),
+            lm_head_weight,
+            target_ids,
+            mask,
+            advantages,
+            lm_head_bias,
+            ref_log_probs,
+            old_log_probs,
+            0.0,  # beta — KL handled upstream via ReBN advantage
+            self.clip_coef,  # epsilon_low
+            self.clip_coef,  # epsilon_high
+            self.temperature,
+            False,  # compiled — torch.compile dynamic shapes fight Liger here
+            1,  # chunk_size
+        )
+        # aux = [kl, clipfrac, pg_loss, entropy] scalars in fp32.
+        metrics = {
+            "kl": float(aux[0].item()),
+            "clipfrac": float(aux[1].item()),
+            "pg_loss": float(aux[2].item()),
+            "entropy": float(aux[3].item()),
+        }
+        return loss, metrics
+
     def _resolve_action_granularity(self, turn_ids: torch.Tensor) -> str:
         """Resolve effective policy granularity for the current batch.
 
@@ -550,7 +685,7 @@ class REINFORCE(LLMAlgorithm):
         :rtype: torch.Tensor
         """
         eval_context = getattr(env, "eval_mode", nullcontext)
-        with eval_context(), torch.inference_mode():
+        with eval_context():
             if isinstance(env, ReasoningGym):
                 prompts = env.reset()
                 rewards = []

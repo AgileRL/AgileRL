@@ -27,8 +27,6 @@ if HAS_LLM_DEPENDENCIES:
     from transformers.modeling_utils import PreTrainedModel
 
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
-
-    AutoTokenizer = AutoTokenizer
 else:
     AutoTokenizer = Any
     PreTrainedModel = Any
@@ -115,21 +113,26 @@ def normalize_reasoning_prompt_batch(
     if batch_size == 0:
         return []
 
-    per_sample: list[ReasoningPrompts] = []
-    for i in range(batch_size):
-        sample: ReasoningPrompts = {}
-        for key, value in prompts.items():
-            if isinstance(value, torch.Tensor):
-                if value.dim() > 0 and value.shape[0] == batch_size:
-                    sample[key] = value[i : i + 1] if value.dim() >= 2 else value[i]
-                else:
-                    sample[key] = value
-            elif isinstance(value, list) and len(value) == batch_size:
-                sample[key] = value[i]
-            else:
+    # Inspect each key once and write into all output dicts in one pass
+    result: list[ReasoningPrompts] = [{} for _ in range(batch_size)]
+    for key, value in prompts.items():
+        if (
+            isinstance(value, torch.Tensor)
+            and value.dim() > 0
+            and value.shape[0] == batch_size
+        ):
+            chunks: tuple[torch.Tensor, ...] = (
+                value.unbind(0) if value.dim() == 1 else value.split(1, dim=0)
+            )
+            for sample, chunk in zip(result, chunks, strict=True):
+                sample[key] = chunk
+        elif isinstance(value, list) and len(value) == batch_size:
+            for sample, v in zip(result, value, strict=True):
+                sample[key] = v
+        else:
+            for sample in result:
                 sample[key] = value
-        per_sample.append(sample)
-    return per_sample
+    return result
 
 
 @contextmanager
@@ -384,36 +387,6 @@ def get_llm_accelerator(
     return Accelerator()
 
 
-def _auto_zero_stage(num_gpus: int, model_size_gb: float | None) -> int:
-    """Pick a ZeRO stage based on GPU count and model size.
-
-    Heuristic:
-
-    * If ``model_size_gb`` is unknown, default to ZeRO-1 (lightest
-      multi-GPU overhead, partitions only optimizer states).
-    * If the model fits comfortably in per-GPU memory (< 60% of VRAM),
-      use ZeRO-1.
-    * If the model is tight but fits (60-90% of VRAM), use ZeRO-2
-      (also partitions gradients).
-    * If the model exceeds per-GPU memory, use ZeRO-3 (also partitions
-      parameters).
-    """
-    if model_size_gb is None:
-        return 1
-
-    try:
-        per_gpu_gb = torch.cuda.get_device_properties(0).total_mem / (1024**3)
-    except Exception:
-        return 1
-
-    ratio = model_size_gb / per_gpu_gb
-    if ratio < 0.6:
-        return 1
-    if ratio < 0.9:
-        return 2
-    return 3
-
-
 def move_params_to_gpu(unwrapped_model: torch.nn.Module, device: torch.device) -> None:
     """Move params to GPU.
 
@@ -479,6 +452,41 @@ def stitch_completion_after_windowed_hf_generate(
         ),
         full_prompt_len,
     )
+
+
+def build_completion_mask(
+    completion_id: torch.Tensor,
+    prompt_len: int | None,
+    pad_token_id: int,
+) -> torch.Tensor:
+    """Build the boolean action mask for a completion tensor.
+
+    Returns ``True`` at positions that are (a) past the prompt and (b) not
+    pad tokens, dropping the leading position to align with the
+    next-token-prediction shift used downstream.
+
+    :param completion_id: Token tensor of shape ``(B, seq_len)`` containing
+        the prompt followed by generated tokens.
+    :type completion_id: torch.Tensor
+    :param prompt_len: Number of leading tokens to mask out (the full
+        prompt length, possibly after sliding-window stitching). ``None``
+        means "no prompt prefix" — every non-pad token is part of the
+        completion. This matches the legacy slice semantics where
+        ``mask[:, None:] = True`` set the entire dim before pads were
+        zeroed back out.
+    :type prompt_len: int | None
+    :param pad_token_id: Pad token id used to suppress padding positions.
+    :type pad_token_id: int
+    :return: Boolean mask of shape ``(B, seq_len - 1)``.
+    :rtype: torch.Tensor
+    """
+    non_pad = completion_id != pad_token_id
+    if prompt_len is None or prompt_len == 0:
+        mask = non_pad
+    else:
+        positions = torch.arange(completion_id.shape[1], device=completion_id.device)
+        mask = (positions.unsqueeze(0) >= prompt_len) & non_pad
+    return mask[:, 1:]
 
 
 def stitch_completion_after_windowed_vllm_generate(
@@ -797,71 +805,11 @@ def compare_responses(
     print(f"\n{'═' * width}\n")
 
 
-try:
-    from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOFunction
-    from liger_kernel.chunked_loss.fused_linear_preference import (
-        LigerFusedLinearPreferenceBase,
-    )
+def calculate_k3_kl(log_p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
+    """K3 estimator of ``KL[q || p]`` (Schulman 2020).
 
-    class _LigerDPOWithAlpha(LigerFusedLinearPreferenceBase):
-        """Thin wrapper that exposes ``alpha`` for NLL scaling.
-
-        ``LigerFusedLinearDPOFunction`` passes ``compute_nll_loss`` as a bool
-        but never forwards ``alpha`` to the base class (which defaults to 1.0).
-        This subclass reuses the DPO preference loss and adds ``alpha`` so the
-        fused kernel correctly scales the NLL component.
-        """
-
-        preference_loss_fn = staticmethod(
-            LigerFusedLinearDPOFunction.preference_loss_fn
-        )
-
-        @classmethod
-        def forward(
-            cls,
-            ctx,
-            _input,
-            weight,
-            target,
-            bias=None,
-            ref_input=None,
-            ref_weight=None,
-            ref_bias=None,
-            ignore_index=-100,
-            beta=0.1,
-            alpha=1.0,
-            compute_nll_loss=True,
-            compiled=True,
-            use_ref_model=True,
-            average_log_prob=False,
-            chunk_size=1,
-            loss_type="sigmoid",
-        ):
-            return LigerFusedLinearPreferenceBase.forward(
-                cls=cls,
-                ctx=ctx,
-                _input=_input,
-                weight=weight,
-                target=target,
-                bias=bias,
-                ignore_index=ignore_index,
-                alpha=alpha,
-                beta=beta,
-                compute_nll_loss=compute_nll_loss,
-                compiled=compiled,
-                use_ref_model=use_ref_model,
-                ref_input=ref_input,
-                ref_weight=ref_weight,
-                ref_bias=ref_bias,
-                average_log_prob=average_log_prob,
-                chunk_size=chunk_size,
-                loss_type=loss_type,
-            )
-
-        @staticmethod
-        def backward(ctx, *grad_output):
-            grads = LigerFusedLinearPreferenceBase.backward(ctx, grad_output)[:4]
-            return (*grads, *(None,) * 12)
-
-except ImportError:
-    _LigerDPOWithAlpha = None
+    ``exp(log_p - log_q) - (log_p - log_q) - 1`` — always-positive,
+    lower-variance than the naive ``log_p - log_q`` estimator.
+    """
+    diff = log_p - log_q
+    return torch.exp(diff) - diff - 1.0

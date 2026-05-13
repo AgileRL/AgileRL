@@ -1,4 +1,5 @@
 import logging
+import os
 import warnings
 from collections.abc import Callable
 from datetime import datetime
@@ -786,6 +787,11 @@ def create_population(
                 actor_network=act,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                use_fused_linear_logprobs=INIT_HP.get(
+                    "USE_FUSED_LINEAR_LOGPROBS",
+                    INIT_HP.get("USE_FUSED_LINEAR", False),
+                ),
+                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
                 use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
                 adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
                 loss_type=INIT_HP.get("LOSS_TYPE", "grpo"),
@@ -987,6 +993,12 @@ def create_population(
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                use_fused_linear_logprobs=INIT_HP.get(
+                    "USE_FUSED_LINEAR_LOGPROBS",
+                    INIT_HP.get("USE_FUSED_LINEAR", False),
+                ),
+                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -1058,6 +1070,12 @@ def create_population(
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                use_fused_linear_logprobs=INIT_HP.get(
+                    "USE_FUSED_LINEAR_LOGPROBS",
+                    INIT_HP.get("USE_FUSED_LINEAR", False),
+                ),
+                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -1233,11 +1251,14 @@ def init_wandb(
     :param addl_args: Additional kwargs to pass to wandb.init()
     :type addl_args: dict, optional
     """
-    if not hasattr(wandb, "api"):
-        if wandb_api_key is not None:
-            wandb.login(key=wandb_api_key)
-        else:
-            warnings.warn("Must login to wandb with API key.", stacklevel=2)
+    api_key = wandb_api_key or os.environ.get("WANDB_API_KEY")
+    if api_key:
+        wandb.login(key=api_key)
+    else:
+        warnings.warn(
+            "No wandb API key provided; set WANDB_API_KEY or pass wandb_api_key for online logging.",
+            stacklevel=2,
+        )
 
     config_dict = {}
     if init_hyperparams is not None:

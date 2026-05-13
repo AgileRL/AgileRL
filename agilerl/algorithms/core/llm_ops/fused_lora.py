@@ -76,6 +76,8 @@ def _get_cached_lora_layers(model: nn.Module) -> list[nn.Module]:
     try:
         model._fused_lora_layers = layers  # type: ignore[attr-defined]
     except (AttributeError, TypeError):
+        # Best-effort cache: some wrapped/slotted modules may reject dynamic attrs.
+        # This only impacts caching/performance, not correctness.
         pass
     return layers
 
@@ -115,6 +117,9 @@ def patch_lora_for_fused_forward(model: nn.Module) -> None:
     try:
         model._fused_lora_layers = layers  # type: ignore[attr-defined]
     except (AttributeError, TypeError):
+        # Best-effort cache only: some wrapped/frozen modules may reject
+        # dynamic attribute assignment. Fused routing still works by
+        # discovering LoRA layers when needed.
         pass
 
 

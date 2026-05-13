@@ -87,8 +87,9 @@ class SFT(LLMAlgorithm):
         memory, defaults to True
     :type gradient_checkpointing: bool, optional
     :param use_liger_loss: Use Liger kernel for memory-efficient cross-entropy loss
-        computation, defaults to False. Requires ``liger_kernel`` to be installed;
-        pass ``False`` to fall back to the standard PyTorch path.
+        computation. Defaults to ``False``. Pass ``True`` to opt in
+        (requires ``liger-kernel`` to be installed; warns and falls back
+        to ``False`` otherwise).
     :type use_liger_loss: bool, optional
     :param use_separate_reference_adapter: Also create a ``reference`` LoRA adapter
         alongside ``actor``. SFT does not itself use a reference policy, so this
@@ -322,7 +323,7 @@ class SFT(LLMAlgorithm):
         :return: Mean negative loss (scalar numpy array)
         :rtype: np.ndarray
         """
-        with env.eval_mode(), torch.inference_mode():
+        with env.eval_mode(), torch.no_grad():
             prompts = env.reset()
             losses = []
             for _ in range(loop):
