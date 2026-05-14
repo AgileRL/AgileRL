@@ -1347,6 +1347,15 @@ class TestCreateModelFromNameOrPathValueHead:
     when a value head is requested."""
 
     def test_add_value_head_calls_value_head_loader(self) -> None:
+        from agilerl import HAS_LLM_DEPENDENCIES
+
+        # When agilerl[llm] isn't installed (e.g. Windows CI), the symbol
+        # collapses to ``typing.Any`` and there's nothing to patch.
+        if not HAS_LLM_DEPENDENCIES:
+            pytest.skip(
+                "AutoModelForCausalLMWithValueHead unavailable without agilerl[llm]."
+            )
+
         from agilerl.utils import llm_utils as llm_utils_module
 
         sentinel_model = object()
