@@ -1007,6 +1007,8 @@ class TestPreferenceGymInit:
 
 def test_llm_utils_fallback_types_when_no_llm_dependencies():
     """Test that llm_utils sets type aliases to Any when HAS_LLM_DEPENDENCIES is False."""
+    import agilerl.utils as agilerl_utils_pkg
+
     # Remove the module from cache to force reimport
     original_module = sys.modules.pop("agilerl.utils.llm_utils", None)
 
@@ -1022,8 +1024,17 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             assert llm_utils_reloaded.Dataset is Any
             assert llm_utils_reloaded.AutoModelForCausalLM is Any
     finally:
-        # Restore original module to avoid affecting other tests
-        sys.modules["agilerl.utils.llm_utils"] = original_module
+        # Restore original module to avoid affecting other tests. Both the
+        # sys.modules entry AND the parent-package attribute have to be
+        # restored — ``from agilerl.utils import llm_utils`` resolves through
+        # the package attribute, not sys.modules, so leaving the reloaded
+        # (Any-bound) module bound on ``agilerl.utils`` leaks symbols into
+        # any tests that import this way on the same xdist worker.
+        if original_module is not None:
+            sys.modules["agilerl.utils.llm_utils"] = original_module
+            agilerl_utils_pkg.llm_utils = original_module
+        else:
+            sys.modules.pop("agilerl.utils.llm_utils", None)
 
 
 class TestCreateLlmAccelerator:
@@ -1347,16 +1358,18 @@ class TestCreateModelFromNameOrPathValueHead:
     when a value head is requested."""
 
     def test_add_value_head_calls_value_head_loader(self) -> None:
-        from agilerl import HAS_LLM_DEPENDENCIES
+        from agilerl.utils import llm_utils as llm_utils_module
 
-        # When agilerl[llm] isn't installed (e.g. Windows CI), the symbol
-        # collapses to ``typing.Any`` and there's nothing to patch.
-        if not HAS_LLM_DEPENDENCIES:
+        # When agilerl[llm] isn't installed (e.g. Windows CI without vllm),
+        # the symbol collapses to ``typing.Any``. Inspect the bound symbol
+        # directly rather than the ``HAS_LLM_DEPENDENCIES`` flag — another
+        # test in this module force-reloads ``llm_utils`` with
+        # ``HAS_LLM_DEPENDENCIES=False`` and the package attribute restore
+        # can leak through xdist worker reuse.
+        if llm_utils_module.AutoModelForCausalLMWithValueHead is Any:
             pytest.skip(
                 "AutoModelForCausalLMWithValueHead unavailable without agilerl[llm]."
             )
-
-        from agilerl.utils import llm_utils as llm_utils_module
 
         sentinel_model = object()
         with patch.object(
