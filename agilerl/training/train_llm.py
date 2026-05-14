@@ -1343,6 +1343,13 @@ def finetune_llm_multiturn(
     max_steps_checkpoint_saved = False
     group_size = getattr(pop[0], "group_size", 1)
     rollout_env = SyncMultiTurnVecEnv(env_factory, batch_size, group_size, env_config)
+    # ``agent.test`` expects a single ``MultiTurnEnv``; ``rollout_env`` is a
+    # ``SyncMultiTurnVecEnv`` wrapping N inner envs whose state is mid-rollout
+    # during training. Build a separate test env so evaluation is isolated.
+    # NOTE: this means one extra env is held for the run's lifetime. Future
+    # refactor could share a subset of the rollout envs (e.g. lease one of the
+    # vec env's inner ``MultiTurnEnv`` instances when no trajectory is active)
+    # to avoid the duplication for heavy env setups.
     test_env = env_factory(**(env_config or {}))
     wall_deadline = (
         time.monotonic() + max_wall_seconds
