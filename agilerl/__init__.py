@@ -16,19 +16,6 @@ def get_extra_dependencies(package: str, extra: str) -> list[str]:
     return deps
 
 
-def _is_dist_installed(dist_name: str) -> bool:
-    """Check if a distribution is installed by its PyPI name.
-
-    Uses distribution metadata instead of find_spec because PyPI names
-    can differ from import names.
-    """
-    try:
-        metadata(dist_name)
-        return True
-    except PackageNotFoundError:
-        return False
-
-
 LLM_PACKAGES = get_extra_dependencies("agilerl", "llm")
 
 
@@ -40,7 +27,7 @@ def _is_distribution_installed(distribution: str) -> bool:
     return True
 
 
-# Use these flags for laxzy import checks
+# Use these flags for lazy import checks
 HAS_LLM_DEPENDENCIES = all(_is_distribution_installed(pkg) for pkg in LLM_PACKAGES)
 HAS_LIGER_KERNEL = _is_distribution_installed("liger-kernel")
 HAS_VLLM = _is_distribution_installed("vllm")

@@ -1186,6 +1186,223 @@ class TestAsyncAgentsWrapperStackExperiences:
         assert stacked["agent_1"] is not None
 
 
+def _make_maddpg_wrapper(ma_vector_space):
+    """Build a CPU MADDPG wrapper for direct off-policy helper tests."""
+    from gymnasium import spaces as gym_spaces
+
+    from agilerl.algorithms import MADDPG
+
+    agent_ids = ["agent_0", "agent_1"]
+    action_spaces = [
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+    ]
+    agent = MADDPG(
+        observation_spaces=ma_vector_space[:2],
+        action_spaces=action_spaces,
+        agent_ids=agent_ids,
+        device="cpu",
+    )
+    return AsyncAgentsWrapper(agent)
+
+
+class TestAsyncAgentsWrapperInsertPlaceholderActions:
+    def test_skips_agent_not_in_action_dict(self, ma_vector_space):
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        action_dict = {"agent_0": np.array([[0.1, 0.2]], dtype=np.float32)}
+        inactive = {"agent_1": np.array([0])}
+
+        out = wrapper._insert_placeholder_actions(action_dict, inactive)
+
+        assert "agent_1" not in out
+        assert out["agent_0"].shape == (1, 2)
+
+    def test_skips_when_action_is_none(self, ma_vector_space):
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        action_dict = {"agent_0": None}
+        inactive = {"agent_0": np.array([0])}
+
+        out = wrapper._insert_placeholder_actions(action_dict, inactive)
+
+        assert out["agent_0"] is None
+
+    def test_integer_dtype_placeholder_is_zero(self, ma_vector_space):
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        action_dict = {"agent_0": np.array([[3, 4]], dtype=np.int64)}
+        inactive = {"agent_0": np.array([1])}
+
+        out = wrapper._insert_placeholder_actions(action_dict, inactive)
+
+        assert out["agent_0"].dtype == np.int64
+        assert out["agent_0"].shape == (2, 2)
+        assert np.array_equal(out["agent_0"][1], np.array([0, 0]))
+
+    def test_float_placeholder_is_nan(self, ma_vector_space):
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        action_dict = {"agent_0": np.array([[0.5, 0.5]], dtype=np.float32)}
+        inactive = {"agent_0": np.array([0])}
+
+        out = wrapper._insert_placeholder_actions(action_dict, inactive)
+
+        assert np.isnan(out["agent_0"][0]).all()
+
+    def test_one_dim_action_uses_scalar_placeholder(self, ma_vector_space):
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        action_dict = {"agent_0": np.array([0.5, 0.7], dtype=np.float32)}
+        inactive = {"agent_0": np.array([1])}
+
+        out = wrapper._insert_placeholder_actions(action_dict, inactive)
+
+        assert out["agent_0"].shape == (3,)
+        assert np.isnan(out["agent_0"][1])
+
+
+class TestAsyncAgentsWrapperAlignAsyncOffPolicyExperiences:
+    def test_drops_agent_with_none_field(self, ma_vector_space):
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        states = {"agent_0": np.zeros((3, 6)), "agent_1": np.zeros((3, 6))}
+        actions = {"agent_0": np.zeros((3, 2)), "agent_1": None}
+        rewards = {"agent_0": np.zeros(3), "agent_1": np.zeros(3)}
+        next_states = {"agent_0": np.zeros((3, 6)), "agent_1": np.zeros((3, 6))}
+        dones = {"agent_0": np.zeros(3), "agent_1": np.zeros(3)}
+
+        out = wrapper._align_async_off_policy_experiences(
+            (states, actions, rewards, next_states, dones)
+        )
+        aligned_states, *_ = out
+
+        assert "agent_0" in aligned_states
+        assert "agent_1" not in aligned_states
+
+    def test_missing_next_state_infers_from_sequence(self, ma_vector_space):
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        states = {"agent_0": np.arange(18.0).reshape(3, 6)}
+        actions = {"agent_0": np.zeros((3, 2))}
+        rewards = {"agent_0": np.array([1.0, 2.0, 3.0])}
+        # next_states absent entirely
+        next_states = {}
+        dones = {"agent_0": np.array([0, 0, 0])}
+
+        (
+            aligned_states,
+            aligned_actions,
+            aligned_rewards,
+            aligned_next,
+            aligned_dones,
+        ) = wrapper._align_async_off_policy_experiences(
+            (states, actions, rewards, next_states, dones)
+        )
+
+        assert aligned_states["agent_0"].shape == (2, 6)
+        assert np.array_equal(aligned_next["agent_0"], states["agent_0"][1:])
+        assert aligned_rewards["agent_0"].tolist() == [1.0, 2.0]
+        assert aligned_dones["agent_0"].tolist() == [0, 0]
+
+    def test_missing_next_state_skips_when_too_few_samples(self, ma_vector_space):
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        states = {"agent_0": np.zeros((1, 6))}
+        actions = {"agent_0": np.zeros((1, 2))}
+        rewards = {"agent_0": np.zeros(1)}
+        next_states = {}
+        dones = {"agent_0": np.zeros(1)}
+
+        aligned_states, *_ = wrapper._align_async_off_policy_experiences(
+            (states, actions, rewards, next_states, dones)
+        )
+
+        assert aligned_states == {}
+
+    def test_all_nan_next_state_treated_as_missing(self, ma_vector_space):
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        states = {"agent_0": np.ones((3, 6))}
+        actions = {"agent_0": np.zeros((3, 2))}
+        rewards = {"agent_0": np.zeros(3)}
+        next_states = {"agent_0": np.full((3, 6), np.nan)}
+        dones = {"agent_0": np.zeros(3)}
+
+        aligned_states, _, _, aligned_next, _ = (
+            wrapper._align_async_off_policy_experiences(
+                (states, actions, rewards, next_states, dones)
+            )
+        )
+
+        assert aligned_states["agent_0"].shape == (2, 6)
+        assert np.array_equal(aligned_next["agent_0"], states["agent_0"][1:])
+
+    def test_trims_to_min_len_when_lengths_differ(self, ma_vector_space):
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        states = {"agent_0": np.zeros((5, 6))}
+        actions = {"agent_0": np.zeros((4, 2))}
+        rewards = {"agent_0": np.zeros(3)}
+        next_states = {"agent_0": np.zeros((5, 6))}
+        dones = {"agent_0": np.zeros(4)}
+
+        (
+            aligned_states,
+            aligned_actions,
+            aligned_rewards,
+            aligned_next,
+            aligned_dones,
+        ) = wrapper._align_async_off_policy_experiences(
+            (states, actions, rewards, next_states, dones)
+        )
+
+        assert aligned_states["agent_0"].shape == (3, 6)
+        assert aligned_actions["agent_0"].shape == (3, 2)
+        assert aligned_rewards["agent_0"].shape == (3,)
+        assert aligned_next["agent_0"].shape == (3, 6)
+        assert aligned_dones["agent_0"].shape == (3,)
+
+    def test_zero_min_len_drops_agent(self, ma_vector_space):
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        states = {"agent_0": np.zeros((0, 6))}
+        actions = {"agent_0": np.zeros((0, 2))}
+        rewards = {"agent_0": np.zeros(0)}
+        next_states = {"agent_0": np.zeros((0, 6))}
+        dones = {"agent_0": np.zeros(0)}
+
+        aligned_states, *_ = wrapper._align_async_off_policy_experiences(
+            (states, actions, rewards, next_states, dones)
+        )
+
+        assert aligned_states == {}
+
+
+class TestAsyncAgentsWrapperGetActionOffPolicy:
+    def test_passthrough_when_get_action_returns_non_tuple(self, ma_vector_space):
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        # Replace get_action so it returns a bare action dict (no env/raw split).
+        wrapper.wrapped_get_action = lambda obs, *a, **kw: {
+            "agent_0": np.zeros((1, 2), dtype=np.float32),
+        }
+        obs = {"agent_0": np.array([[1.0] * 6], dtype=np.float32)}
+
+        result = wrapper.get_action(obs)
+
+        assert isinstance(result, dict)
+        assert "agent_0" in result
+
+    def test_passes_extra_return_values_through(self, ma_vector_space):
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        sentinel = {"meta": "value"}
+
+        def fake_get_action(obs, *_a, **_kw):
+            return (
+                {"agent_0": np.zeros((1, 2), dtype=np.float32)},
+                {"agent_0": np.zeros((1, 2), dtype=np.float32)},
+                sentinel,
+            )
+
+        wrapper.wrapped_get_action = fake_get_action
+        obs = {"agent_0": np.array([[1.0] * 6], dtype=np.float32)}
+
+        env_actions, raw_actions, extra = wrapper.get_action(obs)
+
+        assert extra is sentinel
+        assert env_actions["agent_0"].shape == (1, 2)
+        assert raw_actions["agent_0"].shape == (1, 2)
+
+
 class TestAsyncAgentsWrapperLearn:
     @pytest.mark.parametrize("compile_mode", [None])
     @pytest.mark.parametrize("num_envs", [1, 2])

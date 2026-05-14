@@ -1949,3 +1949,17 @@ class TestDummyOptimizer:
         opt = DummyOptimizer([])
         with pytest.raises(RuntimeError, match="DummyOptimizer"):
             opt.load_state_dict({})
+
+
+class TestResolveLr:
+    def test_returns_single_attr_when_lr_is_string(self):
+        agent = MagicMock(lr=0.01)
+        primary, secondary = algo_utils._resolve_lr(agent, "lr")
+        assert primary == 0.01
+        assert secondary is None
+
+    def test_returns_pair_when_lr_is_tuple(self):
+        agent = MagicMock(lr_actor=1e-4, lr_critic=1e-3)
+        primary, secondary = algo_utils._resolve_lr(agent, ("lr_actor", "lr_critic"))
+        assert primary == 1e-4
+        assert secondary == 1e-3

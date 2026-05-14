@@ -1305,3 +1305,122 @@ def test_check_box2d_available_raises_when_box2d_missing(monkeypatch):
 
     with pytest.raises(ImportError, match="Box2D physics engine"):
         _check_box2d_available("LunarLander-v2")
+
+
+class TestCheckBox2dAvailable:
+    def test_non_box2d_env_short_circuits(self):
+        from agilerl.utils.utils import _check_box2d_available
+
+        # No exception even with no Box2D installed because the prefix doesn't match.
+        _check_box2d_available("CartPole-v1")
+
+
+class TestNormalizeAlgoName:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("grpo", "GRPO"),
+            ("LLM-PPO", "LLM_PPO"),
+            ("llm reinforce", "LLMREINFORCE"),
+            ("Dpo", "DPO"),
+        ],
+    )
+    def test_normalizes_case_and_separators(self, raw, expected):
+        from agilerl.utils.utils import _normalize_algo_name
+
+        assert _normalize_algo_name(raw) == expected
+
+
+class TestPrepareLlmAlgoKwargs:
+    def _init_hp(self, **overrides):
+        base = {"BATCH_SIZE": 8}
+        base.update(overrides)
+        return base
+
+    def test_tokenizer_defaults_apply_when_not_set(self):
+        from agilerl.utils.utils import _prepare_llm_algo_kwargs
+
+        tokenizer = MagicMock(pad_token_id=7, pad_token="<pad>")
+        merged = _prepare_llm_algo_kwargs(
+            {},
+            tokenizer=tokenizer,
+            model_name="foo/bar",
+            lora_config=None,
+            vllm_config=None,
+            INIT_HP=self._init_hp(),
+        )
+        assert merged["pad_token_id"] == 7
+        assert merged["pad_token"] == "<pad>"
+        assert merged["model_name"] == "foo/bar"
+        assert merged["use_vllm"] is False
+        assert merged["use_separate_reference_adapter"] is True
+        assert merged["micro_batch_size_per_gpu"] == 8
+
+    def test_existing_kwargs_take_priority_over_init_hp(self):
+        from agilerl.utils.utils import _prepare_llm_algo_kwargs
+
+        merged = _prepare_llm_algo_kwargs(
+            {"model_name": "explicit/model", "micro_batch_size_per_gpu": 1},
+            tokenizer=None,
+            model_name=None,
+            lora_config=None,
+            vllm_config=None,
+            INIT_HP=self._init_hp(MODEL_NAME="ignored/name"),
+        )
+        assert merged["model_name"] == "explicit/model"
+        assert merged["micro_batch_size_per_gpu"] == 1
+
+    def test_dpo_path_skips_generation_defaults(self):
+        from agilerl.utils.utils import _prepare_llm_algo_kwargs
+
+        merged = _prepare_llm_algo_kwargs(
+            {},
+            tokenizer=None,
+            model_name="foo/bar",
+            lora_config=None,
+            vllm_config=MagicMock(),
+            INIT_HP=self._init_hp(),
+            with_generation_defaults=False,
+        )
+        assert "use_vllm" not in merged
+        assert "vllm_config" not in merged
+        assert merged["use_separate_reference_adapter"] is False
+
+    def test_reduce_memory_peak_propagates_when_set(self):
+        from agilerl.utils.utils import _prepare_llm_algo_kwargs
+
+        merged = _prepare_llm_algo_kwargs(
+            {},
+            tokenizer=None,
+            model_name="foo",
+            lora_config=None,
+            vllm_config=None,
+            INIT_HP=self._init_hp(REDUCE_MEMORY_PEAK=True),
+        )
+        assert merged["reduce_memory_peak"] is True
+
+
+class TestValidateLlmKwargs:
+    def test_raises_when_pad_token_missing(self):
+        from agilerl.utils.utils import _validate_llm_kwargs
+
+        with pytest.raises(ValueError, match="pad_token_id and pad_token"):
+            _validate_llm_kwargs({"model_name": "x"}, actor_network=None)
+
+    def test_raises_when_no_model_or_network(self):
+        from agilerl.utils.utils import _validate_llm_kwargs
+
+        with pytest.raises(ValueError, match="model_name or actor_network"):
+            _validate_llm_kwargs(
+                {"pad_token_id": 0, "pad_token": "<pad>"},
+                actor_network=None,
+            )
+
+    def test_accepts_actor_network_without_model_name(self):
+        from agilerl.utils.utils import _validate_llm_kwargs
+
+        # No raise.
+        _validate_llm_kwargs(
+            {"pad_token_id": 0, "pad_token": "<pad>"},
+            actor_network=MagicMock(),
+        )
