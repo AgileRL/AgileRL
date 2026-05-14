@@ -1435,6 +1435,44 @@ class TestMATD3Learn:
         assert set(loss.keys()) == set(matd3.shared_agent_ids)
         matd3.clean_up()
 
+    def test_returns_per_agent_losses_when_agents_are_not_grouped(
+        self, ma_vector_space
+    ):
+        """When every agent has a distinct group id (homogeneous observation
+        spaces but unique ID prefixes), ``MATD3.learn`` should fill the loss
+        dict per-agent rather than aggregating by group. This covers the
+        ``else: loss_dict[agent_id] = losses`` branch."""
+        # Distinct prefixes => has_grouped_agents() returns False.
+        agent_ids = ["adversary_0", "agent_0", "good_0"]
+        batch_size = 8
+        matd3 = MATD3(
+            observation_spaces=ma_vector_space,
+            action_spaces=copy.deepcopy(ma_vector_space),
+            agent_ids=agent_ids,
+            device="cpu",
+        )
+        assert not matd3.has_grouped_agents()
+
+        states = {
+            agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+            for idx, agent_id in enumerate(agent_ids)
+        }
+        actions = {
+            agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+            for idx, agent_id in enumerate(agent_ids)
+        }
+        rewards = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
+        next_states = {
+            agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+            for idx, agent_id in enumerate(agent_ids)
+        }
+        dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
+
+        loss = matd3.learn((states, actions, rewards, next_states, dones))
+        # When not grouped, the loss dict is keyed by raw agent ids.
+        assert set(loss.keys()) == set(agent_ids)
+        matd3.clean_up()
+
     @pytest.mark.gpu
     @pytest.mark.parametrize(
         "observation_spaces",

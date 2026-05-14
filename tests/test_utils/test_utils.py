@@ -1424,3 +1424,276 @@ class TestValidateLlmKwargs:
             {"pad_token_id": 0, "pad_token": "<pad>"},
             actor_network=MagicMock(),
         )
+
+
+class TestLoraConfigFromInitHp:
+    """Cover the ``_lora_config_from_init_hp`` helper branches.
+
+    The default tests pass a fully-built ``lora_config`` so the helper's
+    string-normalization and HAS_LLM_DEPENDENCIES guard are otherwise unhit.
+    """
+
+    def test_returns_none_when_no_modules(self):
+        from agilerl.utils.utils import _lora_config_from_init_hp
+
+        assert _lora_config_from_init_hp({}) is None
+
+    def test_returns_none_when_llm_deps_missing(self):
+        from agilerl.utils import utils as utils_mod
+
+        with patch.object(utils_mod, "HAS_LLM_DEPENDENCIES", False):
+            assert (
+                utils_mod._lora_config_from_init_hp({"LORA_TARGET_MODULES": "linear_1"})
+                is None
+            )
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES, reason="LoraConfig requires agilerl[llm]."
+    )
+    def test_string_modules_are_wrapped_into_list(self):
+        from agilerl.utils.utils import _lora_config_from_init_hp
+
+        cfg = _lora_config_from_init_hp({"LORA_TARGET_MODULES": "linear_1"})
+        assert cfg is not None
+        assert list(cfg.target_modules) == ["linear_1"]
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES, reason="LoraConfig requires agilerl[llm]."
+    )
+    def test_target_modules_alias_is_accepted(self):
+        from agilerl.utils.utils import _lora_config_from_init_hp
+
+        cfg = _lora_config_from_init_hp(
+            {"TARGET_MODULES": ["q_proj", "k_proj"], "LORA_R": 4}
+        )
+        assert cfg is not None
+        assert set(cfg.target_modules) == {"q_proj", "k_proj"}
+        assert cfg.r == 4
+
+
+@pytest.mark.skipif(
+    not HAS_LLM_DEPENDENCIES, reason="LoraConfig requires agilerl[llm]."
+)
+class TestPrepareLlmAlgoKwargsLoraDefaults:
+    def test_init_hp_lora_modules_build_default_lora_config(self):
+        """When no ``lora_config`` is supplied and INIT_HP carries Lora keys, the
+        helper should build a fresh ``LoraConfig`` and stash it under
+        ``lora_config``."""
+        from agilerl.utils.utils import _prepare_llm_algo_kwargs
+
+        merged = _prepare_llm_algo_kwargs(
+            {},
+            tokenizer=None,
+            model_name="foo/bar",
+            lora_config=None,
+            vllm_config=None,
+            INIT_HP={
+                "BATCH_SIZE": 4,
+                "LORA_TARGET_MODULES": ["linear_1"],
+                "LORA_R": 8,
+            },
+        )
+        assert merged.get("lora_config") is not None
+        assert list(merged["lora_config"].target_modules) == ["linear_1"]
+        assert merged["lora_config"].r == 8
+
+    def test_explicit_lora_config_takes_precedence_over_init_hp(self):
+        from agilerl.utils.utils import _prepare_llm_algo_kwargs
+
+        explicit = LoraConfig(
+            r=16,
+            target_modules=["explicit"],
+            task_type="CAUSAL_LM",
+        )
+        merged = _prepare_llm_algo_kwargs(
+            {},
+            tokenizer=None,
+            model_name="foo/bar",
+            lora_config=explicit,
+            vllm_config=None,
+            INIT_HP={
+                "BATCH_SIZE": 4,
+                "LORA_TARGET_MODULES": ["from_init_hp"],
+            },
+        )
+        # The explicit config is preserved; the INIT_HP fallback is not used.
+        assert merged["lora_config"] is explicit
+
+
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="agilerl[llm] not installed")
+class TestCreatePopulationLlmTorchCompiler:
+    """``create_population`` should forward ``torch_compiler`` into every LLM
+    branch's kwargs (GRPO/CISPO/GSPO, SFT, DPO, LLMPPO, LLMREINFORCE)."""
+
+    @pytest.fixture
+    def actor(self):
+        from tests.test_algorithms.test_llms.test_grpo import (
+            create_module as create_dummy_lm,
+        )
+
+        return create_dummy_lm(input_size=5, max_tokens=10, vocab_size=30, device="cpu")
+
+    @pytest.fixture
+    def init_hp(self):
+        return {
+            "BATCH_SIZE": 2,
+            "LR": 1e-5,
+            "BETA": 0.01,
+            "MAX_GRAD_NORM": 0.5,
+            "UPDATE_EPOCHS": 1,
+            "MAX_MODEL_LEN": 64,
+            "USE_VLLM": False,
+            "GRADIENT_CHECKPOINTING": False,
+        }
+
+    @pytest.mark.parametrize(
+        "algo,patch_target",
+        [
+            ("GRPO", "agilerl.utils.utils.GRPO"),
+            ("CISPO", "agilerl.utils.utils.CISPO"),
+            ("GSPO", "agilerl.utils.utils.GSPO"),
+            ("SFT", "agilerl.utils.utils.SFT"),
+            ("DPO", "agilerl.utils.utils.DPO"),
+            ("LLMPPO", "agilerl.utils.utils.LLMPPO"),
+            ("LLMREINFORCE", "agilerl.utils.utils.LLMREINFORCE"),
+        ],
+    )
+    def test_torch_compiler_threaded_through(
+        self, vector_space, actor, init_hp, algo, patch_target
+    ):
+        mock_agent = MagicMock(name=f"{algo}_agent")
+        with patch(patch_target, return_value=mock_agent) as mock_cls:
+            create_population(
+                algo=algo,
+                observation_space=vector_space,
+                action_space=copy.deepcopy(vector_space),
+                net_config=None,
+                INIT_HP=init_hp,
+                hp_config=None,
+                population_size=1,
+                device="cpu",
+                accelerator=None,
+                actor_network=actor,
+                torch_compiler="inductor",
+                algo_kwargs={
+                    "pad_token_id": 29,
+                    "pad_token": "<pad>",
+                    "use_vllm": False,
+                },
+            )
+        call_kw = mock_cls.call_args.kwargs
+        assert call_kw["torch_compiler"] == "inductor"
+
+    @pytest.mark.parametrize("algo", ["CISPO", "GSPO"])
+    def test_cispo_gspo_drop_loss_type_before_construction(
+        self, vector_space, actor, init_hp, algo
+    ):
+        """Both CISPO and GSPO sit under the GRPO branch but should never see
+        ``loss_type`` forwarded; the branch must ``pop`` it before instantiating
+        the algo (otherwise the constructor receives a duplicate ``loss_type``).
+        """
+        patch_target = f"agilerl.utils.utils.{algo}"
+        mock_agent = MagicMock(name=f"{algo}_agent")
+        with patch(patch_target, return_value=mock_agent) as mock_cls:
+            create_population(
+                algo=algo,
+                observation_space=vector_space,
+                action_space=copy.deepcopy(vector_space),
+                net_config=None,
+                INIT_HP={**init_hp, "LOSS_TYPE": "should-be-dropped"},
+                hp_config=None,
+                population_size=1,
+                device="cpu",
+                accelerator=None,
+                actor_network=actor,
+                algo_kwargs={
+                    "pad_token_id": 29,
+                    "pad_token": "<pad>",
+                    "use_vllm": False,
+                },
+            )
+        call_kw = mock_cls.call_args.kwargs
+        assert "loss_type" not in call_kw
+
+
+class TestCreatePopulationLlmDepGuard:
+    """When ``agilerl[llm]`` is not installed, every LLM-algo branch in
+    ``create_population`` should raise a clear ImportError instead of failing
+    deep inside the algorithm import path."""
+
+    @pytest.mark.parametrize(
+        "algo,match",
+        [
+            ("GRPO", "GRPO/CISPO/GSPO require optional LLM dependencies"),
+            ("CISPO", "GRPO/CISPO/GSPO require optional LLM dependencies"),
+            ("GSPO", "GRPO/CISPO/GSPO require optional LLM dependencies"),
+            ("SFT", "SFT requires optional LLM dependencies"),
+            ("DPO", "DPO requires optional LLM dependencies"),
+            ("LLMPPO", "LLMPPO requires optional LLM dependencies"),
+            ("LLMREINFORCE", "LLMREINFORCE requires optional LLM dependencies"),
+        ],
+    )
+    def test_llm_branches_raise_when_dependencies_missing(
+        self, algo, match, vector_space
+    ):
+        from agilerl.utils import utils as utils_mod
+
+        with patch.object(utils_mod, "HAS_LLM_DEPENDENCIES", False):
+            with pytest.raises(ImportError, match=match):
+                utils_mod.create_population(
+                    algo=algo,
+                    observation_space=vector_space,
+                    action_space=copy.deepcopy(vector_space),
+                    net_config=None,
+                    INIT_HP={"BATCH_SIZE": 2},
+                    hp_config=None,
+                    population_size=1,
+                    device="cpu",
+                    accelerator=None,
+                    actor_network=None,
+                )
+
+
+class TestAggregateMetricsNoAccelerator:
+    """Cover the ``accelerator is None`` branch of ``aggregate_metrics_across_gpus``
+    and the polymorphic float/ndarray/tensor branches of ``safe_aggregate_metrics``.
+    """
+
+    def test_aggregate_with_none_accelerator_and_tensor(self):
+        result = aggregate_metrics_across_gpus(None, torch.tensor([1.0, 2.0, 3.0]))
+        assert result == pytest.approx(2.0)
+
+    def test_aggregate_with_none_accelerator_and_scalar_passthrough(self):
+        # When accelerator is None and the metric is a plain scalar, the helper
+        # short-circuits and returns the scalar unchanged.
+        result = aggregate_metrics_across_gpus(None, 1.5)
+        assert result == 1.5
+
+    def test_safe_aggregate_with_tensor_no_accelerator(self):
+        from agilerl.utils.utils import safe_aggregate_metrics
+
+        result = safe_aggregate_metrics(None, torch.tensor([2.0, 4.0]))
+        assert isinstance(result, float)
+        assert result == pytest.approx(3.0)
+
+    def test_safe_aggregate_with_ndarray_no_accelerator(self):
+        from agilerl.utils.utils import safe_aggregate_metrics
+
+        result = safe_aggregate_metrics(None, np.array([3.0, 5.0, 7.0]))
+        assert isinstance(result, float)
+        assert result == pytest.approx(5.0)
+
+    def test_safe_aggregate_with_plain_float_no_accelerator(self):
+        from agilerl.utils.utils import safe_aggregate_metrics
+
+        assert safe_aggregate_metrics(None, 2.5) == 2.5
+
+    def test_safe_aggregate_with_accelerator_delegates(self):
+        from agilerl.utils.utils import safe_aggregate_metrics
+
+        accelerator = Accelerator()
+        result = safe_aggregate_metrics(
+            accelerator,
+            torch.tensor([1.0, 3.0], device=accelerator.device),
+        )
+        assert result == pytest.approx(2.0)

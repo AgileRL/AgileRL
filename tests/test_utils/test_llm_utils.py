@@ -1304,3 +1304,118 @@ def test_k3_helper_matches_torch() -> None:
     # Reference: torch implementation of the same formula.
     ref = torch.exp(log_p - log_q) - (log_p - log_q) - 1.0
     assert torch.allclose(calculate_k3_kl(log_p, log_q), ref)
+
+
+class TestMaskedMeanAxis:
+    """Cover the axis-reduction branch in :func:`masked_mean`."""
+
+    def test_per_row_axis_reduction(self) -> None:
+        values = torch.tensor([[1.0, 3.0], [4.0, 8.0]])
+        mask = torch.tensor([[1.0, 1.0], [0.0, 1.0]])
+        result = masked_mean(values, mask, axis=1)
+        assert result.shape == (2,)
+        assert result.tolist() == pytest.approx([2.0, 8.0])
+
+
+class TestMaskedWhitenShiftMean:
+    """Cover the ``shift_mean=False`` branch in :func:`masked_whiten`."""
+
+    def test_shift_mean_false_adds_mean_back(self) -> None:
+        from agilerl.utils.llm_utils import masked_whiten
+
+        values = torch.tensor([[1.0, 3.0, 5.0, 7.0]])
+        mask = torch.tensor([[1.0, 1.0, 1.0, 1.0]])
+        whitened_no_shift = masked_whiten(values, mask, shift_mean=False)
+        whitened_shift = masked_whiten(values, mask, shift_mean=True)
+        # The two outputs differ by exactly the masked mean (=4.0).
+        diff = whitened_no_shift - whitened_shift
+        assert torch.allclose(diff, torch.full_like(diff, 4.0), atol=1e-5)
+
+
+class TestPoolByTurnsBadReduction:
+    """``pool_by_turns`` should raise a clear ValueError for unknown reductions."""
+
+    def test_unknown_reduction_raises(self) -> None:
+        token_values = torch.tensor([[1.0, 2.0]])
+        turn_ids = torch.tensor([[0, 0]])
+        with pytest.raises(ValueError, match="Invalid reduction: unsupported"):
+            pool_by_turns(token_values, turn_ids, num_turns=1, reduction="unsupported")
+
+
+class TestCreateModelFromNameOrPathValueHead:
+    """``create_model_from_name_or_path`` should route through ``AutoModelForCausalLMWithValueHead``
+    when a value head is requested."""
+
+    def test_add_value_head_calls_value_head_loader(self) -> None:
+        from agilerl.utils import llm_utils as llm_utils_module
+
+        sentinel_model = object()
+        with patch.object(
+            llm_utils_module.AutoModelForCausalLMWithValueHead,
+            "from_pretrained",
+            return_value=sentinel_model,
+        ) as mock_loader:
+            out = llm_utils_module.create_model_from_name_or_path(
+                "some/model",
+                add_value_head=True,
+                use_accelerator=False,
+            )
+        assert out is sentinel_model
+        # Default model_config is built when not supplied; verify the loader saw
+        # the model name plus the synthesized dtype/attn keys.
+        call_kwargs = mock_loader.call_args.kwargs
+        assert call_kwargs["pretrained_model_name_or_path"] == "some/model"
+        assert call_kwargs["attn_implementation"] == "sdpa"
+
+
+class TestPreparePromptHfGenerateTensorInitialLen:
+    """Multi-turn rollouts may pass ``initial_prompt_len`` as a scalar tensor;
+    the helper must coerce it to a plain Python int so downstream slicing works.
+    """
+
+    def test_tensor_scalar_initial_prompt_len_coerced_to_int(self) -> None:
+        from agilerl.utils.llm_utils import prepare_prompt_hf_generate
+
+        prompt = {
+            "input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
+            "attention_mask": torch.tensor([[1, 1, 1, 1]], dtype=torch.long),
+            "initial_prompt_len": torch.tensor([2], dtype=torch.long),
+        }
+        out = prepare_prompt_hf_generate(prompt, torch.device("cpu"))
+        assert out["initial_prompt_len"] == 2
+        assert isinstance(out["initial_prompt_len"], int)
+
+
+class TestGetModelNameOrPathBaseModelBranches:
+    """``get_model_name_or_path`` falls through several optional attribute
+    chains: ``base_model.name_or_path`` then ``base_model.pretrained_model.name_or_path``.
+    These branches don't fire when ``name_or_path`` exists at the top level.
+    """
+
+    def test_base_model_name_or_path(self) -> None:
+        class _Base:
+            name_or_path = "via_base"
+
+        class _Wrapper:
+            base_model = _Base()
+
+        wrapper = _Wrapper()
+        # Sanity: no top-level ``name_or_path`` and no ``pretrained_model``.
+        assert not hasattr(wrapper, "name_or_path")
+        assert not hasattr(wrapper, "pretrained_model")
+        assert get_model_name_or_path(wrapper) == "via_base"
+
+    def test_base_model_pretrained_model_name_or_path(self) -> None:
+        class _PretrainedInBase:
+            name_or_path = "via_base_pretrained"
+
+        class _Base:
+            pretrained_model = _PretrainedInBase()
+            # Intentionally no ``name_or_path`` here so the helper has to fall
+            # through to ``base_model.pretrained_model.name_or_path``.
+
+        class _Wrapper:
+            base_model = _Base()
+
+        wrapper = _Wrapper()
+        assert get_model_name_or_path(wrapper) == "via_base_pretrained"

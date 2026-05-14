@@ -2246,6 +2246,52 @@ class TestFinetuneLlmMultiturn:
                 verbose=False,
             )
 
+    def test_finetune_llm_multiturn_wall_deadline_stops_loop(self):
+        """When ``max_wall_seconds`` is set and the deadline elapses, the outer
+        loop must break immediately and emit the wall-time stop message — the
+        agent's ``learn`` is never called.
+        """
+        import builtins
+
+        mock_agent = _make_multiturn_mock_agent()
+        mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
+
+        # ``time.monotonic`` is read twice for the deadline: once at start
+        # (to set ``wall_deadline``) and once per iteration (to compare). Force
+        # the second read to be far in the future so the loop bails right away.
+        monotonic_values = iter([0.0, 1_000_000.0])
+        captured_prints = []
+
+        original_print = builtins.print
+
+        def _capture_print(*args, **kwargs):
+            captured_prints.append(" ".join(str(a) for a in args))
+            return original_print(*args, **kwargs)
+
+        with (
+            patch("agilerl.training.train_llm.trange"),
+            patch(
+                "agilerl.training.train_llm.time.monotonic",
+                side_effect=lambda: next(monotonic_values),
+            ),
+            patch("builtins.print", side_effect=_capture_print),
+            patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        ):
+            finetune_llm_multiturn(
+                pop=[mock_agent],
+                env_factory=lambda: mock_env,
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
+                max_steps=100,
+                verbose=False,
+                accelerator=None,
+                max_wall_seconds=5.0,
+            )
+
+        # The loop should bail before doing any work.
+        assert mock_agent.learn.call_count == 0
+        assert any("wall time limit (5.0s) reached" in line for line in captured_prints)
+
 
 class TestBuildTrainWandbDict:
     def test_build_train_wandb_dict_reasoning_llmppo_uses_fallback_pg_and_entropy_keys(

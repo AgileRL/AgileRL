@@ -50,6 +50,30 @@ def test_no_liger_fused_module_raises_import_error(monkeypatch):
         importlib.import_module(mod_name)
 
 
+def test_llm_ops_package_init_sets_symbols_to_none_without_liger() -> None:
+    """When ``HAS_LIGER_KERNEL=False`` at import time, the
+    :mod:`agilerl.algorithms.core.llm_ops` package ``__init__`` resolves
+    its Liger-only re-exports to ``None`` so callers can use ``is None``
+    guards without an ImportError. Exercised by reloading the package
+    with the flag flipped — the always-available ``fused_lora`` helpers
+    must remain re-exported."""
+    import agilerl
+    import agilerl.algorithms.core.llm_ops as llm_ops_pkg
+
+    original_has_liger = agilerl.HAS_LIGER_KERNEL
+    try:
+        agilerl.HAS_LIGER_KERNEL = False
+        importlib.reload(llm_ops_pkg)
+        assert llm_ops_pkg.LigerFusedLinearPolicyLossFunction is None
+        assert llm_ops_pkg._LigerDPOWithAlpha is None
+        assert llm_ops_pkg.llm_policy_loss_fn is None
+        # Always-available helpers are still re-exported.
+        assert callable(llm_ops_pkg.patch_lora_for_fused_forward)
+    finally:
+        agilerl.HAS_LIGER_KERNEL = original_has_liger
+        importlib.reload(llm_ops_pkg)
+
+
 @pytest.mark.parametrize(
     "module_path,symbol",
     [

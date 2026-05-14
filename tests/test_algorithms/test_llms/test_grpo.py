@@ -1722,6 +1722,77 @@ class TestGRPOClipCoefTuple:
         ):
             _make_cpu_grpo_for_branch_tests(clip_coef=(0.1,))
 
+    def test_negative_float_clip_coef_raises(self) -> None:
+        with pytest.raises(
+            ValueError, match="clip_coef must be greater than or equal to zero"
+        ):
+            _make_cpu_grpo_for_branch_tests(clip_coef=-0.1)
+
+    @pytest.mark.parametrize("bad_value", ["not_a_number", {"min": 0.1}, None])
+    def test_non_numeric_clip_coef_raises_typeerror(self, bad_value) -> None:
+        with pytest.raises(
+            TypeError,
+            match="clip_coef must be a float or a tuple or list of two floats",
+        ):
+            _make_cpu_grpo_for_branch_tests(clip_coef=bad_value)
+
+
+class TestGRPOLearnRewardsShape:
+    """Cover the ``rewards.dim() > 1`` collapse branch in :meth:`GRPO.learn`.
+
+    Default learn-path tests pass 1-D rewards; multi-turn rollouts produce
+    [batch, max_turns] rewards that the algo collapses to per-trajectory
+    scalars via ``rewards.sum(dim=1)``.
+    """
+
+    def test_multi_turn_rewards_are_summed_along_last_dim(self) -> None:
+        grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        # Shape [batch, max_turns]; sums to [3, 7, 11, 15] post-collapse.
+        rewards = torch.tensor(
+            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]],
+            dtype=torch.float32,
+        )
+
+        captured = {}
+
+        def _capture_calculate_advantage(self, _rewards):
+            captured["rewards_passed_to_adv"] = _rewards
+            # Return per-sample advantages so the rest of learn() can proceed.
+            return torch.zeros(_rewards.shape[0], 1, dtype=torch.float32)
+
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        with (
+            patch.object(
+                GRPO,
+                "_calculate_advantage",
+                _capture_calculate_advantage,
+            ),
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            patch.object(
+                grpo,
+                "_loss",
+                return_value=(
+                    torch.tensor(0.5, dtype=torch.float32),
+                    torch.tensor(0.0, dtype=torch.float32),
+                ),
+            ),
+            patch.object(grpo, "_backward_pass", return_value=None),
+        ):
+            grpo.learn((completion_ids, action_masks, rewards))
+
+        collapsed = captured["rewards_passed_to_adv"]
+        # After collapse, rewards should be 1-D with summed per-trajectory values.
+        assert collapsed.dim() == 1
+        assert collapsed.tolist() == [3.0, 7.0, 11.0, 15.0]
+        grpo.clean_up()
+
 
 class TestGRPOLigerLossDispatch:
     """Cover the ``loss_type`` -> Liger-API dispatch table in
@@ -1858,6 +1929,54 @@ class TestGRPOGetAction:
             completion_ids, action_masks = grpo.get_action(prompts, training=False)
         assert len(completion_ids) == 1
         assert len(action_masks) == 1
+        grpo.clean_up()
+
+    def test_get_action_grpo_hf_repeats_single_row_stitch_ids_when_grouping(self):
+        """When training with ``group_size > 1`` and a prompt carries a single-row
+        ``stitch_prefix_ids`` tensor, the HF generate path must repeat the stitch
+        prefix to match the grouped batch dimension. Otherwise downstream
+        ``stitch_completion_after_windowed_hf_generate`` would receive a [1, N]
+        prefix against a [group_size, T] completion."""
+        grpo = _make_cpu_grpo_for_branch_tests(group_size=3)
+        seq_len = 4
+        prompts = [
+            {
+                "input_ids": torch.randint(0, 60, (1, seq_len), device=grpo.device),
+                "attention_mask": torch.ones(1, seq_len, device=grpo.device),
+                "stitch_prefix_ids": torch.tensor(
+                    [[7, 8]], dtype=torch.long, device=grpo.device
+                ),
+                "initial_prompt_len": 2,
+            },
+        ]
+        observed_stitch = {}
+
+        def fake_actor_generate(input_ids, attention_mask, generation_config=None):
+            # After repeat, the grouped input_ids should already have the group
+            # dim baked in.
+            return torch.cat(
+                [input_ids, torch.full_like(input_ids[:, :2], 1)],
+                dim=1,
+            )
+
+        def fake_stitch(completion_id, stitch, initial_len):
+            observed_stitch["stitch_shape"] = (
+                None if stitch is None else tuple(stitch.shape)
+            )
+            return completion_id, initial_len
+
+        with (
+            patch.object(grpo.actor, "generate", side_effect=fake_actor_generate),
+            patch(
+                "agilerl.algorithms.grpo.stitch_completion_after_windowed_hf_generate",
+                side_effect=fake_stitch,
+            ),
+        ):
+            completion_ids, _ = grpo.get_action(prompts, training=True)
+
+        # The single-row stitch prefix should have been broadcast to group_size.
+        assert observed_stitch["stitch_shape"] == (3, 2)
+        assert completion_ids[0].shape[0] == 3
         grpo.clean_up()
 
     @pytest.mark.parametrize("config", [deepspeed_config_stage_2])

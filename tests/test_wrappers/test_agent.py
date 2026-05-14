@@ -1185,6 +1185,27 @@ class TestAsyncAgentsWrapperStackExperiences:
         assert stacked["agent_0"] is None
         assert stacked["agent_1"] is not None
 
+    def test_async_stack_experiences_passthrough_non_dict_element(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        """``stack_experiences`` recurses into tuples; non-dict elements
+        (e.g. plain tensors / ndarrays) should be returned unchanged. This
+        covers the ``return experiences`` short-circuit in the recursive helper.
+        """
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=ma_discrete_space[:2],
+            agent_ids=["agent_0", "agent_1"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        raw_array = np.array([1.0, 2.0, 3.0])
+        # Tuple of mixed types: one dict, one bare ndarray. The recursion sees
+        # the ndarray and bails through ``return experiences``.
+        out = wrapper.stack_experiences(({"agent_0": raw_array}, raw_array))
+        assert isinstance(out, tuple)
+        assert out[1] is raw_array
+
 
 def _make_maddpg_wrapper(ma_vector_space):
     """Build a CPU MADDPG wrapper for direct off-policy helper tests."""
@@ -1360,6 +1381,28 @@ class TestAsyncAgentsWrapperAlignAsyncOffPolicyExperiences:
         rewards = {"agent_0": np.zeros(0)}
         next_states = {"agent_0": np.zeros((0, 6))}
         dones = {"agent_0": np.zeros(0)}
+
+        aligned_states, *_ = wrapper._align_async_off_policy_experiences(
+            (states, actions, rewards, next_states, dones)
+        )
+
+        assert aligned_states == {}
+
+    def test_zero_min_len_in_present_next_state_branch_drops_agent(
+        self, ma_vector_space
+    ):
+        """When ``next_states`` is supplied (non-NaN) but one of the per-agent
+        sequence lengths is zero, the ``min_len == 0`` continue in the else
+        branch of ``_align_async_off_policy_experiences`` should fire and the
+        agent is dropped from the aligned output.
+        """
+        wrapper = _make_maddpg_wrapper(ma_vector_space)
+        # next_states is populated and not NaN, so we go down the else branch.
+        states = {"agent_0": np.ones((3, 6))}
+        actions = {"agent_0": np.zeros((0, 2))}  # length zero forces min_len=0
+        rewards = {"agent_0": np.zeros(3)}
+        next_states = {"agent_0": np.ones((3, 6))}
+        dones = {"agent_0": np.zeros(3)}
 
         aligned_states, *_ = wrapper._align_async_off_policy_experiences(
             (states, actions, rewards, next_states, dones)
