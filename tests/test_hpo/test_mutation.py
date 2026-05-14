@@ -1311,6 +1311,7 @@ class TestMutationsMutation:
 
             assert mutation_found, f"Mutation not applied for agent index {old.index}"
 
+    @pytest.mark.gpu
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
     )
