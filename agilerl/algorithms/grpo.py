@@ -419,9 +419,7 @@ class GRPO(LLMAlgorithm):
         # Register metrics to keep track of during training
         self.metrics.register("loss")
         self.metrics.register("kl")
-        self.metrics.register("reward")
         self.metrics.register("completion_length")
-        self.metrics.register("accuracy")
 
     def get_action(
         self,
@@ -551,6 +549,7 @@ class GRPO(LLMAlgorithm):
             # per-turn rewards [batch, max_turns], collapse to episode returns.
             if rewards.dim() > 1 and rewards.shape[0] == completion_ids.shape[0]:
                 rewards = rewards.sum(dim=1)
+
             rewards = rewards.flatten()
             if rewards.shape[0] != completion_ids.shape[0]:
                 msg = (
@@ -656,7 +655,6 @@ class GRPO(LLMAlgorithm):
             }
             completion_lengths = np.mean([x.shape[-1] for x in experiences[0]])
             learn_metrics["completion_length"] = completion_lengths
-            learn_metrics["reward"] = rewards.mean().item()
 
             # Aggregate metrics across GPUs and report to metrics
             agg = aggregate_metrics_dict(self.accelerator, learn_metrics)

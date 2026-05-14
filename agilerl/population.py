@@ -577,7 +577,7 @@ class Population(Generic[AgentT]):
 
         steps = [agent.metrics.steps for agent in self.agents]
         if self.accelerator is not None and self.accelerator.is_main_process:
-            steps = [step * self.accelerator.state.num_processes for step in steps]
+            steps = [step * self.accelerator.num_processes for step in steps]
 
         return PopulationMetrics(
             fitnesses=fitnesses,

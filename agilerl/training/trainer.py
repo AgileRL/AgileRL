@@ -55,8 +55,10 @@ else:
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import AutoTokenizer
+    from agilerl.utils.llm_utils import create_llm_accelerator
 else:
     AutoTokenizer = None
+    create_llm_accelerator = None
 
 if TYPE_CHECKING:
     import torch
@@ -305,6 +307,15 @@ class LocalTrainer(Trainer):
             device=device,
             accelerator=accelerator,
         )
+
+        # LLM algorithms require a DeepSpeed-aware accelerator
+        if isinstance(self.algorithm_spec, LLMAlgorithmSpec) and self.accelerator is None:
+            if create_llm_accelerator is None:
+                msg = "LLM dependencies are not installed. Please install them using: pip install agilerl[llm]"
+                raise ImportError(msg)
+
+            logger.info("User did not provide an accelerator, creating one with DeepSpeed...")
+            self.accelerator = create_llm_accelerator()
 
         # For LLM algorithms, load the tokenizer once and share it.
         self.tokenizer = (

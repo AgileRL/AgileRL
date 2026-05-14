@@ -348,7 +348,6 @@ class PPO(LLMAlgorithm):
             "kl",
             "entropy",
             "clipfrac",
-            "reward",
             "completion_length",
         ):
             self.metrics.register(m)
@@ -685,8 +684,6 @@ class PPO(LLMAlgorithm):
 
         learn_metrics = {k: v / max(updates, 1) for k, v in learn_metrics.items()}
         completion_lengths = np.mean([c.shape[-1] for c in experiences[0]])
-        episode_scores = rewards_2d.sum(dim=1) if rewards_2d.dim() > 1 else rewards_2d
-        learn_metrics["reward"] = episode_scores.mean().item()
         learn_metrics["completion_length"] = completion_lengths
 
         # Aggregate metrics across GPUs and log

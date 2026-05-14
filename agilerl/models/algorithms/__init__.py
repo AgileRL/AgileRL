@@ -17,8 +17,12 @@ from .rainbow_dqn import RainbowDQNSpec
 from .td3 import TD3Spec
 
 if HAS_LLM_DEPENDENCIES:
+    from .cispo import CISPOSpec
     from .dpo import DPOSpec
     from .grpo import GRPOSpec
+    from .gspo import GSPOSpec
+    from .llmppo import LLMPPOSpec
+    from .llmreinforce import LLMREINFORCESpec
     from .sft import SFTSpec
 
 __all__ = [
@@ -36,4 +40,12 @@ __all__ = [
 ]
 
 if HAS_LLM_DEPENDENCIES:
-    __all__ += ["DPOSpec", "GRPOSpec", "SFTSpec"]
+    __all__ += [
+        "CISPOSpec",
+        "DPOSpec",
+        "GRPOSpec",
+        "GSPOSpec",
+        "LLMPPOSpec",
+        "LLMREINFORCESpec",
+        "SFTSpec",
+    ]

@@ -16,8 +16,6 @@ from pathlib import Path
 import torch
 from accelerate import Accelerator
 
-from agilerl.models.algo import LLMAlgorithmSpec
-from agilerl.models.manifest import TrainingManifest
 from agilerl.training.trainer import LocalTrainer
 
 logging.basicConfig(
@@ -121,10 +119,7 @@ def main() -> None:
 
     logger.info("Loading manifest: %s", args.manifest)
 
-    validated_manifest = TrainingManifest.get_validated(args.manifest, mode="python")
-    is_llm = isinstance(validated_manifest.algorithm, LLMAlgorithmSpec)
-
-    accelerator = Accelerator() if args.use_accelerator or is_llm else None
+    accelerator = Accelerator() if args.use_accelerator else None
 
     # Load the Trainer from the manifest
     trainer = LocalTrainer.from_manifest(

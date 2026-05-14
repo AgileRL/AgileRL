@@ -298,7 +298,7 @@ class REINFORCE(LLMAlgorithm):
         if self.wrap:
             self.wrap_models()
 
-        for m in ("loss", "kl", "entropy", "reward", "completion_length"):
+        for m in ("loss", "kl", "entropy", "completion_length"):
             self.metrics.register(m)
 
     def get_action(
@@ -549,8 +549,6 @@ class REINFORCE(LLMAlgorithm):
 
         learn_metrics = {k: v / max(updates, 1) for k, v in learn_metrics.items()}
         completion_lengths = float(np.mean([c.shape[-1] for c in experiences[0]]))
-        episode_scores = rewards_2d.sum(dim=1) if rewards_2d.dim() > 1 else rewards_2d
-        learn_metrics["reward"] = episode_scores.mean().item()
         learn_metrics["completion_length"] = completion_lengths
 
         # Aggregate metrics across GPUs and log

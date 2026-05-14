@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from accelerate import Accelerator
+import torch
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import DPO, GRPO
@@ -329,11 +330,15 @@ def finetune_llm_reasoning(
             agg_rewards = safe_aggregate_metrics(accelerator, rewards)
 
             if max_reward is not None:
+                if "accuracy" not in agent.metrics.additional_metrics:
+                    agent.metrics.register("accuracy")
+
                 accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
                 agg_accuracy = safe_aggregate_metrics(accelerator, accuracy)
-                agent.metrics.log("accuracy", agg_accuracy)
+                if accelerator is None or accelerator.is_main_process:
+                    agent.metrics.log("accuracy", agg_accuracy)
 
-            agent.add_scores([float(agg_rewards)])
+            agent.add_scores([agg_rewards])
             agent.finalize_evo_step(training_env.data_batch_size_per_gpu)
             total_steps += effective_data_batch_size
 
@@ -1002,7 +1007,6 @@ def finetune_llm_multiturn(
         # Collect rollouts and learn
         for agent in population.agents:
             agent.init_evo_step()
-
             (
                 completion_ids_list,
                 action_masks_list,
@@ -1047,31 +1051,46 @@ def finetune_llm_multiturn(
             agg_score = safe_aggregate_metrics(accelerator, mean_score)
 
             if max_reward is not None:
+                if "accuracy" not in agent.metrics.additional_metrics:
+                    agent.metrics.register("accuracy")
+
                 accuracy = (
                     (episode_scores >= max_reward).float().mean().to(agent.device)
                 )
                 agg_accuracy = safe_aggregate_metrics(accelerator, accuracy)
-                agent.metrics.log("accuracy", agg_accuracy)
+
+                if accelerator is None or accelerator.is_main_process:
+                    agent.metrics.log("accuracy", agg_accuracy)
 
             effective_batch_steps = batch_steps * data_increment
-            agent.add_scores([float(agg_score)])
-            agent.finalize_evo_step(batch_size)
+            agent.finalize_evo_step(batch_steps)
             total_steps += effective_batch_steps
 
-        pbar.update(effective_batch_steps // len(population.agents))
-        population.increment_evo_step()
+            if accelerator is None or accelerator.is_main_process:
+                agent.add_scores([float(agg_score)])
 
-        if (i + 1) % evaluation_interval == 0:
-            if eval_fn is not None:
-                for agent in population.agents:
-                    eval_score = eval_fn(agent)
-                    agent.metrics.log("eval_score", float(eval_score))
+            if (i + 1) % evaluation_interval == 0 and eval_fn is not None:
+                eval_score = eval_fn(agent)
+                eval_tensor = torch.tensor(
+                    eval_score, dtype=torch.float32, device=agent.device
+                )
+                agg_eval_score = safe_aggregate_metrics(accelerator, eval_tensor)
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
 
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
+                if accelerator is None or accelerator.is_main_process:
+                    agent.metrics.log("eval_score", agg_eval_score)
 
+        # Report training metrics
+        if accelerator is None or accelerator.is_main_process:
+            pbar.update(effective_batch_steps // len(population.agents))
+            population.increment_evo_step()
             population.report_metrics(clear=True)
 
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+
+        # Tournament selection and mutation
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:

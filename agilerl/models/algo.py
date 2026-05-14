@@ -233,7 +233,7 @@ class AlgorithmSpec(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @classmethod
-    def algo_class(cls) -> type:
+    def algo_class(cls) -> type[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]:
         """Lazily resolve the algorithm class from ``agilerl.algorithms``."""
         if cls._algo_class_cache is None:
             from agilerl import algorithms
@@ -518,6 +518,12 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         use_vllm = getattr(self, "use_vllm", False)
         if not use_vllm and hasattr(self, "vllm_config"):
             self.vllm_config = None
+
+        vllm_cfg = getattr(self, "vllm_config", None)
+        if isinstance(vllm_cfg, dict):
+            from agilerl.utils.algo_utils import VLLMConfig
+
+            self.vllm_config = VLLMConfig(**vllm_cfg)
 
         kwargs = vars(self).copy()
         kwargs.pop("pretrained_model_name_or_path")
