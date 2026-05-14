@@ -1201,7 +1201,6 @@ def finetune_llm_multiturn(
     wandb_project: str = "AgileRL",
     wandb_entity: str | None = None,
     wandb_run_name: str | None = None,
-    eval_fn: Callable[[LLMPPO | LLMREINFORCE], float] | None = None,
     evaluation_interval: int = 50,
     max_reward: float | None = None,
     verbose: bool = True,
@@ -1246,9 +1245,8 @@ def finetune_llm_multiturn(
     :type mutation: Mutations, optional
     :param wandb_api_key: W&B API key, defaults to None.
     :type wandb_api_key: str, optional
-    :param eval_fn: Optional ``(agent) -> float`` evaluated on the main process.
-    :type eval_fn: Callable[[LLMPPO], float], optional
-    :param evaluation_interval: How often to run ``eval_fn`` and verbose banners.
+    :param evaluation_interval: How often to call ``agent.test`` on a fresh
+        environment from ``env_factory`` and emit verbose banners.
     :type evaluation_interval: int, optional
     :param max_reward: If set, adds accuracy metric vs this threshold.
     :type max_reward: float, optional
@@ -1345,6 +1343,7 @@ def finetune_llm_multiturn(
     max_steps_checkpoint_saved = False
     group_size = getattr(pop[0], "group_size", 1)
     rollout_env = SyncMultiTurnVecEnv(env_factory, batch_size, group_size, env_config)
+    test_env = env_factory(**(env_config or {}))
     wall_deadline = (
         time.monotonic() + max_wall_seconds
         if max_wall_seconds is not None and max_wall_seconds > 0
@@ -1434,8 +1433,8 @@ def finetune_llm_multiturn(
             iteration_steps += effective_batch_steps
             agg_eval_score = None
 
-            if (i + 1) % evaluation_interval == 0 and eval_fn is not None:
-                eval_score = eval_fn(agent)
+            if (i + 1) % evaluation_interval == 0:
+                eval_score = agent.test(test_env)
                 eval_tensor = torch.tensor(
                     eval_score, dtype=torch.float32, device=agent.device
                 )

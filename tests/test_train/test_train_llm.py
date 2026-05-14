@@ -1,5 +1,6 @@
 from unittest.mock import ANY, MagicMock, Mock, call, patch
 
+import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
@@ -101,6 +102,9 @@ def _make_multiturn_mock_agent(*, spec=LLMPPO):
     mock_agent.mut = 0
     mock_agent.device = torch.device("cpu")
     mock_agent.set_reference_policy = MagicMock()
+    # ``agent.test`` returns ``np.array(mean_fit)`` for real LLM algos; provide a
+    # tensorable default so the training loop can wrap it in ``torch.tensor``.
+    mock_agent.test.return_value = np.array(0.5, dtype=np.float32)
     return mock_agent
 
 
@@ -1960,10 +1964,14 @@ class TestFinetuneLlmMultiturn:
                 verbose=False,
             )
 
-    def test_finetune_llm_multiturn_eval_fn_interval(self):
+    def test_finetune_llm_multiturn_test_interval(self):
+        """``finetune_llm_multiturn`` should call ``agent.test`` on a fresh env
+        from ``env_factory`` every ``evaluation_interval`` outer iterations,
+        matching the API of the other LLM trainers (no separate ``eval_fn``).
+        """
         mock_agent = _make_multiturn_mock_agent()
         mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
-        eval_fn = MagicMock(return_value=0.42)
+        mock_agent.test.return_value = np.array(0.42, dtype=np.float32)
 
         with (
             patch("agilerl.training.train_llm.trange"),
@@ -1982,12 +1990,13 @@ class TestFinetuneLlmMultiturn:
                 init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
                 max_steps=9,
                 evaluation_interval=1,
-                eval_fn=eval_fn,
                 verbose=False,
                 accelerator=None,
             )
 
-        assert eval_fn.call_count == 3
+        assert mock_agent.test.call_count == 3
+        # Every call should hit the test env that env_factory produced.
+        assert all(c.args[0] is mock_env for c in mock_agent.test.call_args_list)
         n_metrics = 7
         n_eval_agg = 3
         assert mock_agg.call_count == 3 * n_metrics + n_eval_agg
@@ -2136,15 +2145,15 @@ class TestFinetuneLlmMultiturn:
     def test_finetune_llm_multiturn_wandb_accuracy_and_eval_scores_with_verbose_banner(
         self,
     ):
-        """W&B max_reward keys, Eval/Best score from eval_fn, HPO keys, verbose pbar.write paths."""
+        """W&B max_reward keys, Eval/Best score from agent.test, HPO keys, verbose pbar.write paths."""
         mock_pbar = Mock()
         mock_agent = _make_multiturn_mock_agent()
         mock_agent.registry = MagicMock()
         mock_agent.registry.hp_config = MagicMock()
         mock_agent.registry.hp_config.config = {"lr": 0.01}
         mock_agent.lr = 0.01
+        mock_agent.test.return_value = np.array(0.33, dtype=np.float32)
         mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
-        eval_fn = MagicMock(return_value=0.33)
 
         with (
             patch("agilerl.training.train_llm.trange", return_value=mock_pbar),
@@ -2165,7 +2174,6 @@ class TestFinetuneLlmMultiturn:
                 init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO", "env_name": "gem_test"},
                 max_steps=9,
                 evaluation_interval=1,
-                eval_fn=eval_fn,
                 max_reward=0.5,
                 wb=True,
                 wandb_api_key="fake",
@@ -2187,9 +2195,11 @@ class TestFinetuneLlmMultiturn:
         )
         assert acc_logged
 
-    def test_finetune_llm_multiturn_accelerator_syncs_after_eval_fn(self):
-        """Covers accelerator.wait_for_everyone() after distributed eval aggregation."""
+    def test_finetune_llm_multiturn_accelerator_syncs_after_test(self):
+        """Covers accelerator.wait_for_everyone() after distributed eval aggregation
+        that follows the ``agent.test`` call."""
         mock_agent = _make_multiturn_mock_agent()
+        mock_agent.test.return_value = np.array(0.1, dtype=np.float32)
         mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
         acc = MagicMock(spec=Accelerator)
         acc.is_main_process = True
@@ -2216,12 +2226,12 @@ class TestFinetuneLlmMultiturn:
                 init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
                 max_steps=3,
                 evaluation_interval=1,
-                eval_fn=lambda _a: 0.1,
                 verbose=False,
                 accelerator=acc,
             )
 
         assert acc.wait_for_everyone.call_count >= 1
+        assert mock_agent.test.call_count >= 1
 
     def test_finetune_llm_multiturn_raises_when_group_size_not_divisible_by_batch_size(
         self,
