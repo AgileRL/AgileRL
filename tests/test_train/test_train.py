@@ -5415,6 +5415,13 @@ class TestTrainBandits:
         )
         assert os.path.isfile(elite_path)
 
+    # Same xdist_group as ``test_remove_saved_models`` below — the
+    # accelerator branch of ``train_bandits`` writes into ``models/<env_name>/``,
+    # which ``test_remove_saved_models`` then rmtrees. On macOS the rmtree can
+    # land between this test's mkdir and save_checkpoint, producing
+    # ``Parent directory models/<env_name> does not exist``. Pinning both to
+    # the same xdist worker forces serial execution.
+    @pytest.mark.xdist_group("models_dir")
     @pytest.mark.parametrize(
         "state_size, action_size, accelerator_flag",
         [((6,), 2, True), ((6,), 2, False)],
@@ -5457,11 +5464,16 @@ class TestTrainBandits:
                 assert os.path.isfile(f"{checkpoint_path}_{i}_{10 * (s + 1)}.pt")
 
 
+@pytest.mark.xdist_group("models_dir")
 def test_remove_saved_models():
-    # Under xdist a sibling worker may still be writing into ``models/`` (e.g.
-    # checkpoint-saving training tests on another worker) while this teardown
-    # runs, racing ``rmtree`` to ``OSError: Directory not empty``. The test is
-    # purely a cleanup hook, so swallow the race and retry once.
+    # Pinned to the ``models_dir`` xdist_group alongside
+    # ``test_bandit_train_save_checkpoint`` so the two never run on different
+    # workers — the bandit test's checkpoint writes used to race this rmtree
+    # on macOS (``Parent directory models/<env_name> does not exist``).
+    #
+    # The retry below remains for the inverse race against any *other*
+    # sibling worker's writes into ``models/`` (rmtree losing to a concurrent
+    # write), which the xdist_group can't cover.
     if not os.path.exists("models"):
         return
     for _ in range(3):
