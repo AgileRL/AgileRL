@@ -49,7 +49,7 @@ wheels = [
 
 [[package]]
 name = "agilerl"
-version = "2.7.0.dev3"
+version = "2.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
