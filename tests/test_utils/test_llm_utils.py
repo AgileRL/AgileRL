@@ -1161,6 +1161,82 @@ def test_masked_var_unbiased_requires_at_least_two_unmasked_values():
         masked_var(values, mask, unbiased=True)
 
 
+class TestMaxPromptTokensForSlidingWindow:
+    def test_reserves_one_token_when_max_output_tokens_none(self):
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+
+        assert max_prompt_tokens_for_sliding_window(128, None) == 127
+
+    def test_reserves_max_output_tokens_when_set(self):
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+
+        assert max_prompt_tokens_for_sliding_window(128, 32) == 96
+
+    def test_caps_reservation_at_max_model_len(self):
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+
+        # max_output_tokens > max_model_len → reserve max_model_len, return 0
+        assert max_prompt_tokens_for_sliding_window(64, 256) == 0
+
+    def test_clamps_at_zero_when_no_room(self):
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+
+        assert max_prompt_tokens_for_sliding_window(0, None) == 0
+
+
+class TestNormalizeReasoningPromptBatch:
+    def test_passes_list_through(self):
+        from agilerl.utils.llm_utils import normalize_reasoning_prompt_batch
+
+        original = [{"input_ids": torch.tensor([1, 2])}]
+        assert normalize_reasoning_prompt_batch(original) is original
+
+    def test_one_d_input_ids_treated_as_single_sample(self):
+        from agilerl.utils.llm_utils import normalize_reasoning_prompt_batch
+
+        prompts = {"input_ids": torch.tensor([1, 2, 3])}
+        out = normalize_reasoning_prompt_batch(prompts)
+        assert len(out) == 1
+        assert out[0] is prompts
+
+    def test_empty_batch_returns_empty_list(self):
+        from agilerl.utils.llm_utils import normalize_reasoning_prompt_batch
+
+        prompts = {"input_ids": torch.zeros((0, 4), dtype=torch.long)}
+        assert normalize_reasoning_prompt_batch(prompts) == []
+
+    def test_non_tensor_input_ids_returns_single_sample(self):
+        from agilerl.utils.llm_utils import normalize_reasoning_prompt_batch
+
+        prompts = {"input_ids": "not a tensor"}
+        out = normalize_reasoning_prompt_batch(prompts)
+        assert out == [prompts]
+
+
+class TestLlmUtilsDeprecatedReexports:
+    def test_deprecated_name_warns_and_resolves(self):
+        import agilerl.utils.llm_utils as llm_utils_module
+
+        with pytest.warns(FutureWarning, match="moved to agilerl.llm_envs"):
+            cls = llm_utils_module.ReasoningGym
+        from agilerl.llm_envs import ReasoningGym as expected
+
+        assert cls is expected
+
+    def test_unknown_name_raises_attribute_error(self):
+        import agilerl.utils.llm_utils as llm_utils_module
+
+        with pytest.raises(AttributeError, match="has no attribute"):
+            llm_utils_module._nope_definitely_not_here
+
+    def test_dir_includes_deprecated_names(self):
+        import agilerl.utils.llm_utils as llm_utils_module
+
+        d = dir(llm_utils_module)
+        assert "ReasoningGym" in d
+        assert "PreferenceGym" in d
+
+
 def test_move_params_helpers_call_model_move_and_cuda_sync():
     model_gpu = MagicMock()
     gpu_param = MagicMock()
