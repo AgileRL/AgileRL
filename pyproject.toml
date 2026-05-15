@@ -21,7 +21,7 @@ dependencies = [
     "minari[all]==0.5.2",
     "numpy>=2.0.0,<3.0",
     "omegaconf~=2.3.0",
-    "pandas~=2.2.3",
+    "pandas>=2.2.3,<2.4.0",
     "pettingzoo~=1.23.1",
     "jax[cpu]~=0.4.31",
     "packaging>=20.0",
