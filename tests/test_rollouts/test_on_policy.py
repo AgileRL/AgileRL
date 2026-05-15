@@ -317,6 +317,21 @@ class TestCollectRollouts:
         assert isinstance(result[0], list)
         ppo.clean_up()
 
+    def test_collect_rollouts_returns_scores(self, vector_space, discrete_space):
+        ppo = PPO(
+            observation_space=vector_space,
+            action_space=discrete_space,
+            use_rollout_buffer=True,
+            learn_step=4,
+            num_envs=1,
+        )
+        env = DummyEnv(state_size=vector_space.shape, vect=True, num_envs=1)
+        result = collect_rollouts(ppo, env, n_steps=4)
+        assert isinstance(result, tuple)
+        assert len(result) == 5
+        assert isinstance(result[0], list)
+        ppo.clean_up()
+
 
 class Test_CollectRollouts:
     def test_collect_rollouts_warm_start_with_last_obs(

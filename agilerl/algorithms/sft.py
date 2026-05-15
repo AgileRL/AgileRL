@@ -269,7 +269,7 @@ class SFT(LLMAlgorithm):
                 num_updates += 1
 
         learn_metrics = {
-            key: value / num_updates for key, value in learn_metrics.items()
+            key: value / max(num_updates, 1) for key, value in learn_metrics.items()
         }
 
         learn_metrics = aggregate_metrics_dict(self.accelerator, learn_metrics)

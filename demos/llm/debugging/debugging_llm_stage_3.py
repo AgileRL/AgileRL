@@ -325,10 +325,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
                 max_output_tokens=max_new,
             )
 
-        eval_fn = lambda a: evaluate_accuracy(
-            a, tokenizer, grid_size, max_turns, eval_eps, greedy=True
-        )
-
         original_save = train_llm.save_llm_checkpoint
         train_llm.save_llm_checkpoint = lambda *args, **kwargs: None
         try:
@@ -337,7 +333,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
                 max_turns=max_turns,
                 init_hp=init_hp,
                 max_steps=int(dbg["max_sample_steps"]),
-                eval_fn=eval_fn,
                 evaluation_interval=int(dbg["evaluation_interval"]),
                 wb=False,
                 save_elite=False,

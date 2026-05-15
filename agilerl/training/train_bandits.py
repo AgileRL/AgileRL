@@ -208,7 +208,7 @@ def train_bandits(
 
         for agent in population.agents:
             agent.set_training_mode(True)
-            agent.init_evo_step()
+            agent.init_training_step()
 
             score = 0
             context = env.reset()
@@ -235,10 +235,8 @@ def train_bandits(
                 context = next_context
 
             agent.add_scores([score])
-            agent.finalize_evo_step(episode_steps)
+            agent.finalize_training_step(episode_steps)
             pbar.update(episode_steps // population.size)
-
-        population.increment_evo_step()
 
         # Evaluate population
         for agent in population.agents:
@@ -248,7 +246,8 @@ def train_bandits(
                 loop=eval_loop,
             )
 
-        # Aggregate metrics from all agents and log -> clear metrics after reporting
+        # Report progress
+        population.increment_evo_step()
         population.report_metrics(clear=True)
 
         # Check if target score has been reached

@@ -20,7 +20,6 @@ from pettingzoo import ParallelEnv
 from tensordict import TensorDictBase
 from tests.pz_vector_test_utils import (
     GenericTestEnv,
-    SpeakerListenerLikeEnv,
     speaker_listener_like_env,
     term_env,
 )

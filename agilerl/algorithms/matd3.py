@@ -702,7 +702,9 @@ class MATD3(MultiAgentRLAlgorithm):
             for idx in indices:
                 self.current_noise[agent_id][idx, :] = 0
 
-    def learn(self, experiences: ExperiencesType) -> dict[str, float]:
+    def learn(
+        self, experiences: ExperiencesType
+    ) -> dict[str, tuple[float | None, float]]:
         """Update agent network parameters from the gathered experiences.
 
         :param experiences: TensorDict of nested per-agent observations, actions,
@@ -710,7 +712,7 @@ class MATD3(MultiAgentRLAlgorithm):
         :type experiences: TensorDict
 
         :return: Losses for each agent
-        :rtype: dict[str, float]
+        :rtype: dict[str, tuple[float | None, float]]
         """
         states = experiences["obs"]
         actions = experiences["action"]

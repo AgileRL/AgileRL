@@ -912,4 +912,42 @@ class TestDPOSetReferencePolicy:
         ).logits
         assert torch.allclose(output_before, output_after)
         assert dpo.reference_update_tracker == reference_update_tracker
+
+
+class TestDPOLearnMpsCacheClear:
+    """Cover the ``torch.mps.empty_cache()`` guard at the top of ``DPO.learn``.
+
+    The branch only fires on Apple Silicon where ``torch.backends.mps.is_available``
+    returns ``True``; on Linux/Windows CI we simulate that with a patch so the
+    branch becomes reachable. The test verifies that ``mps.empty_cache`` is
+    invoked once per ``learn`` call when the runtime advertises MPS support.
+    """
+
+    def test_mps_empty_cache_called_when_mps_available(self):
+        from unittest.mock import patch
+
+        dpo = _make_cpu_dpo_for_branch_tests()
+        # Build a minimal experiences dict that will reach the cache-clear lines
+        # then fail soon after, so we don't need full forward/backward.
+        garbage = torch.zeros(1, 4, dtype=torch.long)
+        experiences = {
+            "chosen_input_ids": garbage,
+            "rejected_input_ids": garbage,
+            "chosen_attention_mask": garbage,
+            "rejected_attention_mask": garbage,
+        }
+        try:
+            with (
+                patch("torch.backends.mps.is_available", return_value=True),
+                patch("torch.mps.empty_cache") as mock_empty_cache,
+            ):
+                # ``learn`` will eventually fail downstream (no real model
+                # forward set up here), but the cache-clear at L212 fires first.
+                try:
+                    dpo.learn(experiences)
+                except Exception:
+                    pass
+                mock_empty_cache.assert_called()
+        finally:
+            dpo.clean_up()
         dpo.clean_up()

@@ -175,15 +175,15 @@ class DummyAgentOffPolicy:
         self.fitness.append(rand_int)
         return rand_int
 
-    def init_evo_step(self):
-        self.metrics.init_evo_step()
+    def init_training_step(self):
+        self.metrics.init_training_step()
 
     def add_scores(self, scores):
         self.metrics.add_scores(scores)
         self.scores = self.metrics.scores
 
-    def finalize_evo_step(self, num_steps):
-        self.metrics.finalize_evo_step(num_steps)
+    def finalize_training_step(self, num_steps):
+        self.metrics.finalize_training_step(num_steps)
         self.steps_per_second = self.metrics.steps_per_second
         self.steps = self.metrics.steps
 
@@ -813,10 +813,10 @@ def _make_base_mock_agent(spec_cls, state_size, action_size, *, metrics=None):
         return score
 
     mock.test.side_effect = _test_side_effect
-    mock.init_evo_step.side_effect = lambda: mock.metrics.init_evo_step()
+    mock.init_training_step.side_effect = lambda: mock.metrics.init_training_step()
     mock.add_scores.side_effect = lambda scores: mock.metrics.add_scores(scores)
-    mock.finalize_evo_step.side_effect = lambda num_steps: (
-        mock.metrics.finalize_evo_step(num_steps)
+    mock.finalize_training_step.side_effect = lambda num_steps: (
+        mock.metrics.finalize_training_step(num_steps)
     )
     mock.learn.side_effect = lambda *args, **kwargs: random.random()
     mock.save_checkpoint.side_effect = lambda *a, **kw: None
@@ -1359,6 +1359,7 @@ class TestTrainOffPolicy:
         )
 
         assert len(pop) == len(population_off_policy)
+        assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize(
         "algo, num_envs, learn_step", [(DQN, 2, 1), (DDPG, 2, 1), (TD3, 1, 2)]
@@ -1405,6 +1406,12 @@ class TestTrainOffPolicy:
                 save_elite=True,
             )
 
+            mocked_agent_off_policy.get_action.assert_called()
+            mocked_agent_off_policy.learn.assert_called()
+            mocked_agent_off_policy.test.assert_called()
+            if accelerator is not None:
+                mocked_agent_off_policy.wrap_models.assert_called()
+                mocked_agent_off_policy.unwrap_models.assert_called()
             mocked_agent_off_policy.get_action.assert_called()
             mocked_agent_off_policy.learn.assert_called()
             mocked_agent_off_policy.test.assert_called()
@@ -1460,6 +1467,9 @@ class TestTrainOffPolicy:
             save_elite=True,
         )
 
+        mocked_agent_off_policy.get_action.assert_called()
+        mocked_agent_off_policy.learn.assert_called()
+        mocked_agent_off_policy.test.assert_called()
         mocked_agent_off_policy.get_action.assert_called()
         mocked_agent_off_policy.learn.assert_called()
         mocked_agent_off_policy.test.assert_called()
@@ -1551,6 +1561,7 @@ class TestTrainOffPolicy:
             wb=False,
         )
 
+        assert len(pop) == len(population_off_policy)
         assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
@@ -1702,6 +1713,7 @@ class TestTrainOffPolicy:
         )
 
         assert len(pop) == len(population_off_policy)
+        assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize("per", [False, True])
     @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
@@ -1734,6 +1746,7 @@ class TestTrainOffPolicy:
         )
 
         assert len(pop) == len(population_off_policy)
+        assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize("state_size, action_size, vect", _IMG_VECT)
     def test_train_off_policy_using_alternate_buffers_rgb(
@@ -1762,6 +1775,7 @@ class TestTrainOffPolicy:
             wb=False,
         )
 
+        assert len(pop) == len(population_off_policy)
         assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
@@ -1792,6 +1806,7 @@ class TestTrainOffPolicy:
             accelerator=accelerator,
         )
 
+        assert len(pop) == len(population_off_policy)
         assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
@@ -2240,6 +2255,12 @@ class TestTrainOnPolicy:
             if accelerator is not None:
                 mocked_agent_on_policy.wrap_models.assert_called()
                 mocked_agent_on_policy.unwrap_models.assert_called()
+            mocked_agent_on_policy.get_action.assert_called()
+            mocked_agent_on_policy.learn.assert_called()
+            mocked_agent_on_policy.test.assert_called()
+            if accelerator is not None:
+                mocked_agent_on_policy.wrap_models.assert_called()
+                mocked_agent_on_policy.unwrap_models.assert_called()
 
     @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_NOVECT)
     def test_train_on_policy_save_elite_warning(
@@ -2375,6 +2396,7 @@ class TestTrainOnPolicy:
         )
 
         assert len(pop) == len(population_on_policy)
+        assert len(pop) == len(population_on_policy)
 
     @pytest.mark.parametrize("state_size, action_size, vect", _IMG_NOVECT)
     def test_train_on_policy_rgb_input(
@@ -2395,6 +2417,7 @@ class TestTrainOnPolicy:
             wb=False,
         )
 
+        assert len(pop) == len(population_on_policy)
         assert len(pop) == len(population_on_policy)
 
     @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
@@ -2418,6 +2441,7 @@ class TestTrainOnPolicy:
             accelerator=accelerator,
         )
 
+        assert len(pop) == len(population_on_policy)
         assert len(pop) == len(population_on_policy)
 
     @pytest.mark.parametrize("accelerator", [False, True])
@@ -2471,6 +2495,16 @@ class TestTrainOnPolicy:
                 wandb_api_key="testing",
             )
 
+            # Assert that wandb.init was called with expected arguments
+            mock_wandb_init.assert_called_once_with(
+                project=ANY,
+                name=ANY,
+                config=ANY,
+            )
+            # Assert that wandb.log was called with expected log parameters
+            mock_wandb_log.assert_called()
+            # Assert that wandb.finish was called
+            mock_wandb_finish.assert_called()
             # Assert that wandb.init was called with expected arguments
             mock_wandb_init.assert_called_once_with(
                 project=ANY,
@@ -2783,6 +2817,10 @@ class TestTrainMultiAgentOffPolicy:
         )
 
         assert len(pop) == len(population_multi_agent)
+        assert len(pop) == len(population_multi_agent)
+
+    def test_train_multi_agent_off_policy_agent_masking(self):
+        pass
 
     def test_train_multi_agent_off_policy_agent_masking(self):
         pass
@@ -2813,6 +2851,7 @@ class TestTrainMultiAgentOffPolicy:
             mutation=mutations,
         )
 
+        assert len(pop) == len(population_multi_agent)
         assert len(pop) == len(population_multi_agent)
 
     @pytest.mark.parametrize("on_policy", [False])
@@ -2994,6 +3033,16 @@ class TestTrainMultiAgentOffPolicy:
             mock_wandb_log.assert_called()
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
+            # Assert that wandb.init was called with expected arguments
+            mock_wandb_init.assert_called_once_with(
+                project=ANY,
+                name=ANY,
+                config=ANY,
+            )
+            # Assert that wandb.log was called with expected log parameters
+            mock_wandb_log.assert_called()
+            # Assert that wandb.finish was called
+            mock_wandb_finish.assert_called()
 
     @pytest.mark.parametrize("on_policy", [False])
     @pytest.mark.parametrize("state_size, action_size", _FLAT)
@@ -3070,6 +3119,7 @@ class TestTrainMultiAgentOffPolicy:
         accelerator = Accelerator() if accelerator_flag else None
 
         mock_population = [mocked_multi_agent for _ in range(6)]
+        mock_population = [mocked_multi_agent for _ in range(6)]
 
         pop, _ = train_multi_agent_off_policy(
             multi_env,
@@ -3088,6 +3138,13 @@ class TestTrainMultiAgentOffPolicy:
             accelerator=accelerator,
         )
 
+        for agent in mock_population:
+            agent.get_action.assert_called()
+            agent.learn.assert_called()
+            agent.test.assert_called()
+            if accelerator is not None:
+                agent.wrap_models.assert_called()
+                agent.unwrap_models.assert_called()
         for agent in mock_population:
             agent.get_action.assert_called()
             agent.learn.assert_called()
@@ -3911,6 +3968,7 @@ class TestTrainOffline:
             )
 
             assert len(pop) == len(population_off_policy)
+            assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
     def test_train_offline_save_elite_warning(
@@ -4040,6 +4098,16 @@ class TestTrainOffline:
             mock_wandb_log.assert_called()
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
+            # Assert that wandb.init was called with expected arguments
+            mock_wandb_init.assert_called_once_with(
+                project=ANY,
+                name=ANY,
+                config=ANY,
+            )
+            # Assert that wandb.log was called with expected log parameters
+            mock_wandb_log.assert_called()
+            # Assert that wandb.finish was called
+            mock_wandb_finish.assert_called()
 
     @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
     def test_train_offline_early_stop(
@@ -4126,6 +4194,11 @@ class TestTrainOffline:
                 accelerator=accelerator,
             )
 
+            mocked_agent_off_policy.learn.assert_called()
+            mocked_agent_off_policy.test.assert_called()
+            if accelerator is not None:
+                mocked_agent_off_policy.wrap_models.assert_called()
+                mocked_agent_off_policy.unwrap_models.assert_called()
             mocked_agent_off_policy.learn.assert_called()
             mocked_agent_off_policy.test.assert_called()
             if accelerator is not None:
@@ -4347,6 +4420,7 @@ class TestTrainBandits:
         )
 
         assert len(pop) == len(population_bandit)
+        assert len(pop) == len(population_bandit)
 
     @pytest.mark.parametrize("algo", [NeuralUCB])
     @pytest.mark.parametrize("state_size, action_size", _FLAT)
@@ -4382,6 +4456,12 @@ class TestTrainBandits:
                 save_elite=True,
             )
 
+            mocked_bandit.get_action.assert_called()
+            mocked_bandit.learn.assert_called()
+            mocked_bandit.test.assert_called()
+            if accelerator is not None:
+                mocked_bandit.wrap_models.assert_called()
+                mocked_bandit.unwrap_models.assert_called()
             mocked_bandit.get_action.assert_called()
             mocked_bandit.learn.assert_called()
             mocked_bandit.test.assert_called()
@@ -4484,6 +4564,7 @@ class TestTrainBandits:
             wb=False,
         )
 
+        assert len(pop) == len(population_bandit)
         assert len(pop) == len(population_bandit)
 
     @pytest.mark.parametrize("state_size, action_size", _FLAT)
@@ -4601,6 +4682,7 @@ class TestTrainBandits:
         )
 
         assert len(pop) == len(population_bandit)
+        assert len(pop) == len(population_bandit)
 
     @pytest.mark.parametrize("state_size, action_size", _FLAT)
     def test_train_bandit_using_alternate_buffers(
@@ -4630,6 +4712,7 @@ class TestTrainBandits:
         )
 
         assert len(pop) == len(population_bandit)
+        assert len(pop) == len(population_bandit)
 
     @pytest.mark.parametrize("state_size, action_size", _IMG_SQUARE)
     def test_train_bandit_using_alternate_buffers_rgb(
@@ -4658,6 +4741,7 @@ class TestTrainBandits:
             wb=False,
         )
 
+        assert len(pop) == len(population_bandit)
         assert len(pop) == len(population_bandit)
 
     @pytest.mark.parametrize("state_size, action_size", _FLAT)
@@ -4689,6 +4773,7 @@ class TestTrainBandits:
             accelerator=accelerator,
         )
 
+        assert len(pop) == len(population_bandit)
         assert len(pop) == len(population_bandit)
 
     @pytest.mark.parametrize("state_size, action_size", _FLAT)

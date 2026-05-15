@@ -203,7 +203,7 @@ def train_on_policy(
 
         for agent in population.agents:
             agent.set_training_mode(True)
-            agent.init_evo_step()
+            agent.init_training_step()
 
             steps = 0
             completed_episode_scores: list[float] = []
@@ -239,10 +239,8 @@ def train_on_policy(
                 completed_episode_scores += episode_scores
 
             agent.add_scores(completed_episode_scores)
-            agent.finalize_evo_step(steps)
+            agent.finalize_training_step(steps)
             pbar.update(steps // population.size)
-
-        population.increment_evo_step()
 
         # Evaluate population
         for agent in population.agents:
@@ -252,8 +250,9 @@ def train_on_policy(
                 loop=eval_loop,
             )
 
-        # Aggregate metrics from all agents and log -> clear metrics after reporting
+        # Report progress
         population.report_metrics(clear=True)
+        population.increment_evo_step()
 
         # Check if we have met the target score
         if population.should_stop(target):

@@ -255,16 +255,14 @@ def train_offline(
 
         for agent in population.agents:
             agent.set_training_mode(True)
-            agent.init_evo_step()
+            agent.init_training_step()
 
             for _idx_step in range(evo_steps):
                 experiences = sampler.sample(agent.batch_size)
                 agent.learn(experiences)
 
-            agent.finalize_evo_step(evo_steps)
+            agent.finalize_training_step(evo_steps)
             pbar.update(evo_steps // population.size)
-
-        population.increment_evo_step()
 
         # Evaluate population
         for agent in population.agents:
@@ -274,7 +272,8 @@ def train_offline(
                 loop=eval_loop,
             )
 
-        # Aggregate, report, and clear metrics
+        # Report progress
+        population.increment_evo_step()
         population.report_metrics(clear=True)
 
         # Check if we have met the target score

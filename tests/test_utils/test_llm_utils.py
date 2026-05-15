@@ -1007,6 +1007,8 @@ class TestPreferenceGymInit:
 
 def test_llm_utils_fallback_types_when_no_llm_dependencies():
     """Test that llm_utils sets type aliases to Any when HAS_LLM_DEPENDENCIES is False."""
+    import agilerl.utils as agilerl_utils_pkg
+
     # Remove the module from cache to force reimport
     original_module = sys.modules.pop("agilerl.utils.llm_utils", None)
 
@@ -1022,8 +1024,17 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             assert llm_utils_reloaded.Dataset is Any
             assert llm_utils_reloaded.AutoModelForCausalLM is Any
     finally:
-        # Restore original module to avoid affecting other tests
-        sys.modules["agilerl.utils.llm_utils"] = original_module
+        # Restore original module to avoid affecting other tests. Both the
+        # sys.modules entry AND the parent-package attribute have to be
+        # restored — ``from agilerl.utils import llm_utils`` resolves through
+        # the package attribute, not sys.modules, so leaving the reloaded
+        # (Any-bound) module bound on ``agilerl.utils`` leaks symbols into
+        # any tests that import this way on the same xdist worker.
+        if original_module is not None:
+            sys.modules["agilerl.utils.llm_utils"] = original_module
+            agilerl_utils_pkg.llm_utils = original_module
+        else:
+            sys.modules.pop("agilerl.utils.llm_utils", None)
 
 
 class TestCreateLlmAccelerator:
@@ -1161,6 +1172,82 @@ def test_masked_var_unbiased_requires_at_least_two_unmasked_values():
         masked_var(values, mask, unbiased=True)
 
 
+class TestMaxPromptTokensForSlidingWindow:
+    def test_reserves_one_token_when_max_output_tokens_none(self):
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+
+        assert max_prompt_tokens_for_sliding_window(128, None) == 127
+
+    def test_reserves_max_output_tokens_when_set(self):
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+
+        assert max_prompt_tokens_for_sliding_window(128, 32) == 96
+
+    def test_caps_reservation_at_max_model_len(self):
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+
+        # max_output_tokens > max_model_len → reserve max_model_len, return 0
+        assert max_prompt_tokens_for_sliding_window(64, 256) == 0
+
+    def test_clamps_at_zero_when_no_room(self):
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+
+        assert max_prompt_tokens_for_sliding_window(0, None) == 0
+
+
+class TestNormalizeReasoningPromptBatch:
+    def test_passes_list_through(self):
+        from agilerl.utils.llm_utils import normalize_reasoning_prompt_batch
+
+        original = [{"input_ids": torch.tensor([1, 2])}]
+        assert normalize_reasoning_prompt_batch(original) is original
+
+    def test_one_d_input_ids_treated_as_single_sample(self):
+        from agilerl.utils.llm_utils import normalize_reasoning_prompt_batch
+
+        prompts = {"input_ids": torch.tensor([1, 2, 3])}
+        out = normalize_reasoning_prompt_batch(prompts)
+        assert len(out) == 1
+        assert out[0] is prompts
+
+    def test_empty_batch_returns_empty_list(self):
+        from agilerl.utils.llm_utils import normalize_reasoning_prompt_batch
+
+        prompts = {"input_ids": torch.zeros((0, 4), dtype=torch.long)}
+        assert normalize_reasoning_prompt_batch(prompts) == []
+
+    def test_non_tensor_input_ids_returns_single_sample(self):
+        from agilerl.utils.llm_utils import normalize_reasoning_prompt_batch
+
+        prompts = {"input_ids": "not a tensor"}
+        out = normalize_reasoning_prompt_batch(prompts)
+        assert out == [prompts]
+
+
+class TestLlmUtilsDeprecatedReexports:
+    def test_deprecated_name_warns_and_resolves(self):
+        import agilerl.utils.llm_utils as llm_utils_module
+
+        with pytest.warns(FutureWarning, match="moved to agilerl.llm_envs"):
+            cls = llm_utils_module.ReasoningGym
+        from agilerl.llm_envs import ReasoningGym as expected
+
+        assert cls is expected
+
+    def test_unknown_name_raises_attribute_error(self):
+        import agilerl.utils.llm_utils as llm_utils_module
+
+        with pytest.raises(AttributeError, match="has no attribute"):
+            llm_utils_module._nope_definitely_not_here
+
+    def test_dir_includes_deprecated_names(self):
+        import agilerl.utils.llm_utils as llm_utils_module
+
+        d = dir(llm_utils_module)
+        assert "ReasoningGym" in d
+        assert "PreferenceGym" in d
+
+
 def test_move_params_helpers_call_model_move_and_cuda_sync():
     model_gpu = MagicMock()
     gpu_param = MagicMock()
@@ -1228,3 +1315,129 @@ def test_k3_helper_matches_torch() -> None:
     # Reference: torch implementation of the same formula.
     ref = torch.exp(log_p - log_q) - (log_p - log_q) - 1.0
     assert torch.allclose(calculate_k3_kl(log_p, log_q), ref)
+
+
+class TestMaskedMeanAxis:
+    """Cover the axis-reduction branch in :func:`masked_mean`."""
+
+    def test_per_row_axis_reduction(self) -> None:
+        values = torch.tensor([[1.0, 3.0], [4.0, 8.0]])
+        mask = torch.tensor([[1.0, 1.0], [0.0, 1.0]])
+        result = masked_mean(values, mask, axis=1)
+        assert result.shape == (2,)
+        assert result.tolist() == pytest.approx([2.0, 8.0])
+
+
+class TestMaskedWhitenShiftMean:
+    """Cover the ``shift_mean=False`` branch in :func:`masked_whiten`."""
+
+    def test_shift_mean_false_adds_mean_back(self) -> None:
+        from agilerl.utils.llm_utils import masked_whiten
+
+        values = torch.tensor([[1.0, 3.0, 5.0, 7.0]])
+        mask = torch.tensor([[1.0, 1.0, 1.0, 1.0]])
+        whitened_no_shift = masked_whiten(values, mask, shift_mean=False)
+        whitened_shift = masked_whiten(values, mask, shift_mean=True)
+        # The two outputs differ by exactly the masked mean (=4.0).
+        diff = whitened_no_shift - whitened_shift
+        assert torch.allclose(diff, torch.full_like(diff, 4.0), atol=1e-5)
+
+
+class TestPoolByTurnsBadReduction:
+    """``pool_by_turns`` should raise a clear ValueError for unknown reductions."""
+
+    def test_unknown_reduction_raises(self) -> None:
+        token_values = torch.tensor([[1.0, 2.0]])
+        turn_ids = torch.tensor([[0, 0]])
+        with pytest.raises(ValueError, match="Invalid reduction: unsupported"):
+            pool_by_turns(token_values, turn_ids, num_turns=1, reduction="unsupported")
+
+
+class TestCreateModelFromNameOrPathValueHead:
+    """``create_model_from_name_or_path`` should route through ``AutoModelForCausalLMWithValueHead``
+    when a value head is requested."""
+
+    def test_add_value_head_calls_value_head_loader(self) -> None:
+        from agilerl.utils import llm_utils as llm_utils_module
+
+        # When agilerl[llm] isn't installed (e.g. Windows CI without vllm),
+        # the symbol collapses to ``typing.Any``. Inspect the bound symbol
+        # directly rather than the ``HAS_LLM_DEPENDENCIES`` flag — another
+        # test in this module force-reloads ``llm_utils`` with
+        # ``HAS_LLM_DEPENDENCIES=False`` and the package attribute restore
+        # can leak through xdist worker reuse.
+        if llm_utils_module.AutoModelForCausalLMWithValueHead is Any:
+            pytest.skip(
+                "AutoModelForCausalLMWithValueHead unavailable without agilerl[llm]."
+            )
+
+        sentinel_model = object()
+        with patch.object(
+            llm_utils_module.AutoModelForCausalLMWithValueHead,
+            "from_pretrained",
+            return_value=sentinel_model,
+        ) as mock_loader:
+            out = llm_utils_module.create_model_from_name_or_path(
+                "some/model",
+                add_value_head=True,
+                use_accelerator=False,
+            )
+        assert out is sentinel_model
+        # Default model_config is built when not supplied; verify the loader saw
+        # the model name plus the synthesized dtype/attn keys.
+        call_kwargs = mock_loader.call_args.kwargs
+        assert call_kwargs["pretrained_model_name_or_path"] == "some/model"
+        assert call_kwargs["attn_implementation"] == "sdpa"
+
+
+class TestPreparePromptHfGenerateTensorInitialLen:
+    """Multi-turn rollouts may pass ``initial_prompt_len`` as a scalar tensor;
+    the helper must coerce it to a plain Python int so downstream slicing works.
+    """
+
+    def test_tensor_scalar_initial_prompt_len_coerced_to_int(self) -> None:
+        from agilerl.utils.llm_utils import prepare_prompt_hf_generate
+
+        prompt = {
+            "input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
+            "attention_mask": torch.tensor([[1, 1, 1, 1]], dtype=torch.long),
+            "initial_prompt_len": torch.tensor([2], dtype=torch.long),
+        }
+        out = prepare_prompt_hf_generate(prompt, torch.device("cpu"))
+        assert out["initial_prompt_len"] == 2
+        assert isinstance(out["initial_prompt_len"], int)
+
+
+class TestGetModelNameOrPathBaseModelBranches:
+    """``get_model_name_or_path`` falls through several optional attribute
+    chains: ``base_model.name_or_path`` then ``base_model.pretrained_model.name_or_path``.
+    These branches don't fire when ``name_or_path`` exists at the top level.
+    """
+
+    def test_base_model_name_or_path(self) -> None:
+        class _Base:
+            name_or_path = "via_base"
+
+        class _Wrapper:
+            base_model = _Base()
+
+        wrapper = _Wrapper()
+        # Sanity: no top-level ``name_or_path`` and no ``pretrained_model``.
+        assert not hasattr(wrapper, "name_or_path")
+        assert not hasattr(wrapper, "pretrained_model")
+        assert get_model_name_or_path(wrapper) == "via_base"
+
+    def test_base_model_pretrained_model_name_or_path(self) -> None:
+        class _PretrainedInBase:
+            name_or_path = "via_base_pretrained"
+
+        class _Base:
+            pretrained_model = _PretrainedInBase()
+            # Intentionally no ``name_or_path`` here so the helper has to fall
+            # through to ``base_model.pretrained_model.name_or_path``.
+
+        class _Wrapper:
+            base_model = _Base()
+
+        wrapper = _Wrapper()
+        assert get_model_name_or_path(wrapper) == "via_base_pretrained"

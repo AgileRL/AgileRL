@@ -51,7 +51,7 @@ def _is_distribution_installed(distribution: str) -> bool:
     return True
 
 
-# Use these flags for laxzy import checks
+# Use these flags for lazy import checks
 HAS_LLM_DEPENDENCIES = all(_is_distribution_installed(pkg) for pkg in LLM_PACKAGES)
 HAS_ARENA_DEPENDENCIES = all(_is_distribution_installed(pkg) for pkg in ARENA_PACKAGES)
 HAS_LIGER_KERNEL = _is_distribution_installed("liger-kernel")

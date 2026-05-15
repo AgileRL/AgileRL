@@ -684,6 +684,122 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
             "done": aligned_dones,
         }
 
+    def _insert_placeholder_actions(
+        self,
+        action_dict: dict[str, np.ndarray],
+        inactive_agents: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        """Insert placeholder actions for inactive agents back into action dict."""
+        for agent_id, inactive_array in inactive_agents.items():
+            if agent_id not in action_dict:
+                continue
+
+            agent_action = action_dict[agent_id]
+            if agent_action is None:
+                continue
+
+            if len(agent_action.shape) == 1:
+                placeholder_shape = ()
+            else:
+                placeholder_shape = agent_action.shape[1:]
+
+            if np.issubdtype(agent_action.dtype, np.integer):
+                placeholder = np.zeros(placeholder_shape, dtype=agent_action.dtype)
+            else:
+                placeholder = np.full(
+                    placeholder_shape, np.nan, dtype=agent_action.dtype
+                )
+
+            action_dict[agent_id] = np.insert(
+                agent_action,
+                inactive_array,
+                placeholder,
+                axis=0,
+            )
+
+        return action_dict
+
+    def _align_async_off_policy_experiences(
+        self,
+        experiences: ExperiencesType,
+    ) -> ExperiencesType:
+        """Align async off-policy experiences for MADDPG/MATD3.
+
+        Expected format:
+            (states, actions, rewards, next_states, dones)
+        """
+        states, actions, rewards, next_states, dones = experiences
+
+        all_agent_ids = (
+            set(states.keys())
+            | set(actions.keys())
+            | set(rewards.keys())
+            | set(next_states.keys())
+            | set(dones.keys())
+        )
+
+        aligned_states = {}
+        aligned_actions = {}
+        aligned_rewards = {}
+        aligned_next_states = {}
+        aligned_dones = {}
+
+        for agent_id in all_agent_ids:
+            agent_states = states.get(agent_id)
+            agent_actions = actions.get(agent_id)
+            agent_rewards = rewards.get(agent_id)
+            agent_next_states = next_states.get(agent_id)
+            agent_dones = dones.get(agent_id)
+
+            if (
+                agent_states is None
+                or agent_actions is None
+                or agent_rewards is None
+                or agent_dones is None
+            ):
+                continue
+
+            # If next_states is missing or all NaN, infer it from the state sequence.
+            missing_next_state = agent_next_states is None or (
+                isinstance(agent_next_states, np.ndarray)
+                and np.isnan(agent_next_states).all()
+            )
+
+            if missing_next_state:
+                if len(agent_states) <= 1:
+                    continue
+
+                aligned_states[agent_id] = agent_states[:-1]
+                aligned_actions[agent_id] = agent_actions[:-1]
+                aligned_rewards[agent_id] = agent_rewards[:-1]
+                aligned_dones[agent_id] = agent_dones[:-1]
+                aligned_next_states[agent_id] = agent_states[1:]
+            else:
+                # If lengths differ, trim all fields to the shortest length.
+                min_len = min(
+                    len(agent_states),
+                    len(agent_actions),
+                    len(agent_rewards),
+                    len(agent_next_states),
+                    len(agent_dones),
+                )
+                if min_len == 0:
+                    continue
+
+                aligned_states[agent_id] = agent_states[:min_len]
+                aligned_actions[agent_id] = agent_actions[:min_len]
+                aligned_rewards[agent_id] = agent_rewards[:min_len]
+                aligned_next_states[agent_id] = agent_next_states[:min_len]
+                aligned_dones[agent_id] = agent_dones[:min_len]
+
+        return (
+            aligned_states,
+            aligned_actions,
+            aligned_rewards,
+            aligned_next_states,
+            aligned_dones,
+        )
+
     def get_action(
         self,
         obs: MARLObservationType,

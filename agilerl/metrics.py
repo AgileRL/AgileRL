@@ -22,7 +22,7 @@ class BaseMetrics(ABC):
         self._additional_metrics: dict[str, AdditionalMetricType] = {}
         self._nonscalar_metrics: dict[str, list | dict[str, list]] = {}
         self._hyperparameters: dict[str, float] = {}
-        self._evo_start_time: float = 0.0
+        self._training_start_time: float = 0.0
         self.steps_per_second: float = 0.0
         self.steps: int = 0
         self.scores: list[float] = []
@@ -141,17 +141,17 @@ class BaseMetrics(ABC):
         """
         self.steps += n
 
-    def init_evo_step(self) -> None:
-        """Snapshot state at the start of an evolution step."""
-        self._evo_start_time = time.monotonic()
+    def init_training_step(self) -> None:
+        """Snapshot state at the start of a training step."""
+        self._training_start_time = time.monotonic()
 
-    def finalize_evo_step(self, num_steps: int) -> None:
-        """Compute fps from the delta since :meth:`init_evo_step`.
+    def finalize_training_step(self, num_steps: int) -> None:
+        """Compute fps from the delta since :meth:`init_training_step`.
 
-        :param num_steps: Number of steps taken during the evo step.
+        :param num_steps: Number of steps taken during the training step.
         :type num_steps: int
         """
-        elapsed = time.monotonic() - self._evo_start_time
+        elapsed = time.monotonic() - self._training_start_time
         self.steps_per_second = num_steps / max(elapsed, 1e-12)
         self.increment_steps(num_steps)
 

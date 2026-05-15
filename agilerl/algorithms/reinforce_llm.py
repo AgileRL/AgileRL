@@ -19,7 +19,6 @@ else:
     # Keep the name resolvable when liger-kernel isn't installed so unit
     # tests can patch it. ``_reinforce_loss_liger`` guards against actual use.
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
-
 from agilerl.protocols import (
     LoraConfigProtocol,
     MultiTurnEnv,

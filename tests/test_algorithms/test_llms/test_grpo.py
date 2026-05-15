@@ -706,7 +706,7 @@ class TestGRPOInit:
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
         assert grpo.batch_size_per_process == 16
         assert grpo.beta == 0.001
-        assert grpo.lr == 1e-5, grpo.lr
+        assert grpo.lr == 1e-5
         assert grpo.clip_coef == 0.2
         assert grpo.max_grad_norm == 0.1
         assert grpo.update_epochs == 1
@@ -742,11 +742,11 @@ class TestGRPOInit:
             assert grpo.lr_scheduler is None
             assert grpo.cosine_lr_schedule_config is None
 
-            if use_vllm:
-                assert grpo.use_vllm
-                assert isinstance(grpo.vllm_config, VLLMConfig)
-                assert grpo.llm is mock_llm_instance
-            grpo.clean_up()
+        if use_vllm:
+            assert grpo.use_vllm
+            assert isinstance(grpo.vllm_config, VLLMConfig)
+            assert grpo.llm is mock_llm_instance
+        grpo.clean_up()
 
     @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
     @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
@@ -1191,42 +1191,27 @@ class TestGRPOInit:
                 max_output_tokens=max_tokens,
             )
 
-
-@pytest.mark.parametrize(
-    "config, use_deepspeed_optimizer",
-    [
-        (None, False),
-    ],
-)
-@pytest.mark.parametrize("vocab_size", [1000])
-@pytest.mark.parametrize("input_size", [10])
-@pytest.mark.parametrize("max_tokens", [20])
-@pytest.mark.parametrize("group_size", [5])
-@pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
-@pytest.mark.parametrize(
-    "use_vllm, pretrained_model_name_or_path",
-    [(False, "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")],
-)
-@pytest.mark.parametrize("reduce_memory_peak", [True])
-@pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-def test_init_grpo_with_no_accelerator(
-    deepspeed_env,
-    grpo_factory,
-    accelerator_factory,
-    model_factory,
-    config,
-    use_deepspeed_optimizer,
-    vocab_size,
-    input_size,
-    max_tokens,
-    group_size,
-    use_separate_reference_adapter,
-    use_vllm,
-    pretrained_model_name_or_path,
-    reduce_memory_peak,
-    micro_batch_size_per_gpu,
-):
-    grpo = grpo_factory(
+    @pytest.mark.parametrize(
+        "config, use_deepspeed_optimizer",
+        [
+            (None, False),
+        ],
+    )
+    @pytest.mark.parametrize("vocab_size", [1000])
+    @pytest.mark.parametrize("input_size", [10])
+    @pytest.mark.parametrize("max_tokens", [20])
+    @pytest.mark.parametrize("group_size", [5])
+    @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
+    @pytest.mark.parametrize(
+        "use_vllm, pretrained_model_name_or_path",
+        [(False, TINY_LLM_FIXTURE_PATH)],
+    )
+    @pytest.mark.vllm
+    @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+    def test_init_grpo_with_no_accelerator(
+        self,
+        deepspeed_env,
+        grpo_factory,
         accelerator_factory,
         model_factory,
         config,
@@ -1238,39 +1223,52 @@ def test_init_grpo_with_no_accelerator(
         use_separate_reference_adapter,
         use_vllm,
         pretrained_model_name_or_path,
-        reduce_memory_peak,
         micro_batch_size_per_gpu,
-    )
-    assert grpo.batch_size_per_process == 16
-    assert grpo.beta == 0.001
-    assert grpo.lr == 1e-5
-    assert grpo.clip_coef == 0.2
-    assert grpo.max_grad_norm == 0.1
-    assert grpo.update_epochs == 1
-    assert grpo.group_size == 5
-    assert grpo.temperature == 0.9
-    assert grpo.calc_position_embeddings
-    assert isinstance(grpo.cosine_lr_schedule_config, CosineLRScheduleConfig), type(
-        grpo.cosine_lr_schedule_config,
-    )
-    assert grpo.device == (
-        "cuda"
-        if torch.cuda.is_available()
-        else "mps"
-        if torch.backends.mps.is_available()
-        else "cpu"
-    )
-    assert grpo.index == 0
-    assert grpo.scores == []
-    assert grpo.fitness == []
-    assert grpo.steps == 0
-    assert grpo.pad_token_id == 999
-    assert grpo.pad_token == "<pad>"
-    assert isinstance(grpo.generation_config, GenerationConfig)
-    assert isinstance(grpo.actor, DummyEvolvable)
-    assert isinstance(grpo.optimizer, OptimizerWrapper)
-    assert isinstance(grpo.lr_scheduler, SequentialLR), grpo.lr_scheduler
-    grpo.clean_up()
+    ):
+        grpo = grpo_factory(
+            accelerator_factory,
+            model_factory,
+            config,
+            use_deepspeed_optimizer,
+            vocab_size,
+            input_size,
+            max_tokens,
+            group_size,
+            use_separate_reference_adapter,
+            use_vllm,
+            pretrained_model_name_or_path,
+            micro_batch_size_per_gpu,
+        )
+        assert grpo.batch_size_per_process == 16
+        assert grpo.beta == 0.001
+        assert grpo.lr == 1e-5
+        assert grpo.clip_coef == 0.2
+        assert grpo.max_grad_norm == 0.1
+        assert grpo.update_epochs == 1
+        assert grpo.group_size == 5
+        assert grpo.temperature == 0.9
+        assert grpo.calc_position_embeddings
+        assert isinstance(grpo.cosine_lr_schedule_config, CosineLRScheduleConfig), type(
+            grpo.cosine_lr_schedule_config,
+        )
+        assert grpo.device == (
+            "cuda"
+            if torch.cuda.is_available()
+            else "mps"
+            if torch.backends.mps.is_available()
+            else "cpu"
+        )
+        assert grpo.index == 0
+        assert grpo.scores == []
+        assert grpo.fitness == []
+        assert grpo.steps == 0
+        assert grpo.pad_token_id == 999
+        assert grpo.pad_token == "<pad>"
+        assert isinstance(grpo.generation_config, GenerationConfig)
+        assert isinstance(grpo.actor, DummyEvolvable)
+        assert isinstance(grpo.optimizer, OptimizerWrapper)
+        assert isinstance(grpo.lr_scheduler, SequentialLR), grpo.lr_scheduler
+        grpo.clean_up()
 
     @pytest.mark.gpu
     @pytest.mark.parametrize("config", [deepspeed_config_stage_3])
@@ -1724,6 +1722,77 @@ class TestGRPOClipCoefTuple:
         ):
             _make_cpu_grpo_for_branch_tests(clip_coef=(0.1,))
 
+    def test_negative_float_clip_coef_raises(self) -> None:
+        with pytest.raises(
+            ValueError, match="clip_coef must be greater than or equal to zero"
+        ):
+            _make_cpu_grpo_for_branch_tests(clip_coef=-0.1)
+
+    @pytest.mark.parametrize("bad_value", ["not_a_number", {"min": 0.1}, None])
+    def test_non_numeric_clip_coef_raises_typeerror(self, bad_value) -> None:
+        with pytest.raises(
+            TypeError,
+            match="clip_coef must be a float or a tuple or list of two floats",
+        ):
+            _make_cpu_grpo_for_branch_tests(clip_coef=bad_value)
+
+
+class TestGRPOLearnRewardsShape:
+    """Cover the ``rewards.dim() > 1`` collapse branch in :meth:`GRPO.learn`.
+
+    Default learn-path tests pass 1-D rewards; multi-turn rollouts produce
+    [batch, max_turns] rewards that the algo collapses to per-trajectory
+    scalars via ``rewards.sum(dim=1)``.
+    """
+
+    def test_multi_turn_rewards_are_summed_along_last_dim(self) -> None:
+        grpo = _make_cpu_grpo_for_branch_tests(group_size=2)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=4)
+        # Shape [batch, max_turns]; sums to [3, 7, 11, 15] post-collapse.
+        rewards = torch.tensor(
+            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]],
+            dtype=torch.float32,
+        )
+
+        captured = {}
+
+        def _capture_calculate_advantage(self, _rewards):
+            captured["rewards_passed_to_adv"] = _rewards
+            # Return per-sample advantages so the rest of learn() can proceed.
+            return torch.zeros(_rewards.shape[0], 1, dtype=torch.float32)
+
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        with (
+            patch.object(
+                GRPO,
+                "_calculate_advantage",
+                _capture_calculate_advantage,
+            ),
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            patch.object(
+                grpo,
+                "_loss",
+                return_value=(
+                    torch.tensor(0.5, dtype=torch.float32),
+                    torch.tensor(0.0, dtype=torch.float32),
+                ),
+            ),
+            patch.object(grpo, "_backward_pass", return_value=None),
+        ):
+            grpo.learn((completion_ids, action_masks, rewards))
+
+        collapsed = captured["rewards_passed_to_adv"]
+        # After collapse, rewards should be 1-D with summed per-trajectory values.
+        assert collapsed.dim() == 1
+        assert collapsed.tolist() == [3.0, 7.0, 11.0, 15.0]
+        grpo.clean_up()
+
 
 class TestGRPOLigerLossDispatch:
     """Cover the ``loss_type`` -> Liger-API dispatch table in
@@ -1860,6 +1929,54 @@ class TestGRPOGetAction:
             completion_ids, action_masks = grpo.get_action(prompts, training=False)
         assert len(completion_ids) == 1
         assert len(action_masks) == 1
+        grpo.clean_up()
+
+    def test_get_action_grpo_hf_repeats_single_row_stitch_ids_when_grouping(self):
+        """When training with ``group_size > 1`` and a prompt carries a single-row
+        ``stitch_prefix_ids`` tensor, the HF generate path must repeat the stitch
+        prefix to match the grouped batch dimension. Otherwise downstream
+        ``stitch_completion_after_windowed_hf_generate`` would receive a [1, N]
+        prefix against a [group_size, T] completion."""
+        grpo = _make_cpu_grpo_for_branch_tests(group_size=3)
+        seq_len = 4
+        prompts = [
+            {
+                "input_ids": torch.randint(0, 60, (1, seq_len), device=grpo.device),
+                "attention_mask": torch.ones(1, seq_len, device=grpo.device),
+                "stitch_prefix_ids": torch.tensor(
+                    [[7, 8]], dtype=torch.long, device=grpo.device
+                ),
+                "initial_prompt_len": 2,
+            },
+        ]
+        observed_stitch = {}
+
+        def fake_actor_generate(input_ids, attention_mask, generation_config=None):
+            # After repeat, the grouped input_ids should already have the group
+            # dim baked in.
+            return torch.cat(
+                [input_ids, torch.full_like(input_ids[:, :2], 1)],
+                dim=1,
+            )
+
+        def fake_stitch(completion_id, stitch, initial_len):
+            observed_stitch["stitch_shape"] = (
+                None if stitch is None else tuple(stitch.shape)
+            )
+            return completion_id, initial_len
+
+        with (
+            patch.object(grpo.actor, "generate", side_effect=fake_actor_generate),
+            patch(
+                "agilerl.algorithms.grpo.stitch_completion_after_windowed_hf_generate",
+                side_effect=fake_stitch,
+            ),
+        ):
+            completion_ids, _ = grpo.get_action(prompts, training=True)
+
+        # The single-row stitch prefix should have been broadcast to group_size.
+        assert observed_stitch["stitch_shape"] == (3, 2)
+        assert completion_ids[0].shape[0] == 3
         grpo.clean_up()
 
     @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -2771,8 +2888,7 @@ class TestGRPOLearn:
             ),
         ):
             metrics = grpo.learn((completion_ids, action_masks, rewards))
-        assert metrics["loss"] == 0.0
-        assert metrics["kl"] == 0.0
+        assert metrics == {"loss": 0.0, "kl": 0.0}
         grpo.clean_up()
 
     @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -2930,7 +3046,7 @@ class TestGRPOLearn:
         rewards = torch.stack([torch.rand(2, dtype=torch.float32)], dim=0)
 
         metrics = grpo.learn((completions, action_masks, rewards))
-        assert {"loss", "kl"} <= set(metrics.keys())
+        assert set(metrics.keys()) == {"loss", "kl"}
         grpo.clean_up()
 
     def test_grpo_learn_calls_mps_empty_cache(
@@ -4038,6 +4154,55 @@ class TestGRPOPreprocessObservation:
             orig_obs := torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
         )
         assert torch.equal(obs, orig_obs)
+        grpo.clean_up()
+
+    @pytest.mark.gpu
+    @pytest.mark.parametrize("config", [deepspeed_config_stage_3])
+    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
+    def test_init_grpo_zero3_warning(
+        self,
+        deepspeed_env,
+        accelerator_factory,
+        config,
+        use_deepspeed_optimizer,
+        use_separate_reference_adapter,
+    ):
+        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        with pytest.warns(UserWarning):
+            gc.collect()
+            vocab_size = 1000
+            input_size = 10
+            max_tokens = 20
+            group_size = 5
+            grpo = GRPO(
+                actor_network=create_module(
+                    input_size=input_size,
+                    max_tokens=max_tokens,
+                    vocab_size=vocab_size,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                ),
+                lr=0.1,
+                pad_token_id=vocab_size - 1,
+                pad_token="<pad>",
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                group_size=group_size,
+                lora_config=LoraConfig(
+                    r=16,
+                    lora_alpha=64,
+                    target_modules=["linear_1"],
+                    task_type="CAUSAL_LM",
+                    lora_dropout=0.05,
+                ),
+                cosine_lr_schedule_config=(
+                    None
+                    if accelerator is not None
+                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+                ),
+                accelerator=accelerator,
+                use_separate_reference_adapter=use_separate_reference_adapter,
+                max_output_tokens=max_tokens,
+            )
         grpo.clean_up()
 
 

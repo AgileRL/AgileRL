@@ -68,9 +68,9 @@ class TestAgentMetrics:
 
     def test_init_and_finalize_evo_step(self):
         m = AgentMetrics()
-        m.init_evo_step()
+        m.init_training_step()
         time.sleep(0.05)
-        m.finalize_evo_step(100)
+        m.finalize_training_step(100)
 
         assert m.steps == 100
         assert m.steps_per_second > 0
@@ -337,6 +337,6 @@ class TestFinalizeEvoStepNearZeroElapsed:
     def test_near_zero_elapsed_does_not_error(self):
         m = AgentMetrics()
         m._evo_start_time = time.monotonic()
-        m.finalize_evo_step(1000)
+        m.finalize_training_step(1000)
         assert m.steps_per_second > 0
         assert m.steps == 1000

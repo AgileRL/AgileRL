@@ -364,17 +364,17 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         """
         self.metrics.add_scores(scores)
 
-    def init_evo_step(self) -> None:
-        """Initialize the evo step for metrics tracking."""
-        self.metrics.init_evo_step()
+    def init_training_step(self) -> None:
+        """Initialize the training step for metrics tracking."""
+        self.metrics.init_training_step()
 
-    def finalize_evo_step(self, num_steps: int) -> None:
-        """Finalize the evo step for metrics tracking.
+    def finalize_training_step(self, num_steps: int) -> None:
+        """Finalize the training step for metrics tracking.
 
-        :param num_steps: Number of steps taken during the evo step.
+        :param num_steps: Number of steps taken during the training step.
         :type num_steps: int
         """
-        self.metrics.finalize_evo_step(num_steps)
+        self.metrics.finalize_training_step(num_steps)
 
     @abstractmethod
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
@@ -1662,7 +1662,6 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                     placeholder_value=self.placeholder_value,
                 )
             )
-
         for output_id in list(preprocessed.keys()):
             if not preprocessed[output_id]:
                 continue

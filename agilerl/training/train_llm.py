@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from accelerate import Accelerator
-import torch
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import DPO, GRPO
@@ -281,6 +280,7 @@ def finetune_llm_reasoning(
 
     pbar = default_progress_bar(max_steps, accelerator)
 
+    # Initialize loggers and Population wrapper
     loggers = init_loggers(
         algo=init_hp.get("ALGO", "GRPO"),
         env_name=envs[0].name,
@@ -294,7 +294,6 @@ def finetune_llm_reasoning(
         wandb_kwargs=wandb_kwargs,
         init_hyperparams=init_hp,
     )
-
     population = Population(
         agents=pop,
         accelerator=accelerator,
@@ -302,9 +301,11 @@ def finetune_llm_reasoning(
     )
 
     total_steps = 0
+    displayed_steps = 0
     next_checkpoint_step = checkpoint_steps
     max_steps_checkpoint_saved = False
 
+    # Reset the environments
     if uses_env_fn:
         prompts_by_agent = [e.reset(reset_dataloaders=True) for e in envs]
     else:
@@ -319,15 +320,13 @@ def finetune_llm_reasoning(
             current_prompts = prompts_by_agent[agent_idx] if uses_env_fn else prompts
 
             agent.set_reference_policy(training_env.num_epochs)
-            agent.init_evo_step()
+            agent.init_training_step()
 
             completion_ids, action_masks = agent.get_action(current_prompts)
             next_prompts_i, rewards = training_env.step(completion_ids)
 
             experiences = (completion_ids, action_masks, rewards)
             agent.learn(experiences)
-
-            agg_rewards = safe_aggregate_metrics(accelerator, rewards)
 
             if max_reward is not None:
                 if "accuracy" not in agent.metrics.additional_metrics:
@@ -338,8 +337,9 @@ def finetune_llm_reasoning(
                 if accelerator is None or accelerator.is_main_process:
                     agent.metrics.log("accuracy", agg_accuracy)
 
+            agg_rewards = safe_aggregate_metrics(accelerator, rewards)
             agent.add_scores([agg_rewards])
-            agent.finalize_evo_step(training_env.data_batch_size_per_gpu)
+            agent.finalize_training_step(training_env.data_batch_size_per_gpu)
             total_steps += effective_data_batch_size
 
             if uses_env_fn:
@@ -347,16 +347,23 @@ def finetune_llm_reasoning(
             else:
                 prompts = next_prompts_i
 
-        pbar.update(effective_data_batch_size)
-        population.increment_evo_step()
-
+        # Evaluate performance
         if (i + 1) % evaluation_interval == 0:
             for idx, agent in enumerate(population.agents):
                 agent.test(envs[idx] if uses_env_fn else envs[0])
             if accelerator is not None:
                 accelerator.wait_for_everyone()
+
+        # Report progress
+        if accelerator is None or accelerator.is_main_process:
+            increment = min(effective_data_batch_size, max_steps - displayed_steps)
+            if increment > 0:
+                pbar.update(increment)
+                displayed_steps += increment
+
             population.report_metrics(clear=True)
 
+        # Tournament selection and mutation
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
@@ -375,6 +382,8 @@ def finetune_llm_reasoning(
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
+
+                population.increment_evo_step()
         else:
             checkpoint_due = False
             if checkpoint_steps is not None:
@@ -536,6 +545,7 @@ def finetune_llm_preference(
     )
 
     total_steps = 0
+    displayed_steps = 0
     next_checkpoint_step = checkpoint_steps
     max_steps_checkpoint_saved = False
 
@@ -553,13 +563,13 @@ def finetune_llm_preference(
             current_prompts = prompts_by_agent[agent_idx] if uses_env_fn else prompts
 
             agent.set_reference_policy(training_env.num_epochs)
-            agent.init_evo_step()
+            agent.init_training_step()
 
             _, chosen_reward, rejected_reward = agent.learn(current_prompts)
             next_prompts_i = training_env.step()
 
             agent.add_scores([float(chosen_reward - rejected_reward)])
-            agent.finalize_evo_step(training_env.data_batch_size_per_gpu)
+            agent.finalize_training_step(training_env.data_batch_size_per_gpu)
             total_steps += effective_data_batch_size
 
             if uses_env_fn:
@@ -567,9 +577,7 @@ def finetune_llm_preference(
             else:
                 prompts = next_prompts_i
 
-        pbar.update(effective_data_batch_size)
-        population.increment_evo_step()
-
+        # Evaluate performance
         if (i + 1) % evaluation_interval == 0:
             for idx, agent in enumerate(population.agents):
                 agent.test(envs[idx] if uses_env_fn else envs[0])
@@ -577,8 +585,16 @@ def finetune_llm_preference(
             if accelerator is not None:
                 accelerator.wait_for_everyone()
 
+        # Report progress
+        if accelerator is None or accelerator.is_main_process:
+            increment = min(effective_data_batch_size, max_steps - displayed_steps)
+            if increment > 0:
+                pbar.update(increment)
+                displayed_steps += increment
+
             population.report_metrics(clear=True)
 
+        # Tournament selection and mutation
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
@@ -597,6 +613,8 @@ def finetune_llm_preference(
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
+
+                population.increment_evo_step()
         else:
             checkpoint_due = False
             if checkpoint_steps is not None:
@@ -731,6 +749,7 @@ def finetune_llm_sft(
 
     pbar = default_progress_bar(max_steps, accelerator)
 
+    # Initialize loggers and Population wrapper
     loggers = init_loggers(
         algo=init_hp.get("ALGO", "SFT"),
         env_name=env.name,
@@ -744,7 +763,6 @@ def finetune_llm_sft(
         wandb_kwargs=wandb_kwargs,
         init_hyperparams=init_hp,
     )
-
     population = Population(
         agents=pop,
         accelerator=accelerator,
@@ -752,29 +770,29 @@ def finetune_llm_sft(
     )
 
     total_steps = 0
+    displayed_steps = 0
     next_checkpoint_step = checkpoint_steps
     max_steps_checkpoint_saved = False
-
     prompts = env.reset(reset_dataloaders=True)
     for i in range(training_steps):
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
+        # Learn from dataset
         for agent in population.agents:
             agent.set_reference_policy(env.num_epochs)
-            agent.init_evo_step()
+            agent.init_training_step()
 
             agg_loss, _agg_perplexity = agent.learn(prompts)
             next_prompts = env.step()
 
             agent.add_scores([-agg_loss])
-            agent.finalize_evo_step(env.data_batch_size_per_gpu)
+            agent.finalize_training_step(env.data_batch_size_per_gpu)
             total_steps += effective_data_batch_size
 
         prompts = next_prompts
-        pbar.update(effective_data_batch_size)
-        population.increment_evo_step()
 
+        # Evaluate performance
         if (i + 1) % evaluation_interval == 0:
             for agent in population.agents:
                 agent.test(env)
@@ -782,8 +800,17 @@ def finetune_llm_sft(
             if accelerator is not None:
                 accelerator.wait_for_everyone()
 
+        # Report progress
+        if accelerator is None or accelerator.is_main_process:
+            increment = min(effective_data_batch_size, max_steps - displayed_steps)
+            if increment > 0:
+                pbar.update(increment)
+                displayed_steps += increment
+
+            population.increment_evo_step()
             population.report_metrics(clear=True)
 
+        # Tournament selection and mutation
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
@@ -802,6 +829,8 @@ def finetune_llm_sft(
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
+
+                population.increment_evo_step()
         else:
             checkpoint_due = False
             if checkpoint_steps is not None:
@@ -850,7 +879,6 @@ def finetune_llm_multiturn(
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
     wandb_kwargs: dict[str, Any] | None = None,
-    eval_fn: "Callable[[LLMPPO | LLMREINFORCE | GRPO], float] | None" = None,
     evaluation_interval: int = 50,
     max_wall_seconds: float | None = None,
     max_reward: float | None = None,
@@ -985,12 +1013,20 @@ def finetune_llm_multiturn(
     )
 
     total_steps = 0
+    i = 0
     next_checkpoint_step = checkpoint_steps
     max_steps_checkpoint_saved = False
     group_size = getattr(pop[0], "group_size", 1)
     rollout_env = SyncMultiTurnVecEnv(env_factory, batch_size, group_size, env_config)
+    # ``agent.test`` expects a single ``MultiTurnEnv``; ``rollout_env`` is a
+    # ``SyncMultiTurnVecEnv`` wrapping N inner envs whose state is mid-rollout
+    # during training. Build a separate test env so evaluation is isolated.
+    # NOTE: this means one extra env is held for the run's lifetime. Future
+    # refactor could share a subset of the rollout envs (e.g. lease one of the
+    # vec env's inner ``MultiTurnEnv`` instances when no trajectory is active)
+    # to avoid the duplication for heavy env setups.
+    test_env = env_factory(**(env_config or {}))
     group_seed = np.random.randint(0, 1_000_000)
-    i = 0
     wall_deadline = (
         time.monotonic() + max_wall_seconds
         if max_wall_seconds is not None and max_wall_seconds > 0
@@ -1005,8 +1041,9 @@ def finetune_llm_multiturn(
             break
 
         # Collect rollouts and learn
+        iteration_steps = 0
         for agent in population.agents:
-            agent.init_evo_step()
+            agent.init_training_step()
             (
                 completion_ids_list,
                 action_masks_list,
@@ -1063,28 +1100,20 @@ def finetune_llm_multiturn(
                     agent.metrics.log("accuracy", agg_accuracy)
 
             effective_batch_steps = batch_steps * data_increment
-            agent.finalize_evo_step(batch_steps)
+            agent.finalize_training_step(batch_steps)
             total_steps += effective_batch_steps
+            iteration_steps += effective_batch_steps
 
             if accelerator is None or accelerator.is_main_process:
                 agent.add_scores([float(agg_score)])
 
-            if (i + 1) % evaluation_interval == 0 and eval_fn is not None:
-                eval_score = eval_fn(agent)
-                eval_tensor = torch.tensor(
-                    eval_score, dtype=torch.float32, device=agent.device
-                )
-                agg_eval_score = safe_aggregate_metrics(accelerator, eval_tensor)
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-
-                if accelerator is None or accelerator.is_main_process:
-                    agent.metrics.log("eval_score", agg_eval_score)
+            # Evaluate performance
+            if (i + 1) % evaluation_interval == 0:
+                agent.test(test_env)
 
         # Report training metrics
         if accelerator is None or accelerator.is_main_process:
-            pbar.update(effective_batch_steps // len(population.agents))
-            population.increment_evo_step()
+            pbar.update(iteration_steps // len(population.agents))
             population.report_metrics(clear=True)
 
         if accelerator is not None:
@@ -1109,6 +1138,8 @@ def finetune_llm_multiturn(
                 )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
+
+                population.increment_evo_step()
         else:
             checkpoint_due = False
             if checkpoint_steps is not None:

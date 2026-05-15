@@ -270,11 +270,6 @@ def experiences(
     }
 
 
-# TODO: This will be deprecated in the future
-
-# TODO: This will be deprecated in the future
-
-
 def no_sync(self):
     class DummyNoSync:
         def __enter__(self):

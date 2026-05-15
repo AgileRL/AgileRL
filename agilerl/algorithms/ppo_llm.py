@@ -20,7 +20,6 @@ else:
     # Keep the name resolvable when liger-kernel isn't installed so unit
     # tests can patch it. ``_ppo_loss_liger`` guards against actual use.
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
-
 from agilerl.protocols import (
     LoraConfigProtocol,
     MultiTurnEnv,
@@ -341,6 +340,7 @@ class PPO(LLMAlgorithm):
         if self.wrap:
             self.wrap_models()
 
+        # Register algorithm metrics
         for m in (
             "loss",
             "pg_loss",

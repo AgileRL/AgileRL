@@ -490,7 +490,6 @@ def run_multiturn_case(
         save_elite=False,
         verbose=False,
         evaluation_interval=args.evaluation_interval,
-        eval_fn=None,
         evo_steps=evo_steps,
         tournament=tournament,
         mutation=mutation,

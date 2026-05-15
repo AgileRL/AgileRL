@@ -464,7 +464,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         while population.all_below(max_steps):
             for agent in population.agents:
                 agent.set_training_mode(True)
-                agent.init_evo_step()
+                agent.init_training_step()
 
                 obs, info = env.reset()  # Reset environment at start of episode
                 scores = np.zeros(num_envs)
@@ -516,7 +516,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                     agent.reset_action_noise(reset_noise_indices)
 
                 agent.add_scores(completed_episode_scores)
-                agent.finalize_evo_step(steps)
+                agent.finalize_training_step(steps)
                 pbar.update(evo_steps // population.size)
 
             population.increment_evo_step()

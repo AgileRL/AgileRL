@@ -505,11 +505,7 @@ class TestPPOInit:
                 observation_space=observation_space,
                 action_space=action_space,
                 recurrent=True,
-                share_encoders=False,
-                max_seq_len=10,
-                net_config=base_net_config_share,
             )
-
             assert ppo.rollout_buffer.hidden_state_architecture == expected_separate
             assert not ppo.share_encoders
 
@@ -751,6 +747,221 @@ class TestPPOGetAction:
             observation_space=observation_space,
             action_space=action_space,
             recurrent=True,
+            net_config=net_config,
+        )
+
+        # Get action with hidden state
+        obs = np.random.rand(1, *observation_space.shape).astype(
+            observation_space.dtype,
+        )  # Add batch dim for num_envs=1
+        hidden_state = ppo.get_initial_hidden_state()
+        action, log_prob, entropy, value, next_hidden = ppo.get_action(
+            obs,
+            hidden_state=hidden_state,
+        )
+
+        assert action.shape[0] == 1
+        assert isinstance(log_prob, np.ndarray)
+        assert isinstance(entropy, np.ndarray)
+        assert isinstance(value, np.ndarray)
+        assert next_hidden is not None
+        assert next_hidden.get("shared_encoder_h", None).shape == (
+            1,
+            1,
+            32,
+        )  # (directions, num_envs, hidden_size)
+        assert next_hidden.get("shared_encoder_c", None).shape == (1, 1, 32)
+        ppo.clean_up()
+
+    # Test PPO with hidden states
+    def test_ppo_with_hidden_states_multiple_envs(self):
+        num_envs = 2
+        env = gymnasium.vector.SyncVectorEnv(
+            [lambda: gymnasium.make("CartPole-v1")] * num_envs,
+        )
+
+        observation_space = env.single_observation_space  # Use single env space
+        action_space = env.single_action_space  # Use single env space
+
+        ppo = PPO(
+            observation_space=observation_space,
+            action_space=action_space,
+            use_rollout_buffer=True,
+            recurrent=True,
+            num_envs=num_envs,
+            max_seq_len=10,
+            net_config={
+                "encoder_config": {
+                    "hidden_state_size": 32,
+                },
+            },
+        )
+
+        # Get action with hidden state (multiple observations)
+        obs, _ = env.reset()
+        hidden_state = ppo.get_initial_hidden_state(num_envs=num_envs)
+
+        action, log_prob, entropy, value, next_hidden = ppo.get_action(
+            obs,
+            hidden_state=hidden_state,
+        )
+
+        assert action.shape[0] == num_envs
+        assert isinstance(log_prob, np.ndarray)
+        assert isinstance(entropy, np.ndarray)
+        assert isinstance(value, np.ndarray)
+        assert next_hidden is not None
+        assert next_hidden.get("shared_encoder_h", None).shape == (1, num_envs, 32)
+        assert next_hidden.get("shared_encoder_c", None).shape == (1, num_envs, 32)
+        ppo.clean_up()
+        env.close()
+
+    def test_get_action_clips_unsquashed_box_actions(self, vector_space):
+        box_action = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+        ppo = PPO(vector_space, box_action)
+        ppo.set_training_mode(False)
+        ppo.actor.squash_output = False
+
+        ppo._get_action_and_values = lambda *args, **kwargs: (
+            torch.tensor([[5.0, -5.0]]),
+            torch.tensor([0.0]),
+            torch.tensor([0.0]),
+            torch.tensor([0.0]),
+            None,
+        )
+        action, *_ = ppo.get_action(
+            np.zeros((1, vector_space.shape[0]), dtype=np.float32)
+        )
+        assert np.all(action <= 1.0)
+        assert np.all(action >= -1.0)
+        ppo.clean_up()
+
+
+class TestPPOGetActionAndValues:
+    def test_get_action_and_values_share_encoders_false(
+        self, vector_space, discrete_space
+    ):
+        ppo = PPO(
+            vector_space,
+            discrete_space,
+            share_encoders=False,
+            use_rollout_buffer=False,
+        )
+        obs = np.zeros((1, *vector_space.shape), dtype=np.float32)
+        action, log_prob, entropy, values, next_hidden = ppo._get_action_and_values(
+            obs, sample=True
+        )
+        assert action is not None
+        assert values is not None
+        assert next_hidden is None
+        ppo.clean_up()
+
+
+class TestPPOEvaluateActions:
+    def test_evaluate_actions_uses_negative_log_prob_when_entropy_none(
+        self,
+        vector_space,
+        discrete_space,
+        monkeypatch,
+    ):
+        ppo = PPO(vector_space, discrete_space)
+        monkeypatch.setattr(
+            ppo,
+            "_get_action_and_values",
+            lambda *args, **kwargs: (
+                torch.zeros(1),
+                torch.zeros(1),
+                None,
+                torch.zeros(1),
+                None,
+            ),
+        )
+        monkeypatch.setattr(
+            ppo.actor,
+            "action_log_prob",
+            lambda actions: torch.tensor([2.0]),
+        )
+        log_prob, entropy, _ = ppo.evaluate_actions(
+            obs=np.zeros((1, *vector_space.shape), dtype=np.float32),
+            actions=torch.tensor([0]),
+        )
+        assert log_prob.item() == 2.0
+        assert entropy.item() == -2.0
+        ppo.clean_up()
+
+
+class TestPPOShareEncoderParameters:
+    def test_share_encoder_parameters_warns_for_non_evolvable(
+        self, vector_space, discrete_space
+    ):
+        ppo = PPO(vector_space, discrete_space)
+        ppo.actor = nn.Linear(4, 2)
+        ppo.critic = nn.Linear(4, 1)
+        with pytest.warns(UserWarning, match="Encoder sharing is disabled"):
+            ppo.share_encoder_parameters()
+        ppo.clean_up()
+
+
+class TestPPOLearn:
+    # Test PPO learning with rollout buffer
+    @pytest.mark.parametrize(
+        "observation_space",
+        [
+            "vector_space",
+            "discrete_space",
+            "multidiscrete_space",
+            "multibinary_space",
+            "image_space",
+            "dict_space",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "action_space",
+        ["discrete_space", "vector_space", "multidiscrete_space", "multibinary_space"],
+    )
+    @pytest.mark.parametrize("recurrent", [True, False])
+    @pytest.mark.parametrize(
+        "bptt_sequence_type",
+        [
+            BPTTSequenceType.CHUNKED,
+            BPTTSequenceType.MAXIMUM,
+        ],
+    )
+    def test_ppo_learn_with_rollout_buffer(
+        self,
+        observation_space,
+        action_space,
+        bptt_sequence_type,
+        recurrent,
+        request,
+    ):
+        supported_spaces = [
+            "vector_space",
+            "discrete_space",
+            "multidiscrete_space",
+            "multibinary_space",
+        ]
+        if recurrent and observation_space not in supported_spaces:
+            pytest.skip("Recurrent PPO with non-vector space is not supported yet!")
+
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = request.getfixturevalue(action_space)
+
+        learn_step = 32
+        batch_size = 2 if recurrent else 16
+        max_seq_len = 10 if recurrent else None
+
+        net_config = {"encoder_config": {"hidden_state_size": 32}} if recurrent else {}
+
+        ppo = PPO(
+            observation_space=observation_space,
+            action_space=action_space,
+            use_rollout_buffer=True,
+            learn_step=learn_step,
+            batch_size=batch_size,
+            update_epochs=1,
+            bptt_sequence_type=bptt_sequence_type,
+            recurrent=recurrent,
             max_seq_len=max_seq_len,
             net_config=net_config,
         )
@@ -1286,10 +1497,6 @@ class TestPPOLearn:
         ppo = PPO(
             vector_space,
             discrete_space,
-            recurrent=True,
-            target_kl=0.5,
-            update_epochs=1,
-            batch_size=1,
         )
         ppo.rollout_buffer = FakeRolloutBuffer()
 
@@ -1428,10 +1635,6 @@ class TestPPOLearn:
         ppo = PPO(
             observation_space=vector_space,
             action_space=discrete_space,
-            learn_step=learn_step,
-            batch_size=batch_size,
-            recurrent=recurrent,
-            net_config=net_config,
         )
 
         mask_size = discrete_space.n
@@ -1799,10 +2002,6 @@ class TestPPOClone:
             observation_space,
             action_space,
             device=torch.device(device),
-            recurrent=recurrent,
-            net_config=net_config,
-            num_envs=num_vec_envs,
-            share_encoders=share_encoders,
             max_seq_len=None,
             learn_step=32,
             batch_size=16,

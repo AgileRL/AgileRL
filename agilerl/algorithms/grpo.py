@@ -544,12 +544,10 @@ class GRPO(LLMAlgorithm):
             action_masks = action_masks.to(self.device)
             rewards = rewards.to(self.device).float()
             completion_ids = completion_ids.to(self.device)
-
             # GRPO expects one scalar reward per trajectory. If callers pass
             # per-turn rewards [batch, max_turns], collapse to episode returns.
             if rewards.dim() > 1 and rewards.shape[0] == completion_ids.shape[0]:
                 rewards = rewards.sum(dim=1)
-
             rewards = rewards.flatten()
             if rewards.shape[0] != completion_ids.shape[0]:
                 msg = (

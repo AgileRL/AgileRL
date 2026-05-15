@@ -320,6 +320,8 @@ class TestNeuralUCBTest:
         assert isinstance(mean_score, float)
         agent.clean_up()
 
+        env = DummyBanditEnv(state_size=observation_space.shape, arms=discrete_space.n)
+
 
 class TestNeuralUCBClone:
     # Clones the agent and returns an identical agent.

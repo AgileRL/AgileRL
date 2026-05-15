@@ -203,7 +203,7 @@ def train_multi_agent_on_policy(
         for agent in population.agents:
             compiled_agent = agent.torch_compiler is not None
             agent.set_training_mode(True)
-            agent.init_evo_step()
+            agent.init_training_step()
 
             obs, info = env.reset()
             scores = (
@@ -340,10 +340,8 @@ def train_multi_agent_on_policy(
                 agent.learn(experiences)
 
             agent.add_scores(completed_episode_scores)
-            agent.finalize_evo_step(steps)
+            agent.finalize_training_step(steps)
             pbar.update(steps // population.size)
-
-        population.increment_evo_step()
 
         # Evaluate population
         for agent in population.agents:
@@ -354,6 +352,8 @@ def train_multi_agent_on_policy(
                 sum_scores=sum_scores,
             )
 
+        # Report progress
+        population.increment_evo_step()
         population.report_metrics(clear=True)
 
         # Check if we have met the target score

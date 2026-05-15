@@ -220,28 +220,25 @@ class DPO(LLMAlgorithm):
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
         # The following tensors are size [batch_size, max_length]
-        chosen_input_ids_tensor: torch.Tensor = experiences["chosen_input_ids"].to(
+        chosen_input_ids: torch.Tensor = experiences["chosen_input_ids"].to(self.device)
+        rejected_input_ids: torch.Tensor = experiences["rejected_input_ids"].to(
             self.device
         )
-        rejected_input_ids_tensor: torch.Tensor = experiences["rejected_input_ids"].to(
+        chosen_attention_mask: torch.Tensor = experiences["chosen_attention_mask"].to(
             self.device
         )
-        chosen_attention_mask_tensor: torch.Tensor = experiences[
-            "chosen_attention_mask"
-        ].to(self.device)
-        rejected_attention_mask_tensor: torch.Tensor = experiences[
+        rejected_attention_mask: torch.Tensor = experiences[
             "rejected_attention_mask"
         ].to(self.device)
-
         # Check first that all tensors have the same max length before calculating the masks
         assert (
-            chosen_input_ids_tensor.shape[1]
-            == rejected_input_ids_tensor.shape[1]
-            == chosen_attention_mask_tensor.shape[1]
-            == rejected_attention_mask_tensor.shape[1]
+            chosen_input_ids.shape[1]
+            == rejected_input_ids.shape[1]
+            == chosen_attention_mask.shape[1]
+            == rejected_attention_mask.shape[1]
         ), "All tensors must have the same max length"
 
-        max_length = chosen_input_ids_tensor.shape[1]
+        max_length = chosen_input_ids.shape[1]
         prompt_lengths: list[int] = experiences["prompt_lengths"]
 
         # Build the response mask on CPU (same device as dataloader tensors).
@@ -251,9 +248,9 @@ class DPO(LLMAlgorithm):
         ).to(self.device)
 
         # Mask has to be shifted by 1 as output log probs dims are 1 shorter than input ids as first token is used to predict the first log prob
-        chosen_mask = (prompt_masks * chosen_attention_mask_tensor)[:, 1:]
-        rejected_mask = (prompt_masks * rejected_attention_mask_tensor)[:, 1:]
-        num_samples = chosen_input_ids_tensor.shape[0]
+        chosen_mask = (prompt_masks * chosen_attention_mask)[:, 1:]
+        rejected_mask = (prompt_masks * rejected_attention_mask)[:, 1:]
+        num_samples = chosen_input_ids.shape[0]
         batch_size = min(
             num_samples,
             getattr(self, "micro_batch_size_per_gpu", self.batch_size_per_process),
@@ -268,18 +265,18 @@ class DPO(LLMAlgorithm):
         if not self.use_liger_loss:
             with torch.no_grad():
                 ref_rejected_log_probs = self._get_logprobs(
-                    rejected_input_ids_tensor,
+                    rejected_input_ids,
                     batch_size,
                     use_reference=True,
                     eval_mode=True,
-                    attention_mask=rejected_attention_mask_tensor,
+                    attention_mask=rejected_attention_mask,
                 )
                 ref_chosen_log_probs = self._get_logprobs(
-                    chosen_input_ids_tensor,
+                    chosen_input_ids,
                     batch_size,
                     use_reference=True,
                     eval_mode=True,
-                    attention_mask=chosen_attention_mask_tensor,
+                    attention_mask=chosen_attention_mask,
                 )
 
         for _ in range(self.update_epochs):
@@ -290,10 +287,10 @@ class DPO(LLMAlgorithm):
                 loss, chosen_reward, rejected_reward = self._dpo_loss(
                     batch_size,
                     minibatch_idxs,
-                    chosen_input_ids_tensor,
-                    chosen_attention_mask_tensor,
-                    rejected_input_ids_tensor,
-                    rejected_attention_mask_tensor,
+                    chosen_input_ids,
+                    chosen_attention_mask,
+                    rejected_input_ids,
+                    rejected_attention_mask,
                     chosen_mask,
                     rejected_mask,
                     ref_rejected_log_probs,

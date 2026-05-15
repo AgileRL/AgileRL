@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from unittest.mock import ANY, MagicMock, Mock, call, patch
 
+import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
@@ -330,6 +331,11 @@ class TestFinetuneLlmReasoning:
         mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
         mock_env.data_batch_size_per_gpu = 1
 
+        mutation = MagicMock()
+        mutation.architecture_mut = 0
+        mutation.new_layer_prob = 0
+        mutation.parameters_mut = 0
+        mutation.activation_mut = 0
         mutation = MagicMock()
         mutation.architecture_mut = 0
         mutation.new_layer_prob = 0
@@ -671,6 +677,11 @@ class TestFinetuneLlmPreference:
         mutation.new_layer_prob = 0
         mutation.parameters_mut = 0
         mutation.activation_mut = 0
+        mutation = MagicMock()
+        mutation.architecture_mut = 0
+        mutation.new_layer_prob = 0
+        mutation.parameters_mut = 0
+        mutation.activation_mut = 0
 
         with (
             patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
@@ -882,6 +893,11 @@ class TestFinetuneLlmSft:
         mock_env.step.return_value = "next_prompts"
         mock_env.data_batch_size_per_gpu = 1
 
+        mutation = MagicMock()
+        mutation.architecture_mut = 0
+        mutation.new_layer_prob = 0
+        mutation.parameters_mut = 0
+        mutation.activation_mut = 0
         mutation = MagicMock()
         mutation.architecture_mut = 0
         mutation.new_layer_prob = 0
