@@ -156,18 +156,22 @@ def gather_tensor(
 
 
 def aggregate_metrics_across_gpus(
-    accelerator: Accelerator,
+    accelerator: Accelerator | None,
     metric_tensor: torch.Tensor | float,
 ) -> float:
     """Aggregate gathered tensors.
 
     :param accelerator: Accelerator object
-    :type accelerator: accelerate.Accelerator
+    :type accelerator: accelerate.Accelerator | None
     :param metric_tensor: Metrics
     :type metric_tensor: torch.Tensor
     :return: Mean metric
     :rtype: float
     """
+    if accelerator is None:
+        if isinstance(metric_tensor, torch.Tensor):
+            return metric_tensor.float().mean().item()
+        return float(metric_tensor)
     all_metrics = gather_tensor(metric_tensor, accelerator)
     return all_metrics.mean().item()
 

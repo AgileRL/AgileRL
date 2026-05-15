@@ -802,6 +802,10 @@ class TestLocalTrainerLLM:
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
             ),
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ),
         ):
             yield
 

@@ -925,9 +925,7 @@ def finetune_llm_multiturn(
     :type wandb_api_key: str, optional
     :param wandb_kwargs: Additional kwargs to pass to wandb.init()
     :type wandb_kwargs: dict, optional
-    :param eval_fn: Optional ``(agent) -> float`` evaluated on the main process.
-    :type eval_fn: Callable, optional
-    :param evaluation_interval: How often to run ``eval_fn``.
+    :param evaluation_interval: Evaluate every N outer iterations.
     :type evaluation_interval: int
     :param max_wall_seconds: Stop after this wall-clock duration (seconds); ``None`` disables.
     :type max_wall_seconds: float | None

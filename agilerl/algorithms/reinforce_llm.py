@@ -502,10 +502,9 @@ class REINFORCE(LLMAlgorithm):
                             batch_advantages,
                         )
                         self._backward_pass(pg_loss)
-                        learn_metrics["mean_kl"] += metrics["kl"]
-                        learn_metrics["mean_entropy"] += metrics["entropy"]
-                        learn_metrics["mean_pg_loss"] += metrics["pg_loss"]
-                        learn_metrics["mean_loss"] += pg_loss.item()
+                        learn_metrics["kl"] += metrics["kl"]
+                        learn_metrics["entropy"] += metrics["entropy"]
+                        learn_metrics["loss"] += pg_loss.item()
                         updates += 1
                         continue
 

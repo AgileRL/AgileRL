@@ -1210,37 +1210,6 @@ class TestFinetuneLlmMultiturn:
                 verbose=False,
             )
 
-    def test_finetune_llm_multiturn_eval_fn_interval(self):
-        mock_agent = _make_multiturn_mock_agent()
-        eval_fn = MagicMock(return_value=0.42)
-
-        with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
-            patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
-            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
-        ):
-            mock_pbar_fn.return_value = MagicMock()
-            mock_agg.return_value = 0.5
-            mock_collect.return_value = _multiturn_collect_return(batch_steps=3)
-            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
-            finetune_llm_multiturn(
-                pop=[mock_agent],
-                env_factory=MagicMock(),
-                max_turns=2,
-                init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
-                max_steps=9,
-                evaluation_interval=1,
-                eval_fn=eval_fn,
-                verbose=False,
-                accelerator=None,
-            )
-
-        assert eval_fn.call_count == 3
-
     def test_finetune_llm_multiturn_max_reward_adds_accuracy_metric(self):
         mock_agent = _make_multiturn_mock_agent()
 
@@ -1307,41 +1276,6 @@ class TestFinetuneLlmMultiturn:
         init_hp_passed = mock_init_loggers.call_args.kwargs["init_hyperparams"]
         assert init_hp_passed["BATCH_SIZE_PER_GPU"] == 7
         assert init_hp_passed["ALGO"] == "LLMPPO"
-
-    def test_finetune_llm_multiturn_accelerator_syncs_after_eval_fn(self):
-        mock_agent = _make_multiturn_mock_agent()
-        acc = MagicMock(spec=Accelerator)
-        acc.is_main_process = True
-        acc.num_processes = 1
-        acc.state = MagicMock(num_processes=1)
-        acc.wait_for_everyone = MagicMock()
-
-        with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
-            patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
-            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
-        ):
-            mock_pbar_fn.return_value = MagicMock()
-            mock_agg.return_value = 0.5
-            mock_collect.return_value = _multiturn_collect_return(batch_steps=3)
-            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
-            finetune_llm_multiturn(
-                pop=[mock_agent],
-                env_factory=MagicMock(),
-                max_turns=2,
-                init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
-                max_steps=3,
-                evaluation_interval=1,
-                eval_fn=lambda _a: 0.1,
-                verbose=False,
-                accelerator=acc,
-            )
-
-        assert acc.wait_for_everyone.call_count >= 1
 
     def test_finetune_llm_multiturn_raises_when_group_size_not_divisible_by_batch_size(
         self,

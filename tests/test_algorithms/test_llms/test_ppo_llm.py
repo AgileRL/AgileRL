@@ -1290,6 +1290,6 @@ class TestPPOLearnWithLiger:
         # The Liger branch was actually exercised (not the fallback path).
         assert ppo._ppo_loss_liger.call_count >= 1
         # And its returned scalars made it into the aggregated metrics.
-        assert learn_out["mean_loss"] == pytest.approx(0.42, rel=1e-6)
-        assert learn_out["mean_kl"] == pytest.approx(0.1, rel=1e-6)
-        assert learn_out["mean_vf_loss"] == pytest.approx(0.5, rel=1e-6)
+        assert learn_out["loss"] == pytest.approx(0.42, rel=1e-6)
+        assert learn_out["kl"] == pytest.approx(0.1, rel=1e-6)
+        assert learn_out["vf_loss"] == pytest.approx(0.5, rel=1e-6)

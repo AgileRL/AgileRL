@@ -582,6 +582,7 @@ class TestPopulationEdgeCases:
     def test_gather_metrics_with_accelerator(self, two_agents):
         acc = MagicMock()
         acc.is_main_process = True
+        acc.num_processes = 4
         acc.state = MagicMock()
         acc.state.num_processes = 4
         pop = Population(agents=two_agents, accelerator=acc)

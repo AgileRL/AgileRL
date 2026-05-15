@@ -317,10 +317,8 @@ class PPO(RLAlgorithm):
         self.hidden_state = None
 
         # Register metrics to keep track of during training
-        self.metrics.register("total_loss")
-        self.metrics.register("policy_loss")
-        self.metrics.register("value_loss")
-        self.metrics.register("entropy_loss")
+        for metric in ("loss", "policy_loss", "value_loss", "entropy_loss"):
+            self.metrics.register(metric)
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""
@@ -632,7 +630,7 @@ class PPO(RLAlgorithm):
         if buffer_td.is_empty():
             warnings.warn("Buffer data is empty. Skipping learning step.", stacklevel=2)
             for metric_name in (
-                "total_loss",
+                "loss",
                 "policy_loss",
                 "value_loss",
                 "entropy_loss",
@@ -775,10 +773,12 @@ class PPO(RLAlgorithm):
         self.rollout_buffer.prepare_sequence_tensors(device=self.device)
 
         # Here, batch_size means number of sequences per minibatch
-        mean_loss = 0.0
-        mean_policy_loss = 0.0
-        mean_value_loss = 0.0
-        mean_entropy_loss = 0.0
+        learn_metrics = {
+            "loss": 0.0,
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy_loss": 0.0,
+        }
         total_minibatch_updates_total = 0
         for epoch in range(self.update_epochs):
             approx_kl_divs_epoch = []  # KL divergences for this epoch's minibatches
@@ -890,10 +890,10 @@ class PPO(RLAlgorithm):
                 clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
-                mean_loss += loss.item()
-                mean_policy_loss += policy_loss.item()
-                mean_value_loss += value_loss.item()
-                mean_entropy_loss += entropy_loss.item()
+                learn_metrics["loss"] += loss.item()
+                learn_metrics["policy_loss"] += policy_loss.item()
+                learn_metrics["value_loss"] += value_loss.item()
+                learn_metrics["entropy_loss"] += entropy_loss.item()
                 num_minibatches_this_epoch += 1
 
                 if (
@@ -942,13 +942,13 @@ class PPO(RLAlgorithm):
             ):
                 break
 
+        # Log metrics
         divisor = max(1e-8, total_minibatch_updates_total)
-        final_loss = mean_loss / divisor
-        self.metrics.log("total_loss", final_loss)
-        self.metrics.log("policy_loss", mean_policy_loss / divisor)
-        self.metrics.log("value_loss", mean_value_loss / divisor)
-        self.metrics.log("entropy_loss", mean_entropy_loss / divisor)
-        return final_loss
+        learn_metrics = {k: v / divisor for k, v in learn_metrics.items()}
+        for key, value in learn_metrics.items():
+            self.metrics.log(key, value)
+
+        return learn_metrics["loss"]
 
     def test(
         self,

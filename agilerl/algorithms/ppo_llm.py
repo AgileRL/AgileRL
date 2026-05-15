@@ -562,12 +562,12 @@ class PPO(LLMAlgorithm):
                         )
                         self._backward_pass(total_loss)
                         clear_fused_adapter_routing(self._get_unwrapped_actor())
-                        learn_metrics["mean_kl"] += metrics["kl"]
-                        learn_metrics["mean_entropy"] += metrics["entropy"]
-                        learn_metrics["mean_clipfrac"] += metrics["clipfrac"]
-                        learn_metrics["mean_pg_loss"] += metrics["pg_loss"]
-                        learn_metrics["mean_vf_loss"] += metrics["vf_loss"]
-                        learn_metrics["mean_loss"] += total_loss.item()
+                        learn_metrics["kl"] += metrics["kl"]
+                        learn_metrics["entropy"] += metrics["entropy"]
+                        learn_metrics["clipfrac"] += metrics["clipfrac"]
+                        learn_metrics["pg_loss"] += metrics["pg_loss"]
+                        learn_metrics["vf_loss"] += metrics["vf_loss"]
+                        learn_metrics["loss"] += total_loss.item()
                         updates += 1
                         continue
 

@@ -2888,7 +2888,8 @@ class TestGRPOLearn:
             ),
         ):
             metrics = grpo.learn((completion_ids, action_masks, rewards))
-        assert metrics == {"loss": 0.0, "kl": 0.0}
+        assert metrics["loss"] == 0.0
+        assert metrics["kl"] == 0.0
         grpo.clean_up()
 
     @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -3046,7 +3047,7 @@ class TestGRPOLearn:
         rewards = torch.stack([torch.rand(2, dtype=torch.float32)], dim=0)
 
         metrics = grpo.learn((completions, action_masks, rewards))
-        assert set(metrics.keys()) == {"loss", "kl"}
+        assert set(metrics.keys()) == {"loss", "kl", "completion_length"}
         grpo.clean_up()
 
     def test_grpo_learn_calls_mps_empty_cache(

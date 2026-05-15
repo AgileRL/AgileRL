@@ -1073,6 +1073,5 @@ class TestREINFORCELearnWithLiger:
         learn_out = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
         assert rf._reinforce_loss_liger.call_count >= 1
-        assert learn_out["mean_loss"] == pytest.approx(0.3, rel=1e-6)
-        assert learn_out["mean_kl"] == pytest.approx(0.05, rel=1e-6)
-        assert learn_out["mean_pg_loss"] == pytest.approx(0.25, rel=1e-6)
+        assert learn_out["loss"] == pytest.approx(0.3, rel=1e-6)
+        assert learn_out["kl"] == pytest.approx(0.05, rel=1e-6)

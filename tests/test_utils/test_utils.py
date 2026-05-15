@@ -1615,26 +1615,26 @@ class TestAggregateMetricsNoAccelerator:
         assert result == 1.5
 
     def test_safe_aggregate_with_tensor_no_accelerator(self):
-        from agilerl.utils.utils import safe_aggregate_metrics
+        from agilerl.utils.llm_utils import safe_aggregate_metrics
 
         result = safe_aggregate_metrics(None, torch.tensor([2.0, 4.0]))
         assert isinstance(result, float)
         assert result == pytest.approx(3.0)
 
     def test_safe_aggregate_with_ndarray_no_accelerator(self):
-        from agilerl.utils.utils import safe_aggregate_metrics
+        from agilerl.utils.llm_utils import safe_aggregate_metrics
 
         result = safe_aggregate_metrics(None, np.array([3.0, 5.0, 7.0]))
         assert isinstance(result, float)
         assert result == pytest.approx(5.0)
 
     def test_safe_aggregate_with_plain_float_no_accelerator(self):
-        from agilerl.utils.utils import safe_aggregate_metrics
+        from agilerl.utils.llm_utils import safe_aggregate_metrics
 
         assert safe_aggregate_metrics(None, 2.5) == 2.5
 
     def test_safe_aggregate_with_accelerator_delegates(self):
-        from agilerl.utils.utils import safe_aggregate_metrics
+        from agilerl.utils.llm_utils import safe_aggregate_metrics
 
         accelerator = Accelerator()
         result = safe_aggregate_metrics(

@@ -1168,6 +1168,10 @@ class TestLLMLocalTrainer:
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=mock_pop,
             ) as mock_create_pop,
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             from agilerl.models.env import LLMEnvSpec, LLMEnvType
@@ -1204,6 +1208,10 @@ class TestLLMLocalTrainer:
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=mock_pop,
             ),
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             env_spec = MagicMock()
@@ -1235,6 +1243,10 @@ class TestLLMLocalTrainer:
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
             ),
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ) as mock_create_accel,
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             trainer = LocalTrainer(
@@ -1247,7 +1259,7 @@ class TestLLMLocalTrainer:
         assert mock_llm_env_spec.max_context_length == dpo_spec.max_model_len
         assert mock_llm_env_spec.seed == dpo_spec.seed
         mock_llm_env_spec.make_env.assert_called_once_with(
-            tokenizer=mock_tokenizer, accelerator=None
+            tokenizer=mock_tokenizer, accelerator=mock_create_accel.return_value
         )
         assert trainer.env is mock_env
 
@@ -1262,6 +1274,10 @@ class TestLLMLocalTrainer:
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
+            ),
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
             ),
         ):
             mock_auto_tok.from_pretrained.return_value = MagicMock(
@@ -1295,6 +1311,10 @@ class TestLLMLocalTrainer:
             ),
             patch.object(type(dpo_spec), "get_training_fn", return_value=mock_train_fn),
             patch.object(LocalTrainer, "to_manifest", return_value={}),
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             trainer = LocalTrainer(
@@ -1315,7 +1335,10 @@ class TestLLMLocalTrainer:
     # -- Missing LLM dependencies raises ImportError -----------------------
 
     def test_missing_llm_deps_raises(self, dpo_spec):
-        with patch("agilerl.training.trainer.AutoTokenizer", None):
+        with (
+            patch("agilerl.training.trainer.AutoTokenizer", None),
+            patch("agilerl.training.trainer.create_llm_accelerator", None),
+        ):
             with pytest.raises(ImportError, match="LLM dependencies"):
                 LocalTrainer(
                     algorithm=dpo_spec,
@@ -1633,9 +1656,15 @@ class TestLocalTrainerIntegration:
 
         mock_pop = [MagicMock()]
 
-        with patch(
-            "agilerl.training.trainer.create_population_from_spec",
-            return_value=mock_pop,
+        with (
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=mock_pop,
+            ),
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ),
         ):
             trainer = LocalTrainer(
                 algorithm=algo_spec,
@@ -1710,9 +1739,15 @@ class TestLocalTrainerIntegration:
 
         mock_pop = [MagicMock()]
 
-        with patch(
-            "agilerl.training.trainer.create_population_from_spec",
-            return_value=mock_pop,
+        with (
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=mock_pop,
+            ),
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ),
         ):
             trainer = LocalTrainer(
                 algorithm=algo_spec,
@@ -1965,6 +2000,10 @@ class TestLocalTrainerToManifestLLM:
                 return_value=mock_tokenizer,
             ),
             patch.object(LocalTrainer, "_make_env", return_value=mock_env),
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ),
         ):
             trainer = LocalTrainer(
                 algorithm=spec,
@@ -2102,6 +2141,10 @@ class TestLocalTrainerMultiturn:
                 "make_multiturn_env_factory",
                 return_value=MagicMock(),
             ) as mock_factory_method,
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             trainer = LocalTrainer(
@@ -2152,6 +2195,10 @@ class TestLocalTrainerMultiturn:
                 return_value=mock_train_fn,
             ),
             patch.object(LocalTrainer, "to_manifest", return_value={}),
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ),
         ):
             mock_auto_tok.from_pretrained.return_value = mock_tokenizer
             trainer = LocalTrainer(

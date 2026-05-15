@@ -505,7 +505,11 @@ class TestPPOInit:
                 observation_space=observation_space,
                 action_space=action_space,
                 recurrent=True,
+                share_encoders=False,
+                max_seq_len=10,
+                net_config=base_net_config_share,
             )
+
             assert ppo.rollout_buffer.hidden_state_architecture == expected_separate
             assert not ppo.share_encoders
 
@@ -786,7 +790,6 @@ class TestPPOGetAction:
         ppo = PPO(
             observation_space=observation_space,
             action_space=action_space,
-            use_rollout_buffer=True,
             recurrent=True,
             num_envs=num_envs,
             max_seq_len=10,
@@ -845,7 +848,6 @@ class TestPPOGetActionAndValues:
             vector_space,
             discrete_space,
             share_encoders=False,
-            use_rollout_buffer=False,
         )
         obs = np.zeros((1, *vector_space.shape), dtype=np.float32)
         action, log_prob, entropy, values, next_hidden = ppo._get_action_and_values(
@@ -956,7 +958,6 @@ class TestPPOLearn:
         ppo = PPO(
             observation_space=observation_space,
             action_space=action_space,
-            use_rollout_buffer=True,
             learn_step=learn_step,
             batch_size=batch_size,
             update_epochs=1,
@@ -1497,6 +1498,8 @@ class TestPPOLearn:
         ppo = PPO(
             vector_space,
             discrete_space,
+            target_kl=0.5,
+            update_epochs=2,
         )
         ppo.rollout_buffer = FakeRolloutBuffer()
 
@@ -1635,6 +1638,11 @@ class TestPPOLearn:
         ppo = PPO(
             observation_space=vector_space,
             action_space=discrete_space,
+            recurrent=recurrent,
+            max_seq_len=10 if recurrent else None,
+            learn_step=learn_step,
+            batch_size=batch_size,
+            **({} if not net_config else {"net_config": net_config}),
         )
 
         mask_size = discrete_space.n
@@ -2002,10 +2010,14 @@ class TestPPOClone:
             observation_space,
             action_space,
             device=torch.device(device),
-            max_seq_len=None,
+            max_seq_len=10 if recurrent else None,
             learn_step=32,
             batch_size=16,
             update_epochs=1,
+            recurrent=recurrent,
+            share_encoders=share_encoders,
+            num_envs=num_vec_envs,
+            **({} if not net_config else {"net_config": net_config}),
         )
 
         dummy_env = DummyEnv(observation_space.shape, vect=True, num_envs=num_vec_envs)

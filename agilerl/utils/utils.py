@@ -43,6 +43,7 @@ if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from agilerl.algorithms import CISPO, DPO, GRPO, GSPO, LLMPPO, LLMREINFORCE, SFT
     from agilerl.utils.llm_utils import get_llm_accelerator, get_state_dict
 
+
 SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
 
 _BOX2D_ENV_PREFIXES = (

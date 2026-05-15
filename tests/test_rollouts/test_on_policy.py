@@ -321,7 +321,6 @@ class TestCollectRollouts:
         ppo = PPO(
             observation_space=vector_space,
             action_space=discrete_space,
-            use_rollout_buffer=True,
             learn_step=4,
             num_envs=1,
         )
