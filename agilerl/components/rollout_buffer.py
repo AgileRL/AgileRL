@@ -12,7 +12,6 @@ from agilerl.typing import (
     ArrayOrTensor,
     BPTTSequenceType,
     ObservationType,
-    StandardTensorDict,
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
@@ -841,13 +840,13 @@ class RolloutBuffer:
     def get_minibatch_sequences(
         self,
         batch_size: int,
-    ) -> Generator[tuple[StandardTensorDict, StandardTensorDict], None, None]:
+    ) -> Generator[tuple[TensorDict, TensorDict], None, None]:
         """Get a minibatch of sequences from the buffer.
 
         :param batch_size: The number of sequences to sample.
         :type batch_size: int
         :return: A TensorDict containing the minibatch of sequences.
-        :rtype: Generator[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]], None, None]
+        :rtype: Generator[tuple[TensorDict, TensorDict], None, None]
         """
         if self.unpadded_slices is None:
             msg = (
