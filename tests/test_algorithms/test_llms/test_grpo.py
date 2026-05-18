@@ -31,6 +31,7 @@ from transformers import AutoTokenizer
 from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.configuration_utils import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
+from transformers.generation.utils import GenerationMixin
 from vllm import LLM
 
 from agilerl.algorithms import CISPO, GRPO, GSPO
@@ -111,7 +112,7 @@ class DummyForwardOutput:
         self.logits = logits
 
 
-class DummyMLPPreTrainedModel(PreTrainedModel):
+class DummyMLPPreTrainedModel(PreTrainedModel, GenerationMixin):
     config_class = DummyConfig
     base_model_prefix = "dummy_mlp"
 
