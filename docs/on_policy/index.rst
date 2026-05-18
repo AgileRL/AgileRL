@@ -23,6 +23,97 @@ policy, potentially limiting exploration and the use of past experiences.
      - :ref:`Acrobot<ppo_tutorial>`, :ref:`Masked Velocity LunarLander-v3<agilerl_recurrent_ppo_tutorial>`
 
 
+.. _on_policy_trainer:
+
+Training with LocalTrainer
+--------------------------
+
+The simplest way to train an on-policy agent is with a YAML manifest and the
+:class:`~agilerl.training.trainer.LocalTrainer`. This handles population
+creation, rollout collection, evolutionary HPO, and the training loop automatically.
+
+.. collapse:: Example manifest: PPO on LunarLander-v3
+
+  .. code-block:: yaml
+
+    algorithm:
+      name: PPO
+      batch_size: 128
+      lr: 0.001
+      learn_step: 2048
+      gamma: 0.99
+      gae_lambda: 0.95
+      action_std_init: 0.6
+      clip_coef: 0.2
+      ent_coef: 0.01
+      vf_coef: 0.5
+      max_grad_norm: 0.5
+      update_epochs: 4
+
+    environment:
+      name: LunarLander-v3
+      num_envs: 16
+
+    training:
+      max_steps: 6_000_000
+      target_score: 250.0
+      pop_size: 4
+      evo_steps: 10_240
+
+    network:
+      latent_dim: 64
+      arch: mlp
+      encoder_config:
+        hidden_size: [64]
+        activation: ReLU
+        layer_norm: true
+      head_config:
+        hidden_size: [64]
+        activation: ReLU
+        output_vanish: true
+        layer_norm: true
+
+    mutation:
+      probabilities:
+        no_mut: 0.4
+        arch_mut: 0.2
+        new_layer: 0.2
+        params_mut: 0.2
+        rl_hp_mut: 0.2
+      rl_hp_selection:
+        lr:   { min: 0.0001, max: 0.01 }
+        batch_size: { min: 8, max: 1024 }
+        learn_step: { min: 256, max: 8192 }
+        ent_coef: { min: 0.001, max: 0.1 }
+      mutation_sd: 0.1
+      rand_seed: 42
+
+    tournament_selection:
+      tournament_size: 2
+      elitism: true
+
+.. tab-set::
+
+   .. tab-item:: SDK
+
+      .. code-block:: python
+
+         from agilerl.training.trainer import LocalTrainer
+
+         trainer = LocalTrainer.from_manifest("configs/training/ppo/ppo.yaml")
+         population, fitnesses = trainer.train()
+
+   .. tab-item:: CLI
+
+      .. code-block:: bash
+
+         python -m agilerl.train -m configs/training/ppo/ppo.yaml
+
+.. seealso::
+
+   Full manifest reference and additional options: :ref:`trainers`
+
+
 .. _initpop_on_policy:
 
 Population Creation
@@ -93,7 +184,7 @@ can be used in a variety of settings and is widely popular across domains includ
 The setup for PPO is very similar to the off-policy example above, except it does not require the use of an experience replay buffer. It also requires
 some different hyperparameters, shown below in the custom loop.
 
-The easiest way to train a population of agents using PPO is to use our on-policy training function:
+You can use our off-the-shelf on-policy training function to train a population of agents using PPO:
 
 .. code-block:: python
 
@@ -216,9 +307,8 @@ Alternatively, use a custom on-policy training loop:
         total_steps = 0
 
         # TRAINING LOOP
-        print("Training...")
         pbar = default_progress_bar(max_steps)
-        while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+        while np.less([agent.steps for agent in pop], max_steps).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
                 agent.set_training_mode(True)
@@ -292,7 +382,7 @@ Alternatively, use a custom on-policy training loop:
                     # Learn according to agent's RL algorithm
                     agent.learn(experiences)
 
-                agent.steps[-1] += steps
+                agent.steps += steps
                 pop_episode_scores.append(completed_episode_scores)
 
             # Evaluate population
@@ -315,7 +405,7 @@ Alternatively, use a custom on-policy training loop:
 
             pbar.write(
                 f"--- Global steps {total_steps} ---\n"
-                f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+                f"Steps: {[agent.steps for agent in pop]}\n"
                 f"Scores: {mean_scores}\n"
                 f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
                 f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
@@ -325,17 +415,13 @@ Alternatively, use a custom on-policy training loop:
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
 
-            # Update step counter
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
-
         pbar.close()
         env.close()
 
 .. _recurrent_on_policy:
 
 Training Loop for Recurrent On-Policy Algorithms
------------------------------------------------
+------------------------------------------------
 
 Recurrent on-policy algorithms require a different training loop to the standard on-policy algorithms. This is because the agent needs to maintain a hidden state
 between steps, which is not possible with the standard training loop. AgileRL currently supports recurrent policies to be used with ``PPO``. To use a recurrent policy,
@@ -424,9 +510,8 @@ users must set ``recurrent=True`` when creating the algorithm.
         total_steps = 0
 
         # TRAINING LOOP
-        print("Training...")
         pbar = default_progress_bar(max_steps)
-        while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+        while np.less([agent.steps for agent in pop], max_steps).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
                 steps = 0
@@ -450,7 +535,7 @@ users must set ``recurrent=True`` when creating the algorithm.
                     # Update step counter and scores
                     total_steps += agent.learn_step
                     steps += agent.learn_step
-                    agent.steps[-1] += agent.learn_step
+                    agent.steps += agent.learn_step
                     completed_episodes += episode_scores
 
                 pop_episode_scores.append(
@@ -472,7 +557,7 @@ users must set ``recurrent=True`` when creating the algorithm.
 
             pbar.write(
                 f"--- Global steps {total_steps} ---\n"
-                f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+                f"Steps: {[agent.steps for agent in pop]}\n"
                 f"Scores: {pop_episode_scores}\n"
                 f"Fitnesses: {['%.2f' % fitness for fitness in fitnesses]}\n"
                 f"5 fitness avgs: {['%.2f' % np.mean(agent.fitness[-5:]) for agent in pop]}\n"
@@ -488,10 +573,6 @@ users must set ``recurrent=True`` when creating the algorithm.
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
-
-            # Update step counter
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
 
         pbar.close()
         env.close()

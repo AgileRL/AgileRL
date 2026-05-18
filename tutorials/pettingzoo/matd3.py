@@ -77,11 +77,10 @@ if __name__ == "__main__":
     hp_config = HyperparameterConfig(
         lr_actor=RLParameter(min=1e-4, max=1e-2),
         lr_critic=RLParameter(min=1e-4, max=1e-2),
-        batch_size=RLParameter(min=8, max=512, dtype=int),
+        batch_size=RLParameter(min=8, max=512),
         learn_step=RLParameter(
             min=20,
             max=200,
-            dtype=int,
             grow_factor=1.5,
             shrink_factor=0.75,
         ),

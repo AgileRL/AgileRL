@@ -1,6 +1,6 @@
 .. _multiturn_grpo_ppo_tutorial:
 
-Multi-turn finetuning with LLMPPO, LLMREINFORCE, and GRPO
+Multi-turn Fine-Tuning with LLMPPO, LLMREINFORCE, and GRPO
 =========================================================
 
 In this tutorial, we train three LLM reinforcement learning agents on the same multi-turn GEM task:

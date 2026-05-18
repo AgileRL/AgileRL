@@ -17,7 +17,7 @@ usage examples and manifest reference.
    :members: train
 
 .. autoclass:: agilerl.training.trainer.ArenaTrainer
-   :members: train, get_environment_spec
+   :members: train
 
 
 Training Functions

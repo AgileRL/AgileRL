@@ -467,8 +467,8 @@ class MutationRegistry:
     def networks(self) -> list[NetworkConfig]:
         """Get a list of network configurations in the registry.
 
-        :return: A list of network configurations in the registry. This includes the evaluation
-        and shared networks.
+        :return: A list of network configurations in the registry. This includes
+            the evaluation and shared networks.
         :rtype: list[NetworkConfig]
         """
         # Match with optimizers (only eval networks can have optimizers by definition)

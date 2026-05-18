@@ -86,7 +86,7 @@ if __name__ == "__main__":
     )
 
     # Create the replay buffer
-    memory = ReplayBuffer(INIT_HP["MEMORY_SIZE"], device=device)
+    memory = ReplayBuffer(max_size=INIT_HP["MEMORY_SIZE"], device=device)
 
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size
@@ -122,7 +122,6 @@ if __name__ == "__main__":
     total_steps = 0
 
     # TRAINING LOOP
-    print("Training...")
     pbar = default_progress_bar(max_steps)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []

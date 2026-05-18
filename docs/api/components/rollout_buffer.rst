@@ -48,10 +48,10 @@ specify ``recurrent=True``.
 
 .. note::
     The ``bptt_sequence_type`` parameter determines how sequences are sampled from the buffer.
-    - ``BPTTSequenceType.CHUNKED``: Samples as many unique sequences of length ``max_seq_len``as possible from the buffer.
+
+    - ``BPTTSequenceType.CHUNKED``: Samples as many unique sequences of length ``max_seq_len`` as possible from the buffer.
     - ``BPTTSequenceType.MAXIMUM``: Samples as many (overlapping) sequences of length ``max_seq_len`` as possible from the buffer.
-    - ``BPTTSequenceType.FIFTY_PERCENT_OVERLAPPING``: Samples as many (overlapping) sequences of length ``max_seq_len`` as possible from the buffer, with up
-        to 50% overlap between sequences.
+    - ``BPTTSequenceType.FIFTY_PERCENT_OVERLAPPING``: Samples as many (overlapping) sequences of length ``max_seq_len`` as possible from the buffer, with up to 50% overlap between sequences.
 
 Parameters
 ------------

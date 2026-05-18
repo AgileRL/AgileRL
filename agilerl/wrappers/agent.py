@@ -466,7 +466,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
     """Wrapper for multi-agent algorithms that solve environments with asynchronous agents (i.e. environments
     where agents don't return observations with the same frequency).
 
-    .. warning::
+    .. note::
         This currently supports IPPO, MADDPG, and MATD3.
 
     :param agent: MultiAgentRLAlgorithm instance to be wrapped.

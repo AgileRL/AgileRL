@@ -256,7 +256,7 @@ if __name__ == "__main__":
     total_steps = 0
 
     # RL training loop
-    while np.less([agent.steps[-1] for agent in pop], INIT_HP["MAX_STEPS"]).all():
+    while np.less([agent.steps for agent in pop], INIT_HP["MAX_STEPS"]).all():
         for agent in pop:  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
@@ -321,10 +321,10 @@ if __name__ == "__main__":
                 ),
             )
 
-            agent.steps[-1] += 500
+            agent.steps += 500
             total_steps += 500
 
-        if (agent.steps[-1]) % INIT_HP["EVO_STEPS"] == 0:
+        if (agent.steps) % INIT_HP["EVO_STEPS"] == 0:
             mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
             if INIT_HP["WANDB"]:
                 wandb.log(

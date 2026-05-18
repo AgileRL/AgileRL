@@ -1,6 +1,6 @@
 .. _llm_finetuning_hpo:
 
-LLM Finetuning with HPO
+LLM Fine-Tuning with HPO
 ========================
 
 To build on the :ref:`LLM reasoning tutorial<grpo_tutorial>`, we will now introduce how you can perform hyperparameter optimisation (HPO)
@@ -481,7 +481,7 @@ function and is an example of how we might choose to make use of a population of
                         ]
                         avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
                         agents = [agent.index for agent in pop]
-                        num_steps = [agent.steps[-1] for agent in pop]
+                        num_steps = [agent.steps for agent in pop]
                         muts = [agent.mut for agent in pop]
                         print(
                             f"""
@@ -514,7 +514,7 @@ function and is an example of how we might choose to make use of a population of
                             test_metrics_dict
                         )
                     pbar.update(effective_data_batch_size)
-                    agent.steps.append(effective_data_batch_size)
+                    agent.steps += effective_data_batch_size
                     agent.scores.append(mean_scores)
                     total_steps += effective_data_batch_size
 

@@ -107,7 +107,6 @@ if __name__ == "__main__":
     evo_count = 0
 
     # TRAINING LOOP
-    print("Training...")
     pbar = default_progress_bar(max_steps)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         for agent in pop:  # Loop through population

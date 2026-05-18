@@ -1,5 +1,4 @@
 # Configuration file for the Sphinx documentation builder.
-
 import sys
 from pathlib import Path
 
@@ -21,10 +20,12 @@ extensions = [
     "sphinx.ext.doctest",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
+    "sphinx.ext.graphviz",
     "sphinx.ext.intersphinx",
+    "sphinx_design",
     "sphinx_tabs.tabs",
     "sphinx_toolbox.collapse",
-    "sphinx_github_changelog",
+    # "sphinx_github_changelog",
     "notfound.extension",
     "sphinxcontrib.googleanalytics",
 ]

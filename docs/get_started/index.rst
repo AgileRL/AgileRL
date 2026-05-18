@@ -3,9 +3,7 @@ Getting Started
 
 .. raw:: html
 
-   <h3 id="install-agilerl">Install AgileRL</h3>
-
-To use AgileRL, first download the source code and install requirements.
+   <h3 id="install-agilerl">Installation</h3>
 
 Install as a package with pip:
 
@@ -20,17 +18,24 @@ Or install in development mode:
    git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
    pip install -e .
 
-If you wish to install all additional dependencies please specify `[all]` or
-if you want to install a specific family of dependencies specify that family
-directly. At present, we have just one family, `[llm]`, which contains the
-dependencies related to our LLM RFT algorithms (datasets, deepspeed, peft,
-transformers, vllm).
+AgileRL ships optional dependency groups that you can install as needed:
 
-.. code-block:: bash
+.. list-table::
+   :widths: 30 70
+   :header-rows: 1
 
-   pip install agilerl[all]
+   * - Installation
+     - Description
+   * - ``agilerl[box2d]``
+     - Box2D physics engine for Gymnasium environments.
+   * - ``agilerl[arena]``
+     - `Arena <https://arena.agilerl.com>`_ SDK & CLI. Validate custom environments, and train & deploy agents on managed cloud infrastructure.
+   * - ``agilerl[llm]``
+     - LLM reinforcement fine-tuning.
+   * - ``agilerl[all]``
+     - Cover all functionalities of AgileRL.
 
-Or in development mode:
+In development mode, quote the extras:
 
 .. code-block:: bash
 
@@ -211,7 +216,7 @@ To install the ``nightly`` version of AgileRL with the latest features, use:
       <a href="../llm_finetuning/index.html" class="tile llm-finetuning">
          <h2>LLM Finetuning</h2>
          <p>
-               Algorithms: DPO, GRPO
+               Algorithms: DPO, GRPO, GSPO, CISPO, LLMPPO, LLMREINFORCE
                <!-- Add more algorithms as needed -->
          </p>
       </a>
@@ -255,7 +260,10 @@ faster hyperparameter optimization. Please see the available tutorials below.
        `EvolvableSimBa <../tutorials/custom_networks/agilerl_simba_tutorial.html>`_
    * - `LLM Finetuning <../tutorials/llm_finetuning/index.html>`_
      - Learn how to finetune an LLM using AgileRL.
-     - `GRPO <../tutorials/llm_finetuning/index.html>`_
+     - `GRPO <../tutorials/llm_finetuning/grpo_finetuning.html>`_ |br|
+       `GRPO with Evo HPO <../tutorials/llm_finetuning/grpo_hpo.html>`_ |br|
+       `Multi-turn GRPO/PPO <../tutorials/llm_finetuning/multiturn_grpo_ppo.html>`_ |br|
+       `SFT + DPO <../tutorials/llm_finetuning/sft_dpo_finetuning.html>`_
 
 .. |br| raw:: html
 
@@ -263,177 +271,101 @@ faster hyperparameter optimization. Please see the available tutorials below.
 
 .. raw:: html
 
-   <h3 id="train-an-agent">Train an Agent</h3>
+   <h3 id="quick-start">Quick Start</h3>
 
-Train an agent to beat a Gym environment.
+The simplest way to train an RL agent with AgileRL is through the
+:class:`~agilerl.training.trainer.LocalTrainer`. Here is an example of training a DQN agent on the LunarLander-v3 environment:
 
-Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in ``INIT_HP``, for general
-parameters, and ``MUTATION_PARAMS``, which define the evolutionary probabilities, and ``NET_CONFIG``, which defines the network architecture. For example:
+.. code-block:: python
 
-.. collapse:: Algorithm Hyperparameters
+   from agilerl.training.trainer import LocalTrainer
 
-   .. code-block:: python
+   trainer = LocalTrainer(algorithm="DQN", environment="LunarLander-v3")
+   population, fitnesses = trainer.train()
 
-      INIT_HP = {
-          'ENV_NAME': 'LunarLander-v3',   # Gym environment name
-          'ALGO': 'DQN',                  # Algorithm
-          'DOUBLE': True,                 # Use double Q-learning
-          'BATCH_SIZE': 256,              # Batch size
-          'LR': 1e-3,                     # Learning rate
-          'MAX_STEPS': 1_000_000,         # Max no. steps
-          'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
-          'GAMMA': 0.99,                  # Discount factor
-          'MEMORY_SIZE': 10000,           # Max memory buffer size
-          'LEARN_STEP': 1,                # Learning frequency
-          'TAU': 1e-3,                    # For soft update of target parameters
-          'TOURN_SIZE': 2,                # Tournament size
-          'ELITISM': True,                # Elitism in tournament selection
-          'POP_SIZE': 6,                  # Population size
-          'EVO_STEPS': 10_000,            # Evolution frequency
-          'EVAL_STEPS': None,             # Evaluation steps
-          'EVAL_LOOP': 1,                 # Evaluation episodes
-          'LEARNING_DELAY': 1000,         # Steps before starting learning
-          'WANDB': True,                  # Log with Weights and Biases
-      }
+.. note::
 
-.. collapse:: Mutation Hyperparameters
+   With no other arguments provided, ``LocalTrainer`` defaults to 1,000,000 steps with a
+   single agent and the algorithm's default hyperparameters — no evolutionary
+   HPO is applied.
 
-   .. code-block:: python
+**Training a Population with Evolutionary HPO:**
 
-      MUTATION_PARAMS = {
-          # Relative probabilities
-          'NO_MUT': 0.4,                              # No mutation
-          'ARCH_MUT': 0.2,                            # Architecture mutation
-          'NEW_LAYER': 0.2,                           # New layer mutation
-          'PARAMS_MUT': 0.2,                          # Network parameters mutation
-          'ACT_MUT': 0,                               # Activation layer mutation
-          'RL_HP_MUT': 0.2,                           # Learning HP mutation
-          'MUT_SD': 0.1,                              # Mutation strength
-          'RAND_SEED': 1,                             # Random seed
-      }
+To unlock AgileRL's evolutionary hyperparameter optimization, train a population
+of agents whose hyperparameters will evolve and mutate towards their optimal
+values:
 
-.. collapse:: Network Configuration
+.. code-block:: python
 
-   .. code-block:: python
+   from agilerl.training.trainer import LocalTrainer
+   from agilerl.models.training import TrainingSpec
+   from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 
-      NET_CONFIG = {
-          'latent_dim': 16
-          'encoder_config': {
-            'hidden_size': [32]     # Observation encoder configuration
-          }
-          'head_config': {
-            'hidden_size': [32]     # Network head configuration
-          }
+   training = TrainingSpec(
+       max_steps=1_000_000,
+       target_score=200.0,
+       pop_size=4,
+       evo_steps=10_000,
+   )
 
-      }
+   mutation = MutationSpec(
+       probabilities={
+           "no_mut": 0.4,
+           "arch_mut": 0.2,
+           "new_layer": 0.2,
+           "params_mut": 0.2,
+           "rl_hp_mut": 0.2,
+       },
+       rl_hp_selection={
+           "lr": {"min": 0.0001, "max": 0.01},
+           "batch_size": {"min": 8, "max": 512},
+       },
+   )
 
-.. raw:: html
+   tournament = TournamentSelectionSpec(tournament_size=2, elitism=True)
 
-   <br>
-   <h3>Creating a Population of Agents</h3>
+   trainer = LocalTrainer(
+       algorithm="DQN",
+       environment="LunarLander-v3",
+       training=training,
+       mutation=mutation,
+       tournament=tournament,
+   )
+   population, fitnesses = trainer.train()
 
-First, use ``utils.utils.create_population`` to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
+This trains a population of four DQN agents that share experiences but learn
+individually. Every 10,000 steps, tournament selection identifies the best
+performers and mutations are applied to explore the hyperparameter space. See
+:ref:`evo_hyperparam_opt` for details on how this works.
 
-.. collapse:: Population Creation Example
-   :open:
+Or equivalently via a YAML manifest:
 
-   .. code-block:: python
+.. tab-set::
 
-      import torch
-      from agilerl.utils.utils import (
-          make_vect_envs,
-          create_population,
-      )
+   .. tab-item:: CLI
 
-      device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+      .. code-block:: bash
 
-      num_envs = 16
-      env = make_vect_envs(env_name=INIT_HP['ENV_NAME'], num_envs=num_envs)
+         python -m agilerl.train -m configs/training/dqn/dqn.yaml
 
-      observation_space = env.single_observation_space
-      action_space = env.single_action_space
+   .. tab-item:: SDK
 
-      agent_pop = create_population(
-          algo=INIT_HP['ALGO'],                 # Algorithm
-          observation_space=observation_space,  # Observation space
-          action_space=action_space,            # Action space
-          net_config=NET_CONFIG,                # Network configuration
-          INIT_HP=INIT_HP,                      # Initial hyperparameters
-          population_size=INIT_HP['POP_SIZE'],  # Population size
-          num_envs=num_envs,                    # Number of vectorized environments
-          device=device
-      )
+      .. code-block:: python
 
-.. raw:: html
+         from agilerl.training.trainer import LocalTrainer
 
-   <h3>Initializing Evolutionary HPO</h3>
+         trainer = LocalTrainer.from_manifest("configs/training/dqn/dqn.yaml")
+         population, fitnesses = trainer.train()
 
-Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
+Every aspect of the training pipeline is customisable — from modifying
+hyperparameters and mutation strategies in our off-the-shelf tools, to
+implementing your own :ref:`evolvable algorithms <custom_algorithms>`,
+:ref:`network architectures <evolvable_networks>`, and
+:ref:`training loops <off_policy>`.
 
-.. collapse:: Mutations and Tournament Selection Example
-   :open:
+.. seealso::
 
-   .. code-block:: python
-
-      from agilerl.components.replay_buffer import ReplayBuffer
-      from agilerl.hpo.tournament import TournamentSelection
-      from agilerl.hpo.mutation import Mutations
-
-      memory = ReplayBuffer(
-          max_size=INIT_HP['MEMORY_SIZE'],   # Max replay buffer size
-          device=device,
-      )
-
-      tournament = TournamentSelection(
-          tournament_size=INIT_HP['TOURN_SIZE'], # Tournament selection size
-          elitism=INIT_HP['ELITISM'],            # Elitism in tournament selection
-          population_size=INIT_HP['POP_SIZE'],   # Population size
-      )
-
-      mutations = Mutations(
-          no_mutation=MUTATION_PARAMS['NO_MUT'],                # No mutation
-          architecture=MUTATION_PARAMS['ARCH_MUT'],             # Architecture mutation
-          new_layer_prob=MUTATION_PARAMS['NEW_LAYER'],          # New layer mutation
-          parameters=MUTATION_PARAMS['PARAMS_MUT'],             # Network parameters mutation
-          activation=MUTATION_PARAMS['ACT_MUT'],                # Activation layer mutation
-          rl_hp=MUTATION_PARAMS['RL_HP_MUT'],                   # Learning HP mutation
-          mutation_sd=MUTATION_PARAMS['MUT_SD'],                # Mutation strength
-          rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
-          device=device,
-      )
-
-.. raw:: html
-
-   <h3>Train a Population of Agents</h3>
-
-The easiest training loop implementation is to use our :func:`train_off_policy() <agilerl.training.train_off_policy.train_off_policy>` function.
-It requires the ``agent`` have methods ``get_action()`` and ``learn()``.
-
-.. collapse:: Training Example
-   :open:
-
-   .. code-block:: python
-
-      from agilerl.training.train_off_policy import train_off_policy
-
-      trained_pop, pop_fitnesses = train_off_policy(
-          env=env,                                   # Gym-style environment
-          env_name=INIT_HP['ENV_NAME'],              # Environment name
-          algo=INIT_HP['ALGO'],                      # Algorithm
-          pop=agent_pop,                             # Population of agents
-          memory=memory,                             # Replay buffer
-          max_steps=INIT_HP["MAX_STEPS"],            # Max number of training steps
-          evo_steps=INIT_HP['EVO_STEPS'],            # Evolution frequency
-          eval_steps=INIT_HP["EVAL_STEPS"],          # Number of steps in evaluation episode
-          eval_loop=INIT_HP["EVAL_LOOP"],            # Number of evaluation episodes
-          learning_delay=INIT_HP['LEARNING_DELAY'],  # Steps before starting learning
-          target=INIT_HP['TARGET_SCORE'],            # Target score for early stopping
-          tournament=tournament,                     # Tournament selection object
-          mutation=mutations,                        # Mutations object
-          wb=INIT_HP['WANDB'],                       # Weights and Biases tracking
-      )
-
-.. toctree::
-   :hidden:
-
-   agilerl2changes
+   - :ref:`trainers` for full manifest reference, Pydantic model construction,
+     and all ``LocalTrainer`` options.
+   - :ref:`off_policy` for a detailed walkthrough of customising the training
+     pipeline (replay buffers, exploration, evaluation, and evolution).

@@ -119,7 +119,7 @@ if __name__ == "__main__":
     # TRAINING LOOP
     print("Training...")
     pbar = default_progress_bar(max_steps)
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+    while np.less([agent.steps for agent in pop], max_steps).all():
         for i, agent in enumerate(pop):  # Loop through population
             losses = []
             context = env.reset()  # Reset environment at start of episode
@@ -155,7 +155,7 @@ if __name__ == "__main__":
                 regret[i].append(regret[i][-1] + 1 - reward)
 
             total_steps += episode_steps
-            agent.steps[-1] += episode_steps
+            agent.steps += episode_steps
 
         pbar.update(episode_steps)
 
@@ -171,13 +171,13 @@ if __name__ == "__main__":
 
         pbar.write(
             f"--- Global steps {total_steps} ---\n"
-            f"Steps {[agent.steps[-1] for agent in pop]}\n"
+            f"Steps {[agent.steps for agent in pop]}\n"
             f"Regret: {[regret[i][-1] for i in range(len(pop))]}\n"
             f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
             f"Mutations: {[agent.mut for agent in pop]}",
         )
 
-        if pop[0].steps[-1] // evo_steps > evo_count:
+        if pop[0].steps // evo_steps > evo_count:
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)

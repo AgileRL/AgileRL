@@ -1,3 +1,5 @@
+.. _off_policy:
+
 Off-Policy Training
 ===================
 
@@ -27,6 +29,88 @@ often results in higher potential for reuse of previously gathered experiences a
      - --
    * - :ref:`TD3 <td3>`
      - :ref:`Lunar Lander <td3_tutorial>`
+
+
+.. _off_policy_trainer:
+
+Training with LocalTrainer
+--------------------------
+
+The simplest way to train an off-policy agent is with a YAML manifest and the
+:class:`~agilerl.training.trainer.LocalTrainer`. This handles population
+creation, replay buffers, evolutionary HPO, and the training loop automatically.
+
+.. collapse:: Example manifest: DQN on LunarLander-v3
+
+  .. code-block:: yaml
+
+    algorithm:
+      name: DQN
+      batch_size: 128
+      lr: 6.3e-4
+      learn_step: 4
+      gamma: 0.99
+      tau: 0.001
+
+    environment:
+      name: LunarLander-v3
+      num_envs: 16
+
+    training:
+      max_steps: 1_000_000
+      target_score: 200.0
+      pop_size: 4
+      evo_steps: 10_000
+
+    network:
+      arch: mlp
+      latent_dim: 128
+      encoder_config:
+        hidden_size: [128]
+      head_config:
+        hidden_size: [128]
+
+    replay_buffer:
+      max_size: 100_000
+
+    mutation:
+      probabilities:
+        no_mut: 0.4
+        arch_mut: 0.2
+        new_layer: 0.2
+        params_mut: 0.2
+        act_mut: 0.2
+        rl_hp_mut: 0.2
+      rl_hp_selection:
+        lr:   { min: 0.0000625, max: 0.01 }
+        batch_size: { min: 8, max: 512 }
+      mutation_sd: 0.1
+      rand_seed: 42
+
+    tournament_selection:
+      tournament_size: 2
+      elitism: true
+
+.. tab-set::
+
+   .. tab-item:: SDK
+
+      .. code-block:: python
+
+         from agilerl.training.trainer import LocalTrainer
+
+         trainer = LocalTrainer.from_manifest("configs/training/dqn/dqn.yaml")
+         population, fitnesses = trainer.train()
+
+   .. tab-item:: CLI
+
+      .. code-block:: bash
+
+         python -m agilerl.train -m configs/training/dqn/dqn.yaml
+
+.. seealso::
+
+   Full manifest reference and additional options: :ref:`trainers`
 
 
 .. _initpop_off_policy:
@@ -122,8 +206,8 @@ buffer, call ``ReplayBuffer.sample()``.
 Training Loop
 -------------
 
-Now it is time to insert the evolutionary HPO components into our training loop. If you are using a Gym-style environment, it is
-easiest to use our training function, which returns a population of trained agents and logged training metrics.
+Now it is time to insert the evolutionary HPO components into our training loop. If you are using a Gym-style environment, you
+can use our off-the-shelf training function, which returns a population of trained agents and logged training metrics.
 
 .. code-block:: python
 
@@ -236,9 +320,8 @@ Alternatively, use a custom training loop. Combining all of the above:
         total_steps = 0
 
         # TRAINING LOOP
-        print("Training...")
         pbar = default_progress_bar(max_steps)
-        while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+        while np.less([agent.steps for agent in pop], max_steps).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
                 agent.set_training_mode(True)
@@ -295,7 +378,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                     obs = next_obs
 
                 pbar.update(evo_steps // len(pop))
-                agent.steps[-1] += steps
+                agent.steps += steps
                 pop_episode_scores.append(completed_episode_scores)
 
             # Reset epsilon start to latest decayed value for next round of population training
@@ -321,7 +404,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
             pbar.write(
                 f"--- Global steps {total_steps} --- \n"
-                f"Steps: {[agent.steps[-1] for agent in pop]} \n"
+                f"Steps: {[agent.steps for agent in pop]} \n"
                 f"Scores: {mean_scores} \n"
                 f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]} \n'
                 f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}',
@@ -330,10 +413,6 @@ Alternatively, use a custom training loop. Combining all of the above:
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
-
-            # Update step counter
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
 
         pbar.close()
         env.close()

@@ -138,9 +138,8 @@ Below is an example of a distributed training loop.
         print(f"\nDistributed training on {accelerator.device}...")
 
         # TRAINING LOOP
-        print("Training...")
         pbar = trange(max_steps, unit="step", disable=not accelerator.is_local_main_process)
-        while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+        while np.less([agent.steps for agent in pop], max_steps).all():
             accelerator.wait_for_everyone()
             pop_episode_scores = []
             for agent in pop:  # Loop through population
@@ -186,7 +185,7 @@ Below is an example of a distributed training loop.
                     state = next_state
 
                 pbar.update(evo_steps // len(pop))
-                agent.steps[-1] += steps
+                agent.steps += steps
                 pop_episode_scores.append(completed_episode_scores)
 
             # Reset epsilon start to latest decayed value for next round of population training
@@ -211,11 +210,11 @@ Below is an example of a distributed training loop.
             ]
 
             if accelerator.is_main_process:
-                print(f"--- Global steps {total_steps} ---")
-                print(f"Steps {[agent.steps[-1] for agent in pop]}")
-                print(f"Scores: {mean_scores}")
-                print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-                print(
+                pbar.write(
+                    f"--- Global steps {total_steps} ---\n"
+                    f"Steps: {[agent.steps for agent in pop]}\n"
+                    f"Scores: {mean_scores}\n"
+                    f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}\n'
                     f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
                 )
 
@@ -236,10 +235,6 @@ Below is an example of a distributed training loop.
             accelerator.wait_for_everyone()
             for model in pop:
                 model.wrap_models()
-
-            # Update step counter
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
 
         pbar.close()
         env.close()

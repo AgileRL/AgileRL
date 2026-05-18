@@ -308,9 +308,8 @@ function and is an example of how we might choose to make use of a population of
         total_steps = 0
 
         # TRAINING LOOP
-        print("Training...")
         pbar = trange(INIT_HP["MAX_STEPS"], unit="step")
-        while np.less([agent.steps[-1] for agent in pop], INIT_HP["MAX_STEPS"]).all():
+        while np.less([agent.steps for agent in pop], INIT_HP["MAX_STEPS"]).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
                 obs, info = env.reset()  # Reset environment at start of episode
@@ -363,7 +362,7 @@ function and is an example of how we might choose to make use of a population of
                     obs = next_obs
 
                 pbar.update(INIT_HP["EVO_STEPS"] // len(pop))
-                agent.steps[-1] += steps
+                agent.steps += steps
                 pop_episode_scores.append(completed_episode_scores)
 
             # Evaluate population
@@ -385,7 +384,7 @@ function and is an example of how we might choose to make use of a population of
             ]
 
             print(f"--- Global steps {total_steps} ---")
-            print(f"Steps {[agent.steps[-1] for agent in pop]}")
+            print(f"Steps {[agent.steps for agent in pop]}")
             print(f"Scores: {mean_scores}")
             print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
             print(
@@ -395,10 +394,6 @@ function and is an example of how we might choose to make use of a population of
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
-
-            # Update step counter
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
 
         # Save the trained algorithm
         save_path = "TD3_trained_agent.pt"

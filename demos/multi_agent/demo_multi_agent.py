@@ -137,7 +137,6 @@ if __name__ == "__main__":
     population.update(mutations.mutation(population.agents, pre_training_mut=True))
 
     # TRAINING LOOP
-    print("Training...")
     while population.all_below(max_steps):
         for agent in population.agents:  # Loop through population
             agent.set_training_mode(True)

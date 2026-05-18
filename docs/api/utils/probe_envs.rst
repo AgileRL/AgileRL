@@ -1,7 +1,9 @@
 Probe Environments
 ==================
 
-For more information on how to use probe environments, see :ref:`Debugging RL<debugging_rl>`.
+.. seealso::
+
+   :ref:`debugging_rl` for a guide on how to use probe environments to debug RL agents.
 
 Single-agent probe environments
 -------------------------------

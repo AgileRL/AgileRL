@@ -384,7 +384,7 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
    .. code-block:: python
 
       # RL training loop
-      while np.less([agent.steps[-1] for agent in pop], INIT_HP["MAX_STEPS"]).all():
+      while np.less([agent.steps for agent in pop], INIT_HP["MAX_STEPS"]).all():
          for agent in pop:  # Loop through population
                obs = env.reset()[0]  # Reset environment at start of episode
                score = 0
@@ -457,10 +457,10 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
                   )
                )
 
-               agent.steps[-1] += idx_step + 1
+               agent.steps += idx_step + 1
                total_steps += idx_step + 1
 
-         if (agent.steps[-1]) % INIT_HP["EVO_STEPS"] == 0:
+         if (agent.steps) % INIT_HP["EVO_STEPS"] == 0:
             mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
             if INIT_HP["WANDB"]:
                 wandb.log(

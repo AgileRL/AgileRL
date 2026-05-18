@@ -78,7 +78,7 @@ following networks, common in a variety of reinforcement learning algorithms, ar
 
 
 Configuring the Architecture of an ``EvolvableNetwork``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 In order to configure the architecture of ``EvolvableNetwork``'s, we must pass in separate dictionaries that specify the architecture of the encoder and head networks through
 the ``encoder_config`` and ``head_config`` arguments of the constructor of the ``EvolvableNetwork`` class. These dictionaries should include the initialisation arguments of the
@@ -217,7 +217,11 @@ If your environment has a dictionary or tuple observation space, by default the 
 .. note::
     In AgileRL algorithms, we pass a single ``net_config`` dictionary that includes the ``encoder_config`` and ``head_config`` dictionaries, as well as
     any other initialisation arguments to the respective network used in the algorithm. This becomes more complex in multi-agent settings, where there are
-    multiple networks that can be configured (see :ref:`here <multi_agent_networks>` for more details).
+    multiple networks that can be configured.
+
+.. seealso::
+
+   :ref:`multi_agent_networks` for details on configuring networks in multi-agent settings.
 
 
 Using Non-Evolvable Networks in an Evolvable Setting
@@ -281,7 +285,7 @@ to wrap their non-evolvable networks in a manner compatible with our mutations f
 
 
 Integrating Architecture Mutations Into a Custom PyTorch Network
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. warning::
   The following section pertains to the :class:`MakeEvolvable <agilerl.wrappers.make_evolvable.MakeEvolvable>` wrapper, which will be deprecated in a
@@ -376,19 +380,20 @@ If you are using an algorithm that also uses a single critic (PPO, DDPG), define
 If the single agent algorithm has more than one critic (e.g. TD3), then pass the ``critic_network`` argument a list of two critics.
 
 .. collapse:: Using it in a Population with Multiple Critics
-  :open:
-  .. code-block:: python
+   :open:
 
-    pop = create_population(
-            algo="TD3",                                           # Algorithm
-            observation_space=observation_space,                      # Observation space
-            action_space=action_space,                                # Action space
-            actor_network=evolvable_actor,                            # Custom evolvable actor
-            critic_network=[evolvable_critic_1, evolvable_critic_2],  # Custom evolvable critic
-            INIT_HP=INIT_HP,                                          # Initial hyperparameters
-            population_size=INIT_HP["POPULATION_SIZE"],               # Population size
-            device=device
-          )
+   .. code-block:: python
+
+      pop = create_population(
+              algo="TD3",                                           # Algorithm
+              observation_space=observation_space,                      # Observation space
+              action_space=action_space,                                # Action space
+              actor_network=evolvable_actor,                            # Custom evolvable actor
+              critic_network=[evolvable_critic_1, evolvable_critic_2],  # Custom evolvable critic
+              INIT_HP=INIT_HP,                                          # Initial hyperparameters
+              population_size=INIT_HP["POPULATION_SIZE"],               # Population size
+              device=device
+            )
 
 
 If you are using a multi-agent algorithm, define ``actor_network`` and ``critic_network`` as lists containing networks for each agent in the
@@ -396,31 +401,32 @@ multi-agent environment. The example below outlines how this would work for a tw
 environment in the variable ``env``).
 
 .. collapse:: Example
-  :open:
-  .. code-block:: python
+   :open:
 
-    # For MADDPG
-    evolvable_actors = [actor_network_1, actor_network_2]
-    evolvable_critics = [critic_network_1, critic_network_2]
+   .. code-block:: python
 
-    # For MATD3, "critics" will be a list of 2 lists as MATD3 uses one more critic than MADDPG
-    evolvable_actors = [actor_network_1, actor_network_2]
-    evolvable_critics = [[critic_1_network_1, critic_1_network_2],
-                         [critic_2_network_1, critic_2_network_2]]
+      # For MADDPG
+      evolvable_actors = [actor_network_1, actor_network_2]
+      evolvable_critics = [critic_network_1, critic_network_2]
 
-    # Instantiate the populations as follows
-    observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
-    action_spaces = [env.single_action_space(agent) for agent in env.agents]
-    pop = create_population(
-            algo="MADDPG",                                # Algorithm
-            observation_space=observation_spaces,         # Observation space
-            action_space=action_spaces,                   # Action space
-            actor_network=evolvable_actors,               # Custom evolvable actor
-            critic_network=evolvable_critics,             # Custom evolvable critic
-            INIT_HP=INIT_HP,                              # Initial hyperparameters
-            population_size=INIT_HP["POPULATION_SIZE"],   # Population size
-            device=device
-          )
+      # For MATD3, "critics" will be a list of 2 lists as MATD3 uses one more critic than MADDPG
+      evolvable_actors = [actor_network_1, actor_network_2]
+      evolvable_critics = [[critic_1_network_1, critic_1_network_2],
+                           [critic_2_network_1, critic_2_network_2]]
+
+      # Instantiate the populations as follows
+      observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
+      action_spaces = [env.single_action_space(agent) for agent in env.agents]
+      pop = create_population(
+              algo="MADDPG",                                # Algorithm
+              observation_space=observation_spaces,         # Observation space
+              action_space=action_spaces,                   # Action space
+              actor_network=evolvable_actors,               # Custom evolvable actor
+              critic_network=evolvable_critics,             # Custom evolvable critic
+              INIT_HP=INIT_HP,                              # Initial hyperparameters
+              population_size=INIT_HP["POPULATION_SIZE"],   # Population size
+              device=device
+            )
 
 Finally, if you are using a multi-agent algorithm but need to use CNNs to account for RGB image states, there are a few extra considerations
 that need to be taken into account when defining your critic network. In MADDPG and MATD3, each agent consists of an actor and critic and each
@@ -432,101 +438,76 @@ how to define actor and critic networks for a two agent system with state tensor
 
 .. collapse:: Example CNN Networks
 
-  .. code-block:: python
+   .. code-block:: python
 
-  from agilerl.networks.custom_activation import GumbelSoftmax
+      from agilerl.networks.custom_activation import GumbelSoftmax
 
-  class MultiAgentCNNActor(nn.Module):
-    def __init__(self):
-    super().__init__()
-      self.conv1 = nn.Conv3d(
-         in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
-      )
-      self.conv2 = nn.Conv3d(
-            in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
-      )
-      # Define the max-pooling layers
-      self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+      class MultiAgentCNNActor(nn.Module):
+          def __init__(self):
+              super().__init__()
+              self.conv1 = nn.Conv3d(
+                  in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
+              )
+              self.conv2 = nn.Conv3d(
+                  in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
+              )
+              self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+              self.fc1 = nn.Linear(15200, 256)
+              self.fc2 = nn.Linear(256, 2)
+              self.relu = nn.ReLU()
+              self.output_activation = GumbelSoftmax()
 
-      # Define fully connected layers
-      self.fc1 = nn.Linear(15200, 256)
-      self.fc2 = nn.Linear(256, 2)
-
-      # Define activation function
-      self.relu = nn.ReLU()
-
-      # Define output activation
-      self.output_activation = GumbelSoftmax()
-
-    def forward(self, state_tensor):
-        # Forward pass through convolutional layers
-        x = self.relu(self.conv1(state_tensor))
-        x = self.relu(self.conv2(x))
-
-        # Flatten the output for the fully connected layers
-        x = x.view(x.size(0), -1)
-
-        # Forward pass through fully connected layers
-        x = self.relu(self.fc1(x))
-        x = self.output_activation(self.fc2(x))
-
-        return x
+          def forward(self, state_tensor):
+              x = self.relu(self.conv1(state_tensor))
+              x = self.relu(self.conv2(x))
+              x = x.view(x.size(0), -1)
+              x = self.relu(self.fc1(x))
+              x = self.output_activation(self.fc2(x))
+              return x
 
 
-  class MultiAgentCNNCritic(nn.Module):
-    def __init__(self):
-        super().__init__()
+      class MultiAgentCNNCritic(nn.Module):
+          def __init__(self):
+              super().__init__()
+              self.conv1 = nn.Conv3d(
+                  in_channels=4, out_channels=16, kernel_size=(2, 3, 3), stride=4
+              )
+              self.conv2 = nn.Conv3d(
+                  in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
+              )
+              self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+              self.fc1 = nn.Linear(15208, 256)
+              self.fc2 = nn.Linear(256, 2)
+              self.relu = nn.ReLU()
 
-        # Define the convolutional layers
-        self.conv1 = nn.Conv3d(
-            in_channels=4, out_channels=16, kernel_size=(2, 3, 3), stride=4
-        )
-        self.conv2 = nn.Conv3d(
-            in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
-        )
-
-        # Define the max-pooling layers
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        # Define fully connected layers
-        self.fc1 = nn.Linear(15208, 256)
-        self.fc2 = nn.Linear(256, 2)
-
-        # Define activation function
-        self.relu = nn.ReLU()
-
-
-    def forward(self, state_tensor, action_tensor):
-        # Forward pass through convolutional layers
-        x = self.relu(self.conv1(state_tensor))
-        x = self.relu(self.conv2(x))
-
-        # Flatten the output for the fully connected layers
-        x = x.view(x.size(0), -1)
-        x = torch.cat([x, action_tensor], dim=1)
-
-        # Forward pass through fully connected layers
-        x = self.relu(self.fc1(x))
-        x = self.fc2(x)
-
-        return x
+          def forward(self, state_tensor, action_tensor):
+              x = self.relu(self.conv1(state_tensor))
+              x = self.relu(self.conv2(x))
+              x = x.view(x.size(0), -1)
+              x = torch.cat([x, action_tensor], dim=1)
+              x = self.relu(self.fc1(x))
+              x = self.fc2(x)
+              return x
 
 To then make these two CNNs evolvable we pass them, along with input tensors into the ``MakeEvolvable`` wrapper.
 
 .. collapse:: Example
 
-  .. code-block:: python
+   .. code-block:: python
 
-  actor = MultiAgentCNNActor()
-  evolvable_actor = MakeEvolvable(network=actor,
-                                  input_tensor=torch.randn(1, 4, 1, 210, 160), # (B, C_in, D, H, W) D = 1 as actors are decentralised
-                                  device=device)
-  critic = MultiAgentCNNCritic()
-  evolvable_critic = MakeEvolvable(network=critic,
-                                   input_tensor=torch.randn(1, 4, 2, 210, 160), # (B, C_in, D, H, W)),
-                                                                                #  D = 2 as critics are centralised and  so we evaluate both agents
-                                   secondary_input_tensor=torch.randn(1,8), # Assuming 2 agents each with action dimensions of 4
-                                   device=device)
+      actor = MultiAgentCNNActor()
+      evolvable_actor = MakeEvolvable(
+          network=actor,
+          input_tensor=torch.randn(1, 4, 1, 210, 160),
+          device=device,
+      )
+      critic = MultiAgentCNNCritic()
+      evolvable_critic = MakeEvolvable(
+          network=critic,
+          input_tensor=torch.randn(1, 4, 2, 210, 160),
+          secondary_input_tensor=torch.randn(1, 8),
+          device=device,
+      )
 
 
 .. _comparch:

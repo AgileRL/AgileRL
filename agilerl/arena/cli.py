@@ -94,7 +94,7 @@ def main(
     "--force",
     is_flag=True,
     default=False,
-    help="Run browser login even if the stored session is still valid.",
+    help="Run browser login even if an API key is set or the stored session is still valid.",
 )
 @click.option(
     "--timeout",

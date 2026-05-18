@@ -1,3 +1,5 @@
+.. _custom_algorithms:
+
 Creating Custom Algorithms
 ==========================
 

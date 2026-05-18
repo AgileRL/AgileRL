@@ -225,10 +225,9 @@ function and is an example of how we might choose to train an AgileRL agent.
         save_path = "RainbowDQN.pt"
 
         # TRAINING LOOP
-        print("Training...")
         pbar = trange(INIT_HP["MAX_STEPS"], unit="step")
         rainbow_dqn.set_training_mode(True)
-        while rainbow_dqn.steps[-1] < INIT_HP["MAX_STEPS"]:
+        while rainbow_dqn.steps < INIT_HP["MAX_STEPS"]:
             obs = env.reset()[0]  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
@@ -267,7 +266,7 @@ function and is an example of how we might choose to train an AgileRL agent.
 
                 # Update agent beta
                 fraction = min(
-                    ((rainbow_dqn.steps[-1] + idx_step + 1) * num_envs / INIT_HP["MAX_STEPS"]), 1.0
+                    ((rainbow_dqn.steps + idx_step + 1) * num_envs / INIT_HP["MAX_STEPS"]), 1.0
                 )
                 rainbow_dqn.beta += fraction * (1.0 - rainbow_dqn.beta)
 
@@ -299,7 +298,7 @@ function and is an example of how we might choose to train an AgileRL agent.
             )
 
             print(f"--- Global steps {total_steps} ---")
-            print(f"Steps {rainbow_dqn.steps[-1]}")
+            print(f"Steps {rainbow_dqn.steps}")
             print(f"Scores: {"%.2f"%mean_score}")
             print(f'Fitness: {"%.2f"%fitness}')
             print(f'5 fitness avg: {"%.2f"%np.mean(rainbow_dqn.fitness[-5:])}')
@@ -307,7 +306,7 @@ function and is an example of how we might choose to train an AgileRL agent.
             fitness = "%.2f" % fitness
             avg_fitness = "%.2f" % np.mean(rainbow_dqn.fitness[-100:])
             avg_score = "%.2f" % np.mean(rainbow_dqn.scores[-100:])
-            num_steps = rainbow_dqn.steps[-1]
+            num_steps = rainbow_dqn.steps
 
             print(
                 f"""
@@ -319,8 +318,6 @@ function and is an example of how we might choose to train an AgileRL agent.
                 """,
                 end="\r",
             )
-
-            rainbow_dqn.steps.append(rainbow_dqn.steps[-1])
 
         # Save the trained algorithm at the end of the training loop
         rainbow_dqn.save_checkpoint(save_path)

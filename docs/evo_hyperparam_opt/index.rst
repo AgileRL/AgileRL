@@ -143,19 +143,18 @@ of the hyperparameters and evolvable networks registered for mutation. Specifica
 Architecture Mutations
 ~~~~~~~~~~~~~~~~~~~~~~
 
-.. note::
-    AgileRL currently doesn't support architecture mutations for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` objects.
-
-
 Evolvable Networks Overview
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 In machine learning it is often difficult to identify the optimal architecture of a neural network and the capacity required to solve a given problem. In RL,
 this is particularly challenging due to the large number of transitions needed to learn a policy. We address this by introducing a framework for performing
-architecture mutations through the :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` abstraction (see :ref:`here <evolvable_networks>` for more
-details). Specifically, it allows us to seamlessly track and apply architecture mutations in networks with nested evolvable modules. This is particularly useful
-in RL algorithms, where we define default configurations suitable for a variety of tasks (i.e. combinations of observation and action spaces), which require
-very different architectures.
+architecture mutations through the :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` abstraction. It allows us to seamlessly track and apply
+architecture mutations in networks with nested evolvable modules. This is particularly useful in RL algorithms, where we define default configurations
+suitable for a variety of tasks (i.e. combinations of observation and action spaces), which require very different architectures.
+
+.. seealso::
+
+   :ref:`evolvable_networks` for a full guide on evolvable modules and architecture mutations.
 
 For the above reason, we define the :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>` base class, which inherits from ``EvolvableModule``.
 This abstraction allows us to define common networks used in RL algorithms very simply, since it automatically creates an appropriate encoder for the passed observation space. After,
@@ -205,6 +204,9 @@ Summarising the above considerations, the procedure to perform an architecture m
     4. Reinitialize the networks that share parameters with the evaluation networks but aren't optimized directly during training (e.g. target networks) with the mutated architecture.
 
 This has proven to be successful in our experiments, but it is still experimental and we are always open to discussing feedback and suggestions for improvement through our `Discord <https://discord.gg/eB8HyTA2ux>`_.
+
+.. note::
+    AgileRL currently doesn't support architecture mutations for :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` objects.
 
 RL Hyperparameter Mutations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~

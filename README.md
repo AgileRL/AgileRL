@@ -55,11 +55,12 @@ pip install -e .
 
 AgileRL ships optional dependency groups that you can install as needed:
 
-| Extra | Install | Description |
-|-------|---------|-------------|
-| `arena` | `pip install agilerl[arena]` | [Arena](https://arena.agilerl.com) SDK & CLI — validate, profile, and train with custom environments on Arena. |
-| `llm` | `pip install agilerl[llm]` | LLM reinforcement fine-tuning (GRPO, DPO) via DeepSpeed, vLLM, Transformers, and PEFT. |
-| `all` | `pip install agilerl[all]` | Everything above. |
+| Installation | Description |
+|-------|--------------|
+| `agilerl[box2d]` | Box2D physics engine for Gymnasium environments |
+| `agilerl[arena]` | [Arena](https://arena.agilerl.com) SDK & CLI. Validate custom environments, and train & deploy agents on managed cloud infrastructure. |
+| `agilerl[llm]` | LLM reinforcement fine-tuning. |
+| `agilerl[all]` | Cover all functionalities of AgileRL. |
 
 In development mode, quote the extras:
 ```bash
@@ -89,7 +90,7 @@ AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-s
   <img src=https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png  min-width="100%" width="700">
 </p>
 
-## Arena
+## Arena Client Library
 
 [Arena](https://arena.agilerl.com) is the RLOps platform from AgileRL. We provide tools to create and validate custom reinforcement learning environments on the platform and train RL agents on managed cloud infrastructure — no cluster setup required. See the documentation
 
@@ -99,7 +100,7 @@ AgileRL ships an **Arena SDK** (Python client) and an **Arena CLI** for interact
 pip install agilerl[arena]
 ```
 
-### Arena SDK
+### Python SDK
 
 Use the `ArenaClient` to interact with Arena programmatically from scripts or notebooks:
 
@@ -113,7 +114,6 @@ client.login()
 client.validate_environment(
     name="my-env",
     source="path/to/my_env/",          # directory or .tar.gz
-
     entrypoint="my_env:MyCustomEnv",
 )
 

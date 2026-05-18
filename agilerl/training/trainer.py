@@ -55,6 +55,7 @@ else:
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import AutoTokenizer
+
     from agilerl.utils.llm_utils import create_llm_accelerator
 else:
     AutoTokenizer = None
@@ -96,7 +97,7 @@ class Trainer(ABC):
         self,
         algorithm: AlgoSpecT | str,
         environment: EnvSpecT | str,
-        training: TrainingSpec,
+        training: TrainingSpec | None = None,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
         replay_buffer: ReplayBufferT | None = None,
@@ -116,7 +117,7 @@ class Trainer(ABC):
 
         self.algorithm_spec = algorithm
         self.env_spec = environment
-        self.training_spec = training
+        self.training_spec = training or TrainingSpec()
         self.mutation_spec = mutation
         self.tournament_selection_spec = tournament
         self.replay_buffer_spec = replay_buffer
@@ -264,8 +265,9 @@ class LocalTrainer(Trainer):
     :type algorithm: AlgorithmSpec | str
     :param environment: An RL environment following Gymnasium or PettingZoo API.
     :type environment: gym.Env | ParallelEnv
-    :param training: Training parameters.
-    :type training: TrainingSpec
+    :param training: Training parameters. Defaults to ``TrainingSpec()`` (1M steps,
+        single agent, no HPO).
+    :type training: TrainingSpec | None
     :param mutation: Mutation probabilities and RL hyperparameter ranges.  When an
         :class:`RLAlgorithmSpec` is used and ``hp_config`` is not set on it,
         hyperparameter ranges are derived from ``mutation.rl_hp_selection``.
@@ -286,7 +288,7 @@ class LocalTrainer(Trainer):
         self,
         algorithm: AlgoSpecT | str,
         environment: EnvSpecT | str,
-        training: TrainingSpec,
+        training: TrainingSpec | None = None,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
         replay_buffer: ReplayBufferT | None = None,
@@ -309,12 +311,17 @@ class LocalTrainer(Trainer):
         )
 
         # LLM algorithms require a DeepSpeed-aware accelerator
-        if isinstance(self.algorithm_spec, LLMAlgorithmSpec) and self.accelerator is None:
+        if (
+            isinstance(self.algorithm_spec, LLMAlgorithmSpec)
+            and self.accelerator is None
+        ):
             if create_llm_accelerator is None:
                 msg = "LLM dependencies are not installed. Please install them using: pip install agilerl[llm]"
                 raise ImportError(msg)
 
-            logger.info("User did not provide an accelerator, creating one with DeepSpeed...")
+            logger.info(
+                "User did not provide an accelerator, creating one with DeepSpeed..."
+            )
             self.accelerator = create_llm_accelerator()
 
         # For LLM algorithms, load the tokenizer once and share it.
@@ -566,7 +573,7 @@ class ArenaTrainer(Trainer):
         self,
         algorithm: AlgoSpecT | str,
         environment: ArenaEnvT,
-        training: TrainingSpec,
+        training: TrainingSpec | None = None,
         *,
         client: ArenaClient | None = None,
         api_key: str | None = None,

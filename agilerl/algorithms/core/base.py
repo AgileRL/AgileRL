@@ -2379,23 +2379,25 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         Behaviour per cell of the ``(lora_only, save_optimizer, deepspeed)``
         grid:
 
-          Plain (no accelerator):
-            lora_only=T, save_optimizer=T  ->  PEFT adapter dirs on disk +
-                                                 optimizer state in ``attributes.pt``
-            lora_only=T, save_optimizer=F  ->  PEFT adapter dirs only
-            lora_only=F, save_optimizer=T  ->  full actor state_dict +
-                                                 optimizer state in ``attributes.pt``
-            lora_only=F, save_optimizer=F  ->  full actor state_dict in ``attributes.pt``
+        **Plain (no accelerator):**
 
-          DeepSpeed:
-            lora_only=T, save_optimizer=T  ->  engine tag dir (frozen params
-                                                 excluded) + PEFT adapter dirs
-            lora_only=T, save_optimizer=F  ->  PEFT adapter dirs only
-            lora_only=F, save_optimizer=T  ->  engine tag dir (frozen params
-                                                 included)
-            lora_only=F, save_optimizer=F  ->  gathered (ZeRO-3 aware) actor
-                                                 state_dict injected into
-                                                 ``attributes.pt``
+        - ``lora_only=T, save_optimizer=T`` -- PEFT adapter dirs on disk +
+          optimizer state in ``attributes.pt``
+        - ``lora_only=T, save_optimizer=F`` -- PEFT adapter dirs only
+        - ``lora_only=F, save_optimizer=T`` -- full actor state_dict +
+          optimizer state in ``attributes.pt``
+        - ``lora_only=F, save_optimizer=F`` -- full actor state_dict in
+          ``attributes.pt``
+
+        **DeepSpeed:**
+
+        - ``lora_only=T, save_optimizer=T`` -- engine tag dir (frozen params
+          excluded) + PEFT adapter dirs
+        - ``lora_only=T, save_optimizer=F`` -- PEFT adapter dirs only
+        - ``lora_only=F, save_optimizer=T`` -- engine tag dir (frozen params
+          included)
+        - ``lora_only=F, save_optimizer=F`` -- gathered (ZeRO-3 aware) actor
+          state_dict injected into ``attributes.pt``
 
         :param path: Directory to write the checkpoint into.
         :type path: str
@@ -2525,32 +2527,34 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         algorithm's config disagree, loading fails fast by default. Pass
         ``merge_lora_configs=True`` to merge them for compatibility:
 
-          * ``r`` (rank) -> ``max(current, checkpoint)``; the smaller side's
-            weights are padded into the top-left rank slice of the larger
-            adapter (see :meth:`_pad_adapter_state_to_live_shape`).
-          * ``target_modules`` / ``modules_to_save`` -> union.
-          * Any other mismatched field -> current value wins, with a warning.
+        - ``r`` (rank) -- ``max(current, checkpoint)``; the smaller side's
+          weights are padded into the top-left rank slice of the larger
+          adapter (see :meth:`_pad_adapter_state_to_live_shape`).
+        - ``target_modules`` / ``modules_to_save`` -- union.
+        - Any other mismatched field -- current value wins, with a warning.
 
         Any adapter whose live config ends up differing from the selected
         target config is rebuilt via :meth:`_reconfigure_adapters_to_match` before
         weights are loaded, so tensors always land in the correct shape.
 
-          No DeepSpeed:
-            lora_only=T, load_optimizer=T  ->  PEFT adapter load + optimizer
-                                                 state from ``attributes.pt``
-            lora_only=T, load_optimizer=F  ->  PEFT adapter load only
-            lora_only=F, load_optimizer=T  ->  torch load of actor +
-                                                 optimizer from ``attributes.pt``
-            lora_only=F, load_optimizer=F  ->  torch load of actor only
+        **No DeepSpeed:**
 
-          DeepSpeed:
-            lora_only=T, load_optimizer=T  ->  DeepSpeed engine load from
-                                                 ``<path>/save_checkpoint``
-            lora_only=T, load_optimizer=F  ->  PEFT adapter load
-            lora_only=F, load_optimizer=T  ->  DeepSpeed engine load from
-                                                 ``<path>/save_checkpoint``
-            lora_only=F, load_optimizer=F  ->  ``actor.load_state_dict(...)``
-                                                 from ``attributes.pt``
+        - ``lora_only=T, load_optimizer=T`` -- PEFT adapter load + optimizer
+          state from ``attributes.pt``
+        - ``lora_only=T, load_optimizer=F`` -- PEFT adapter load only
+        - ``lora_only=F, load_optimizer=T`` -- torch load of actor +
+          optimizer from ``attributes.pt``
+        - ``lora_only=F, load_optimizer=F`` -- torch load of actor only
+
+        **DeepSpeed:**
+
+        - ``lora_only=T, load_optimizer=T`` -- DeepSpeed engine load from
+          ``<path>/save_checkpoint``
+        - ``lora_only=T, load_optimizer=F`` -- PEFT adapter load
+        - ``lora_only=F, load_optimizer=T`` -- DeepSpeed engine load from
+          ``<path>/save_checkpoint``
+        - ``lora_only=F, load_optimizer=F`` -- ``actor.load_state_dict(...)``
+          from ``attributes.pt``
 
         When ``load_optimizer=True`` but the checkpoint contains no optimizer
         state (e.g. it was saved with ``save_optimizer=False``), a

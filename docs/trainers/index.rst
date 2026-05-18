@@ -23,8 +23,6 @@ Two concrete trainers are available:
    * - :ref:`ArenaTrainer <arena_trainer>`
      - Run evolutionary RL training jobs on `Arena <https://arena.agilerl.com>`_, AgileRL's managed RLOps platform for cloud-scale distributed training.
 
-Both share the same ``from_manifest`` factory, making it trivial to switch
-between local experimentation and cloud-scale runs.
 
 .. _training_manifests:
 
@@ -44,15 +42,15 @@ Pydantic model and contains up to six top-level sections:
    * - ``algorithm``
      - Algorithm configuration. Users must provide a ``name`` field corresponding to the name of the algorithm class.
    * - ``environment``
-     - Environment to train on. If only ``name`` is provided, a Gymnasium / PettingZoo environment is assumed. Users can provide a custom environment by providing an entrypoint, path, config, and wrappers. Users can also provide a custom environment by providing a custom environment factory function.
+     - Environment to train on. If only ``name`` is provided, a Gymnasium / PettingZoo environment is assumed. Users can train on custom environments by providing an entrypoint, a path to the environment directory, and a config with arguments to pass to the environment constructor. Alternatively, we can simply pass a custom environment factory function.
    * - ``training``
-     - Training configuration. Users must provide a ``max_steps`` field corresponding to the total number of steps to train for, as well as ``evo_steps`` corresponding to the number of steps taken before an evolution takes place (or simply the frequency with which to report metrics for non-evolutionary settings), and ``pop_size`` corresponding to the number of individuals to train.
+     - Training configuration that determines the number of steps to train for, the number of steps taken before an evolution takes place (or simply the frequency with which to report metrics for non-evolutionary settings), and the number of individuals to train, as well as other training-specific hyperparameters.
    * - ``mutation``
-     - Mutation configuration. Users must provide a ``probabilities`` field corresponding to the probability of each mutation type, as well as ``rl_hp_selection`` corresponding to the hyperparameter ranges and scaling factors for the algorithm-specific hyperparameters.
+     - Mutation configuration that determines the probability of each mutation type, as well as the hyperparameter ranges and scaling factors for the algorithm-specific hyperparameters.
    * - ``tournament_selection``
-     - Tournament selection configuration. Users must provide a ``tournament_size`` field corresponding to the size of the tournament, as well as an ``elitism`` flag corresponding to whether to use elitism.
+     - Tournament selection configuration that determines the size of the tournament, as well as whether to use elitism.
    * - ``replay_buffer``
-     - Replay buffer configuration. Users must provide a ``max_size`` field corresponding to the maximum size of the replay buffer, and are able to choose between different buffer types depending on the chosen algorithm.
+     - Replay buffer configuration that determines the maximum size of the replay buffer, and the type of buffer to use. Only applicable to off-policy algorithms.
    * - ``network``
      - Network architecture specification (i.e. the arguments of the ``EvolvableNetwork`` corresponding to the chosen algorithm). This is passed as the ``net_config`` argument of most algorithms (except LLM algorithms).
 

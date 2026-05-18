@@ -1,7 +1,7 @@
 .. _fused_logprobs:
 
 Fused linear log-prob optimizations
-=================================
+====================================
 
 When you train an LLM with reinforcement learning, the model still has to turn
 each hidden vector into a score for every vocabulary token. That intermediate

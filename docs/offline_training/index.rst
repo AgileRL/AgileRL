@@ -18,6 +18,90 @@ AgileRL's offline RL training framework enables you to leverage evolutionary HPO
    * - :ref:`ILQL <ilql>`
      - --
 
+Training with LocalTrainer
+--------------------------
+
+The simplest way to train an offline RL agent is with a YAML manifest and the
+:class:`~agilerl.training.trainer.LocalTrainer`. This handles population
+creation, dataset loading, replay buffers, evolutionary HPO, and the training
+loop automatically.
+
+.. collapse:: Example manifest: CQL on CartPole (Minari dataset)
+
+   .. code-block:: yaml
+
+      algorithm:
+        name: CQN
+        batch_size: 256
+        lr: 0.001
+        learn_step: 1
+        gamma: 0.99
+        tau: 0.001
+        double: true
+
+      environment:
+        name: CartPole-v1
+        num_envs: 16
+        minari_dataset_id: cartpole/random-v0
+
+      training:
+        max_steps: 50_000
+        target_score: 200.0
+        pop_size: 4
+        evo_steps: 5_000
+        learning_delay: 1000
+
+      network:
+        latent_dim: 64
+        arch: mlp
+        encoder_config:
+          hidden_size: [64]
+        head_config:
+          hidden_size: [64]
+
+      replay_buffer:
+        max_size: 100_000
+
+      mutation:
+        probabilities:
+          no_mut: 0.4
+          arch_mut: 0.2
+          new_layer: 0.2
+          params_mut: 0.2
+          act_mut: 0.2
+          rl_hp_mut: 0.2
+        rl_hp_selection:
+          lr:   { min: 0.0001, max: 0.01 }
+          batch_size: { min: 8, max: 1024 }
+        mutation_sd: 0.1
+        rand_seed: 42
+
+      tournament_selection:
+        tournament_size: 2
+        elitism: true
+
+.. tab-set::
+
+   .. tab-item:: SDK
+
+      .. code-block:: python
+
+         from agilerl.training.trainer import LocalTrainer
+
+         trainer = LocalTrainer.from_manifest("configs/training/cqn.yaml")
+         population, fitnesses = trainer.train()
+
+   .. tab-item:: CLI
+
+      .. code-block:: bash
+
+         python -m agilerl.train -m configs/training/cqn.yaml
+
+.. seealso::
+
+   Full manifest reference and additional options: :ref:`trainers`
+
+
 .. _initpop_offline:
 
 Population Creation and Environment Setup
@@ -167,7 +251,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         from agilerl.components.replay_buffer import ReplayBuffer
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
-        from agilerl.utils.utils import create_population, make_vect_envs
+        from agilerl.utils.utils import create_population, make_vect_envs, default_progress_bar
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -259,15 +343,16 @@ Alternatively, use a custom training loop. Combining all of the above:
         total_steps = 0
 
         # TRAINING LOOP
-        print("Training...")
-        pbar = trange(max_steps, unit="step")
-        while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+        pbar = default_progress_bar(max_steps)
+        while np.less([agent.steps for agent in pop], max_steps).all():
             for agent in pop:  # Loop through population
-                for idx_step in range(max_steps):
+                for idx_step in range(evo_steps):
                     experiences = memory.sample(agent.batch_size)  # Sample replay buffer
                     agent.learn(experiences)  # Learn according to agent's RL algorithm
-                total_steps += max_steps
-                agent.steps[-1] += max_steps
+
+                total_steps += evo_steps
+                agent.steps += evo_steps
+                pbar.update(evo_steps // len(pop))
 
             # Evaluate population
             fitnesses = [
@@ -279,21 +364,16 @@ Alternatively, use a custom training loop. Combining all of the above:
                 for agent in pop
             ]
 
-            print(f"--- Global Steps {total_steps} ---")
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(f"Steps {[agent.steps[-1] for agent in pop]}")
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(
+            pbar.write(
+                f"--- Global Steps {total_steps} ---\n"
+                f"Steps: {[agent.steps for agent in pop]}\n"
+                f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}\n'
                 f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
             )
 
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
-
-            # Update step counter
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
 
         pbar.close()
         env.close()

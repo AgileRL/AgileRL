@@ -3,8 +3,8 @@ from __future__ import annotations
 import io
 import logging
 import os
-import time
 import tarfile
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -117,7 +117,8 @@ class ArenaClient:
     :param upload_timeout: Timeout in seconds for file-upload requests.
     """
 
-    BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
+    # BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
+    BASE_URL: ClassVar[str] = "https://arena-dev.agilerl.rlops.ai"
 
     _ERROR_MAP: ClassVar[dict[str, type[ArenaAPIError]]] = {
         "/api/cli/v1/environments/create-and-validate": ArenaValidationError,
@@ -151,8 +152,7 @@ class ArenaClient:
             follow_redirects=True,
         )
 
-        if self._api_key is None:
-            self._try_restore_session()
+        self._try_restore_session()
 
     @classmethod
     def configure(
@@ -185,7 +185,9 @@ class ArenaClient:
     def login(self, *, timeout: int = 300, force: bool = False) -> None:
         """Start the device-authorization login flow (or reuse a valid stored session).
 
-        If ``ARENA_API_KEY`` / *api_key* is set, device login is not used.
+        When *force* is false (default) and an API key is set, device login is
+        skipped. Pass ``force=True`` to run device authorization regardless
+        (useful when the API key is invalid and you want to switch to OAuth).
 
         When *force* is false (default), an unexpired OAuth access token or a
         successful refresh from ``~/.arena/credentials.json`` skips the browser
@@ -193,9 +195,17 @@ class ArenaClient:
         On success the tokens are persisted to
         ``~/.arena/credentials.json``.
         """
-        if self._api_key is not None:
-            logger.info("API key in use; device login not required.")
+        if self._api_key is not None and not force:
+            logger.info(
+                "API key in use; device login not required. Use --force to override."
+            )
             return
+
+        if self._api_key is not None and force:
+            logger.info(
+                "Forcing device login; API key will be ignored for this session."
+            )
+            self._api_key = None
 
         if not force:
             if is_oauth_access_token_valid(self._tokens.access_token):
@@ -204,9 +214,7 @@ class ArenaClient:
 
             if self._tokens.refresh_token:
                 try:
-                    tokens = self._auth.refresh_access_token(
-                        self._tokens.refresh_token
-                    )
+                    tokens = self._auth.refresh_access_token(self._tokens.refresh_token)
                     self._tokens.access_token = tokens["access_token"]
                     self._tokens.refresh_token = tokens.get(
                         "refresh_token", self._tokens.refresh_token
@@ -1174,6 +1182,32 @@ class ArenaClient:
         # Handle 401 Unauthorized.
         if resp.status_code == 401:
             raw = self._read_response_body(resp, stream=stream)
+
+            # If the API key failed but we have stored OAuth credentials, retry with those.
+            if self._api_key and not _retried and self._tokens.access_token:
+                logger.debug(
+                    "API key rejected; falling back to stored OAuth credentials."
+                )
+                self._api_key = None
+                return self._send(
+                    method,
+                    path,
+                    stream=stream,
+                    timeout=timeout,
+                    _retried=True,
+                    headers=request_headers,
+                    **kwargs,
+                )
+
+            if self._api_key:
+                msg = (
+                    "Invalid API key. Please check that your ARENA_API_KEY is correct."
+                )
+                raise ArenaAuthError(
+                    msg,
+                    sdk_hint="Verify the api_key passed to ArenaClient() or the ARENA_API_KEY environment variable.",
+                    cli_hint="Verify your --api-key flag or ARENA_API_KEY environment variable.",
+                )
             msg = f"Session expired and could not be refreshed. Server response: {raw[:200]}"
             raise ArenaAuthError(
                 msg,
