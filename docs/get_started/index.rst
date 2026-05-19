@@ -29,13 +29,13 @@ AgileRL ships optional dependency groups that you can install as needed:
    * - ``agilerl[box2d]``
      - Box2D physics engine for Gymnasium environments.
    * - ``agilerl[arena]``
-     - `Arena <https://arena.agilerl.com>`_ SDK & CLI. Validate custom environments, and train & deploy agents on managed cloud infrastructure.
+     - `Arena <https://arena.agilerl.com>`_ SDK & CLI. Validate custom environments, train & deploy agents on managed cloud infrastructure.
    * - ``agilerl[llm]``
      - LLM reinforcement fine-tuning.
    * - ``agilerl[all]``
      - Cover all functionalities of AgileRL.
 
-In development mode, quote the extras:
+In development mode, quote the extras - for example:
 
 .. code-block:: bash
 
@@ -150,6 +150,7 @@ To install the ``nightly`` version of AgileRL with the latest features, use:
         margin-bottom: 8px; /* Adjust the margin */
         font-size: 24px; /* Adjust the font size */
         text-align: center; /* Center title text */
+        color: #468082;
     }
 
    .tile p {
@@ -158,6 +159,7 @@ To install the ``nightly`` version of AgileRL with the latest features, use:
          font-size: 16px; /* Adjust the font size */
          text-align: left;
          word-wrap: break-word;
+         color: #468082;
       }
 
 
@@ -273,6 +275,8 @@ faster hyperparameter optimization. Please see the available tutorials below.
 
    <h3 id="quick-start">Quick Start</h3>
 
+**Training a Single Agent without Evolutionary HPO:**
+
 The simplest way to train an RL agent with AgileRL is through the
 :class:`~agilerl.training.trainer.LocalTrainer`. Here is an example of training a DQN agent on the LunarLander-v3 environment:
 
@@ -297,50 +301,37 @@ values:
 
 .. code-block:: python
 
-   from agilerl.training.trainer import LocalTrainer
-   from agilerl.models.training import TrainingSpec
-   from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
-
-   training = TrainingSpec(
-       max_steps=1_000_000,
-       target_score=200.0,
-       pop_size=4,
-       evo_steps=10_000,
-   )
-
-   mutation = MutationSpec(
-       probabilities={
-           "no_mut": 0.4,
-           "arch_mut": 0.2,
-           "new_layer": 0.2,
-           "params_mut": 0.2,
-           "rl_hp_mut": 0.2,
-       },
-       rl_hp_selection={
-           "lr": {"min": 0.0001, "max": 0.01},
-           "batch_size": {"min": 8, "max": 512},
-       },
-   )
-
-   tournament = TournamentSelectionSpec(tournament_size=2, elitism=True)
+   from agilerl import LocalTrainer
+   from agilerl.models import TrainingSpec
 
    trainer = LocalTrainer(
        algorithm="DQN",
        environment="LunarLander-v3",
-       training=training,
-       mutation=mutation,
-       tournament=tournament,
+       training=TrainingSpec(pop_size=4), # Train four agents simultaneously
+       hpo=True, # Enable evolutionary HPO using default mutation probabilities, tournament selection, and RL hyperparameters to mutate
    )
    population, fitnesses = trainer.train()
 
-This trains a population of four DQN agents that share experiences but learn
-individually. Every 10,000 steps, tournament selection identifies the best
-performers and mutations are applied to explore the hyperparameter space. See
-:ref:`evo_hyperparam_opt` for details on how this works.
+This trains a population of four DQN agents that share experiences but learn individually. Every 10,000 steps
+(default value for ``evo_steps`` in ``TrainingSpec``), tournament selection identifies the best
+performers and mutations are applied to explore the hyperparameter space.
 
-Or equivalently via a YAML manifest:
+.. seealso::
+
+   :ref:`evo_hyperparam_opt` for details on how evolutionary HPO works.
+
+Or via a YAML manifest (example can be found `here <https://github.com/AgileRL/AgileRL/blob/main/configs/training/dqn/dqn.yaml>`_):
 
 .. tab-set::
+
+   .. tab-item:: SDK
+
+      .. code-block:: python
+
+         from agilerl import LocalTrainer
+
+         trainer = LocalTrainer.from_manifest("configs/training/dqn/dqn.yaml")
+         population, fitnesses = trainer.train()
 
    .. tab-item:: CLI
 
@@ -348,14 +339,6 @@ Or equivalently via a YAML manifest:
 
          python -m agilerl.train -m configs/training/dqn/dqn.yaml
 
-   .. tab-item:: SDK
-
-      .. code-block:: python
-
-         from agilerl.training.trainer import LocalTrainer
-
-         trainer = LocalTrainer.from_manifest("configs/training/dqn/dqn.yaml")
-         population, fitnesses = trainer.train()
 
 Every aspect of the training pipeline is customisable — from modifying
 hyperparameters and mutation strategies in our off-the-shelf tools, to

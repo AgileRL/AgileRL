@@ -329,6 +329,16 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self._mut = value
 
     @property
+    def hp_config(self) -> HyperparameterConfig:
+        """Return the hyperparameter configuration for Evo-HPO mutations."""
+        return self.registry.hp_config
+
+    @hp_config.setter
+    def hp_config(self, value: HyperparameterConfig) -> None:
+        """Set the hyperparameter configuration for Evo-HPO mutations."""
+        self.registry.hp_config = value
+
+    @property
     def steps(self) -> int:
         """Cumulative global step count."""
         return self.metrics.steps

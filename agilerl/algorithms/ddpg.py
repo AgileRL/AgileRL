@@ -9,7 +9,11 @@ from gymnasium import spaces
 from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
@@ -204,6 +208,14 @@ class DDPG(RLAlgorithm):
         self.learn_counter = 0
         self.action_low = torch.as_tensor(action_space.low, dtype=torch.float32)
         self.action_high = torch.as_tensor(action_space.high, dtype=torch.float32)
+
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr_actor=self.lr_actor,
+            lr_critic=self.lr_critic,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):

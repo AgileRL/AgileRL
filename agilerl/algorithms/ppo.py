@@ -11,7 +11,11 @@ from torch import optim
 from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
@@ -236,6 +240,13 @@ class PPO(RLAlgorithm):
         self.num_envs = num_envs
         self.rollout_buffer_config = rollout_buffer_config or {}
         self.bptt_sequence_type = bptt_sequence_type
+
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr=self.lr,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):

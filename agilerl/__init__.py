@@ -1,9 +1,16 @@
 import warnings
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, metadata, version
+from typing import TYPE_CHECKING
 
+import lazy_loader as lazy
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
+
+if TYPE_CHECKING:
+    from agilerl.training.trainer import ArenaTrainer, LocalTrainer
+
+__all__ = ["ArenaTrainer", "LocalTrainer"]
 
 # pygame currently imports deprecated pkg_resources -> suppress warning
 warnings.filterwarnings(
@@ -24,19 +31,6 @@ def get_extra_dependencies(package: str, extra: str) -> list[str]:
         if r.marker and r.marker.evaluate(marker_environment):
             deps.append(r.name)
     return deps
-
-
-def _is_dist_installed(dist_name: str) -> bool:
-    """Check if a distribution is installed by its PyPI name.
-
-    Uses distribution metadata instead of find_spec because PyPI names
-    can differ from import names.
-    """
-    try:
-        metadata(dist_name)
-        return True
-    except PackageNotFoundError:
-        return False
 
 
 LLM_PACKAGES = get_extra_dependencies("agilerl", "llm")
@@ -67,3 +61,12 @@ class AgentType(Enum):
     LLMAgent = "llm_agent"
     OfflineAgent = "offline_agent"
     BanditAgent = "bandit_agent"
+
+
+# NOTE: Need to lazy-load to avoid circular imports
+__getattr__, __dir__, _ = lazy.attach(
+    __name__,
+    submod_attrs={
+        "training.trainer": ["LocalTrainer", "ArenaTrainer"],
+    },
+)

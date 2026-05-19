@@ -226,6 +226,7 @@ class AlgorithmSpec(BaseModel):
     off_policy: ClassVar[bool] = False
     offline: ClassVar[bool] = False
     bandit: ClassVar[bool] = False
+    default_evo_steps: ClassVar[int] = 10_000
 
     _algo_class_cache: ClassVar[type | None] = None
 
@@ -484,6 +485,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     lora_config: LoraConfig | None = Field(default=None)
 
     agent_type: ClassVar[AgentType] = AgentType.LLMAgent
+    default_evo_steps: ClassVar[int] = 5
     env_type: ClassVar[LLMEnvType]
 
     def build_algorithm(

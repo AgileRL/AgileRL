@@ -9,7 +9,11 @@ from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import ExperiencesType, GymEnvType, ObservationType
@@ -115,6 +119,13 @@ class CQN(RLAlgorithm):
         self.mut = mut
         self.double = double
         self.net_config = net_config
+
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr=self.lr,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
 
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):

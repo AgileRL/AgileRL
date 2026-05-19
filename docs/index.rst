@@ -135,6 +135,7 @@ If you use AgileRL in your work, please cite the repository:
    tutorials/llm_finetuning/index
    tutorials/bandits/index
    tutorials/custom_networks/index
+   tutorials/arena/index
 
 .. toctree::
    :maxdepth: 1

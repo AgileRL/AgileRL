@@ -11,7 +11,11 @@ from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
@@ -235,6 +239,13 @@ class IPPO(MultiAgentRLAlgorithm):
         self.target_kl = target_kl
         self.update_epochs = update_epochs
         self.action_batch_size = action_batch_size
+
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr=self.lr,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
 
         if actor_networks is not None and critic_networks is not None:
             if isinstance(actor_networks, list):

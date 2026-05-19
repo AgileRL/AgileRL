@@ -7,7 +7,11 @@ from gymnasium import spaces
 from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.modules import EvolvableModule
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.protocols import BanditEnvProtocol
@@ -124,6 +128,13 @@ class NeuralTS(RLAlgorithm):
         self.mut = mut
         self.net_config = net_config
         self.regret = [0]
+
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr=self.lr,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
 
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):

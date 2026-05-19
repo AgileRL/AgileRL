@@ -235,7 +235,7 @@ class TrainingSpec(BaseModel):
     # Multi-agent specific training parameters
     sum_scores: bool = Field(default=True)
 
-    # NOTE: The following are only applicable to Arena training
+    # NOTE: The following are only applicable to training on Arena
     reporting_interval: int = Field(default=1024, ge=1)
     experience_sharing: bool = Field(
         default=False

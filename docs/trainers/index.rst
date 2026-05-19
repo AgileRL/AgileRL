@@ -7,7 +7,7 @@ AgileRL provides a **Trainer** abstraction that encapsulates the full
 evolutionary training pipeline — environment creation, population management,
 mutation, tournament selection, and the training loop — behind a single,
 declarative interface. Instead of stitching these components together manually,
-you describe *what* to train in a YAML manifest and the trainer handles the
+you describe *what* to train and the trainer handles the
 *how*.
 
 Two concrete trainers are available:
@@ -19,19 +19,19 @@ Two concrete trainers are available:
    * - Trainer
      - Description
    * - :ref:`LocalTrainer <local_trainer>`
-     - Runs evolutionary RL training on your local machine (CPU or GPU).
+     - Run evolutionary RL training on your local machine (CPU or GPU).
    * - :ref:`ArenaTrainer <arena_trainer>`
      - Run evolutionary RL training jobs on `Arena <https://arena.agilerl.com>`_, AgileRL's managed RLOps platform for cloud-scale distributed training.
 
 
 .. _training_manifests:
 
-Training Manifests
-------------------
+Manifest Formulation
+--------------------
 
-A training manifest is a YAML (or JSON) file that fully describes a training
+A training manifest is a YAML (or JSON) file that fully describes an AgileRL training
 run. Every manifest is validated against the :class:`~agilerl.models.manifest.TrainingManifest`
-Pydantic model and contains up to six top-level sections:
+Pydantic model, ensuring correctness and completeness of the training configuration. It contains up to six top-level sections:
 
 .. list-table::
    :widths: 20 75
@@ -54,9 +54,46 @@ Pydantic model and contains up to six top-level sections:
    * - ``network``
      - Network architecture specification (i.e. the arguments of the ``EvolvableNetwork`` corresponding to the chosen algorithm). This is passed as the ``net_config`` argument of most algorithms (except LLM algorithms).
 
-Below is a minimal off-policy manifest training DQN on LunarLander:
+.. note::
 
-.. collapse:: DQN Manifest LunarLander-v3
+    Example manifests for every supported algorithm can be found in the `AgileRL repository <https://github.com/AgileRL/AgileRL/tree/main/configs/training>`_.
+
+.. _local_trainer:
+
+Training Locally with LocalTrainer
+----------------------------------
+
+:class:`~agilerl.training.trainer.LocalTrainer` is the simplest way to run
+training on your own hardware. It resolves the manifest into concrete objects
+(vectorized environments, agent population, replay buffer, mutations, and
+tournament selection) and delegates to the algorithm-specific training loops.
+
+Example Usage
+~~~~~~~~~~~~~
+
+The simplest way to train with the AgileRL framework is instantiate a ``LocalTrainer`` by specifying
+a supported algorithm and a registered Gymnasium/PettingZoo environment. This is mostly useful for quick experiments
+and benchmarking.
+
+**Minimal example:**
+
+.. code-block:: python
+
+  from agilerl import LocalTrainer
+
+  # Specify algorithm and Gymnasium/PettingZoo environment and use
+  # default parameters for training.
+  trainer = LocalTrainer(algorithm="PPO", environment="LunarLanderContinuous-v3")
+  population, fitnesses = trainer.train()
+
+**From a manifest file:**
+
+Specifying their training configuration from a manifest file also allows users to use the ``agilerl/train.py`` CLI entry point,
+which wraps the ``LocalTrainer`` and provides a convenient way to train a population of agents.
+
+Below is a minimal off-policy manifest to train DQN on LunarLander-v3 (example can be found `here <https://github.com/AgileRL/AgileRL/blob/main/configs/training/dqn/dqn.yaml>`_):
+
+.. collapse:: DQN manifest for LunarLander-v3
 
   .. code-block:: yaml
 
@@ -107,176 +144,192 @@ Below is a minimal off-policy manifest training DQN on LunarLander:
       tournament_size: 2
       elitism: true
 
-.. note::
+.. tab-set::
 
-    Users can find example manifests for every supported algorithm in the repository
-    under ``configs/training/``.
+   .. tab-item:: SDK
+      :sync: sdk
 
-.. _local_trainer:
+      .. code-block:: python
 
-LocalTrainer
-------------
+         import torch
+         from agilerl import LocalTrainer
 
-:class:`~agilerl.training.trainer.LocalTrainer` is the simplest way to run
-training on your own hardware. It resolves the manifest into concrete objects
-(vectorized environments, agent population, replay buffer, mutations, and
-tournament selection) and delegates to the algorithm-specific training loops.
+         # Instantiate the trainer from a manifest file.
+         device = "cuda" if torch.cuda.is_available() else "cpu"
+         trainer = LocalTrainer.from_manifest(
+            manifest="configs/training/dqn/dqn.yaml",
+            device=device
+         )
 
-**From a manifest file (recommended):**
+         # Train the population of agents.
+         population, fitnesses = trainer.train(
+            wb=True, # Enable Weights & Biases logging
+            verbose=True # Print verbose output
+         )
 
-.. code-block:: python
+   .. tab-item:: CLI
+      :sync: cli
 
-   import torch
-   from agilerl.training.trainer import LocalTrainer
+      .. code-block:: bash
 
-   # Instantiate the trainer from a manifest file.
-   trainer = LocalTrainer.from_manifest(
-      manifest="configs/training/dqn/dqn.yaml",
-      device="cuda" if torch.cuda.is_available() else "cpu"
-  )
-
-   population, fitnesses = trainer.train(wb=True, verbose=True)
+         python -m agilerl.train configs/training/dqn/dqn.yaml --wb --verbose
 
 **From Pydantic Models:**
 
 Users can also choose to instantiate trainers explicitly from the Pydantic models used under-the-hood to validate a training
-configuration automatically.
+configuration automatically. In the example below we show a more advanced configuration for training DQN on LunarLander-v3
+applying evolutionary HPO with custom mutation probabilities.
 
 .. code-block:: python
 
-   from agilerl.training.trainer import LocalTrainer
-   from agilerl.models.training import TrainingSpec, ReplayBufferSpec
-   from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+   import torch
+   from agilerl import LocalTrainer
+   from agilerl.models import (
+    TrainingSpec, MutationSpec, TournamentSelectionSpec, MutationProbabilities
+   )
 
+   # Custom training configuration.
+   training_spec = TrainingSpec(
+       max_steps=5_000_000,
+       evo_steps=10_000,
+       population_size=6, # Train six agents simultaneously
+       target_score=200.0, # Target score to achieve for LunarLander-v3
+   )
+
+   # Customise Evo-HPO configuration.
+   mutation_spec = MutationSpec(
+       probabilities=MutationProbabilities(
+        no_mut=0.5,
+        arch_mut=0.3,
+        rl_hp_mut=0.2
+       ),
+   )
+   tournament_spec = TournamentSelectionSpec(tournament_size=2, elitism=True)
+
+   # Instantiate the trainer from the custom training configuration.
+   device = "cuda" if torch.cuda.is_available() else "cpu"
    trainer = LocalTrainer(
        algorithm="DQN",
        environment="LunarLander-v3",
-       training=TrainingSpec(
-           max_steps=500_000,
-           evo_steps=10_000,
-           population_size=4,
-           target_score=200.0,
-       ),
-       mutation=MutationSpec(
-           probabilities={"no_mut": 0.4, "arch_mut": 0.2, "rl_hp_mut": 0.2},
-       ),
-       tournament=TournamentSelectionSpec(tournament_size=2, elitism=True),
-       replay_buffer=ReplayBufferSpec(max_size=100_000),
-       device="cuda",
+       training=training_spec,
+       mutation=mutation_spec,
+       tournament=tournament_spec,
+       device=device,
    )
 
    # Train the population of agents.
-   population, fitnesses = trainer.train()
+   population, fitnesses = trainer.train(
+      wb=True, # Enable Weights & Biases logging
+      verbose=True # Print verbose output
+   )
 
-**Minimal example:**
 
-.. code-block:: python
+How ``LocalTrainer.train()`` works
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-  training_spec = TrainingSpec(
-      max_steps=1_000_000,
-      evo_steps=10_000, # Number of steps between metric reports in the absence of evo-HPO
-      population_size=4
-  )
-
-  trainer = LocalTrainer(
-      algorithm="PPO",
-      environment="LunarLanderContinuous-v3",
-      training=training_spec
-  )
-
-  trainer.train()
-
-How ``train()`` works
-~~~~~~~~~~~~~~~~~~~~~
-
-Calling ``trainer.train()`` assembles keyword arguments from the stored specs
+Calling ``LocalTrainer.train()`` assembles keyword arguments from the stored specs
 and passes them to the algorithm's training function (e.g.
 ``train_off_policy``, ``train_on_policy``, ``train_multi_agent_off_policy``).
 The return value is always a tuple of ``(population, fitness_history)``.
 
-``train()`` accepts several optional keyword arguments for logging - please refer to the :ref:`API documentation <trainers_api>` for more details.
+Users can also pass additional keyword arguments to ``LocalTrainer.train()`` to customise monitoring and checkpointing.
 
-CLI entry point
-~~~~~~~~~~~~~~~
+.. seealso::
 
-The ``agilerl/train.py`` script wraps ``LocalTrainer`` for command-line use:
+   :ref:`API documentation <trainers_api>` for more details on the available keyword arguments.
 
-.. code-block:: bash
-
-   python -m agilerl.train -m configs/training/ppo/ppo.yaml --device cuda --wb
 
 .. _arena_trainer:
 
-ArenaTrainer
-------------
+Training on Managed Cloud Infrastructure with ArenaTrainer
+----------------------------------------------------------
 
 :class:`~agilerl.training.trainer.ArenaTrainer` submits the same
 manifest-based configuration to `Arena <https://arena.agilerl.com>`_, AgileRL's
-managed RLOps platform. The trainer serializes its state to a
+managed RLOps platform. The trainer validates the specified training configuration against the
 :class:`~agilerl.models.manifest.TrainingManifest`, then uses an
-:class:`~agilerl.arena.client.ArenaClient` to submit the job for remote execution.
+:class:`~agilerl.arena.client.ArenaClient` to submit the job for training on a remote cluster.
+
+.. note::
+
+  `Sign up to Arena <https://arena.agilerl.com>`_ for free now and get **110 free training credits (~20 hours)** to get started!
 
 Pre-requisites
 ~~~~~~~~~~~~~~
 
-A pre-requisite for using ArenaTrainer is to have an Arena account and API key. You can get your API key by logging in to Arena and clicking on the "API Keys" tab in the left sidebar.
-You can then set the ``ARENA_API_KEY`` environment variable to your API key.
+Installation
+^^^^^^^^^^^^
 
-.. code-block:: bash
-
-  export ARENA_API_KEY="your-arena-api-key"
-
-Alternatively, you can pass the API key to the ``ArenaTrainer`` constructor.
-
-.. code-block:: python
-
-  from agilerl.training.trainer import ArenaTrainer
-  from agilerl.arena.client import ArenaClient
-
-  client = ArenaClient(api_key="your-arena-api-key")
-
-  trainer = ArenaTrainer.from_manifest(
-      manifest="configs/training/dqn/dqn.yaml",
-      client=client,
-  )
-
-You must also have the extra dependencies for Arena installed, available via:
+Make sure you have the extra dependencies for Arena installed, available via:
 
 .. code-block:: bash
 
   pip install agilerl[arena]
 
 
-**From a manifest file (recommended):**
+Authentication
+^^^^^^^^^^^^^^
+In order to authenticate with Arena, users must have a registered account. Then, there are a few ways to authenticate before submitting a training job:
 
-.. code-block:: python
+1. Set the ``ARENA_API_KEY`` environment variable:
 
-   from agilerl.training.trainer import ArenaTrainer
-   from agilerl.models.training import TrainingSpec
+   .. code-block:: bash
 
-   trainer = ArenaTrainer.from_manifest(
-       manifest="configs/training/dqn/dqn.yaml",
-   )
+      export ARENA_API_KEY="arena_pat..."
 
-   # Submit to Arena (non-blocking)
-   response = trainer.train()
+   .. note::
+      Personal access tokens can be found in the Arena account profile, under *Profile management* -> *CLI API Key*.
 
-   # Or stream logs until completion
-   result = trainer.train(stream=True)
 
-**Programmatic construction:**
+2. Use ``arena login`` CLI command:
 
-.. code-block:: python
+   .. code-block:: bash
 
-   from agilerl.training.trainer import ArenaTrainer
-   from agilerl.models.env import ArenaEnvSpec
-   from agilerl.models.training import TrainingSpec
+      arena login
 
-   trainer = ArenaTrainer(
-       algorithm="DQN",
-       environment=ArenaEnvSpec(name="Your-Arena-Env", num_envs=16),
-       training=TrainingSpec(max_steps=500_000, evo_steps=10_000, population_size=4),
-       api_key="your-arena-api-key",
-   )
+3. Use ``ArenaClient`` SDK class:
 
-   response = trainer.train()
+   .. code-block:: python
+
+      from agilerl.arena import ArenaClient
+
+      # Option 1: Set the API key explicitly
+      client = ArenaClient(api_key="arena_pat...")
+
+      # Option 2: OAuth device login
+      client = ArenaClient()
+      client.login() # Opens a browser for interactive authentication
+
+.. seealso::
+
+   :ref:`ArenaClient <arena_client>` for more information on the full functionality of the client library.
+
+Submitting a Training Job to Arena
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Once the Arena client is authenticated, users can submit a training job to Arena by instantiating an ``ArenaTrainer`` and calling ``train()``,
+or through the **Arena CLI** ``arena experiments submit`` command.
+
+.. tab-set::
+
+   .. tab-item:: SDK
+      :sync: sdk
+
+      .. code-block:: python
+
+         from agilerl import ArenaTrainer
+
+         # Instantiate the trainer from a manifest file.
+         trainer = ArenaTrainer.from_manifest(
+            manifest="configs/training/dqn/dqn.yaml",
+         )
+
+         # Train on Arena.
+         trainer.train()
+
+   .. tab-item:: CLI
+      :sync: cli
+
+      .. code-block:: bash
+
+         arena experiments submit --manifest configs/training/dqn/dqn.yaml

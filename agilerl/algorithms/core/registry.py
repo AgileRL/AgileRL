@@ -242,6 +242,31 @@ class HyperparameterConfig:
         return list(self.config.keys())[key], list(self.config.values())[key]
 
 
+def make_default_hp_config(**kwargs: float) -> HyperparameterConfig:
+    """Create a default HyperparameterConfig with bounds derived from the current values.
+
+    For floats (e.g. learning rates), bounds are set to ``[value / 10, value * 10]``.
+    For ints (e.g. batch_size, learn_step), bounds are set to ``[value // 4, value * 4]``
+    (clamped to a minimum of 1).
+
+    :param kwargs: Mapping of hyperparameter names to their current values.
+    :returns: A HyperparameterConfig with sensible mutation ranges.
+    :rtype: HyperparameterConfig
+    """
+    params: dict[str, RLParameter] = {}
+    for name, value in kwargs.items():
+        if isinstance(value, float):
+            params[name] = RLParameter(min=value / 10, max=value * 10)
+        elif isinstance(value, int):
+            params[name] = RLParameter(
+                min=max(1, value // 4),
+                max=value * 4,
+                grow_factor=1.5,
+                shrink_factor=0.75,
+            )
+    return HyperparameterConfig(**params)
+
+
 @dataclass
 class NetworkGroup:
     """Dataclass for storing a group of networks. This consists of an evaluation network (i.e.

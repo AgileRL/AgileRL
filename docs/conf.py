@@ -22,6 +22,7 @@ extensions = [
     "sphinx.ext.autosummary",
     "sphinx.ext.graphviz",
     "sphinx.ext.intersphinx",
+    "sphinx_copybutton",
     "sphinx_design",
     "sphinx_tabs.tabs",
     "sphinx_toolbox.collapse",
@@ -39,6 +40,11 @@ intersphinx_mapping = {
 intersphinx_disabled_domains = ["std"]
 
 templates_path = ["_templates"]
+
+# -- Options for syntax highlighting
+
+pygments_style = "tango"
+pygments_dark_style = "monokai"
 
 # -- Options for HTML output
 

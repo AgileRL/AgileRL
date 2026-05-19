@@ -15,10 +15,16 @@ from agilerl.algorithms.core.base import (
     MultiAgentRLAlgorithm,
     RLAlgorithm,
 )
-from agilerl.models.algo import (
+from agilerl.models import (
     ALGO_REGISTRY,
     AlgoSpecT,
+    FinetuningNetworkSpec,
     LLMAlgorithmSpec,
+    MutationSpec,
+    ReplayBufferSpec,
+    TournamentSelectionSpec,
+    TrainingManifest,
+    TrainingSpec,
 )
 from agilerl.models.env import (
     ArenaEnvSpec,
@@ -29,10 +35,6 @@ from agilerl.models.env import (
     OfflineEnvSpec,
     PzEnvSpec,
 )
-from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
-from agilerl.models.manifest import TrainingManifest
-from agilerl.models.networks import FinetuningNetworkSpec
-from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.utils.trainer_utils import (
     EnvironmentT,
     build_mutations_from_spec,
@@ -49,7 +51,7 @@ ReplayBufferT = ReplayBufferSpec | None
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
 if HAS_ARENA_DEPENDENCIES:
-    from agilerl.arena.client import ArenaClient
+    from agilerl.arena import ArenaClient
 else:
     ArenaClient = None
 
@@ -276,6 +278,9 @@ class LocalTrainer(Trainer):
     :type tournament: TournamentSelectionSpec | TournamentSelection | None
     :param replay_buffer: Replay buffer configuration.
     :type replay_buffer: ReplayBufferSpec | ReplayBuffer | None
+    :param hpo: Whether to enable evolutionary HPO using default mutation probabilities, tournament selection,
+        and RL hyperparameters to mutate. Defaults to ``False``.
+    :type hpo: bool
     :param resume_from_checkpoint: Path to resume from checkpoint.
     :type resume_from_checkpoint: str | None
     :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
@@ -294,6 +299,7 @@ class LocalTrainer(Trainer):
         replay_buffer: ReplayBufferT | None = None,
         *,
         resume_from_checkpoint: str | None = None,
+        hpo: bool = False,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
     ) -> None:
@@ -309,6 +315,13 @@ class LocalTrainer(Trainer):
             device=device,
             accelerator=accelerator,
         )
+
+        # If HPO is enabled, use default mutation probabilities, tournament selection, and RL hyperparameters to mutate
+        if hpo:
+            self.mutation_spec = self.mutation_spec or MutationSpec()
+            self.tournament_selection_spec = (
+                self.tournament_selection_spec or TournamentSelectionSpec()
+            )
 
         # LLM algorithms require a DeepSpeed-aware accelerator
         if (
@@ -506,11 +519,16 @@ class LocalTrainer(Trainer):
         :rtype: tuple[PopulationT, list[list[float]]]
         """
         manifest = self.to_manifest()
+        evo_steps = (
+            self.training_spec.evo_steps
+            if self.training_spec.evo_steps is not None
+            else self.algorithm_spec.default_evo_steps
+        )
         kwargs: dict[str, Any] = {
             "pop": self.population,
             "init_hp": manifest,
             "max_steps": self.training_spec.max_steps,
-            "evo_steps": self.training_spec.evo_steps,
+            "evo_steps": evo_steps,
             "tournament": self.tournament_selection,
             "mutation": self.mutations,
             "save_elite": save_elite,

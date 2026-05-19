@@ -25,7 +25,11 @@ from agilerl.models.algorithms import (  # noqa: F401
     RainbowDQNSpec,
     TD3Spec,
 )
-from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec  # noqa: F401
+from agilerl.models.hpo import (  # noqa: F401
+    MutationProbabilities,
+    MutationSpec,
+    TournamentSelectionSpec,
+)
 from agilerl.models.manifest import TrainingManifest  # noqa: F401
 from agilerl.models.networks import (  # noqa: F401
     CnnSpec,

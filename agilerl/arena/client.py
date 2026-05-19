@@ -38,6 +38,17 @@ from agilerl.models.manifest import ArenaManifest
 logger = logging.getLogger(__name__)
 
 
+def _extract_filename(disposition: str | None) -> str | None:
+    """Parse a filename from a Content-Disposition header value."""
+    if not disposition:
+        return None
+    for part in disposition.split(";"):
+        part = part.strip()
+        if part.startswith("filename="):
+            return part.removeprefix("filename=").strip('"')
+    return None
+
+
 def prepare_env_upload(source: str | os.PathLike[str] | bytes) -> tuple[str, bytes]:
     """Resolve an environment source into an upload-ready ``(name, bytes)`` pair.
 
@@ -347,13 +358,13 @@ class ArenaClient:
         entrypoint: str | None = None,
         description: str | None = None,
         multi_agent: bool = False,
-        do_rollouts: bool = True,
+        do_rollouts: bool = False,
     ) -> dict[str, Any]:
         """Validate a custom environment on Arena.
 
-        When *source* is provided the environment is uploaded, created, and
-        validated in a single step.  When *source* is ``None`` an
-        already-registered environment is validated by *name*/*version*.
+        When source is provided the environment is uploaded, created, and
+        validated in a single step.  When source is None an
+        already-registered environment is validated by name/version.
 
         :param name: Environment name.
         :type name: str | None
@@ -363,17 +374,19 @@ class ArenaClient:
         :param source: Environment source — a directory path (compressed
             automatically), a ``.tar.gz`` file path, or raw ``bytes``.
         :type source: str | os.PathLike[str] | bytes | None
-        :param env_config: Path to the ``env_config.yaml`` file.
+        :param env_config: Path to the environment configuration file containing the environment parameters. Default is None.
         :type env_config: str | os.PathLike[str] | None
-        :param requirements: Path to ``requirements.txt``.
+        :param requirements: Path to additional dependencies needed for the environment. Default is None.
         :type requirements: str | os.PathLike[str] | None
-        :param entrypoint: Optional entrypoint override.
+        :param entrypoint: Optional entrypoint override. Default is None.
         :type entrypoint: str | None
-        :param description: Optional human-readable description of the environment.
+        :param description: Optional description of the environment. Default is None.
         :type description: str | None
-        :param multi_agent: Whether the environment is multi-agent.
+        :param multi_agent: Whether the environment is multi-agent. Default is False.
         :type multi_agent: bool
-        :param do_rollouts: Whether to run rollout profiling.
+        :param do_rollouts: Whether to perform environment rollouts during validation. Setting this to True will
+            run 100 random episodes and collect additional information such as the average random reward and visualize
+            the rendered environment. Default is False.
         :type do_rollouts: bool
 
         :returns: A dictionary containing the validation result.
@@ -719,22 +732,46 @@ class ArenaClient:
     def download_experiment_metrics(
         self,
         experiment_name: str,
+        output_path: str | os.PathLike[str] | None = None,
         metrics: list[str] | None = None,
-    ) -> tuple[bytes, str | None, str | None]:
-        """Download experiment metrics payload (CSV or zipped CSV).
+    ) -> Path:
+        """Download experiment metrics to a local file.
 
         :param experiment_name: The name of the experiment to download metrics for.
         :type experiment_name: str
+        :param output_path: Destination file path or directory. If a directory,
+            the filename is inferred from the server response.
+            Defaults to ``{experiment_name}_metrics.csv`` in the current directory.
+        :type output_path: str | os.PathLike[str] | None
         :param metrics: The metrics to download. If None, download all metrics.
         :type metrics: list[str] | None
-        :returns: A tuple of the metrics payload, content type, and disposition.
-        :rtype: tuple[bytes, str | None, str | None]
+        :returns: The path to the written file.
+        :rtype: Path
+        :raises FileExistsError: If the resolved output path already exists.
         """
-        return self._request_raw(
+        payload, _, disposition = self._request_raw(
             "POST",
             f"/api/cli/v1/experiments/{experiment_name}/metrics",
             json={"metrics": metrics},
         )
+
+        if output_path is None:
+            path = Path(f"{experiment_name}_metrics.csv")
+        else:
+            path = Path(output_path)
+            if path.is_dir():
+                filename = (
+                    _extract_filename(disposition) or f"{experiment_name}_metrics.csv"
+                )
+                path = path / filename
+
+        if path.exists():
+            msg = f"Output path already exists: {path}. Please remove it or specify a different path."
+            raise FileExistsError(msg)
+
+        path.write_bytes(payload)
+        logger.info("Metrics saved to %s", path)
+        return path
 
     def stop_experiment(self, experiment_name: str) -> Any:
         """Stop a running experiment in Arena.

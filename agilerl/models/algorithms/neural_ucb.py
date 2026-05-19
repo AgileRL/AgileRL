@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import Field
 
@@ -28,6 +28,8 @@ class NeuralUCBSpec(RLAlgorithmSpec):
     learn_step: int = Field(default=2, ge=1)
     net_config: QNetworkSpec | None = Field(default=None)
     actor_network: EvolvableModule | None = Field(default=None)
+
+    default_evo_steps: ClassVar[int] = 500
 
     @staticmethod
     def get_training_fn() -> Callable[..., Any]:

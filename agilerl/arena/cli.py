@@ -15,7 +15,6 @@ from agilerl.arena.output import (
     emit_result,
     handle_error,
 )
-from agilerl.arena.payloads import resolve_metrics_output_path
 
 ArenaError.enable_cli_mode()
 
@@ -161,7 +160,22 @@ def resources_group() -> None:
 def resources_list(config: CommandConfig) -> None:
     """List resource tiers: ids, specs, and credits per node-hour."""
     with arena_client(config) as client:
-        emit_result(client.list_resources())
+        data = client.list_resources()
+        tiers = data.get("tiers", {})
+        sorted_tiers = sorted(tiers.values(), key=lambda t: t["price_per_node_hour"])
+        rows = [
+            {
+                "Resource ID": tier["name"],
+                "GPUs": f"{tier['num_gpus']}x {tier['gpu_type']}"
+                if tier.get("gpu_type")
+                else "—",
+                "CPUs": tier["num_cpus"],
+                "RAM (GB)": tier["ram_gb"],
+                "credits/node-hour": f"{tier['price_per_node_hour']:.2f}",
+            }
+            for tier in sorted_tiers
+        ]
+        emit_result(rows)
 
 
 @main.group("env")
@@ -362,7 +376,7 @@ def env_duplicate(
         )
 
 
-@main.group("experiment")
+@main.group("experiments")
 def experiment() -> None:
     """Manage experiments (training jobs) by name."""
 
@@ -509,29 +523,16 @@ def experiment_metrics(
     output_file: Path | None,
     preview_rows: int,
 ) -> None:
-    """Download metrics for an experiment by name (CSV or zip)."""
+    """Download metrics for an experiment by name."""
     with arena_client(config) as client:
         metrics_list: list[str] | None = list(metrics) if metrics else None
-        payload, content_type, disposition = client.download_experiment_metrics(
+        target_path = client.download_experiment_metrics(
             experiment_name=experiment_name,
+            output_path=output_file,
             metrics=metrics_list,
         )
-        target_path = resolve_metrics_output_path(
-            experiment_name=experiment_name,
-            payload=payload,
-            content_type=content_type,
-            disposition=disposition,
-            output_file=output_file,
-        )
-        target_path.write_bytes(payload)
-        emit_result(
-            {
-                "saved": str(target_path),
-                "bytes": len(payload),
-                "content_type": content_type or "unknown",
-            },
-        )
 
+        # Preview the metrics if requested
         if preview_rows > 0:
             preview_payload, preview_ct, _ = client.preview_experiment_metrics_csv(
                 experiment_name=experiment_name,
@@ -540,8 +541,8 @@ def experiment_metrics(
             )
             if (preview_ct or "").startswith("text/csv"):
                 emit_csv_preview(preview_payload, max_rows=preview_rows)
-            elif (content_type or "").startswith("text/csv"):
-                emit_csv_preview(payload, max_rows=preview_rows)
+            elif target_path.suffix == ".csv":
+                emit_csv_preview(target_path.read_bytes(), max_rows=preview_rows)
 
 
 @experiment.command("deploy")

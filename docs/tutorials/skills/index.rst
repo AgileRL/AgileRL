@@ -1,7 +1,7 @@
 .. _skills_tutorials:
 
-Hierarchical Skills Tutorial
-============================
+Hierarchical Skills
+===================
 
 This tutorial provides an introductory guide to using `AgileRL <https://github.com/AgileRL/AgileRL>`_ to learn skills and apply these in a hierarchical fashion.
 AgileRL's single-agent algorithms allow users to train agents to perform specific skills, and then combine these in a learned order to achieve an outcome.
