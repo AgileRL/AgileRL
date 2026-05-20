@@ -86,9 +86,11 @@ def api_key_client():
 @pytest.fixture
 def token_client():
     """ArenaClient with OAuth tokens pre-loaded (no API key)."""
-    with patch("agilerl.arena.auth.KeycloakOpenID"):
-        with patch.object(ArenaClient, "_try_restore_session"):
-            client = ArenaClient()
+    env = {k: v for k, v in os.environ.items() if k != "ARENA_API_KEY"}
+    with patch.dict(os.environ, env, clear=True):
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            with patch.object(ArenaClient, "_try_restore_session"):
+                client = ArenaClient()
     client._tokens.access_token = "tok_access"
     client._tokens.refresh_token = "tok_refresh"
     return client
@@ -97,9 +99,11 @@ def token_client():
 @pytest.fixture
 def unauthenticated_client():
     """ArenaClient with no credentials at all."""
-    with patch("agilerl.arena.auth.KeycloakOpenID"):
-        with patch.object(ArenaClient, "_try_restore_session"):
-            client = ArenaClient()
+    env = {k: v for k, v in os.environ.items() if k != "ARENA_API_KEY"}
+    with patch.dict(os.environ, env, clear=True):
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            with patch.object(ArenaClient, "_try_restore_session"):
+                client = ArenaClient()
     return client
 
 
@@ -483,7 +487,7 @@ class TestValidateEnvironment:
         api_key_client._open_stream.assert_called_once_with(
             "POST",
             "/api/cli/v1/environments/validate",
-            json={"name": "MyEnv", "version": "v1", "do_rollouts": True},
+            json={"name": "MyEnv", "version": "v1", "do_rollouts": False},
             timeout=api_key_client._upload_timeout,
         )
         mock_stream.collect.assert_called_once()

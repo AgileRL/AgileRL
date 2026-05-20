@@ -595,6 +595,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :type wrapper_kwargs: dict[str, Any] | None
         :param resume_from_checkpoint: Path to checkpoint to resume from.
         :type resume_from_checkpoint: str | None
+        :param kwargs: Additional keyword arguments to pass to the algorithm constructor.
+        :type kwargs: Any
         :return: A list of algorithms.
         :rtype: list[EvolvableAlgorithm]
         """

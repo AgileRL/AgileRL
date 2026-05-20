@@ -101,7 +101,7 @@ Below is an example manifest for training NeuralUCB on the Iris dataset.
 
       .. code-block:: python
 
-         from agilerl.training.trainer import LocalTrainer
+         from agilerl import LocalTrainer
 
          trainer = LocalTrainer.from_manifest("neural_ucb.yaml")
          population, fitnesses = trainer.train()

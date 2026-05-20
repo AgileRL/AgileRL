@@ -1,14 +1,13 @@
 .. _DQN tutorial:
 
-Self-play Connect4 with DQN + curriculum learning
-=============================================================
+Self-Play Connect4 with DQN + Curriculum Learning
+=================================================
 
 .. figure:: connect_four_self_opp.gif
    :height: 400
    :align: center
 
    Agent trained to play Connect Four through self-play
-
 
 This tutorial shows how to train a :ref:`DQN<dqn>` agent on the `connect four <https://pettingzoo.farama.org/environments/classic/connect_four/>`_ classic environment.
 
@@ -704,16 +703,8 @@ Before we go any further in this tutorial, it would be helpful to define and set
          "batch_size": 256,
          "lr": 1e-4,
          "gamma": 0.99,
-         "learn_step": 1,
-         "n_step": 1,
-         "per": False,
-         "alpha": 0.6,
+         "learn_step": 2,
          "tau": 0.01,
-         "beta": 0.4,
-         "prior_eps": 0.000001,
-         "num_atoms": 51,
-         "v_min": 0.0,
-         "v_max": 200.0,
       }
 
       # Initialize population

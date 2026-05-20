@@ -33,6 +33,7 @@ Dependencies
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from agilerl.algorithms import GRPO
     from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+    from agilerl.utils.algo_utils import VLLMConfig
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_llm import finetune_llm_reasoning

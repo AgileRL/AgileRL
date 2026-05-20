@@ -274,7 +274,7 @@ Below is an example manifest for training MADDPG on the simple-speaker-listener-
 
       .. code-block:: python
 
-         from agilerl.training.trainer import LocalTrainer
+         from agilerl import LocalTrainer
 
          trainer = LocalTrainer.from_manifest("maddpg.yaml")
          population, fitnesses = trainer.train()
@@ -380,6 +380,35 @@ multi-agent environments. Transitions are built using the ``MultiAgentTransition
 
     memory = MultiAgentReplayBuffer(
         max_size=100000,
+        device=device,
+    )
+
+Evolutionary HPO
+^^^^^^^^^^^^^^^^^
+
+Tournament selection is used to select the agents from a population which will make up the next generation of agents.
+Mutation is periodically used to explore the hyperparameter space.
+
+.. code-block:: python
+
+    from agilerl.hpo.mutation import Mutations
+    from agilerl.hpo.tournament import TournamentSelection
+
+    tournament = TournamentSelection(
+        tournament_size=2,  # Tournament selection size
+        elitism=True,  # Elitism in tournament selection
+        population_size=population_size,  # Population size
+    )
+
+    mutations = Mutations(
+        no_mutation=0.4,  # No mutation
+        architecture=0.2,  # Architecture mutation
+        new_layer_prob=0.2,  # New layer mutation
+        parameters=0.2,  # Network parameters mutation
+        activation=0,  # Activation layer mutation
+        rl_hp=0.2,  # Learning HP mutation
+        mutation_sd=0.1,  # Mutation strength
+        rand_seed=1,  # Random seed
         device=device,
     )
 
@@ -502,13 +531,12 @@ Alternatively, use a custom training loop. Combining all of the above:
             device=device,
         )
 
-        # Instantiate a tournament selection object (used for HPO)
+        # Evo-HPO
         tournament = TournamentSelection(
             tournament_size=2,  # Tournament selection size
             elitism=True,  # Elitism in tournament selection
             population_size=population_size,  # Population size
         )
-
         mutations = Mutations(
             no_mutation=0.2,  # Probability of no mutation
             architecture=0.2,  # Probability of architecture mutation
@@ -684,7 +712,7 @@ In the snippet below, we show an example of how to create a population of IPPO a
 Training Loop
 ^^^^^^^^^^^^^
 
-Similarly to the off-policy alternative, you can use our off-the-shelf training function
+You can use our off-the-shelf training function
 :func:`train_multi_agent_on_policy() <agilerl.training.train_multi_agent_on_policy.train_multi_agent_on_policy>`, which returns a population of trained agents and logged training metrics.
 
 .. collapse:: Training loop

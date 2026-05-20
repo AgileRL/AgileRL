@@ -202,7 +202,7 @@ To install the ``nightly`` version of AgileRL with the latest features, use:
    </div>
    <div class="tiles_2 article">
       <a href="../multi_agent_training/index.html" class="tile multi-agent">
-         <h2>Multi Agent</h2>
+         <h2>Multi-agent</h2>
          <p>
                Algorithms: MADDPG, MATD3, IPPO
                <!-- Add more algorithms as needed -->

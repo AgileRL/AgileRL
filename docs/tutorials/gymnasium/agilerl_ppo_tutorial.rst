@@ -58,7 +58,7 @@ such for the PPO algorithm. Additionally, we also define a mutations parameters 
 mutations we want to happen, to what extent we want these mutations to occur, and what RL hyperparameters we want to tune.
 Additionally, we also define our upper and lower limits for these hyperparameters to define search spaces.
 
-.. collapse:: Evo-HPO Configuration
+.. collapse:: Hyperparameter Configuration
 
     .. code-block:: python
 
@@ -88,6 +88,8 @@ Additionally, we also define our upper and lower limits for these hyperparameter
             "target_kl": None,
             "update_epochs": 4,
             "num_envs": num_envs,
+            "hp_config": hp_config,
+            "net_config": net_config,
         }
 
 Create the Environment
@@ -121,8 +123,6 @@ followed by mutations) is detailed further below.
         size=population_size,
         observation_space=observation_space,
         action_space=action_space,
-        net_config=net_config,
-        hp_config=hp_config,
         device="cuda" if torch.cuda.is_available() else "cpu",
         **init_hp,
     )
@@ -226,7 +226,7 @@ fitnesses (fitness is each agents test scores on the environment).
       if __name__ == "__main__":
           train_agent()
 
-Using a custom training loop
+Using a Custom Training Loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we wanted to have more control over the training process, it is also possible to write our own custom
 training loops to train our agents. The training loop below can be used alternatively to the above ``train_on_policy``

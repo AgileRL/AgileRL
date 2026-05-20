@@ -189,11 +189,9 @@ for both the tournament and mutation arguments.
         eval_loop=INIT_HP["EVAL_LOOP"],
         learning_delay=INIT_HP["LEARNING_DELAY"],
         target=INIT_HP["TARGET_SCORE"],
-        n_step=True,
-        per=True,
         tournament=None,
         mutation=None,
-        wb=False,  # Boolean flag to record run with Weights & Biases
+        wb=False,
         checkpoint=INIT_HP["MAX_STEPS"],
         checkpoint_path="RainbowDQN.pt",
     )
@@ -211,7 +209,7 @@ for both the tournament and mutation arguments.
       if __name__ == "__main__":
           train_agent()
 
-Using a custom training loop
+Using a Custom Training Loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we wanted to have more control over the training process, it is also possible to write our own custom
 training loops to train our agents. The training loop below can be used alternatively to the above ``train_off_policy``

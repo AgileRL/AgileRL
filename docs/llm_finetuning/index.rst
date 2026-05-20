@@ -19,7 +19,7 @@ develop *agency* and can be described as **agents**.
      - **Tutorials**
    * - :ref:`GRPO<grpo>`
      - :ref:`LLM reasoning with GRPO<grpo_tutorial>`
-   * - :ref:`SFT<sft>` and :ref:`DPO<dpo>`
+   * - :ref:`SFT<sft>`, :ref:`DPO<dpo>`
      - :ref:`LLM fine-tuning with SFT and DPO<sft_dpo_finetuning>`
 
 .. _rl_for_reasoning:
@@ -58,8 +58,15 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
       :language: python
 
 .. toctree::
-   :maxdepth: 1
-   :caption: Topics
+   :hidden:
 
    fused_logprobs
    llm_checkpoints
+
+.. seealso::
+
+   :doc:`fused_logprobs`
+      Fused linear log-probability computation for memory-efficient training.
+
+   :doc:`llm_checkpoints`
+      Saving and loading LLM checkpoints during fine-tuning.

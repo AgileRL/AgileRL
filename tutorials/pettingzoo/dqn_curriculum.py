@@ -25,7 +25,6 @@ from agilerl.components.data import Transition
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import create_population
 
 
 class CurriculumEnv:
@@ -563,40 +562,30 @@ if __name__ == "__main__":
         with open(f"./curriculums/connect_four/lesson{lesson_number}.yaml") as file:
             LESSON = yaml.safe_load(file)
 
-        # Define the network configuration
-        NET_CONFIG = {
+        # Network configuration
+        net_config = {
             "encoder_config": {
-                "channel_size": [128],  # CNN channel size
-                "kernel_size": [4],  # CNN kernel size
-                "stride_size": [1],  # CNN stride size
+                "channel_size": [128],
+                "kernel_size": [4],
+                "stride_size": [1],
             },
             "head_config": {
-                "hidden_size": [64, 64],  # Actor head hidden size
+                "hidden_size": [64, 64],
             },
         }
 
-        # Define the initial hyperparameters
-        INIT_HP = {
-            "POPULATION_SIZE": 6,
-            # "ALGO": "Rainbow DQN",  # Algorithm
-            "ALGO": "DQN",  # Algorithm
-            "DOUBLE": True,
-            "BATCH_SIZE": 256,  # Batch size
-            "LR": 1e-4,  # Learning rate
-            "GAMMA": 0.99,  # Discount factor
-            "MEMORY_SIZE": 10000,  # Max memory buffer size
-            "LEARN_STEP": 1,  # Learning frequency
-            "CUDAGRAPHS": False,  # Use CUDA graphs
-            "N_STEP": 1,  # Step number to calculate td error
-            "PER": False,  # Use prioritized experience replay buffer
-            "ALPHA": 0.6,  # Prioritized replay buffer parameter
-            "TAU": 0.01,  # For soft update of target parameters
-            "BETA": 0.4,  # Importance sampling coefficient
-            "PRIOR_EPS": 0.000001,  # Minimum priority for sampling
-            "NUM_ATOMS": 51,  # Unit number of support
-            "V_MIN": 0.0,  # Minimum value of support
-            "V_MAX": 200.0,  # Maximum value of support
+        # Algorithm hyperparameters
+        init_hp = {
+            "double": True,
+            "batch_size": 256,
+            "lr": 1e-4,
+            "gamma": 0.99,
+            "learn_step": 1,
+            "tau": 0.01,
         }
+
+        population_size = 6
+        memory_size = 10000
 
         # Define the connect four environment
         env = connect_four_v3.env()
@@ -633,20 +622,19 @@ if __name__ == "__main__":
         )
 
         # Create a population ready for evolutionary hyper-parameter optimisation
-        pop: list[DQN] = create_population(
-            INIT_HP["ALGO"],
-            observation_space,
-            action_spaces[0],
-            NET_CONFIG,
-            INIT_HP,
-            hp_config,
-            population_size=INIT_HP["POPULATION_SIZE"],
+        pop = DQN.population(
+            size=population_size,
+            observation_space=observation_space,
+            action_space=action_spaces[0],
+            net_config=net_config,
+            hp_config=hp_config,
             device=device,
+            **init_hp,
         )
 
         # Configure the replay buffer
         memory = ReplayBuffer(
-            max_size=INIT_HP["MEMORY_SIZE"],  # Max replay buffer size
+            max_size=memory_size,
             device=device,
         )
 
@@ -654,7 +642,7 @@ if __name__ == "__main__":
         tournament = TournamentSelection(
             tournament_size=2,  # Tournament selection size
             elitism=True,  # Elitism in tournament selection
-            population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+            population_size=population_size,  # Population size
         )
 
         # Instantiate a mutations object (used for HPO)
@@ -687,7 +675,7 @@ if __name__ == "__main__":
                 # Load pretrained checkpoint
                 agent.load_checkpoint(LESSON["pretrained_path"])
                 # Reinit optimizer for new task
-                agent.lr = INIT_HP["LR"]
+                agent.lr = init_hp["lr"]
                 agent.optimizer = OptimizerWrapper(
                     torch.optim.Adam,
                     networks=agent.actor,
@@ -730,15 +718,14 @@ if __name__ == "__main__":
                 project="AgileRL",
                 name="{}-EvoHPO-{}-{}Opposition-CNN-{}".format(
                     "connect_four_v3",
-                    INIT_HP["ALGO"],
+                    "DQN",
                     LESSON["opponent"],
                     datetime.now(tz=timezone.utc).strftime("%m%d%Y%H%M%S"),
                 ),
-                # track hyperparameters and run metadata
                 config={
-                    "algo": "Evo HPO Rainbow DQN",
+                    "algo": "Evo HPO DQN",
                     "env": "connect_four_v3",
-                    "INIT_HP": INIT_HP,
+                    "init_hp": init_hp,
                     "lesson": LESSON,
                 },
             )

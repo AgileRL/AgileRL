@@ -16,7 +16,6 @@ from agilerl.components.data import MultiAgentTransition
 from agilerl.components.replay_buffer import MultiAgentReplayBuffer
 from agilerl.population import Population
 from agilerl.utils.utils import (
-    create_population,
     default_progress_bar,
     init_loggers,
     make_multi_agent_vect_envs,
@@ -25,36 +24,33 @@ from agilerl.utils.utils import (
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Define the network configuration
-    NET_CONFIG = {
+    num_envs = 8
+
+    # Network configuration
+    net_config = {
         "latent_dim": 128,
         "encoder_config": {
-            "channel_size": [32, 32],  # CNN channel size
-            "kernel_size": [3, 3],  # CNN kernel size
-            "stride_size": [1, 1],  # CNN stride size
+            "channel_size": [32, 32],
+            "kernel_size": [3, 3],
+            "stride_size": [1, 1],
         },
-        "head_config": {"hidden_size": [128]},  # Actor head hidden size
+        "head_config": {"hidden_size": [128]},
     }
 
-    # Define the initial hyperparameters
-    INIT_HP = {
-        "POPULATION_SIZE": 1,
-        "ALGO": "MADDPG",  # Algorithm
-        "BATCH_SIZE": 128,  # Batch size
-        "O_U_NOISE": True,  # Ornstein Uhlenbeck action noise
-        "EXPL_NOISE": 0.1,  # Action noise scale
-        "MEAN_NOISE": 0.0,  # Mean action noise
-        "THETA": 0.15,  # Rate of mean reversion in OU noise
-        "DT": 0.01,  # Timestep for OU noise
-        "LR_ACTOR": 0.0001,  # Actor learning rate
-        "LR_CRITIC": 0.001,  # Critic learning rate
-        "GAMMA": 0.95,  # Discount factor
-        "MEMORY_SIZE": 100_000,  # Max memory buffer size
-        "LEARN_STEP": 50,  # Learning frequency
-        "TAU": 0.01,  # For soft update of target parameters
+    # Algorithm hyperparameters
+    init_hp = {
+        "O_U_noise": True,
+        "expl_noise": 0.1,
+        "mean_noise": 0.0,
+        "theta": 0.15,
+        "dt": 0.01,
+        "batch_size": 128,
+        "lr_actor": 0.0001,
+        "lr_critic": 0.001,
+        "gamma": 0.95,
+        "learn_step": 50,
+        "tau": 0.01,
     }
-
-    num_envs = 8
 
     # Define the space invaders environment as a parallel environment
     def make_env():
@@ -73,24 +69,21 @@ if __name__ == "__main__":
     observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
     action_spaces = [env.single_action_space(agent) for agent in env.agents]
 
-    # Append number of agents and agent IDs to the initial hyperparameter dictionary
-    INIT_HP["AGENT_IDS"] = env.agents
-
     # Create a population ready for evolutionary hyper-parameter optimisation
-    pop: list[MADDPG] = create_population(
-        INIT_HP["ALGO"],
-        observation_spaces,
-        action_spaces,
-        NET_CONFIG,
-        INIT_HP,
-        population_size=INIT_HP["POPULATION_SIZE"],
-        num_envs=num_envs,
+    population_size = 1
+    pop = MADDPG.population(
+        size=population_size,
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
+        agent_ids=env.agents,
+        net_config=net_config,
         device=device,
+        **init_hp,
     )
 
     # Configure the multi-agent replay buffer
     memory = MultiAgentReplayBuffer(
-        INIT_HP["MEMORY_SIZE"],
+        100_000,
         device=device,
     )
 
@@ -105,7 +98,7 @@ if __name__ == "__main__":
 
     # Initialize loggers and population wrapper
     loggers = init_loggers(
-        algo=INIT_HP["ALGO"],
+        algo="MADDPG",
         env_name="space_invaders_v2",
         pbar=pbar,
         verbose=True,
@@ -117,7 +110,6 @@ if __name__ == "__main__":
     )
 
     # TRAINING LOOP
-    print("Training...")
     while population.all_below(max_steps):
         for agent in population.agents:
             agent.set_training_mode(True)

@@ -168,7 +168,6 @@ followed by mutations) is detailed further below.
         "max_grad_norm": 0.5,
         "share_encoders": True,
         "recurrent": True,
-        "use_rollout_buffer": True,
         "target_kl": None,
         "update_epochs": 4,
         "bptt_sequence_type": BPTTSequenceType.CHUNKED,
@@ -177,8 +176,9 @@ followed by mutations) is detailed further below.
     }
 
     # Define a population
+    population_size = 4
     pop = PPO.population(
-        size=4,
+        size=population_size,
         observation_space=observation_space,
         action_space=action_space,
         net_config=net_config,
@@ -206,7 +206,7 @@ returns the best agent, and the new generation of agents.
     tournament = TournamentSelection(
         tournament_size=2,
         elitism=True,
-        population_size=4,
+        population_size=population_size,
     )
 
 Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be
@@ -291,7 +291,7 @@ fitnesses (fitness is each agents test scores on the environment).
           train_agent()
 
 
-Using a custom training loop
+Using a Custom Training Loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we wanted to have more control over the training process, it is also possible to write our own custom
 training loops to train our agents. The training loop below can be used alternatively to the above ``train_on_policy``
@@ -313,7 +313,6 @@ function and is an example of how we might choose to make use of a population of
         total_steps = 0
         training_complete = False
 
-        print("Training...")
         pbar = default_progress_bar(max_steps)
         while (
             np.less([agent.steps for agent in pop], max_steps).all()

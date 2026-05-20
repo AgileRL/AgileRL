@@ -18,7 +18,6 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.utils.utils import (
-    create_population,
     default_progress_bar,
     init_loggers,
     make_multi_agent_vect_envs,
@@ -29,37 +28,34 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("===== AgileRL Online Multi-Agent Demo =====")
 
-    # Define the network configuration
-    NET_CONFIG = {
+    num_envs = 8
+
+    # Network configuration
+    net_config = {
         "latent_dim": 64,
         "encoder_config": {
-            "hidden_size": [64],  # Actor hidden size
+            "hidden_size": [64],
         },
         "head_config": {
-            "hidden_size": [64],  # Critic hidden size
+            "hidden_size": [64],
         },
     }
 
-    # Define the initial hyperparameters
-    INIT_HP = {
-        "POPULATION_SIZE": 4,
-        "ALGO": "MATD3",  # Algorithm
-        "BATCH_SIZE": 128,  # Batch size
-        "O_U_NOISE": True,  # Ornstein Uhlenbeck action noise
-        "EXPL_NOISE": 0.1,  # Action noise scale
-        "MEAN_NOISE": 0.0,  # Mean action noise
-        "THETA": 0.15,  # Rate of mean reversion in OU noise
-        "DT": 0.01,  # Timestep for OU noise
-        "LR_ACTOR": 0.0001,  # Actor learning rate
-        "LR_CRITIC": 0.001,  # Critic learning rate
-        "GAMMA": 0.95,  # Discount factor
-        "MEMORY_SIZE": 100000,  # Max memory buffer size
-        "LEARN_STEP": 100,  # Learning frequency
-        "TAU": 0.01,  # For soft update of target parameters
-        "POLICY_FREQ": 2,  # Policy frequnecy
+    # Algorithm hyperparameters
+    init_hp = {
+        "O_U_noise": True,
+        "expl_noise": 0.1,
+        "mean_noise": 0.0,
+        "theta": 0.15,
+        "dt": 0.01,
+        "batch_size": 128,
+        "lr_actor": 0.0001,
+        "lr_critic": 0.001,
+        "gamma": 0.95,
+        "learn_step": 100,
+        "tau": 0.01,
+        "policy_freq": 2,
     }
-
-    num_envs = 8
 
     def make_env():
         return simple_speaker_listener_v4.parallel_env(continuous_actions=True)
@@ -69,9 +65,6 @@ if __name__ == "__main__":
     # Configure the multi-agent algo input arguments
     observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
     action_spaces = [env.single_action_space(agent) for agent in env.agents]
-
-    # Append number of agents and agent IDs to the initial hyperparameter dictionary
-    INIT_HP["AGENT_IDS"] = env.agents
 
     # Mutation config for RL hyperparameters
     hp_config = HyperparameterConfig(
@@ -87,21 +80,21 @@ if __name__ == "__main__":
     )
 
     # Create a population ready for evolutionary hyper-parameter optimisation
-    pop: list[MATD3] = create_population(
-        INIT_HP["ALGO"],
-        observation_spaces,
-        action_spaces,
-        NET_CONFIG,
-        INIT_HP,
+    population_size = 4
+    pop = MATD3.population(
+        size=population_size,
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
+        agent_ids=env.agents,
+        net_config=net_config,
         hp_config=hp_config,
-        population_size=INIT_HP["POPULATION_SIZE"],
-        num_envs=num_envs,
         device=device,
+        **init_hp,
     )
 
     # Configure the multi-agent replay buffer
     memory = MultiAgentReplayBuffer(
-        INIT_HP["MEMORY_SIZE"],
+        max_size=100_000,
         device=device,
     )
 
@@ -109,7 +102,7 @@ if __name__ == "__main__":
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size
         elitism=True,  # Elitism in tournament selection
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+        population_size=population_size,  # Population size
     )
 
     # Instantiate a mutations object (used for HPO)
@@ -136,7 +129,7 @@ if __name__ == "__main__":
 
     # Initialize loggers and population wrapper
     loggers = init_loggers(
-        algo=INIT_HP["ALGO"],
+        algo="MATD3",
         env_name="simple_speaker_listener_v4",
         pbar=pbar,
         verbose=True,
@@ -151,7 +144,6 @@ if __name__ == "__main__":
     population.update(mutations.mutation(population.agents, pre_training_mut=True))
 
     # TRAINING LOOP
-    print("Training...")
     while population.all_below(max_steps):
         for agent in population.agents:  # Loop through population
             agent.set_training_mode(True)
@@ -250,7 +242,7 @@ if __name__ == "__main__":
                 tournament=tournament,
                 mutation=mutations,
                 env_name="simple_speaker_listener_v4",
-                algo=INIT_HP["ALGO"],
+                algo="MATD3",
                 save_elite=True,
                 elite_path="./models/MATD3",
             ),

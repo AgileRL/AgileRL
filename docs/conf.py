@@ -43,7 +43,7 @@ templates_path = ["_templates"]
 
 # -- Options for syntax highlighting
 
-pygments_style = "tango"
+pygments_style = "friendly"
 pygments_dark_style = "monokai"
 
 # -- Options for HTML output

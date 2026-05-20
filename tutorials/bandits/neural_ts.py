@@ -20,27 +20,30 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import create_population, default_progress_bar
+from agilerl.utils.utils import default_progress_bar
 from agilerl.wrappers.learning import BanditEnv
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    NET_CONFIG = {
+    # Network configuration
+    net_config = {
         "latent_dim": 64,
         "encoder_config": {"hidden_size": [64]},
         "head_config": {"hidden_size": [64]},
     }
 
-    INIT_HP = {
-        "POPULATION_SIZE": 4,  # Population size
-        "BATCH_SIZE": 64,  # Batch size
-        "LR": 0.001,  # Learning rate
-        "GAMMA": 1.0,  # Scaling factor
-        "LAMBDA": 1.0,  # Regularization factor
-        "REG": 0.0625,  # Loss regularization factor
-        "LEARN_STEP": 2,  # Learning frequency
+    # Algorithm hyperparameters
+    init_hp = {
+        "batch_size": 64,
+        "lr": 0.001,
+        "gamma": 1.0,
+        "lamb": 1.0,
+        "reg": 0.0625,
+        "learn_step": 2,
     }
+
+    population_size = 4
 
     # Fetch data  https://archive.ics.uci.edu/
     pendigits = fetch_ucirepo(id=81)
@@ -73,15 +76,14 @@ if __name__ == "__main__":
     action_space = spaces.Discrete(action_dim)
 
     # Create population of agents
-    pop: list[NeuralTS] = create_population(
-        algo="NeuralTS",  # Algorithm
-        observation_space=observation_space,  # Observation space
-        action_space=action_space,  # Action space
-        net_config=NET_CONFIG,  # Network configuration
-        INIT_HP=INIT_HP,  # Initial hyperparameters
-        hp_config=hp_config,  # Hyperparameter configuration
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+    pop = NeuralTS.population(
+        size=population_size,
+        observation_space=observation_space,
+        action_space=action_space,
+        net_config=net_config,
+        hp_config=hp_config,
         device=device,
+        **init_hp,
     )
 
     memory = ReplayBuffer(
@@ -92,7 +94,7 @@ if __name__ == "__main__":
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size
         elitism=True,  # Elitism in tournament selection
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+        population_size=population_size,  # Population size
     )
 
     mutations = Mutations(

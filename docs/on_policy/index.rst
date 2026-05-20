@@ -108,7 +108,7 @@ Here is an example manifest to train PPO on LunarLander-v3:
 
       .. code-block:: python
 
-         from agilerl.training.trainer import LocalTrainer
+         from agilerl import LocalTrainer
 
          trainer = LocalTrainer.from_manifest("ppo.yaml")
          population, fitnesses = trainer.train()

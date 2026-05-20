@@ -105,7 +105,7 @@ population. The sequence of evolution (tournament selection followed by mutation
         "batch_size": 128,
         "lr_actor": 0.0001,
         "lr_critic": 0.001,
-        "o_u_noise": True,
+        "O_U_noise": True,
         "expl_noise": 0.1,
         "mean_noise": 0.0,
         "theta": 0.15,

@@ -12,5 +12,6 @@ Utils
    log_utils
    minari_utils
    probe_envs
+   probe_envs_llm
    torch_utils
    llm_utils

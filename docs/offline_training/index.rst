@@ -88,7 +88,7 @@ Below is an example manifest for training CQN on the CartPole-v1 environment (Mi
 
       .. code-block:: python
 
-         from agilerl.training.trainer import LocalTrainer
+         from agilerl import LocalTrainer
 
          trainer = LocalTrainer.from_manifest("cqn.yaml")
          population, fitnesses = trainer.train()
@@ -114,7 +114,8 @@ Population Creation and Environment Setup
 
 To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
-are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below.
+are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below. The referenced
+CartPole-v1 dataset can be found in the `AgileRL repository <https://github.com/AgileRL/AgileRL/blob/main/data/cartpole/>`_.
 
 .. collapse:: Population Creation and Environment Setup
     :open:
@@ -130,6 +131,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        # Create environment and load offline dataset
         num_envs = 1
         env = make_vect_envs("CartPole-v1", num_envs=num_envs)  # Create environment
         dataset = h5py.File("data/cartpole/cartpole_random_v1.1.0.h5", "r")  # Load dataset
@@ -352,12 +354,12 @@ Alternatively, use a custom training loop. Combining all of the above:
 
             memory.add(transition.to_tensordict())
 
+        # Tournament and mutations for Evo-HPO
         tournament = TournamentSelection(
             tournament_size=2,  # Tournament selection size
             elitism=True,  # Elitism in tournament selection
             population_size=population_size,  # Population size
         )
-
         mutations = Mutations(
             no_mutation=0.4,  # No mutation
             architecture=0.2,  # Architecture mutation

@@ -54,7 +54,7 @@ correctly functioning agent should be able to learn, and can be used to diagnose
 
             check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
 
-    See function docs: :ref:`agilerl.utils.probe_envs.check_q_learning_with_probe_env<single_check_q_learning_with_probe_env>`
+    See function docs: :func:`~agilerl.utils.probe_envs.check_q_learning_with_probe_env`
 
 .. collapse:: Single-agent - Check Policy and Q-learning
 
@@ -92,7 +92,7 @@ correctly functioning agent should be able to learn, and can be used to diagnose
                 env, DDPG, algo_args, memory, learn_steps, device
             )
 
-    See function docs: :ref:`agilerl.utils.probe_envs.check_policy_q_learning_with_probe_env<single_check_policy_q_learning_with_probe_env>`
+    See function docs: :func:`~agilerl.utils.probe_envs.check_policy_q_learning_with_probe_env`
 
 .. collapse:: Single-agent - Check Policy and Value (On-Policy)
 
@@ -122,7 +122,7 @@ correctly functioning agent should be able to learn, and can be used to diagnose
                   env, PPO, algo_args, memory, learn_steps, device
         )
 
-See function docs: :ref:`agilerl.utils.probe_envs.check_policy_on_policy_with_probe_env<single_check_policy_on_policy_with_probe_env>`
+See function docs: :func:`~agilerl.utils.probe_envs.check_policy_on_policy_with_probe_env`
 
 
 .. collapse:: Multi-agent - Check Policy and Q-learning
@@ -160,7 +160,7 @@ See function docs: :ref:`agilerl.utils.probe_envs.check_policy_on_policy_with_pr
 
             check_policy_q_learning_with_probe_env(env, MADDPG, algo_args, memory, learn_steps, device)
 
-    See function docs: :ref:`agilerl.utils.probe_envs.check_policy_q_learning_with_probe_env<single_check_policy_q_learning_with_probe_env>`
+    See function docs: :func:`~agilerl.utils.probe_envs.check_policy_q_learning_with_probe_env`
 
 Debugging with LLM Probe Environments
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -171,17 +171,17 @@ All probe environments use string observations and string actions. The first thr
 
 Use the probes in this order:
 
-1. ``ConstantTargetEnv``: fixed prompt and fixed target digit. This is a basic end-to-end sanity check.
-2. ``ConditionalTargetEnv``: one input digit, target ``(digit % 3) + 1``. This checks whether the policy conditions on the observation.
-3. ``MultiInputConditionalEnv``: two input digits, target ``((d1 + d2) % 3) + 1``. This checks multi-input composition.
-4. ``GridNavigationEnv``: multi-turn 1D navigation with step costs. The reset observation is ``<start><target>``, later observations are only the current position, and actions are parsed from the first valid digit in generated text (``"1"=left, "2"=stay, "3"=right``).
+1. :class:`~agilerl.utils.probe_envs_llm.ConstantTargetEnv`: fixed prompt and fixed target digit. This is a basic end-to-end sanity check.
+2. :class:`~agilerl.utils.probe_envs_llm.ConditionalTargetEnv`: one input digit, target ``(digit % 3) + 1``. This checks whether the policy conditions on the observation.
+3. :class:`~agilerl.utils.probe_envs_llm.MultiInputConditionalEnv`: two input digits, target ``((d1 + d2) % 3) + 1``. This checks multi-input composition.
+4. :class:`~agilerl.utils.probe_envs_llm.GridNavigationEnv`: multi-turn 1D navigation with step costs. The reset observation is ``<start><target>``, later observations are only the current position, and actions are parsed from the first valid digit in generated text (``"1"=left, "2"=stay, "3"=right``).
 
 The ready-to-run staged scripts in ``demos/llm/debugging/`` follow the same progression:
 
-- ``debugging_llm.py`` -> ``ConstantTargetEnv``
-- ``debugging_llm_stage_1.py`` -> ``ConditionalTargetEnv``
-- ``debugging_llm_stage_2.py`` -> ``MultiInputConditionalEnv``
-- ``debugging_llm_stage_3.py`` -> ``GridNavigationEnv``
+- ``debugging_llm.py`` -> :class:`~agilerl.utils.probe_envs_llm.ConstantTargetEnv`
+- ``debugging_llm_stage_1.py`` -> :class:`~agilerl.utils.probe_envs_llm.ConditionalTargetEnv`
+- ``debugging_llm_stage_2.py`` -> :class:`~agilerl.utils.probe_envs_llm.MultiInputConditionalEnv`
+- ``debugging_llm_stage_3.py`` -> :class:`~agilerl.utils.probe_envs_llm.GridNavigationEnv`
 
 These scripts use slightly different evaluation metrics by stage. Some stages use exact-match accuracy for generated output, which is stricter than the substring-based reward used by the environment.
 
@@ -214,59 +214,59 @@ Single-agent Probe Environments
 
    * - **Probe Environment**
      - **Details**
-   * - :ref:`ConstantRewardEnv<single_ConstantRewardEnv>`
+   * - :class:`~agilerl.utils.probe_envs.ConstantRewardEnv`
 
-       :ref:`ConstantRewardImageEnv<single_ConstantRewardImageEnv>`
+       :class:`~agilerl.utils.probe_envs.ConstantRewardImageEnv`
 
-       :ref:`ConstantRewardContActionsEnv<single_ConstantRewardContActionsEnv>`
+       :class:`~agilerl.utils.probe_envs.ConstantRewardContActionsEnv`
 
-       :ref:`ConstantRewardContActionsImageEnv<single_ConstantRewardContActionsImageEnv>`
+       :class:`~agilerl.utils.probe_envs.ConstantRewardContActionsImageEnv`
 
      - **Constant Reward Environment**
 
        Isolates the value/critic network. Agents should be able to learn that the value of the only observation they see is 1. Failure indicates a problem with the loss of this network.
-   * - :ref:`ObsDependentRewardEnv<single_ObsDependentRewardEnv>`
+   * - :class:`~agilerl.utils.probe_envs.ObsDependentRewardEnv`
 
-       :ref:`ObsDependentRewardImageEnv<single_ObsDependentRewardImageEnv>`
+       :class:`~agilerl.utils.probe_envs.ObsDependentRewardImageEnv`
 
-       :ref:`ObsDependentRewardContActionsEnv<single_ObsDependentRewardContActionsEnv>`
+       :class:`~agilerl.utils.probe_envs.ObsDependentRewardContActionsEnv`
 
-       :ref:`ObsDependentRewardContActionsImageEnv<single_ObsDependentRewardContActionsImageEnv>`
+       :class:`~agilerl.utils.probe_envs.ObsDependentRewardContActionsImageEnv`
 
      - **Observation-dependent Reward Environment**
 
        Isolates the value/critic network. Agents should be able to learn that the reward depends on the simple observation. Failure indicates a problem with the learning of this network.
-   * - :ref:`DiscountedRewardEnv<single_DiscountedRewardEnv>`
+   * - :class:`~agilerl.utils.probe_envs.DiscountedRewardEnv`
 
-       :ref:`DiscountedRewardImageEnv<single_DiscountedRewardImageEnv>`
+       :class:`~agilerl.utils.probe_envs.DiscountedRewardImageEnv`
 
-       :ref:`DiscountedRewardContActionsEnv<single_DiscountedRewardContActionsEnv>`
+       :class:`~agilerl.utils.probe_envs.DiscountedRewardContActionsEnv`
 
-       :ref:`DiscountedRewardContActionsImageEnv<single_DiscountedRewardContActionsImageEnv>`
+       :class:`~agilerl.utils.probe_envs.DiscountedRewardContActionsImageEnv`
 
      - **Discounted Reward Environment**
 
        Agents should be able to learn that the reward depends on the simple observation, and also apply discounting. Failure indicates a problem with reward discounting.
-   * - :ref:`FixedObsPolicyEnv<single_FixedObsPolicyEnv>`
+   * - :class:`~agilerl.utils.probe_envs.FixedObsPolicyEnv`
 
-       :ref:`FixedObsPolicyImageEnv<single_FixedObsPolicyImageEnv>`
+       :class:`~agilerl.utils.probe_envs.FixedObsPolicyImageEnv`
 
-       :ref:`FixedObsPolicyContActionsEnv<single_FixedObsPolicyContActionsEnv>`
+       :class:`~agilerl.utils.probe_envs.FixedObsPolicyContActionsEnv`
 
-       :ref:`FixedObsPolicyContActionsImageEnv<single_FixedObsPolicyContActionsImageEnv>`
+       :class:`~agilerl.utils.probe_envs.FixedObsPolicyContActionsImageEnv`
 
      - **Fixed-observation Policy Environment**
 
        Isolates the policy/actor network. Agents should be able to learn the reward depends on action taken under the same observation. Failure indicates a problem with policy loss or updates.
-   * - :ref:`PolicyEnv<single_PolicyEnv>`
+   * - :class:`~agilerl.utils.probe_envs.PolicyEnv`
 
-       :ref:`PolicyImageEnv<single_PolicyImageEnv>`
+       :class:`~agilerl.utils.probe_envs.PolicyImageEnv`
 
-       :ref:`PolicyContActionsEnv<single_PolicyContActionsEnv>`
+       :class:`~agilerl.utils.probe_envs.PolicyContActionsEnv`
 
-       :ref:`PolicyContActionsImageEnvSimple<single_PolicyContActionsImageEnvSimple>`
+       :class:`~agilerl.utils.probe_envs.PolicyContActionsImageEnvSimple`
 
-       :ref:`PolicyContActionsImageEnv<single_PolicyContActionsImageEnv>`
+       :class:`~agilerl.utils.probe_envs.PolicyContActionsImageEnv`
 
      - **Observation-dependent Policy Environment**
 
@@ -282,71 +282,71 @@ Multi-agent Probe Environments
 
    * - **Probe Environment**
      - **Details**
-   * - :ref:`ConstantRewardEnv<multi_ConstantRewardEnv>`
+   * - :class:`~agilerl.utils.probe_envs_ma.ConstantRewardEnv`
 
-       :ref:`ConstantRewardImageEnv<multi_ConstantRewardImageEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.ConstantRewardImageEnv`
 
-       :ref:`ConstantRewardContActionsEnv<multi_ConstantRewardContActionsEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.ConstantRewardContActionsEnv`
 
-       :ref:`ConstantRewardContActionsImageEnv<multi_ConstantRewardContActionsImageEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.ConstantRewardContActionsImageEnv`
 
      - **Constant Reward Environment**
 
        Isolates the value/critic network. Agents should be able to learn that the value of the only observation they see is 1. Failure indicates a problem with the loss of this network.
-   * - :ref:`ObsDependentRewardEnv<multi_ObsDependentRewardEnv>`
+   * - :class:`~agilerl.utils.probe_envs_ma.ObsDependentRewardEnv`
 
-       :ref:`ObsDependentRewardImageEnv<multi_ObsDependentRewardImageEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.ObsDependentRewardImageEnv`
 
-       :ref:`ObsDependentRewardContActionsEnv<multi_ObsDependentRewardContActionsEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.ObsDependentRewardContActionsEnv`
 
-       :ref:`ObsDependentRewardContActionsImageEnv<multi_ObsDependentRewardContActionsImageEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.ObsDependentRewardContActionsImageEnv`
 
      - **Observation-dependent Reward Environment**
 
        Isolates the value/critic network. Agents should be able to learn that the reward depends on the simple observation. Failure indicates a problem with the learning of this network.
-   * - :ref:`DiscountedRewardEnv<multi_DiscountedRewardEnv>`
+   * - :class:`~agilerl.utils.probe_envs_ma.DiscountedRewardEnv`
 
-       :ref:`DiscountedRewardImageEnv<multi_DiscountedRewardImageEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.DiscountedRewardImageEnv`
 
-       :ref:`DiscountedRewardContActionsEnv<multi_DiscountedRewardContActionsEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.DiscountedRewardContActionsEnv`
 
-       :ref:`DiscountedRewardContActionsImageEnv<multi_DiscountedRewardContActionsImageEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.DiscountedRewardContActionsImageEnv`
 
      - **Discounted Reward Environment**
 
        Agents should be able to learn that the reward depends on the simple observation, and also apply discounting. Failure indicates a problem with reward discounting.
-   * - :ref:`FixedObsPolicyEnv<multi_FixedObsPolicyEnv>`
+   * - :class:`~agilerl.utils.probe_envs_ma.FixedObsPolicyEnv`
 
-       :ref:`FixedObsPolicyImageEnv<multi_FixedObsPolicyImageEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.FixedObsPolicyImageEnv`
 
-       :ref:`FixedObsPolicyContActionsEnv<multi_FixedObsPolicyContActionsEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.FixedObsPolicyContActionsEnv`
 
-       :ref:`FixedObsPolicyContActionsImageEnv<multi_FixedObsPolicyContActionsImageEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.FixedObsPolicyContActionsImageEnv`
 
      - **Fixed-observation Policy Environment**
 
        Isolates the policy/actor network. Agents should be able to learn the reward depends on action taken under the same observation. Failure indicates a problem with policy loss or updates.
-   * - :ref:`PolicyEnv<multi_PolicyEnv>`
+   * - :class:`~agilerl.utils.probe_envs_ma.PolicyEnv`
 
-       :ref:`PolicyImageEnv<multi_PolicyImageEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.PolicyImageEnv`
 
-       :ref:`PolicyContActionsEnv<multi_PolicyContActionsEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.PolicyContActionsEnv`
 
-       :ref:`PolicyContActionsImageEnv<multi_PolicyContActionsImageEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.PolicyContActionsImageEnv`
 
      - **Observation-dependent Policy Environment**
 
        Agents should be able to learn the reward depends on different actions taken under different observations. The value/critic and policy/actor networks work together to learn to solve the environment. The policy network should learn the correct actions to output and the value network should learn the value. With Q-learning, the actor is doing both. Failure indicates a problem with the overall algorithm, batching, or even hyperparameters.
-   * - :ref:`MultiPolicyEnv<multi_MultiPolicyEnv>`
+   * - :class:`~agilerl.utils.probe_envs_ma.MultiPolicyEnv`
 
-       :ref:`MultiPolicyImageEnv<multi_MultiPolicyImageEnv>`
+       :class:`~agilerl.utils.probe_envs_ma.MultiPolicyImageEnv`
 
      - **Observation-dependent Multi-agent Policy Environment**
 
        Harder version of Observation-dependent Policy Environment. Critic networks should be able to evaluate a reward dependent on actions taken by all agents, while actors should still learn to take the correct action. Failure indicates a problem with the mutli-agent algorithm, or may have other minor causes such as incorrect hyperparameters.
 
 
-LLM probe environments
+LLM Probe Environments
 ~~~~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
@@ -355,11 +355,11 @@ LLM probe environments
 
    * - **Probe Environment**
      - **Details**
-   * - ``ConstantTargetEnv``
+   * - :class:`~agilerl.utils.probe_envs_llm.ConstantTargetEnv`
      - **Constant target (single turn).** Fixed prompt and fixed target digit. Reward is ``+1`` when the generated text contains the target digit, otherwise ``-1``. Useful for basic end-to-end wiring checks.
-   * - ``ConditionalTargetEnv``
+   * - :class:`~agilerl.utils.probe_envs_llm.ConditionalTargetEnv`
      - **Observation-conditioned target (single turn).** Observation is one digit and target is ``(digit % 3) + 1``. Reward is substring-based (target digit appears in generated text). Useful for checking observation conditioning.
-   * - ``MultiInputConditionalEnv``
+   * - :class:`~agilerl.utils.probe_envs_llm.MultiInputConditionalEnv`
      - **Two-input conditional target (single turn).** Observation is two digits and target is ``((d1 + d2) % 3) + 1``. Reward is substring-based. Useful for checking simple compositional reasoning over multiple inputs.
-   * - ``GridNavigationEnv``
+   * - :class:`~agilerl.utils.probe_envs_llm.GridNavigationEnv`
      - **Multi-turn navigation.** Initial observation encodes ``<start><target>``; later observations provide current position only. Actions are parsed from the first valid generated digit (``"1"`` left, ``"2"`` stay, ``"3"`` right). Rewards are ``+1`` on success, ``step_cost`` on intermediate steps, and ``-1`` when max turns are reached without success.

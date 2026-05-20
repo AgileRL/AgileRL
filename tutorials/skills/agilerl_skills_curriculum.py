@@ -9,7 +9,6 @@ from gymnasium.spaces import Discrete
 from agilerl.algorithms.ppo import PPO
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import (
-    create_population,
     make_skill_vect_envs,
     make_vect_envs,
 )
@@ -127,34 +126,38 @@ class LandingSkill(Skill):
 
 
 if __name__ == "__main__":
-    NET_CONFIG = {
-        "encoder_config": {"hidden_size": [64]},  # Encoder hidden size
-        "head_config": {"hidden_size": [64]},  # Actor head hidden size
-    }
-
-    INIT_HP = {
-        "ENV_NAME": "LunarLander-v3",
-        "ALGO": "PPO",
-        "POPULATION_SIZE": 1,  # Population size
-        "BATCH_SIZE": 128,  # Batch size
-        "LR": 1e-3,  # Learning rate
-        "LEARN_STEP": 128,  # Learning frequency
-        "GAMMA": 0.99,  # Discount factor
-        "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
-        "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
-        "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
-        "ENT_COEF": 0.01,  # Entropy coefficient
-        "VF_COEF": 0.5,  # Value function coefficient
-        "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
-        "TARGET_KL": None,  # Target KL divergence threshold
-        "TARGET_SCORE": 2000,
-        "MAX_STEPS": 10_000_000,
-        "EVO_STEPS": 10_000,
-        "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-        "WANDB": True,
-    }
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    env_name = "LunarLander-v3"
+
+    # Network configuration
+    net_config = {
+        "encoder_config": {"hidden_size": [64]},
+        "head_config": {"hidden_size": [64]},
+    }
+
+    # Algorithm hyperparameters
+    init_hp = {
+        "batch_size": 128,
+        "lr": 1e-3,
+        "learn_step": 128,
+        "gamma": 0.99,
+        "gae_lambda": 0.95,
+        "action_std_init": 0.6,
+        "clip_coef": 0.2,
+        "ent_coef": 0.01,
+        "vf_coef": 0.5,
+        "max_grad_norm": 0.5,
+        "target_kl": None,
+        "update_epochs": 4,
+    }
+
+    # Training parameters
+    population_size = 1
+    max_steps = 10_000_000
+    evo_steps = 10_000
+    target_score = 2000
+    use_wandb = True
 
     # Directory to save trained agents and skills
     save_dir = "./models/PPO"
@@ -168,7 +171,7 @@ if __name__ == "__main__":
 
     for skill in skills:
         env = make_skill_vect_envs(
-            INIT_HP["ENV_NAME"],
+            env_name,
             skills[skill],
             num_envs=1,
         )  # Create environment
@@ -176,27 +179,26 @@ if __name__ == "__main__":
         observation_space = env.single_observation_space
         action_space = env.single_action_space
 
-        pop = create_population(
-            algo="PPO",  # Algorithm
-            observation_space=observation_space,  # Observation space
-            action_space=action_space,  # Action space
-            net_config=NET_CONFIG,  # Network configuration
-            INIT_HP=INIT_HP,  # Initial hyperparameters
-            population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+        pop = PPO.population(
+            size=population_size,
+            observation_space=observation_space,
+            action_space=action_space,
+            net_config=net_config,
             device=device,
+            **init_hp,
         )
 
         trained_pop, pop_fitnesses = train_on_policy(
             env=env,  # Gym-style environment
-            env_name=f"{INIT_HP['ENV_NAME']}-{skill}",  # Environment name
-            algo=INIT_HP["ALGO"],  # Algorithm
+            env_name=f"{env_name}-{skill}",  # Environment name
+            algo="PPO",  # Algorithm
             pop=pop,  # Population of agents
-            max_steps=INIT_HP["MAX_STEPS"],  # Max number of training episodes
-            evo_steps=INIT_HP["EVO_STEPS"],  # Evolution frequency
-            target=INIT_HP["TARGET_SCORE"],  # Target score for early stopping
+            max_steps=max_steps,  # Max number of training episodes
+            evo_steps=evo_steps,  # Evolution frequency
+            target=target_score,  # Target score for early stopping
             tournament=None,  # Tournament selection object
             mutation=None,  # Mutations object
-            wb=INIT_HP["WANDB"],  # Weights and Biases tracking
+            wb=True,  # Weights and Biases tracking
         )
 
         # Save the trained algorithm
@@ -218,7 +220,7 @@ if __name__ == "__main__":
         2: {"skill": "landing", "agent": landing_agent, "skill_duration": 40},
     }
 
-    env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=1)  # Create environment
+    env = make_vect_envs(env_name, num_envs=1)  # Create environment
 
     observation_space = env.single_observation_space
 
@@ -226,37 +228,33 @@ if __name__ == "__main__":
         trained_skills,
     )  # Selector will be trained to choose which trained skill to use
 
-    pop = create_population(
-        algo="PPO",  # Algorithm
-        observation_space=observation_space,  # Observation space
-        action_space=Discrete(action_dim),  # Action space
-        net_config=NET_CONFIG,  # Network configuration
-        INIT_HP=INIT_HP,  # Initial hyperparameters
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+    pop = PPO.population(
+        size=population_size,
+        observation_space=observation_space,
+        action_space=Discrete(action_dim),
+        net_config=net_config,
         device=device,
+        **init_hp,
     )
 
-    if INIT_HP["WANDB"]:
+    if use_wandb:
         wandb.init(
-            # set the wandb project where this run will be logged
             project="EvoWrappers",
             name="{}-EvoHPO-{}-{}".format(
-                INIT_HP["ENV_NAME"],
-                INIT_HP["ALGO"],
+                env_name,
+                "PPO",
                 datetime.now(tz=timezone.utc).strftime("%m%d%Y%H%M%S"),
             ),
-            # track hyperparameters and run metadata
             config={
-                "algo": f"Evo HPO {INIT_HP['ALGO']}",
-                "env": INIT_HP["ENV_NAME"],
-                "INIT_HP": INIT_HP,
+                "algo": "Evo HPO PPO",
+                "env": env_name,
+                "init_hp": init_hp,
             },
         )
 
-    total_steps = 0
-
     # RL training loop
-    while np.less([agent.steps for agent in pop], INIT_HP["MAX_STEPS"]).all():
+    total_steps = 0
+    while np.less([agent.steps for agent in pop], max_steps).all():
         for agent in pop:  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
@@ -324,9 +322,9 @@ if __name__ == "__main__":
             agent.steps += 500
             total_steps += 500
 
-        if (agent.steps) % INIT_HP["EVO_STEPS"] == 0:
+        if (agent.steps) % evo_steps == 0:
             mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
-            if INIT_HP["WANDB"]:
+            if use_wandb:
                 wandb.log(
                     {
                         "global_step": total_steps,
@@ -341,8 +339,7 @@ if __name__ == "__main__":
                 end="\r",
             )
 
-    if INIT_HP["WANDB"]:
-        wandb.finish()
+    wandb.finish()
     env.close()
 
     # Save the trained selector
