@@ -10,8 +10,8 @@ using a **BinPacking2D** environment as our example.
 Prerequisites
 -------------
 
-Install Arena dependencies
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Installation
+~~~~~~~~~~~~
 
 Arena requires additional packages (``httpx``, ``rich``, etc.) that are not included in the
 base AgileRL installation. Install them with:
@@ -20,8 +20,8 @@ base AgileRL installation. Install them with:
 
    pip install agilerl[arena]
 
-Authenticate with Arena
-~~~~~~~~~~~~~~~~~~~~~~~
+Authentication
+~~~~~~~~~~~~~~
 
 All Arena operations require authentication. You can authenticate in one of two ways:
 
@@ -61,7 +61,7 @@ All Arena operations require authentication. You can authenticate in one of two 
    Credentials are persisted locally so you only need to authenticate once per machine.
 
 The Environment
----------------
+~~~~~~~~~~~~~~~
 
 Our agent must place randomly generated 2D packages into a 10×10 bin, maximising space
 usage while respecting height and support constraints. The environment follows the
@@ -73,8 +73,8 @@ standard Gymnasium interface with a discrete action space (position × orientati
       :language: python
 
 
-Step 1: Validate the Environment
----------------------------------
+Validate the Environment
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 Before training, we need to register and validate our environment on Arena. Validation
 ensures the environment is importable, has the correct interface, and can be stepped
@@ -114,12 +114,16 @@ After validation succeeds, the environment is automatically profiled to determin
 resource requirements. You will be able to view it in the **Environments** section of the Arena
 dashboard.
 
-Step 2: Submit a Training Job
-------------------------------
+Submit a Training Job
+~~~~~~~~~~~~~~~~~~~~~
 
 With the environment validated, we can submit a training experiment. We define the
-training configuration in a YAML manifest. Note how in the ``environment`` section we reference the
-environment by its name as seen on Arena. If no version is specified, the latest one is used.
+training configuration in a YAML manifest (``bin_packing_ppo.yaml``). Note how in the ``environment`` section we
+reference the validated environment by its name as seen on Arena. If no version is specified, the latest one is used.
+
+Here we decide to train on the ``arena-medium`` resource, which has 1x nvidia-l4 GPU, 15x CPUs, and 55GB of RAM
+(costing around 2.41 credits/node-hour on Arena). You can view all of the available resources to train on by
+running the ``arena resources list`` command.
 
 .. collapse:: bin_packing_ppo.yaml
 
@@ -181,17 +185,22 @@ environment by its name as seen on Arena. If no version is specified, the latest
 
          arena experiments submit \
              --manifest bin_packing_ppo.yaml \
-             --resource-id arena-medium \
-             --num-nodes 2 \
-             --project 'BinPacking Tutorial' \
+             --resource-id arena-medium \ # can be any of the available resources on Arena
+             --num-nodes 2 \ # number of nodes to use in the training cluster
+             --project 'BinPacking Tutorial' \ # project to submit the experiment to
              --experiment-name bin-packing-ppo-v1
 
 .. note::
 
    Since we specified two nodes and a population size of 6, Arena will train 3 agents on each of the nodes in parallel.
 
-Step 3: Monitor Training
--------------------------
+.. warning::
+
+   The training cost scales linearly with the number of nodes. In this case, the training cost will be
+   2.41 credits/node-hour * 2 nodes = 4.82 credits / hour.
+
+Monitor Training
+~~~~~~~~~~~~~~~~
 
 You can monitor training progress directly from the Arena dashboard, or download
 metrics programmatically:
@@ -227,8 +236,8 @@ metrics programmatically:
          # List checkpoints
          arena experiments checkpoints bin-packing-ppo-v1
 
-Step 4: Deploy the Trained Agent
----------------------------------
+Deploy the Trained Agent
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Once training is complete, deploy the best checkpoint to an inference endpoint:
 
@@ -260,8 +269,8 @@ Once training is complete, deploy the best checkpoint to an inference endpoint:
          # Deploy a specific checkpoint
          arena experiments deploy bin-packing-ppo-v1 --checkpoint step_500000
 
-Step 5: Interact with the Deployed Agent
------------------------------------------
+Interact with the Deployed Agent
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 After deployment, you can send observations and receive actions through the inference
 API:

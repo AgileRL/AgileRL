@@ -129,7 +129,8 @@ class ArenaClient:
     """
 
     # BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
-    BASE_URL: ClassVar[str] = "https://arena-dev.agilerl.rlops.ai"
+    # BASE_URL: ClassVar[str] = "https://arena-dev.agilerl.rlops.ai"
+    BASE_URL: ClassVar[str] = "http://localhost:3001"
 
     _ERROR_MAP: ClassVar[dict[str, type[ArenaAPIError]]] = {
         "/api/cli/v1/environments/create-and-validate": ArenaValidationError,

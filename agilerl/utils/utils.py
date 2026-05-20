@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING, Any
 import gymnasium as gym
 import numpy as np
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -353,6 +353,9 @@ def create_population(
 ) -> PopulationType:
     """Return population of identical agents.
 
+    .. deprecated::
+        Use ``Algorithm.population()`` instead (e.g. ``DQN.population(size=4, ...)``).
+
     :param algo: RL algorithm
     :type algo: str
     :param net_config: Network configuration
@@ -390,13 +393,17 @@ def create_population(
     :type lora_config: Any, optional
     :param vllm_config: ``VLLMConfig`` for GRPO / LLMPPO / LLMREINFORCE (ignored for DPO).
     :type vllm_config: Any, optional
-    :return: Population of agents
-    :rtype: list[EvolvableAlgorithm]
     :param algo_kwargs: Additional keyword arguments for the algorithm
     :type algo_kwargs: dict, optional
     :return: Population of agents
     :rtype: list[EvolvableAlgorithm]
     """
+    warnings.warn(
+        f"create_population() is deprecated. Use {algo}.population() instead "
+        f"(e.g. {algo}.population(size=4, observation_space=obs, action_space=act, ...)).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if algo_kwargs is None:
         algo_kwargs = {}
     population = []

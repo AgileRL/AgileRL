@@ -28,11 +28,13 @@ policy, potentially limiting exploration and the use of past experiences.
 Training with LocalTrainer
 --------------------------
 
-The simplest way to train an on-policy agent is with a YAML manifest and the
+The recommended way to train a fully-customised on-policy agent is through a YAML manifest and the
 :class:`~agilerl.training.trainer.LocalTrainer`. This handles population
 creation, rollout collection, evolutionary HPO, and the training loop automatically.
 
-.. collapse:: Example manifest: PPO on LunarLander-v3
+Here is an example manifest to train PPO on LunarLander-v3:
+
+.. collapse:: ppo.yaml
 
   .. code-block:: yaml
 
@@ -81,10 +83,18 @@ creation, rollout collection, evolutionary HPO, and the training loop automatica
         params_mut: 0.2
         rl_hp_mut: 0.2
       rl_hp_selection:
-        lr:   { min: 0.0001, max: 0.01 }
-        batch_size: { min: 8, max: 1024 }
-        learn_step: { min: 256, max: 8192 }
-        ent_coef: { min: 0.001, max: 0.1 }
+        lr:
+          min: 0.0001
+          max: 0.01
+        batch_size:
+          min: 8
+          max: 1024
+        learn_step:
+          min: 256
+          max: 8192
+        ent_coef:
+          min: 0.001
+          max: 0.1
       mutation_sd: 0.1
       rand_seed: 42
 
@@ -100,18 +110,18 @@ creation, rollout collection, evolutionary HPO, and the training loop automatica
 
          from agilerl.training.trainer import LocalTrainer
 
-         trainer = LocalTrainer.from_manifest("configs/training/ppo/ppo.yaml")
+         trainer = LocalTrainer.from_manifest("ppo.yaml")
          population, fitnesses = trainer.train()
 
    .. tab-item:: CLI
 
       .. code-block:: bash
 
-         python -m agilerl.train -m configs/training/ppo/ppo.yaml
+         python -m agilerl.train -m ppo.yaml
 
 .. seealso::
 
-   Full manifest reference and additional options: :ref:`trainers`
+   :ref:`trainers` for full manifest reference and additional options.
 
 
 .. _initpop_on_policy:
@@ -126,55 +136,85 @@ are more likely to remain present in the population. The sequence of evolution (
 .. collapse:: Example Population Creation
   :open:
 
-    .. code-block:: python
+.. code-block:: python
 
-        import torch
-        from agilerl.utils.utils import (
-            create_population,
-            make_vect_envs,
-        )
+    import torch
+    from agilerl.algorithms import PPO
+    from agilerl.utils.utils import make_vect_envs
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        NET_CONFIG = {
-            "encoder_config": {"hidden_size": [32, 32]}  # Actor head hidden size
-        }
+    num_envs = 16
+    env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
 
-        INIT_HP = {
-            "POP_SIZE": 6,  # Population size
-            "BATCH_SIZE": 128,  # Batch size
-            "LR": 1e-3,  # Learning rate
-            "LEARN_STEP": 128,  # Learning frequency
-            "GAMMA": 0.99,  # Discount factor
-            "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
-            "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
-            "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
-            "ENT_COEF": 0.01,  # Entropy coefficient
-            "VF_COEF": 0.5,  # Value function coefficient
-            "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
-            "TARGET_KL": None,  # Target KL divergence threshold
-            "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-        }
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
 
-        num_envs = 16
-        env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
+    # Configure network architecture
+    net_config = {
+        "encoder_config": {"hidden_size": [32, 32]}  # Actor head hidden size
+    }
 
-        observation_space = env.single_observation_space
-        action_space = env.single_action_space
+    # Algorithm hyperparameters
+    init_hp = {
+        "batch_size": 128,
+        "lr": 1e-3,
+        "learn_step": 128,
+        "gamma": 0.99,
+        "gae_lambda": 0.95,
+        "action_std_init": 0.6,
+        "clip_coef": 0.2,
+        "ent_coef": 0.01,
+        "vf_coef": 0.5,
+        "max_grad_norm": 0.5,
+        "target_kl": None,
+        "update_epochs": 4,
+        "num_envs": num_envs,
+    }
 
-        pop = create_population(
-            algo="PPO",  # RL algorithm
-            observation_space=observation_space,  # State dimension
-            action_space=action_space,  # Action dimension
-            net_config=NET_CONFIG,  # Network configuration
-            INIT_HP=INIT_HP,  # Initial hyperparameters
-            population_size=INIT_HP["POP_SIZE"],  # Population size
-            num_envs=num_envs,  # Number of vectorized envs
-            device=device,
-        )
+    # Initialize population
+    population_size = 6
+    pop = PPO.population(
+        size=population_size,
+        observation_space=observation_space,
+        action_space=action_space,
+        net_config=net_config,
+        device=device,
+        **init_hp,
+    )
+
+Evolutionary HPO
+~~~~~~~~~~~~~~~~~
+
+Tournament selection is used to select the agents from a population which will make up the next generation of agents. If
+elitism is used, the best agent from a population is automatically preserved and becomes a member of the next generation.
+Mutation is periodically used to explore the hyperparameter space.
+
+.. code-block:: python
+
+    from agilerl.hpo.mutation import Mutations
+    from agilerl.hpo.tournament import TournamentSelection
+
+    tournament = TournamentSelection(
+        tournament_size=2,  # Tournament selection size
+        elitism=True,  # Elitism in tournament selection
+        population_size=6,  # Population size
+    )
+
+    mutations = Mutations(
+        no_mutation=0.4,  # No mutation
+        architecture=0.2,  # Architecture mutation
+        new_layer_prob=0.2,  # New layer mutation
+        parameters=0.2,  # Network parameters mutation
+        activation=0,  # Activation layer mutation
+        rl_hp=0.2,  # Learning HP mutation
+        mutation_sd=0.1,  # Mutation strength
+        rand_seed=1,  # Random seed
+        device=device,
+    )
 
 Training Loop
--------------
+~~~~~~~~~~~~~
 
 While off-policy RL algorithms can be considered more sample-efficient than on-policy algorithms, due to their ability to learn from experiences
 collected using a different or previous policy, on-policy algorithms often do better in practice due to the improved stability during training.
@@ -226,13 +266,20 @@ Alternatively, use a custom on-policy training loop:
         import numpy as np
         import torch
         from tqdm import trange
+        from agilerl.algorithms import PPO
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
-        from agilerl.utils.utils import create_population, make_vect_envs, default_progress_bar
+        from agilerl.utils.utils import make_vect_envs, default_progress_bar
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        NET_CONFIG = {
+        num_envs = 16
+        env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
+        observation_space = env.single_observation_space
+        action_space = env.single_action_space
+
+        # Configure network architecture
+        net_config = {
             "encoder_config": {
                 "hidden_size": [32, 32], # Encoder hidden size
                 "activation": "ReLU"
@@ -242,50 +289,37 @@ Alternatively, use a custom on-policy training loop:
             }
         }
 
-        INIT_HP = {
-            "POP_SIZE": 6,  # Population size
-            "BATCH_SIZE": 128,  # Batch size
-            "LR": 1e-3,  # Learning rate
-            "LEARN_STEP": 128,  # Learning frequency
-            "GAMMA": 0.99,  # Discount factor
-            "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
-            "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
-            "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
-            "ENT_COEF": 0.01,  # Entropy coefficient
-            "VF_COEF": 0.5,  # Value function coefficient
-            "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
-            "TARGET_KL": None,  # Target KL divergence threshold
-            "UPDATE_EPOCHS": 4,  # Number of policy update epochs
+        # Algorithm hyperparameters
+        init_hp = {
+            "batch_size": 128,
+            "lr": 1e-3,
+            "learn_step": 128,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "action_std_init": 0.6,
+            "clip_coef": 0.2,
+            "ent_coef": 0.01,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "target_kl": None,
+            "update_epochs": 4,
+            "num_envs": num_envs,
         }
 
-        num_envs = 16
-        env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
-        observation_space = env.single_observation_space
-        action_space = env.single_action_space
-
-        # RL hyperparameters configuration for mutation during training
-        hp_config = HyperparameterConfig(
-            lr = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(min=8, max=1024),
-            learn_step = RLParameter(min=64, max=1024)
-        )
-
-        pop = create_population(
-            algo="PPO",  # RL algorithm
-            observation_space=observation_space,  # State dimension
-            action_space=action_space,  # Action dimension
-            net_config=NET_CONFIG,  # Network configuration
-            INIT_HP=INIT_HP,  # Initial hyperparameters
-            hp_config=hp_config,  # Hyperparameters configuration
-            population_size=INIT_HP["POP_SIZE"],  # Population size
-            num_envs=num_envs,  # Number of vectorized envs
+        # Initialize population
+        pop = PPO.population(
+            size=6,
+            observation_space=observation_space,
+            action_space=action_space,
+            net_config=net_config,
             device=device,
+            **init_hp,
         )
 
         tournament = TournamentSelection(
             tournament_size=2,  # Tournament selection size
             elitism=True,  # Elitism in tournament selection
-            population_size=INIT_HP["POP_SIZE"],  # Population size
+            population_size=6,  # Population size
         )
 
         mutations = Mutations(
@@ -427,44 +461,17 @@ Recurrent on-policy algorithms require a different training loop to the standard
 between steps, which is not possible with the standard training loop. AgileRL currently supports recurrent policies to be used with ``PPO``. To use a recurrent policy,
 users must set ``recurrent=True`` when creating the algorithm.
 
-.. collapse:: Example Population Creation
+.. collapse:: End-to-end example: Recurrent PPO on LunarLander-v3
   :open:
 
     .. code-block:: python
 
         import torch
+        from agilerl.algorithms import PPO
         from agilerl.rollouts.on_policy import collect_rollouts_recurrent
-        from agilerl.utils.utils import create_population, make_vect_envs, default_progress_bar
+        from agilerl.utils.utils import make_vect_envs, default_progress_bar
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        NET_CONFIG = {
-            "encoder_config": {
-                "hidden_state_size": 64,
-                "num_layers": 1,
-                "max_seq_len": 512,
-            },
-            "head_config": {
-                "hidden_size": [64],
-            }
-        }
-
-        INIT_HP = {
-            "POP_SIZE": 6,  # Population size
-            "BATCH_SIZE": 128,  # Batch size
-            "LR": 1e-3,  # Learning rate
-            "LEARN_STEP": 128,  # Learning frequency
-            "GAMMA": 0.99,  # Discount factor
-            "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
-            "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
-            "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
-            "ENT_COEF": 0.01,  # Entropy coefficient
-            "VF_COEF": 0.5,  # Value function coefficient
-            "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
-            "RECURRENT": True,
-            "TARGET_KL": None,  # Target KL divergence threshold
-            "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-        }
 
         # Create environment
         num_envs = 16
@@ -473,22 +480,50 @@ users must set ``recurrent=True`` when creating the algorithm.
         observation_space = env.single_observation_space
         action_space = env.single_action_space
 
-        # Create population
-        pop = create_population(
-            algo="PPO",  # RL algorithm
-            observation_space=observation_space,  # State dimension
-            action_space=action_space,  # Action dimension
-            net_config=NET_CONFIG,  # Network configuration
-            INIT_HP=INIT_HP,  # Initial hyperparameters
-            population_size=INIT_HP["POP_SIZE"],  # Population size
-            num_envs=num_envs,  # Number of vectorized envs
+        # Configure network architecture
+        net_config = {
+            "encoder_config": {
+                "hidden_state_size": 64,
+                "num_layers": 1,
+            },
+            "head_config": {
+                "hidden_size": [64],
+            }
+        }
+
+        # Algorithm hyperparameters
+        init_hp = {
+            "batch_size": 128,
+            "lr": 1e-3,
+            "learn_step": 128,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "action_std_init": 0.6,
+            "clip_coef": 0.2,
+            "ent_coef": 0.01,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "recurrent": True,
+            "max_seq_len": 512,
+            "target_kl": None,
+            "update_epochs": 4,
+            "num_envs": num_envs,
+        }
+
+        # Initialize population
+        pop = PPO.population(
+            size=6,
+            observation_space=observation_space,
+            action_space=action_space,
+            net_config=net_config,
             device=device,
+            **init_hp,
         )
 
         tournament = TournamentSelection(
             tournament_size=2,  # Tournament selection size
             elitism=True,  # Elitism in tournament selection
-            population_size=INIT_HP["POP_SIZE"],  # Population size
+            population_size=6,  # Population size
         )
 
         mutations = Mutations(

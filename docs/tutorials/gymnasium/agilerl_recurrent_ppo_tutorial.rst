@@ -62,72 +62,8 @@ Dependencies
     from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.utils.utils import create_population, make_vect_envs
+    from agilerl.utils.utils import make_vect_envs
     from agilerl.rollouts.on_policy import collect_rollouts_recurrent
-
-Defining Hyperparameters
-------------------------
-Before we commence training, it's easiest to define all of our hyperparameters in one dictionary. Below is an example of
-such for the PPO algorithm. Additionally, we also define a mutations parameters dictionary, in which we determine what
-mutations we want to happen, to what extent we want these mutations to occur, and what RL hyperparameters we want to tune.
-Additionally, we also define our upper and lower limits for these hyperparameters to define search spaces.
-
-.. collapse:: Hyperparameter Configuration
-    :open:
-
-    .. code-block:: python
-
-        # Initial hyperparameters
-        num_envs = 8
-        INIT_HP = {
-            "POP_SIZE": 4,  # Population size
-            "BATCH_SIZE": 256,  # Batch size
-            "LR": 0.001,  # Learning rate
-            "LEARN_STEP": 1024 * num_envs,  # Learning frequency (global steps)
-            "GAMMA": 0.9,  # Discount factor
-            "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
-            "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
-            "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
-            "ENT_COEF": 0.0,  # Entropy coefficient
-            "VF_COEF": 0.5,  # Value function coefficient
-            "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
-            "SHARE_ENCODERS": True, # Flag to signal that we want to share encoders between agents
-            "RECURRENT": True # Flag to signal that we want a recurrent policy
-            "USE_ROLLOUT_BUFFER ": True # Use a rollout buffer for data collection
-            "TARGET_KL": None,  # Target KL divergence threshold
-            "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-            "TARGET_SCORE": -200.0,  # Target score that will beat the environment
-            "MAX_STEPS": 150000,  # Maximum number of steps an agent takes in an environment
-            "EVO_STEPS": 10000,  # Evolution frequency
-            "EVAL_STEPS": None,  # Number of evaluation steps per episode
-            "EVAL_LOOP": 3,  # Number of evaluation episodes
-            "TOURN_SIZE": 2,  # Tournament size
-            "ELITISM": True,  # Elitism in tournament selection
-            "BPTT_SEQUENCE_TYPE": BPTTSequenceType.CHUNKED, # Type of BPTT sequences to use
-            "MAX_SEQ_LEN": 16, # Maximum sequence length for truncated BPTT
-        }
-
-        # Mutation parameters
-        MUT_P = {
-            # Mutation probabilities
-            "NO_MUT": 0.4,  # No mutation
-            "ARCH_MUT": 0.2,  # Architecture mutation
-            "NEW_LAYER": 0.2,  # New layer mutation
-            "PARAMS_MUT": 0.2,  # Network parameters mutation
-            "ACT_MUT": 0.0,  # Activation layer mutation
-            "RL_HP_MUT": 0.2,  # Learning HP mutation
-            "MUT_SD": 0.1,  # Mutation strength
-            "RAND_SEED": 42,  # Random seed
-        }
-
-        # RL hyperparameters configuration for mutation during training
-        hp_config = HyperparameterConfig(
-            lr=RLParameter(min=1e-4, max=1e-2),
-            batch_size=RLParameter(min=128, max=1024),
-            # In general we want the entropy to decay over time
-            ent_coef=RLParameter(min=0.0001, max=0.001, grow_factor=1.0, shrink_factor=0.9),
-        )
-
 
 Create the Environment
 ----------------------
@@ -211,17 +147,44 @@ followed by mutations) is detailed further below.
         },
     }
 
+    # RL hyperparameters configuration for mutation during training
+    hp_config = HyperparameterConfig(
+        lr=RLParameter(min=1e-4, max=1e-2),
+        batch_size=RLParameter(min=128, max=1024),
+        ent_coef=RLParameter(min=0.0001, max=0.001, grow_factor=1.0, shrink_factor=0.9),
+    )
+
+    # Algorithm hyperparameters
+    init_hp = {
+        "batch_size": 256,
+        "lr": 0.001,
+        "learn_step": 1024 * num_envs,
+        "gamma": 0.9,
+        "gae_lambda": 0.95,
+        "action_std_init": 0.6,
+        "clip_coef": 0.2,
+        "ent_coef": 0.0,
+        "vf_coef": 0.5,
+        "max_grad_norm": 0.5,
+        "share_encoders": True,
+        "recurrent": True,
+        "use_rollout_buffer": True,
+        "target_kl": None,
+        "update_epochs": 4,
+        "bptt_sequence_type": BPTTSequenceType.CHUNKED,
+        "max_seq_len": 16,
+        "num_envs": num_envs,
+    }
+
     # Define a population
-    pop = create_population(
-        algo="PPO",  # RL algorithm
-        observation_space=observation_space,  # State dimension
-        action_space=action_space,  # Action dimension
-        net_config=net_config,  # Network configuration
-        INIT_HP=INIT_HP,  # Initial hyperparameter
-        hp_config=hp_config,  # RL hyperparameter configuration
-        population_size=INIT_HP["POP_SIZE"],  # Population size
-        num_envs=num_envs,
+    pop = PPO.population(
+        size=4,
+        observation_space=observation_space,
+        action_space=action_space,
+        net_config=net_config,
+        hp_config=hp_config,
         device=device,
+        **init_hp,
     )
 
     # Wrap the population with the RSNorm wrapper to
@@ -241,9 +204,9 @@ returns the best agent, and the new generation of agents.
 .. code-block:: python
 
     tournament = TournamentSelection(
-        INIT_HP["TOURN_SIZE"],
-        INIT_HP["ELITISM"],
-        INIT_HP["POP_SIZE"],
+        tournament_size=2,
+        elitism=True,
+        population_size=4,
     )
 
 Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be
@@ -265,14 +228,14 @@ Tournament selection and mutation should be applied sequentially to fully evolve
 .. code-block:: python
 
     mutations = Mutations(
-        no_mutation=MUT_P["NO_MUT"],
-        architecture=MUT_P["ARCH_MUT"],
-        new_layer_prob=MUT_P["NEW_LAYER"],
-        parameters=MUT_P["PARAMS_MUT"],
-        activation=MUT_P["ACT_MUT"],
-        rl_hp=MUT_P["RL_HP_MUT"],
-        mutation_sd=MUT_P["MUT_SD"],
-        rand_seed=MUT_P["RAND_SEED"],
+        no_mutation=0.4,
+        architecture=0.2,
+        new_layer_prob=0.2,
+        parameters=0.2,
+        activation=0.0,
+        rl_hp=0.2,
+        mutation_sd=0.1,
+        rand_seed=42,
         device=device,
     )
 
@@ -292,17 +255,22 @@ fitnesses (fitness is each agents test scores on the environment).
     # Define a save path for our trained agent
     save_path = "PPO_trained_agent.pt"
 
+    # Training parameters
+    max_steps = 1000000
+    evo_steps = 10000
+    eval_steps = None
+    eval_loop = 3
+
     trained_pop, pop_fitnesses = train_on_policy(
         env=env,
         env_name="PendulumNoVel-v1",
         algo="PPO",
         pop=pop,
-        INIT_HP=INIT_HP,
-        MUT_P=MUT_P,
-        max_steps=INIT_HP["MAX_STEPS"],
-        evo_steps=INIT_HP["EVO_STEPS"],
-        eval_steps=INIT_HP["EVAL_STEPS"],
-        eval_loop=INIT_HP["EVAL_LOOP"],
+        init_hp=init_hp,
+        max_steps=max_steps,
+        evo_steps=evo_steps,
+        eval_steps=eval_steps,
+        eval_loop=eval_loop,
         tournament=tournament,
         mutation=mutations,
         wb=False,  # Boolean flag to record run with Weights & Biases
@@ -339,7 +307,7 @@ function and is an example of how we might choose to make use of a population of
         # --- Training Loop ---
         max_steps = 1_000_000
         required_score = -200
-        evo_steps = INIT_HP["LEARN_STEP"] * 5
+        evo_steps = init_hp["learn_step"] * 5
         eval_steps = None
 
         total_steps = 0

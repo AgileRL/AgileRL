@@ -48,7 +48,7 @@ Dependencies
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_on_policy import train_on_policy
-    from agilerl.utils.utils import create_population, make_vect_envs
+    from agilerl.utils.utils import make_vect_envs
     from agilerl.rollouts.on_policy import collect_rollouts
 
 Defining Hyperparameters
@@ -58,53 +58,37 @@ such for the PPO algorithm. Additionally, we also define a mutations parameters 
 mutations we want to happen, to what extent we want these mutations to occur, and what RL hyperparameters we want to tune.
 Additionally, we also define our upper and lower limits for these hyperparameters to define search spaces.
 
-.. collapse:: Hyperparameter Configuration
+.. collapse:: Evo-HPO Configuration
 
     .. code-block:: python
 
-        # Initial hyperparameters
-        INIT_HP = {
-            "POP_SIZE": 4,  # Population size
-            "BATCH_SIZE": 128,  # Batch size
-            "LR": 0.001,  # Learning rate
-            "LEARN_STEP": 1024,  # Learning frequency
-            "GAMMA": 0.99,  # Discount factor
-            "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
-            "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
-            "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
-            "ENT_COEF": 0.01,  # Entropy coefficient
-            "VF_COEF": 0.5,  # Value function coefficient
-            "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
-            "TARGET_KL": None,  # Target KL divergence threshold
-            "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-            "TARGET_SCORE": 200.0,  # Target score that will beat the environment
-            "MAX_STEPS": 150000,  # Maximum number of steps an agent takes in an environment
-            "EVO_STEPS": 10000,  # Evolution frequency
-            "EVAL_STEPS": None,  # Number of evaluation steps per episode
-            "EVAL_LOOP": 3,  # Number of evaluation episodes
-            "TOURN_SIZE": 2,  # Tournament size
-            "ELITISM": True,  # Elitism in tournament selection
-        }
-
-        # Mutation parameters
-        MUT_P = {
-            # Mutation probabilities
-            "NO_MUT": 0.4,  # No mutation
-            "ARCH_MUT": 0.2,  # Architecture mutation
-            "NEW_LAYER": 0.2,  # New layer mutation
-            "PARAMS_MUT": 0.2,  # Network parameters mutation
-            "ACT_MUT": 0.2,  # Activation layer mutation
-            "RL_HP_MUT": 0.2,  # Learning HP mutation
-            "MUT_SD": 0.1,  # Mutation strength
-            "RAND_SEED": 42,  # Random seed
-        }
+        # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
+        net_config = {"head_config": {"hidden_size": [64, 64]}}
 
         # RL hyperparameters configuration for mutation during training
         hp_config = HyperparameterConfig(
             lr = RLParameter(min=1e-4, max=1e-2),
             batch_size = RLParameter(min=8, max=1024),
+            learn_step = RLParameter(min=1, max=10, grow_factor=1.5, shrink_factor=0.75),
+            ent_coef=RLParameter(min=0.0001, max=0.001, grow_factor=1.0, shrink_factor=0.9),
         )
 
+        # Algorithm hyperparameters
+        init_hp = {
+            "batch_size": 128,
+            "lr": 0.001,
+            "learn_step": 1024,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "action_std_init": 0.6,
+            "clip_coef": 0.2,
+            "ent_coef": 0.01,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "target_kl": None,
+            "update_epochs": 4,
+            "num_envs": num_envs,
+        }
 
 Create the Environment
 ----------------------
@@ -131,23 +115,16 @@ followed by mutations) is detailed further below.
 
 .. code-block:: python
 
-    # Set-up the device
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
-    net_config = {"head_config": {"hidden_size": [64, 64]}}
-
     # Define a population
-    pop = create_population(
-        algo="PPO",  # RL algorithm
-        observation_space=observation_space,  # State dimension
-        action_space=action_space,  # Action dimension
-        net_config=net_config,  # Network configuration
-        INIT_HP=INIT_HP,  # Initial hyperparameter
-        hp_config=hp_config,  # RL hyperparameter configuration
-        population_size=INIT_HP["POP_SIZE"],  # Population size
-        num_envs=num_envs,
-        device=device,
+    population_size = 4
+    pop = PPO.population(
+        size=population_size,
+        observation_space=observation_space,
+        action_space=action_space,
+        net_config=net_config,
+        hp_config=hp_config,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        **init_hp,
     )
 
 Creating Mutations and Tournament Objects
@@ -163,9 +140,9 @@ returns the best agent, and the new generation of agents.
 .. code-block:: python
 
     tournament = TournamentSelection(
-        INIT_HP["TOURN_SIZE"],
-        INIT_HP["ELITISM"],
-        INIT_HP["POP_SIZE"],
+        tournament_size=2,
+        elitism=True,
+        population_size=population_size,
     )
 
 Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be
@@ -187,14 +164,14 @@ Tournament selection and mutation should be applied sequentially to fully evolve
 .. code-block:: python
 
     mutations = Mutations(
-        no_mutation=MUT_P["NO_MUT"],
-        architecture=MUT_P["ARCH_MUT"],
-        new_layer_prob=MUT_P["NEW_LAYER"],
-        parameters=MUT_P["PARAMS_MUT"],
-        activation=MUT_P["ACT_MUT"],
-        rl_hp=MUT_P["RL_HP_MUT"],
-        mutation_sd=MUT_P["MUT_SD"],
-        rand_seed=MUT_P["RAND_SEED"],
+        no_mutation=0.4,
+        architecture=0.2,
+        new_layer_prob=0.2,
+        parameters=0.2,
+        activation=0.2,
+        rl_hp=0.2,
+        mutation_sd=0.1,
+        rand_seed=42,
         device=device,
     )
 
@@ -214,17 +191,22 @@ fitnesses (fitness is each agents test scores on the environment).
     # Define a save path for our trained agent
     save_path = "PPO_trained_agent.pt"
 
+    # Training parameters
+    max_steps = 200000
+    evo_steps = 10000
+    eval_steps = None
+    eval_loop = 1
+
     trained_pop, pop_fitnesses = train_on_policy(
         env=env,
         env_name="Acrobot-v1",
         algo="PPO",
         pop=pop,
-        INIT_HP=INIT_HP,
-        MUT_P=MUT_P,
-        max_steps=INIT_HP["MAX_STEPS"],
-        evo_steps=INIT_HP["EVO_STEPS"],
-        eval_steps=INIT_HP["EVAL_STEPS"],
-        eval_loop=INIT_HP["EVAL_LOOP"],
+        init_hp=init_hp,
+        max_steps=max_steps,
+        evo_steps=evo_steps,
+        eval_steps=eval_steps,
+        eval_loop=eval_loop,
         tournament=tournament,
         mutation=mutations,
         wb=False,  # Boolean flag to record run with Weights & Biases
@@ -257,8 +239,8 @@ function and is an example of how we might choose to make use of a population of
         total_steps = 0
 
         # TRAINING LOOP
-        pbar = trange(INIT_HP["MAX_STEPS"], unit="step")
-        while np.less([agent.steps for agent in pop], INIT_HP["MAX_STEPS"]).all():
+        pbar = trange(max_steps, unit="step")
+        while np.less([agent.steps for agent in pop], max_steps).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
                 collect_rollouts(agent, env)
@@ -271,8 +253,8 @@ function and is an example of how we might choose to make use of a population of
             fitnesses = [
                 agent.test(
                     env,
-                    max_steps=INIT_HP["EVAL_STEPS"],
-                    loop=INIT_HP["EVAL_LOOP"],
+                    max_steps=eval_steps,
+                    loop=eval_loop,
                 )
                 for agent in pop
             ]

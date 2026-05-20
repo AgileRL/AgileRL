@@ -31,5 +31,6 @@ process through a special :func:`collect_rollouts_recurrent() <agilerl.rollouts.
 :func:`train_on_policy() <agilerl.training.train_on_policy.train_on_policy>` function, and used automatically if we set ``recurrent=True``
 in the :class:`PPO <agilerl.algorithms.ppo.PPO>` constructor.
 
-For an end-to-end example of how to train ``PPO`` on a partially observable environment, please refer to
-the :ref:`Partially Observable Pendulum-v1 with Recurrent PPO <agilerl_recurrent_ppo_tutorial>` tutorial.
+.. seealso::
+
+   :ref:`agilerl_recurrent_ppo_tutorial` for an end-to-end example of training PPO on a partially observable environment.

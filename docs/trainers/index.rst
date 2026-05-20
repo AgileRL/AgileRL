@@ -91,9 +91,9 @@ and benchmarking.
 Specifying their training configuration from a manifest file also allows users to use the ``agilerl/train.py`` CLI entry point,
 which wraps the ``LocalTrainer`` and provides a convenient way to train a population of agents.
 
-Below is a minimal off-policy manifest to train DQN on LunarLander-v3 (example can be found `here <https://github.com/AgileRL/AgileRL/blob/main/configs/training/dqn/dqn.yaml>`_):
+Below is a minimal off-policy manifest to train DQN on LunarLander-v3.
 
-.. collapse:: DQN manifest for LunarLander-v3
+.. collapse:: dqn.yaml
 
   .. code-block:: yaml
 
@@ -135,8 +135,12 @@ Below is a minimal off-policy manifest to train DQN on LunarLander-v3 (example c
         act_mut: 0.2
         rl_hp_mut: 0.2
       rl_hp_selection:
-        lr:   { min: 0.0000625, max: 0.01 }
-        batch_size: { min: 8, max: 512 }
+        lr:
+          min: 0.0000625
+          max: 0.01
+        batch_size:
+          min: 8
+          max: 512
       mutation_sd: 0.1
       rand_seed: 42
 
@@ -157,7 +161,7 @@ Below is a minimal off-policy manifest to train DQN on LunarLander-v3 (example c
          # Instantiate the trainer from a manifest file.
          device = "cuda" if torch.cuda.is_available() else "cpu"
          trainer = LocalTrainer.from_manifest(
-            manifest="configs/training/dqn/dqn.yaml",
+            manifest="dqn.yaml",
             device=device
          )
 
@@ -172,11 +176,15 @@ Below is a minimal off-policy manifest to train DQN on LunarLander-v3 (example c
 
       .. code-block:: bash
 
-         python -m agilerl.train configs/training/dqn/dqn.yaml --wb --verbose
+         python -m agilerl.train dqn.yaml --wb --verbose
+
+.. seealso::
+
+   Example manifests for every supported algorithm can be found in the `AgileRL repository <https://github.com/AgileRL/AgileRL/tree/main/configs/training>`_.
 
 **From Pydantic Models:**
 
-Users can also choose to instantiate trainers explicitly from the Pydantic models used under-the-hood to validate a training
+Trainers can also be instantiated explicitly from the Pydantic models used under-the-hood to validate a training
 configuration automatically. In the example below we show a more advanced configuration for training DQN on LunarLander-v3
 applying evolutionary HPO with custom mutation probabilities.
 
@@ -185,7 +193,10 @@ applying evolutionary HPO with custom mutation probabilities.
    import torch
    from agilerl import LocalTrainer
    from agilerl.models import (
-    TrainingSpec, MutationSpec, TournamentSelectionSpec, MutationProbabilities
+    TrainingSpec,
+    MutationSpec,
+    TournamentSelectionSpec,
+    MutationProbabilities,
    )
 
    # Custom training configuration.
@@ -228,15 +239,14 @@ How ``LocalTrainer.train()`` works
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Calling ``LocalTrainer.train()`` assembles keyword arguments from the stored specs
-and passes them to the algorithm's training function (e.g.
+and dispatches to the algorithm-specific training function (e.g.
 ``train_off_policy``, ``train_on_policy``, ``train_multi_agent_off_policy``).
 The return value is always a tuple of ``(population, fitness_history)``.
 
-Users can also pass additional keyword arguments to ``LocalTrainer.train()`` to customise monitoring and checkpointing.
-
 .. seealso::
 
-   :ref:`API documentation <trainers_api>` for more details on the available keyword arguments.
+   :ref:`API documentation <trainers_api>` for the full method signature, including options to
+   customise monitoring and checkpointing.
 
 
 .. _arena_trainer:
@@ -310,6 +320,8 @@ Submitting a Training Job to Arena
 Once the Arena client is authenticated, users can submit a training job to Arena by instantiating an ``ArenaTrainer`` and calling ``train()``,
 or through the **Arena CLI** ``arena experiments submit`` command.
 
+Here is an example using the same ``dqn.yaml`` manifest file as in the :ref:`local_trainer` section.
+
 .. tab-set::
 
    .. tab-item:: SDK
@@ -320,16 +332,24 @@ or through the **Arena CLI** ``arena experiments submit`` command.
          from agilerl import ArenaTrainer
 
          # Instantiate the trainer from a manifest file.
-         trainer = ArenaTrainer.from_manifest(
-            manifest="configs/training/dqn/dqn.yaml",
-         )
+         trainer = ArenaTrainer.from_manifest(manifest="dqn.yaml")
 
          # Train on Arena.
-         trainer.train()
+         trainer.train(
+          resource_id="arena-medium",
+          num_nodes=2,
+          project="my-project",
+          experiment_name="lunar-lander-dqn",
+         )
 
    .. tab-item:: CLI
       :sync: cli
 
       .. code-block:: bash
 
-         arena experiments submit --manifest configs/training/dqn/dqn.yaml
+         arena experiments submit -m dqn.yaml
+
+.. seealso::
+
+   :ref:`tutorial_arena_end_to_end` for a complete walkthrough of validating, training, and deploying
+   using a custom environment.

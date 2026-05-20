@@ -205,7 +205,6 @@ class DQN(RLAlgorithm):
 
         # Register metrics to keep track of during training
         self.metrics.register("loss")
-        self.metrics.register("epsilon")
         self.metrics.register_histogram("action_dist")
 
     def get_action(
@@ -253,7 +252,6 @@ class DQN(RLAlgorithm):
 
         if self.training:
             self.metrics.log_histogram("action_dist", action)
-            self.metrics.log("epsilon", epsilon)
 
         return action
 

@@ -340,59 +340,88 @@ the ``MakeEvolvable`` wrapper.
         device=device
       )
 
-When instantiating using ``create_population`` to generate a population of agents with a custom actor,
-you need to set ``actor_network`` to ``evolvable_actor``.
+When instantiating using ``Algorithm.population()`` to generate a population of agents with a custom actor,
+pass the ``actor_network`` keyword argument.
 
 .. collapse:: Using it in a Population
   :open:
 
   .. code-block:: python
 
-    pop = create_population(
-            algo="DQN",                                  # Algorithm
-            observation_space=observation_space,         # Observation space
-            action_space=action_space,                   # Action space
-            actor_network=evolvable_actor,               # Custom evolvable actor
-            INIT_HP=INIT_HP,                             # Initial hyperparameters
-            population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-            device=device
+    from agilerl.algorithms import DQN
+
+    # Algorithm hyperparameters
+    init_hp = {
+        "batch_size": 128,
+        "lr": 1e-3,
+        "gamma": 0.99,
+    }
+
+    # Initialize population
+    population_size = 4
+    pop = DQN.population(
+            size=population_size,
+            observation_space=observation_space,
+            action_space=action_space,
+            actor_network=evolvable_actor,
+            device=device,
+            **init_hp,
           )
 
-If you are using an algorithm that also uses a single critic (PPO, DDPG), define the critic network and pass it into the
-``create_population`` class.
+If you are using an algorithm that also uses a single critic (PPO, DDPG), define the critic network and pass it as
+``critic_network``.
 
 .. collapse:: Using it in a Population with a Single Critic
   :open:
 
   .. code-block:: python
 
-    pop = create_population(
-            algo="PPO",                                  # Algorithm
-            observation_space=observation_space,         # Observation space
-            action_space=action_space,                   # Action space
-            actor_network=evolvable_actor,               # Custom evolvable actor
-            critic_network=evolvable_critic,             # Custom evolvable critic
-            INIT_HP=INIT_HP,                             # Initial hyperparameters
-            population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-            device=device
+    from agilerl.algorithms import PPO
+
+    # Algorithm hyperparameters
+    init_hp = {
+        "batch_size": 128,
+        "lr": 1e-3,
+        "gamma": 0.99,
+    }
+
+    # Initialize population
+    pop = PPO.population(
+            size=4,
+            observation_space=observation_space,
+            action_space=action_space,
+            actor_network=evolvable_actor,
+            critic_network=evolvable_critic,
+            device=device,
+            **init_hp,
           )
 
-If the single agent algorithm has more than one critic (e.g. TD3), then pass the ``critic_network`` argument a list of two critics.
+If the single agent algorithm has more than one critic (e.g. TD3), then pass a list of two critics as ``critic_network``.
 
 .. collapse:: Using it in a Population with Multiple Critics
    :open:
 
    .. code-block:: python
 
-      pop = create_population(
-              algo="TD3",                                           # Algorithm
-              observation_space=observation_space,                      # Observation space
-              action_space=action_space,                                # Action space
-              actor_network=evolvable_actor,                            # Custom evolvable actor
-              critic_network=[evolvable_critic_1, evolvable_critic_2],  # Custom evolvable critic
-              INIT_HP=INIT_HP,                                          # Initial hyperparameters
-              population_size=INIT_HP["POPULATION_SIZE"],               # Population size
-              device=device
+      from agilerl.algorithms import TD3
+
+      # Algorithm hyperparameters
+      init_hp = {
+          "batch_size": 128,
+          "lr_actor": 1e-3,
+          "lr_critic": 1e-3,
+          "gamma": 0.99,
+      }
+
+      # Initialize population
+      pop = TD3.population(
+              size=4,
+              observation_space=observation_space,
+              action_space=action_space,
+              actor_network=evolvable_actor,
+              critic_network=[evolvable_critic_1, evolvable_critic_2],
+              device=device,
+              **init_hp,
             )
 
 
@@ -404,6 +433,8 @@ environment in the variable ``env``).
    :open:
 
    .. code-block:: python
+
+      from agilerl.algorithms import MADDPG
 
       # For MADDPG
       evolvable_actors = [actor_network_1, actor_network_2]
@@ -417,15 +448,23 @@ environment in the variable ``env``).
       # Instantiate the populations as follows
       observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
       action_spaces = [env.single_action_space(agent) for agent in env.agents]
-      pop = create_population(
-              algo="MADDPG",                                # Algorithm
-              observation_space=observation_spaces,         # Observation space
-              action_space=action_spaces,                   # Action space
-              actor_network=evolvable_actors,               # Custom evolvable actor
-              critic_network=evolvable_critics,             # Custom evolvable critic
-              INIT_HP=INIT_HP,                              # Initial hyperparameters
-              population_size=INIT_HP["POPULATION_SIZE"],   # Population size
-              device=device
+      # Algorithm hyperparameters
+      init_hp = {
+          "batch_size": 128,
+          "lr_actor": 1e-3,
+          "lr_critic": 1e-3,
+          "gamma": 0.99,
+      }
+
+      # Initialize population
+      pop = MADDPG.population(
+              size=4,
+              observation_space=observation_spaces,
+              action_space=action_spaces,
+              actor_network=evolvable_actors,
+              critic_network=evolvable_critics,
+              device=device,
+              **init_hp,
             )
 
 Finally, if you are using a multi-agent algorithm but need to use CNNs to account for RGB image states, there are a few extra considerations

@@ -93,16 +93,16 @@ of the hyperparameters and evolvable networks registered for mutation. Specifica
     .. note::
         Any ``EvolvableAlgorithm`` should register at least one ``NetworkGroup`` corresponding to the policy (i.e. the network used to select actions) by setting ``policy=True``.
 
-    - All AgileRL algorithms include a ``hp_config`` argument that can be used to register RL hyperparameters for mutation. Specifically, users should instantiate a
-      :class:`HyperparameterConfig <agilerl.algorithms.core.registry.HyperparameterConfig>` dataclass with the :class:`RLParameter <agilerl.algorithms.core.registry.RLParameter>`'s
-      you wish to mutate, which should be available as attributes of the algorithm. If we wanted to mutate the learning rate, batch size, and learning step in e.g. ``DQN``:
+    - All AgileRL algorithms automatically configure sensible default RL hyperparameters for mutation when ``hp_config=None`` (usually the learning rate, batch size, and learning step). The ranges are derived
+      dynamically from the algorithm's initial hyperparameter values. If you need to override these defaults, you can pass a custom
+      :class:`HyperparameterConfig <agilerl.algorithms.core.registry.HyperparameterConfig>` with the :class:`RLParameter <agilerl.algorithms.core.registry.RLParameter>`'s
+      you wish to mutate. For example, to customize the mutation ranges for ``DQN``:
 
     .. code-block:: python
 
         from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
-        # Need to use the algorithms attribute names in DQN 'lr', 'batch_size',
-        # and 'learn_step' to register the hyperparameters
+        # Override default mutation ranges for specific hyperparameters
         hp_config = HyperparameterConfig(
             lr=RLParameter(min=1e-4, max=1e-2),
             batch_size=RLParameter(min=32, max=256),
@@ -220,8 +220,7 @@ method. If we wanted to mutate the learning rate, batch size, and learning step 
 
     from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
-    # Need to use the algorithms attribute names in DQN 'lr', 'batch_size',
-    # and 'learn_step' to register the hyperparameters
+    # Override default mutation ranges for specific hyperparameters
     hp_config = HyperparameterConfig(
         lr=RLParameter(min=1e-4, max=1e-2),
         batch_size=RLParameter(min=32, max=256),

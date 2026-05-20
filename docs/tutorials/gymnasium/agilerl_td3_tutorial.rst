@@ -51,77 +51,13 @@ Dependencies
     import torch
     from tqdm import trange
 
-    from agilerl.algorithms.td3 import TD3
+    from agilerl.algorithms import TD3
+    from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
     from agilerl.components.replay_buffer import ReplayBuffer
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_off_policy import train_off_policy
-    from agilerl.utils.utils import (
-        create_population,
-        make_vect_envs,
-    )
-
-
-Defining Hyperparameters
-------------------------
-Before we commence training, it's easiest to define all of our hyperparameters in one dictionary. Below is an example of
-such for the TD3 algorithm. Additionally, we also define a mutations parameters dictionary, in which we determine what
-mutations we want to happen, to what extent we want these mutations to occur, and what RL hyperparameters we want to tune.
-Additionally, we also define our upper and lower limits for these hyperparameters to define search spaces.
-
-.. collapse:: Hyperparameter Configuration
-
-    .. code-block:: python
-
-        # Initial hyperparameters
-        INIT_HP = {
-            "ALGO": "TD3",
-            "POP_SIZE": 4,  # Population size
-            "BATCH_SIZE": 128,  # Batch size
-            "LR_ACTOR": 0.0001,  # Actor learning rate
-            "LR_CRITIC": 0.001,  # Critic learning rate
-            "O_U_NOISE": True,  # Ornstein-Uhlenbeck action noise
-            "EXPL_NOISE": 0.1,  # Action noise scale
-            "MEAN_NOISE": 0.0,  # Mean action noise
-            "THETA": 0.15,  # Rate of mean reversion in OU noise
-            "DT": 0.01,  # Timestep for OU noise
-            "GAMMA": 0.99,  # Discount factor
-            "MEMORY_SIZE": 100_000,  # Max memory buffer size
-            "POLICY_FREQ": 2,  # Policy network update frequency
-            "LEARN_STEP": 1,  # Learning frequency
-            "TAU": 0.005,  # For soft update of target parameters
-            "EPISODES": 1000,  # Number of episodes to train for
-            "EVO_EPOCHS": 20,  # Evolution frequency, i.e. evolve after every 20 episodes
-            "TARGET_SCORE": 200.0,  # Target score that will beat the environment
-            "EVO_LOOP": 3,  # Number of evaluation episodes
-            "MAX_STEPS": 500,  # Maximum number of steps an agent takes in an environment
-            "LEARNING_DELAY": 1000,  # Steps before starting learning
-            "EVO_STEPS": 10000,  # Evolution frequency
-            "EVAL_STEPS": None,  # Number of evaluation steps per episode
-            "EVAL_LOOP": 1,  # Number of evaluation episodes
-            "TOURN_SIZE": 2,  # Tournament size
-            "ELITISM": True,  # Elitism in tournament selection
-        }
-
-        # Mutation parameters
-        MUT_P = {
-            # Mutation probabilities
-            "NO_MUT": 0.4,  # No mutation
-            "ARCH_MUT": 0.2,  # Architecture mutation
-            "NEW_LAYER": 0.2,  # New layer mutation
-            "PARAMS_MUT": 0.2,  # Network parameters mutation
-            "ACT_MUT": 0.2,  # Activation layer mutation
-            "RL_HP_MUT": 0.2,  # Learning HP mutation
-            "MUT_SD": 0.1,  # Mutation strength
-            "RAND_SEED": 42,  # Random seed
-            # Define max and min limits for mutating RL hyperparams
-            "MIN_LR": 0.0001,
-            "MAX_LR": 0.01,
-            "MIN_BATCH_SIZE": 8,
-            "MAX_BATCH_SIZE": 1024,
-            "MIN_LEARN_STEP": 1,
-            "MAX_LEARN_STEP": 16,
-        }
+    from agilerl.utils.utils import make_vect_envs
 
 Create the Environment
 ----------------------
@@ -164,17 +100,32 @@ population. The sequence of evolution (tournament selection followed by mutation
         batch_size = RLParameter(min=8, max=512),
     )
 
+    # Algorithm hyperparameters
+    init_hp = {
+        "batch_size": 128,
+        "lr_actor": 0.0001,
+        "lr_critic": 0.001,
+        "o_u_noise": True,
+        "expl_noise": 0.1,
+        "mean_noise": 0.0,
+        "theta": 0.15,
+        "dt": 0.01,
+        "gamma": 0.99,
+        "policy_freq": 2,
+        "learn_step": 1,
+        "tau": 0.005,
+        "num_envs": num_envs,
+    }
+
     # Define a population
-    pop = create_population(
-        algo="TD3", # Algorithm
-        observation_space=observation_space,  # State dimension
-        action_space=action_space,  # Action dimension
-        net_config=net_config,  # Network configuration
-        INIT_HP=INIT_HP,  # Initial hyperparameters
-        hp_config=hp_config,  # RL hyperparameter configuration
-        population_size=INIT_HP["POP_SIZE"],  # Population size
-        num_envs=num_envs,
+    pop = TD3.population(
+        size=4,
+        observation_space=observation_space,
+        action_space=action_space,
+        net_config=net_config,
+        hp_config=hp_config,
         device=device,
+        **init_hp,
     )
 
 
@@ -215,9 +166,9 @@ returns the best agent, and the new generation of agents.
 .. code-block:: python
 
     tournament = TournamentSelection(
-        INIT_HP["TOURN_SIZE"],
-        INIT_HP["ELITISM"],
-        INIT_HP["POP_SIZE"],
+        tournament_size=2,
+        elitism=True,
+        population_size=4,
     )
 
 
@@ -239,14 +190,14 @@ Tournament selection and mutation should be applied sequentially to fully evolve
 .. code-block:: python
 
     mutations = Mutations(
-        no_mutation=MUT_P["NO_MUT"],
-        architecture=MUT_P["ARCH_MUT"],
-        new_layer_prob=MUT_P["NEW_LAYER"],
-        parameters=MUT_P["PARAMS_MUT"],
-        activation=MUT_P["ACT_MUT"],
-        rl_hp=MUT_P["RL_HP_MUT"],
-        mutation_sd=MUT_P["MUT_SD"],
-        rand_seed=MUT_P["RAND_SEED"],
+        no_mutation=0.4,
+        architecture=0.2,
+        new_layer_prob=0.2,
+        parameters=0.2,
+        activation=0.2,
+        rl_hp=0.2,
+        mutation_sd=0.1,
+        rand_seed=42,
         device=device,
     )
 
@@ -261,20 +212,27 @@ fitnesses (fitness is each agents test scores on the environment).
 
 .. code-block:: python
 
+    # Training parameters
+    max_steps = 200000
+    evo_steps = 10000
+    eval_steps = None
+    eval_loop = 1
+    learning_delay = 1000
+    target_score = 200.0
+
     trained_pop, pop_fitnesses = train_off_policy(
         env=env,
         env_name="LunarLanderContinuous-v3",
         algo="TD3",
         pop=pop,
         memory=memory,
-        INIT_HP=INIT_HP,
-        MUT_P=MUT_P,
-        max_steps=INIT_HP["MAX_STEPS"],
-        evo_steps=INIT_HP["EVO_STEPS"],
-        eval_steps=INIT_HP["EVAL_STEPS"],
-        eval_loop=INIT_HP["EVAL_LOOP"],
-        learning_delay=INIT_HP["LEARNING_DELAY"],
-        target=INIT_HP["TARGET_SCORE"],
+        init_hp=init_hp,
+        max_steps=max_steps,
+        evo_steps=evo_steps,
+        eval_steps=eval_steps,
+        eval_loop=eval_loop,
+        learning_delay=learning_delay,
+        target=target_score,
         tournament=tournament,
         mutation=mutations,
         wb=False,  # Boolean flag to record run with Weights & Biases
@@ -308,8 +266,8 @@ function and is an example of how we might choose to make use of a population of
         total_steps = 0
 
         # TRAINING LOOP
-        pbar = trange(INIT_HP["MAX_STEPS"], unit="step")
-        while np.less([agent.steps for agent in pop], INIT_HP["MAX_STEPS"]).all():
+        pbar = trange(max_steps, unit="step")
+        while np.less([agent.steps for agent in pop], max_steps).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
                 obs, info = env.reset()  # Reset environment at start of episode
@@ -317,7 +275,7 @@ function and is an example of how we might choose to make use of a population of
                 completed_episode_scores = []
                 steps = 0
 
-                for idx_step in range(INIT_HP["EVO_STEPS"] // num_envs):
+                for idx_step in range(evo_steps // num_envs):
                     action = agent.get_action(obs)  # Get next action from agent
 
                     # Act in environment
@@ -352,7 +310,7 @@ function and is an example of how we might choose to make use of a population of
                     memory.add(transition)
 
                     # Learn according to learning frequency
-                    if memory.size > INIT_HP["LEARNING_DELAY"] and len(memory) >= agent.batch_size:
+                    if memory.size > learning_delay and len(memory) >= agent.batch_size:
                         for _ in range(num_envs // agent.learn_step):
                             # Sample replay buffer
                             experiences = memory.sample(agent.batch_size)
@@ -361,7 +319,7 @@ function and is an example of how we might choose to make use of a population of
 
                     obs = next_obs
 
-                pbar.update(INIT_HP["EVO_STEPS"] // len(pop))
+                pbar.update(evo_steps // len(pop))
                 agent.steps += steps
                 pop_episode_scores.append(completed_episode_scores)
 
@@ -369,8 +327,8 @@ function and is an example of how we might choose to make use of a population of
             fitnesses = [
                 agent.test(
                     env,
-                    INIT_HP["MAX_STEPS"]=INIT_HP["EVAL_STEPS"],
-                    loop=INIT_HP["EVAL_LOOP"],
+                    max_steps=eval_steps,
+                    loop=eval_loop,
                 )
                 for agent in pop
             ]

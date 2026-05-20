@@ -30,13 +30,15 @@ decision-making, as the algorithm becomes better at identifying which actions ar
 
 
 Training with LocalTrainer
---------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The simplest way to train a bandit agent is with a YAML manifest and the
 :class:`~agilerl.training.trainer.LocalTrainer`. This handles population
 creation, dataset loading, evolutionary HPO, and the training loop automatically.
 
-.. collapse:: Example manifest: NeuralUCB on Iris dataset
+Below is an example manifest for training NeuralUCB on the Iris dataset.
+
+.. collapse:: neural_ucb.yaml
 
    .. code-block:: yaml
 
@@ -80,8 +82,12 @@ creation, dataset loading, evolutionary HPO, and the training loop automatically
           act_mut: 0.2
           rl_hp_mut: 0.2
         rl_hp_selection:
-          lr:   { min: 0.0000625, max: 0.01 }
-          batch_size: { min: 8, max: 512 }
+          lr:
+            min: 0.0000625
+            max: 0.01
+          batch_size:
+            min: 8
+            max: 512
         mutation_sd: 0.1
         rand_seed: 42
 
@@ -97,22 +103,25 @@ creation, dataset loading, evolutionary HPO, and the training loop automatically
 
          from agilerl.training.trainer import LocalTrainer
 
-         trainer = LocalTrainer.from_manifest("configs/training/bandit/neural_ucb.yaml")
+         trainer = LocalTrainer.from_manifest("neural_ucb.yaml")
          population, fitnesses = trainer.train()
 
    .. tab-item:: CLI
 
       .. code-block:: bash
 
-         python -m agilerl.train -m configs/training/bandit/neural_ucb.yaml
+         python -m agilerl.train -m neural_ucb.yaml
 
 .. seealso::
 
    Full manifest reference and additional options: :ref:`trainers`
 
 
+Customised Training Pipeline
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 Population Creation and Environment Setup
------------------------------------------
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
@@ -126,26 +135,13 @@ be imported and used for training with the Python package ``ucimlrepo``, and to 
 
     .. code-block:: python
 
-        from agilerl.utils.utils import create_population
+        from agilerl.algorithms import NeuralUCB
         from agilerl.wrappers.learning import BanditEnv
+        from gymnasium import spaces
         import torch
         from ucimlrepo import fetch_ucirepo
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        NET_CONFIG = {
-            "encoder_config": {"hidden_size": [128]},  # Encoder hidden size
-        }
-
-        INIT_HP = {
-            "BATCH_SIZE": 64,  # Batch size
-            "LR": 1e-3,  # Learning rate
-            "GAMMA": 1.0,  # Scaling factor
-            "LAMBDA": 1.0,  # Regularization factor
-            "REG": 0.000625,  # Loss regularization factor
-            "LEARN_STEP": 2,  # Learning frequency
-            "POP_SIZE": 4,  # Population size
-        }
 
         # Fetch data  https://archive.ics.uci.edu/
         iris = fetch_ucirepo(id=53)
@@ -156,28 +152,36 @@ be imported and used for training with the Python package ``ucimlrepo``, and to 
         context_dim = env.context_dim
         action_dim = env.arms
 
-        # Mutation config for RL hyperparameters
-        hp_config = HyperparameterConfig(
-            lr = RLParameter(min=6.25e-5, max=1e-2),
-            batch_size = RLParameter(min=8, max=512),
-            learn_step = RLParameter(min=1, max=10, grow_factor=1.5, shrink_factor=0.75)
-        )
-
         obs_space = spaces.Box(low=features.values.min(), high=features.values.max())
         action_space = spaces.Discrete(action_dim)
-        pop = create_population(
-            algo="NeuralUCB",  # Algorithm
-            observation_space=obs_space,  # Observation space
-            action_space=action_space,  # Action space
-            net_config=NET_CONFIG,  # Network configuration
-            INIT_HP=INIT_HP,  # Initial hyperparameters
-            hp_config=hp_config,  # Hyperparameter configuration
-            population_size=INIT_HP["POP_SIZE"],  # Population size
+
+        # Configure network architecture
+        net_config = {
+            "encoder_config": {"hidden_size": [128]},  # Encoder hidden size
+        }
+
+        # Algorithm hyperparameters
+        init_hp = {
+            "batch_size": 64,
+            "lr": 1e-3,
+            "gamma": 1.0,
+            "lamb": 1.0,
+            "reg": 0.000625,
+            "learn_step": 2,
+        }
+
+        # Initialize population
+        pop = NeuralUCB.population(
+            size=4,
+            observation_space=obs_space,
+            action_space=action_space,
+            net_config=net_config,
             device=device,
+            **init_hp,
         )
 
 Experience Replay
------------------
+^^^^^^^^^^^^^^^^^
 
 In order to efficiently train a population of RL agents, off-policy algorithms must be used to share memory within populations. This reduces the exploration needed
 by an individual agent because it allows faster learning from the behaviour of other agents. For example, if you were able to watch a bunch of people attempt to solve
@@ -198,8 +202,37 @@ buffer, call ``ReplayBuffer.sample()``.
     )
 
 
+Evolutionary HPO
+^^^^^^^^^^^^^^^^^
+
+Tournament selection is used to select the agents from a population which will make up the next generation of agents.
+Mutation is periodically used to explore the hyperparameter space.
+
+.. code-block:: python
+
+    from agilerl.hpo.mutation import Mutations
+    from agilerl.hpo.tournament import TournamentSelection
+
+    tournament = TournamentSelection(
+        tournament_size=2,  # Tournament selection size
+        elitism=True,  # Elitism in tournament selection
+        population_size=4,  # Population size
+    )
+
+    mutations = Mutations(
+        no_mutation=0.4,  # No mutation
+        architecture=0.2,  # Architecture mutation
+        new_layer_prob=0.2,  # New layer mutation
+        parameters=0.2,  # Network parameters mutation
+        activation=0,  # Activation layer mutation
+        rl_hp=0.2,  # Learning HP mutation
+        mutation_sd=0.1,  # Mutation strength
+        rand_seed=1,  # Random seed
+        device=device,
+    )
+
 Training Loop
--------------
+^^^^^^^^^^^^^
 
 The easiest way to train a population of bandits is to use our training function:
 
@@ -209,21 +242,20 @@ The easiest way to train a population of bandits is to use our training function
 
     trained_pop, pop_fitnesses = train_bandits(
         env,  # Bandit environment
-        INIT_HP["ENV_NAME"],  # Environment name
+        "IRIS",  # Environment name
         "NeuralUCB",  # Algorithm
         agent_pop,  # Population of agents
         memory=memory,  # Experience replay buffer
-        INIT_HP=INIT_HP,  # Initial hyperparameters
-        MUT_P=MUTATION_PARAMS,  # Mutation parameters
+        init_hp=init_hp,  # Initial hyperparameters
         max_steps=10000,  # Max number of training steps
         episode_steps=500,  # Steps in episode
         evo_steps=500,  # Evolution frequency
         eval_steps=500,  # Number of steps in evaluation episode,
         eval_loop=1,  # Number of evaluation episodes
-        target=INIT_HP["TARGET_SCORE"],  # Target score for early stopping
+        target=96.0,  # Target score for early stopping
         tournament=tournament,  # Tournament selection object
         mutation=mutations,  # Mutations object
-        wb=INIT_HP["WANDB"],  # Weights and Biases tracking
+        wb=True,  # Weights and Biases tracking
     )
 
 Alternatively, use a custom bandit training loop:
@@ -242,9 +274,9 @@ Alternatively, use a custom bandit training loop:
 
         import wandb
         from agilerl.components.replay_buffer import ReplayBuffer
+        from agilerl.algorithms import NeuralUCB
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
-        from agilerl.utils.utils import create_population
         from agilerl.wrappers.learning import BanditEnv
 
 
@@ -252,20 +284,6 @@ Alternatively, use a custom bandit training loop:
             print("===== AgileRL Bandit Demo =====")
 
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-            NET_CONFIG = {
-                "hidden_size": [128],  # Actor hidden size
-            }
-
-            INIT_HP = {
-                "BATCH_SIZE": 64,  # Batch size
-                "LR": 1e-3,  # Learning rate
-                "GAMMA": 1.0,  # Scaling factor
-                "LAMBDA": 1.0,  # Regularization factor
-                "REG": 0.000625,  # Loss regularization factor
-                "LEARN_STEP": 2,  # Learning frequency
-                "POP_SIZE": 4,  # Population size
-            }
 
             # Fetch data  https://archive.ics.uci.edu/
             iris = fetch_ucirepo(id=53)
@@ -278,14 +296,30 @@ Alternatively, use a custom bandit training loop:
 
             obs_space = spaces.Box(low=features.values.min(), high=features.values.max())
             action_space = spaces.Discrete(action_dim)
-            pop = create_population(
-                algo="NeuralUCB",  # Algorithm
-                observation_space=obs_space,  # Observation space
-                action_space=action_space,  # Action space
-                net_config=NET_CONFIG,  # Network configuration
-                INIT_HP=INIT_HP,  # Initial hyperparameters
-                population_size=INIT_HP["POP_SIZE"],  # Population size
+
+            # Configure network architecture
+            net_config = {
+                "hidden_size": [128],  # Actor hidden size
+            }
+
+            # Algorithm hyperparameters
+            init_hp = {
+                "batch_size": 64,
+                "lr": 1e-3,
+                "gamma": 1.0,
+                "lamb": 1.0,
+                "reg": 0.000625,
+                "learn_step": 2,
+            }
+
+            # Initialize population
+            pop = NeuralUCB.population(
+                size=4,
+                observation_space=obs_space,
+                action_space=action_space,
+                net_config=net_config,
                 device=device,
+                **init_hp,
             )
 
             memory = ReplayBuffer(max_size=10000, device=device)
@@ -293,7 +327,7 @@ Alternatively, use a custom bandit training loop:
             tournament = TournamentSelection(
                 tournament_size=2,  # Tournament selection size
                 elitism=True,  # Elitism in tournament selection
-                population_size=INIT_HP["POP_SIZE"],  # Population size
+                population_size=4,  # Population size
             )
             mutations = Mutations(
                 no_mutation=0.4,  # No mutation
@@ -318,7 +352,7 @@ Alternatively, use a custom bandit training loop:
                 project="AgileRL-Bandits",
                 name="NeuralUCB-{}".format(datetime.now().strftime("%m%d%Y%H%M%S")),
                 # track hyperparameters and run metadata
-                config=INIT_HP,
+                config=init_hp,
             )
 
             total_steps = 0

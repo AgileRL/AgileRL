@@ -633,6 +633,236 @@ class TestMultiAgentRLAlgorithmPopulation:
             assert agent.index == i
 
 
+class TestPopulationDeviceParam:
+    """Test the explicit device parameter in population()."""
+
+    def test_population_passes_device_to_agents(self, vector_space, discrete_space):
+        pop = DummyRLAlgorithm.population(3, vector_space, discrete_space, device="cpu")
+        assert len(pop) == 3
+        for agent in pop:
+            assert agent.device == "cpu"
+
+    def test_population_default_device_is_cpu(self, vector_space, discrete_space):
+        pop = DummyRLAlgorithm.population(2, vector_space, discrete_space)
+        for agent in pop:
+            assert agent.device == "cpu"
+
+
+class TestPopulationResumeFromCheckpoint:
+    """Test the resume_from_checkpoint parameter in population()."""
+
+    def test_population_calls_load_checkpoint(
+        self, vector_space, discrete_space, tmp_path
+    ):
+        agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
+        checkpoint_path = str(tmp_path / "checkpoint.pt")
+        agent.save_checkpoint(checkpoint_path)
+
+        pop = DummyRLAlgorithm.population(
+            2,
+            vector_space,
+            discrete_space,
+            resume_from_checkpoint=checkpoint_path,
+        )
+        assert len(pop) == 2
+        for i, loaded_agent in enumerate(pop):
+            assert loaded_agent.index == i
+
+    def test_population_no_checkpoint_skips_loading(self, vector_space, discrete_space):
+        pop = DummyRLAlgorithm.population(
+            2, vector_space, discrete_space, resume_from_checkpoint=None
+        )
+        assert len(pop) == 2
+
+
+class TestPopulationWithWrapper:
+    """Test that population() applies wrappers correctly with device and checkpoint."""
+
+    def test_population_wrapper_with_device(self, vector_space, discrete_space):
+        class SimpleWrapper:
+            def __init__(self, agent):
+                self.agent = agent
+
+        pop = DummyRLAlgorithm.population(
+            3,
+            vector_space,
+            discrete_space,
+            device="cpu",
+            wrapper_cls=SimpleWrapper,
+        )
+        assert len(pop) == 3
+        for i, wrapped in enumerate(pop):
+            assert isinstance(wrapped, SimpleWrapper)
+            assert wrapped.agent.index == i
+            assert wrapped.agent.device == "cpu"
+
+    def test_population_wrapper_with_checkpoint(
+        self, vector_space, discrete_space, tmp_path
+    ):
+        class SimpleWrapper:
+            def __init__(self, agent):
+                self.agent = agent
+
+        agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
+        checkpoint_path = str(tmp_path / "checkpoint.pt")
+        agent.save_checkpoint(checkpoint_path)
+
+        pop = DummyRLAlgorithm.population(
+            2,
+            vector_space,
+            discrete_space,
+            wrapper_cls=SimpleWrapper,
+            resume_from_checkpoint=checkpoint_path,
+        )
+        assert len(pop) == 2
+        for i, wrapped in enumerate(pop):
+            assert isinstance(wrapped, SimpleWrapper)
+            assert wrapped.agent.index == i
+
+
+class TestPopulationKwargsPassthrough:
+    """Test that extra kwargs are passed through to the constructor."""
+
+    def test_population_passes_kwargs(self, vector_space, discrete_space):
+        pop = DummyRLAlgorithm.population(2, vector_space, discrete_space, device="cpu")
+        assert len(pop) == 2
+        for agent in pop:
+            assert agent.observation_space == vector_space
+            assert agent.action_space == discrete_space
+
+    @pytest.mark.parametrize("size", [1, 2, 4, 8])
+    def test_population_various_sizes(self, vector_space, discrete_space, size):
+        pop = DummyRLAlgorithm.population(size, vector_space, discrete_space)
+        assert len(pop) == size
+        for i, agent in enumerate(pop):
+            assert agent.index == i
+
+    def test_population_sequential_indices(self, vector_space, discrete_space):
+        pop = DummyRLAlgorithm.population(5, vector_space, discrete_space)
+        indices = [agent.index for agent in pop]
+        assert indices == [0, 1, 2, 3, 4]
+
+
+class TestPopulationMultiAgent:
+    """Test population() for multi-agent algorithms."""
+
+    def test_multi_agent_population_with_device(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        pop = DummyMARLAlgorithm.population(
+            3,
+            ma_vector_space,
+            ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "agent_2"],
+            device="cpu",
+        )
+        assert len(pop) == 3
+        for i, agent in enumerate(pop):
+            assert agent.index == i
+            assert agent.device == "cpu"
+
+
+class TestCreatePopulationDeprecation:
+    """Test that create_population() emits a deprecation warning."""
+
+    def test_create_population_emits_deprecation_warning(
+        self, vector_space, discrete_space
+    ):
+        from agilerl.utils.utils import create_population
+
+        with pytest.warns(DeprecationWarning, match="create_population.*deprecated"):
+            create_population(
+                algo="DQN",
+                net_config=None,
+                INIT_HP={
+                    "BATCH_SIZE": 64,
+                    "LR": 1e-3,
+                    "GAMMA": 0.99,
+                    "LEARN_STEP": 1,
+                    "TAU": 1e-3,
+                    "POP_SIZE": 2,
+                },
+                observation_space=vector_space,
+                action_space=discrete_space,
+                population_size=2,
+                device="cpu",
+            )
+
+
+class TestPopulationEndToEnd:
+    """End-to-end tests with real algorithm classes."""
+
+    def test_dqn_population(self, vector_space, discrete_space):
+        from agilerl.algorithms import DQN
+
+        pop = DQN.population(
+            size=3,
+            observation_space=vector_space,
+            action_space=discrete_space,
+            batch_size=64,
+            lr=1e-3,
+            gamma=0.99,
+            learn_step=1,
+            tau=1e-3,
+            device="cpu",
+        )
+        assert len(pop) == 3
+        for i, agent in enumerate(pop):
+            assert isinstance(agent, DQN)
+            assert agent.index == i
+            assert agent.batch_size == 64
+            assert agent.lr == 1e-3
+            assert agent.gamma == 0.99
+
+    def test_dqn_population_with_checkpoint(
+        self, vector_space, discrete_space, tmp_path
+    ):
+        from agilerl.algorithms import DQN
+
+        original = DQN(
+            vector_space,
+            discrete_space,
+            index=0,
+            batch_size=64,
+            lr=1e-3,
+            gamma=0.99,
+            device="cpu",
+        )
+        checkpoint_path = str(tmp_path / "dqn_checkpoint.pt")
+        original.save_checkpoint(checkpoint_path)
+
+        pop = DQN.population(
+            size=2,
+            observation_space=vector_space,
+            action_space=discrete_space,
+            batch_size=64,
+            lr=1e-3,
+            gamma=0.99,
+            device="cpu",
+            resume_from_checkpoint=checkpoint_path,
+        )
+        assert len(pop) == 2
+        assert pop[0].index == 0
+        assert pop[1].index == 1
+
+    def test_ppo_population(self, vector_space, discrete_space):
+        from agilerl.algorithms import PPO
+
+        pop = PPO.population(
+            size=2,
+            observation_space=vector_space,
+            action_space=discrete_space,
+            batch_size=64,
+            lr=1e-3,
+            gamma=0.99,
+            device="cpu",
+        )
+        assert len(pop) == 2
+        for i, agent in enumerate(pop):
+            assert isinstance(agent, PPO)
+            assert agent.index == i
+
+
 class TestRLAlgorithmGetStateDim:
     def test_get_state_dim_returns_expected_output(self, vector_space, discrete_space):
         """get_state_dim returns the same as get_input_size_from_space for observation space."""

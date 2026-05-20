@@ -293,6 +293,60 @@ A training configuration is defined via a **manifest** (YAML or JSON file) descr
 the algorithm, environment, training parameters, and evolutionary HPO settings. The formulation of the manifest is described in the :ref:`training_manifests` section,
 and is mostly analogous for both the :class:`~agilerl.training.trainer.LocalTrainer` and training jobs in Arena.
 
+Here is an example manifest for training DQN on LunarLander-v3:
+
+.. collapse:: dqn.yaml
+
+  .. code-block:: yaml
+
+    algorithm:
+      name: DQN
+
+    environment:
+      name: LunarLander-v3
+      num_envs: 16
+
+    training:
+      max_steps: 1_000_000
+      target_score: 200.0
+      pop_size: 4
+      evo_steps: 10_000
+
+    network:
+      arch: mlp
+      latent_dim: 128
+      encoder_config:
+        hidden_size: [128]
+        activation: ReLU
+      head_config:
+        hidden_size: [128]
+        activation: ReLU
+
+    replay_buffer:
+      max_size: 100_000
+
+    mutation:
+      probabilities:
+        no_mut: 0.4
+        arch_mut: 0.2
+        new_layer: 0.2
+        params_mut: 0.2
+        act_mut: 0.2
+        rl_hp_mut: 0.2
+      rl_hp_selection:
+        lr:
+          min: 0.0000625
+          max: 0.01
+        batch_size:
+          min: 8
+          max: 512
+      mutation_sd: 0.1
+      rand_seed: 42
+
+    tournament_selection:
+      tournament_size: 2
+      elitism: true
+
 .. tab-set::
    :sync-group: interface
 
@@ -303,7 +357,7 @@ and is mostly analogous for both the :class:`~agilerl.training.trainer.LocalTrai
 
          # Submit an experiment
          arena experiments submit \
-             --manifest configs/training/dqn/dqn.yaml \
+             --manifest dqn.yaml \
              --resource-id arena-medium \ # can be any of the available resources on Arena
              --num-nodes 2 \ # number of nodes to use in the training cluster
              --project my-project \ # project to submit the experiment to
@@ -318,7 +372,7 @@ and is mostly analogous for both the :class:`~agilerl.training.trainer.LocalTrai
 
          client = ArenaClient()
          result = client.submit_experiment(
-             manifest="configs/training/dqn/dqn.yaml",
+             manifest="dqn.yaml",
              resource_id="arena-medium",
              num_nodes=2,
              project="my-project",
@@ -334,7 +388,7 @@ class, which provides a higher-level interface:
 
    # Don't need to provide a client if we have already authenticated through `arena login`
    trainer = ArenaTrainer.from_manifest(
-       manifest="configs/training/dqn/dqn.yaml",
+       manifest="dqn.yaml",
    )
    result = trainer.train()
 

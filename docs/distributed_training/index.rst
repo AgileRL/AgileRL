@@ -30,7 +30,8 @@ Below is an example of a distributed training loop.
         from agilerl.components.sampler import Sampler
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
-        from agilerl.utils.utils import create_population, make_vect_envs
+        from agilerl.algorithms import DQN
+        from agilerl.utils.utils import make_vect_envs
         from accelerate import Accelerator
         import numpy as np
         import os
@@ -44,21 +45,6 @@ Below is an example of a distributed training loop.
             print("===== AgileRL Online Distributed Demo =====")
         accelerator.wait_for_everyone()
 
-        NET_CONFIG = {
-            "encoder_config": {"hidden_size": [32, 32]},  # Encoder hidden size
-            "head_config": {"hidden_size": [32, 32]},  # Head hidden size
-        }
-
-        INIT_HP = {
-            "DOUBLE": True,  # Use double Q-learning in DQN or CQN
-            "BATCH_SIZE": 128,  # Batch size
-            "LR": 1e-3,  # Learning rate
-            "GAMMA": 0.99,  # Discount factor
-            "LEARN_STEP": 1,  # Learning frequency
-            "TAU": 1e-3,  # For soft update of target network parameters
-            "POP_SIZE": 4,  # Population size
-        }
-
         # Create vectorized environment
         num_envs = 8
         env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
@@ -66,22 +52,31 @@ Below is an example of a distributed training loop.
         observation_space = env.single_observation_space
         action_space = env.single_action_space
 
-        # RL hyperparameter configuration for mutations
-        hp_config = HyperparameterConfig(
-            lr = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(min=8, max=64),
-            learn_step = RLParameter(min=1, max=120, grow_factor=1.5, shrink_factor=0.75)
-        )
+        # Configure network architecture
+        net_config = {
+            "encoder_config": {"hidden_size": [32, 32]},  # Encoder hidden size
+            "head_config": {"hidden_size": [32, 32]},  # Head hidden size
+        }
 
-        pop = create_population(
-            algo="DQN",  # RL algorithm
-            observation_space=observation_space,  # State dimension
-            action_space=action_space,  # Action dimension
-            net_config=NET_CONFIG,  # Network configuration
-            INIT_HP=INIT_HP,  # Initial hyperparameters
-            population_size=INIT_HP["POP_SIZE"],  # Population size
-            num_envs=num_envs,  # No. vectorized envs
-            accelerator=accelerator,  # Accelerator
+        # Algorithm hyperparameters
+        init_hp = {
+            "double": True,
+            "batch_size": 128,
+            "lr": 1e-3,
+            "gamma": 0.99,
+            "learn_step": 1,
+            "tau": 1e-3,
+        }
+
+        # Initialize population
+        population_size = 4
+        pop = DQN.population(
+            size=population_size,
+            observation_space=observation_space,
+            action_space=action_space,
+            net_config=net_config,
+            accelerator=accelerator,
+            **init_hp,
         )
 
         memory = ReplayBuffer(
@@ -89,7 +84,7 @@ Below is an example of a distributed training loop.
             device=accelerator.device,
         )
 
-        replay_dataset = ReplayDataset(memory, INIT_HP["BATCH_SIZE"])
+        replay_dataset = ReplayDataset(memory, 128)
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
         replay_dataloader = accelerator.prepare(replay_dataloader)
         sampler = Sampler(
@@ -100,7 +95,7 @@ Below is an example of a distributed training loop.
         tournament = TournamentSelection(
             tournament_size=2,  # Tournament selection size
             elitism=True,  # Elitism in tournament selection
-            population_size=INIT_HP["POP_SIZE"],  # Population size
+            population_size=population_size,  # Population size
         )
 
         mutations = Mutations(

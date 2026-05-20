@@ -495,6 +495,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         resume_from_checkpoint: str | None = None,
         accelerator: Accelerator | None = None,
         device: str | torch.device = "cpu",
+        actor_network: Any | None = None,
     ) -> LLMAlgorithm:
         """Build an LLM algorithm instance from spec fields.
 
@@ -508,6 +509,10 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         :type accelerator: Accelerator | None
         :param device: Torch device. Defaults to "cpu".
         :type device: str | torch.device
+        :param actor_network: Pre-built or cloned actor network. When provided,
+            this is passed directly to the algorithm constructor instead of loading
+            the model from ``pretrained_model_name_or_path``.
+        :type actor_network: Any | None
         :returns: LLM algorithm instance.
         :rtype: LLMAlgorithm
         """
@@ -541,6 +546,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             index=index,
             micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             device=device,
+            actor_network=actor_network,
             **kwargs,
         )
 

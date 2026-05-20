@@ -81,10 +81,10 @@ Importing the following packages, functions and classes will enable us to run th
       from tqdm import tqdm
       from pettingzoo.classic import connect_four_v3
 
+      from agilerl.algorithms import DQN
       from agilerl.components.replay_buffer import ReplayBuffer
       from agilerl.hpo.mutation import Mutations
       from agilerl.hpo.tournament import TournamentSelection
-      from agilerl.utils.utils import create_population
 
 Curriculum Learning
 ^^^^^^^^^^^^^^^^^^^
@@ -665,38 +665,6 @@ Before we go any further in this tutorial, it would be helpful to define and set
       with open(f"./curriculums/connect_four/lesson{lesson_number}.yaml") as file:
          LESSON = yaml.safe_load(file)
 
-      # Define the network configuration
-      NET_CONFIG = {
-         "encoder_config": {
-            "channel_size": [128],  # CNN channel size
-            "kernel_size": [4],  # CNN kernel size
-            "stride_size": [1],  # CNN stride size
-         },
-         "head_config": {"hidden_size": [64, 64]},  # Network head hidden size
-      }
-
-      # Define the initial hyperparameters
-      INIT_HP = {
-         "POPULATION_SIZE": 6,
-         # "ALGO": "Rainbow DQN",  # Algorithm
-         "ALGO": "DQN",  # Algorithm
-         "DOUBLE": True,
-         "BATCH_SIZE": 256,  # Batch size
-         "LR": 1e-4,  # Learning rate
-         "GAMMA": 0.99,  # Discount factor
-         "MEMORY_SIZE": 100000,  # Max memory buffer size
-         "LEARN_STEP": 1,  # Learning frequency
-         "N_STEP": 1,  # Step number to calculate td error
-         "PER": False,  # Use prioritized experience replay buffer
-         "ALPHA": 0.6,  # Prioritized replay buffer parameter
-         "TAU": 0.01,  # For soft update of target parameters
-         "BETA": 0.4,  # Importance sampling coefficient
-         "PRIOR_EPS": 0.000001,  # Minimum priority for sampling
-         "NUM_ATOMS": 51,  # Unit number of support
-         "V_MIN": 0.0,  # Minimum value of support
-         "V_MAX": 200.0,  # Maximum value of support
-      }
-
       # Define the connect four environment
       env = connect_four_v3.env()
       env.reset()
@@ -720,28 +688,50 @@ Before we go any further in this tutorial, it would be helpful to define and set
       )
       action_space = action_spaces[0]
 
-      # Mutation config for RL hyperparameters
-      hp_config = HyperparameterConfig(
-         lr = RLParameter(min=1e-4, max=1e-2),
-         batch_size = RLParameter(min=8, max=64),
-         learn_step = RLParameter(min=1, max=120, grow_factor=1.5, shrink_factor=0.75)
+      # Configure network architecture
+      net_config = {
+         "encoder_config": {
+            "channel_size": [128],  # CNN channel size
+            "kernel_size": [4],  # CNN kernel size
+            "stride_size": [1],  # CNN stride size
+         },
+         "head_config": {"hidden_size": [64, 64]},  # Network head hidden size
+      }
+
+      # Algorithm hyperparameters
+      init_hp = {
+         "double": True,
+         "batch_size": 256,
+         "lr": 1e-4,
+         "gamma": 0.99,
+         "learn_step": 1,
+         "n_step": 1,
+         "per": False,
+         "alpha": 0.6,
+         "tau": 0.01,
+         "beta": 0.4,
+         "prior_eps": 0.000001,
+         "num_atoms": 51,
+         "v_min": 0.0,
+         "v_max": 200.0,
+      }
+
+      # Initialize population
+      population_size = 6
+      pop = DQN.population(
+         size=population_size,
+         observation_space=observation_space,
+         action_space=action_space,
+         net_config=net_config,
+         device=device,
+         **init_hp,
       )
 
-      # Create a population ready for evolutionary hyper-parameter optimisation
-      pop = create_population(
-         INIT_HP["ALGO"],
-         observation_space,
-         action_space,
-         NET_CONFIG,
-         INIT_HP,
-         hp_config,
-         population_size=INIT_HP["POPULATION_SIZE"],
-         device=device,
-      )
+      memory_size = 20000
 
       # Configure the replay buffer
       memory = ReplayBuffer(
-         max_size=INIT_HP["MEMORY_SIZE"],  # Max replay buffer size
+         max_size=memory_size,  # Max replay buffer size
          device=device,
       )
 
@@ -749,7 +739,7 @@ Before we go any further in this tutorial, it would be helpful to define and set
       tournament = TournamentSelection(
          tournament_size=2,  # Tournament selection size
          elitism=True,  # Elitism in tournament selection
-         population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+         population_size=population_size,  # Population size
       )
 
       # Instantiate a mutations object (used for HPO)
@@ -848,7 +838,7 @@ can be loaded to the population as follows:
                # Load pretrained checkpoint
                agent.load_checkpoint(LESSON["pretrained_path"])
                # Reinit optimizer for new task
-               agent.lr = INIT_HP["LR"]
+               agent.lr = init_hp["lr"]
                agent.optimizer = OptimizerWrapper(
                   torch.optim.Adam,
                   networks=agent.actor,
@@ -908,18 +898,18 @@ to optimize hyperparameters and maximise the performance of our agents in a sing
                # set the wandb project where this run will be logged
                project="AgileRL",
                name="{}-EvoHPO-{}-{}Opposition-CNN-{}".format(
-                  "connect_four_v3",
-                  INIT_HP["ALGO"],
-                  LESSON["opponent"],
-                  datetime.now().strftime("%m%d%Y%H%M%S"),
-               ),
-               # track hyperparameters and run metadata
-               config={
-                  "algo": "Evo HPO Rainbow DQN",
-                  "env": "connect_four_v3",
-                  "INIT_HP": INIT_HP,
-                  "lesson": LESSON,
-               },
+               "connect_four_v3",
+               "DQN",
+               LESSON["opponent"],
+               datetime.now().strftime("%m%d%Y%H%M%S"),
+            ),
+            # track hyperparameters and run metadata
+            config={
+               "algo": "Evo HPO Rainbow DQN",
+               "env": "connect_four_v3",
+               "init_hp": init_hp,
+               "lesson": LESSON,
+            },
          )
 
       total_steps = 0

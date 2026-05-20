@@ -199,15 +199,32 @@ def create_population_from_spec(
             for i in range(population_size)
         ]
 
-    # LLM algorithms — each agent beyond the first gets a fresh Accelerator
-    # to avoid sharing the same DeepSpeed distributed context.
-    population = []
-    for i in range(population_size):
-        if i == 0 or accelerator is None:
-            agent_accelerator = accelerator
-        else:
-            agent_accelerator = Accelerator()
+    # LLM algorithms — build agent 0 fully, then clone the actor for agents 1..N.
+    # Each agent beyond the first gets a fresh Accelerator to avoid sharing the
+    # same DeepSpeed distributed context.
+    from agilerl.utils.algo_utils import clone_llm
+    from agilerl.utils.llm_utils import get_state_dict
 
+    agent_0 = algo_spec.build_algorithm(
+        tokenizer=tokenizer,
+        index=0,
+        resume_from_checkpoint=resume_from_checkpoint,
+        accelerator=accelerator,
+        device=device,
+    )
+    population = [agent_0]
+
+    for i in range(1, population_size):
+        agent_accelerator = Accelerator() if accelerator is not None else None
+        cloned_actor = clone_llm(
+            agent_0.actor,
+            zero_stage=getattr(algo_spec, "zero_stage", 0),
+            state_dict=(
+                agent_0.actor.state_dict()
+                if accelerator is None
+                else get_state_dict(agent_0.actor)
+            ),
+        )
         population.append(
             algo_spec.build_algorithm(
                 tokenizer=tokenizer,
@@ -215,6 +232,7 @@ def create_population_from_spec(
                 resume_from_checkpoint=resume_from_checkpoint,
                 accelerator=agent_accelerator,
                 device=device,
+                actor_network=cloned_actor,
             )
         )
     return population

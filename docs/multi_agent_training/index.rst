@@ -204,7 +204,9 @@ The simplest way to train multi-agent systems is with a YAML manifest and the
 creation, multi-agent replay buffers, evolutionary HPO, and the training loop
 automatically for PettingZoo environments.
 
-.. collapse:: Example manifest: MADDPG on Simple Speaker Listener
+Below is an example manifest for training MADDPG on the simple-speaker-listener-v4 environment.
+
+.. collapse:: maddpg.yaml
 
   .. code-block:: yaml
 
@@ -250,9 +252,15 @@ automatically for PettingZoo environments.
         new_layer: 0.2
         rl_hp_mut: 0.35
       rl_hp_selection:
-        lr_actor: { min: 0.0001, max: 0.01 }
-        lr_critic: { min: 0.0001, max: 0.01 }
-        batch_size: { min: 8, max: 2048 }
+        lr_actor:
+          min: 0.0001
+          max: 0.01
+        lr_critic:
+          min: 0.0001
+          max: 0.01
+        batch_size:
+          min: 8
+          max: 2048
       mutation_sd: 0.1
       rand_seed: 42
 
@@ -268,21 +276,24 @@ automatically for PettingZoo environments.
 
          from agilerl.training.trainer import LocalTrainer
 
-         trainer = LocalTrainer.from_manifest("configs/training/multi_agent/maddpg.yaml")
+         trainer = LocalTrainer.from_manifest("maddpg.yaml")
          population, fitnesses = trainer.train()
 
    .. tab-item:: CLI
 
       .. code-block:: bash
 
-         python -m agilerl.train -m configs/training/multi_agent/maddpg.yaml
+        python -m agilerl.train -m maddpg.yaml
 
 .. seealso::
 
    Full manifest reference and additional options: :ref:`trainers`
 
+Customised Training Pipeline
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 Creating a Population of Agents
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 In the snippet below, we show an example of how to create a population of MADDPG agents for the simple speaker listener environment.
 
@@ -290,42 +301,13 @@ In the snippet below, we show an example of how to create a population of MADDPG
 
     .. code-block:: python
 
-        from agilerl.utils.utils import create_population
-        from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
-        from pettingzoo.mpe import simple_speaker_listener_v4
         import torch
+        from pettingzoo.mpe import simple_speaker_listener_v4
+
+        from agilerl.algorithms import MADDPG
+        from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # Define the network configuration
-        NET_CONFIG = {
-            "speaker_0": {
-                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
-                "head_config": {"hidden_size": [32]},
-            },
-            "listener_0": {
-                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
-                "head_config": {"hidden_size": [32]},
-            },
-        }
-
-        # Define the initial hyperparameters
-        INIT_HP = {
-            "BATCH_SIZE": 32,  # Batch size
-            "O_U_NOISE": True,  # Ornstein Uhlenbeck action noise
-            "EXPL_NOISE": 0.1,  # Action noise scale
-            "MEAN_NOISE": 0.0,  # Mean action noise
-            "THETA": 0.15,  # Rate of mean reversion in OU noise
-            "DT": 0.01,  # Timestep for OU noise
-            "LR_ACTOR": 0.001,  # Actor learning rate
-            "LR_CRITIC": 0.001,  # Critic learning rate
-            "GAMMA": 0.95,  # Discount factor
-            "MEMORY_SIZE": 100000,  # Max memory buffer size
-            "LEARN_STEP": 100,  # Learning frequency
-            "TAU": 0.01,  # For soft update of target parameters
-            "POLICY_FREQ": 2,  # Policy frequnecy
-            "POP_SIZE": 4,  # Population size
-        }
 
         num_envs = 8
         # Define the simple speaker listener environment as a parallel environment
@@ -341,34 +323,49 @@ In the snippet below, we show an example of how to create a population of MADDPG
         observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
         action_spaces = [env.single_action_space(agent) for agent in env.agents]
 
-        # Append number of agents and agent IDs to the initial hyperparameter dictionary
-        INIT_HP["AGENT_IDS"] = env.agents
+        # Configure network architecture
+        net_config = {
+            "speaker_0": {
+                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
+                "head_config": {"hidden_size": [32]},
+            },
+            "listener_0": {
+                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
+                "head_config": {"hidden_size": [32]},
+            },
+        }
 
-        # Mutation config for RL hyperparameters
-        hp_config = HyperparameterConfig(
-            lr_actor = RLParameter(min=1e-4, max=1e-2),
-            lr_critic = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(min=8, max=512),
-            learn_step = RLParameter(min=20, max=200, grow_factor=1.5, shrink_factor=0.75)
-        )
+        # Algorithm hyperparameters
+        init_hp = {
+            "batch_size": 32,
+            "O_U_noise": True,
+            "expl_noise": 0.1,
+            "mean_noise": 0.0,
+            "theta": 0.15,
+            "dt": 0.01,
+            "lr_actor": 0.001,
+            "lr_critic": 0.001,
+            "gamma": 0.95,
+            "learn_step": 100,
+            "tau": 0.01,
+        }
 
-        # Create a population ready for evolutionary hyper-parameter optimisation
-        pop = create_population(
-            "MADDPG",
-            observation_spaces,
-            action_spaces,
-            NET_CONFIG,
-            INIT_HP,
-            hp_config,
-            population_size=INIT_HP["POP_SIZE"],
-            num_envs=num_envs,
+        # Initialize population
+        population_size = 4
+        pop = MADDPG.population(
+            size=population_size,
+            observation_space=observation_spaces,
+            action_space=action_spaces,
+            net_config=net_config,
+            agent_ids=env.agents,
             device=device,
+            **init_hp,
         )
 
 .. _memory:
 
 Experience Replay
-~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^
 
 In order to efficiently train a population of RL agents, off-policy algorithms must be used to share memory within populations. This reduces the exploration needed
 by an individual agent because it allows faster learning from the behaviour of other agents. For example, if you were able to watch a bunch of people attempt to solve
@@ -382,14 +379,14 @@ multi-agent environments. Transitions are built using the ``MultiAgentTransition
     from agilerl.components.replay_buffer import MultiAgentReplayBuffer
 
     memory = MultiAgentReplayBuffer(
-        max_size=INIT_HP["MEMORY_SIZE"],
+        max_size=100000,
         device=device,
     )
 
 .. _trainloop:
 
 Training Loop
-~~~~~~~~~~~~~
+^^^^^^^^^^^^^
 
 Now it is time to insert the evolutionary HPO components into our training loop. If you are using a Gym-style environment (e.g. pettingzoo
 for multi-agent environments) you can use the off-the-shelf training function :func:`train_multi_agent_off_policy() <agilerl.training.train_multi_agent_off_policy.train_multi_agent_off_policy>`,
@@ -405,8 +402,8 @@ which returns a population of trained agents and logged training metrics.
         algo="MADDPG",  # Algorithm
         pop=pop,  # Population of agents
         memory=memory,  # Replay buffer
-        INIT_HP=INIT_HP,  # IINIT_HP dictionary
-        net_config=NET_CONFIG,  # Network configuration
+        init_hp=init_hp,  # Algorithm hyperparameters
+        net_config=net_config,  # Network configuration
         max_steps=2000000,  # Max number of training steps
         evo_steps=10000,  # Evolution frequency
         eval_steps=None,  # Number of steps in evaluation episode
@@ -438,7 +435,6 @@ Alternatively, use a custom training loop. Combining all of the above:
         from agilerl.hpo.tournament import TournamentSelection
         from agilerl.population import Population
         from agilerl.utils.utils import (
-            create_population,
             default_progress_bar,
             init_loggers,
             tournament_selection_and_mutation,
@@ -446,36 +442,6 @@ Alternatively, use a custom training loop. Combining all of the above:
         from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # Define the network configuration
-        NET_CONFIG = {
-            "speaker_0": {
-                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
-                "head_config": {"hidden_size": [32]},
-            },
-            "listener_0": {
-                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
-                "head_config": {"hidden_size": [32]},
-            },
-        }
-
-        # Define the initial hyperparameters
-        INIT_HP = {
-            "BATCH_SIZE": 32,  # Batch size
-            "O_U_NOISE": True,  # Ornstein Uhlenbeck action noise
-            "EXPL_NOISE": 0.1,  # Action noise scale
-            "MEAN_NOISE": 0.0,  # Mean action noise
-            "THETA": 0.15,  # Rate of mean reversion in OU noise
-            "DT": 0.01,  # Timestep for OU noise
-            "LR_ACTOR": 0.001,  # Actor learning rate
-            "LR_CRITIC": 0.001,  # Critic learning rate
-            "GAMMA": 0.95,  # Discount factor
-            "MEMORY_SIZE": 100000,  # Max memory buffer size
-            "LEARN_STEP": 100,  # Learning frequency
-            "TAU": 0.01,  # For soft update of target parameters
-            "POLICY_FREQ": 2,  # Policy frequnecy
-            "POP_SIZE": 4,  # Population size
-        }
 
         num_envs = 8
         # Define the simple speaker listener environment as a parallel environment
@@ -491,24 +457,48 @@ Alternatively, use a custom training loop. Combining all of the above:
         observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
         action_spaces = [env.single_action_space(agent) for agent in env.agents]
 
-        # Append number of agents and agent IDs to the initial hyperparameter dictionary
-        INIT_HP["AGENT_IDS"] = env.agents
+        # Configure network architecture
+        net_config = {
+            "speaker_0": {
+                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
+                "head_config": {"hidden_size": [32]},
+            },
+            "listener_0": {
+                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
+                "head_config": {"hidden_size": [32]},
+            },
+        }
 
-        # Create a population ready for evolutionary hyper-parameter optimisation
-        pop: list[MADDPG] = create_population(
-            "MADDPG",
-            observation_spaces,
-            action_spaces,
-            NET_CONFIG,
-            INIT_HP,
-            population_size=INIT_HP["POP_SIZE"],
-            num_envs=num_envs,
+        # Algorithm hyperparameters
+        init_hp = {
+            "batch_size": 32,
+            "O_U_noise": True,
+            "expl_noise": 0.1,
+            "mean_noise": 0.0,
+            "theta": 0.15,
+            "dt": 0.01,
+            "lr_actor": 0.001,
+            "lr_critic": 0.001,
+            "gamma": 0.95,
+            "learn_step": 100,
+            "tau": 0.01,
+        }
+
+        # Initialize population
+        population_size = 4
+        pop: list[MADDPG] = MADDPG.population(
+            size=population_size,
+            observation_space=observation_spaces,
+            action_space=action_spaces,
+            net_config=net_config,
+            agent_ids=env.agents,
             device=device,
+            **init_hp,
         )
 
         # Configure the multi-agent replay buffer
         memory = MultiAgentReplayBuffer(
-            max_size=INIT_HP["MEMORY_SIZE"],
+            max_size=100000,
             device=device,
         )
 
@@ -516,7 +506,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         tournament = TournamentSelection(
             tournament_size=2,  # Tournament selection size
             elitism=True,  # Elitism in tournament selection
-            population_size=INIT_HP["POP_SIZE"],  # Population size
+            population_size=population_size,  # Population size
         )
 
         mutations = Mutations(
@@ -634,8 +624,11 @@ Similarly to off-policy training, we've adapted our single-agent on-policy train
 :class:`IPPO <agilerl.algorithms.ippo.IPPO>` has been implemented to be used with this training function, but we are looking to add
 more algorithms in the future!
 
-Create a Population of Agents
+Customised Training Pipeline
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Create a Population of Agents
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 In the snippet below, we show an example of how to create a population of IPPO agents for the simple speaker listener environment.
 
@@ -643,26 +636,13 @@ In the snippet below, we show an example of how to create a population of IPPO a
 
     .. code-block:: python
 
-        from pettingzoo.mpe import simple_speaker_listener_v4
         import torch
+        from pettingzoo.mpe import simple_speaker_listener_v4
 
-        from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-        from agilerl.utils.utils import create_population
+        from agilerl.algorithms import IPPO
         from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # Define the network configuration
-        NET_CONFIG = {
-            "speaker_0": {
-                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
-                "head_config": {"hidden_size": [32]},
-            },
-            "listener_0": {
-                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
-                "head_config": {"hidden_size": [32]},
-            },
-        }
 
         # Define the simple speaker listener environment as a parallel environment
         num_envs = 8
@@ -678,32 +658,31 @@ In the snippet below, we show an example of how to create a population of IPPO a
         observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
         action_spaces = [env.single_action_space(agent) for agent in env.agents]
 
-        # Append number of agents and agent IDs to the initial hyperparameter dictionary
-        INIT_HP["AGENT_IDS"] = env.agents
+        # Configure network architecture
+        net_config = {
+            "speaker_0": {
+                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
+                "head_config": {"hidden_size": [32]},
+            },
+            "listener_0": {
+                "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},
+                "head_config": {"hidden_size": [32]},
+            },
+        }
 
-        # Mutation config for RL hyperparameters
-        hp_config = HyperparameterConfig(
-            lr = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(min=8, max=1024),
-            learn_step = RLParameter(min=256, max=8192, grow_factor=1.5, shrink_factor=0.75)
-        )
-
-        # Create a population ready for evolutionary hyper-parameter optimisation
+        # Initialize population
         population_size = 4
-        pop = create_population(
-            "IPPO",
-            observation_spaces,
-            action_spaces,
-            NET_CONFIG,
-            INIT_HP,
-            hp_config,
-            population_size=population_size,
-            num_envs=num_envs,
+        pop = IPPO.population(
+            size=population_size,
+            observation_space=observation_spaces,
+            action_space=action_spaces,
+            net_config=net_config,
+            agent_ids=env.agents,
             device=device,
         )
 
 Training Loop
-~~~~~~~~~~~~~
+^^^^^^^^^^^^^
 
 Similarly to the off-policy alternative, you can use our off-the-shelf training function
 :func:`train_multi_agent_on_policy() <agilerl.training.train_multi_agent_on_policy.train_multi_agent_on_policy>`, which returns a population of trained agents and logged training metrics.
@@ -721,8 +700,7 @@ Similarly to the off-policy alternative, you can use our off-the-shelf training 
             algo="IPPO",  # Algorithm
             pop=pop,  # Population of agents
             sum_scores=True,
-            INIT_HP=INIT_HP,
-            MUT_P=MUTATION_PARAMS,
+            init_hp=init_hp,
             max_steps=1000000,  # Max number of training steps
             evo_steps=10000,  # Evolution frequency
             eval_steps=None,  # Number of steps in evaluation episode

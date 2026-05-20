@@ -573,32 +573,47 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         size: int,
         observation_space: GymSpaceType,
         action_space: GymSpaceType,
+        device: str = "cpu",
         wrapper_cls: type[SelfAgentWrapper] | None = None,
         wrapper_kwargs: dict[str, Any] | None = None,
+        resume_from_checkpoint: str | None = None,
         **kwargs,
     ) -> list[Self | SelfAgentWrapper]:
         """Create a population of algorithms.
 
         :param size: The size of the population.
-        :type size: int.
-
+        :type size: int
+        :param observation_space: The observation space.
+        :type observation_space: GymSpaceType
+        :param action_space: The action space.
+        :type action_space: GymSpaceType
+        :param device: Torch device string. Defaults to ``"cpu"``.
+        :type device: str
+        :param wrapper_cls: Optional wrapper class to apply to each agent.
+        :type wrapper_cls: type | None
+        :param wrapper_kwargs: Keyword arguments for the wrapper class.
+        :type wrapper_kwargs: dict[str, Any] | None
+        :param resume_from_checkpoint: Path to checkpoint to resume from.
+        :type resume_from_checkpoint: str | None
         :return: A list of algorithms.
-        :rtype: list[EvolvableAlgorithm].
+        :rtype: list[EvolvableAlgorithm]
         """
         if wrapper_kwargs is None:
             wrapper_kwargs = {}
-        if wrapper_cls is not None:
-            return [
-                wrapper_cls(
-                    cls(observation_space, action_space, index=i, **kwargs),
-                    **wrapper_kwargs,
-                )
-                for i in range(size)
-            ]
 
-        return [
-            cls(observation_space, action_space, index=i, **kwargs) for i in range(size)
-        ]
+        population: list[Self | SelfAgentWrapper] = []
+        for i in range(size):
+            agent = cls(
+                observation_space, action_space, index=i, device=device, **kwargs
+            )
+            if resume_from_checkpoint is not None:
+                agent.load_checkpoint(resume_from_checkpoint)
+                agent.index = i
+            if wrapper_cls is not None:
+                agent = wrapper_cls(agent, **wrapper_kwargs)
+            population.append(agent)
+
+        return population
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Set the attribute of the algorithm. If the attribute is an OptimizerWrapper,
@@ -2787,6 +2802,67 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         raise NotImplementedError(
             msg,
         )
+
+    @classmethod
+    def population(
+        cls,
+        size: int,
+        accelerator: Accelerator | None = None,
+        device: str | torch.device = "cpu",
+        resume_from_checkpoint: str | None = None,
+        **kwargs: Any,
+    ) -> list[Self]:
+        """Create a population of LLM algorithms.
+
+        Builds agent 0 fully (loading the model from disk), then clones the actor
+        network for agents 1..N using :func:`clone_llm`. Each agent beyond the
+        first receives a fresh ``Accelerator`` instance to avoid sharing the same
+        DeepSpeed distributed context.
+
+        :param size: The size of the population.
+        :type size: int
+        :param accelerator: HuggingFace ``Accelerator`` instance for agent 0.
+        :type accelerator: Accelerator | None
+        :param device: Torch device string. Defaults to ``"cpu"``.
+        :type device: str | torch.device
+        :param resume_from_checkpoint: Path to checkpoint to resume from.
+        :type resume_from_checkpoint: str | None
+        :return: A list of LLM algorithms.
+        :rtype: list[LLMAlgorithm]
+        """
+        from agilerl.utils.algo_utils import clone_llm
+        from agilerl.utils.llm_utils import get_state_dict
+
+        agent_0 = cls(index=0, accelerator=accelerator, device=device, **kwargs)
+        if resume_from_checkpoint is not None:
+            agent_0.load_checkpoint(resume_from_checkpoint)
+            agent_0.index = 0
+
+        population: list[Self] = [agent_0]
+        for i in range(1, size):
+            agent_accelerator = Accelerator() if accelerator is not None else None
+            cloned_actor = clone_llm(
+                agent_0.actor,
+                zero_stage=0,
+                state_dict=(
+                    agent_0.actor.state_dict()
+                    if accelerator is None
+                    else get_state_dict(agent_0.actor)
+                ),
+            )
+            agent = cls(
+                index=i,
+                accelerator=agent_accelerator,
+                device=device,
+                actor_network=cloned_actor,
+                **kwargs,
+            )
+            if resume_from_checkpoint is not None:
+                agent.load_checkpoint(resume_from_checkpoint)
+                agent.index = i
+            population.append(agent)
+
+        return population
 
     def wrap_models(self) -> None:
         """Wrap the models in the accelerator, DeepSpeed objects must be wrapped at the same time,

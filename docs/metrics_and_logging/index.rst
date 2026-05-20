@@ -118,20 +118,34 @@ with a :class:`~agilerl.population.Population`:
    num_envs = 8
    env = make_vect_envs("LunarLander-v3", num_envs=num_envs)
 
-   # Population of agents
-   pop_size = 4
-   pop = [
-       DQN(observation_space=env.single_observation_space,
-           action_space=env.single_action_space,
-           device=device)
-       for _ in range(pop_size)
-   ]
+   # Algorithm hyperparameters
+   init_hp = {
+       "batch_size": 128,
+       "lr": 1e-3,
+       "gamma": 0.99,
+       "learn_step": 1,
+       "tau": 1e-3,
+   }
+
+   # Initialize population
+   population_size = 4
+   pop = DQN.population(
+       size=population_size,
+       observation_space=env.single_observation_space,
+       action_space=env.single_action_space,
+       device=device,
+       **init_hp,
+   )
 
    # Replay buffer
    memory = ReplayBuffer(max_size=100_000, device=device)
 
-   # HPO operators
-   tournament = TournamentSelection(tournament_size=2, elitism=True, population_size=pop_size)
+   # Evo-HPO
+   tournament = TournamentSelection(
+    tournament_size=2,
+    elitism=True,
+    population_size=population_size,
+   )
    mutation = Mutations(
        no_mutation=0.4,
        architecture=0.2,
@@ -139,6 +153,7 @@ with a :class:`~agilerl.population.Population`:
        parameters=0.2,
        activation=0.1,
        rl_hp=0.1,
+       device=device,
    )
 
    # Configure loggers and population
