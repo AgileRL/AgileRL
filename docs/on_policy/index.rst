@@ -117,7 +117,7 @@ Here is an example manifest to train PPO on LunarLander-v3:
 
       .. code-block:: bash
 
-         python -m agilerl.train -m ppo.yaml
+         python -m agilerl.train ppo.yaml
 
 .. seealso::
 

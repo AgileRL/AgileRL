@@ -11,7 +11,12 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import httpx
 import pytest
 
-from agilerl.arena.client import ArenaClient, _TokenStore, prepare_env_upload
+from agilerl.arena.client import (
+    ArenaClient,
+    _TokenStore,
+    _extract_filename,
+    prepare_env_upload,
+)
 from agilerl.arena.auth import ArenaOAuth2
 from agilerl.arena.exceptions import (
     ArenaAPIError,
@@ -44,9 +49,6 @@ def _mock_ndjson_stream(result: dict | None = None) -> MagicMock:
     return mock
 
 
-# ---------------------------------------------------------------------------
-# _TokenStore
-# ---------------------------------------------------------------------------
 class TestTokenStore:
     def test_defaults_are_none(self):
         store = _TokenStore()
@@ -72,9 +74,6 @@ class TestTokenStore:
         assert store.refresh_token is None
 
 
-# ---------------------------------------------------------------------------
-# Helpers — Create an ArenaClient bypassing real auth / HTTP
-# ---------------------------------------------------------------------------
 @pytest.fixture
 def api_key_client():
     """ArenaClient with a static API key (no OAuth, no session restore)."""
@@ -107,9 +106,6 @@ def unauthenticated_client():
     return client
 
 
-# ---------------------------------------------------------------------------
-# ArenaClient.__init__
-# ---------------------------------------------------------------------------
 class TestArenaClientInit:
     @patch("agilerl.arena.auth.KeycloakOpenID")
     def test_with_explicit_api_key(self, _kc):
@@ -140,9 +136,6 @@ class TestArenaClientInit:
         assert client._upload_timeout == 300  # default
 
 
-# ---------------------------------------------------------------------------
-# ArenaClient.configure
-# ---------------------------------------------------------------------------
 class TestArenaClientConfigure:
     def setup_method(self):
         self._orig_url = ArenaClient.BASE_URL
@@ -176,9 +169,6 @@ class TestArenaClientConfigure:
         assert ArenaClient.BASE_URL == orig
 
 
-# ---------------------------------------------------------------------------
-# login / logout
-# ---------------------------------------------------------------------------
 class TestArenaClientLogin:
     def test_login_stores_tokens(self, unauthenticated_client):
         client = unauthenticated_client
@@ -269,9 +259,6 @@ class TestArenaClientLogout:
         assert client._tokens.access_token is None
 
 
-# ---------------------------------------------------------------------------
-# is_authenticated
-# ---------------------------------------------------------------------------
 class TestIsAuthenticated:
     def test_true_with_api_key(self, api_key_client):
         assert api_key_client.is_authenticated is True
@@ -283,9 +270,6 @@ class TestIsAuthenticated:
         assert unauthenticated_client.is_authenticated is False
 
 
-# ---------------------------------------------------------------------------
-# set_stream_handler
-# ---------------------------------------------------------------------------
 class TestSetStreamHandler:
     def test_default_handler_is_none(self, api_key_client):
         assert api_key_client._stream_handler is None
@@ -301,9 +285,6 @@ class TestSetStreamHandler:
         assert api_key_client._stream_handler is None
 
 
-# ---------------------------------------------------------------------------
-# _auth_headers
-# ---------------------------------------------------------------------------
 class TestAuthHeaders:
     def test_api_key_header(self, api_key_client):
         headers = api_key_client._auth_headers()
@@ -318,9 +299,6 @@ class TestAuthHeaders:
             unauthenticated_client._auth_headers()
 
 
-# ---------------------------------------------------------------------------
-# _request
-# ---------------------------------------------------------------------------
 class TestRequest:
     def test_successful_json_response(self, api_key_client):
         mock_resp = MagicMock()
@@ -453,9 +431,6 @@ class TestRequest:
         assert "Authorization" in headers
 
 
-# ---------------------------------------------------------------------------
-# Environment methods
-# ---------------------------------------------------------------------------
 class TestEnvironmentListMethods:
     def test_list_environments(self, api_key_client):
         api_key_client._request = MagicMock(
@@ -588,11 +563,6 @@ class TestValidateEnvironment:
             )
 
 
-# ---------------------------------------------------------------------------
-# prepare_env_upload
-# ---------------------------------------------------------------------------
-
-
 class TestPrepareEnvUpload:
     def test_directory_is_compressed(self, tmp_path):
         env_dir = tmp_path / "my_env"
@@ -642,11 +612,6 @@ class TestPrepareEnvUpload:
             prepare_env_upload("/does/not/exist.tar.gz")
 
 
-# ---------------------------------------------------------------------------
-# Job methods
-# ---------------------------------------------------------------------------
-
-
 class TestStopExperiment:
     def test_posts_cli_stop_by_name(self, api_key_client):
         api_key_client._request = MagicMock(return_value="Ok")
@@ -659,9 +624,8 @@ class TestStopExperiment:
 
 
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Context manager and repr
-# ---------------------------------------------------------------------------
+
+
 class TestContextManager:
     def test_enter_returns_self(self, api_key_client):
         assert api_key_client.__enter__() is api_key_client
@@ -735,11 +699,6 @@ class TestTryRestoreSession:
             assert client._tokens.refresh_token is None
         finally:
             ArenaOAuth2.CREDENTIALS_FILE = orig
-
-
-# ---------------------------------------------------------------------------
-# ValidateEnvironment — parameter forwarding
-# ---------------------------------------------------------------------------
 
 
 class TestValidateEnvironmentParams:
@@ -839,9 +798,6 @@ class TestCliV1EndpointPaths:
         )
 
 
-# ---------------------------------------------------------------------------
-# _open_stream wiring
-# ---------------------------------------------------------------------------
 class TestOpenStream:
     def test_verbose_creates_renderer_with_error_map(self, api_key_client):
         """Verbose client creates a StreamRichRenderer with the correct error_cls."""
@@ -919,9 +875,6 @@ class TestOpenStream:
         assert stream._renderer is None
 
 
-# ---------------------------------------------------------------------------
-# _send with stream=True
-# ---------------------------------------------------------------------------
 class TestSendStreaming:
     def test_success_returns_raw_response(self, api_key_client):
         mock_resp = MagicMock()
@@ -1010,3 +963,424 @@ class TestSendStreaming:
             api_key_client._send("POST", "/api/test", stream=True)
         assert exc_info.value.status_code == 0
         assert "Network error" in exc_info.value.detail
+
+
+class TestExtractFilename:
+    def test_returns_none_for_none(self):
+        assert _extract_filename(None) is None
+
+    def test_returns_none_for_empty_string(self):
+        assert _extract_filename("") is None
+
+    def test_extracts_unquoted_filename(self):
+        assert _extract_filename("attachment; filename=report.csv") == "report.csv"
+
+    def test_extracts_quoted_filename(self):
+        assert _extract_filename('attachment; filename="report.csv"') == "report.csv"
+
+    def test_returns_none_when_no_filename_part(self):
+        assert _extract_filename("inline") is None
+
+    def test_handles_extra_params(self):
+        result = _extract_filename("attachment; foo=bar; filename=data.csv; baz=qux")
+        assert result == "data.csv"
+
+
+class TestLoginForceWithApiKey:
+    def test_force_clears_api_key_and_runs_device_login(self, api_key_client):
+        client = api_key_client
+        assert client._api_key == "test-key"
+        tokens = {"access_token": "new_at", "refresh_token": "new_rt"}
+        client._auth.device_login = MagicMock(return_value=tokens)
+
+        client.login(force=True)
+
+        assert client._api_key is None
+        client._auth.device_login.assert_called_once()
+        assert client._tokens.access_token == "new_at"
+        assert client._tokens.refresh_token == "new_rt"
+
+
+class TestDeleteEnvironmentMultiVersion:
+    def test_delete_no_versions_found(self, api_key_client):
+        api_key_client.list_environments = MagicMock(return_value={"MyEnv": {}})
+        result = api_key_client.delete_environment(name="MyEnv")
+        assert result is None
+
+    def test_delete_version_none_not_in_list_returns_early(self, api_key_client):
+        """When version=None, the code checks `version not in version_list` which
+        is always True (None is never a dict key), so it returns early."""
+        api_key_client.list_environments = MagicMock(
+            return_value={"MyEnv": {"v1": {}, "v2": {}}}
+        )
+        api_key_client._request = MagicMock()
+        result = api_key_client.delete_environment(name="MyEnv")
+        assert result == {"deleted": False, "name": "MyEnv", "version": None}
+        api_key_client._request.assert_not_called()
+
+    def test_delete_specific_version(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deleted": True})
+        result = api_key_client.delete_environment(name="MyEnv", version="v1")
+        api_key_client._request.assert_called_once_with(
+            "DELETE",
+            "/api/cli/v1/environments/delete",
+            json={"name": "MyEnv", "version": "v1"},
+        )
+        assert result == {"deleted": True}
+
+
+class TestDuplicateEnvironmentVersion:
+    def test_calls_request_with_correct_payload(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"duplicated": True})
+        result = api_key_client.duplicate_environment_version(
+            name="MyEnv", new_version_name="v2", version="v1"
+        )
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/environments/duplicate",
+            json={"name": "MyEnv", "new_version_name": "v2", "version": "v1"},
+        )
+        assert result == {"duplicated": True}
+
+    def test_version_none_uses_latest(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={})
+        api_key_client.duplicate_environment_version(name="Env", new_version_name="v3")
+        payload = api_key_client._request.call_args[1]["json"]
+        assert payload["version"] is None
+
+
+class TestExperimentMethods:
+    def test_list_experiments(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=[{"name": "exp1"}])
+        result = api_key_client.list_experiments("proj1")
+        api_key_client._request.assert_called_once_with(
+            "GET", "/api/cli/v1/experiments/list", params={"project": "proj1"}
+        )
+        assert result == [{"name": "exp1"}]
+
+    def test_resume_experiment(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"resumed": True})
+        result = api_key_client.resume_experiment("exp1", max_steps=1000)
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/experiments/jobs/resume",
+            json={"experiment_name": "exp1", "max_steps": 1000},
+        )
+        assert result == {"resumed": True}
+
+    def test_list_checkpoints(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=[{"step": 100}])
+        result = api_key_client.list_checkpoints("exp1")
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/jobs/checkpoints",
+            params={"experiment_name": "exp1"},
+        )
+        assert result == [{"step": 100}]
+
+
+class TestPreviewExperimentMetricsCsv:
+    def test_basic_call(self, api_key_client):
+        api_key_client._request_raw = MagicMock(
+            return_value=(b"col1,col2\n1,2\n", "text/csv", None)
+        )
+        payload, ct, disp = api_key_client.preview_experiment_metrics_csv(
+            "exp1", preview_rows=10
+        )
+        call_kwargs = api_key_client._request_raw.call_args[1]
+        params = call_kwargs["params"]
+        assert ("experiment_name", "exp1") in params
+        assert ("preview_rows", 10) in params
+        assert payload == b"col1,col2\n1,2\n"
+
+    def test_with_metrics_and_project(self, api_key_client):
+        api_key_client._request_raw = MagicMock(
+            return_value=(b"data", "text/csv", None)
+        )
+        api_key_client.preview_experiment_metrics_csv(
+            "exp1", preview_rows=5, metrics=["loss", "reward"], project="proj1"
+        )
+        call_kwargs = api_key_client._request_raw.call_args[1]
+        params = call_kwargs["params"]
+        assert ("project", "proj1") in params
+        # Note: params.extend(("metric", m)) adds "metric" and m as separate items
+        assert "metric" in params
+        assert "loss" in params
+        assert "reward" in params
+
+
+class TestListExperimentMetricNames:
+    def test_basic_call(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=["loss", "reward"])
+        result = api_key_client.list_experiment_metric_names("exp1")
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/experiments/metrics",
+            params={"experiment_name": "exp1"},
+        )
+        assert result == ["loss", "reward"]
+
+    def test_with_project_and_details(self, api_key_client):
+        api_key_client._request = MagicMock(
+            return_value={"experiment_id": "123", "metrics": ["a"]}
+        )
+        result = api_key_client.list_experiment_metric_names(
+            "exp1", project="proj1", details=True
+        )
+        call_kwargs = api_key_client._request.call_args[1]
+        assert call_kwargs["params"] == {
+            "experiment_name": "exp1",
+            "project": "proj1",
+            "details": True,
+        }
+        assert result == {"experiment_id": "123", "metrics": ["a"]}
+
+
+class TestListResources:
+    def test_calls_correct_endpoint(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"tiers": []})
+        result = api_key_client.list_resources()
+        api_key_client._request.assert_called_once_with(
+            "GET", "/api/cli/v1/resources/list"
+        )
+        assert result == {"tiers": []}
+
+
+class TestDownloadExperimentMetrics:
+    def test_default_output_path(self, api_key_client, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        api_key_client._request_raw = MagicMock(
+            return_value=(b"csv-data", "text/csv", None)
+        )
+        result = api_key_client.download_experiment_metrics("exp1")
+        assert result == Path("exp1_metrics.csv")
+        assert result.read_bytes() == b"csv-data"
+
+    def test_output_path_as_directory(self, api_key_client, tmp_path):
+        api_key_client._request_raw = MagicMock(
+            return_value=(b"data", "text/csv", 'attachment; filename="custom.csv"')
+        )
+        result = api_key_client.download_experiment_metrics(
+            "exp1", output_path=tmp_path
+        )
+        assert result == tmp_path / "custom.csv"
+        assert result.read_bytes() == b"data"
+
+    def test_output_path_as_directory_no_disposition(self, api_key_client, tmp_path):
+        api_key_client._request_raw = MagicMock(
+            return_value=(b"data", "text/csv", None)
+        )
+        result = api_key_client.download_experiment_metrics(
+            "exp1", output_path=tmp_path
+        )
+        assert result == tmp_path / "exp1_metrics.csv"
+
+    def test_raises_if_file_exists(self, api_key_client, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        existing = tmp_path / "exp1_metrics.csv"
+        existing.write_text("old")
+        api_key_client._request_raw = MagicMock(return_value=(b"new", "text/csv", None))
+        with pytest.raises(FileExistsError, match="already exists"):
+            api_key_client.download_experiment_metrics("exp1")
+
+    def test_metrics_param_forwarded(self, api_key_client, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        api_key_client._request_raw = MagicMock(
+            return_value=(b"data", "text/csv", None)
+        )
+        api_key_client.download_experiment_metrics("exp1", metrics=["loss"])
+        call_kwargs = api_key_client._request_raw.call_args[1]
+        assert call_kwargs["json"] == {"metrics": ["loss"]}
+
+
+class TestProjectMethods:
+    def test_list_projects(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=[{"name": "p1"}])
+        result = api_key_client.list_projects()
+        api_key_client._request.assert_called_once_with("GET", "/api/cli/v1/projects")
+        assert result == [{"name": "p1"}]
+
+    def test_create_project(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"id": 1, "name": "p1"})
+        result = api_key_client.create_project("p1", "desc", llm_based=True)
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/projects/create",
+            json={"name": "p1", "description": "desc", "llm_based": True},
+        )
+        assert result == {"id": 1, "name": "p1"}
+
+    def test_delete_project(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=None)
+        result = api_key_client.delete_project("p1")
+        api_key_client._request.assert_called_once_with(
+            "DELETE", "/api/cli/v1/projects/delete", json={"name": "p1"}
+        )
+        assert result is None
+
+
+class TestInferenceDeployments:
+    def test_deploy_agent(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+        result = api_key_client.deploy_agent("exp1", checkpoint="step_100")
+        api_key_client._request.assert_called_once_with(
+            "POST",
+            "/api/cli/v1/inference/deploy",
+            json={"experiment_name": "exp1", "checkpoint": "step_100"},
+        )
+        assert result == {"deployed": True}
+
+    def test_deploy_agent_no_checkpoint(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"deployed": True})
+        api_key_client.deploy_agent("exp1")
+        payload = api_key_client._request.call_args[1]["json"]
+        assert payload["checkpoint"] is None
+
+    def test_list_inference_deployments(self, api_key_client):
+        api_key_client._request = MagicMock(
+            return_value=[{"name": "dep1"}, {"name": "dep2"}]
+        )
+        result = api_key_client.list_inference_deployments(experiment_name="exp1")
+        assert result == [{"name": "dep1"}, {"name": "dep2"}]
+
+    def test_list_inference_deployments_non_list_response(self, api_key_client):
+        api_key_client._request = MagicMock(return_value="unexpected")
+        result = api_key_client.list_inference_deployments()
+        assert result == []
+
+    def test_list_inference_deployments_filters_non_dicts(self, api_key_client):
+        api_key_client._request = MagicMock(
+            return_value=[{"name": "dep1"}, "garbage", 42]
+        )
+        result = api_key_client.list_inference_deployments()
+        assert result == [{"name": "dep1"}]
+
+    def test_fetch_deployment_for_inference_single_match(self, api_key_client):
+        api_key_client._request = MagicMock(
+            return_value=[{"name": "my-dep", "spec": {"url": "http://x"}}]
+        )
+        result = api_key_client.fetch_deployment_for_inference("my-dep")
+        assert result == {"name": "my-dep", "spec": {"url": "http://x"}}
+
+    def test_fetch_deployment_for_inference_no_match_raises(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=[])
+        with pytest.raises(ArenaAPIError, match="No deployment found"):
+            api_key_client.fetch_deployment_for_inference("missing")
+
+    def test_fetch_deployment_for_inference_multiple_raises(self, api_key_client):
+        api_key_client._request = MagicMock(return_value=[{"name": "d"}, {"name": "d"}])
+        with pytest.raises(ArenaAPIError, match="Multiple deployments"):
+            api_key_client.fetch_deployment_for_inference("d")
+
+    def test_fetch_deployment_for_inference_non_list_raises(self, api_key_client):
+        api_key_client._request = MagicMock(return_value="not a list")
+        with pytest.raises(ArenaAPIError, match="No deployment found"):
+            api_key_client.fetch_deployment_for_inference("dep")
+
+
+class TestDeploymentUrlAndApiKey:
+    def test_happy_path(self):
+        row = {"spec": {"url": "http://inference.example.com"}, "api_key": "key123"}
+        url, key = ArenaClient.deployment_url_and_api_key(row)
+        assert url == "http://inference.example.com"
+        assert key == "key123"
+
+    def test_missing_spec_raises(self):
+        row = {"api_key": "key123"}
+        with pytest.raises(ArenaAPIError, match="no inference URL"):
+            ArenaClient.deployment_url_and_api_key(row)
+
+    def test_empty_url_raises(self):
+        row = {"spec": {"url": "  "}, "api_key": "key123"}
+        with pytest.raises(ArenaAPIError, match="no inference URL"):
+            ArenaClient.deployment_url_and_api_key(row)
+
+    def test_missing_api_key_raises(self):
+        row = {"spec": {"url": "http://x"}}
+        with pytest.raises(ArenaAPIError, match="no api_key"):
+            ArenaClient.deployment_url_and_api_key(row)
+
+    def test_empty_api_key_raises(self):
+        row = {"spec": {"url": "http://x"}, "api_key": "  "}
+        with pytest.raises(ArenaAPIError, match="api_key was empty"):
+            ArenaClient.deployment_url_and_api_key(row)
+
+    def test_strips_whitespace(self):
+        row = {"spec": {"url": " http://x "}, "api_key": " key "}
+        url, key = ArenaClient.deployment_url_and_api_key(row)
+        assert url == "http://x"
+        assert key == "key"
+
+
+class TestEnsureInferenceBinding:
+    @patch("agilerl.arena.client.save_inference_binding")
+    @patch("agilerl.arena.client.load_inference_binding")
+    def test_returns_cached_when_not_refresh(
+        self, mock_load, mock_save, api_key_client
+    ):
+        mock_load.return_value = ("http://cached", "cached_key")
+        result = api_key_client.ensure_inference_binding("my-dep")
+        assert result == ("http://cached", "cached_key")
+        mock_save.assert_not_called()
+
+    @patch("agilerl.arena.client.save_inference_binding")
+    @patch("agilerl.arena.client.load_inference_binding")
+    def test_fetches_and_caches_on_refresh(self, mock_load, mock_save, api_key_client):
+        mock_load.return_value = ("http://cached", "cached_key")
+        api_key_client.fetch_deployment_for_inference = MagicMock(
+            return_value={"spec": {"url": "http://new"}, "api_key": "new_key"}
+        )
+        result = api_key_client.ensure_inference_binding("my-dep", refresh=True)
+        assert result == ("http://new", "new_key")
+        mock_save.assert_called_once_with("my-dep", "http://new", "new_key")
+
+    @patch("agilerl.arena.client.save_inference_binding")
+    @patch("agilerl.arena.client.load_inference_binding")
+    def test_fetches_when_no_cache(self, mock_load, mock_save, api_key_client):
+        mock_load.return_value = None
+        api_key_client.fetch_deployment_for_inference = MagicMock(
+            return_value={"spec": {"url": "http://new"}, "api_key": "k"}
+        )
+        result = api_key_client.ensure_inference_binding("dep")
+        assert result == ("http://new", "k")
+        mock_save.assert_called_once()
+
+
+class TestOpenInferenceAgent:
+    @patch("agilerl.arena.client.Agent")
+    def test_returns_agent_instance(self, mock_agent_cls, api_key_client):
+        api_key_client.ensure_inference_binding = MagicMock(
+            return_value=("http://url", "api_key")
+        )
+        mock_agent = MagicMock()
+        mock_agent_cls.return_value = mock_agent
+
+        result = api_key_client.open_inference_agent("dep1")
+
+        mock_agent_cls.assert_called_once_with(
+            "http://url",
+            api_key="api_key",
+            timeout=api_key_client._request_timeout,
+        )
+        assert result is mock_agent
+
+    @patch("agilerl.arena.client.Agent")
+    def test_custom_timeout(self, mock_agent_cls, api_key_client):
+        api_key_client.ensure_inference_binding = MagicMock(
+            return_value=("http://url", "key")
+        )
+        api_key_client.open_inference_agent("dep", timeout=120)
+        call_kwargs = mock_agent_cls.call_args[1]
+        assert call_kwargs["timeout"] == 120
+
+    @patch("agilerl.arena.client.Agent")
+    def test_forwards_refresh_and_filters(self, mock_agent_cls, api_key_client):
+        api_key_client.ensure_inference_binding = MagicMock(
+            return_value=("http://url", "key")
+        )
+        api_key_client.open_inference_agent(
+            "dep", refresh=True, experiment_name="e", project_name="p"
+        )
+        api_key_client.ensure_inference_binding.assert_called_once_with(
+            "dep", refresh=True, experiment_name="e", project_name="p"
+        )

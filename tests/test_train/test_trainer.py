@@ -10,13 +10,14 @@ Covers:
 
 from __future__ import annotations
 
+import importlib
 import types
 from unittest.mock import MagicMock, patch
 
 import pytest
 from gymnasium.spaces import Box, Discrete
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import AgentType, HAS_LLM_DEPENDENCIES
 from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -43,11 +44,6 @@ from agilerl.utils.trainer_utils import (
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
 )
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 
 class DummyEnv:
@@ -150,11 +146,6 @@ def mock_client():
         "status": "PENDING",
     }
     return client
-
-
-# ---------------------------------------------------------------------------
-# trainer_utils — build_* functions
-# ---------------------------------------------------------------------------
 
 
 class TestBuildMutations:
@@ -341,11 +332,6 @@ class TestGetTrainingKwargs:
         assert "n_step_memory" not in kwargs
 
 
-# ---------------------------------------------------------------------------
-# LocalTrainer
-# ---------------------------------------------------------------------------
-
-
 class TestLocalTrainerConstruction:
     @patch("agilerl.training.trainer.create_population_from_spec")
     def test_string_algorithm(self, mock_create_pop, env, training_spec):
@@ -418,11 +404,6 @@ class TestLocalTrainerTrain:
 
         mock_train_fn.assert_called_once()
         assert result == (mock_pop, [[1.0]])
-
-
-# ---------------------------------------------------------------------------
-# ArenaTrainer
-# ---------------------------------------------------------------------------
 
 
 class TestArenaTrainerConstruction:
@@ -746,11 +727,6 @@ class TestArenaTrainerFromManifest:
         assert trainer._client._api_key == "my-api-key"
 
 
-# ---------------------------------------------------------------------------
-# ALGO_REGISTRY completeness
-# ---------------------------------------------------------------------------
-
-
 class TestAlgoRegistry:
     EXPECTED_ALGOS = {
         "PPO",
@@ -776,11 +752,6 @@ class TestAlgoRegistry:
         for name in self.EXPECTED_ALGOS:
             entry = ALGO_REGISTRY.get(name)
             assert entry.spec_cls is not None
-
-
-# ---------------------------------------------------------------------------
-# Custom network injection via LocalTrainer
-# ---------------------------------------------------------------------------
 
 
 class VectorizedDummyEnv(DummyEnv):
@@ -921,11 +892,6 @@ class TestLocalTrainerCustomNetworks:
             for j, b in enumerate(actors):
                 if i != j:
                     assert a is not b, "Each individual should have its own copy"
-
-
-# ---------------------------------------------------------------------------
-# LLM algorithm integration (DPO / GRPO)
-# ---------------------------------------------------------------------------
 
 
 try:
@@ -1771,11 +1737,6 @@ class TestLocalTrainerIntegration:
             assert "evaluation_interval" in call_kwargs
 
 
-# ---------------------------------------------------------------------------
-# String environment resolution
-# ---------------------------------------------------------------------------
-
-
 class TestStringEnvironmentResolution:
     """Verify that passing a plain string as the ``environment`` parameter
     produces the correct env spec and that the constructed environment
@@ -1868,11 +1829,6 @@ class TestStringEnvironmentResolution:
         assert trainer.env_spec.name == "CartPole-v1"
 
 
-# ---------------------------------------------------------------------------
-# Trainer.get_validated_manifest — direct / dict
-# ---------------------------------------------------------------------------
-
-
 class TestGetValidatedManifest:
     def test_from_yaml_file(self):
         from agilerl.models.manifest import TrainingManifest
@@ -1895,11 +1851,6 @@ class TestGetValidatedManifest:
         assert manifest.algorithm.name == "DQN"
         assert manifest.training.max_steps == 100
         assert manifest.training.pop_size == 2
-
-
-# ---------------------------------------------------------------------------
-# LocalTrainer.to_manifest
-# ---------------------------------------------------------------------------
 
 
 class TestLocalTrainerToManifest:
@@ -2031,11 +1982,6 @@ class TestLocalTrainerToManifestLLM:
         assert round_trip.algorithm.lora_config.lora_alpha == 9
 
 
-# ---------------------------------------------------------------------------
-# LocalTrainer.train optional kwargs forwarding
-# ---------------------------------------------------------------------------
-
-
 class TestLocalTrainerTrainKwargs:
     @patch("agilerl.training.trainer.create_population_from_spec")
     def test_train_kwargs_forwarded(self, mock_create_pop, training_spec):
@@ -2082,11 +2028,6 @@ class TestLocalTrainerTrainKwargs:
         assert trainer.training_spec.checkpoint_steps == 50
         assert trainer.training_spec.checkpoint_path == "/tmp/ckpt"
         assert trainer.training_spec.overwrite_checkpoints is True
-
-
-# ---------------------------------------------------------------------------
-# Multi-turn LLM support
-# ---------------------------------------------------------------------------
 
 
 class TestGRPOSpecMultiturn:
@@ -2215,3 +2156,182 @@ class TestLocalTrainerMultiturn:
         assert call_kwargs["pop"] is mock_pop
         assert call_kwargs["max_steps"] == 100
         assert "env" not in call_kwargs
+
+
+class TestImportGuardReload:
+    """Module-level fallbacks via importlib reload."""
+
+    def test_arena_client_none_without_deps(self):
+        """ArenaClient set to None when HAS_ARENA_DEPENDENCIES is False."""
+        import agilerl.training.trainer as mod
+
+        with (
+            patch("agilerl.HAS_ARENA_DEPENDENCIES", False),
+            patch("agilerl.training.trainer.HAS_ARENA_DEPENDENCIES", False),
+        ):
+            importlib.reload(mod)
+            assert mod.ArenaClient is None
+
+        importlib.reload(mod)
+
+    def test_llm_fallbacks_without_deps(self):
+        """AutoTokenizer and create_llm_accelerator set to None."""
+        import agilerl.training.trainer as mod
+
+        with (
+            patch("agilerl.HAS_LLM_DEPENDENCIES", False),
+            patch("agilerl.training.trainer.HAS_LLM_DEPENDENCIES", False),
+        ):
+            importlib.reload(mod)
+            assert mod.AutoTokenizer is None
+            assert mod.create_llm_accelerator is None
+
+        importlib.reload(mod)
+
+
+class TestMakeEnvBranches:
+    """Unit tests for LocalTrainer._make_env individual branches."""
+
+    def test_llm_multiturn_returns_none(self):
+        """LLMEnvSpec with MULTITURN returns None."""
+        from agilerl.models.env import LLMEnvSpec, LLMEnvType
+
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.env_spec = MagicMock(spec=LLMEnvSpec)
+        trainer.env_spec.env_type = LLMEnvType.MULTITURN
+        trainer.algorithm_spec = MagicMock()
+        trainer.tokenizer = MagicMock()
+        trainer.accelerator = MagicMock()
+
+        with patch(
+            "agilerl.training.trainer.isinstance",
+            side_effect=lambda o, c: (
+                True
+                if c is LLMEnvSpec and o is trainer.env_spec
+                else type.__instancecheck__(c, o)
+                if isinstance(c, type)
+                else False
+            ),
+        ):
+            result = trainer._make_env()
+        assert result is None
+
+    def test_llm_non_multiturn_calls_make_env(self):
+        """LLMEnvSpec non-multiturn sets fields and calls make_env."""
+        from agilerl.models.env import LLMEnvSpec, LLMEnvType
+
+        mock_env = MagicMock()
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.env_spec = MagicMock(spec=LLMEnvSpec)
+        trainer.env_spec.env_type = LLMEnvType.REASONING
+        trainer.env_spec.make_env = MagicMock(return_value=mock_env)
+        trainer.algorithm_spec = MagicMock()
+        trainer.algorithm_spec.use_vllm = True
+        trainer.algorithm_spec.max_model_len = 1024
+        trainer.algorithm_spec.seed = 42
+        trainer.algorithm_spec.batch_size = 8
+        trainer.tokenizer = MagicMock()
+        trainer.accelerator = MagicMock()
+
+        with patch(
+            "agilerl.training.trainer.isinstance",
+            side_effect=lambda o, c: (
+                True
+                if c is LLMEnvSpec and o is trainer.env_spec
+                else type.__instancecheck__(c, o)
+                if isinstance(c, type)
+                else False
+            ),
+        ):
+            result = trainer._make_env()
+
+        assert result is mock_env
+        assert trainer.env_spec.return_raw_completions is True
+        assert trainer.env_spec.max_context_length == 1024
+        assert trainer.env_spec.seed == 42
+        assert trainer.env_spec.data_batch_size_per_gpu == 8
+
+    def test_standard_env_calls_make_env(self):
+        """Non-LLM env spec calls make_env() with no args."""
+        mock_env = MagicMock()
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.env_spec = MagicMock()
+        trainer.env_spec.make_env = MagicMock(return_value=mock_env)
+        trainer.algorithm_spec = MagicMock()
+        trainer.tokenizer = None
+        trainer.accelerator = None
+
+        result = trainer._make_env()
+
+        assert result is mock_env
+        trainer.env_spec.make_env.assert_called_once_with()
+
+
+class TestLocalTrainerResolveEnvSpecBranches:
+    """Tests for LocalTrainer._resolve_env_spec covering all agent types."""
+
+    def _make_manifest(self, agent_type, env_data=None, **algo_attrs):
+        manifest = MagicMock()
+        manifest.environment = env_data or {"name": "TestEnv-v0", "num_envs": 4}
+        manifest.algorithm = MagicMock()
+        manifest.algorithm.agent_type = agent_type
+        for k, v in algo_attrs.items():
+            setattr(manifest.algorithm, k, v)
+        return manifest
+
+    def test_single_agent_returns_gym_spec(self):
+        from agilerl.models.env import GymEnvSpec
+
+        manifest = self._make_manifest(AgentType.SingleAgent)
+        result = LocalTrainer._resolve_env_spec(manifest)
+        assert isinstance(result, GymEnvSpec)
+        assert result.name == "TestEnv-v0"
+
+    def test_multi_agent_returns_pz_spec(self):
+        from agilerl.models.env import PzEnvSpec
+
+        manifest = self._make_manifest(AgentType.MultiAgent)
+        result = LocalTrainer._resolve_env_spec(manifest)
+        assert isinstance(result, PzEnvSpec)
+        assert result.name == "TestEnv-v0"
+
+    def test_offline_agent_returns_offline_spec(self):
+        from agilerl.models.env import OfflineEnvSpec
+
+        manifest = self._make_manifest(
+            AgentType.OfflineAgent,
+            env_data={"name": "d4rl-test", "minari_dataset_id": "hopper-medium-v2"},
+        )
+        with patch(
+            "agilerl.models.env.OfflineEnvSpec._validate_and_load_dataset",
+            return_value=None,
+        ):
+            result = LocalTrainer._resolve_env_spec(manifest)
+        assert isinstance(result, OfflineEnvSpec)
+
+    def test_bandit_agent_returns_bandit_spec(self):
+        from agilerl.models.env import BanditEnvSpec
+
+        manifest = self._make_manifest(
+            AgentType.BanditAgent,
+            env_data={"name": "bandit-env", "entrypoint": "my_module:MyEnv"},
+        )
+        result = LocalTrainer._resolve_env_spec(manifest)
+        assert isinstance(result, BanditEnvSpec)
+
+    def test_llm_agent_returns_llm_env_spec(self):
+        from agilerl.models.env import LLMEnvSpec, LLMEnvType
+
+        manifest = self._make_manifest(
+            AgentType.LLMAgent,
+            env_data={
+                "dataset": "gsm8k",
+                "reward_file_path": "/tmp/reward.py",
+                "reward_fn_name": "reward_fn",
+                "prompt_template": {"system": "You are helpful"},
+            },
+            env_type=LLMEnvType.REASONING,
+        )
+        result = LocalTrainer._resolve_env_spec(manifest)
+        assert isinstance(result, LLMEnvSpec)
+        assert result.env_type == LLMEnvType.REASONING

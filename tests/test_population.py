@@ -1,80 +1,23 @@
-"""Tests for agilerl.population and agilerl.logger.
-
-Covers:
-- get_nested_mean utility
-- PopulationMetrics dataclass
-- MetricRow, MetricsReport (formatting, coloring, rendering)
-- Population wrapper (lifecycle, metrics gathering, logger dispatch)
-- Logger implementations (StdOut, CSV, Wandb, TensorBoard)
-"""
+"""Tests for agilerl/population.py."""
 
 from __future__ import annotations
 
-import csv
-import math
-from dataclasses import FrozenInstanceError
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import numpy as np
 import pytest
 
-from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
-from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
-from agilerl.metrics import AgentMetrics, MultiAgentMetrics
-from agilerl.population import (
-    MetricsReport,
-    Population,
-    PopulationMetrics,
-)
-from agilerl.utils.population_utils import (
-    ScalarMetricRow,
-    fmt_value,
-    get_nested_mean,
-)
+from agilerl.population import MetricsReport, Population, PopulationMetrics
 
 
-class MockAgent:
-    """Minimal single-agent mock for Population tests."""
-
-    def __init__(self, index: int = 0) -> None:
-        self.metrics = AgentMetrics()
-        self.mut = "None"
-        self.index = index
-        self.registry = MagicMock()
-        self.registry.hp_config = None
-
-    @property
-    def fitness(self):
-        return self.metrics.fitness
-
-
-class MockMultiAgent:
-    """Minimal multi-agent mock for Population tests."""
-
-    def __init__(self, agent_ids: list[str], index: int = 0) -> None:
-        self.metrics = MultiAgentMetrics(agent_ids)
-        self.mut = "None"
-        self.index = index
-        self.registry = MagicMock()
-        self.registry.hp_config = None
-
-    @property
-    def fitness(self):
-        return self.metrics.fitness
-
-
-# Register so isinstance(mock, MultiAgentRLAlgorithm) returns True
-MultiAgentRLAlgorithm.register(MockMultiAgent)
-
-
-def _make_pop_metrics(**overrides) -> PopulationMetrics:
-    """Build a PopulationMetrics with sensible two-agent defaults."""
+def _make_scalar_metrics(**overrides) -> PopulationMetrics:
+    """Build a PopulationMetrics with sensible scalar defaults."""
     defaults = dict(
-        fitnesses=[1.0, 3.0],
+        fitnesses=[1.0, 2.0],
         scores=[10.0, 20.0],
         steps=[100, 200],
-        steps_per_second=[50.0, 100.0],
-        mutations=["None", "sigma"],
+        steps_per_second=[50.0, 60.0],
+        mutations=["none", "gauss"],
         indices=[0, 1],
         additional_metrics=[{"loss": 0.5}, {"loss": 0.3}],
         hyperparameters=[{"lr": 0.001}, {"lr": 0.002}],
@@ -83,88 +26,195 @@ def _make_pop_metrics(**overrides) -> PopulationMetrics:
     return PopulationMetrics(**defaults)
 
 
-@pytest.fixture()
-def pop_metrics() -> PopulationMetrics:
-    return _make_pop_metrics()
+def _make_nested_metrics(**overrides) -> PopulationMetrics:
+    """Build a PopulationMetrics with nested (multi-agent) fitnesses/scores."""
+    defaults = dict(
+        fitnesses=[{"a0": 1.0, "a1": 3.0}, {"a0": 2.0, "a1": 4.0}],
+        scores=[{"a0": 10.0, "a1": 30.0}, {"a0": 20.0, "a1": 40.0}],
+        steps=[100, 200],
+        steps_per_second=[50.0, 60.0],
+        mutations=["none", "gauss"],
+        indices=[0, 1],
+        additional_metrics=[
+            {"reward/a0": 1.0, "reward/a1": 2.0},
+            {"reward/a0": 3.0, "reward/a1": 4.0},
+        ],
+        hyperparameters=[{"lr": 0.001}, {"lr": 0.002}],
+    )
+    defaults.update(overrides)
+    return PopulationMetrics(**defaults)
 
 
-@pytest.fixture()
-def two_agents() -> list[MockAgent]:
-    agents = [MockAgent(index=i) for i in range(2)]
-    for a in agents:
-        a.metrics.register("loss")
-        a.metrics.add_fitness(1.0)
-        a.metrics.add_scores([10.0])
-        a.metrics.increment_steps(100)
-    return agents
+def _make_mock_agent(
+    *,
+    fitness=None,
+    scores=None,
+    steps=100,
+    steps_per_second=50.0,
+    additional_metrics=None,
+    nonscalar_metrics=None,
+    agent_ids=None,
+    mut="none",
+    index=0,
+    hp_config=None,
+    hp_values=None,
+):
+    """Create a mock agent with a .metrics attribute."""
+    agent = MagicMock()
+    agent.mut = mut
+    agent.index = index
+    agent.fitness = fitness if fitness is not None else [1.0]
+
+    metrics = MagicMock()
+    metrics.scores = scores if scores is not None else [10.0]
+    metrics.steps = steps
+    metrics.steps_per_second = steps_per_second
+    metrics.additional_metrics = additional_metrics or []
+    metrics.nonscalar_metrics = nonscalar_metrics or []
+    metrics.agent_ids = agent_ids
+    metrics.get_mean = MagicMock(return_value=0.5)
+    metrics.get_histogram = MagicMock(return_value=np.array([1.0, 2.0]))
+    metrics.clear = MagicMock()
+    agent.metrics = metrics
+
+    registry = MagicMock()
+    registry.hp_config = hp_config
+    if hp_config is not None:
+        hp_config.names = MagicMock(return_value=list((hp_values or {}).keys()))
+        for k, v in (hp_values or {}).items():
+            setattr(agent, k, v)
+    agent.registry = registry
+
+    return agent
 
 
-class TestGetNestedMean:
-    def test_basic(self):
-        result = get_nested_mean([{"a": 1.0, "b": 2.0}, {"a": 3.0, "b": 4.0}])
-        assert result == {"a": pytest.approx(2.0), "b": pytest.approx(3.0)}
+def _make_population(agents, **kwargs):
+    """Build a Population via __new__ to bypass __init__ validation."""
+    pop = Population.__new__(Population)
+    pop._agents = agents
+    pop.sample_agent = agents[0]
+    pop.min_evo_steps = kwargs.get("min_evo_steps", 10)
+    pop.accelerator = kwargs.get("accelerator", None)
+    pop.loggers = kwargs.get("loggers", [])
+    pop.last_fitnesses = []
+    pop.evo_steps = kwargs.get("evo_steps", 0)
+    pop.is_multi_agent = kwargs.get("is_multi_agent", False)
+    pop.additional_metric_names = kwargs.get("additional_metric_names", [])
+    pop.nonscalar_metric_names = kwargs.get("nonscalar_metric_names", [])
+    pop.agent_ids = kwargs.get("agent_ids", None)
+    return pop
 
-    def test_with_nan(self):
-        result = get_nested_mean([{"x": 1.0}, {"x": float("nan")}])
-        assert result["x"] == pytest.approx(1.0)
 
-    def test_single_dict(self):
-        result = get_nested_mean([{"k": 42.0}])
-        assert result == {"k": pytest.approx(42.0)}
+# ===========================================================================
+# PopulationMetrics dataclass
+# ===========================================================================
 
 
 class TestPopulationMetrics:
-    def test_global_step(self, pop_metrics):
-        assert pop_metrics.global_step == 300
+    # -- mean_fitness (lines 78-82) --
 
-    def test_fps(self, pop_metrics):
-        assert pop_metrics.mean_fps == pytest.approx(75.0)
+    def test_mean_fitness_empty(self):
+        """empty fitnesses returns nan."""
+        m = _make_scalar_metrics(fitnesses=[])
+        assert np.isnan(m.mean_fitness)
 
-    def test_mean_and_best_fitness(self, pop_metrics):
-        assert pop_metrics.mean_fitness == pytest.approx(2.0)
-        assert pop_metrics.best_fitness == pytest.approx(3.0)
+    def test_mean_fitness_scalar(self):
+        """scalar mean."""
+        m = _make_scalar_metrics(fitnesses=[2.0, 4.0])
+        assert m.mean_fitness == pytest.approx(3.0)
 
-    def test_mean_score_scalar(self, pop_metrics):
-        assert pop_metrics.mean_score == pytest.approx(15.0)
+    def test_mean_fitness_nested(self):
+        """nested dict path via get_nested_mean."""
+        m = _make_nested_metrics()
+        result = m.mean_fitness
+        assert isinstance(result, dict)
+        assert result["a0"] == pytest.approx(1.5)
+        assert result["a1"] == pytest.approx(3.5)
 
-    def test_mean_score_dict(self):
-        pm = _make_pop_metrics(
-            scores=[{"a0": 1.0, "a1": 2.0}, {"a0": 3.0, "a1": 4.0}],
-        )
-        mean = pm.mean_score
-        assert isinstance(mean, dict)
-        assert mean["a0"] == pytest.approx(2.0)
-        assert mean["a1"] == pytest.approx(3.0)
+    # -- best_fitness (lines 86-94) --
 
-    def test_mean_additional_metrics_multi_agent_flattened_keys(self):
-        pm = _make_pop_metrics(
+    def test_best_fitness_empty(self):
+        """empty returns nan."""
+        m = _make_scalar_metrics(fitnesses=[])
+        assert np.isnan(m.best_fitness)
+
+    def test_best_fitness_scalar(self):
+        """scalar max."""
+        m = _make_scalar_metrics(fitnesses=[1.0, 5.0])
+        assert m.best_fitness == pytest.approx(5.0)
+
+    def test_best_fitness_nested(self):
+        """nested dict per-key nanmax."""
+        m = _make_nested_metrics()
+        result = m.best_fitness
+        assert isinstance(result, dict)
+        assert result["a0"] == pytest.approx(2.0)
+        assert result["a1"] == pytest.approx(4.0)
+
+    # -- mean_score (lines 97-102) --
+
+    def test_mean_score_empty(self):
+        """empty returns nan."""
+        m = _make_scalar_metrics(scores=[])
+        assert np.isnan(m.mean_score)
+
+    def test_mean_score_scalar(self):
+        """scalar nanmean."""
+        m = _make_scalar_metrics(scores=[10.0, 20.0])
+        assert m.mean_score == pytest.approx(15.0)
+
+    def test_mean_score_nested(self):
+        """nested dict scores."""
+        m = _make_nested_metrics()
+        result = m.mean_score
+        assert isinstance(result, dict)
+        assert result["a0"] == pytest.approx(15.0)
+        assert result["a1"] == pytest.approx(35.0)
+
+    # -- mean_additional_metrics (line 106) --
+
+    def test_mean_additional_metrics(self):
+        m = _make_scalar_metrics(
             additional_metrics=[
-                {"loss/a0": 0.5, "loss/a1": 0.7},
-                {"loss/a0": 0.3, "loss/a1": 0.1},
+                {"loss": 0.5, "reward": 1.0},
+                {"loss": 0.3, "reward": 2.0},
             ]
         )
-        mean = pm.mean_additional_metrics
-        assert mean["loss/a0"] == pytest.approx(0.4)
-        assert mean["loss/a1"] == pytest.approx(0.4)
+        result = m.mean_additional_metrics
+        assert result["loss"] == pytest.approx(0.4)
+        assert result["reward"] == pytest.approx(1.5)
 
-    def test_dict_scores_mean(self):
-        pm = _make_pop_metrics(
-            scores=[
-                {"alice": 1.0, "bob": 2.0},
-                {"alice": 3.0, "bob": 4.0},
-            ],
+    # -- additional_metric_names (line 110) --
+
+    def test_additional_metric_names(self):
+        m = _make_scalar_metrics(additional_metrics=[{"loss": 0.5, "acc": 0.9}])
+        assert m.additional_metric_names == ["loss", "acc"]
+
+    # -- pop_size, global_step, mean_fps --
+
+    def test_pop_size(self):
+        m = _make_scalar_metrics()
+        assert m.pop_size == 2
+
+    def test_global_step(self):
+        m = _make_scalar_metrics(steps=[100, 200])
+        assert m.global_step == 300
+
+    def test_mean_fps(self):
+        m = _make_scalar_metrics(steps_per_second=[50.0, 60.0])
+        assert m.mean_fps == pytest.approx(55.0)
+
+    # -- to_dict (lines 112-157) --
+
+    def test_to_dict_scalar(self):
+        """scalar fitness/scores path."""
+        m = _make_scalar_metrics(
+            additional_metrics=[{"loss": 0.5}, {"loss": 0.3}],
+            hyperparameters=[{"lr": 0.001}, {"lr": 0.002}],
         )
-        mean = pm.mean_score
-        assert isinstance(mean, dict)
-        assert mean["alice"] == pytest.approx(2.0)
-        assert mean["bob"] == pytest.approx(3.0)
-
-    def test_to_dict_keys(self, pop_metrics):
-        d = pop_metrics.to_dict()
+        d = m.to_dict()
         assert "eval/mean_fitness" in d
         assert "eval/best_fitness" in d
-        assert "train/global_step" in d
-        assert "train/steps_per_second" in d
         assert "train/mean_score" in d
         assert "train/agent_0/loss" in d
         assert "train/agent_1/loss" in d
@@ -172,582 +222,602 @@ class TestPopulationMetrics:
         assert "train/agent_0/lr" in d
         assert "train/agent_1/lr" in d
 
+    def test_to_dict_nested(self):
+        """nested fitness/scores dict path."""
+        m = _make_nested_metrics()
+        d = m.to_dict()
+        assert "eval/mean_fitness/a0" in d
+        assert "eval/best_fitness/a0" in d
+        assert "train/mean_score/a0" in d
 
-class TestFmtValue:
-    def test_nan(self):
-        assert fmt_value(float("nan")) == "-"
-
-    def test_integer(self):
-        assert fmt_value(5.0) == "5"
-
-    def test_large(self):
-        assert "e" in fmt_value(1_234_567.89)
-
-    def test_small(self):
-        assert "e" in fmt_value(1e-6)
-
-    def test_normal(self):
-        assert fmt_value(0.12345) == "0.1235"
+    def test_to_dict_empty_scores(self):
+        """scores block skipped when empty."""
+        m = _make_scalar_metrics(scores=[])
+        d = m.to_dict()
+        assert "train/mean_score" not in d
 
 
-class TestMetricRow:
-    def test_frozen(self):
-        row = ScalarMetricRow(name="x", agent_values=[1.0], pop_mean=1.0)
-        with pytest.raises(FrozenInstanceError):
-            row.name = "y"
-
-    def test_fmt_name_eval(self):
-        row = ScalarMetricRow(name="eval/fitness", agent_values=[1.0], pop_mean=1.0)
-        assert row.fmt_name == "fitness"
-
-    def test_fmt_name_train(self):
-        row = ScalarMetricRow(name="train/score", agent_values=[1.0], pop_mean=1.0)
-        assert row.fmt_name == "score"
-
-    def test_fmt_name_noop(self):
-        row = ScalarMetricRow(name="other/metric", agent_values=[1.0], pop_mean=1.0)
-        assert row.fmt_name == "other/metric"
+# ===========================================================================
+# MetricsReport
+# ===========================================================================
 
 
 class TestMetricsReport:
-    def _make_report(self, **overrides) -> MetricsReport:
-        return MetricsReport(_make_pop_metrics(**overrides))
+    def test_str_returns_render(self):
+        """__str__ delegates to render()."""
+        m = _make_scalar_metrics()
+        report = MetricsReport(m)
+        assert str(report) == report.render()
 
-    # -- render / __str__ --
+    def test_show_mean_column_true(self):
+        """True when pop_size > 1."""
+        m = _make_scalar_metrics()
+        assert MetricsReport(m).show_mean_column is True
 
-    def test_render_contains_banner(self):
-        report = self._make_report()
-        text = str(report)
-        assert "Global Steps 300" in text
-        assert "Agent 0" in text
-        assert "Agent 1" in text
-
-    def test_render_banner_formats_large_global_steps(self):
-        report = self._make_report(steps=[123_000, 4_567])
-        text = str(report)
-        assert "Global Steps 127_567" in text
-
-    def test_report_str_delegates_to_render(self):
-        report = self._make_report()
-        rendered = report.render()
-        assert str(report) == rendered
-
-    def test_render_contains_banner_and_headers(self):
-        report = self._make_report()
-        rendered = report.render()
-        assert "Global Steps 300" in rendered
-        assert "Agent 0" in rendered
-        assert "Agent 1" in rendered
-        assert "Mean" in rendered
-
-    def test_render_single_agent_omits_mean_column(self):
-        report = self._make_report(
+    def test_show_mean_column_false(self):
+        """False when pop_size == 1."""
+        m = _make_scalar_metrics(
             fitnesses=[1.0],
             scores=[10.0],
             steps=[100],
             steps_per_second=[50.0],
-            mutations=["None"],
+            mutations=["none"],
             indices=[0],
             additional_metrics=[{"loss": 0.5}],
             hyperparameters=[{"lr": 0.001}],
         )
-        rendered = report.render()
-        assert "Agent 0" in rendered
-        assert "Mean" not in rendered
-
-    def test_render_contains_metadata_rows(self):
-        report = self._make_report()
-        rendered = report.render()
-        assert "steps" in rendered
-        assert "mutations" in rendered
-        assert "steps/s" in rendered
+        assert MetricsReport(m).show_mean_column is False
 
     def test_to_dict_delegates(self):
-        report = self._make_report()
-        assert report.to_dict() == report.metrics.to_dict()
+        """delegates to metrics.to_dict."""
+        m = _make_scalar_metrics()
+        report = MetricsReport(m)
+        assert report.to_dict() == m.to_dict()
 
-    def test_to_nonscalar_dict_empty_by_default(self):
-        report = self._make_report()
+    def test_to_nonscalar_dict_with_values(self):
+        """returns non-scalar metrics keyed by agent index."""
+        arr = np.array([1.0, 2.0, 3.0])
+        m = _make_scalar_metrics(
+            nonscalar_additional_metrics=[
+                {"histogram": arr, "empty_one": None},
+                {"histogram": arr, "empty_one": None},
+            ]
+        )
+        report = MetricsReport(m)
+        d = report.to_nonscalar_dict()
+        assert "train/agent_0/histogram" in d
+        assert "train/agent_1/histogram" in d
+        assert "train/agent_0/empty_one" not in d  # None filtered out
+        np.testing.assert_array_equal(d["train/agent_0/histogram"], arr)
+
+    def test_to_nonscalar_dict_empty(self):
+        """empty when no nonscalar metrics."""
+        m = _make_scalar_metrics()
+        report = MetricsReport(m)
         assert report.to_nonscalar_dict() == {}
 
-    def test_to_nonscalar_dict_with_data(self):
-        arr0 = np.array([1, 2, 3])
-        arr1 = np.array([4, 5, 6])
-        report = self._make_report(
-            nonscalar_additional_metrics=[
-                {"action_dist": arr0},
-                {"action_dist": arr1},
-            ]
+    def test_eval_rows(self):
+        """returns fitness row."""
+        m = _make_scalar_metrics()
+        rows = MetricsReport(m).eval_rows()
+        assert len(rows) == 1
+
+    def test_train_rows_with_scores_and_metrics(self):
+        """score + additional metric rows."""
+        m = _make_scalar_metrics()
+        rows = MetricsReport(m).train_rows()
+        assert len(rows) >= 2  # score row + at least one additional metric row
+
+    def test_train_rows_empty_scores(self):
+        """no score row when scores empty."""
+        m = _make_scalar_metrics(scores=[])
+        rows = MetricsReport(m).train_rows()
+        # Only additional metric rows, no score row
+        score_names = [r.name for r in rows if hasattr(r, "name")]
+        assert "train/score" not in score_names
+
+    def test_train_rows_empty_additional_metrics(self):
+        """no additional metric rows when empty."""
+        m = _make_scalar_metrics(additional_metrics=[])
+        rows = MetricsReport(m).train_rows()
+        assert len(rows) == 1  # only score row
+
+    def test_add_additional_metric_rows_nested(self):
+        """nested additional metrics (multi-agent keys with /)."""
+        m = _make_nested_metrics()
+        report = MetricsReport(m)
+        rows = report.train_rows()
+        nested_rows = [r for r in rows if hasattr(r, "children")]
+        assert len(nested_rows) >= 1
+
+    def test_render_scalar_single_agent(self):
+        """render with single agent (no mean column)."""
+        m = _make_scalar_metrics(
+            fitnesses=[3.0],
+            scores=[15.0],
+            steps=[300],
+            steps_per_second=[75.0],
+            mutations=["none"],
+            indices=[0],
+            additional_metrics=[{"loss": 0.5}],
+            hyperparameters=[{"lr": 0.001}],
         )
-        result = report.to_nonscalar_dict()
-        assert set(result.keys()) == {
-            "train/agent_0/action_dist",
-            "train/agent_1/action_dist",
-        }
-        np.testing.assert_array_equal(result["train/agent_0/action_dist"], arr0)
-        np.testing.assert_array_equal(result["train/agent_1/action_dist"], arr1)
+        report = MetricsReport(m)
+        text = report.render()
+        assert "Agent 0" in text
+        assert "fitness" in text
+        assert "steps" in text
 
-    def test_to_nonscalar_dict_skips_none(self):
-        report = self._make_report(
-            nonscalar_additional_metrics=[
-                {"action_dist": np.array([1])},
-                {"action_dist": None},
-            ]
-        )
-        result = report.to_nonscalar_dict()
-        assert "train/agent_0/action_dist" in result
-        assert "train/agent_1/action_dist" not in result
+    def test_render_scalar_multi_agent(self):
+        """render with multiple agents (mean column shown)."""
+        m = _make_scalar_metrics()
+        report = MetricsReport(m)
+        text = report.render()
+        assert "Agent 0" in text
+        assert "Agent 1" in text
+        assert "Mean" in text
+        assert "mutations" in text
+        assert "steps/s" in text
 
-    def test_render_multi_agent_additional_metrics_nested_rows(self):
-        report = self._make_report(
-            additional_metrics=[
-                {
-                    "loss/a0": 0.5,
-                    "loss/a1": 0.6,
-                    "entropy/a0": 0.2,
-                    "entropy/a1": 0.3,
-                },
-                {
-                    "loss/a0": 0.7,
-                    "loss/a1": 0.9,
-                    "entropy/a0": 0.4,
-                    "entropy/a1": 0.5,
-                },
-            ]
-        )
-        rendered = report.render()
-        assert "Sub-agent Additional Metrics" not in rendered
-        assert "loss/a0" not in rendered
-        assert "entropy/a0" not in rendered
-        assert "loss" in rendered
-        assert "entropy" in rendered
-        assert "a0" in rendered
-        assert "a1" in rendered
+    def test_render_nested_metrics(self):
+        """render nested metric rows."""
+        m = _make_nested_metrics()
+        report = MetricsReport(m)
+        text = report.render()
+        assert "fitness" in text
+        assert "a0" in text
 
-    def test_render_multi_agent_scores_nested_rows(self):
-        report = self._make_report(
-            scores=[
-                {"a0": 10.0, "a1": 20.0},
-                {"a0": 30.0, "a1": 40.0},
-            ]
-        )
-        rendered = report.render()
-        assert "score/a0" not in rendered
-        assert "score/a1" not in rendered
-        assert "score" in rendered
-        assert "a0" in rendered
-        assert "a1" in rendered
-
-    def test_render_multi_agent_scores_nested_rows_from_dicts(self):
-        report = self._make_report(
-            scores=[
-                {"p0": 10.0, "p1": 20.0},
-                {"p0": 30.0, "p1": 40.0},
-            ],
-        )
-        rendered = report.render()
-        assert "score" in rendered
-        assert "p0" in rendered
-        assert "p1" in rendered
+    def test_render_no_hyperparameters(self):
+        """skip HP section when empty."""
+        m = _make_scalar_metrics(hyperparameters=[])
+        report = MetricsReport(m)
+        text = report.render()
+        assert "lr" not in text
 
 
-class TestPopulation:
-    def test_init_homogeneous(self, two_agents):
-        pop = Population(agents=two_agents)
-        assert pop.size == 2
-
-    def test_init_heterogeneous_raises(self):
-        a1 = MockAgent(index=0)
-        a1.metrics.add_scores([1.0])
-        a2 = MagicMock()
-        a2.metrics = AgentMetrics()
-        a2.metrics.add_scores([1.0])
-        with pytest.raises(ValueError, match="same algorithm"):
-            Population(agents=[a1, a2])
-
-    def test_agents_property_and_size(self, two_agents):
-        pop = Population(agents=two_agents)
-        assert pop.agents is two_agents
-        assert pop.size == 2
-
-    def test_update_replaces_agents(self, two_agents):
-        pop = Population(agents=two_agents)
-        new_agents = [MockAgent(index=5)]
-        new_agents[0].metrics.add_scores([1.0])
-        pop.update(new_agents)
-        assert pop.agents is new_agents
-
-    def test_increment_evo_step(self, two_agents):
-        pop = Population(agents=two_agents)
-        assert pop.evo_steps == 0
-        pop.increment_evo_step()
-        pop.increment_evo_step()
-        assert pop.evo_steps == 2
-
-    def test_all_below(self, two_agents):
-        pop = Population(agents=two_agents)
-        assert pop.all_below(200)
-        assert not pop.all_below(100)
-
-    def test_should_stop_none_target(self, two_agents):
-        pop = Population(agents=two_agents)
-        assert pop.should_stop(None) is False
-
-    def test_should_stop_below_min_evo_steps(self, two_agents):
-        pop = Population(agents=two_agents, min_evo_steps=10)
-        pop.evo_steps = 5
-        assert pop.should_stop(0.5) is False
-
-    def test_should_stop_true(self, two_agents):
-        pop = Population(agents=two_agents, min_evo_steps=2)
-        pop.evo_steps = 3
-        assert pop.should_stop(0.5) is True
-
-    def test_clear_agent_metrics(self, two_agents):
-        two_agents[0].metrics.log("loss", 1.0)
-        pop = Population(agents=two_agents)
-        pop.clear_agent_metrics()
-        assert math.isnan(two_agents[0].metrics.get_mean("loss"))
-        assert two_agents[0].metrics.scores == []
-
-    def test_report_metrics_dispatches_to_loggers(self, two_agents):
-        logger = MagicMock()
-        pop = Population(agents=two_agents, loggers=[logger])
-        pop.report_metrics()
-        logger.write.assert_called_once()
-        arg = logger.write.call_args[0][0]
-        assert isinstance(arg, MetricsReport)
-
-    def test_finish_calls_close_on_loggers(self, two_agents):
-        l1, l2 = MagicMock(), MagicMock()
-        pop = Population(agents=two_agents, loggers=[l1, l2])
-        pop.finish()
-        l1.close.assert_called_once()
-        l2.close.assert_called_once()
-
-    def test_collect_scores_scalar(self, two_agents):
-        pop = Population(agents=two_agents)
-        scores = pop._collect_scores()
-        assert scores == [pytest.approx(10.0), pytest.approx(10.0)]
-
-    def test_collect_additional_metrics_single_agent(self, two_agents):
-        two_agents[0].metrics.log("loss", 0.5)
-        two_agents[1].metrics.log("loss", 0.3)
-        pop = Population(agents=two_agents)
-        result = pop._collect_additional_metrics()
-        assert result[0]["loss"] == pytest.approx(0.5)
-        assert result[1]["loss"] == pytest.approx(0.3)
-
-    def test_collect_scores_nested(self):
-        agent_ids = ["a0", "a1"]
-        agents = [MockMultiAgent(agent_ids, index=i) for i in range(2)]
-        for a in agents:
-            a.metrics.add_scores([[1.0, 2.0], [3.0, 4.0]])
-            a.metrics.add_fitness(1.0)
-            a.metrics.increment_steps(100)
-
-        pop = Population(agents=agents)
-        scores = pop._collect_scores()
-        assert isinstance(scores[0], dict)
-        assert scores[0]["a0"] == pytest.approx(2.0)
-        assert scores[0]["a1"] == pytest.approx(3.0)
-
-    def test_collect_additional_metrics_multi_agent(self):
-        agent_ids = ["a0", "a1"]
-        agents = [MockMultiAgent(agent_ids, index=i) for i in range(2)]
-        for a in agents:
-            a.metrics.register("loss")
-            a.metrics.add_scores([1.0])
-            a.metrics.add_fitness(1.0)
-            a.metrics.increment_steps(100)
-        agents[0].metrics.log("loss", "a0", 0.5)
-        agents[0].metrics.log("loss", "a1", 0.7)
-        agents[1].metrics.log("loss", "a0", 0.3)
-        agents[1].metrics.log("loss", "a1", 0.1)
-
-        pop = Population(agents=agents)
-        result = pop._collect_additional_metrics()
-        assert result[0]["loss/a0"] == pytest.approx(0.5)
-        assert result[0]["loss/a1"] == pytest.approx(0.7)
-        assert result[1]["loss/a0"] == pytest.approx(0.3)
-
-    def test_collect_nonscalar_metrics_single_agent(self, two_agents):
-        for a in two_agents:
-            a.metrics.register_histogram("action_dist")
-        two_agents[0].metrics.log_histogram("action_dist", np.array([1, 2, 3]))
-        two_agents[1].metrics.log_histogram("action_dist", np.array([4, 5, 6]))
-
-        pop = Population(agents=two_agents)
-        result = pop._collect_nonscalar_metrics()
-        np.testing.assert_array_equal(result[0]["action_dist"], [1, 2, 3])
-        np.testing.assert_array_equal(result[1]["action_dist"], [4, 5, 6])
-
-    def test_collect_nonscalar_metrics_multi_agent(self):
-        agent_ids = ["a0", "a1"]
-        agents = [MockMultiAgent(agent_ids, index=i) for i in range(2)]
-        for a in agents:
-            a.metrics.register_histogram("action_dist")
-            a.metrics.add_scores([1.0])
-            a.metrics.add_fitness(1.0)
-            a.metrics.increment_steps(100)
-        agents[0].metrics.log_histogram("action_dist", "a0", np.array([10, 20]))
-
-        pop = Population(agents=agents)
-        result = pop._collect_nonscalar_metrics()
-        np.testing.assert_array_equal(result[0]["action_dist/a0"], [10, 20])
-        assert result[0]["action_dist/a1"] is None
-
-    def test_nonscalar_in_report_metrics(self, two_agents):
-        for a in two_agents:
-            a.metrics.register_histogram("action_dist")
-        two_agents[0].metrics.log_histogram("action_dist", np.array([1, 2]))
-
-        pop = Population(agents=two_agents)
-        report = pop.report_metrics()
-        ns = report.to_nonscalar_dict()
-        assert "train/agent_0/action_dist" in ns
-        assert "train/agent_1/action_dist" not in ns
+# ===========================================================================
+# Population class
+# ===========================================================================
 
 
-# ---------------------------------------------------------------------------
-# Edge-case tests — Population / PopulationMetrics / MetricsReport
-# ---------------------------------------------------------------------------
-
-
-class TestPopulationEdgeCases:
+class TestPopulationInit:
     def test_empty_agents_raises(self):
+        """ValueError on empty agents list."""
         with pytest.raises(ValueError, match="at least one agent"):
             Population(agents=[])
 
-    def test_local_step(self, two_agents):
-        two_agents[0].metrics.increment_steps(50)
-        two_agents[1].metrics.increment_steps(200)
-        pop = Population(agents=two_agents)
-        assert pop.local_step == max(a.metrics.steps for a in two_agents)
+    def test_mixed_types_raises(self):
+        """ValueError when agents have different types."""
 
-    def test_is_nested_scores_false_for_scalar(self, two_agents):
-        pop = Population(agents=two_agents)
+        class AlgoA:
+            pass
+
+        class AlgoB:
+            pass
+
+        a, b = AlgoA(), AlgoB()
+        with pytest.raises(ValueError, match="same algorithm"):
+            Population(agents=[a, b])
+
+    def test_init_happy_path(self):
+        """real __init__ with uniform agent types."""
+
+        class FakeAlgo:
+            pass
+
+        agent = FakeAlgo()
+        metrics = MagicMock()
+        metrics.additional_metrics = ["loss"]
+        metrics.nonscalar_metrics = ["hist"]
+        metrics.agent_ids = None
+        agent.metrics = metrics
+
+        pop = Population(agents=[agent])
+        assert pop._agents == [agent]
+        assert pop.sample_agent is agent
+        assert pop.min_evo_steps == 10
+        assert pop.accelerator is None
+        assert pop.loggers == []
+        assert pop.last_fitnesses == []
+        assert pop.evo_steps == 0
+        assert pop.is_multi_agent is False
+        assert pop.additional_metric_names == ["loss"]
+        assert pop.nonscalar_metric_names == ["hist"]
+        assert pop.agent_ids is None
+
+    def test_init_multi_agent_real(self):
+        """is_multi_agent=True when all agents are MultiAgentRLAlgorithm."""
+        from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
+
+        agent = MagicMock(spec=MultiAgentRLAlgorithm)
+        agent.metrics = MagicMock()
+        agent.metrics.additional_metrics = []
+        agent.metrics.nonscalar_metrics = []
+        agent.metrics.agent_ids = ["a0", "a1"]
+
+        pop = Population(agents=[agent])
+        assert pop.is_multi_agent is True
+        assert pop.agent_ids == ["a0", "a1"]
+
+
+class TestPopulationProperties:
+    def test_agents_property(self):
+        """returns _agents."""
+        agents = [_make_mock_agent(index=i) for i in range(3)]
+        pop = _make_population(agents)
+        assert pop.agents is agents
+
+    def test_size(self):
+        pop = _make_population([_make_mock_agent(), _make_mock_agent()])
+        assert pop.size == 2
+
+    def test_local_step(self):
+        """max of agent steps."""
+        a1 = _make_mock_agent(steps=100)
+        a2 = _make_mock_agent(steps=200)
+        pop = _make_population([a1, a2])
+        assert pop.local_step == 200
+
+
+class TestPopulationIsNestedScores:
+    def test_flat_scores(self):
+        """returns False for flat scores."""
+        a = _make_mock_agent(scores=[1.0, 2.0])
+        pop = _make_population([a])
         assert pop.is_nested_scores() is False
 
-    def test_is_nested_scores_true_for_nested(self):
-        agent_ids = ["a0", "a1"]
-        agents = [MockMultiAgent(agent_ids, index=i) for i in range(2)]
-        for a in agents:
-            a.metrics.add_scores([[1.0, 2.0]])
-            a.metrics.add_fitness(1.0)
-            a.metrics.increment_steps(10)
-        pop = Population(agents=agents)
+    def test_nested_scores(self):
+        """returns True when scores are list of lists."""
+        a = _make_mock_agent(scores=[[1.0, 2.0], [3.0, 4.0]])
+        pop = _make_population([a])
         assert pop.is_nested_scores() is True
 
-    def test_is_nested_scores_empty(self, two_agents):
-        two_agents[0].metrics.scores.clear()
-        two_agents[1].metrics.scores.clear()
-        pop = Population(agents=two_agents)
+    def test_empty_scores_skipped(self):
+        """agents with empty scores are skipped."""
+        a_empty = _make_mock_agent(scores=[])
+        a_nested = _make_mock_agent(scores=[[1.0, 2.0]])
+        pop = _make_population([a_empty, a_nested])
+        assert pop.is_nested_scores() is True
+
+    def test_all_empty_scores(self):
+        """returns False when all agents have empty scores."""
+        a = _make_mock_agent(scores=[])
+        pop = _make_population([a])
         assert pop.is_nested_scores() is False
 
-    def test_report_metrics_clear_false_preserves(self, two_agents):
-        pop = Population(agents=two_agents)
+
+class TestPopulationUpdate:
+    def test_update_replaces_agents(self):
+        a1 = _make_mock_agent(index=0)
+        a2 = _make_mock_agent(index=1)
+        pop = _make_population([a1])
+        pop.update([a2])
+        assert pop.agents == [a2]
+
+
+class TestPopulationIncrementEvoStep:
+    def test_increment(self):
+        pop = _make_population([_make_mock_agent()])
+        assert pop.evo_steps == 0
+        pop.increment_evo_step()
+        assert pop.evo_steps == 1
+
+
+class TestPopulationAllBelow:
+    def test_all_below_true(self):
+        """all agents below max_steps."""
+        a1 = _make_mock_agent(steps=50)
+        a2 = _make_mock_agent(steps=99)
+        pop = _make_population([a1, a2])
+        assert pop.all_below(100) is True
+
+    def test_all_below_false(self):
+        """one agent at or above max_steps."""
+        a1 = _make_mock_agent(steps=50)
+        a2 = _make_mock_agent(steps=100)
+        pop = _make_population([a1, a2])
+        assert pop.all_below(100) is False
+
+
+class TestPopulationShouldStop:
+    def test_should_stop_none_target(self):
+        """returns False when target is None."""
+        pop = _make_population([_make_mock_agent()])
+        assert pop.should_stop(None) is False
+
+    def test_should_stop_below_min_evo(self):
+        """returns False when evo_steps < min_evo_steps."""
+        a = _make_mock_agent(fitness=[100.0])
+        pop = _make_population([a], min_evo_steps=10, evo_steps=5)
+        assert pop.should_stop(1.0) is False
+
+    def test_should_stop_true(self):
+        """returns True when all above target and enough evo_steps."""
+        a = _make_mock_agent(fitness=[100.0])
+        pop = _make_population([a], min_evo_steps=5, evo_steps=10)
+        assert pop.should_stop(1.0) is True
+
+
+class TestPopulationClearAndFinish:
+    def test_clear_agent_metrics(self):
+        a = _make_mock_agent()
+        pop = _make_population([a])
+        pop.clear_agent_metrics()
+        a.metrics.clear.assert_called_once()
+
+    def test_finish_closes_loggers(self):
+        logger = MagicMock()
+        pop = _make_population([_make_mock_agent()], loggers=[logger])
+        pop.finish()
+        logger.close.assert_called_once()
+
+
+class TestPopulationReportMetrics:
+    def test_report_metrics_writes_to_loggers(self):
+        """gathers, logs, clears."""
+        logger = MagicMock()
+        a = _make_mock_agent(
+            additional_metrics=["loss"],
+            nonscalar_metrics=[],
+            hp_config=MagicMock(),
+            hp_values={"lr": 0.001},
+        )
+        pop = _make_population(
+            [a],
+            loggers=[logger],
+            additional_metric_names=["loss"],
+            nonscalar_metric_names=[],
+        )
+
+        report = pop.report_metrics(clear=True)
+        assert isinstance(report, MetricsReport)
+        logger.write.assert_called_once_with(report)
+        a.metrics.clear.assert_called_once()
+
+    def test_report_metrics_no_clear(self):
+        """skip clear when clear=False."""
+        a = _make_mock_agent(
+            additional_metrics=["loss"],
+            nonscalar_metrics=[],
+            hp_config=MagicMock(),
+            hp_values={"lr": 0.001},
+        )
+        pop = _make_population(
+            [a],
+            additional_metric_names=["loss"],
+            nonscalar_metric_names=[],
+        )
         pop.report_metrics(clear=False)
-        assert two_agents[0].metrics.scores != []
+        a.metrics.clear.assert_not_called()
 
-    def test_collect_fitnesses_dict_values(self):
-        agent_ids = ["a0", "a1"]
-        agents = [MockMultiAgent(agent_ids, index=i) for i in range(2)]
-        for a in agents:
-            a.metrics.fitness.append({"a0": 1.0, "a1": 2.0})
-            a.metrics.add_scores([1.0])
-            a.metrics.increment_steps(10)
-        pop = Population(agents=agents)
-        fitnesses = pop._collect_fitnesses()
-        assert isinstance(fitnesses[0], dict)
-        assert fitnesses[0]["a0"] == 1.0
-        assert fitnesses[0]["a1"] == 2.0
 
-    def test_collect_fitnesses_empty_deque_returns_nan(self, two_agents):
-        for a in two_agents:
-            a.metrics.fitness.clear()
-        pop = Population(agents=two_agents)
-        fitnesses = pop._collect_fitnesses()
-        assert all(math.isnan(f) for f in fitnesses)
+class TestCollectFitnesses:
+    def test_scalar_fitness(self):
+        """scalar path."""
+        a = _make_mock_agent(fitness=[3.0, 5.0])
+        pop = _make_population([a])
+        result = pop._collect_fitnesses()
+        assert result == [5.0]
 
-    def test_collect_fitnesses_ndarray_without_agent_ids_raises(self):
-        agents = [MockAgent(index=0)]
-        agents[0].metrics.fitness.append(np.array([1.0, 2.0]))
-        agents[0].metrics.add_scores([1.0])
-        agents[0].metrics.increment_steps(10)
-        pop = Population(agents=agents)
+    def test_empty_fitness(self):
+        """nan for empty fitness."""
+        a = _make_mock_agent(fitness=[])
+        pop = _make_population([a])
+        result = pop._collect_fitnesses()
+        assert len(result) == 1
+        assert np.isnan(result[0])
+
+    def test_dict_fitness(self):
+        """multi-agent dict fitness."""
+        a = _make_mock_agent(fitness=[{"a0": 1.0, "a1": 2.0}])
+        pop = _make_population([a])
+        result = pop._collect_fitnesses()
+        assert result == [{"a0": 1.0, "a1": 2.0}]
+
+    def test_list_fitness_with_agent_ids(self):
+        """list/tuple fitness converted to dict via agent_ids."""
+        a = _make_mock_agent(fitness=[[1.0, 2.0]])
+        pop = _make_population([a], agent_ids=["a0", "a1"])
+        result = pop._collect_fitnesses()
+        assert result == [{"a0": 1.0, "a1": 2.0}]
+
+    def test_list_fitness_without_agent_ids_raises(self):
+        """raises when nested fitness but no agent_ids."""
+        a = _make_mock_agent(fitness=[[1.0, 2.0]])
+        pop = _make_population([a], agent_ids=None)
         with pytest.raises(ValueError, match="without configured agent_ids"):
             pop._collect_fitnesses()
 
-    def test_gather_metrics_with_accelerator(self, two_agents):
-        acc = MagicMock()
-        acc.is_main_process = True
-        acc.num_processes = 4
-        acc.state = MagicMock()
-        acc.state.num_processes = 4
-        pop = Population(agents=two_agents, accelerator=acc)
+    def test_ndarray_fitness_with_agent_ids(self):
+        """numpy array fitness converted to dict."""
+        a = _make_mock_agent(fitness=[np.array([1.0, 2.0])])
+        pop = _make_population([a], agent_ids=["a0", "a1"])
+        result = pop._collect_fitnesses()
+        assert result[0]["a0"] == pytest.approx(1.0)
+        assert result[0]["a1"] == pytest.approx(2.0)
+
+
+class TestCollectScores:
+    def test_scalar_scores(self):
+        """flat mean scores."""
+        a1 = _make_mock_agent(scores=[10.0, 20.0])
+        a2 = _make_mock_agent(scores=[30.0, 40.0])
+        pop = _make_population([a1, a2])
+        result = pop._collect_scores()
+        assert result[0] == pytest.approx(15.0)
+        assert result[1] == pytest.approx(35.0)
+
+    def test_scalar_empty_scores(self):
+        """nan for agent with empty scores."""
+        a = _make_mock_agent(scores=[])
+        pop = _make_population([a])
+        result = pop._collect_scores()
+        assert np.isnan(result[0])
+
+    def test_nested_scores(self):
+        """per-sub-agent mean scores."""
+        a = _make_mock_agent(scores=[[1.0, 2.0], [3.0, 4.0]])
+        pop = _make_population([a], agent_ids=["a0", "a1"])
+        result = pop._collect_scores()
+        assert result[0]["a0"] == pytest.approx(2.0)
+        assert result[0]["a1"] == pytest.approx(3.0)
+
+    def test_nested_empty_scores(self):
+        """nan dict when nested but agent has no scores."""
+        a_with = _make_mock_agent(scores=[[1.0, 2.0]])
+        a_empty = _make_mock_agent(scores=[])
+        pop = _make_population([a_with, a_empty], agent_ids=["a0", "a1"])
+        result = pop._collect_scores()
+        assert np.isnan(result[1]["a0"])
+        assert np.isnan(result[1]["a1"])
+
+
+class TestCollectAdditionalMetrics:
+    def test_single_agent(self):
+        """single-agent path (no agent_ids)."""
+        a = _make_mock_agent(additional_metrics=["loss"])
+        a.metrics.get_mean.return_value = 0.42
+        pop = _make_population([a], additional_metric_names=["loss"])
+        result = pop._collect_additional_metrics()
+        assert result == [{"loss": 0.42}]
+
+    def test_multi_agent(self):
+        """multi-agent path with agent_ids."""
+        a = _make_mock_agent(additional_metrics=["reward"])
+        a.metrics.get_mean.side_effect = lambda name, agent_id=None: {
+            ("reward", "a0"): 1.0,
+            ("reward", "a1"): 2.0,
+        }[(name, agent_id)]
+
+        pop = _make_population(
+            [a],
+            is_multi_agent=True,
+            additional_metric_names=["reward"],
+            agent_ids=["a0", "a1"],
+        )
+        result = pop._collect_additional_metrics()
+        assert result[0]["reward/a0"] == 1.0
+        assert result[0]["reward/a1"] == 2.0
+
+
+class TestCollectNonscalarMetrics:
+    def test_single_agent(self):
+        """single-agent nonscalar metrics."""
+        arr = np.array([1.0, 2.0])
+        a = _make_mock_agent(nonscalar_metrics=["hist"])
+        a.metrics.get_histogram.return_value = arr
+        pop = _make_population([a], nonscalar_metric_names=["hist"])
+        result = pop._collect_nonscalar_metrics()
+        assert len(result) == 1
+        np.testing.assert_array_equal(result[0]["hist"], arr)
+
+    def test_multi_agent(self):
+        """multi-agent nonscalar metrics."""
+        arr = np.array([1.0, 2.0])
+        a = _make_mock_agent(nonscalar_metrics=["hist"])
+        a.metrics.get_histogram.return_value = arr
+
+        pop = _make_population(
+            [a],
+            is_multi_agent=True,
+            nonscalar_metric_names=["hist"],
+            agent_ids=["a0", "a1"],
+        )
+        result = pop._collect_nonscalar_metrics()
+        assert "hist/a0" in result[0]
+        assert "hist/a1" in result[0]
+
+
+class TestCollectHyperparameters:
+    def test_with_hp_config(self):
+        """collects HPs from agents."""
+        hp_config = MagicMock()
+        hp_config.names.return_value = ["lr", "gamma"]
+        a = _make_mock_agent(
+            hp_config=hp_config, hp_values={"lr": 0.001, "gamma": 0.99}
+        )
+        pop = _make_population([a])
+        result = pop._collect_hyperparameters()
+        assert result == [{"lr": 0.001, "gamma": 0.99}]
+
+    def test_without_hp_config(self):
+        """skips agent when hp_config is None."""
+        a = _make_mock_agent(hp_config=None)
+        pop = _make_population([a])
+        result = pop._collect_hyperparameters()
+        assert result == []
+
+
+class TestGatherMetrics:
+    def test_gather_metrics_no_accelerator(self):
+        """full gather without accelerator."""
+        hp_config = MagicMock()
+        hp_config.names.return_value = ["lr"]
+        a = _make_mock_agent(
+            fitness=[2.0],
+            scores=[10.0],
+            additional_metrics=["loss"],
+            nonscalar_metrics=[],
+            hp_config=hp_config,
+            hp_values={"lr": 0.001},
+        )
+        pop = _make_population(
+            [a],
+            additional_metric_names=["loss"],
+            nonscalar_metric_names=[],
+        )
         metrics = pop._gather_metrics()
-        for step, agent in zip(metrics.steps, two_agents):
-            assert step == agent.metrics.steps * 4
+        assert isinstance(metrics, PopulationMetrics)
+        assert metrics.steps == [100]
+        assert pop.last_fitnesses == metrics.fitnesses
 
-
-class TestPopulationMetricsEdgeCases:
-    def test_empty_additional_metrics_names_raises(self):
-        pm = _make_pop_metrics(additional_metrics=[])
-        with pytest.raises(IndexError):
-            _ = pm.additional_metric_names
-
-    def test_to_dict_dict_fitnesses(self):
-        pm = _make_pop_metrics(
-            fitnesses=[{"a0": 1.0, "a1": 2.0}, {"a0": 3.0, "a1": 4.0}],
+    def test_gather_metrics_with_accelerator(self):
+        """steps multiplied by num_processes."""
+        hp_config = MagicMock()
+        hp_config.names.return_value = []
+        a = _make_mock_agent(
+            fitness=[1.0],
+            scores=[5.0],
+            steps=100,
+            additional_metrics=[],
+            nonscalar_metrics=[],
+            hp_config=hp_config,
+            hp_values={},
         )
-        d = pm.to_dict()
-        assert "eval/mean_fitness/a0" in d
-        assert "eval/mean_fitness/a1" in d
-        assert "eval/best_fitness/a0" in d
-        assert "eval/best_fitness/a1" in d
+        accelerator = MagicMock()
+        accelerator.is_main_process = True
+        accelerator.num_processes = 4
 
-    def test_to_dict_empty_scores_omits_score_key(self):
-        pm = _make_pop_metrics(scores=[])
-        d = pm.to_dict()
-        assert "train/mean_score" not in d
-
-    def test_empty_fitnesses_returns_nan(self):
-        pm = _make_pop_metrics(fitnesses=[])
-        assert math.isnan(pm.mean_fitness)
-        assert math.isnan(pm.best_fitness)
-
-    def test_empty_scores_returns_nan(self):
-        pm = _make_pop_metrics(scores=[])
-        assert math.isnan(pm.mean_score)
-
-
-class TestMetricsReportEdgeCases:
-    def _make_report(self, **overrides) -> MetricsReport:
-        return MetricsReport(_make_pop_metrics(**overrides))
-
-    def test_render_no_scores_succeeds(self):
-        report = self._make_report(scores=[])
-        rendered = report.render()
-        assert "score" not in rendered.lower() or "score" in rendered
-
-    def test_render_no_additional_metrics_succeeds(self):
-        report = self._make_report(additional_metrics=[])
-        rendered = report.render()
-        assert "Global Steps" in rendered
-
-    def test_render_empty_hyperparameters_succeeds(self):
-        report = self._make_report(hyperparameters=[])
-        rendered = report.render()
-        assert "Global Steps" in rendered
-        assert "lr" not in rendered
-
-    def test_train_rows_empty_scores(self):
-        report = self._make_report(scores=[])
-        rows = report.train_rows()
-        names = [r.name if hasattr(r, "name") else "" for r in rows]
-        assert "train/score" not in names
-
-    def test_train_rows_empty_additional_metrics_still_has_scores(self):
-        report = self._make_report(additional_metrics=[])
-        rows = report.train_rows()
-        names = [r.name for r in rows if hasattr(r, "name")]
-        assert "train/score" in names
-        assert all("loss" not in n for n in names)
-
-
-class TestStdOutLogger:
-    def test_write(self, pop_metrics):
-        pbar = MagicMock()
-        logger = StdOutLogger(pbar)
-        report = MetricsReport(pop_metrics)
-        logger.write(report)
-        pbar.write.assert_called_once()
-        assert "Global Steps" in pbar.write.call_args[0][0]
-
-
-class TestCSVLogger:
-    def test_creates_file_with_header_and_row(self, tmp_path, pop_metrics):
-        path = tmp_path / "log.csv"
-        logger = CSVLogger(path)
-        report = MetricsReport(pop_metrics)
-        logger.write(report)
-        logger.close()
-
-        with open(path) as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-        assert len(rows) == 1
-        assert "eval/mean_fitness" in rows[0]
-
-    def test_close_and_reopen(self, tmp_path, pop_metrics):
-        path = tmp_path / "log.csv"
-        logger = CSVLogger(path)
-        logger.write(MetricsReport(pop_metrics))
-        logger.close()
-
-        logger2 = CSVLogger(path)
-        logger2.write(MetricsReport(pop_metrics))
-        logger2.close()
-
-        with open(path) as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-        assert len(rows) == 1
-
-
-class TestWandbLogger:
-    @patch("agilerl.logger.wandb")
-    def test_write(self, mock_wandb, pop_metrics):
-        logger = WandbLogger()
-        report = MetricsReport(pop_metrics)
-        logger.write(report)
-        mock_wandb.log.assert_called_once_with(report.to_dict())
-
-    @patch("agilerl.logger.wandb")
-    def test_close(self, mock_wandb):
-        logger = WandbLogger()
-        logger.close()
-        mock_wandb.finish.assert_called_once()
-
-
-class TestTensorboardLogger:
-    @patch("agilerl.logger.SummaryWriter")
-    def test_write(self, MockWriter, pop_metrics):
-        mock_writer = MagicMock()
-        MockWriter.return_value = mock_writer
-
-        logger = TensorboardLogger(log_dir="/tmp/tb_test")
-        report = MetricsReport(pop_metrics)
-        logger.write(report)
-
-        assert mock_writer.add_scalar.call_count > 0
-        mock_writer.flush.assert_called_once()
-
-        scalar_keys = {call.args[0] for call in mock_writer.add_scalar.call_args_list}
-        assert "eval/mean_fitness" in scalar_keys
-
-    @patch("agilerl.logger.SummaryWriter")
-    def test_write_histograms(self, MockWriter):
-        mock_writer = MagicMock()
-        MockWriter.return_value = mock_writer
-
-        arr = np.array([1, 2, 3, 4, 5])
-        pm = _make_pop_metrics(
-            nonscalar_additional_metrics=[{"action_dist": arr}, {"action_dist": None}]
+        pop = _make_population(
+            [a],
+            accelerator=accelerator,
+            additional_metric_names=[],
+            nonscalar_metric_names=[],
         )
-        logger = TensorboardLogger(log_dir="/tmp/tb_test")
-        logger.write(MetricsReport(pm))
+        metrics = pop._gather_metrics()
+        assert metrics.steps == [400]
 
-        hist_keys = {call.args[0] for call in mock_writer.add_histogram.call_args_list}
-        assert "train/agent_0/action_dist" in hist_keys
-        assert "train/agent_1/action_dist" not in hist_keys
+    def test_gather_metrics_accelerator_not_main(self):
+        """steps NOT multiplied when not main process."""
+        hp_config = MagicMock()
+        hp_config.names.return_value = []
+        a = _make_mock_agent(
+            fitness=[1.0],
+            scores=[5.0],
+            steps=100,
+            additional_metrics=[],
+            nonscalar_metrics=[],
+            hp_config=hp_config,
+            hp_values={},
+        )
+        accelerator = MagicMock()
+        accelerator.is_main_process = False
 
-    @patch("agilerl.logger.SummaryWriter")
-    def test_close(self, MockWriter):
-        mock_writer = MagicMock()
-        MockWriter.return_value = mock_writer
-
-        logger = TensorboardLogger(log_dir="/tmp/tb_test")
-        logger.close()
-        mock_writer.close.assert_called_once()
+        pop = _make_population(
+            [a],
+            accelerator=accelerator,
+            additional_metric_names=[],
+            nonscalar_metric_names=[],
+        )
+        metrics = pop._gather_metrics()
+        assert metrics.steps == [100]

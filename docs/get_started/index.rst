@@ -337,7 +337,7 @@ Or via a YAML manifest (example can be found `here <https://github.com/AgileRL/A
 
       .. code-block:: bash
 
-         python -m agilerl.train -m configs/training/dqn/dqn.yaml
+         python -m agilerl.train configs/training/dqn/dqn.yaml
 
 
 Every aspect of the training pipeline is customisable — from modifying

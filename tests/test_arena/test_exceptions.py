@@ -93,9 +93,6 @@ class TestArenaValidationError:
         assert "Ambiguous entrypoint" in str(err)
 
 
-# ---------------------------------------------------------------------------
-# ArenaError._parse_body
-# ---------------------------------------------------------------------------
 class TestParseBody:
     def test_valid_json_dict(self):
         raw = '{"error": "something bad", "status": 500}'
@@ -131,9 +128,6 @@ class TestParseBody:
         assert result is None
 
 
-# ---------------------------------------------------------------------------
-# ArenaAPIError.from_response_body
-# ---------------------------------------------------------------------------
 class TestFromResponseBody:
     def test_empty_raw_string(self):
         err = ArenaAPIError.from_response_body("", status_code=500)
@@ -154,6 +148,7 @@ class TestFromResponseBody:
         assert "b:B" in msg
 
     def test_sdk_hint_shown_by_default(self):
+        ArenaError._cli_mode = False
         raw = '{"error": "Ambiguous entrypoint", "error_code": "AMBIGUOUS_ENTRYPOINT", "available_entrypoints": ["mod:Env"]}'
         err = ArenaAPIError.from_response_body(raw, status_code=400)
         msg = str(err)
@@ -186,9 +181,6 @@ class TestFromResponseBody:
         assert "docs.agilerl.com" in err.detail
 
 
-# ---------------------------------------------------------------------------
-# _sanitize_detail
-# ---------------------------------------------------------------------------
 class TestSanitizeDetail:
     def test_strips_internal_http_url(self):
         msg = "Failed to call: error sending request for url (http://env-validator:8080/api/v1/validations/foo)"
@@ -210,9 +202,6 @@ class TestSanitizeDetail:
         assert _sanitize_detail(msg) == msg
 
 
-# ---------------------------------------------------------------------------
-# enable_cli_mode
-# ---------------------------------------------------------------------------
 class TestEnableCliMode:
     def setup_method(self):
         self._orig = ArenaError._cli_mode
@@ -262,9 +251,6 @@ class TestEnableCliMode:
         assert "cli" in str(err)
 
 
-# ---------------------------------------------------------------------------
-# ArenaTrainingError
-# ---------------------------------------------------------------------------
 class TestArenaTrainingError:
     def test_label_is_training_error(self):
         err = ArenaTrainingError(detail="job failed", status_code=500)
@@ -274,9 +260,6 @@ class TestArenaTrainingError:
         assert issubclass(ArenaTrainingError, ArenaAPIError)
 
 
-# ---------------------------------------------------------------------------
-# _generate_hints
-# ---------------------------------------------------------------------------
 class TestGenerateHints:
     def test_ambiguous_entrypoint_with_list(self):
         body = {"error_code": "AMBIGUOUS_ENTRYPOINT"}
@@ -305,11 +288,6 @@ class TestGenerateHints:
         sdk_hint, cli_hint = ArenaError._generate_hints(body, extras)
         assert sdk_hint == ""
         assert cli_hint == ""
-
-
-# ---------------------------------------------------------------------------
-# arena/__init__.py import guard
-# ---------------------------------------------------------------------------
 
 
 class TestArenaInitImportGuard:

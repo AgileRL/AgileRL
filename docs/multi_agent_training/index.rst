@@ -283,7 +283,7 @@ Below is an example manifest for training MADDPG on the simple-speaker-listener-
 
       .. code-block:: bash
 
-        python -m agilerl.train -m maddpg.yaml
+        python -m agilerl.train maddpg.yaml
 
 .. seealso::
 

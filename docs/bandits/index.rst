@@ -110,7 +110,7 @@ Below is an example manifest for training NeuralUCB on the Iris dataset.
 
       .. code-block:: bash
 
-         python -m agilerl.train -m neural_ucb.yaml
+         python -m agilerl.train neural_ucb.yaml
 
 .. seealso::
 
