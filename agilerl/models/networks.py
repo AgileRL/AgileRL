@@ -158,7 +158,8 @@ class SimbaSpec(BaseModel):
     @model_validator(mode="after")
     def _check_blocks(self) -> Self:
         min_max_validator("min_blocks", "max_blocks")(self)
-        return min_max_validator("min_blocks", "num_blocks")(self)
+        min_max_validator("min_blocks", "num_blocks")(self)
+        return min_max_validator("num_blocks", "max_blocks")(self)
 
     @model_validator(mode="after")
     def _check_mlp_nodes(self) -> Self:
@@ -251,7 +252,8 @@ class MultiInputSpec(BaseModel):
     @model_validator(mode="after")
     def _check_latent_dim(self) -> Self:
         min_max_validator("min_latent_dim", "max_latent_dim")(self)
-        return min_max_validator("min_latent_dim", "latent_dim")(self)
+        min_max_validator("min_latent_dim", "latent_dim")(self)
+        return min_max_validator("latent_dim", "max_latent_dim")(self)
 
 
 class LstmSpec(BaseModel):
@@ -270,12 +272,14 @@ class LstmSpec(BaseModel):
     @model_validator(mode="after")
     def _check_hidden_state_size(self) -> Self:
         min_max_validator("min_hidden_state_size", "max_hidden_state_size")(self)
-        return min_max_validator("min_hidden_state_size", "hidden_state_size")(self)
+        min_max_validator("min_hidden_state_size", "hidden_state_size")(self)
+        return min_max_validator("hidden_state_size", "max_hidden_state_size")(self)
 
     @model_validator(mode="after")
     def _check_layers(self) -> Self:
         min_max_validator("min_layers", "max_layers")(self)
-        return min_max_validator("min_layers", "num_layers")(self)
+        min_max_validator("min_layers", "num_layers")(self)
+        return min_max_validator("num_layers", "max_layers")(self)
 
 
 EncoderType = MlpSpec | CnnSpec | LstmSpec | MultiInputSpec | SimbaSpec
@@ -295,7 +299,8 @@ class NetworkSpec(BaseModel):
     @model_validator(mode="after")
     def _check_latent_dim(self) -> Self:
         min_max_validator("min_latent_dim", "max_latent_dim")(self)
-        return min_max_validator("min_latent_dim", "latent_dim")(self)
+        min_max_validator("min_latent_dim", "latent_dim")(self)
+        return min_max_validator("latent_dim", "max_latent_dim")(self)
 
     @model_validator(mode="after")
     def _detect_simba(self) -> Self:

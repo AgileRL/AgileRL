@@ -307,6 +307,23 @@ def env_validate(
         )
 
 
+_PROFILE_METRIC_LABELS: dict[str, str] = {
+    "avg_cpu_per_env": "Avg CPU per Env (%)",
+    "memory_per_env_gb": "Memory per Env (GB)",
+    "peak_cpu_per_env": "Peak CPU per Env (%)",
+    "steps_per_second": "Steps per Second",
+}
+
+
+def _format_profile_metrics(raw: dict[str, float]) -> dict[str, str]:
+    """Transform raw profiling metric keys into human-readable labels with formatted values."""
+    formatted: dict[str, str] = {}
+    for key, value in raw.items():
+        label = _PROFILE_METRIC_LABELS.get(key, key.replace("_", " ").title())
+        formatted[label] = f"{value:.3f}"
+    return formatted
+
+
 @env.command("profile")
 @click.argument("name")
 @click.option("--version", default=None, show_default=True)
@@ -320,7 +337,10 @@ def env_profile(
     with arena_client(config) as client:
         result = client.profile_environment(name=name, version=version)
         if result:
-            emit_result(result)
+            emit_result(
+                _format_profile_metrics(result),
+                columns=["Metric", "Estimate"],
+            )
 
 
 @env.command("delete")
@@ -339,40 +359,30 @@ def env_delete(
     version: str | None,
     yes: bool,
 ) -> None:
-    """Delete an environment version from Arena."""
-    if not yes and not click.confirm(
-        f"Delete environment {name}:{version}?", default=False
-    ):
-        click.echo("Aborted.")
-        return
-
+    """Delete an environment version (or all versions if version is None) from Arena."""
     with arena_client(config) as client:
-        result = client.delete_environment(name=name, version=version)
-        if result in ("", None):
-            emit_result({"deleted": True, "name": name, "version": version})
-            return
-        emit_result(result)
+        result = client.delete_environment(name=name, version=version, confirm=yes)
+        if result is not None:
+            click.echo(f"Environment {name}:{version} deleted successfully.")
 
 
 @env.command("duplicate")
 @click.argument("name")
-@click.argument("new_version_name")
+@click.argument("new_version")
 @click.option("--version", default=None, show_default=True)
 @click.pass_obj
 def env_duplicate(
     config: CommandConfig,
     name: str,
-    new_version_name: str,
+    new_version: str,
     version: str | None,
 ) -> None:
-    """Copy an existing environment version to a new version name (S3 + registry)."""
+    """Copy an existing environment version to a new version name."""
     with arena_client(config) as client:
-        emit_result(
-            client.duplicate_environment_version(
-                name=name,
-                new_version_name=new_version_name,
-                version=version,
-            ),
+        client.duplicate_environment_version(
+            name=name,
+            new_version=new_version,
+            version=version,
         )
 
 
@@ -404,7 +414,7 @@ def experiment() -> None:
     "--project",
     type=str,
     default=None,
-    help="Project to submit the experiment to.",
+    help="Project to submit the experiment to (defaults to the default project in ~/.arena/config.json).",
 )
 @click.option(
     "--experiment-name",
@@ -421,27 +431,25 @@ def experiment_submit(
     project: str | None,
     experiment_name: str | None,
 ) -> None:
-    """Submit an experiment from a manifest (training job submit API)."""
+    """Submit an experiment from a manifest."""
     with arena_client(config) as client:
-        emit_result(
-            client.submit_experiment(
-                manifest=manifest,
-                resource_id=resource_id,
-                num_nodes=num_nodes,
-                project=project,
-                experiment_name=experiment_name,
-            )
+        client.submit_experiment(
+            manifest=manifest,
+            resource_id=resource_id,
+            num_nodes=num_nodes,
+            project=project,
+            experiment_name=experiment_name,
         )
 
 
 @experiment.command("list")
 @click.option(
     "--project",
-    required=True,
-    help="Project whose experiments should be listed.",
+    default=None,
+    help="Project whose experiments should be listed (defaults to the default project in ~/.arena/config.json).",
 )
 @click.pass_obj
-def experiment_list(config: CommandConfig, project: str) -> None:
+def experiment_list(config: CommandConfig, project: str | None) -> None:
     """List experiments in a project."""
     with arena_client(config) as client:
         emit_result(client.list_experiments(project=project))
@@ -739,7 +747,7 @@ def projects() -> None:
 def projects_list(config: CommandConfig) -> None:
     """List all projects in Arena."""
     with arena_client(config) as client:
-        emit_result(client.list_projects())
+        emit_result(client.list_projects(), columns=["Name", "Type", "Description"])
 
 
 @projects.command("create")
@@ -789,3 +797,25 @@ def projects_delete(config: CommandConfig, name: str, yes: bool) -> None:
 
     with arena_client(config) as client:
         emit_result(client.delete_project(name=name))
+
+
+@projects.command("set-default")
+@click.argument("name")
+@click.pass_obj
+def projects_set_default(config: CommandConfig, name: str) -> None:
+    """Set the default project for commands that accept --project."""
+    with arena_client(config) as client:
+        client.set_default_project(name)
+    click.echo(f"Default project set to {name!r}.")
+
+
+@projects.command("get-default")
+@click.pass_obj
+def projects_get_default(config: CommandConfig) -> None:
+    """Show the current default project."""
+    with arena_client(config) as client:
+        project = client.get_default_project()
+    if project:
+        click.echo(project)
+    else:
+        click.echo("No default project set. Use 'arena projects set-default <name>'.")

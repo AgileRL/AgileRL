@@ -246,4 +246,14 @@ class TrainingSpec(BaseModel):
         if self.eval_steps is not None and self.eval_steps <= self.evaluation_interval:
             msg = "eval_steps must be greater than evaluation_interval"
             raise ValueError(msg)
+        if self.evo_steps is not None and self.evo_steps > self.max_steps:
+            msg = f"evo_steps ({self.evo_steps}) must be less than or equal to max_steps ({self.max_steps})."
+            raise ValueError(msg)
+        if (
+            self.eps_start is not None
+            and self.eps_end is not None
+            and self.eps_start < self.eps_end
+        ):
+            msg = f"eps_start ({self.eps_start}) must be greater than or equal to eps_end ({self.eps_end})."
+            raise ValueError(msg)
         return self

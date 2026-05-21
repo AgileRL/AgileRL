@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import io
-import logging
 from unittest.mock import MagicMock, patch
-
 import click
 import pytest
-from rich.console import Console
 
-from agilerl.arena.exceptions import ArenaAPIError, ArenaError, ArenaValidationError
+from agilerl.arena.exceptions import (
+    ArenaAPIError,
+    ArenaTrainingError,
+    ArenaValidationError,
+)
 from agilerl.arena.output import (
     StreamRichRenderer,
-    StreamRow,
     _looks_like_environment_catalog,
     emit_csv_preview,
     emit_result,
@@ -205,6 +204,33 @@ class TestRendererErrorEvent:
         assert "a:A" in row_status
         assert "b:B" in row_status
 
+    def test_error_without_live_promotes_training_env_not_found(self):
+        from agilerl.arena.exceptions import ArenaEnvironmentNotFoundError
+
+        renderer = StreamRichRenderer(error_cls=ArenaTrainingError)
+        event = ErrorEvent(
+            message="Environment 'LunarLander-v3' not found.",
+            extras={},
+            raw={},
+        )
+
+        with pytest.raises(ArenaEnvironmentNotFoundError) as exc_info:
+            renderer.handle_event(event)
+
+        assert "list_environments" in str(exc_info.value)
+
+    def test_error_with_live_shows_env_not_found_cli_hint(self):
+        renderer = StreamRichRenderer()
+        renderer._live = MagicMock()
+        event = ErrorEvent(
+            message="Environment 'X' not found.",
+            extras={},
+            raw={},
+        )
+        renderer.handle_event(event)
+
+        assert "arena env list" in renderer._rows[0].status
+
 
 # ---------------------------------------------------------------------------
 # StreamRichRenderer.handle_event — LogEvent
@@ -220,6 +246,14 @@ class TestRendererLogEvent:
         assert len(renderer._rows) == 1
         assert renderer._rows[0].event_type == "log"
         assert renderer._rows[0].status == "some debug output"
+
+    def test_check_event_starts_live_renderer(self):
+        renderer = StreamRichRenderer()
+        event = CheckEvent(name="imports", success=True, warnings=[], error="", raw={})
+        renderer.handle_event(event)
+
+        assert renderer._live is not None
+        assert len(renderer._rows) == 1
 
     def test_empty_log_event_no_row(self):
         renderer = StreamRichRenderer()
@@ -279,6 +313,13 @@ class TestLooksLikeEnvironmentCatalog:
         catalog = {"MyEnv": {"v1": {"profiled": True}}}
         assert _looks_like_environment_catalog(catalog) is False
 
+    def test_non_dict_version_map(self):
+        assert _looks_like_environment_catalog({"MyEnv": "v1"}) is False
+
+    def test_non_dict_metadata(self):
+        catalog = {"MyEnv": {"v1": "ready"}}
+        assert _looks_like_environment_catalog(catalog) is False
+
 
 # ---------------------------------------------------------------------------
 # emit_result dispatch
@@ -311,6 +352,42 @@ class TestEmitResult:
         mock_print.assert_called_once()
         args = mock_print.call_args
         assert args[0][0] == "42"
+
+    @patch("agilerl.arena.output.error_console")
+    def test_is_error_uses_error_console(self, mock_error_console):
+        from agilerl.arena.output import _print_rich
+
+        _print_rich("oops", is_error=True)
+        mock_error_console.print.assert_called_once_with("oops")
+
+    @patch("agilerl.arena.output.console")
+    def test_is_error_false_uses_console(self, mock_console):
+        from agilerl.arena.output import _print_rich
+
+        _print_rich("ok", is_error=False)
+        mock_console.print.assert_called_once_with("ok")
+
+    @patch("agilerl.arena.output._print_rich")
+    def test_empty_environment_catalog(self, mock_print):
+        from agilerl.arena.output import _emit_environment_catalog
+
+        _emit_environment_catalog({})
+        mock_print.assert_called_once_with("No environments found.", is_error=False)
+
+    @patch("agilerl.arena.output._print_rich")
+    def test_catalog_skips_non_dict_versions(self, mock_print):
+        catalog = {
+            "MyEnv": "not-a-version-map",
+            "Other": {"v1": {"validated": True, "profiled": False}},
+        }
+        emit_result(catalog)
+        mock_print.assert_called_once()
+
+    def test_format_cell_json_for_nested_values(self):
+        from agilerl.arena.output import _format_cell
+
+        result = _format_cell({"a": 1})
+        assert '"a"' in result
 
 
 # ---------------------------------------------------------------------------

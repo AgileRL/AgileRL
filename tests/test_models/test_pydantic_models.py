@@ -11,11 +11,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agilerl.models.env import BanditEnvSpec, LLMEnvSpec, LLMEnvType
+from pydantic import ValidationError
+
+from agilerl.models.hpo import MutationSpec
 from agilerl.models.networks import (
     CnnSpec,
     FinetuningNetworkSpec,
     LoraConfigDict,
+    LstmSpec,
     MlpSpec,
+    MultiInputSpec,
+    NetworkSpec,
     SimbaSpec,
     min_max_validator,
     normalize_manifest_network,
@@ -785,6 +791,69 @@ class TestGRPOSpec:
 
         with pytest.raises(ValueError, match="VLLM config is not set"):
             GRPOSpec(group_size=4, use_vllm=True, vllm_config=None)
+
+
+class TestMutationSpecExtraForbid:
+    def test_extra_fields_forbidden(self):
+        with pytest.raises(ValidationError):
+            MutationSpec(no_mutation=0.5)
+
+    def test_valid_nested_structure(self):
+        spec = MutationSpec(probabilities={"no_mut": 0.5})
+        assert spec.probabilities.no_mut == 0.5
+
+
+class TestNetworkSpecUpperBound:
+    def test_latent_dim_exceeds_max(self):
+        with pytest.raises(ValidationError):
+            NetworkSpec(
+                latent_dim=200,
+                max_latent_dim=128,
+                encoder_config={"arch": "mlp", "hidden_size": [64]},
+                head_config={"hidden_size": [64]},
+            )
+
+
+class TestSimbaSpecUpperBound:
+    def test_num_blocks_exceeds_max(self):
+        with pytest.raises(ValidationError):
+            SimbaSpec(hidden_size=64, num_blocks=10, max_blocks=4)
+
+
+class TestLstmSpecUpperBound:
+    def test_hidden_state_size_exceeds_max(self):
+        with pytest.raises(ValidationError):
+            LstmSpec(hidden_state_size=512, max_hidden_state_size=256)
+
+    def test_num_layers_exceeds_max(self):
+        with pytest.raises(ValidationError):
+            LstmSpec(hidden_state_size=64, num_layers=10, max_layers=6)
+
+
+class TestMultiInputSpecUpperBound:
+    def test_latent_dim_exceeds_max(self):
+        with pytest.raises(ValidationError):
+            MultiInputSpec(latent_dim=200, max_latent_dim=128)
+
+
+class TestTrainingSpecValidations:
+    def test_evo_steps_greater_than_max_steps_raises(self):
+        with pytest.raises(ValidationError):
+            TrainingSpec(max_steps=1000, evo_steps=5000)
+
+    def test_eps_start_less_than_eps_end_raises(self):
+        with pytest.raises(ValidationError):
+            TrainingSpec(eps_start=0.01, eps_end=1.0)
+
+    def test_valid_evo_steps(self):
+        spec = TrainingSpec(max_steps=5000, evo_steps=1000)
+        assert spec.max_steps == 5000
+        assert spec.evo_steps == 1000
+
+    def test_valid_eps(self):
+        spec = TrainingSpec(eps_start=1.0, eps_end=0.01)
+        assert spec.eps_start == 1.0
+        assert spec.eps_end == 0.01
 
 
 # Helper for Python < 3.10 that might not have contextlib.nullcontext

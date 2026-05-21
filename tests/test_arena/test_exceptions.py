@@ -9,6 +9,7 @@ import pytest
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
+    ArenaConfigError,
     ArenaError,
     ArenaTimeoutError,
     ArenaTrainingError,
@@ -35,6 +36,41 @@ class TestArenaAuthError:
             raise ArenaAuthError("auth failed")
 
 
+class TestArenaConfigError:
+    def setup_method(self):
+        self._orig = ArenaError._cli_mode
+
+    def teardown_method(self):
+        ArenaError._cli_mode = self._orig
+
+    def test_is_subclass_of_arena_error(self):
+        assert issubclass(ArenaConfigError, ArenaError)
+
+    def test_sdk_mode_shows_sdk_hint(self):
+        ArenaError._cli_mode = False
+        err = ArenaConfigError(
+            "No project specified.",
+            sdk_hint="Pass project= to the method.",
+            cli_hint="Use --project flag.",
+        )
+        assert "Pass project=" in str(err)
+        assert "--project" not in str(err)
+
+    def test_cli_mode_shows_cli_hint(self):
+        ArenaError._cli_mode = True
+        err = ArenaConfigError(
+            "No project specified.",
+            sdk_hint="Pass project= to the method.",
+            cli_hint="Use --project flag.",
+        )
+        assert "--project" in str(err)
+        assert "Pass project=" not in str(err)
+
+    def test_str_without_hint_returns_message_only(self):
+        err = ArenaConfigError("No project specified.")
+        assert str(err) == "No project specified."
+
+
 class TestArenaAPIError:
     def test_stores_status_code_and_detail(self):
         err = ArenaAPIError(status_code=404, detail="not found")
@@ -51,6 +87,14 @@ class TestArenaAPIError:
     def test_caught_by_arena_error_handler(self):
         with pytest.raises(ArenaError):
             raise ArenaAPIError(status_code=400, detail="bad request")
+
+    def test_scalar_extra_rendered(self):
+        err = ArenaAPIError(detail="failed", extras={"retry_after": 30})
+        assert "Retry after: 30" in str(err)
+
+    def test_format_without_status_code(self):
+        err = ArenaAPIError(detail="failed")
+        assert str(err) == "API error: failed"
 
 
 class TestArenaTimeoutError:
@@ -126,6 +170,23 @@ class TestParseBody:
         raw = "This is not JSON at all!!! {{{"
         result = ArenaError._parse_body(raw)
         assert result is None
+
+    def test_ndjson_skips_blank_lines(self):
+        raw = '\n\n{"error": "failed"}\n'
+        result = ArenaError._parse_body(raw)
+        assert result == {"error": "failed"}
+
+    def test_ndjson_only_blank_lines_then_error(self):
+        raw = '\n\n\n{"error": "failed"}'
+        result = ArenaError._parse_body(raw)
+        assert result == {"error": "failed"}
+
+    def test_nested_envelope_non_message_inner_skipped(self):
+        inner = json.dumps({"status": 1})
+        raw = json.dumps({"detail": inner})
+        result = ArenaError._parse_body(raw)
+        assert result is not None
+        assert result["detail"] == inner
 
 
 class TestFromResponseBody:
@@ -289,6 +350,12 @@ class TestGenerateHints:
         assert sdk_hint == ""
         assert cli_hint == ""
 
+    def test_environment_not_found_via_message_key(self):
+        body = {"message": "Environment 'X' not found."}
+        sdk_hint, cli_hint = ArenaError._generate_hints(body, {})
+        assert "list_environments" in sdk_hint
+        assert "arena env list" in cli_hint
+
 
 class TestArenaInitImportGuard:
     def test_import_error_when_deps_missing(self):
@@ -308,3 +375,98 @@ class TestArenaInitImportGuard:
         finally:
             if saved_module is not None:
                 sys.modules["agilerl.arena"] = saved_module
+
+
+class TestResolveApiErrorClass:
+    def test_training_error_promoted_for_missing_environment(self):
+        from agilerl.arena.exceptions import (
+            ArenaEnvironmentNotFoundError,
+            ArenaTrainingError,
+            resolve_api_error_class,
+        )
+
+        message = "Environment 'LunarLander-v3' not found. Register custom environments first."
+        assert (
+            resolve_api_error_class(ArenaTrainingError, message)
+            is ArenaEnvironmentNotFoundError
+        )
+
+    def test_training_error_unchanged_for_other_failures(self):
+        from agilerl.arena.exceptions import ArenaTrainingError, resolve_api_error_class
+
+        assert (
+            resolve_api_error_class(
+                ArenaTrainingError, "Internal server error during training."
+            )
+            is ArenaTrainingError
+        )
+
+    def test_other_base_classes_unchanged(self):
+        from agilerl.arena.exceptions import (
+            ArenaAPIError,
+            ArenaValidationError,
+            resolve_api_error_class,
+        )
+
+        message = "Environment 'X' not found."
+        assert resolve_api_error_class(ArenaAPIError, message) is ArenaAPIError
+        assert (
+            resolve_api_error_class(ArenaValidationError, message)
+            is ArenaValidationError
+        )
+
+
+class TestArenaEnvironmentNotFoundError:
+    def test_promoted_from_training_error(self):
+        import json
+
+        from agilerl.arena.exceptions import (
+            ArenaEnvironmentNotFoundError,
+            ArenaError,
+            ArenaTrainingError,
+        )
+
+        ArenaError._cli_mode = False
+        raw = json.dumps(
+            {
+                "error": "Environment 'MyEnv-v1' not found. Register custom environments first."
+            }
+        )
+        err = ArenaTrainingError.from_response_body(raw, status_code=400)
+        assert isinstance(err, ArenaEnvironmentNotFoundError)
+
+    def test_sdk_hint_shown(self):
+        import json
+
+        from agilerl.arena.exceptions import ArenaError, ArenaTrainingError
+
+        ArenaError._cli_mode = False
+        raw = json.dumps({"error": "Environment 'X' not found."})
+        err = ArenaTrainingError.from_response_body(raw, status_code=400)
+        assert "list_environments" in str(err)
+
+    def test_cli_hint_shown(self):
+        import json
+
+        from agilerl.arena.exceptions import ArenaError, ArenaTrainingError
+
+        ArenaError._cli_mode = True
+        raw = json.dumps({"error": "Environment 'X' not found."})
+        err = ArenaTrainingError.from_response_body(raw, status_code=400)
+        assert "arena env list" in str(err)
+        ArenaError._cli_mode = False
+
+    def test_non_env_error_stays_training_error(self):
+        import json
+
+        from agilerl.arena.exceptions import (
+            ArenaEnvironmentNotFoundError,
+            ArenaError,
+            ArenaTrainingError,
+        )
+
+        ArenaError._cli_mode = False
+        raw = json.dumps({"error": "Internal server error during training."})
+        err = ArenaTrainingError.from_response_body(raw, status_code=500)
+        assert not isinstance(err, ArenaEnvironmentNotFoundError)
+        assert isinstance(err, ArenaTrainingError)

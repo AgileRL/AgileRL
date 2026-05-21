@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import tarfile
@@ -21,6 +22,7 @@ from agilerl.arena.auth import (
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
+    ArenaConfigError,
     ArenaFileNotFoundError,
     ArenaTrainingError,
     ArenaValidationError,
@@ -55,6 +57,7 @@ def prepare_env_upload(source: str | os.PathLike[str] | bytes) -> tuple[str, byt
     *source* may be:
 
     * A path to a directory — compressed into ``.tar.gz`` automatically.
+    * A path to a single file — compressed into ``.tar.gz`` automatically.
     * A path to an existing ``.tar.gz`` file — read as-is.
     * Raw ``bytes`` — used directly (assumed to be a valid ``.tar.gz``).
 
@@ -69,6 +72,7 @@ def prepare_env_upload(source: str | os.PathLike[str] | bytes) -> tuple[str, byt
 
     path = Path(os.fspath(source)).expanduser().resolve()
 
+    # Directory
     if path.is_dir():
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -77,8 +81,14 @@ def prepare_env_upload(source: str | os.PathLike[str] | bytes) -> tuple[str, byt
                     tar.add(str(child), arcname=child.relative_to(path).as_posix())
         return (f"{path.name}.tar.gz", buf.getvalue())
 
+    # Single file
     if path.is_file():
-        return (path.name, path.read_bytes())
+        if path.suffixes[-2:] == [".tar", ".gz"] or path.suffix == ".tgz":
+            return (path.name, path.read_bytes())
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            tar.add(str(path), arcname=path.name)
+        return (f"{path.stem}.tar.gz", buf.getvalue())
 
     msg = f"Source path not found: {path}"
     raise ArenaFileNotFoundError(msg)
@@ -131,6 +141,8 @@ class ArenaClient:
     # BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
     # BASE_URL: ClassVar[str] = "https://arena-dev.agilerl.rlops.ai"
     BASE_URL: ClassVar[str] = "http://localhost:3001"
+    CONFIG_DIR: ClassVar[Path] = Path.home() / ".arena"
+    CONFIG_FILE: ClassVar[Path] = CONFIG_DIR / "config.json"
 
     _ERROR_MAP: ClassVar[dict[str, type[ArenaAPIError]]] = {
         "/api/cli/v1/environments/create-and-validate": ArenaValidationError,
@@ -193,6 +205,49 @@ class ArenaClient:
             client_id=client_id,
         )
         return cls
+
+    @classmethod
+    def _read_config(cls) -> dict[str, Any]:
+        if not cls.CONFIG_FILE.is_file():
+            return {}
+        try:
+            return json.loads(cls.CONFIG_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    @classmethod
+    def _write_config(cls, data: dict[str, Any]) -> None:
+        cls.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        cls.CONFIG_FILE.write_text(json.dumps(data, indent=2) + "\n")
+
+    def get_default_project(self) -> str | None:
+        """Return the default project name from ``~/.arena/config.json``, or None if unset."""
+        return self._read_config().get("default_project")
+
+    def set_default_project(self, name: str) -> None:
+        """Validate that *name* exists and persist it as the default project.
+
+        :param name: The project name to set as default.
+        :type name: str
+        :raises ArenaConfigError: If the project does not exist.
+        """
+        existing = self.list_projects()
+        names = [p["name"] for p in existing]
+        if name not in names:
+            hint = f"Available projects: {', '.join(names) or 'None'}. "
+            msg = f"Project {name!r} not found."
+            raise ArenaConfigError(msg, sdk_hint=hint, cli_hint=hint)
+        config = self._read_config()
+        config["default_project"] = name
+        self._write_config(config)
+
+    def _resolve_project(self, project: str | None) -> str | None:
+        """Return *project* if given, otherwise fall back to the stored default."""
+        return project if project is not None else self.get_default_project()
+
+    # -------------------------------------------------------------------------
+    ### Authentication ###
+    # -------------------------------------------------------------------------
 
     def login(self, *, timeout: int = 300, force: bool = False) -> None:
         """Start the device-authorization login flow (or reuse a valid stored session).
@@ -283,14 +338,29 @@ class ArenaClient:
     def list_environments(
         self,
         name: str | None = None,
-        include_arena: str | None = None,
-    ) -> list[dict[str, Any]]:
+        include_arena: bool = False,
+    ) -> dict[str, dict[str, dict[str, bool]]]:
         """List environments available to the authenticated user.
 
         :param name: Environment name. If None, list all environments.
         :type name: str | None
-        :returns: A list of environments.
-        :rtype: list[dict[str, Any]]
+        :param include_arena: Whether to include off-the-shelf Gymnasium/PettingZoo environments
+            available in Arena.
+        :type include_arena: bool
+        :returns: A nested dictionary keyed by environment name, then version:
+
+            .. code-block:: python
+
+                {
+                    "<name>": {
+                        "<version>": {
+                            "validated": True,
+                            "profiled": True,
+                        }
+                    }
+                }
+
+        :rtype: dict[str, dict[str, dict[str, bool]]]
         """
         return self._request(
             "GET",
@@ -320,10 +390,6 @@ class ArenaClient:
                     return bool(resp[key])
         return bool(resp)
 
-    # TODO: In general, for all endpoints that take in a name and version, if the version
-    # is None, we should resolve to the latest version in the backend and return an INFO log
-    # saying "No version specified, resolving to latest version {latest_version}". The only
-    # exception is create-and-validate which should always expect a version to be given.
     def list_environment_entrypoints(
         self,
         name: str,
@@ -343,10 +409,13 @@ class ArenaClient:
             "/api/cli/v1/environments/entrypoints",
             params={"name": name, "version": version},
         )
-
-        assert type(resp) is list, "List entrypoints response should be a list"
-
-        return resp
+        logger.info(
+            "Found %d entrypoints for environment %s:%s.",
+            len(resp["entrypoints"]),
+            name,
+            resp["version"],
+        )
+        return resp["entrypoints"]
 
     def validate_environment(
         self,
@@ -456,50 +525,58 @@ class ArenaClient:
             timeout=self._upload_timeout,
         ).collect()
 
-    # TODO: Check this works
-    def delete_environment(self, *, name: str, version: str | None = None) -> Any:
-        """Delete an environment version.
+    def delete_environment(
+        self, *, name: str, version: str | None = None, confirm: bool = False
+    ) -> Any:
+        """Delete an environment version (or all versions if version is None).
 
         :param name: Environment name, as specified in Arena.
         :type name: str
         :param version: Environment version. If None, delete all environment versions.
         :type version: str | None
+        :param confirm: Whether to confirm the deletion.
+        :type confirm: bool
         """
+        # Fetch existing versions
+        versions_data = self.list_environments(name=name)
+        if name in versions_data:
+            versions_data = versions_data[name]
+
+        version_list = versions_data.keys()
+
+        if not version_list:
+            logger.info(
+                "No versions found for environment '%s'. Nothing to delete.", name
+            )
+            return None
+
         if version is None:
-            # Fetch existing versions
-            versions_data = self.list_environments(name=name)
-            if name in versions_data:
-                versions_data = versions_data[name]
-
-            version_list = versions_data.keys()
-
-            if not version_list:
-                logger.info(
-                    "No versions found for environment '%s'. Nothing to delete.", name
-                )
-                return None
-
-            if version not in version_list:
-                logger.info(
-                    "Version '%s' not found in environment '%s'. Please specify a version to be deleted.",
-                    version,
-                    name,
-                )
-                return {"deleted": False, "name": name, "version": version}
-
-            # Format and Prompt
             logger.info(
                 "The following versions for '%s' will be deleted: %s",
                 name,
                 ", ".join(version_list),
             )
-            confirm = input("Do you wish to continue? [y/N]: ").strip().lower()
-
-            if confirm not in ("y", "yes"):
-                logger.info("Delete operation cancelled.")
+        else:
+            if version not in version_list:
+                logger.info(
+                    "Version '%s' not found in environment '%s'. Please specify a valid version from the list: %s.",
+                    version,
+                    name,
+                    ", ".join(version_list),
+                )
                 return None
 
-        # 2. Proceed with the request
+            logger.info(
+                "The following version for '%s' will be deleted: %s",
+                name,
+                version,
+            )
+
+        confirm_prompt = input("Do you wish to continue? [y/N]: ").strip().lower()
+        confirm = (confirm_prompt in ("y", "yes")) or confirm
+        if not confirm:
+            logger.info("No environment was deleted for %s.", name)
+            return None
         payload = {"name": name, "version": version}
         return self._request("DELETE", "/api/cli/v1/environments/delete", json=payload)
 
@@ -507,28 +584,36 @@ class ArenaClient:
         self,
         *,
         name: str,
-        new_version_name: str,
+        new_version: str,
         version: str | None = None,
     ) -> dict[str, Any]:
         """Duplicate a custom environment version to a new version name.
 
         :param name: Environment name.
         :type name: str
-        :param new_version_name: New ``version_name`` for the duplicate (e.g. ``v2``).
-        :type new_version_name: str
+        :param new_version: New ``version`` for the duplicate (e.g. ``v2``).
+        :type new_version: str
         :param version: Source version; when omitted, the latest version is used.
         :type version: str | None
         """
         payload: dict[str, Any] = {
             "name": name,
-            "new_version_name": new_version_name,
+            "new_version_name": new_version,
             "version": version,
         }
-        return self._request(
+        resp = self._request(
             "POST",
             "/api/cli/v1/environments/duplicate",
             json=payload,
         )
+        logger.info(
+            "Environment %s:%s duplicated to %s:%s.",
+            name,
+            resp["source_version"],
+            name,
+            new_version,
+        )
+        return resp
 
     # -------------------------------------------------------------------------
     ### Training Jobs ###
@@ -564,7 +649,7 @@ class ArenaClient:
             "manifest": validated,
             "resource_id": resource_id,
             "num_nodes": num_nodes,
-            "project": project,
+            "project": self._resolve_project(project),
             "experiment_name": experiment_name,
         }
         return self._open_stream(
@@ -592,16 +677,25 @@ class ArenaClient:
             experiment_name=experiment_name,
         )
 
-    def list_experiments(self, project: str) -> list[dict[str, Any]]:
+    def list_experiments(self, project: str | None = None) -> list[dict[str, Any]]:
         """List all experiments in a project.
 
-        :param project: The name of the project.
-        :type project: str
+        :param project: The name of the project. Falls back to the default
+            project from ``~/.arena/config.json`` if not provided.
+        :type project: str | None
         :returns: A list of experiments.
         :rtype: list[dict[str, Any]]
         """
+        resolved = self._resolve_project(project)
+        if not resolved:
+            msg = "No project specified."
+            raise ArenaConfigError(
+                msg,
+                sdk_hint="Pass a project name or set a default with ArenaClient.set_default_project().",
+                cli_hint="Use --project or set a default with 'arena projects set-default <name>'.",
+            )
         return self._request(
-            "GET", "/api/cli/v1/experiments/list", params={"project": project}
+            "GET", "/api/cli/v1/experiments/list", params={"project": resolved}
         )
 
     # TODO: Check with Rob
@@ -672,12 +766,13 @@ class ArenaClient:
         :returns: A tuple of the metrics payload, content type, and disposition.
         :rtype: tuple[bytes, str | None, str | None]
         """
+        resolved_project = self._resolve_project(project)
         params: list[tuple[str, Any]] = [
             ("experiment_name", experiment_name),
             ("preview_rows", preview_rows),
         ]
-        if project is not None:
-            params.append(("project", project))
+        if resolved_project is not None:
+            params.append(("project", resolved_project))
         if metrics:
             for m in metrics:
                 params.extend(("metric", m))
@@ -708,9 +803,10 @@ class ArenaClient:
         :returns: Sorted unique metric names, or that object when ``details`` is True.
         :rtype: list[str] | dict[str, Any]
         """
+        resolved_project = self._resolve_project(project)
         params: dict[str, Any] = {"experiment_name": experiment_name}
-        if project is not None:
-            params["project"] = project
+        if resolved_project is not None:
+            params["project"] = resolved_project
         if details:
             params["details"] = True
         return self._request(
@@ -796,7 +892,13 @@ class ArenaClient:
         :returns: A list of projects.
         :rtype: list[dict[str, Any]]
         """
-        return self._request("GET", "/api/cli/v1/projects")
+        resp = self._request("GET", "/api/cli/v1/projects")
+        if resp:
+            return [
+                {"name": p["name"], "type": p["type"], "description": p["description"]}
+                for p in resp
+            ]
+        return []
 
     def create_project(
         self, name: str, description: str | None, llm_based: bool
@@ -812,11 +914,13 @@ class ArenaClient:
         :returns: A dictionary containing the project creation result.
         :rtype: dict[str, Any]
         """
-        return self._request(
+        resp = self._request(
             "POST",
             "/api/cli/v1/projects/create",
             json={"name": name, "description": description, "llm_based": llm_based},
         )
+        logger.info("Project %s created successfully.", name)
+        return resp
 
     def delete_project(self, name: str) -> None:
         """Delete a project in Arena.
@@ -824,9 +928,11 @@ class ArenaClient:
         :param name: The name of the project to delete.
         :type name: str
         """
-        return self._request(
+        resp = self._request(
             "DELETE", "/api/cli/v1/projects/delete", json={"name": name}
         )
+        logger.info("Project %s deleted successfully.", name)
+        return resp
 
     # -------------------------------------------------------------------------
     ### Inference ###

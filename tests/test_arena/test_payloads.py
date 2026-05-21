@@ -101,3 +101,25 @@ class TestResolveMetricsOutputPath:
             output_file=None,
         )
         assert result == Path("experiment_9_metrics.csv")
+
+    def test_experiment_name_without_id(self):
+        result = resolve_metrics_output_path(
+            experiment_id=None,
+            experiment_name="My Experiment!",
+            payload=b"col1\n1",
+            content_type="text/csv",
+            disposition=None,
+            output_file=None,
+        )
+        assert result == Path("experiment_My_Experiment__metrics.csv")
+
+    def test_generic_fallback_without_id_or_name(self):
+        result = resolve_metrics_output_path(
+            experiment_id=None,
+            experiment_name=None,
+            payload=b"col1\n1",
+            content_type="text/csv",
+            disposition=None,
+            output_file=None,
+        )
+        assert result == Path("experiment_metrics.csv")

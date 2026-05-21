@@ -99,10 +99,11 @@ def _coerce_environment(data: Any) -> dict[str, Any]:
 
 
 def _resolve_network(data: Any) -> dict[str, Any]:
-    """Normalise the network section to a plain dict.
+    """Normalise the network section to a validated dict with all defaults filled in.
 
-    The top-level arch discriminator is moved into the encoder_config.arch field for
-    proper dispatching to the correct encoder type.
+    Raw dicts are validated through :class:`NetworkSpec` so that default values
+    (``layer_norm``, ``init_layers``, ``output_vanish``, ``min_latent_dim``, etc.)
+    are included in the serialized output.
 
     :param data: Network config dict or spec instance.
     :type data: Any
@@ -117,7 +118,11 @@ def _resolve_network(data: Any) -> dict[str, Any]:
             data_dict["encoder_config"]["arch"] = data.encoder_config.arch
         return data_dict
 
-    return normalize_manifest_network(data)
+    normalized = normalize_manifest_network(data)
+    spec = NetworkSpec.model_validate(normalized)
+    data_dict = spec.model_dump()
+    data_dict["encoder_config"]["arch"] = spec.encoder_config.arch
+    return data_dict
 
 
 _ALGO_NON_SERIALIZABLE_FIELDS: set[str] = {
@@ -166,6 +171,28 @@ EnvironmentFromManifest = Annotated[
 NetworkFromManifest = Annotated[dict[str, Any], BeforeValidator(_resolve_network)]
 
 
+_ARCH_TO_NAME: dict[str, str] = {
+    "mlp": "EvolvableMLP",
+    "cnn": "EvolvableCNN",
+    "simba": "EvolvableSimBa",
+    "multi_input": "EvolvableMultiInput",
+    "lstm": "EvolvableLSTM",
+}
+
+
+def _normalize_network_for_platform(network: dict[str, Any]) -> None:
+    """Move ``arch`` from encoder_config to network top level and add ``name``."""
+    encoder = network.get("encoder_config")
+    if isinstance(encoder, dict):
+        arch = encoder.pop("arch", None)
+        if arch:
+            network.setdefault("arch", arch)
+
+    arch = network.get("arch")
+    if arch and "name" not in network:
+        network["name"] = _ARCH_TO_NAME.get(arch, "EvolvableMLP")
+
+
 def _ensure_platform_run_spec_keys(data: dict[str, Any]) -> None:
     """Mutate *data* for Arena run-spec JSON.
 
@@ -179,6 +206,9 @@ def _ensure_platform_run_spec_keys(data: dict[str, Any]) -> None:
         data["tournament_selection"] = {}
     if "network" not in data:
         data["network"] = {}
+
+    if data["network"]:
+        _normalize_network_for_platform(data["network"])
 
 
 class TrainingManifest(BaseModel):
@@ -271,10 +301,13 @@ class TrainingManifest(BaseModel):
         """
         data = TrainingManifest._load_yaml(manifest)
         validated = cls.model_validate(data)
+
+        # NOTE: This path is meant for Arena submission.
         if mode == "json":
             payload = validated.model_dump(mode="json", exclude_none=True)
             _ensure_platform_run_spec_keys(payload)
             return payload
+
         return validated
 
 

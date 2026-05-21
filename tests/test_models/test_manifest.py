@@ -100,6 +100,62 @@ def test_get_validated_json_inserts_empty_optional_sections() -> None:
     assert out["network"] == {}
 
 
+class TestNormalizeNetworkForPlatform:
+    """Tests for _normalize_network_for_platform via get_validated(mode='json')."""
+
+    def test_arch_moved_to_top_level(self):
+        raw = {
+            "algorithm": {"name": "DQN"},
+            "environment": {"name": "CartPole-v1"},
+            "training": _TRAINING,
+            "network": {
+                "latent_dim": 64,
+                "arch": "mlp",
+                "encoder_config": {"hidden_size": [64]},
+                "head_config": {"hidden_size": [64]},
+            },
+        }
+        out = TrainingManifest.get_validated(raw, mode="json")
+        network = out["network"]
+        assert "arch" in network
+        assert network["arch"] == "mlp"
+        assert "arch" not in network.get("encoder_config", {})
+
+    def test_name_field_added(self):
+        raw = {
+            "algorithm": {"name": "DQN"},
+            "environment": {"name": "CartPole-v1"},
+            "training": _TRAINING,
+            "network": {
+                "latent_dim": 64,
+                "arch": "mlp",
+                "encoder_config": {"hidden_size": [64]},
+                "head_config": {"hidden_size": [64]},
+            },
+        }
+        out = TrainingManifest.get_validated(raw, mode="json")
+        network = out["network"]
+        assert network["name"] == "EvolvableMLP"
+
+    def test_default_fields_filled_in(self):
+        raw = {
+            "algorithm": {"name": "DQN"},
+            "environment": {"name": "CartPole-v1"},
+            "training": _TRAINING,
+            "network": {
+                "latent_dim": 64,
+                "arch": "mlp",
+                "encoder_config": {"hidden_size": [64]},
+                "head_config": {"hidden_size": [64]},
+            },
+        }
+        out = TrainingManifest.get_validated(raw, mode="json")
+        encoder = out["network"]["encoder_config"]
+        assert "layer_norm" in encoder
+        assert "init_layers" in encoder
+        assert "output_vanish" in encoder
+
+
 # ---------------------------------------------------------------------------
 # Load all test manifests at module level
 # ---------------------------------------------------------------------------

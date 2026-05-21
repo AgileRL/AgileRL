@@ -401,7 +401,11 @@ class TestEnvValidateCommand:
 
 class TestEnvProfileCommand:
     def test_profile(self, runner, mock_client):
-        mock_client.profile_environment.return_value = {"cpu": 2, "memory": "4Gi"}
+        mock_client.profile_environment.return_value = {
+            "avg_cpu_per_env": 0.312,
+            "memory_per_env_gb": 0.126,
+            "steps_per_second": 2750.545,
+        }
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["env", "profile", "my-env"])
         assert result.exit_code == 0
@@ -423,7 +427,7 @@ class TestEnvDeleteCommand:
             result = runner.invoke(main, ["env", "delete", "my-env", "--yes"])
         assert result.exit_code == 0
         mock_client.delete_environment.assert_called_once_with(
-            name="my-env", version=None
+            name="my-env", version=None, confirm=True
         )
 
     def test_delete_aborted(self, runner, mock_client):
@@ -953,3 +957,23 @@ class TestGlobalOptions:
     def test_invalid_timeout_rejected(self, runner):
         result = runner.invoke(main, ["--request-timeout", "0", "login"])
         assert result.exit_code != 0
+
+
+class TestFormatProfileMetrics:
+    def test_known_key_gets_human_readable_label(self):
+        from agilerl.arena.cli import _format_profile_metrics
+
+        result = _format_profile_metrics({"avg_cpu_per_env": 45.123456})
+        assert "Avg CPU per Env (%)" in result
+
+    def test_unknown_key_falls_back_to_title_case(self):
+        from agilerl.arena.cli import _format_profile_metrics
+
+        result = _format_profile_metrics({"foo_bar": 1.5})
+        assert "Foo Bar" in result
+
+    def test_float_values_formatted_to_3_decimal_places(self):
+        from agilerl.arena.cli import _format_profile_metrics
+
+        result = _format_profile_metrics({"steps_per_second": 123.456789})
+        assert result["Steps per Second"] == "123.457"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RLHyperparameter(BaseModel):
@@ -56,12 +56,16 @@ class MutationSpec(BaseModel):
     :type rl_hp_selection: dict[str, RLHyperparameter]
     :param mutation_sd: Standard deviation of the mutation.
     :type mutation_sd: float
+    :param rand_seed: Random seed for repeatability.
+    :type rand_seed: int
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     probabilities: MutationProbabilities = Field(default_factory=MutationProbabilities)
     rl_hp_selection: dict[str, RLHyperparameter] = Field(default_factory=dict)
     mutation_sd: float = Field(default=0.1, ge=0.0)
-    rand_seed: int | None = None
+    rand_seed: int = Field(default=42, ge=0)
 
 
 class TournamentSelectionSpec(BaseModel):

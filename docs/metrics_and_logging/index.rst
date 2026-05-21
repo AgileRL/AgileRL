@@ -161,6 +161,10 @@ with a :class:`~agilerl.population.Population`:
    evo_steps = 5_000
    pbar = default_progress_bar(max_steps)
 
+  # The following loggers will:
+  # - Render a Rich table with training progress to the console via ``tqdm.write()``.
+  # - Log the flat metrics dict to Weights & Biases. Auto-initialises a run if needed.
+  # - Append one row per evolution step to a CSV file for offline analysis.
    loggers = [
        StdOutLogger(pbar=pbar),
        WandbLogger(project="AgileRL"),

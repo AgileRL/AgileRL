@@ -13,7 +13,7 @@ from rich.live import Live
 from rich.table import Table
 
 from agilerl.arena import console, error_console
-from agilerl.arena.exceptions import ArenaAPIError, ArenaError
+from agilerl.arena.exceptions import ArenaAPIError, ArenaError, resolve_api_error_class
 from agilerl.arena.stream import (
     CheckEvent,
     ErrorEvent,
@@ -242,9 +242,15 @@ class StreamRichRenderer:
                 self._render_error(event)
                 self._refresh()
             else:
-                raise self._error_cls(
+                sdk_hint, cli_hint = ArenaError._generate_hints(
+                    {"error": event.message, **event.extras}, event.extras
+                )
+                error_cls = resolve_api_error_class(self._error_cls, event.message)
+                raise error_cls(
                     detail=event.message,
                     extras=event.extras,
+                    sdk_hint=sdk_hint,
+                    cli_hint=cli_hint,
                 )
             return
 
@@ -300,6 +306,13 @@ class StreamRichRenderer:
                 detail += f"\n{label}: {', '.join(str(v) for v in value)}"
             else:
                 detail += f"\n{label}: {value}"
+
+        _, cli_hint = ArenaError._generate_hints(
+            {"error": event.message, **event.extras}, event.extras
+        )
+        if cli_hint:
+            detail += f"\n[yellow]{cli_hint}[/yellow]"
+
         self._rows.append(StreamRow("error", "-", f"[red]{detail}[/red]"))
 
     def _render_log(self, event: LogEvent) -> None:

@@ -42,6 +42,19 @@ class ArenaError(Exception):
                 f"Retry with --entrypoint {example}",
             )
 
+        primary = ""
+        for key in ("error", "message", "detail", "description"):
+            value = body.get(key)
+            if value and isinstance(value, str):
+                primary = value
+                break
+
+        if _environment_not_found_in_message(primary):
+            return (
+                "Check available environments with client.list_environments(include_arena=True).",
+                "Run 'arena env list --include-arena' to see available environments.",
+            )
+
         return ("", "")
 
     @staticmethod
@@ -94,6 +107,28 @@ class ArenaError(Exception):
                 return inner
 
         return body
+
+
+class ArenaConfigError(ArenaError):
+    """Raised when required configuration (e.g. default project) is missing."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        sdk_hint: str = "",
+        cli_hint: str = "",
+    ) -> None:
+        self.message = message
+        self.sdk_hint = sdk_hint
+        self.cli_hint = cli_hint
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        hint = self.cli_hint if self._cli_mode and self.cli_hint else self.sdk_hint
+        if hint:
+            return f"{self.message} {hint}"
+        return self.message
 
 
 class ArenaFileNotFoundError(ArenaError, FileNotFoundError):
@@ -224,7 +259,43 @@ class ArenaValidationError(ArenaAPIError):
     _label = "ValidationError"
 
 
+class ArenaEnvironmentNotFoundError(ArenaAPIError):
+    """Raised when a referenced environment does not exist in Arena."""
+
+    _label = "EnvironmentNotFoundError"
+
+
 class ArenaTrainingError(ArenaAPIError):
     """Raised when a training job submission or execution fails."""
 
     _label = "TrainingError"
+
+    @classmethod
+    def from_response_body(cls, raw: str, *, status_code: int = 0) -> ArenaAPIError:
+        """Promote to :class:`ArenaEnvironmentNotFoundError` when applicable."""
+        err = super().from_response_body(raw, status_code=status_code)
+        error_cls = resolve_api_error_class(cls, err.detail)
+        if error_cls is cls:
+            return err
+        return error_cls(
+            detail=err.detail,
+            status_code=err.status_code,
+            extras=err.extras,
+            sdk_hint=err.sdk_hint,
+            cli_hint=err.cli_hint,
+        )
+
+
+def _environment_not_found_in_message(message: str) -> bool:
+    lower = message.lower()
+    return "not found" in lower and "environment" in lower
+
+
+def resolve_api_error_class(
+    base_cls: type[ArenaAPIError],
+    message: str,
+) -> type[ArenaAPIError]:
+    """Return a more specific API error class when *message* matches a known pattern."""
+    if base_cls is ArenaTrainingError and _environment_not_found_in_message(message):
+        return ArenaEnvironmentNotFoundError
+    return base_cls

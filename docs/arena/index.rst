@@ -197,12 +197,65 @@ You can find the analogous CLI commands by running ``arena env --help``.
 - :meth:`~agilerl.arena.client.ArenaClient.delete_environment` — Delete one or all versions of a registered environment.
 
 
+.. _arena_projects:
+
+Project Management
+------------------
+
+Projects are the top-level organisational unit in Arena. Every experiment belongs to a
+project, and you must specify a project when submitting training jobs.
+
+.. tab-set::
+   :sync-group: interface
+
+   .. tab-item:: SDK
+      :sync: sdk
+
+      .. code-block:: python
+
+         from agilerl.arena import ArenaClient
+
+         client = ArenaClient()
+
+         # List all projects
+         projects = client.list_projects()
+
+         # Create a new project
+         client.create_project(name="CartPole-HPO", description="HPO on CartPole")
+
+         # Set a default project (persisted to ~/.arena/config.json)
+         client.set_default_project("CartPole-HPO")
+
+         # Subsequent calls to list_experiments(), submit_experiment(), etc.
+         # will use this project automatically if --project is not specified.
+
+   .. tab-item:: CLI
+      :sync: cli
+
+      .. code-block:: bash
+
+         # List all projects
+         arena projects list
+
+         # Create a new project
+         arena projects create CartPole-HPO --description "HPO on CartPole"
+
+         # Set a default project
+         arena projects set-default CartPole-HPO
+
+         # Show the current default
+         arena projects get-default
+
+         # Delete a project
+         arena projects delete CartPole-HPO --yes
+
+
 .. _arena_training:
 
 Submitting Experiments
 ----------------------
 
-Once your environment has been validated and profiled, you can submit training
+Once your environment or dataset has been validated, you can submit training
 jobs for it to Arena. AgileRL has its own managed cloud infrastructure with
 automatic checkpointing, metric logging, and real-time monitoring accessible
 directly from the Arena dashboard. Training runs in a distributed manner across multiple nodes
@@ -358,10 +411,10 @@ Here is an example manifest for training DQN on LunarLander-v3:
          # Submit an experiment
          arena experiments submit \
              --manifest dqn.yaml \
-             --resource-id arena-medium \ # can be any of the available resources on Arena
-             --num-nodes 2 \ # number of nodes to use in the training cluster
-             --project my-project \ # project to submit the experiment to
-             --experiment-name lunar-lander-dqn # name of the experiment
+             --resource-id arena-medium \
+             --num-nodes 2 \
+             --project my-project \
+             --experiment-name lunar-lander-dqn
 
    .. tab-item:: SDK
       :sync: sdk
