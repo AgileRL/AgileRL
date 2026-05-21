@@ -854,6 +854,9 @@ def obs_to_tensor(obs: ObservationType, device: str | torch.device) -> TorchObsT
     if isinstance(obs, (list, Number)):
         return torch.tensor(obs, device=device).float()
 
+    if hasattr(obs, "__dlpack__"):
+        return torch.from_dlpack(obs).float().to(device)
+
     msg = f"Unrecognized type of observation {type(obs)}"
     raise TypeError(msg)
 
