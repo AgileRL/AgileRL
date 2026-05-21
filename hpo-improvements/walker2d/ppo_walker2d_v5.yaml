@@ -1,0 +1,59 @@
+---
+# Single-agent PPO on Walker2d-v5 (no evolutionary HPO).
+# Requires MuJoCo: uv pip install 'gymnasium[mujoco]'
+#
+# Run from repo root:
+#   uv run python -m agilerl.train configs/training/ppo/ppo_walker2d_v5.yaml --wb
+
+algorithm:
+    name: PPO
+    batch_size: 128
+    lr: 0.0003
+    learn_step: 2048
+    gamma: 0.99
+    gae_lambda: 0.95
+    action_std_init: 1.0
+    clip_coef: 0.2
+    ent_coef: 0.0
+    vf_coef: 0.5
+    max_grad_norm: 0.5
+    target_kl:
+    update_epochs: 10
+    share_encoders: true
+
+environment:
+    name: Walker2d-v5
+    num_envs: 16
+
+network:
+    latent_dim: 256
+    max_latent_dim: 256
+    arch: mlp
+    encoder_config:
+        hidden_size:
+            - 256
+            - 256
+        activation: Tanh
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
+        layer_norm: false
+
+    head_config:
+        hidden_size:
+            - 256
+            - 256
+        activation: Tanh
+        min_hidden_layers: 1
+        max_hidden_layers: 3
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
+        output_vanish: true
+        layer_norm: false
+
+training:
+    max_steps: 1_000_000
+    target_score:
+    pop_size: 1
+    evo_steps: 10240
+    eval_steps:
+    eval_loop: 1
