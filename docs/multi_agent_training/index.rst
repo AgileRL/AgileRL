@@ -158,8 +158,7 @@ following which would assign the same network architecture to all agents:
 Parameter Sharing
 ~~~~~~~~~~~~~~~~~
 It is common in multi-agent settings to require centralized policies for groups of homogeneous agents during training for scalability, since the number of trainable parameters
-can increase significantly with the number of agents. In this manner, we obtain a more sample efficient training process. Currently, AgileRL only includes the
-:class:`IPPO <agilerl.algorithms.ippo.IPPO>` algorithm which supports this. In such cases, we restrict users to pass in network configurations to the groups directly. For the
+can increase significantly with the number of agents. In this manner, we obtain a more sample efficient training process. In such cases, we restrict users to pass in network configurations to the groups directly. For the
 setting described above, we could only use the latter configuration.
 
 Asynchronous Agents
@@ -184,6 +183,10 @@ To perform evolutionary HPO, we require a population of agents. Individuals in t
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
 are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below. At present, evolutionary
 hyper-parameter tuning is only compatible with **cooperative** multi-agent environments.
+
+.. seealso::
+
+   :ref:`evo_hyperparam_opt` for details on how evolutionary HPO works.
 
 .. _multi_off_policy:
 

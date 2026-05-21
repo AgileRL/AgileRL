@@ -239,6 +239,10 @@ likely to be preserved in the next generation, and so those characteristics are 
         device=device,
     )
 
+.. seealso::
+
+   :ref:`evo_hyperparam_opt` for details on how evolutionary HPO works.
+
 .. _trainloop_off_policy:
 
 Training Loop

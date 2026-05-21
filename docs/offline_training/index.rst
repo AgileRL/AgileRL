@@ -243,6 +243,10 @@ Mutation is periodically used to explore the hyperparameter space.
         device=device,
     )
 
+.. seealso::
+
+   :ref:`evo_hyperparam_opt` for details on how evolutionary HPO works.
+
 .. _trainloop_offline:
 
 Training Loop
