@@ -42,7 +42,7 @@ from mujoco_playground import registry  # noqa: E402
 _ENV_DEFAULTS: dict[str, dict[str, Any]] = {
     "WalkerWalk": {
         "action_repeat": 1,
-        "reward_scaling": 10.0,
+        "reward_scaling": 1.0,
         "normalize_obs": True,
     },
 }
