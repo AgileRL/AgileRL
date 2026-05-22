@@ -131,6 +131,8 @@ def _prepare_llm_algo_kwargs(
         built = _lora_config_from_init_hp(INIT_HP)
         if built is not None:
             merged["lora_config"] = built
+    if "lora_target_scope" not in merged and INIT_HP.get("LORA_TARGET_SCOPE"):
+        merged["lora_target_scope"] = INIT_HP["LORA_TARGET_SCOPE"]
     if with_generation_defaults:
         if vllm_config is not None:
             merged.setdefault("vllm_config", vllm_config)

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import random
+import re
 import shutil
 import textwrap
 import warnings
@@ -177,6 +179,309 @@ def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
     """
     with gather_if_zero3(3, list(model.parameters()), modifier_rank=0):
         return model.state_dict()
+
+
+_CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
+
+
+def model_has_clippable_linear_wrappers(model: nn.Module) -> bool:
+    """Return True when the model uses *ClippableLinear projection wrappers."""
+    return any(
+        mod.__class__.__name__.endswith(_CLIPPABLE_LINEAR_WRAPPER_SUFFIX)
+        for mod in model.modules()
+    )
+
+
+def discover_clippable_projection_leaf_names(model: nn.Module) -> list[str]:
+    """Return leaf names (e.g. ``q_proj``) of *ClippableLinear wrapper modules."""
+    names: set[str] = set()
+    for name, mod in model.named_modules():
+        if mod.__class__.__name__.endswith(_CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
+            names.add(name.rsplit(".", 1)[-1])
+    return sorted(names)
+
+
+def discover_clippable_inner_linear_module_keys(model: nn.Module) -> list[str]:
+    """Return full ``named_modules`` keys for inner ``.linear`` weights in wrappers."""
+    named = dict(model.named_modules())
+    keys: list[str] = []
+    for name, mod in model.named_modules():
+        if not mod.__class__.__name__.endswith(_CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
+            continue
+        inner_key = f"{name}.linear"
+        inner = named.get(inner_key)
+        if inner is not None and _is_peft_adaptable_linear(inner):
+            keys.append(inner_key)
+    return sorted(keys)
+
+
+def _is_peft_adaptable_linear(module: nn.Module) -> bool:
+    """Return True when PEFT LoRA can wrap this weight module."""
+    if isinstance(module, nn.Linear):
+        return True
+    return module.__class__.__name__ in ("Linear4bit", "Linear8bitLt")
+
+
+def peft_target_key_matches(key: str, target_modules: str | list[str]) -> bool:
+    """Mirror PEFT 0.19 ``target_modules`` matching (``fullmatch`` or suffix list)."""
+    if isinstance(target_modules, str):
+        return re.fullmatch(target_modules, key) is not None
+    if key in target_modules:
+        return True
+    return any(key.endswith(f".{target_key}") for target_key in target_modules)
+
+
+def _peft_key_is_excluded(key: str, exclude_modules: list[str] | None) -> bool:
+    if not exclude_modules:
+        return False
+    return any(
+        key == excluded or key.endswith(f".{excluded}") or excluded in key
+        for excluded in exclude_modules
+    )
+
+
+def list_peft_matched_module_keys(
+    model: nn.Module,
+    target_modules: str | list[str],
+    *,
+    exclude_modules: list[str] | None = None,
+) -> list[str]:
+    """List module keys that PEFT would adapt for the given target spec."""
+    matched: list[str] = []
+    for key, _ in model.named_modules():
+        if _peft_key_is_excluded(key, exclude_modules):
+            continue
+        if peft_target_key_matches(key, target_modules):
+            matched.append(key)
+    return matched
+
+
+def _looks_like_peft_target_regex(spec: str) -> bool:
+    """Heuristic: user already passed a PEFT ``target_modules`` regex."""
+    return spec.startswith(".*") or r"\." in spec or "(" in spec
+
+
+def build_clippable_linear_lora_target_regex(
+    projection_names: list[str],
+    *,
+    scope: str | None = None,
+) -> str:
+    r"""Build a PEFT regex that targets inner ``.linear`` inside *ClippableLinear.
+
+    Example (no scope)::
+
+        .*\.(q_proj|k_proj|v_proj)\.linear
+
+    When ``scope`` is set, prefer :func:`build_scoped_lora_target_regex` instead
+    (also matches plain ``nn.Linear`` projections under the scope).
+
+    See https://github.com/huggingface/peft/issues/3129
+    """
+    if not projection_names:
+        msg = "At least one projection name is required for the LoRA target regex."
+        raise ValueError(msg)
+    alts = "|".join(re.escape(name) for name in sorted(set(projection_names)))
+    if scope:
+        return build_scoped_lora_target_regex(projection_names, scope)
+    # Optional prefix so top-level and nested keys both fullmatch.
+    return rf"(?:.*\.)?({alts})\.linear"
+
+
+def build_scoped_lora_target_regex(
+    projection_names: list[str],
+    scope: str,
+) -> str:
+    r"""PEFT regex for projections under a multimodal scope (e.g. ``language_model``).
+
+    Matches both:
+
+    * *ClippableLinear* inner weights (``…q_proj.linear``) on vision/audio towers
+    * Plain ``nn.Linear`` leaves (``…q_proj``) on the language model in Gemma 4
+
+    PEFT uses ``re.fullmatch`` on ``named_modules()`` keys (peft#3129).
+    """
+    if not projection_names:
+        msg = "At least one projection name is required for the LoRA target regex."
+        raise ValueError(msg)
+    alts = "|".join(re.escape(name) for name in sorted(set(projection_names)))
+    scope_esc = re.escape(scope.strip("."))
+    return rf".*\.{scope_esc}.*\.(?:{alts})(?:\.linear)?$"
+
+
+def _normalize_projection_leaf_name(name: str) -> str:
+    """Strip a trailing ``.linear`` so YAML can use either ``q_proj`` or ``q_proj.linear``."""
+    return name.removesuffix(".linear")
+
+
+def _projection_names_for_clippable_lora(
+    model: nn.Module, raw_targets: str | list[str]
+) -> list[str] | None:
+    """Resolve projection leaf names, or ``None`` if ``raw_targets`` is already regex."""
+    raw_list = [raw_targets] if isinstance(raw_targets, str) else list(raw_targets)
+    if any(_looks_like_peft_target_regex(t) for t in raw_list):
+        return None
+
+    names: list[str] = []
+    for target in raw_list:
+        if target == "all-linear":
+            names.extend(discover_clippable_projection_leaf_names(model))
+        else:
+            names.append(_normalize_projection_leaf_name(target))
+    return sorted(set(names))
+
+
+def build_clippable_linear_lora_target_suffixes(
+    projection_names: list[str],
+) -> list[str]:
+    """Build PEFT list targets ``q_proj.linear`` (suffix match, avoids regex pitfalls)."""
+    return [f"{name}.linear" for name in sorted(set(projection_names))]
+
+
+def _infer_clippable_lora_scope(model: nn.Module) -> str | None:
+    """Infer ``language_model`` / ``audio_tower`` scope only when all inner keys live under it."""
+    inner_keys = discover_clippable_inner_linear_module_keys(model)
+    if not inner_keys:
+        return None
+    for scope in ("language_model", "audio_tower"):
+        if all(
+            key == scope or key.startswith(f"{scope}.") or f".{scope}." in key
+            for key in inner_keys
+        ):
+            return scope
+    return None
+
+
+def _clone_lora_config_with_targets(
+    lora_config: Any, target_modules: str | list[str]
+) -> Any:
+    """Return a new ``LoraConfig`` with updated ``target_modules``."""
+    if hasattr(lora_config, "to_dict"):
+        cfg_dict = lora_config.to_dict()
+        cfg_dict["target_modules"] = target_modules
+        return lora_config.__class__(**cfg_dict)
+    adapted = copy.deepcopy(lora_config)
+    adapted.target_modules = target_modules
+    return adapted
+
+
+def _example_module_keys_for_lora_scope(
+    model: nn.Module,
+    scope: str,
+    *,
+    limit: int = 3,
+) -> list[str]:
+    """Sample ``named_modules`` keys under a scope (for error messages)."""
+    scope_token = scope.strip(".")
+    keys = [
+        key
+        for key, _ in model.named_modules()
+        if f".{scope_token}." in key or key.startswith(f"{scope_token}.")
+    ]
+    return keys[:limit]
+
+
+def adapt_lora_config_for_model(
+    model: nn.Module,
+    lora_config: Any,
+    *,
+    lora_target_scope: str | None = None,
+) -> Any:
+    r"""Rewrite ``LoraConfig.target_modules`` for PEFT (regex or suffix list).
+
+    For *ClippableLinear* models (Gemma 4 vision/audio), short names like ``q_proj``
+    substring-match the wrapper and fail injection; use regex targets on the inner
+    ``.linear`` (https://github.com/huggingface/peft/issues/3129).
+
+    When ``lora_target_scope`` is set (e.g. ``language_model``), only modules under
+    that path are targeted. The scoped regex matches plain ``nn.Linear`` language
+    layers and ``.linear`` inside ClippableLinear towers. Unscoped fallbacks are
+    not used when the scope is explicit.
+    """
+    raw_targets = lora_config.target_modules
+    projection_names = _projection_names_for_clippable_lora(model, raw_targets)
+    if projection_names is None:
+        return lora_config
+
+    exclude_modules = list(getattr(lora_config, "exclude_modules", None) or [])
+
+    explicit_scope = lora_target_scope is not None
+    scope = lora_target_scope if explicit_scope else _infer_clippable_lora_scope(model)
+
+    if scope is not None:
+        if not projection_names:
+            msg = (
+                "lora_target_scope is set but no projection names were resolved "
+                f"from target_modules={raw_targets!r}."
+            )
+            raise ValueError(msg)
+        target_spec = build_scoped_lora_target_regex(projection_names, scope)
+        matched = list_peft_matched_module_keys(
+            model, target_spec, exclude_modules=exclude_modules
+        )
+        if not matched:
+            examples = _example_module_keys_for_lora_scope(model, scope)
+            msg = (
+                f"No modules matched scoped LoRA target_modules for scope={scope!r} "
+                f"(regex={target_spec!r}). "
+                f"Example keys under scope: {examples}. "
+                "Check LORA_TARGET_SCOPE and TARGET_MODULES match the model layout."
+            )
+            raise ValueError(msg)
+        if raw_targets == target_spec:
+            return lora_config
+        adapted = _clone_lora_config_with_targets(lora_config, target_spec)
+        logger.info(
+            "Adapted LoRA target_modules via scoped regex (%s) (%d modules), e.g. %s",
+            scope,
+            len(matched),
+            ", ".join(matched[:2]) + ("..." if len(matched) > 2 else ""),
+        )
+        return adapted
+
+    if not model_has_clippable_linear_wrappers(model):
+        return lora_config
+
+    if not projection_names:
+        msg = (
+            "Model uses ClippableLinear wrappers but no projection names were "
+            "resolved for LoRA targeting."
+        )
+        raise ValueError(msg)
+
+    suffix_targets = build_clippable_linear_lora_target_suffixes(projection_names)
+    candidate_specs: list[tuple[str, str | list[str]]] = [
+        ("suffix list", suffix_targets),
+        ("regex", build_clippable_linear_lora_target_regex(projection_names)),
+    ]
+
+    for label, target_spec in candidate_specs:
+        matched = list_peft_matched_module_keys(
+            model, target_spec, exclude_modules=exclude_modules
+        )
+        if not matched:
+            continue
+        if raw_targets == target_spec:
+            return lora_config
+        adapted = _clone_lora_config_with_targets(lora_config, target_spec)
+        logger.info(
+            "Adapted LoRA target_modules for ClippableLinear wrappers via %s "
+            "(%d modules), e.g. %s",
+            label,
+            len(matched),
+            ", ".join(matched[:2]) + ("..." if len(matched) > 2 else ""),
+        )
+        return adapted
+
+    sample_inner = discover_clippable_inner_linear_module_keys(model)[:5]
+    tried = [f"{label}={spec!r}" for label, spec in candidate_specs]
+    msg = (
+        "No modules matched LoRA target_modules for ClippableLinear layers. "
+        f"Tried: {'; '.join(tried)}. "
+        f"Example inner linear keys: {sample_inner}. "
+        "Set LORA_TARGET_SCOPE in INIT_HP if the tower path differs, or pass a "
+        "custom target_modules regex."
+    )
+    raise ValueError(msg)
 
 
 def resolve_attn_implementation(requested: str | None = None) -> str:

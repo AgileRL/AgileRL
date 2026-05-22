@@ -182,6 +182,7 @@ class REINFORCE(LLMAlgorithm):
         use_fused_linear_logprobs: bool = False,
         cast_logprobs_to_fp32: bool = True,
         use_liger_loss: bool = False,
+        lora_target_scope: str | None = None,
     ) -> None:
 
         device = (
@@ -201,6 +202,7 @@ class REINFORCE(LLMAlgorithm):
             use_liger_loss=use_liger_loss,
             use_memory_efficient_params=use_memory_efficient_params,
             lora_config=lora_config,
+            lora_target_scope=lora_target_scope,
             use_separate_reference_adapter=use_separate_reference_adapter,
             use_vllm=use_vllm,
             vllm_config=vllm_config,

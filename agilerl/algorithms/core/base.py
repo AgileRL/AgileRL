@@ -112,7 +112,11 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     )
     from safetensors.torch import load_file
 
-    from agilerl.utils.llm_utils import create_model_from_name_or_path, gather_if_zero3
+    from agilerl.utils.llm_utils import (
+        adapt_lora_config_for_model,
+        create_model_from_name_or_path,
+        gather_if_zero3,
+    )
 
 if TYPE_CHECKING or HAS_DEEPSPEED:
     from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
@@ -2074,6 +2078,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         reduce_memory_peak: bool = False,
         use_fused_linear_logprobs: bool = False,
         cast_logprobs_to_fp32: bool = True,
+        lora_target_scope: str | None = None,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
             msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
@@ -2206,6 +2211,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         # YAML / config loaders may supply LR as a string (e.g. "5e-5"); PyTorch optimizers require float.
         self.lora_config = lora_config
+        self.lora_target_scope = lora_target_scope
         self.use_vllm = use_vllm
         self.vllm_config = vllm_config
         self.max_grad_norm = max_grad_norm
@@ -3297,10 +3303,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             peft_target = (
                 base_model.pretrained_model if self.use_value_head else base_model
             )
+            # Gemma 4 etc.: LoRA must target inner ``.linear`` inside *ClippableLinear.
+            lora_config = adapt_lora_config_for_model(
+                peft_target,
+                self.lora_config,
+                lora_target_scope=self.lora_target_scope,
+            )
+            self.lora_config = lora_config
             # User Peft is merged to dense above; always attach AgileRL adapters here.
             peft_target = get_peft_model(
                 peft_target,
-                self.lora_config,
+                lora_config,
                 adapter_name="actor",
             )
 
