@@ -63,8 +63,9 @@ class TokenObservationWrapper:
                 tokenize=True,
                 add_generation_prompt=True,
             )
-            # Transformers v5 apply_chat_template returns a dict
-            token_ids = result["input_ids"]
+            # Transformers v5 apply_chat_template returns a dict/BatchEncoding;
+            # older tokenizers (and test doubles) return the token-id list directly.
+            token_ids = result["input_ids"] if hasattr(result, "keys") else result
             if (
                 isinstance(token_ids, list)
                 and token_ids
