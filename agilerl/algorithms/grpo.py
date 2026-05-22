@@ -112,6 +112,10 @@ class GRPO(LLMAlgorithm):
     :type hf_generate_chunk_size: int | None, optional
     :param lora_config: Config for LoRA, defaults to None
     :type lora_config: LoraConfig, optional
+    :param lora_target_scope: Optional PEFT LoRA scope for multimodal models
+        (e.g. ``"language_model"`` for Gemma 4), restricting LoRA to that tower;
+        defaults to None (no-op for plain causal LMs).
+    :type lora_target_scope: str | None, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
     :type cosine_lr_schedule_config: CosineLRScheduleConfig, optional
     :param use_memory_efficient_params: Use memory efficient params.
@@ -234,6 +238,7 @@ class GRPO(LLMAlgorithm):
         reduce_memory_peak: bool = False,
         use_fused_linear_logprobs: bool = False,
         cast_logprobs_to_fp32: bool = True,
+        lora_target_scope: str | None = None,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -259,6 +264,7 @@ class GRPO(LLMAlgorithm):
             use_memory_efficient_params=use_memory_efficient_params,
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
+            lora_target_scope=lora_target_scope,
             use_separate_reference_adapter=use_separate_reference_adapter,
             use_vllm=use_vllm,
             vllm_config=vllm_config,

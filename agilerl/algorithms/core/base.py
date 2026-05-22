@@ -1989,6 +1989,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :type use_liger_loss: bool
     :param lora_config: The LoRA config.
     :type lora_config: LoraConfigProtocol | None
+    :param lora_target_scope: Optional PEFT LoRA scope for multimodal models
+        (e.g. ``"language_model"`` for Gemma 4), restricting LoRA injection to
+        that tower; passed to :func:`adapt_lora_config_for_model`. Defaults to
+        None (no scoping; a no-op for plain causal LMs).
+    :type lora_target_scope: str | None, optional
     :param use_separate_reference_adapter: Whether to use a separate reference adapter.
     :type use_separate_reference_adapter: bool
     :param use_value_head: Whether to use a separate value head.

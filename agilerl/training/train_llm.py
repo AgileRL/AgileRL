@@ -40,120 +40,6 @@ def _is_main_process(accelerator: Accelerator | None) -> bool:
     return accelerator is None or accelerator.is_main_process
 
 
-_DEBUG_ROLLOUTS_ENV = "AGILERL_DEBUG_ROLLOUTS"
-
-
-def _debug_rollout_step_budget() -> int:
-    """Return how many training iterations should dump rollout debug info."""
-    raw = os.environ.get(_DEBUG_ROLLOUTS_ENV)
-    if not raw:
-        return 0
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        return 0
-
-
-def _print_multiturn_rollout_debug(
-    *,
-    iteration: int,
-    rollout_env: "SyncMultiTurnVecEnv",
-    completion_ids_list: list[torch.Tensor],
-    max_trajectories: int = 2,
-    max_turns_per_traj: int = 2,
-    max_chars: int = 400,
-) -> None:
-    """Dump per-trajectory rollout state for debugging multi-turn training.
-
-    Enable by setting ``AGILERL_DEBUG_ROLLOUTS=<N>``: prints during the first
-    N iterations on the main process only. Designed to surface issues like
-    early termination (e.g. GEM env returning ``terminated=True`` on a
-    format-error reward), abnormally short rollouts, or rewards that are
-    all equal (which kills GRPO advantage signal).
-    """
-    trajectories = list(rollout_env.trajectories)
-    n_total = len(trajectories)
-    n_turns_per: list[int] = []
-    sum_rewards_per: list[float] = []
-    for traj in trajectories:
-        env_wrap = traj.env
-        if hasattr(env_wrap, "turn_boundaries"):
-            n_turns_per.append(len(env_wrap.turn_boundaries))
-        if hasattr(env_wrap, "turn_rewards"):
-            sum_rewards_per.append(float(sum(env_wrap.turn_rewards)))
-    completion_lengths = [int(x.shape[1]) for x in completion_ids_list]
-
-    print(f"\n[rollout-debug] iteration={iteration} n_trajectories={n_total}")
-    if n_turns_per:
-        print(
-            "[rollout-debug] turns/traj: "
-            f"min={min(n_turns_per)} max={max(n_turns_per)} "
-            f"mean={float(np.mean(n_turns_per)):.2f}"
-        )
-    if completion_lengths:
-        print(
-            "[rollout-debug] completion_tokens: "
-            f"min={min(completion_lengths)} max={max(completion_lengths)} "
-            f"mean={float(np.mean(completion_lengths)):.1f}"
-        )
-    if sum_rewards_per:
-        print(
-            "[rollout-debug] episode_reward_sum: "
-            f"min={min(sum_rewards_per):.4f} max={max(sum_rewards_per):.4f} "
-            f"mean={float(np.mean(sum_rewards_per)):.4f}"
-        )
-
-    for idx, traj in enumerate(trajectories[:max_trajectories]):
-        env_wrap = traj.env
-        info = env_wrap.get_debug_info() if hasattr(env_wrap, "get_debug_info") else {}
-        print(
-            f"\n[rollout-debug] -- trajectory {idx} "
-            f"(batch={traj.batch_idx}, group={traj.group_idx}, done={traj.done}) --"
-        )
-        print(f"  n_turns         = {info.get('n_turns')}")
-        print(f"  n_total_tokens  = {info.get('n_total_tokens')}")
-        print(f"  n_action_tokens = {info.get('n_action_tokens')}")
-        print(f"  per_turn_rewards= {info.get('turn_rewards_raw')}")
-        prompt_text = info.get("prompt_text") or ""
-        if prompt_text:
-            print(f"  raw_env_prompt[:{max_chars}]= {prompt_text[:max_chars]!r}")
-        # Decoded initial prompt as the model actually sees it (chat-template
-        # wrapped). If the template tokens look wrong here, the model has no
-        # anchor for "what is an assistant turn" and will degenerate.
-        initial_len = getattr(env_wrap, "_initial_prompt_len", None)
-        full_ids = getattr(env_wrap, "full_ids", None)
-        tokenizer = getattr(env_wrap, "tokenizer", None)
-        if initial_len is not None and full_ids is not None and tokenizer is not None:
-            try:
-                wrapped_prompt = tokenizer.decode(
-                    full_ids[0, :initial_len].tolist(),
-                    skip_special_tokens=False,
-                )
-                print(
-                    f"  tokenized_initial_prompt[:{max_chars * 2}]= "
-                    f"{wrapped_prompt[: max_chars * 2]!r}"
-                )
-                # Trailing chars are where chat-template assistant-start markers
-                # live; print explicitly so they're easy to eyeball.
-                print(
-                    f"  tokenized_initial_prompt_tail[-120:]= {wrapped_prompt[-120:]!r}"
-                )
-            except Exception as exc:
-                print(f"  tokenized_initial_prompt= <decode failed: {exc!r}>")
-        for td in (info.get("turn_details") or [])[:max_turns_per_traj]:
-            gen_text = (td.get("gen_text_decoded_from_ids") or "")[:max_chars]
-            print(
-                f"  turn {td.get('turn')}: reward={td.get('reward')} "
-                f"gen_len={td.get('gen_len')}"
-            )
-            print(f"    gen[:{max_chars}]= {gen_text!r}")
-        feedback_texts = info.get("feedback_texts") or []
-        if feedback_texts:
-            print(
-                f"  first_env_feedback[:{max_chars}]= {feedback_texts[0][:max_chars]!r}"
-            )
-
-
 def _validate_llm_evolution_args(
     evo_steps: int | None,
     tournament: TournamentSelection | None,
@@ -1495,17 +1381,6 @@ def finetune_llm_multiturn(
                 group_size=group_size,
                 group_seed=group_seed,
             )
-
-            if (
-                _is_main_process(accelerator)
-                and agent_idx == 0
-                and i < _debug_rollout_step_budget()
-            ):
-                _print_multiturn_rollout_debug(
-                    iteration=i,
-                    rollout_env=rollout_env,
-                    completion_ids_list=completion_ids_list,
-                )
 
             # Normalize rewards to 2D [1, n_turns] per trajectory so padding
             # stacks into [batch, max_turns] rather than flattening to 1D.

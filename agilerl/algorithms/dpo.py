@@ -63,6 +63,10 @@ class DPO(LLMAlgorithm):
     :type device: str, optional
     :param lora_config: Config for LoRA, defaults to None
     :type lora_config: LoraConfig, optional
+    :param lora_target_scope: Optional PEFT LoRA scope for multimodal models
+        (e.g. ``"language_model"`` for Gemma 4), restricting LoRA to that tower;
+        defaults to None (no-op for plain causal LMs).
+    :type lora_target_scope: str | None, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
@@ -118,6 +122,7 @@ class DPO(LLMAlgorithm):
         reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
         use_separate_reference_adapter: bool = True,
+        lora_target_scope: str | None = None,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -142,6 +147,7 @@ class DPO(LLMAlgorithm):
             pad_token=pad_token,
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
+            lora_target_scope=lora_target_scope,
             model_name=model_name,
             actor_network=actor_network,
             model_config=model_config,

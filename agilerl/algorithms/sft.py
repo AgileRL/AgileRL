@@ -73,6 +73,10 @@ class SFT(LLMAlgorithm):
     :param lora_config: LoRA config; when supplied the base model is wrapped with
         PEFT adapters, defaults to None
     :type lora_config: LoraConfig, optional
+    :param lora_target_scope: Optional PEFT LoRA scope for multimodal models
+        (e.g. ``"language_model"`` for Gemma 4), restricting LoRA to that tower;
+        defaults to None (no-op for plain causal LMs).
+    :type lora_target_scope: str | None, optional
     :param accelerator: Accelerate distributed-training handle, defaults to None
     :type accelerator: accelerate.Accelerator, optional
     :param wrap: Wrap models for distributed training on construction, defaults to
@@ -124,6 +128,7 @@ class SFT(LLMAlgorithm):
         use_liger_loss: bool = False,
         reduce_memory_peak: bool = False,
         use_separate_reference_adapter: bool = False,
+        lora_target_scope: str | None = None,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -148,6 +153,7 @@ class SFT(LLMAlgorithm):
             pad_token=pad_token,
             use_liger_loss=use_liger_loss,
             lora_config=lora_config,
+            lora_target_scope=lora_target_scope,
             use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
             actor_network=actor_network,
