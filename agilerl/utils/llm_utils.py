@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import shutil
 import textwrap
@@ -178,6 +179,90 @@ def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
         return model.state_dict()
 
 
+def resolve_attn_implementation(requested: str | None = None) -> str:
+    """Pick the most memory-efficient attention implementation available.
+
+    Long-context RL rollouts make attention the memory bottleneck. SDPA's flash
+    backend is only used when there is no explicit attention mask, but
+    sliding-window models (e.g. Gemma) pass an explicit mask, so SDPA falls back
+    to a backend that materialises the full TxT scores/bias (OOM at ~30k
+    tokens). ``flash_attention_2`` (the ``flash_attn`` package) uses native
+    windowed-causal attention with O(T) memory and no TxT mask, so prefer it
+    when installed; otherwise fall back to SDPA.
+
+    The ``AGILERL_ATTN_IMPLEMENTATION`` env var overrides the auto choice (but
+    not an explicit caller value), e.g. set it to ``"flex_attention"`` for
+    PyTorch's built-in FlexAttention — block-sparse masked attention with O(T)
+    memory and no TxT mask, which handles sliding-window models at long context
+    without needing the ``flash_attn`` package.
+
+    :param requested: An explicit choice from the caller. Anything other than
+        ``None`` / ``"auto"`` is returned unchanged (caller stays authoritative).
+    :return: The attention implementation string for ``from_pretrained`` /
+        ``from_config``.
+    """
+    if requested is None or requested == "auto":
+        env = os.environ.get("AGILERL_ATTN_IMPLEMENTATION")
+        if env:
+            requested = env
+    if requested is not None and requested != "auto":
+        return requested
+    import importlib.util
+
+    if importlib.util.find_spec("flash_attn") is not None:
+        return "flash_attention_2"
+    return "sdpa"
+
+
+def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -> None:
+    """Inject SRAM-safe Triton ``kernel_options`` into transformers' flex path.
+
+    FlexAttention's default Triton config for large head dims (e.g. Gemma's
+    head_dim=256) needs more shared memory than an A100 has (~208 KB required vs
+    ~163 KB available), so the autotuner finds "no valid triton configs". The
+    flex attention function accepts ``kernel_options`` to shrink the block sizes
+    / pipeline stages; this registers a wrapper over the ``"flex_attention"``
+    entry that supplies safe defaults when the caller passes none. Idempotent;
+    no-op if transformers/flex is unavailable.
+
+    :param options: Override the default kernel options (forward + backward
+        block sizes, ``num_warps``, ``num_stages``).
+    """
+    try:
+        from transformers.integrations.flex_attention import flex_attention_forward
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+    except Exception:
+        return
+    if getattr(flex_attention_forward, "_agilerl_kernel_opts_patched", False):
+        return
+    # head_dim=256 makes the Q/K/V tiles (BLOCK x head_dim) the dominant SRAM
+    # cost, so use small 32-wide blocks to fit the A100's ~163 KB shared memory.
+    opts = options or {
+        # Forward kernel blocks.
+        "BLOCK_M": 32,
+        "BLOCK_N": 32,
+        # Backward kernel blocks (training).
+        "BLOCK_M1": 16,
+        "BLOCK_N1": 32,
+        "BLOCK_M2": 32,
+        "BLOCK_N2": 16,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
+
+    def _flex_with_opts(module, query, key, value, attention_mask, **kwargs):
+        kwargs.setdefault("kernel_options", opts)
+        return flex_attention_forward(
+            module, query, key, value, attention_mask, **kwargs
+        )
+
+    _flex_with_opts._agilerl_kernel_opts_patched = True
+    try:
+        ALL_ATTENTION_FUNCTIONS["flex_attention"] = _flex_with_opts
+    except Exception:
+        ALL_ATTENTION_FUNCTIONS.register("flex_attention", _flex_with_opts)
+
+
 def create_model_from_name_or_path(
     model_name_or_path: str,
     model_config: dict[str, Any] | None = None,
@@ -188,7 +273,10 @@ def create_model_from_name_or_path(
 
     :param model_name_or_path: The name or path of the model to create.
     :type model_name_or_path: str
-    :param model_config: The configuration of the model to create.
+    :param model_config: Extra keyword arguments forwarded to ``from_pretrained``.
+        ``torch_dtype`` and ``attn_implementation`` are filled in as defaults
+        when not already present, so passing a config never silently disables
+        the auto-selected attention backend.
     :type model_config: dict[str, Any ] | None
     :param use_value_head: Flag to indicate if a value head should be added to the model, defaults to False
     :type use_value_head: bool, optional
@@ -197,11 +285,24 @@ def create_model_from_name_or_path(
     :return: The created model.
     :rtype: PreTrainedModel
     """
-    if model_config is None:
-        model_config = {
-            "torch_dtype": torch.bfloat16 if not use_accelerator else torch.float16,
-            "attn_implementation": "sdpa",
-        }
+    # Merge dtype + attention defaults into whatever the caller supplied rather
+    # than only applying them when ``model_config is None``; ``setdefault`` keeps
+    # any explicit caller value authoritative while ensuring a passed config
+    # never drops the auto-selected attention backend.
+    model_config = dict(model_config) if model_config else {}
+    model_config.setdefault(
+        "torch_dtype", torch.bfloat16 if not use_accelerator else torch.float16
+    )
+    # Auto-select the best available attention backend (flash_attention_2 when
+    # the flash_attn package is installed, else sdpa). ``resolve_*`` treats an
+    # explicit caller value (incl. "flex_attention") as authoritative. This is
+    # what keeps sliding-window models (e.g. Gemma) off the OOM-prone full-mask
+    # SDPA path at long context.
+    model_config["attn_implementation"] = resolve_attn_implementation(
+        model_config.get("attn_implementation")
+    )
+    if model_config["attn_implementation"] == "flex_attention":
+        patch_flex_attention_kernel_options()
     if add_value_head:
         return AutoModelForCausalLMWithValueHead.from_pretrained(
             pretrained_model_name_or_path=model_name_or_path,

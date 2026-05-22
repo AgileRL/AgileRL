@@ -58,11 +58,19 @@ class TokenObservationWrapper:
     def _tokenize_initial_prompt(self, obs_text: str) -> dict[str, torch.Tensor]:
         """Tokenize the initial observation, optionally with chat template."""
         if self.apply_chat_template:
-            token_ids = self.tokenizer.apply_chat_template(
+            result = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": obs_text}],
                 tokenize=True,
                 add_generation_prompt=True,
             )
+            # Transformers v5 apply_chat_template returns a dict
+            token_ids = result["input_ids"]
+            if (
+                isinstance(token_ids, list)
+                and token_ids
+                and isinstance(token_ids[0], list)
+            ):
+                token_ids = token_ids[0]
             input_ids = torch.tensor([token_ids], dtype=torch.long)
             return {
                 "input_ids": input_ids,
@@ -82,22 +90,88 @@ class TokenObservationWrapper:
         }
 
     def _tokenize_feedback(self, feedback_text: str) -> torch.Tensor:
-        """Tokenize feedback for the next turn, with chat turn boundaries."""
-        if self.apply_chat_template:
-            turn_boundary = (
-                "<|im_end|>\n<|im_start|>user\n"
-                + feedback_text
-                + "<|im_end|>\n<|im_start|>assistant\n"
-            )
+        """Tokenize the assistant→user→assistant boundary plus feedback text.
+
+        Uses ``tokenizer.apply_chat_template`` to compute the boundary so this
+        works for any chat-templated model (Gemma, Llama, Qwen, Mistral, ...).
+        We render two short conversations — one ending after a placeholder
+        assistant turn, one continuing with the new user feedback turn and a
+        fresh generation prompt — then take the suffix difference. Falling
+        back to ChatML markers preserves prior behaviour for tokenizers whose
+        templates don't preserve the prefix string (rare).
+        """
+        if not self.apply_chat_template:
             return torch.tensor(
-                [self.tokenizer.encode(turn_boundary)],
+                [self.tokenizer.encode(feedback_text)],
                 dtype=torch.long,
             )
 
+        boundary_ids = self._chat_template_boundary_ids(feedback_text)
+        if boundary_ids is not None:
+            return boundary_ids
+
+        # Fallback: ChatML-style markers (works for Qwen and derivatives).
+        turn_boundary = (
+            "<|im_end|>\n<|im_start|>user\n"
+            + feedback_text
+            + "<|im_end|>\n<|im_start|>assistant\n"
+        )
         return torch.tensor(
-            [self.tokenizer.encode(feedback_text)],
+            [self.tokenizer.encode(turn_boundary)],
             dtype=torch.long,
         )
+
+    _BOUNDARY_PLACEHOLDER = "__AGILERL_PRIOR_ASSISTANT_PLACEHOLDER_a8b2f__"
+
+    def _chat_template_boundary_ids(
+        self,
+        feedback_text: str,
+    ) -> torch.Tensor | None:
+        """Compute boundary token ids via the tokenizer's chat template.
+
+        Renders ``[user("."), assistant(placeholder), user(feedback)]`` with
+        ``add_generation_prompt=True`` and slices the rendered string from
+        the end of ``placeholder`` to the end. This yields exactly the bytes
+        that close the assistant turn, write a user turn containing
+        ``feedback_text``, and open the next assistant turn — for whatever
+        chat template the tokenizer carries. The dummy leading user message
+        keeps strict-alternation templates (e.g. some Mistral variants)
+        happy; the placeholder must be unique enough not to collide with
+        anything the template might already render.
+
+        Returns ``None`` if the placeholder cannot be located in the render
+        (caller should fall back to ChatML markers).
+        """
+        placeholder = self._BOUNDARY_PLACEHOLDER
+        messages = [
+            {"role": "user", "content": "."},
+            {"role": "assistant", "content": placeholder},
+            {"role": "user", "content": feedback_text},
+        ]
+        try:
+            rendered = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        except Exception:
+            return None
+
+        if not isinstance(rendered, str):
+            return None
+
+        idx = rendered.rfind(placeholder)
+        if idx < 0:
+            return None
+
+        boundary_text = rendered[idx + len(placeholder) :]
+        if not boundary_text:
+            return None
+
+        encoded = self.tokenizer.encode(boundary_text, add_special_tokens=False)
+        if not encoded:
+            return None
+        return torch.tensor([encoded], dtype=torch.long)
 
     def _policy_observation_from_state(self) -> dict[str, Any]:
         """Build observation dict for ``get_action`` from current ``full_ids``."""
