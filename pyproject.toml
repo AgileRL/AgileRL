@@ -138,6 +138,21 @@ no-build-isolation-package = [
     "deepspeed"
 ]
 
+# vLLM 0.21 lists these CUDA-only build/runtime deps unconditionally, but they
+# publish linux-only wheels (no macOS/Windows wheels or sdists). vLLM is required
+# on darwin purely so the LLM test modules import (the real vLLM tests skip on
+# non-linux), so constrain this CUDA toolchain to linux to keep `uv sync` working
+# on macOS/Windows.
+override-dependencies = [
+    "flashinfer-python; sys_platform == 'linux'",
+    "nvidia-cudnn-frontend; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl-libs-base; sys_platform == 'linux'",
+    "cuda-tile; sys_platform == 'linux'",
+    "apache-tvm-ffi; sys_platform == 'linux'",
+    "tokenspeed-mla; sys_platform == 'linux'",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["agilerl"]
 
