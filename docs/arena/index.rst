@@ -203,7 +203,27 @@ Project Management
 ------------------
 
 Projects are the top-level organisational unit in Arena. Every experiment belongs to a
-project, and you must specify a project when submitting training jobs.
+project, and you must specify a project when submitting training jobs. You can set a default project to
+work on by doing the following. This will be stored in the ``~/.arena/config.json`` file.
+
+.. tab-set::
+   :sync-group: interface
+
+   .. tab-item:: CLI
+      :sync: cli
+
+      .. code-block:: bash
+
+         arena projects set-default <project-name>
+
+   .. tab-item:: SDK
+      :sync: sdk
+
+      .. code-block:: python
+
+         client.set_default_project("my-project")
+
+Some other useful commands:
 
 .. tab-set::
    :sync-group: interface
@@ -223,11 +243,11 @@ project, and you must specify a project when submitting training jobs.
          # Create a new project
          client.create_project(name="CartPole-HPO", description="HPO on CartPole")
 
-         # Set a default project (persisted to ~/.arena/config.json)
-         client.set_default_project("CartPole-HPO")
+         # Delete a project
+         client.delete_project("CartPole-HPO")
 
-         # Subsequent calls to list_experiments(), submit_experiment(), etc.
-         # will use this project automatically if --project is not specified.
+         # Show the current default
+         client.get_default_project()
 
    .. tab-item:: CLI
       :sync: cli
@@ -240,14 +260,11 @@ project, and you must specify a project when submitting training jobs.
          # Create a new project
          arena projects create CartPole-HPO --description "HPO on CartPole"
 
-         # Set a default project
-         arena projects set-default CartPole-HPO
+         # Delete a project
+         arena projects delete CartPole-HPO --yes
 
          # Show the current default
          arena projects get-default
-
-         # Delete a project
-         arena projects delete CartPole-HPO --yes
 
 
 .. _arena_training:

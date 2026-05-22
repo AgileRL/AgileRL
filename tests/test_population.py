@@ -216,6 +216,12 @@ class TestPopulationMetrics:
         assert "eval/mean_fitness" in d
         assert "eval/best_fitness" in d
         assert "train/mean_score" in d
+        assert d["train/agent_0/local_steps"] == 100
+        assert d["train/agent_1/local_steps"] == 200
+        assert d["eval/agent_0/fitness"] == pytest.approx(1.0)
+        assert d["eval/agent_1/fitness"] == pytest.approx(2.0)
+        assert d["train/agent_0/score"] == pytest.approx(10.0)
+        assert d["train/agent_1/score"] == pytest.approx(20.0)
         assert "train/agent_0/loss" in d
         assert "train/agent_1/loss" in d
         assert "train/mean_loss" in d
@@ -229,12 +235,17 @@ class TestPopulationMetrics:
         assert "eval/mean_fitness/a0" in d
         assert "eval/best_fitness/a0" in d
         assert "train/mean_score/a0" in d
+        assert d["train/agent_0/local_steps"] == 100
+        assert d["eval/agent_0/fitness/a0"] == pytest.approx(1.0)
+        assert d["train/agent_0/score/a0"] == pytest.approx(10.0)
 
     def test_to_dict_empty_scores(self):
-        """scores block skipped when empty."""
+        """mean score block skipped when empty; per-agent scores omitted too."""
         m = _make_scalar_metrics(scores=[])
         d = m.to_dict()
         assert "train/mean_score" not in d
+        assert "train/agent_0/score" not in d
+        assert "train/agent_0/local_steps" in d
 
 
 # ===========================================================================

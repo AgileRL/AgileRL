@@ -140,6 +140,23 @@ class PopulationMetrics:
             else:
                 d["train/mean_score"] = mean_score
 
+        for idx, local_steps in enumerate(self.steps):
+            d[f"train/agent_{idx}/local_steps"] = local_steps
+
+        for idx, fitness in enumerate(self.fitnesses):
+            if isinstance(fitness, dict):
+                for agent_id, value in fitness.items():
+                    d[f"eval/agent_{idx}/fitness/{agent_id}"] = value
+            else:
+                d[f"eval/agent_{idx}/fitness"] = fitness
+
+        for idx, score in enumerate(self.scores):
+            if isinstance(score, dict):
+                for agent_id, value in score.items():
+                    d[f"train/agent_{idx}/score/{agent_id}"] = value
+            else:
+                d[f"train/agent_{idx}/score"] = score
+
         # Per-agent additional metrics
         for idx, agent_metrics in enumerate(self.additional_metrics):
             for name, val in agent_metrics.items():
