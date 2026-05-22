@@ -191,6 +191,7 @@ def _build_batched_env(
     env_name: str,
     num_envs: int,
     impl: str,
+    staggered_resets: bool,
     seed: int,
     torch_device: str,
 ) -> Any:
@@ -198,6 +199,7 @@ def _build_batched_env(
         env_name=env_name,
         num_envs=num_envs,
         impl=impl,
+        staggered_resets=staggered_resets,
         seed=seed,
         torch_device=torch_device,
     )
@@ -216,6 +218,7 @@ def main() -> None:
         env_name=env_cfg["name"],
         num_envs=env_cfg["num_envs"],
         impl=env_cfg.get("impl", "jax"),
+        staggered_resets=env_cfg.get("staggered_resets", False),
         seed=args.env_seed,
         torch_device=args.device,
     )

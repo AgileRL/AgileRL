@@ -20,6 +20,33 @@ environment:
     name: WalkerWalk
     num_envs: 16
 
+mutation:
+    probabilities:
+        no_mut: 0.4
+        arch_mut: 0.2
+        new_layer: 0.2
+        params_mut: 0.2
+        act_mut: 0.0
+        rl_hp_mut: 0.2
+    rl_hp_selection:
+        lr:
+            min: 0.0001
+            max: 0.01
+        batch_size:
+            min: 8
+            max: 1024
+        learn_step:
+            min: 256
+            max: 8192
+        ent_coef:
+            min: 0.001
+            max: 0.1
+        update_epochs:
+            min: 1
+            max: 10
+    mutation_sd: 0.1
+    rand_seed: 42
+
 network:
     latent_dim: 256
     max_latent_dim: 256
@@ -45,10 +72,14 @@ network:
         output_vanish: true
         layer_norm: false
 
+tournament_selection:
+    tournament_size: 2
+    elitism: true
+
 training:
     max_steps: 2_000_000
     target_score:
-    pop_size: 1
-    evo_steps: 20_480
+    pop_size: 4
+    evo_steps: 160_000
     eval_steps:
     eval_loop: 3

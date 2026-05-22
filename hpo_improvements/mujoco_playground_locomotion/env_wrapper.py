@@ -142,6 +142,7 @@ class BatchedPlaygroundVectorEnv(gym.vector.VectorEnv):
         action_repeat: int | None = None,
         reward_scaling: float | None = None,
         normalize_obs: bool | None = None,
+        staggered_resets: bool = False,
         torch_device: str | torch.device | None = None,
     ) -> None:
         """Initialize a batched vectorized wrapper.
@@ -154,6 +155,7 @@ class BatchedPlaygroundVectorEnv(gym.vector.VectorEnv):
         :arg action_repeat: Optional control-repeat override.
         :arg reward_scaling: Optional reward scaling override.
         :arg normalize_obs: Optional observation normalization override.
+        :arg staggered_resets: Whether resets use staggered episode offsets.
         :arg torch_device: Optional torch device for observation output.
         """
         cfg = registry.get_default_config(env_name)
@@ -196,6 +198,7 @@ class BatchedPlaygroundVectorEnv(gym.vector.VectorEnv):
             dtype=np.int32,
         )
         self._step_counts = self._init_step_counts.copy()
+        self._staggered_resets = staggered_resets
 
         obs_size = self._env.observation_size
         ctrl_range = np.array(self._env.mj_model.actuator_ctrlrange, dtype=np.float32)
@@ -295,6 +298,18 @@ class BatchedPlaygroundVectorEnv(gym.vector.VectorEnv):
         """Return observations in the configured output type."""
         return self._obs_to_torch(obs) if self._torch_device is not None else obs
 
+    @property
+    def staggered_resets_enabled(self) -> bool:
+        """Whether reset() restores staggered per-env step counters."""
+        return self._staggered_resets
+
+    def set_staggered_resets(self, enabled: bool) -> None:
+        """Enable or disable staggered reset step counters.
+
+        :arg enabled: If ``True``, reset uses staggered episode offsets.
+        """
+        self._staggered_resets = enabled
+
     def reset(
         self,
         *,
@@ -316,7 +331,11 @@ class BatchedPlaygroundVectorEnv(gym.vector.VectorEnv):
         self._first_data = self._states.data
         self._first_obs = self._states.obs
 
-        self._step_counts = self._init_step_counts.copy()
+        self._step_counts = (
+            self._init_step_counts.copy()
+            if self._staggered_resets
+            else np.zeros(self.num_envs, dtype=np.int32)
+        )
 
         normalized_obs = self._maybe_normalize_obs(self._states.obs)
         return self._format_obs(normalized_obs), {}
