@@ -129,7 +129,7 @@ Here is an example manifest to train PPO on LunarLander-v3:
 Population Creation
 -------------------
 
-To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
+To perform evolutionary HPO, we require a population of agents. Individuals in this population learn individually, allowing us to
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
 are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below.
 
@@ -152,7 +152,8 @@ are more likely to remain present in the population. The sequence of evolution (
 
     # Configure network architecture
     net_config = {
-        "encoder_config": {"hidden_size": [32, 32]}  # Actor head hidden size
+        "encoder_config": {"hidden_size": [64, 64]},
+        "head_config": {"hidden_size": [64]},
     }
 
     # Algorithm hyperparameters

@@ -187,7 +187,7 @@ requires-dist = [
     { name = "supersuit", specifier = "~=3.9.0" },
     { name = "swig", marker = "sys_platform != 'win32' and extra == 'all'", specifier = "~=4.4.1" },
     { name = "swig", marker = "sys_platform != 'win32' and extra == 'box2d'", specifier = "~=4.4.1" },
-    { name = "tabulate", specifier = ">=0.10.0" },
+    { name = "tabulate", specifier = ">=0.9.0" },
     { name = "tensordict", specifier = "~=0.8" },
     { name = "termcolor", specifier = "~=1.1.0" },
     { name = "torch", marker = "sys_platform != 'darwin'", specifier = "==2.9.0" },
