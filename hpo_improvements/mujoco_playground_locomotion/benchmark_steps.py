@@ -5,8 +5,8 @@ Measures the number of environment steps per second achieved by
 
 Usage::
 
-    python hpo-improvements/mujoco_playground_locomotion/benchmark_steps.py
-    python hpo-improvements/mujoco_playground_locomotion/benchmark_steps.py --env HumanoidWalk --num-envs 128
+    python hpo_improvements/mujoco_playground_locomotion/benchmark_steps.py
+    python hpo_improvements/mujoco_playground_locomotion/benchmark_steps.py --env HumanoidWalk --num-envs 128
 """
 
 from __future__ import annotations
@@ -25,18 +25,25 @@ from env_wrapper import BatchedPlaygroundVectorEnv  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for env-step benchmarking."""
     p = argparse.ArgumentParser(description="Benchmark env steps/s")
     p.add_argument("--env", type=str, default="WalkerWalk")
     p.add_argument("--num-envs", type=int, default=1024)
     p.add_argument("--impl", type=str, default="jax", choices=["jax", "warp"])
-    p.add_argument("--duration", type=float, default=30.0,
-                   help="Benchmark duration in seconds.")
-    p.add_argument("--warmup-steps", type=int, default=10,
-                   help="Number of warm-up steps (excluded from timing).")
+    p.add_argument(
+        "--duration", type=float, default=30.0, help="Benchmark duration in seconds."
+    )
+    p.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=10,
+        help="Number of warm-up steps (excluded from timing).",
+    )
     return p.parse_args()
 
 
 def main() -> None:
+    """Run a fixed-duration environment stepping benchmark."""
     args = parse_args()
 
     print(f"Building env: {args.env} x {args.num_envs} (impl={args.impl})")
@@ -45,27 +52,31 @@ def main() -> None:
         num_envs=args.num_envs,
         impl=args.impl,
     )
-    print(f"  obs_space={env.single_observation_space.shape}  "
-          f"act_space={env.single_action_space.shape}")
+    print(
+        f"  obs_space={env.single_observation_space.shape}  "
+        f"act_space={env.single_action_space.shape}"
+    )
 
-    obs, _ = env.reset(seed=42)
+    _obs, _ = env.reset(seed=42)
 
     # Warm-up: let JIT compilation happen outside the timed window
     print(f"Warming up ({args.warmup_steps} steps)...")
     for _ in range(args.warmup_steps):
         actions = np.array(env.action_space.sample(), dtype=np.float32)
-        obs, *_ = env.step(actions)
+        _obs, *_ = env.step(actions)
 
     # Timed benchmark
     steps_per_call = env.num_envs
-    print(f"Benchmarking for {args.duration:.0f}s  (steps_per_call={steps_per_call}) ...")
+    print(
+        f"Benchmarking for {args.duration:.0f}s  (steps_per_call={steps_per_call}) ..."
+    )
     total_steps = 0
     t_start = time.perf_counter()
     deadline = t_start + args.duration
 
     while True:
         actions = np.array(env.action_space.sample(), dtype=np.float32)
-        obs, *_ = env.step(actions)
+        _obs, *_ = env.step(actions)
         total_steps += steps_per_call
         if time.perf_counter() >= deadline:
             break

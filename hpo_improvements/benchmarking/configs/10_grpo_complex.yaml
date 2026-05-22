@@ -25,11 +25,12 @@ environment:
     columns:
         question: question
         answer: answer
-    reward_file_path: hpo-improvements/benchmarking/rewards/gsm8k_reward.py
+    reward_file_path: hpo_improvements/benchmarking/rewards/gsm8k_reward.py
     reward_fn_name: combined_rewards
     prompt_template:
         system_0: You are a helpful math assistant. Think step by step and provide your final numerical answer.
-        user_1: "Solve the following math problem:\n\n{question}\n\nShow your reasoning in <redacted_thinking> </redacted_thinking> tags. Then provide your final numerical answer in <answer> </answer> tags, for example <answer>42</answer>."
+        user_1: "Solve the following math problem:\n\n{question}\n\nShow your reasoning in <redacted_thinking> </redacted_thinking> tags. Then provide your\
+            \ final numerical answer in <answer> </answer> tags, for example <answer>42</answer>."
         assistant_2: "Let me solve this step by step.\n<redacted_thinking>"
     max_reward: 2.0
     train_test_split: 0.8

@@ -9,33 +9,34 @@ from __future__ import annotations
 
 import re
 
+EXPECTED_GROUPS = 2
+ANSWER_TAG_COUNT = 1
+EQUATION_TOLERANCE = 1e-5
+
 
 def format_reward_func(completions, target, **kwargs):
     """Reward correct use of <think>...</think> and <answer>...</answer> tags."""
     rewards = []
-    for completion, gt in zip(completions, target):
-        try:
-            completion = "<think>" + completion
-            regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
-            match = re.search(regex, completion, re.DOTALL)
-            if match is None or len(match.groups()) != 2:
-                rewards.append(0.0)
-            else:
-                rewards.append(1.0)
-        except Exception:
+    regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
+    for completion, _gt in zip(completions, target, strict=False):
+        candidate = "<think>" + completion
+        match = re.search(regex, candidate, re.DOTALL)
+        if match is None or len(match.groups()) != EXPECTED_GROUPS:
             rewards.append(0.0)
+        else:
+            rewards.append(1.0)
     return rewards
 
 
 def equation_reward_func(completions, target, nums, **kwargs):
     """Reward correct arithmetic equations that use all numbers and hit the target."""
     rewards = []
-    for completion, gt, numbers in zip(completions, target, nums):
+    for completion, gt, numbers in zip(completions, target, nums, strict=False):
         try:
-            completion = "<think>" + completion
-            answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
+            candidate = "<think>" + completion
+            answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", candidate)
 
-            if len(answer_tags) != 1:
+            if len(answer_tags) != ANSWER_TAG_COUNT:
                 rewards.append(0.0)
                 continue
 
@@ -53,19 +54,18 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
             result = eval(equation, {"__builtins__": None}, {})  # noqa: S307
 
-            if abs(float(result) - float(gt)) < 1e-5:
+            if abs(float(result) - float(gt)) < EQUATION_TOLERANCE:
                 rewards.append(1.0)
             else:
                 rewards.append(0.0)
-        except Exception:
+        except (NameError, SyntaxError, TypeError, ValueError, ZeroDivisionError):
             rewards.append(0.0)
     return rewards
 
 
 def combined_rewards(completion, solution, prompt):
-    """Combined format + equation reward (max 2.0)."""
-    reward = (
+    """Combine format and equation rewards (max 2.0)."""
+    return (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
     )
-    return reward

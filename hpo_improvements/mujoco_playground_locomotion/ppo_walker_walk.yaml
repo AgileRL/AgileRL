@@ -1,0 +1,54 @@
+---
+
+algorithm:
+    name: PPO
+    batch_size: 256
+    lr: 0.0002
+    learn_step: 4096
+    gamma: 0.99
+    gae_lambda: 0.95
+    action_std_init: 0.8
+    clip_coef: 0.2
+    ent_coef: 0.005
+    vf_coef: 0.5
+    max_grad_norm: 0.5
+    target_kl:
+    update_epochs: 8
+    share_encoders: true
+
+environment:
+    name: WalkerWalk
+    num_envs: 16
+
+network:
+    latent_dim: 256
+    max_latent_dim: 256
+    arch: mlp
+    encoder_config:
+        hidden_size:
+            - 256
+            - 256
+        activation: Tanh
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
+        layer_norm: false
+
+    head_config:
+        hidden_size:
+            - 256
+            - 256
+        activation: Tanh
+        min_hidden_layers: 1
+        max_hidden_layers: 3
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
+        output_vanish: true
+        layer_norm: false
+
+training:
+    max_steps: 2_000_000
+    target_score:
+    pop_size: 1
+    evo_steps: 20_480
+    eval_steps:
+    eval_loop: 3
