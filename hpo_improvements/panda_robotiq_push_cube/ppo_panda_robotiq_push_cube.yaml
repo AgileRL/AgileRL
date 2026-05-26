@@ -7,44 +7,44 @@
 algorithm:
     name: PPO
     batch_size: 512
-    lr: 0.0006
+    lr: 0.0003
     learn_step: 4096
     gamma: 0.994
     gae_lambda: 0.95
     action_std_init: 0.5
-    clip_coef: 0.2
-    ent_coef: 0.01
-    vf_coef: 0.5
+    clip_coef: 0.15
+    ent_coef: 0.001
+    vf_coef: 1.0
     max_grad_norm: 0.5
-    target_kl:
+    target_kl: 0.01
     update_epochs: 8
     share_encoders: false
 
 environment:
     name: PandaRobotiqPushCube-v1
-    num_envs: 16
+    num_envs: 32
     config:
         env_id: PandaRobotiqPushCube-v1
         env_kwargs:
             flatten_obs: true
 
 network:
-    latent_dim: 64
-    max_latent_dim: 256
+    latent_dim: 128
+    max_latent_dim: 512
     arch: mlp
     encoder_config:
         hidden_size:
-            - 64
-            - 64
+            - 256
+            - 256
         activation: Tanh
-        min_mlp_nodes: 32
-        max_mlp_nodes: 256
+        min_mlp_nodes: 64
+        max_mlp_nodes: 512
     head_config:
         hidden_size:
-            - 64
+            - 128
         activation: Tanh
-        min_mlp_nodes: 32
-        max_mlp_nodes: 256
+        min_mlp_nodes: 64
+        max_mlp_nodes: 512
         output_vanish: true
 
 training:

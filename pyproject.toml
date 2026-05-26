@@ -40,8 +40,9 @@ dependencies = [
     "torch==2.8.0; sys_platform == 'darwin'",
     "tensordict~=0.8",
     "tqdm>=4.66.4",
-    "wandb~=0.18.0",
+    "wandb>=0.19.0",
     "datasets>=4.4.1",
+    "envpool>=0.8.4",
 ]
 
 [project.optional-dependencies]
