@@ -216,8 +216,8 @@ class RainbowDQN(RLAlgorithm):
 
             def create_actor() -> RainbowQNetwork:
                 return RainbowQNetwork(
-                    observation_space=observation_space,
-                    action_space=action_space,
+                    observation_space=self.observation_space,
+                    action_space=self.action_space,
                     support=self.support,
                     num_atoms=self.num_atoms,
                     noise_std=self.noise_std,

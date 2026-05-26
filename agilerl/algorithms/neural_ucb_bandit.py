@@ -150,13 +150,13 @@ class NeuralUCB(RLAlgorithm):
             net_config = {} if net_config is None else net_config
             simba = net_config.get("simba", False)
             encoder_config = (
-                get_default_encoder_config(observation_space, simba)
+                get_default_encoder_config(self.observation_space, simba)
                 if net_config.get("encoder_config") is None
                 else net_config["encoder_config"]
             )
 
             if not simba and not isinstance(
-                observation_space,
+                self.observation_space,
                 (spaces.Dict, spaces.Tuple),
             ):
                 # Layer norm is not used in the original implementation
@@ -165,7 +165,7 @@ class NeuralUCB(RLAlgorithm):
             net_config["encoder_config"] = encoder_config
 
             self.actor = ValueNetwork(
-                observation_space=observation_space,
+                observation_space=self.observation_space,
                 device=self.device,
                 **net_config,
             )

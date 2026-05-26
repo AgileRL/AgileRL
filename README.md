@@ -248,7 +248,7 @@ This approach gives you the flexibility to swap in your own Gymnasium or Petting
 
 ## Training on Arena
 
-[Arena](https://arena.agilerl.com) is the RLOps platform from AgileRL. We provide tools to create and validate custom reinforcement learning environments on the platform and train RL agents on managed cloud infrastructure — no cluster setup required. See the documentation
+[Arena](https://arena.agilerl.com) is the RLOps platform from AgileRL. We provide tools to create and validate custom reinforcement learning environments on the platform and train RL agents on managed cloud infrastructure — no cluster setup required.
 
 AgileRL ships an **Arena SDK** (Python client) and an **Arena CLI** for interacting with the platform. Install them with:
 
@@ -269,11 +269,11 @@ client.login()
 # Register and validate a custom environment
 client.validate_environment(
     name="my-env",
-    source="path/to/my_env/",          # directory or .tar.gz
+    source="path/to/my_env.py",      # directory, file, or .tar.gz
     entrypoint="my_env:MyCustomEnv",
 )
 
-# Train on validated custom environment (requires target project name)
+# Train on validated custom environment
 client.submit_experiment(
     manifest="path/to/manifest.yaml",
     project="my-project",
@@ -291,12 +291,14 @@ arena login
 # Upload and validate
 arena env validate
     --name my-env \
-    --source path/to/my_env/ \
+    --source path/to/my_env.py \
     --entrypoint my_env:MyCustomEnv
 
 # Train on validated custom environment
 arena experiment submit --manifest path/to/manifest.yaml --project my-project
 ```
+
+For the full CLI and Python SDK reference—including authentication, environment validation, experiments, and deployment—see the [Arena Client](https://docs.agilerl.com/en/latest/arena/index.html) documentation.
 
 ## Tutorials
 

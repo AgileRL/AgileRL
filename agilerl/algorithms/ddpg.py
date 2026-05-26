@@ -259,7 +259,7 @@ class DDPG(RLAlgorithm):
                 simba = net_config.get("simba", False)
                 recurrent = net_config.get("recurrent", False)
                 encoder_config = get_default_encoder_config(
-                    observation_space,
+                    self.observation_space,
                     simba=simba,
                     recurrent=recurrent,
                     layer_norm=False,
@@ -280,7 +280,7 @@ class DDPG(RLAlgorithm):
 
             def create_actor() -> DeterministicActor:
                 return DeterministicActor(
-                    observation_space=observation_space,
+                    observation_space=self.observation_space,
                     action_space=action_space,
                     device=self.device,
                     **net_config,
@@ -288,7 +288,7 @@ class DDPG(RLAlgorithm):
 
             def create_critic() -> ContinuousQNetwork:
                 return ContinuousQNetwork(
-                    observation_space=observation_space,
+                    observation_space=self.observation_space,
                     action_space=action_space,
                     device=self.device,
                     **critic_net_config,

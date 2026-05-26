@@ -154,8 +154,8 @@ class DQN(RLAlgorithm):
 
             def create_actor() -> QNetwork:
                 return QNetwork(
-                    observation_space=observation_space,
-                    action_space=action_space,
+                    observation_space=self.observation_space,
+                    action_space=self.action_space,
                     device=self.device,
                     **net_config,
                 )
