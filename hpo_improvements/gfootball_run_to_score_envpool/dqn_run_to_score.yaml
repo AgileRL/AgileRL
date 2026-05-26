@@ -1,0 +1,61 @@
+---
+# Hyperparameters adapted from:
+# "Google Research Football: A Novel Reinforcement Learning Environment"
+# Kurach et al., 2020 — https://arxiv.org/abs/1907.11180
+#
+# The paper uses Ape-X DQN (distributed, 150 actors). Parameters below are
+# adapted to single-process AgileRL DQN where noted.
+
+algorithm:
+    name: DQN
+    batch_size: 512        # paper Table 9: 512
+    lr: 0.00001475         # paper Table 9: best lr for Scoring reward (log-uniform 1e-7–1e-3)
+    learn_step: 4          # not specified in paper; standard DQN update frequency kept
+    gamma: 0.999           # paper Table 9: 0.999
+    tau: 0.0004            # paper uses hard target update every 2500 steps; approx. tau = 1/2500
+    double: false          # paper does not use Double DQN
+    cudagraphs: false
+
+environment:
+    name: gfootball/academy_run_to_score-v1
+    num_envs: 1
+    config:
+        env_id: gfootball/academy_run_to_score-v1
+        env_kwargs:
+            flatten_obs: false  # keep spatial dims for CNN encoder
+
+network:
+    latent_dim: 512            # standard for CNN DQN (Nature DQN)
+    max_latent_dim: 512
+    arch: cnn
+    encoder_config:
+        channel_size:          # Nature DQN / GFootball paper CNN
+            - 32
+            - 64
+            - 64
+        kernel_size:
+            - 8
+            - 4
+            - 3
+        stride_size:
+            - 4
+            - 2
+            - 1
+        activation: ReLU
+    head_config:
+        hidden_size:
+            - 512
+        max_mlp_nodes: 512
+
+replay_buffer:
+    max_size: 1_000_000    # increased to support large batch size and n-step replay
+
+training:
+    max_steps: 1_000_000
+    pop_size: 1
+    learning_delay: 50_000
+    eval_loop: 1
+    eval_steps:
+    eps_start: 1.0
+    eps_end: 0.01          # paper Table 9: evaluation ε = 0.01
+    eps_decay: 0.9999954   # decays from 1.0 → 0.01 over ~1M steps
