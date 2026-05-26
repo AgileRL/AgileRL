@@ -10,8 +10,16 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import types
 from pathlib import Path
 from typing import Any
+
+import numpy as np
+
+# MPS doesn't support all PyTorch ops (e.g. linalg_qr for orthogonal init).
+# Enable CPU fallback automatically so MPS training works out of the box.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import gymnasium as gym
 import torch
@@ -26,6 +34,107 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _test_with_success(
+    self,
+    env: Any,
+    max_steps: int | None = None,
+    loop: int = 1,
+    vectorized: bool = True,
+    callback: Any = None,
+) -> float:
+    """Drop-in replacement for PPO.test() that also tracks and logs success rate.
+
+    Replicates the original fitness computation exactly, while additionally
+    recording whether each evaluation episode was successful (``info['success']``
+    ever became ``True`` during the episode) and logging the aggregate rate to
+    Weights & Biases and the console.
+    """
+    self.actor.eval()
+    self.critic.eval()
+    self.set_training_mode(False)
+
+    all_rewards: list[float] = []
+    all_successes: list[bool] = []
+
+    with torch.no_grad():
+        num_envs = env.num_envs if hasattr(env, "num_envs") and vectorized else 1
+
+        for _ in range(loop):
+            obs, info = env.reset()
+            scores = np.zeros(num_envs)
+            completed_scores = np.zeros(num_envs)
+            completed_successes = np.zeros(num_envs, dtype=bool)
+            # Latches to True the first time success fires for each env.
+            success_achieved = np.zeros(num_envs, dtype=bool)
+            finished = np.zeros(num_envs, dtype=bool)
+            step = 0
+
+            while not np.all(finished):
+                action, _, _, _ = self.get_action(obs)
+                obs, reward, done, trunc, info = env.step(action)
+
+                step += 1
+                scores += np.asarray(reward).flatten()
+
+                # Accumulate success across the episode for each env.
+                if "success" in info:
+                    success_achieved |= (
+                        np.asarray(info["success"]).flatten().astype(bool)
+                    )
+
+                newly_finished = (
+                    np.logical_or(
+                        np.logical_or(
+                            np.asarray(done).flatten(),
+                            np.asarray(trunc).flatten(),
+                        ),
+                        (max_steps is not None and step == max_steps),
+                    )
+                    & ~finished
+                )
+
+                if np.any(newly_finished):
+                    completed_scores[newly_finished] = scores[newly_finished]
+                    completed_successes[newly_finished] = success_achieved[
+                        newly_finished
+                    ]
+                    finished[newly_finished] = True
+
+                if callback is not None and np.all(finished):
+                    final_info = info if isinstance(info, dict) else {}
+                    callback(float(np.sum(completed_scores)), final_info)
+
+            all_rewards.append(float(np.mean(completed_scores)))
+            all_successes.extend(completed_successes.tolist())
+
+    mean_fit = float(np.mean(all_rewards))
+    success_rate = float(np.mean(all_successes))
+
+    self.metrics.add_fitness(mean_fit)
+
+    # Log to W&B if a run is active (commit=False so it merges with the
+    # other training metrics logged in the same step).
+    try:
+        import wandb as _wandb  # noqa: PLC0415
+
+        if _wandb.run is not None:
+            _wandb.log({"eval/success_rate": success_rate}, commit=False)
+    except ImportError:
+        pass
+
+    logger.info(
+        "Eval  →  fitness: %.4f  |  success rate: %.1f%%",
+        mean_fit,
+        success_rate * 100,
+    )
+
+    self.set_training_mode(True)
+    self.actor.train()
+    self.critic.train()
+
+    return mean_fit
 
 
 class EnvPoolLocalTrainer(LocalTrainer):
@@ -60,7 +169,7 @@ class EnvPoolLocalTrainer(LocalTrainer):
         env_spec = GymEnvSpec(**env_data)
         cls._prebuilt_env = vector_env
         try:
-            return cls(
+            trainer = cls(
                 algorithm=validated.algorithm,
                 environment=env_spec,
                 training=validated.training,
@@ -73,6 +182,13 @@ class EnvPoolLocalTrainer(LocalTrainer):
             )
         finally:
             cls._prebuilt_env = None
+
+        # Replace test() on every agent with a version that tracks and logs
+        # the episode success rate in addition to the standard fitness value.
+        for agent in trainer.population:
+            agent.test = types.MethodType(_test_with_success, agent)
+
+        return trainer
 
 
 def _build_envpool_env(

@@ -6,23 +6,23 @@
 
 algorithm:
     name: PPO
-    batch_size: 512
-    lr: 0.0003
-    learn_step: 4096
+    batch_size: 4096
+    lr: 0.0001
+    learn_step: 32768
     gamma: 0.994
     gae_lambda: 0.95
     action_std_init: 0.5
     clip_coef: 0.15
-    ent_coef: 0.001
-    vf_coef: 1.0
+    ent_coef: 0.005
+    vf_coef: 0.5
     max_grad_norm: 0.5
     target_kl: 0.01
-    update_epochs: 8
+    update_epochs: 4
     share_encoders: false
 
 environment:
     name: PandaRobotiqPushCube-v1
-    num_envs: 32
+    num_envs: 256
     config:
         env_id: PandaRobotiqPushCube-v1
         env_kwargs:
@@ -52,4 +52,4 @@ training:
     pop_size: 1
     evo_steps: 160_000
     eval_steps:
-    eval_loop: 3
+    eval_loop: 8

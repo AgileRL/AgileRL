@@ -842,15 +842,29 @@ def obs_to_tensor(obs: ObservationType, device: str | torch.device) -> TorchObsT
         return obs if obs.device == device else obs.to(device)
     if isinstance(obs, torch.Tensor):
         return obs.float().to(device)
+
+    def _maybe_cast_f32(arr: np.ndarray) -> np.ndarray:
+        """MPS doesn't support float64; cast to float32 before moving to device."""
+        if (
+            isinstance(arr, np.ndarray)
+            and arr.dtype == np.float64
+            and str(device) == "mps"
+        ):
+            return arr.astype(np.float32)
+        return arr
+
     if isinstance(obs, np.ndarray):
-        return torch.as_tensor(obs, device=device).float()
+        return torch.as_tensor(_maybe_cast_f32(obs), device=device).float()
     if isinstance(obs, dict):
         return {
-            key: torch.as_tensor(_obs, device=device).float()
+            key: torch.as_tensor(_maybe_cast_f32(_obs), device=device).float()
             for (key, _obs) in obs.items()
         }
     if isinstance(obs, tuple):
-        return tuple(torch.as_tensor(_obs, device=device).float() for _obs in obs)
+        return tuple(
+            torch.as_tensor(_maybe_cast_f32(_obs), device=device).float()
+            for _obs in obs
+        )
     if isinstance(obs, (list, Number)):
         return torch.tensor(obs, device=device).float()
 
