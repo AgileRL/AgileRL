@@ -56,7 +56,6 @@ def _test_with_success(
     self.set_training_mode(False)
 
     all_rewards: list[float] = []
-    all_successes: list[bool] = []
 
     with torch.no_grad():
         num_envs = env.num_envs if hasattr(env, "num_envs") and vectorized else 1
@@ -65,9 +64,6 @@ def _test_with_success(
             obs, info = env.reset()
             scores = np.zeros(num_envs)
             completed_scores = np.zeros(num_envs)
-            completed_successes = np.zeros(num_envs, dtype=bool)
-            # Latches to True the first time success fires for each env.
-            success_achieved = np.zeros(num_envs, dtype=bool)
             finished = np.zeros(num_envs, dtype=bool)
             step = 0
 
@@ -77,12 +73,6 @@ def _test_with_success(
 
                 step += 1
                 scores += np.asarray(reward).flatten()
-
-                # Accumulate success across the episode for each env.
-                if "success" in info:
-                    success_achieved |= (
-                        np.asarray(info["success"]).flatten().astype(bool)
-                    )
 
                 newly_finished = (
                     np.logical_or(
@@ -97,9 +87,6 @@ def _test_with_success(
 
                 if np.any(newly_finished):
                     completed_scores[newly_finished] = scores[newly_finished]
-                    completed_successes[newly_finished] = success_achieved[
-                        newly_finished
-                    ]
                     finished[newly_finished] = True
 
                 if callback is not None and np.all(finished):
@@ -107,28 +94,10 @@ def _test_with_success(
                     callback(float(np.sum(completed_scores)), final_info)
 
             all_rewards.append(float(np.mean(completed_scores)))
-            all_successes.extend(completed_successes.tolist())
 
     mean_fit = float(np.mean(all_rewards))
-    success_rate = float(np.mean(all_successes))
 
     self.metrics.add_fitness(mean_fit)
-
-    # Log to W&B if a run is active (commit=False so it merges with the
-    # other training metrics logged in the same step).
-    try:
-        import wandb as _wandb  # noqa: PLC0415
-
-        if _wandb.run is not None:
-            _wandb.log({"eval/success_rate": success_rate}, commit=False)
-    except ImportError:
-        pass
-
-    logger.info(
-        "Eval  →  fitness: %.4f  |  success rate: %.1f%%",
-        mean_fit,
-        success_rate * 100,
-    )
 
     self.set_training_mode(True)
     self.actor.train()

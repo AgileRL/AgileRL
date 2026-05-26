@@ -47,9 +47,40 @@ network:
         max_mlp_nodes: 512
         output_vanish: true
 
+mutation:
+    probabilities:
+        no_mut: 0.4
+        arch_mut: 0.2
+        new_layer: 0.2
+        params_mut: 0.2
+        act_mut: 0.0
+        rl_hp_mut: 0.2
+    rl_hp_selection:
+        lr:
+            min: 0.00005
+            max: 0.001
+        batch_size:
+            min: 512
+            max: 8192
+        learn_step:
+            min: 4096
+            max: 65536
+        ent_coef:
+            min: 0.0
+            max: 0.01
+        update_epochs:
+            min: 2
+            max: 10
+    mutation_sd: 0.1
+    rand_seed: 42
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true
+
 training:
-    max_steps: 2_000_000_000
-    pop_size: 1
+    max_steps: 50_000_000
+    pop_size: 4
     evo_steps: 160_000
     eval_steps:
     eval_loop: 8
