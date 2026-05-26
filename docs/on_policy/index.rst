@@ -20,8 +20,12 @@ policy, potentially limiting exploration and the use of past experiences.
    * - **Algorithms**
      - **Tutorials**
    * - :ref:`PPO<ppo>`
-     - :ref:`Acrobot<ppo_tutorial>`, :ref:`Masked Velocity LunarLander-v3<agilerl_recurrent_ppo_tutorial>`
+     - :ref:`Acrobot<ppo_tutorial>` |br|
+       :ref:`Masked Velocity LunarLander-v3<agilerl_recurrent_ppo_tutorial>`
 
+.. |br| raw:: html
+
+   <br>
 
 .. _on_policy_trainer:
 

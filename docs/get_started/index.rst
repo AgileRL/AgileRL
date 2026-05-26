@@ -260,6 +260,9 @@ faster hyperparameter optimization. Please see the available tutorials below.
      - Learn how to create custom evolvable modules and networks for RL algorithms.
      - `Dueling Distributional Q Network <../tutorials/custom_networks/agilerl_rainbow_tutorial.html>`_ |br|
        `EvolvableSimBa <../tutorials/custom_networks/agilerl_simba_tutorial.html>`_
+   * - `Training on Arena <../tutorials/arena_training/index.html>`_
+     - Upload and validate custom environments, submit training jobs on managed cloud infrastructure, and deploy trained agents for inference.
+     - `PPO - BipedalWalker Custom Environment <../tutorials/arena_training/ppo_custom_env.html>`_
    * - `LLM Finetuning <../tutorials/llm_finetuning/index.html>`_
      - Learn how to finetune an LLM using AgileRL.
      - `GRPO <../tutorials/llm_finetuning/grpo_finetuning.html>`_ |br|
