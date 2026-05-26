@@ -53,7 +53,7 @@ Dependencies
     import gymnasium as gym
     import numpy as np
     import torch
-    from typing import List
+    from typing import ClassVar
     from tqdm import trange
 
     from agilerl.typing import BPTTSequenceType
@@ -64,6 +64,7 @@ Dependencies
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.utils.utils import make_vect_envs
     from agilerl.rollouts.on_policy import collect_rollouts_recurrent
+    from agilerl.training.train_on_policy import train_on_policy
 
 Create the Environment
 ----------------------
@@ -184,12 +185,9 @@ followed by mutations) is detailed further below.
         net_config=net_config,
         hp_config=hp_config,
         device=device,
+        wrapper_cls=RSNorm,
         **init_hp,
     )
-
-    # Wrap the population with the RSNorm wrapper to
-    # normalize observations using running statistics
-    pop = [RSNorm(agent) for agent in pop]
 
 Creating Mutations and Tournament Objects
 -----------------------------------------

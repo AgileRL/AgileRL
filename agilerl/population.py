@@ -359,7 +359,7 @@ class MetricsReport:
 
         # Create a table for the report
         table = Table(
-            title=f"Global Steps {self.metrics.global_step:_}",
+            title=f"Global Steps: {self.metrics.global_step:_}",
             title_style="bold",
             show_header=True,
             header_style="bold",
