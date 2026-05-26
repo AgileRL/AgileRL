@@ -90,7 +90,163 @@ AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-s
   <img src=https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png  min-width="100%" width="700">
 </p>
 
-## Arena Client Library
+## Training Locally
+
+AgileRL provides the tools to train RL algorithms in a variety of ways, focusing on flexibility and modularity as a stepping stone for efficiently training
+arbitrarily large populations of agents in a distributed manner on Arena.
+
+### Training a Single Agent without Evolutionary HPO
+
+The simplest way to train an RL agent with AgileRL is through the
+[`LocalTrainer`](https://docs.agilerl.com/en/latest/trainers/index.html). Here is an example of training a DQN agent on the LunarLander-v3 environment:
+
+```python
+from agilerl.training.trainer import LocalTrainer
+
+trainer = LocalTrainer(algorithm="DQN", environment="LunarLander-v3")
+population, fitnesses = trainer.train()
+```
+
+> **Note:** With no other arguments provided, `LocalTrainer` defaults to 1,000,000 steps with a
+> single agent and the algorithm's default hyperparameters — no evolutionary
+> HPO is applied.
+
+### Training a Population with Evolutionary HPO
+
+To unlock AgileRL's evolutionary hyperparameter optimization, train a population
+of agents whose hyperparameters will evolve and mutate towards their optimal
+values:
+
+```python
+from agilerl import LocalTrainer
+from agilerl.models import TrainingSpec
+
+trainer = LocalTrainer(
+    algorithm="DQN",
+    environment="LunarLander-v3",
+    training=TrainingSpec(pop_size=4), # Train four agents simultaneously
+    hpo=True, # Enable evolutionary HPO using default mutation probabilities, tournament selection, and RL hyperparameters to mutate
+)
+population, fitnesses = trainer.train()
+```
+
+This trains a population of four DQN agents that share experiences but learn individually. Every 10,000 steps
+(default value for `evo_steps` in `TrainingSpec`), tournament selection identifies the best
+performers and mutations are applied to explore the hyperparameter space. See [Evolutionary Hyperparameter Optimization](https://docs.agilerl.com/en/latest/evo_hyperparam_opt/index.html) for details on how evolutionary HPO works.
+
+Or via a YAML manifest (example can be found [here](https://github.com/AgileRL/AgileRL/blob/main/configs/training/dqn/dqn.yaml)):
+
+**Python**
+
+```python
+from agilerl import LocalTrainer
+
+trainer = LocalTrainer.from_manifest("configs/training/dqn/dqn.yaml")
+population, fitnesses = trainer.train()
+```
+
+**CLI**
+
+```bash
+python -m agilerl.train configs/training/dqn/dqn.yaml
+```
+
+Every aspect of the training pipeline is customisable — from modifying
+hyperparameters and mutation strategies in our off-the-shelf tools, to
+implementing your own [evolvable algorithms](https://docs.agilerl.com/en/latest/custom_algorithms/index.html),
+[network architectures](https://docs.agilerl.com/en/latest/evolvable_networks/index.html), and
+[training loops](https://docs.agilerl.com/en/latest/off_policy/index.html).
+
+### Custom Training Pipelines
+
+For full control — custom environments, network architectures, or training loops — you can build each component individually:
+
+<details>
+<summary>Custom RL pipeline example</summary>
+
+```python
+import torch
+
+from agilerl.algorithms import DQN
+from agilerl.utils.utils import make_vect_envs
+from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.hpo.mutation import Mutations
+from agilerl.training.train_off_policy import train_off_policy
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Initialize environment
+env = make_vect_envs(env_name="LunarLander-v3", num_envs=16)
+
+# Network configuration
+net_config = {
+    "latent_dim": 64,
+    "encoder_config": {"hidden_size": [64]},
+    "head_config": {"hidden_size": [64]}
+}
+
+# Algorithm hyperparameters
+init_hp = {
+    "double": True,
+    "batch_size": 256,
+    "lr": 1e-3,
+    "gamma": 0.99,
+    "learn_step": 1,
+    "tau": 1e-3
+}
+
+# Create a population of DQN agents
+population_size=6
+agent_pop = DQN.population(
+    size=population_size,
+    observation_space=env.single_observation_space,
+    action_space=env.single_action_space,
+    net_config=net_config,
+    device=device,
+    **init_hp
+)
+
+# Replay buffer
+memory = ReplayBuffer(max_size=10_000, device=device)
+
+# Evolutionary HPO
+tournament = TournamentSelection(
+    tournament_size=2,
+    elitism=True,
+    population_size=population_size
+)
+mutations = Mutations(
+    no_mutation=0.4,
+    architecture=0.2,
+    new_layer_prob=0.2,
+    parameters=0.2,
+    activation=0.0,
+    rl_hp=0.2,
+    mutation_sd=0.1,
+    rand_seed=42,
+    device=device,
+)
+
+trained_pop, pop_fitnesses = train_off_policy(
+    env=env,
+    env_name="LunarLander-v3",
+    algo="DQN",
+    pop=agent_pop,
+    memory=memory,
+    max_steps=1_000_000,
+    evo_steps=10_000,
+    target=200.0,
+    tournament=tournament,
+    mutation=mutations,
+)
+```
+
+</details>
+
+This approach gives you the flexibility to swap in your own Gymnasium or PettingZoo environments, custom evolvable networks, or entirely custom training loops while still leveraging AgileRL's evolutionary HPO.
+
+## Training on Arena
 
 [Arena](https://arena.agilerl.com) is the RLOps platform from AgileRL. We provide tools to create and validate custom reinforcement learning environments on the platform and train RL agents on managed cloud infrastructure — no cluster setup required. See the documentation
 
@@ -183,183 +339,6 @@ We are constantly updating our tutorials to showcase the latest features of Agil
   | ---------- | --------- |
   | [On-Policy](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Group Relative Policy Optimization (GRPO)](https://docs.agilerl.com/en/latest/api/algorithms/grpo.html) <br> [Clipped Importance Sampling Policy Optimization (CISPO)](https://docs.agilerl.com/en/latest/api/algorithms/cispo.html) <br> [Grouped Sequence Policy Optimization (GSPO)](https://docs.agilerl.com/en/latest/api/algorithms/gspo.html) <br> [LLM Proximal Policy Optimization (LLM PPO)](https://docs.agilerl.com/en/latest/api/algorithms/llmppo.html) <br> [LLM REINFORCE](https://docs.agilerl.com/en/latest/api/algorithms/llmreinforce.html) <br>
   | [Off-Policy](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Direct Preference Optimization (DPO)](https://docs.agilerl.com/en/latest/api/algorithms/dpo.html)
-
-
-## Training
-
-AgileRL provides the tools to train RL algorithms in a variety of ways, focusing on flexibility and modularity as a stepping stone for efficiently training
-arbitrarily large populations of agents in a distributed manner on Arena.
-
-### Training a Single Agent without Evolutionary HPO
-
-The simplest way to train an RL agent with AgileRL is through the
-[`LocalTrainer`](https://docs.agilerl.com/en/latest/trainers/index.html). Here is an example of training a DQN agent on the LunarLander-v3 environment:
-
-```python
-from agilerl.training.trainer import LocalTrainer
-
-trainer = LocalTrainer(algorithm="DQN", environment="LunarLander-v3")
-population, fitnesses = trainer.train()
-```
-
-> **Note:** With no other arguments provided, `LocalTrainer` defaults to 1,000,000 steps with a
-> single agent and the algorithm's default hyperparameters — no evolutionary
-> HPO is applied.
-
-### Training a Population with Evolutionary HPO
-
-To unlock AgileRL's evolutionary hyperparameter optimization, train a population
-of agents whose hyperparameters will evolve and mutate towards their optimal
-values:
-
-```python
-from agilerl import LocalTrainer
-from agilerl.models import TrainingSpec
-
-trainer = LocalTrainer(
-    algorithm="DQN",
-    environment="LunarLander-v3",
-    training=TrainingSpec(pop_size=4), # Train four agents simultaneously
-    hpo=True, # Enable evolutionary HPO using default mutation probabilities, tournament selection, and RL hyperparameters to mutate
-)
-population, fitnesses = trainer.train()
-```
-
-This trains a population of four DQN agents that share experiences but learn individually. Every 10,000 steps
-(default value for `evo_steps` in `TrainingSpec`), tournament selection identifies the best
-performers and mutations are applied to explore the hyperparameter space.
-
-> See [Evolutionary Hyperparameter Optimization](https://docs.agilerl.com/en/latest/evo_hyperparam_opt/index.html) for details on how evolutionary HPO works.
-
-Or via a YAML manifest (example can be found [here](https://github.com/AgileRL/AgileRL/blob/main/configs/training/dqn/dqn.yaml)):
-
-**Python**
-
-```python
-from agilerl import LocalTrainer
-
-trainer = LocalTrainer.from_manifest("configs/training/dqn/dqn.yaml")
-population, fitnesses = trainer.train()
-```
-
-**CLI**
-
-```bash
-python -m agilerl.train configs/training/dqn/dqn.yaml
-```
-
-Every aspect of the training pipeline is customisable — from modifying
-hyperparameters and mutation strategies in our off-the-shelf tools, to
-implementing your own [evolvable algorithms](https://docs.agilerl.com/en/latest/custom_algorithms/index.html),
-[network architectures](https://docs.agilerl.com/en/latest/evolvable_networks/index.html), and
-[training loops](https://docs.agilerl.com/en/latest/off_policy/index.html).
-
-- [Trainers](https://docs.agilerl.com/en/latest/trainers/index.html) for full manifest reference, Pydantic model construction,
-  and all `LocalTrainer` options.
-- [Off-policy training](https://docs.agilerl.com/en/latest/off_policy/index.html) for a detailed walkthrough of customising the training
-  pipeline (replay buffers, exploration, evaluation, and evolution).
-
-### Training on Arena
-
-To run the same experiment on [Arena](https://arena.agilerl.com)'s managed infrastructure, use the `ArenaTrainer`. The manifest is identical except the `environment` section references an environment that has already been [validated on Arena](#arena):
-
-```python
-from agilerl.training.trainer import ArenaTrainer
-
-trainer = ArenaTrainer.from_manifest("configs/training/ppo/ppo.yaml")
-trainer.train()
-```
-
-The `ArenaTrainer` builds a training manifest and submits it as a job to Arena. It handles authentication, manifest validation, and job submission automatically.
-
-### Custom Training Pipelines
-
-For full control — custom environments, network architectures, or training loops — you can build each component individually:
-
-<details>
-<summary>Custom pipeline example</summary>
-
-```python
-import torch
-
-from agilerl.algorithms import DQN
-from agilerl.utils.utils import make_vect_envs
-from agilerl.components.replay_buffer import ReplayBuffer
-from agilerl.hpo.tournament import TournamentSelection
-from agilerl.hpo.mutation import Mutations
-from agilerl.training.train_off_policy import train_off_policy
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Initialize environment
-env = make_vect_envs(env_name="LunarLander-v3", num_envs=16)
-
-# Network configuration
-net_config = {
-    "latent_dim": 64,
-    "encoder_config": {"hidden_size": [64]},
-    "head_config": {"hidden_size": [64]}
-}
-
-# Algorithm hyperparameters
-init_hp = {
-    "double": True,
-    "batch_size": 256,
-    "lr": 1e-3,
-    "gamma": 0.99,
-    "learn_step": 1,
-    "tau": 1e-3
-}
-
-# Create a population of DQN agents
-population_size=6
-agent_pop = DQN.population(
-    size=population_size,
-    observation_space=env.single_observation_space,
-    action_space=env.single_action_space,
-    net_config=net_config,
-    device=device,
-    **init_hp
-)
-
-# Replay buffer
-memory = ReplayBuffer(max_size=10_000, device=device)
-
-# Evolutionary HPO
-tournament = TournamentSelection(
-    tournament_size=2,
-    elitism=True,
-    population_size=population_size
-)
-mutations = Mutations(
-    no_mutation=0.4,
-    architecture=0.2,
-    new_layer_prob=0.2,
-    parameters=0.2,
-    activation=0.0,
-    rl_hp=0.2,
-    mutation_sd=0.1,
-    rand_seed=42,
-    device=device,
-)
-
-trained_pop, pop_fitnesses = train_off_policy(
-    env=env,
-    env_name="LunarLander-v3",
-    algo="DQN",
-    pop=agent_pop,
-    memory=memory,
-    max_steps=1_000_000,
-    evo_steps=10_000,
-    target=200.0,
-    tournament=tournament,
-    mutation=mutations,
-)
-```
-
-</details>
-
-This approach gives you the flexibility to swap in your own Gymnasium or PettingZoo environments, custom evolvable networks, or entirely custom training loops while still leveraging AgileRL's evolutionary HPO.
 
 ## Citing AgileRL
 
