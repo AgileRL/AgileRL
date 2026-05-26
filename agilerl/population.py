@@ -409,7 +409,7 @@ class MetricsReport:
 
         table.add_row(*steps_cells)
 
-        mutation_cells = ["mutations", *[str(m) for m in self.metrics.mutations]]
+        mutation_cells = ["last mutation", *[str(m) for m in self.metrics.mutations]]
         if self.show_mean_column:
             mutation_cells.append("")
 

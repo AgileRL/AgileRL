@@ -150,8 +150,8 @@ Below is a minimal off-policy manifest to train DQN on LunarLander-v3.
 
 .. tab-set::
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 
@@ -297,7 +297,7 @@ In order to authenticate with Arena, users must have a registered account. Then,
 
       arena login
 
-3. Use ``ArenaClient`` SDK class:
+3. Use the ``ArenaClient`` class in Python:
 
    .. code-block:: python
 
@@ -324,8 +324,8 @@ Here is an example using the same ``dqn.yaml`` manifest file as in the :ref:`loc
 
 .. tab-set::
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 

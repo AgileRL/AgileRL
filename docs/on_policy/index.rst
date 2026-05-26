@@ -104,7 +104,7 @@ Here is an example manifest to train PPO on LunarLander-v3:
 
 .. tab-set::
 
-   .. tab-item:: SDK
+   .. tab-item:: Python
 
       .. code-block:: python
 

@@ -175,7 +175,7 @@ class ArenaAPIError(ArenaError):
     :param detail: Human-readable error description.
     :param status_code: HTTP status code from the API response.
     :param extras: Supplementary context from the error body.
-    :param sdk_hint: Guidance shown when running from the SDK.
+    :param sdk_hint: Guidance shown when running from the Python SDK.
     :param cli_hint: Guidance shown when running from the CLI.
     """
 

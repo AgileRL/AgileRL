@@ -84,7 +84,7 @@ Below is an example manifest for training CQN on the CartPole-v1 environment (Mi
 
 .. tab-set::
 
-   .. tab-item:: SDK
+   .. tab-item:: Python
 
       .. code-block:: python
 

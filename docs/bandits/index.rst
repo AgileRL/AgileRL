@@ -97,7 +97,7 @@ Below is an example manifest for training NeuralUCB on the Iris dataset.
 
 .. tab-set::
 
-   .. tab-item:: SDK
+   .. tab-item:: Python
 
       .. code-block:: python
 

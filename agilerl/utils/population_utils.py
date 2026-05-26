@@ -71,9 +71,9 @@ def fmt_value(value: float) -> str:
         isinstance(value, float) and value.is_integer()
     ):
         return str(int(value))
-    if abs(value) >= 1e6:
+    if abs(value) >= 1e3:
         return f"{value:.2e}"
-    if abs(value) < 5e-5:
+    if abs(value) < 1e-2:
         return f"{value:.2e}"
     return f"{value:.4f}"
 

@@ -41,8 +41,8 @@ All Arena operations require authentication. You can authenticate in one of two 
    .. tab-set::
       :sync-group: interface
 
-      .. tab-item:: SDK
-         :sync: sdk
+      .. tab-item:: Python
+         :sync: python
 
          .. code-block:: python
 
@@ -99,8 +99,8 @@ If no version is specified when creating an environment from scratch, ``v1`` is 
 .. tab-set::
    :sync-group: interface
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 
@@ -136,8 +136,8 @@ Before submitting a training job, we need to create a project to submit it to (i
 .. tab-set::
    :sync-group: interface
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 
@@ -247,8 +247,8 @@ size of 6, Arena will train 3 agents on each of the nodes in parallel.
 .. tab-set::
    :sync-group: interface
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 
@@ -286,8 +286,8 @@ metrics programmatically:
 .. tab-set::
    :sync-group: interface
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 
@@ -322,8 +322,8 @@ Once training is complete, deploy the best checkpoint to an inference endpoint:
 .. tab-set::
    :sync-group: interface
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 

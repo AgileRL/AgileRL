@@ -2,7 +2,7 @@ Exceptions
 ==========
 
 Custom exception hierarchy for Arena client errors. Provides structured error
-messages with SDK/CLI hints and automatic internal-URL sanitization.
+messages with Python/CLI hints and automatic internal-URL sanitization.
 
 Base
 ----

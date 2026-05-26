@@ -324,7 +324,7 @@ Or via a YAML manifest (example can be found `here <https://github.com/AgileRL/A
 
 .. tab-set::
 
-   .. tab-item:: SDK
+   .. tab-item:: Python
 
       .. code-block:: python
 

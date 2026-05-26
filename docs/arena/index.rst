@@ -68,8 +68,8 @@ persists credentials locally so you only need to log in once per machine:
          # Or skip login entirely with an env var or flag
          export ARENA_API_KEY="arena_pat_..."
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 
@@ -140,8 +140,8 @@ RL Environments
          # Validate an already-registered environment
          arena env validate my-env --version v1
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 
@@ -175,8 +175,8 @@ LLM Datasets
          # Upload and validate in one step
          arena dataset validate --source ./my_dataset/ --version v1
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 
@@ -216,8 +216,8 @@ work on by doing the following. This will be stored in the ``~/.arena/config.jso
 
          arena projects set-default <project-name>
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 
@@ -228,8 +228,8 @@ Some other useful commands:
 .. tab-set::
    :sync-group: interface
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 
@@ -288,8 +288,8 @@ method to get the latest list of available resources before setting off an exper
 .. tab-set::
    :sync-group: interface
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 
@@ -433,8 +433,8 @@ Here is an example manifest for training DQN on LunarLander-v3:
              --project my-project \
              --experiment-name lunar-lander-dqn
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 
@@ -508,8 +508,8 @@ Deploying an Agent
          # Deploy a specific checkpoint
          arena deploy lunar-lander-dqn --checkpoint step_500000
 
-   .. tab-item:: SDK
-      :sync: sdk
+   .. tab-item:: Python
+      :sync: python
 
       .. code-block:: python
 

@@ -13,7 +13,7 @@ custom environments, submit training jobs on scalable compute, and deploy traine
 
 .. seealso::
 
-   :ref:`arena_client` for the full CLI and SDK reference (commands, manifests, and API details).
+   :ref:`arena_client` for the full CLI and Python SDK reference (commands, manifests, and API details).
 
    :ref:`trainers` for how :class:`~agilerl.training.trainer.LocalTrainer` and
    :class:`~agilerl.training.trainer.ArenaTrainer` relate to local and cloud training.

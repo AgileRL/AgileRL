@@ -273,7 +273,7 @@ Below is an example manifest for training MADDPG on the simple-speaker-listener-
 
 .. tab-set::
 
-   .. tab-item:: SDK
+   .. tab-item:: Python
 
       .. code-block:: python
 

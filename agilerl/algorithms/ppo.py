@@ -315,6 +315,8 @@ class PPO(RLAlgorithm):
         # Initialize rollout buffer to store experiences for learning
         # NOTE: Need to register a mutation hook that does this after every mutation
         # (e.g. the batch size, sequence length, etc. have changed)
+        # TODO: Try implementing a way to register mutation hooks that applies only after
+        # certain attributes have been mutated!
         self.create_rollout_buffer()
         self.register_mutation_hook(self.create_rollout_buffer)
 
