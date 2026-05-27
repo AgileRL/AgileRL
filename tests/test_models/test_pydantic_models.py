@@ -30,11 +30,30 @@ from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 
 
 class TestNormalizeManifestNetwork:
-    """non-dict passthrough in normalize_manifest_network."""
+    """normalize_manifest_network arch placement and validation."""
 
     def test_non_dict_passthrough(self):
         assert normalize_manifest_network(42) == 42
         assert normalize_manifest_network("hello") == "hello"
+
+    def test_top_level_arch_without_encoder_config(self):
+        normalized = normalize_manifest_network(
+            {
+                "arch": "mlp",
+                "latent_dim": 64,
+                "head_config": {"hidden_size": [64]},
+            },
+        )
+        assert normalized["encoder_config"] == {"arch": "mlp"}
+
+    def test_missing_arch_raises_helpful_error(self):
+        with pytest.raises(ValueError, match="Missing encoder architecture"):
+            normalize_manifest_network(
+                {
+                    "encoder_config": {"hidden_size": [64]},
+                    "head_config": {"hidden_size": [64]},
+                },
+            )
 
 
 class TestMinMaxValidator:

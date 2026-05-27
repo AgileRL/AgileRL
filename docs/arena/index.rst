@@ -15,7 +15,7 @@ everything from their own development environment: validate custom environments,
 submit training experiments, monitor progress, and deploy trained agents for
 inference.
 
-.. note::
+.. tip::
 
   `Sign up to Arena <https://arena.agilerl.com>`_ for free now and get **110 free training credits (~20 hours)** to get started!
 
@@ -115,13 +115,10 @@ Please refer to the :meth:`ArenaClient.validate_environment <agilerl.arena.clien
 
 Once your environment / dataset has been validated successfully, you will be able to view it in the **Environments / Datasets** section in Arena.
 
-.. seealso::
-
-   :ref:`tutorial_arena_end_to_end` for a complete walkthrough of validating, training, and deploying
-   using a custom environment.
-
 RL Environments
 ^^^^^^^^^^^^^^^
+
+The following commands assume you have a valid environment in the ``my_env/`` directory.
 
 .. tab-set::
    :sync-group: interface
@@ -132,10 +129,10 @@ RL Environments
       .. code-block:: bash
 
          # Upload and validate in one step
-         arena env validate --source ./my_env/
+         arena env validate --source my_env
 
          # With an explicit entrypoint (when multiple exist in the same path)
-         arena env validate --source ./my_env/ --entrypoint my_module:MyEnvClass
+         arena env validate --source my_env --entrypoint my_module:MyEnvClass
 
          # Validate an already-registered environment
          arena env validate my-env --version v1
@@ -186,7 +183,8 @@ LLM Datasets
          result = client.validate_dataset(source="./my_dataset/")
 
 Additional Tools
-~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^
+
 Here is a list of additional methods provided by the :class:`~agilerl.arena.client.ArenaClient` to help you navigate the custom environments workflow in Arena.
 You can find the analogous CLI commands by running ``arena env --help``.
 
@@ -196,34 +194,15 @@ You can find the analogous CLI commands by running ``arena env --help``.
 - :meth:`~agilerl.arena.client.ArenaClient.profile_environment` — Profile a validated environment to determine its resource requirements.
 - :meth:`~agilerl.arena.client.ArenaClient.delete_environment` — Delete one or all versions of a registered environment.
 
-
 .. _arena_projects:
 
 Project Management
 ------------------
 
 Projects are the top-level organisational unit in Arena. Every experiment belongs to a
-project, and you must specify a project when submitting training jobs. You can set a default project to
-work on by doing the following. This will be stored in the ``~/.arena/config.json`` file.
+project, and you must specify a project when submitting training jobs.
 
-.. tab-set::
-   :sync-group: interface
-
-   .. tab-item:: CLI
-      :sync: cli
-
-      .. code-block:: bash
-
-         arena projects set-default <project-name>
-
-   .. tab-item:: Python
-      :sync: python
-
-      .. code-block:: python
-
-         client.set_default_project("my-project")
-
-Some other useful commands:
+Some useful command to manage your projects:
 
 .. tab-set::
    :sync-group: interface
@@ -266,6 +245,12 @@ Some other useful commands:
          # Show the current default
          arena projects get-default
 
+.. tip::
+   You can set a default project to work on by doing the following. This will be stored in the ``~/.arena/config.json`` file.
+
+   .. code-block:: bash
+
+      arena projects set-default <project-name>
 
 .. _arena_training:
 
@@ -469,7 +454,8 @@ class, which provides a higher-level interface:
    :ref:`trainers` section for more information on the ``ArenaTrainer`` class and its usage.
 
 Additional Tools
-~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^
+
 Here is a list of additional methods provided by the :class:`~agilerl.arena.client.ArenaClient` for managing experiments.
 You can find the analogous CLI commands by running ``arena experiments --help``.
 
@@ -564,3 +550,8 @@ inference, dict/tuple observation spaces, and recurrent hidden states.
        "velocity": np.array([1.0, 0.5]),
    }
    status, action, hidden_state = agent.get_action(obs_dict)
+
+.. tutorial::
+
+   :ref:`tutorial_arena_end_to_end`
+      Complete walkthrough of validating, training, and deploying a custom environment on Arena.

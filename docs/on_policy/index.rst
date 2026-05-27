@@ -620,3 +620,11 @@ users must set ``recurrent=True`` when creating the algorithm.
 
         pbar.close()
         env.close()
+
+.. tutorial::
+
+   :ref:`ppo_tutorial`
+      Evolve a PPO population on Acrobot-v1.
+
+   :ref:`agilerl_recurrent_ppo_tutorial`
+      Recurrent PPO on masked-velocity LunarLander-v3.

@@ -310,8 +310,8 @@ values:
    trainer = LocalTrainer(
        algorithm="DQN",
        environment="LunarLander-v3",
-       training=TrainingSpec(pop_size=4), # Train four agents simultaneously
-       hpo=True, # Enable evolutionary HPO using default mutation probabilities, tournament selection, and RL hyperparameters to mutate
+       training=TrainingSpec(pop_size=4), # Train four agents synchronously
+       hpo=True, # Enable evolutionary HPO using default settings
    )
    population, fitnesses = trainer.train()
 
@@ -323,7 +323,75 @@ performers and mutations are applied to explore the hyperparameter space.
 
    :ref:`evo_hyperparam_opt` for details on how evolutionary HPO works.
 
-Or via a YAML manifest (example can be found `here <https://github.com/AgileRL/AgileRL/blob/main/configs/training/dqn/dqn.yaml>`_):
+Or via a YAML manifest:
+
+.. collapse:: dqn.yaml
+
+  .. code-block:: yaml
+
+    algorithm:
+        name: DQN
+        batch_size: 128
+        lr: 6.3e-4
+        learn_step: 4
+        gamma: 0.99
+        tau: 0.001
+        double: false
+        cudagraphs: false
+
+    environment:
+        name: LunarLander-v3
+        num_envs: 16
+
+    mutation:
+        probabilities:
+            no_mut: 0.4
+            arch_mut: 0.2
+            new_layer: 0.2
+            params_mut: 0.2
+            act_mut: 0.2
+            rl_hp_mut: 0.2
+        rl_hp_selection:
+            lr:
+                min: 0.0000625
+                max: 0.01
+            batch_size:
+                min: 8
+                max: 512
+            learn_step:
+                min: 1
+                max: 10
+        mutation_sd: 0.1
+        rand_seed: 42
+
+    network:
+        latent_dim: 128
+        arch: mlp
+        encoder_config:
+            hidden_size:
+                - 128
+        head_config:
+            hidden_size:
+                - 128
+
+    replay_buffer:
+        max_size: 100_000
+
+    tournament_selection:
+        tournament_size: 2
+        elitism: true
+
+    training:
+        max_steps: 1_000_000
+        target_score: 200.0
+        pop_size: 4
+        evo_steps: 10_000
+        eval_steps:
+        eval_loop: 1
+        learning_delay: 0
+        eps_start: 1.0
+        eps_end: 0.1
+        eps_decay: 0.99
 
 .. tab-set::
 
@@ -333,14 +401,14 @@ Or via a YAML manifest (example can be found `here <https://github.com/AgileRL/A
 
          from agilerl import LocalTrainer
 
-         trainer = LocalTrainer.from_manifest("configs/training/dqn/dqn.yaml")
+         trainer = LocalTrainer.from_manifest("dqn.yaml")
          population, fitnesses = trainer.train()
 
    .. tab-item:: CLI
 
       .. code-block:: bash
 
-         python -m agilerl.train configs/training/dqn/dqn.yaml
+         python -m agilerl.train dqn.yaml
 
 
 Every aspect of the training pipeline is customisable — from modifying

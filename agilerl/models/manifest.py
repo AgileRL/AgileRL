@@ -226,7 +226,7 @@ class TrainingManifest(BaseModel):
 
     algorithm: AlgorithmFromManifest
     environment: EnvironmentFromManifest
-    training: TrainingSpec
+    training: TrainingSpec = Field(default_factory=TrainingSpec)
     network: NetworkFromManifest | None = Field(default=None)
     mutation: MutationSpec | None = Field(default=None)
     replay_buffer: ReplayBufferSpec | None = Field(default=None)

@@ -70,3 +70,17 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
 
    :doc:`llm_checkpoints`
       Saving and loading LLM checkpoints during fine-tuning.
+
+.. tutorial::
+
+   :ref:`grpo_tutorial`
+      GRPO for LLM reasoning tasks.
+
+   :ref:`sft_dpo_finetuning`
+      Supervised fine-tuning and DPO.
+
+   :ref:`llm_finetuning_hpo`
+      Evolutionary HPO for GRPO fine-tuning.
+
+   :ref:`multiturn_grpo_ppo_tutorial`
+      Multi-turn GRPO and PPO for LLMs.

@@ -16,20 +16,44 @@ LoraConfig = None
 T = TypeVar("T", bound=BaseModel)
 
 
+_MANIFEST_ENCODER_ARCHS = ("mlp", "cnn", "lstm", "simba", "multiinput")
+
+
 def normalize_manifest_network(data: Any) -> Any:
     """Move a top-level ``arch`` key into ``encoder_config.arch``.
 
     Raw YAML/JSON manifests place ``arch`` at the network section root,
     but :class:`NetworkSpec` (a discriminated union) expects it nested
     under ``encoder_config``.  This helper bridges the two representations.
+
+    :raises ValueError: If ``arch`` is missing from both the network root and
+        ``encoder_config``.
     """
     if not isinstance(data, dict):
         return data
 
-    arch = data.pop("arch", None)
-    if arch and "encoder_config" in data:
-        data["encoder_config"] = dict(data["encoder_config"])
+    data = dict(data)
+    top_level_arch = data.pop("arch", None)
+    encoder_config = data.get("encoder_config")
+    nested_arch = (
+        encoder_config.get("arch") if isinstance(encoder_config, dict) else None
+    )
+    arch = top_level_arch or nested_arch
+
+    if arch is None:
+        supported = ", ".join(_MANIFEST_ENCODER_ARCHS)
+        msg = (
+            "Missing encoder architecture in the manifest. "
+            f"Set 'arch' at the top level of 'network'. Supported values: {supported}."
+        )
+        raise ValueError(msg)
+
+    if encoder_config is None:
+        data["encoder_config"] = {"arch": arch}
+    else:
+        data["encoder_config"] = dict(encoder_config)
         data["encoder_config"].setdefault("arch", arch)
+
     return data
 
 

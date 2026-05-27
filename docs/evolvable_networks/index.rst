@@ -40,6 +40,14 @@ Below is an example of the simplest evolvable module included in AgileRL, the ``
     .. literalinclude:: ../../agilerl/modules/mlp.py
         :language: python
 
+.. tutorial::
+
+   :ref:`simba_tutorial`
+      Build and evolve a Simba-style architecture.
+
+   :ref:`rainbow_dqn_tutorial`
+      Custom Rainbow DQN network design
+
 Policies, Value Functions, and More Complex Networks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

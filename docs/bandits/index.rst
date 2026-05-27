@@ -433,3 +433,11 @@ Alternatively, use a custom bandit training loop:
 
             pbar.close()
             env.close()
+
+.. tutorial::
+
+   :ref:`neural_ucb_tutorial`
+      Train NeuralUCB on the Iris bandit environment.
+
+   :ref:`neural_ts_tutorial`
+      Train NeuralTS on PenDigits with evolutionary HPO.

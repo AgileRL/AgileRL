@@ -461,3 +461,14 @@ Alternatively, use a custom training loop. Combining all of the above:
 
         pbar.close()
         env.close()
+
+.. tutorial::
+
+   :ref:`rainbow_tutorial`
+      Rainbow DQN on CartPole-v1.
+
+   :ref:`td3_tutorial`
+      TD3 on LunarLander-v3.
+
+   :ref:`DQN tutorial`
+      Curriculum learning and self-play with DQN.

@@ -742,3 +742,14 @@ You can use our off-the-shelf training function
             wb=False,  # Weights and Biases tracking
             accelerator=accelerator,
         )
+
+.. tutorial::
+
+   :ref:`MADDPG tutorial`
+      MADDPG on Space Invaders.
+
+   :ref:`MATD3 tutorial`
+      MATD3 on Simple Speaker Listener.
+
+   :ref:`DQN tutorial`
+      Multi-agent DQN with curriculum learning.

@@ -107,7 +107,7 @@ trainer = LocalTrainer(algorithm="DQN", environment="LunarLander-v3")
 population, fitnesses = trainer.train()
 ```
 
-> **Note:** With no other arguments provided, `LocalTrainer` defaults to 1,000,000 steps with a
+> With no other arguments provided, `LocalTrainer` defaults to 1,000,000 steps with a
 > single agent and the algorithm's default hyperparameters — no evolutionary
 > HPO is applied.
 

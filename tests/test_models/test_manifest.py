@@ -251,6 +251,18 @@ class TestTrainingManifest:
 
     # -- Network architecture injection -------------------------------------
 
+    def test_network_missing_arch_raises_helpful_error(self):
+        data = _make_manifest(
+            algo={"name": "DQN"},
+            network={
+                "latent_dim": 64,
+                "encoder_config": {"hidden_size": [64]},
+                "head_config": {"hidden_size": [64]},
+            },
+        )
+        with pytest.raises(ValueError, match="Missing encoder architecture"):
+            TrainingManifest.model_validate(data)
+
     @pytest.mark.parametrize(
         "arch, encoder_kwargs, expected_encoder_cls",
         [
@@ -333,6 +345,17 @@ class TestTrainingManifest:
         data = {"algorithm": {"name": "DQN"}, "training": _TRAINING}
         with pytest.raises(Exception):
             TrainingManifest.model_validate(data)
+
+    def test_training_section_optional(self):
+        data = {
+            "algorithm": {"name": "DQN"},
+            "environment": {"name": "CartPole-v1"},
+        }
+        manifest = TrainingManifest.model_validate(data)
+        assert isinstance(manifest.training, TrainingSpec)
+        assert manifest.training.max_steps == 1_000_000
+        assert manifest.training.pop_size == 1
+        assert manifest.training.hpo is True
 
     def test_environment_kept_as_raw_dict(self):
         data = _make_manifest(

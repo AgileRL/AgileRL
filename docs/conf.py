@@ -1,8 +1,8 @@
-# Configuration file for the Sphinx documentation builder.
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path("..").resolve()))
+sys.path.insert(0, str(Path(__file__).parent.resolve() / "_ext"))
 
 # -- Project information
 
@@ -26,6 +26,7 @@ extensions = [
     "sphinx_design",
     "sphinx_tabs.tabs",
     "sphinx_toolbox.collapse",
+    "agilerl_directives",
     # "sphinx_github_changelog",
     "notfound.extension",
     "sphinxcontrib.googleanalytics",

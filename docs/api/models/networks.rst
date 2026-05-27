@@ -44,3 +44,18 @@ Network Specs
 
 .. autoclass:: agilerl.models.networks.ValueNetworkSpec
    :members:
+
+.. autoclass:: agilerl.models.networks.RainbowQNetworkSpec
+   :members:
+
+LLM Finetuning Specs
+--------------------
+
+Used by the ``network`` section of manifests for LLM algorithms (GRPO, DPO,
+etc.) instead of :class:`~agilerl.models.networks.NetworkSpec`.
+
+.. autoclass:: agilerl.models.networks.LoraConfigDict
+   :members:
+
+.. autoclass:: agilerl.models.networks.FinetuningNetworkSpec
+   :members:

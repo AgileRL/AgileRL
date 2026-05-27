@@ -30,33 +30,217 @@ Manifest Formulation
 --------------------
 
 A training manifest is a YAML (or JSON) file that fully describes an AgileRL training
-run. Every manifest is validated against the :class:`~agilerl.models.manifest.TrainingManifest`
-Pydantic model, ensuring correctness and completeness of the training configuration. It contains up to six top-level sections:
+run. Before training starts, the file is parsed and validated by
+:class:`~agilerl.models.manifest.TrainingManifest` (through Pydantic). Invalid manifests fail
+fast with field-level errors rather than failing mid-training.
+
+**Required top-level fields:** ``algorithm`` and ``environment``.
+
+**Optional top-level fields:** ``training``, ``network``, ``mutation``,
+``tournament_selection``, and ``replay_buffer``. When omitted, each section falls back
+to the defaults of its Pydantic spec (e.g. :class:`~agilerl.models.training.TrainingSpec`
+uses ``max_steps=1_000_000``, ``pop_size=1``).
 
 .. list-table::
-   :widths: 20 75
+   :widths: 22 78
    :header-rows: 1
 
    * - Section
-     - Description
+     - Role
    * - ``algorithm``
-     - Algorithm configuration. Users must provide a ``name`` field corresponding to the name of the algorithm class.
+     - Algorithm class name (``name``) plus algorithm-specific hyperparameters (learning rate, ``gamma``, etc.).
    * - ``environment``
-     - Environment to train on. If only ``name`` is provided, a Gymnasium / PettingZoo environment is assumed. Users can train on custom environments by providing an entrypoint, a path to the environment directory, and a config with arguments to pass to the environment constructor. Alternatively, we can simply pass a custom environment factory function.
+     - Where and how environments are created. Interpretation depends on the algorithm type (Gymnasium, PettingZoo, offline, bandit, or LLM).
    * - ``training``
-     - Training configuration that determines the number of steps to train for, the number of steps taken before an evolution takes place (or simply the frequency with which to report metrics for non-evolutionary settings), and the number of individuals to train, as well as other training-specific hyperparameters.
-   * - ``mutation``
-     - Mutation configuration that determines the probability of each mutation type, as well as the hyperparameter ranges and scaling factors for the algorithm-specific hyperparameters.
-   * - ``tournament_selection``
-     - Tournament selection configuration that determines the size of the tournament, as well as whether to use elitism.
-   * - ``replay_buffer``
-     - Replay buffer configuration that determines the maximum size of the replay buffer, and the type of buffer to use. Only applicable to off-policy algorithms.
+     - Population training loop: step budget, evolution interval, population size, exploration schedule, checkpoints, etc.
    * - ``network``
-     - Network architecture specification (i.e. the arguments of the ``EvolvableNetwork`` corresponding to the chosen algorithm). This is passed as the ``net_config`` argument of most algorithms (except LLM algorithms).
+     - Evolvable network architecture for RL algorithms, or pretrained model / LoRA settings for LLM finetuning. Becomes the algorithm's ``net_config`` when supported.
+   * - ``mutation``
+     - Evolutionary HPO: mutation probabilities, RL hyperparameter ranges, noise scale, random seed.
+   * - ``tournament_selection``
+     - Tournament size and elitism for population selection between evolution steps.
+   * - ``replay_buffer``
+     - Off-policy experience storage (size, n-step, prioritized replay). Not used for pure on-policy runs.
 
 .. note::
 
-    Example manifests for every supported algorithm can be found in the `AgileRL repository <https://github.com/AgileRL/AgileRL/tree/main/configs/training>`_.
+   Example manifests for every supported algorithm live under
+   `configs/training <https://github.com/AgileRL/AgileRL/tree/main/configs/training>`_ in the repository.
+   Validate a file using the :meth:`~agilerl.models.manifest.TrainingManifest.get_validated` method.
+
+How validation works
+~~~~~~~~~~~~~~~~~~~~
+
+1. ``algorithm``
+^^^^^^^^^^^^^^^^
+Dispatches to the appropriate Pydantic model for algorithm argument validation based on the ``name`` field
+(e.g. ``"DQN"`` → :class:`~agilerl.models.algorithms.dqn.DQNSpec`). Names are **case-sensitive** and must
+match the registered class name exactly.
+
+.. code-block:: yaml
+
+   algorithm:
+     name: DQN   # Required — must match a registered algorithm name
+     # ... other fields depend on the algorithm
+     lr: 6.3e-4
+     batch_size: 128
+
+:class:`~agilerl.models.manifest.ArenaManifest` rejects algorithms not marked ``arena=True`` in the
+registry (e.g. ``CQN``, ``NeuralUCB`` are not available for Arena training).
+
+2. ``environment``
+^^^^^^^^^^^^^^^^^^
+
+Validated differently for local and Arena training. Locally, we validate against an appropriate model depending on the chosen
+algorithm since each training paradigm (e.g. single-agent, multi-agent, LLM, etc.) has different environment requirements. When
+training on Arena, we check that the environment has been registered and validated before submission.
+
+.. list-table::
+   :widths: 28 72
+   :header-rows: 1
+
+   * - Algorithm type
+     - Field Overview
+   * - Single-agent (Gymnasium)
+     - ``name`` (e.g. ``LunarLander-v3``), ``num_envs``. Allow custom environments through: ``entrypoint``, ``path``, ``config``, ``wrappers``, ``sync``.
+   * - Multi-agent (PettingZoo)
+     - ``name`` as a module path (e.g. ``pettingzoo.mpe.simple_speaker_listener_v4``), ``num_envs``. Allow custom environments as in single-agent training.
+   * - Offline
+     - ``name`` for evaluation env **plus** exactly one of ``minari_dataset_id`` or ``dataset_path`` for the offline dataset.
+   * - Bandit
+     - ``name`` plus either ``features`` and ``targets`` (paths or in-memory tables) **or** a custom ``entrypoint``.
+   * - LLM Fine-tuning
+     -  ``dataset``, reward/column/template fields per type. ``env_type`` is usually inferred from the algorithm if omitted.
+
+3. ``training``
+^^^^^^^^^^^^^^^
+
+Defines the training loop arguments and evolutionary schedule. Sensible defaults are set and provided by :class:`~agilerl.models.training.TrainingSpec`.
+
+.. code-block:: yaml
+
+   training:
+     max_steps: 1_000_000      # Total environment steps (required, >= 1)
+     evo_steps: 10_000         # Steps between mutations when HPO is enabled
+     pop_size: 4               # Population size
+
+4. ``network``
+^^^^^^^^^^^^^^
+
+**Standard RL:**
+
+For standard RL algorithms, this section is validated against :class:`~agilerl.models.networks.NetworkSpec` and is passed to the algorithm as ``net_config``.
+
+.. code-block:: yaml
+
+   network:
+     arch: mlp # Required discriminator for Pydantic validation
+     latent_dim: 128
+     encoder_config:
+       hidden_size: [128]
+     head_config:
+       hidden_size: [128]
+
+.. warning::
+
+  Users must always set a ``arch`` field at the top-level of this section corresponding to the type of encoder their network
+  configuration aligns with. If this is not set, we can't validate against the appropriate Pydantic model.
+
+**Supported arch values**
+
+.. list-table::
+   :widths: 14 30 56
+   :header-rows: 1
+
+   * - ``arch``
+     - Use when
+     - Key ``encoder_config`` fields
+   * - ``mlp``
+     - Vector / box observations
+     - ``hidden_size`` (list of layer widths), ``activation``, ``layer_norm``, ``min_mlp_nodes``, ``max_mlp_nodes``, …
+   * - ``cnn``
+     - Image observations
+     - ``channel_size``, ``kernel_size``, ``stride_size`` (lists of **equal length**), ``activation``, ``layer_norm``, …
+   * - ``lstm``
+     - Recurrent policies
+     - ``hidden_state_size``, ``num_layers``, ``dropout``, min/max layer bounds
+   * - ``simba``
+     - SimBA encoder
+     - ``hidden_size``, ``num_blocks``, block/node mutation bounds
+   * - ``multiinput``
+     - ``Dict`` / ``Tuple`` observation spaces
+     - ``latent_dim``, optional ``mlp_config`` / ``cnn_config`` per sub-space
+
+**LLM Fine-tuning:**
+
+For LLM algorithms, the ``network`` section is validated against
+:class:`~agilerl.models.networks.FinetuningNetworkSpec`. ``pretrained_model_name_or_path`` can be
+any model available on Hugging Face or locally.
+
+.. code-block:: yaml
+
+   network:
+     pretrained_model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+     max_context_length: 512
+     lora_config:
+       lora_r: 16
+       lora_alpha: 64
+       target_modules: [q_proj, k_proj, v_proj, o_proj]
+       lora_dropout: 0.05
+       task_type: CAUSAL_LM
+
+5. ``mutation``
+^^^^^^^^^^^^^^^
+
+Configures the mutation probabilities and the hyperparameters of the selected algorithm
+to mutate during training.
+
+.. code-block:: yaml
+
+   mutation:
+     probabilities:
+       no_mut: 0.4
+       arch_mut: 0.2
+       new_layer: 0.2
+       params_mut: 0.2
+       act_mut: 0.0
+       rl_hp_mut: 0.2
+     rl_hp_selection:
+       lr:
+         min: 1.0e-4
+         max: 1.0e-2
+       batch_size:
+         min: 8
+         max: 512
+     mutation_sd: 0.1
+     rand_seed: 42
+
+.. note::
+   Keys under ``rl_hp_selection`` must name hyperparameters that the algorithm class
+   exposes as attributes and that you want to mutate (e.g. ``lr`` for DQN, ``lr_actor`` /
+   ``lr_critic`` for MADDPG). Each entry is an :class:`~agilerl.models.hpo.RLHyperparameter`
+   range (``min``, ``max``, optional ``grow_factor`` / ``shrink_factor``).
+
+6. ``tournament_selection``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: yaml
+
+   tournament_selection:
+     tournament_size: 2   # Must be >= 2
+     elitism: true
+
+7. ``replay_buffer``
+^^^^^^^^^^^^^^^^^^^^^
+
+Used by off-policy single- and multi-agent algorithms. When omitted, a default replay buffer with size 100,000 is used.
+N-step and prioritized replay are supported only for single-agent algorithms.
+
+.. code-block:: yaml
+
+   replay_buffer:
+     max_size: 100_000
+
 
 .. _local_trainer:
 
@@ -64,16 +248,12 @@ Training Locally with LocalTrainer
 ----------------------------------
 
 :class:`~agilerl.training.trainer.LocalTrainer` is the simplest way to run
-training on your own hardware. It resolves the manifest into concrete objects
-(vectorized environments, agent population, replay buffer, mutations, and
-tournament selection) and delegates to the algorithm-specific training loops.
+training on your own hardware. It instantiates the components necessary for training (algorithm, environment, etc.) from
+a manifest-like specification (either a YAML file or the Pydantic models directly) and delegates to the algorithm-specific
+training loops.
 
-Example Usage
-~~~~~~~~~~~~~
-
-The simplest way to train with the AgileRL framework is instantiate a ``LocalTrainer`` by specifying
-a supported algorithm and a registered Gymnasium/PettingZoo environment. This is mostly useful for quick experiments
-and benchmarking.
+The simplest way to train with ``LocalTrainer`` is to specify a supported algorithm and a registered Gymnasium/PettingZoo
+environment. This is mostly useful for quick experiments and benchmarking.
 
 **Minimal example:**
 
@@ -251,8 +431,8 @@ The return value is always a tuple of ``(population, fitness_history)``.
 
 .. _arena_trainer:
 
-Training on Managed Cloud Infrastructure with ArenaTrainer
-----------------------------------------------------------
+Training on Managed Cloud Infrastructure
+----------------------------------------
 
 :class:`~agilerl.training.trainer.ArenaTrainer` submits the same
 manifest-based configuration to `Arena <https://arena.agilerl.com>`_, AgileRL's
@@ -260,7 +440,7 @@ managed RLOps platform. The trainer validates the specified training configurati
 :class:`~agilerl.models.manifest.TrainingManifest`, then uses an
 :class:`~agilerl.arena.client.ArenaClient` to submit the job for training on a remote cluster.
 
-.. note::
+.. tip::
 
   `Sign up to Arena <https://arena.agilerl.com>`_ for free now and get **110 free training credits (~20 hours)** to get started!
 
