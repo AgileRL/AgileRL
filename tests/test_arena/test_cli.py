@@ -11,9 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from agilerl.arena.cli import (
-    _InferenceCliGroup,
-    _numpy_leaf_jsonable,
-    _redact_inference_rows_for_display,
+    _redact_agent_rows_for_display,
     arena_client,
     main,
 )
@@ -52,7 +50,6 @@ def mock_client() -> MagicMock:
             "preview_experiment_metrics_csv",
             "deploy_agent",
             "list_inference_deployments",
-            "parse_inference_observation",
             "open_inference_agent",
             "list_projects",
             "create_project",
@@ -671,34 +668,13 @@ class TestExperimentMetricsCommand:
         assert result.exit_code == 0
 
 
-class TestExperimentDeployCommand:
-    def test_deploy(self, runner, mock_client):
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["experiments", "deploy", "my-exp"])
-        assert result.exit_code == 0
-        mock_client.deploy_agent.assert_called_once_with(
-            experiment_name="my-exp", checkpoint=None
-        )
-
-    def test_deploy_with_checkpoint(self, runner, mock_client):
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main,
-                ["experiments", "deploy", "my-exp", "--checkpoint", "step-500"],
-            )
-        assert result.exit_code == 0
-        mock_client.deploy_agent.assert_called_once_with(
-            experiment_name="my-exp", checkpoint="step-500"
-        )
-
-
-class TestInferenceListCommand:
+class TestAgentListCommand:
     def test_list_default(self, runner, mock_client):
         mock_client.list_inference_deployments.return_value = [
             {"name": "dep1", "api_key": "secret"}
         ]
         with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["inference", "list"])
+            result = runner.invoke(main, ["agent", "list"])
         assert result.exit_code == 0
         mock_client.list_inference_deployments.assert_called_once_with(
             name=None, experiment_name=None, project_name=None
@@ -710,7 +686,7 @@ class TestInferenceListCommand:
             result = runner.invoke(
                 main,
                 [
-                    "inference",
+                    "agent",
                     "list",
                     "--name",
                     "dep1",
@@ -730,50 +706,111 @@ class TestInferenceListCommand:
             {"name": "dep1", "api_key": "secret123"}
         ]
         with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["inference", "list", "--show-api-keys"])
+            result = runner.invoke(main, ["agent", "list", "--show-api-keys"])
         assert result.exit_code == 0
 
 
-class TestInferenceRunCommand:
-    def test_run(self, runner, mock_client):
-        mock_client.parse_inference_observation.return_value = {"obs": [1, 2, 3]}
+class TestAgentDeployCommand:
+    def test_deploy(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["agent", "deploy", "my-exp"])
+        assert result.exit_code == 0
+        mock_client.deploy_agent.assert_called_once_with(
+            experiment_name="my-exp", checkpoint=None
+        )
+
+    def test_deploy_with_checkpoint(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                ["agent", "deploy", "my-exp", "--checkpoint", "step-500"],
+            )
+        assert result.exit_code == 0
+        mock_client.deploy_agent.assert_called_once_with(
+            experiment_name="my-exp", checkpoint="step-500"
+        )
+
+
+class TestAgentRunCommand:
+    def test_run_sets_active_agent(self, runner, mock_client):
+        mock_client.ensure_inference_binding.return_value = ("http://x", "key")
+        with (
+            _patched_arena_client(mock_client),
+            patch("agilerl.arena.cli.save_active_agent") as mock_save,
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "agent",
+                    "run",
+                    "my-dep",
+                    "--experiment-name",
+                    "exp1",
+                    "--project-name",
+                    "proj1",
+                ],
+            )
+        assert result.exit_code == 0
+        mock_client.ensure_inference_binding.assert_called_once_with(
+            "my-dep",
+            refresh=False,
+            experiment_name="exp1",
+            project_name="proj1",
+        )
+        mock_save.assert_called_once_with(
+            "my-dep",
+            experiment_name="exp1",
+            project_name="proj1",
+        )
+
+
+class TestAgentGenerateCommand:
+    def test_generate_streams(self, runner, mock_client):
         mock_agent = MagicMock()
-        mock_agent.get_action.return_value = (200, [0.5, 0.3], None)
+        mock_agent.generate_stream.return_value = iter(["foo", "bar"])
         mock_agent.__enter__ = MagicMock(return_value=mock_agent)
         mock_agent.__exit__ = MagicMock(return_value=False)
         mock_client.open_inference_agent.return_value = mock_agent
         with _patched_arena_client(mock_client):
             result = runner.invoke(
                 main,
-                ["inference", "run", "my-dep", "--obs", '{"x": [1,2,3]}'],
+                ["agent", "generate", "my-dep", "--prompt", "hi"],
             )
         assert result.exit_code == 0
-        mock_client.parse_inference_observation.assert_called_once_with(
-            '{"x": [1,2,3]}'
+        mock_agent.generate_stream.assert_called_once_with("hi")
+
+    def test_generate_uses_active_agent(self, runner, mock_client):
+        mock_agent = MagicMock()
+        mock_agent.generate_stream.return_value = iter(["ok"])
+        mock_agent.__enter__ = MagicMock(return_value=mock_agent)
+        mock_agent.__exit__ = MagicMock(return_value=False)
+        mock_client.open_inference_agent.return_value = mock_agent
+        active = MagicMock(
+            deployment_name="cached-dep",
+            experiment_name="exp1",
+            project_name=None,
+        )
+        with (
+            _patched_arena_client(mock_client),
+            patch("agilerl.arena.cli.load_active_agent", return_value=active),
+        ):
+            result = runner.invoke(main, ["agent", "generate", "--prompt", "hi"])
+        assert result.exit_code == 0
+        mock_client.open_inference_agent.assert_called_once_with(
+            "cached-dep",
+            refresh=False,
+            experiment_name="exp1",
+            project_name=None,
         )
 
-    def test_run_with_hidden_state(self, runner, mock_client):
-        mock_client.parse_inference_observation.return_value = {"obs": [1]}
-        mock_agent = MagicMock()
-        mock_agent.get_action.return_value = (200, [1.0], {"h": [0.1, 0.2]})
-        mock_agent.__enter__ = MagicMock(return_value=mock_agent)
-        mock_agent.__exit__ = MagicMock(return_value=False)
-        mock_client.open_inference_agent.return_value = mock_agent
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["inference", "run", "my-dep", "--obs", "[1]"])
-        assert result.exit_code == 0
-
-    def test_run_default_subcommand(self, runner, mock_client):
-        """When no subcommand is given, inference defaults to 'run'."""
-        mock_client.parse_inference_observation.return_value = {"obs": [1]}
-        mock_agent = MagicMock()
-        mock_agent.get_action.return_value = (200, [1.0], None)
-        mock_agent.__enter__ = MagicMock(return_value=mock_agent)
-        mock_agent.__exit__ = MagicMock(return_value=False)
-        mock_client.open_inference_agent.return_value = mock_agent
-        with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["inference", "my-dep", "--obs", "[1]"])
-        assert result.exit_code == 0
+    def test_generate_without_active_agent_fails(self, runner, mock_client):
+        with (
+            _patched_arena_client(mock_client),
+            patch("agilerl.arena.cli.load_active_agent", return_value=None),
+        ):
+            result = runner.invoke(main, ["agent", "generate", "--prompt", "hi"])
+        assert result.exit_code != 0
+        assert "No active agent" in result.output
 
 
 class TestProjectsListCommand:
@@ -831,43 +868,15 @@ class TestProjectsDeleteCommand:
         mock_client.delete_project.assert_not_called()
 
 
-class TestNumpyLeafJsonable:
-    def test_scalar_passthrough(self):
-        assert _numpy_leaf_jsonable(42) == 42
-        assert _numpy_leaf_jsonable("hello") == "hello"
-        assert _numpy_leaf_jsonable(3.14) == 3.14
-
-    def test_tolist_called(self):
-        mock_arr = MagicMock()
-        mock_arr.tolist.return_value = [1, 2, 3]
-        assert _numpy_leaf_jsonable(mock_arr) == [1, 2, 3]
-
-    def test_dict_recursive(self):
-        mock_arr = MagicMock()
-        mock_arr.tolist.return_value = [4, 5]
-        result = _numpy_leaf_jsonable({"a": mock_arr, "b": 1})
-        assert result == {"a": [4, 5], "b": 1}
-
-    def test_list_recursive(self):
-        mock_arr = MagicMock()
-        mock_arr.tolist.return_value = 7
-        result = _numpy_leaf_jsonable([mock_arr, "x"])
-        assert result == (7, "x")
-
-    def test_tuple_recursive(self):
-        result = _numpy_leaf_jsonable((1, 2, 3))
-        assert result == (1, 2, 3)
-
-
-class TestRedactInferenceRows:
+class TestRedactAgentRows:
     def test_show_api_keys_true(self):
         rows = [{"name": "dep1", "api_key": "secret"}]
-        result = _redact_inference_rows_for_display(rows, show_api_keys=True)
+        result = _redact_agent_rows_for_display(rows, show_api_keys=True)
         assert result is rows
 
     def test_redacts_api_key(self):
         rows = [{"name": "dep1", "api_key": "secret", "url": "http://x"}]
-        result = _redact_inference_rows_for_display(rows, show_api_keys=False)
+        result = _redact_agent_rows_for_display(rows, show_api_keys=False)
         assert len(result) == 1
         assert "api_key" not in result[0]
         assert result[0]["name"] == "dep1"
@@ -880,42 +889,13 @@ class TestRedactInferenceRows:
                 "spec": {"api_key": "nested_secret", "url": "http://y"},
             }
         ]
-        result = _redact_inference_rows_for_display(rows, show_api_keys=False)
+        result = _redact_agent_rows_for_display(rows, show_api_keys=False)
         assert "api_key" not in result[0].get("spec", {})
         assert result[0]["spec"]["url"] == "http://y"
 
     def test_empty_rows(self):
-        result = _redact_inference_rows_for_display([], show_api_keys=False)
+        result = _redact_agent_rows_for_display([], show_api_keys=False)
         assert result == []
-
-
-class TestInferenceCliGroup:
-    def test_resolve_command_inserts_run_for_unknown(self):
-        group = _InferenceCliGroup(name="inference")
-        group.add_command(click.Command("run"))
-        group.add_command(click.Command("list"))
-        ctx = click.Context(group)
-        _, cmd, args = group.resolve_command(ctx, ["my-deployment", "--obs", "x"])
-        assert cmd is not None
-        assert cmd.name == "run"
-
-    def test_resolve_command_passes_known_commands(self):
-        group = _InferenceCliGroup(name="inference")
-        list_cmd = click.Command("list")
-        group.add_command(click.Command("run"))
-        group.add_command(list_cmd)
-        ctx = click.Context(group)
-        _, cmd, args = group.resolve_command(ctx, ["list"])
-        assert cmd is not None
-        assert cmd.name == "list"
-
-    def test_resolve_command_does_not_prefix_help_tokens(self):
-        group = _InferenceCliGroup(name="inference")
-        group.add_command(click.Command("run"))
-        ctx = click.Context(group)
-        # --help triggers click.Exit; it should NOT be prefixed with 'run'
-        with pytest.raises(click.exceptions.Exit):
-            group.resolve_command(ctx, ["--help"])
 
 
 class TestCliErrorHandling:

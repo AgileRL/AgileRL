@@ -265,6 +265,12 @@ class ArenaEnvironmentNotFoundError(ArenaAPIError):
     _label = "EnvironmentNotFoundError"
 
 
+class ArenaInferenceError(ArenaAPIError):
+    """Raised when an Arena inference deployment request fails or inputs are invalid."""
+
+    _label = "InferenceError"
+
+
 class ArenaTrainingError(ArenaAPIError):
     """Raised when a training job submission or execution fails."""
 

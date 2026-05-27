@@ -11,6 +11,7 @@ from agilerl.arena.exceptions import (
     ArenaAuthError,
     ArenaConfigError,
     ArenaError,
+    ArenaInferenceError,
     ArenaTimeoutError,
     ArenaTrainingError,
     ArenaValidationError,
@@ -310,6 +311,15 @@ class TestEnableCliMode:
             cli_hint="cli",
         )
         assert "cli" in str(err)
+
+
+class TestArenaInferenceError:
+    def test_label_is_inference_error(self):
+        err = ArenaInferenceError(detail="bad obs", status_code=400)
+        assert "InferenceError" in str(err)
+
+    def test_is_subclass_of_arena_api_error(self):
+        assert issubclass(ArenaInferenceError, ArenaAPIError)
 
 
 class TestArenaTrainingError:

@@ -57,17 +57,6 @@ persists credentials locally so you only need to log in once per machine:
 .. tab-set::
    :sync-group: interface
 
-   .. tab-item:: CLI
-      :sync: cli
-
-      .. code-block:: bash
-
-         # One-time interactive login (persists to ~/.arena/credentials.json)
-         arena login
-
-         # Or skip login entirely with an env var or flag
-         export ARENA_API_KEY="arena_pat_..."
-
    .. tab-item:: Python
       :sync: python
 
@@ -85,6 +74,17 @@ persists credentials locally so you only need to log in once per machine:
          client = ArenaClient()
          client.login()  # opens browser, persists credentials
 
+   .. tab-item:: CLI
+      :sync: cli
+
+      .. code-block:: bash
+
+         # One-time interactive login (persists to ~/.arena/credentials.json)
+         arena login
+
+         # Or skip login entirely with an env var or flag
+         export ARENA_API_KEY="arena_pat_..."
+
 
 .. _arena_environments:
 
@@ -100,7 +100,7 @@ available for training, depending on the selected cluster tier.
 
 Users can register two types of environments on Arena:
 
-- **Custom Gymnasium/PettingZoo** — upload a source directory or
+- **Custom Gymnasium/PettingZoo** — upload a source directory, file, or
   ``.tar.gz`` archive containing your environment code.
 - **LLM Datasets** — upload a dataset file or reference a HuggingFace
   dataset ID to create a language-model fine-tuning environment.
@@ -118,10 +118,27 @@ Once your environment / dataset has been validated successfully, you will be abl
 RL Environments
 ^^^^^^^^^^^^^^^
 
-The following commands assume you have a valid environment in the ``my_env/`` directory.
+The following commands assume the script ``my_module.py`` contains the ``MyEnvClass`` class in the ``my_env/`` directory.
 
 .. tab-set::
    :sync-group: interface
+
+   .. tab-item:: Python
+      :sync: python
+
+      .. code-block:: python
+
+         # Upload, create, and validate in one step
+         result = client.validate_environment(source="my_env")
+
+         # With an explicit entrypoint (when multiple exist in the same path)
+         result = client.validate_environment(
+             source="my_env",
+             entrypoint="my_module:MyEnvClass",
+         )
+
+         # Re-validate an already-registered environment
+         result = client.validate_environment(name="my-env", version="v1")
 
    .. tab-item:: CLI
       :sync: cli
@@ -134,35 +151,21 @@ The following commands assume you have a valid environment in the ``my_env/`` di
          # With an explicit entrypoint (when multiple exist in the same path)
          arena env validate --source my_env --entrypoint my_module:MyEnvClass
 
-         # Validate an already-registered environment
+         # Re-validate an already-registered environment
          arena env validate my-env --version v1
-
-   .. tab-item:: Python
-      :sync: python
-
-      .. code-block:: python
-
-         from agilerl.arena import ArenaClient
-
-         client = ArenaClient()
-
-         # Upload, create, and validate in one step
-         result = client.validate_environment(source="./my_env/")
-
-         # With an explicit entrypoint (assuming my_module.py exists in source and contains the MyEnvClass class)
-         result = client.validate_environment(
-             source="./my_env/",
-             entrypoint="my_module:MyEnvClass",
-         )
-
-         # Validate an already-registered environment
-         result = client.validate_environment(name="my-env", version="v1")
 
 LLM Datasets
 ^^^^^^^^^^^^^
 
 .. tab-set::
    :sync-group: interface
+
+   .. tab-item:: Python
+      :sync: python
+
+      .. code-block:: python
+
+         result = client.validate_dataset(source="./my_dataset/")
 
    .. tab-item:: CLI
       :sync: cli
@@ -171,16 +174,6 @@ LLM Datasets
 
          # Upload and validate in one step
          arena dataset validate --source ./my_dataset/ --version v1
-
-   .. tab-item:: Python
-      :sync: python
-
-      .. code-block:: python
-
-         from agilerl.arena import ArenaClient
-
-         client = ArenaClient()
-         result = client.validate_dataset(source="./my_dataset/")
 
 Additional Tools
 ^^^^^^^^^^^^^^^^
@@ -211,10 +204,6 @@ Some useful command to manage your projects:
       :sync: python
 
       .. code-block:: python
-
-         from agilerl.arena import ArenaClient
-
-         client = ArenaClient()
 
          # List all projects
          projects = client.list_projects()
@@ -278,9 +267,6 @@ method to get the latest list of available resources before setting off an exper
 
       .. code-block:: python
 
-         from agilerl.arena import ArenaClient
-
-         client = ArenaClient()
          resources = client.list_resources()
 
    .. tab-item:: CLI
@@ -405,6 +391,19 @@ Here is an example manifest for training DQN on LunarLander-v3:
 .. tab-set::
    :sync-group: interface
 
+   .. tab-item:: Python
+      :sync: python
+
+      .. code-block:: python
+
+         result = client.submit_experiment(
+             manifest="dqn.yaml",
+             resource_id="arena-medium",
+             num_nodes=2,
+             project="my-project",
+             experiment_name="lunar-lander-dqn",
+         )
+
    .. tab-item:: CLI
       :sync: cli
 
@@ -417,22 +416,6 @@ Here is an example manifest for training DQN on LunarLander-v3:
              --num-nodes 2 \
              --project my-project \
              --experiment-name lunar-lander-dqn
-
-   .. tab-item:: Python
-      :sync: python
-
-      .. code-block:: python
-
-         from agilerl.arena import ArenaClient
-
-         client = ArenaClient()
-         result = client.submit_experiment(
-             manifest="dqn.yaml",
-             resource_id="arena-medium",
-             num_nodes=2,
-             project="my-project",
-             experiment_name="lunar-lander-dqn",
-         )
 
 You can also submit experiments via the :class:`~agilerl.training.trainer.ArenaTrainer`
 class, which provides a higher-level interface:
@@ -449,9 +432,9 @@ class, which provides a higher-level interface:
 
 .. seealso::
 
-   :ref:`training_manifests` section for an overview of the training manifest and its options.
+   - :ref:`training_manifests` section for an overview of the training manifest and its options.
 
-   :ref:`trainers` section for more information on the ``ArenaTrainer`` class and its usage.
+   - :ref:`trainers` section for more information on the ``ArenaTrainer`` class and its usage.
 
 Additional Tools
 ^^^^^^^^^^^^^^^^
@@ -472,16 +455,28 @@ You can find the analogous CLI commands by running ``arena experiments --help``.
 Agent Deployment
 ----------------
 
-Once training is complete, you can deploy a trained agent to an Arena inference
+Once training is complete, you can deploy a checkpoint from an experiment to an Arena inference
 endpoint and interact with it in real time. Deployed agents expose an HTTP API
-that accepts observations and returns actions, making it easy to integrate
-trained RL policies into applications.
+that accepts observations and returns actions, making the integration of
+trained RL policies into applications seamless.
 
-Deploying an Agent
-~~~~~~~~~~~~~~~~~~
+To deploy an agent, you can use the :meth:`~agilerl.arena.client.ArenaClient.deploy_agent` method by specifying the experiment
+name and optionally the checkpoint you wish to deploy. If the latter is not provided, the checkpoint with the largest fitness value
+will be deployed by default.
 
 .. tab-set::
    :sync-group: interface
+
+   .. tab-item:: Python
+      :sync: python
+
+      .. code-block:: python
+
+         # Deploy an agent from an experiment
+         client.deploy_agent(
+            experiment_name="<experiment-name>",
+            checkpoint="<checkpoint-name>",  # optional, defaults to best fitness
+         )
 
    .. tab-item:: CLI
       :sync: cli
@@ -489,67 +484,103 @@ Deploying an Agent
       .. code-block:: bash
 
          # Deploy the best checkpoint from an experiment
-         arena deploy lunar-lander-dqn
+         arena agent deploy lunar-lander-dqn
 
          # Deploy a specific checkpoint
-         arena deploy lunar-lander-dqn --checkpoint step_500000
-
-   .. tab-item:: Python
-      :sync: python
-
-      .. code-block:: python
-
-         from agilerl.arena.client import ArenaClient
-
-         with ArenaClient() as client:
-             client.deploy_agent(
-                 experiment_name="lunar-lander-dqn",
-                 checkpoint="step_500000",  # optional, defaults to best
-             )
+         arena agent deploy lunar-lander-dqn --checkpoint step_500000
 
 Interacting with a Deployed Agent
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Once deployed, use the :class:`~agilerl.arena.inference.Agent` class to query
-the endpoint:
+Each deployment runs one agent type. Metadata is loaded when you construct
+:class:`~agilerl.arena.inference.Agent` (see :attr:`~agilerl.arena.inference.Agent.metadata`).
+Call the matching client method; the server returns HTTP 400 if the route does
+not match the deployment:
+
+- **RL** (single- or multi-agent, recurrent): :meth:`~agilerl.arena.inference.Agent.get_action`
+- **Supervised (SFT)**: :meth:`~agilerl.arena.inference.Agent.predict`
+- **LLM**: :meth:`~agilerl.arena.inference.Agent.generate` or
+  :meth:`~agilerl.arena.inference.Agent.generate_stream`
 
 .. code-block:: python
 
-   import numpy as np
    from agilerl.arena.inference import Agent
 
    agent = Agent(
        "https://<deployment-id>.inference.agilerl.com",
        api_key="your-arena-api-key",
    )
+   print(agent.metadata.agent.algo, agent.metadata.agent.llm)
 
-   obs = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
-   hidden_state = None
-
-   # Get an action from the deployed agent
-   status, action, hidden_state = agent.get_action(
-       obs, hidden_state=hidden_state,
-   )
-
-   print(f"Action: {action}")
-
-The ``Agent`` class handles serialization of NumPy arrays, supports batched
-inference, dict/tuple observation spaces, and recurrent hidden states.
+Routing by deployment type
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: python
 
-   # Batched inference
-   obs_batch = np.random.randn(8, 4)  # batch of 8 observations
-   status, actions, hidden_state = agent.get_action(
-       obs_batch, batched=True, hidden_state=hidden_state,
-   )
+   if agent.metadata.agent.llm:
+       result = agent.generate(
+           ["Explain reinforcement learning."],
+           params={"max_new_tokens": 128},
+       )
+       for item in result.results:
+           print(item.completion)
 
-   # Dict observation space
+       for chunk in agent.generate_stream("Summarize PPO in one sentence."):
+           print(chunk, end="", flush=True)
+
+   elif agent.metadata.agent.supervised:
+       import numpy as np
+
+       outputs, meta = agent.predict(np.array([1.0, 2.0, 3.0]))
+       print(meta.inference_time_ms, outputs)
+
+   else:
+       import gymnasium as gym
+
+       env = gym.make("LunarLander-v3")
+       obs, _ = env.reset()
+       action, _ = agent.get_action(obs)
+       print(action)
+
+RL inference
+^^^^^^^^^^^^
+
+:meth:`~agilerl.arena.inference.Agent.get_action` serializes NumPy observations
+(base64 ``.npy`` wire format), supports batched inference, ``Dict`` / ``Tuple``
+observation spaces, and recurrent hidden states.
+
+.. code-block:: python
+
+   import numpy as np
+   import gymnasium as gym
+
+   from agilerl.arena.inference import Agent
+
+   env = gym.make("LunarLander-v3")
+   agent = Agent("https://<deployment-id>.inference.agilerl.com", api_key="...")
+
+   obs, _ = env.reset()
+   action, hidden_state = agent.get_action(obs)
+
+   # Batched inference
+   batch_size = 8
+   obs_batch = np.stack([env.observation_space.sample() for _ in range(batch_size)])
+   actions, _ = agent.get_action(obs_batch, batched=True)
+
+   # Dict observation space (single-agent)
    obs_dict = {
        "image": np.random.randn(64, 64, 3),
        "velocity": np.array([1.0, 0.5]),
    }
-   status, action, hidden_state = agent.get_action(obs_dict)
+   action, hidden_state = agent.get_action(obs_dict)
+
+Multi-agent RL passes per-agent observations and returns a dict of actions:
+
+.. code-block:: python
+
+   obs = {"agent_0": obs_a, "agent_1": obs_b}
+   actions, _ = agent.get_action(obs)
+   # actions["agent_0"], actions["agent_1"]
 
 .. tutorial::
 

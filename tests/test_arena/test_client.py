@@ -1610,8 +1610,8 @@ class TestDeploymentUrlAndApiKey:
 
 
 class TestEnsureInferenceBinding:
-    @patch("agilerl.arena.client.save_inference_binding")
-    @patch("agilerl.arena.client.load_inference_binding")
+    @patch("agilerl.arena.client.save_binding")
+    @patch("agilerl.arena.client.load_binding")
     def test_returns_cached_when_not_refresh(
         self, mock_load, mock_save, api_key_client
     ):
@@ -1620,8 +1620,8 @@ class TestEnsureInferenceBinding:
         assert result == ("http://cached", "cached_key")
         mock_save.assert_not_called()
 
-    @patch("agilerl.arena.client.save_inference_binding")
-    @patch("agilerl.arena.client.load_inference_binding")
+    @patch("agilerl.arena.client.save_binding")
+    @patch("agilerl.arena.client.load_binding")
     def test_fetches_and_caches_on_refresh(self, mock_load, mock_save, api_key_client):
         mock_load.return_value = ("http://cached", "cached_key")
         api_key_client.fetch_deployment_for_inference = MagicMock(
@@ -1631,8 +1631,8 @@ class TestEnsureInferenceBinding:
         assert result == ("http://new", "new_key")
         mock_save.assert_called_once_with("my-dep", "http://new", "new_key")
 
-    @patch("agilerl.arena.client.save_inference_binding")
-    @patch("agilerl.arena.client.load_inference_binding")
+    @patch("agilerl.arena.client.save_binding")
+    @patch("agilerl.arena.client.load_binding")
     def test_fetches_when_no_cache(self, mock_load, mock_save, api_key_client):
         mock_load.return_value = None
         api_key_client.fetch_deployment_for_inference = MagicMock(
@@ -1641,15 +1641,6 @@ class TestEnsureInferenceBinding:
         result = api_key_client.ensure_inference_binding("dep")
         assert result == ("http://new", "k")
         mock_save.assert_called_once()
-
-
-class TestParseInferenceObservation:
-    @patch("agilerl.arena.client.Agent.observation_from_string")
-    def test_delegates_to_agent(self, mock_obs, api_key_client):
-        mock_obs.return_value = "obs"
-        result = api_key_client.parse_inference_observation("[1,2]", batched=True)
-        mock_obs.assert_called_once_with("[1,2]", batched=True)
-        assert result == "obs"
 
 
 class TestOpenInferenceAgent:

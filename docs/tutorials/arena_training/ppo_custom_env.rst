@@ -273,10 +273,10 @@ Once training is complete, deploy the best checkpoint to an inference endpoint:
       .. code-block:: bash
 
          # Deploy the best checkpoint
-         arena experiments deploy bipedal-walker-ppo-v1
+         arena agent deploy bipedal-walker-ppo-v1
 
          # Deploy a specific checkpoint
-         arena experiments deploy bipedal-walker-ppo-v1 --checkpoint step_500000
+         arena agent deploy bipedal-walker-ppo-v1 --checkpoint step_500000
 
 Interact with the Deployed Agent
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

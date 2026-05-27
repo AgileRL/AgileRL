@@ -28,5 +28,8 @@ API Errors
 .. autoclass:: agilerl.arena.exceptions.ArenaValidationError
    :members:
 
+.. autoclass:: agilerl.arena.exceptions.ArenaInferenceError
+   :members:
+
 .. autoclass:: agilerl.arena.exceptions.ArenaTrainingError
    :members:

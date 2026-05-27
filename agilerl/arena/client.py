@@ -27,11 +27,11 @@ from agilerl.arena.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
-from agilerl.arena.inference import Agent, RLData
-from agilerl.arena.inference_cache import (
-    load_inference_binding,
+from agilerl.arena.inference import Agent
+from agilerl.arena.inference.cache import (
+    load_binding,
     normalized_deployment_name,
-    save_inference_binding,
+    save_binding,
 )
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
@@ -1085,7 +1085,7 @@ class ArenaClient:
         """Return cached ``(url, api_key)`` or fetch from the API, persist, and return."""
         key = normalized_deployment_name(deployment_name)
         if not refresh:
-            cached = load_inference_binding(key)
+            cached = load_binding(key)
             if cached is not None:
                 return cached
 
@@ -1095,16 +1095,8 @@ class ArenaClient:
             project_name=project_name,
         )
         url, api_key = self.deployment_url_and_api_key(row)
-        save_inference_binding(key, url, api_key)
+        save_binding(key, url, api_key)
         return url, api_key
-
-    @staticmethod
-    def parse_inference_observation(raw: str, *, batched: bool = False) -> RLData:
-        """Turn ``--obs`` / deployment-style string into arrays for :meth:`Agent.get_action`.
-
-        Delegates to :meth:`~agilerl.arena.inference.Agent.observation_from_string`.
-        """
-        return Agent.observation_from_string(raw, batched=batched)
 
     def open_inference_agent(
         self,
@@ -1117,11 +1109,13 @@ class ArenaClient:
     ) -> Agent:
         """Build an :class:`~agilerl.arena.inference.Agent` for a named deployment.
 
-        Deployment observations use ``np.save`` bytes as base64 (nested JSON
-        structure mirrors :meth:`~agilerl.arena.inference.Agent.serialize`).
-        Use :meth:`parse_inference_observation` on the same string format as
-        request body ``obs``, then :meth:`~agilerl.arena.inference.Agent.get_action`.
-        CLI: ``arena inference run … --obs '<json-or-base64>'``.
+        Deployment metadata is fetched on construction
+        (:attr:`~agilerl.arena.inference.Agent.metadata`). Use
+        :meth:`~agilerl.arena.inference.Agent.get_action` (RL),
+        :meth:`~agilerl.arena.inference.Agent.predict` (supervised), or
+        :meth:`~agilerl.arena.inference.Agent.generate` (LLM).
+
+        CLI: ``arena agent run <deployment>`` then ``arena agent generate --prompt '...'``.
         """
         url, api_key = self.ensure_inference_binding(
             deployment_name,

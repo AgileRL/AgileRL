@@ -61,8 +61,8 @@ def load_credentials_payload(
 ) -> dict[str, Any]:
     """Load the raw JSON object from the credentials file (no token validation).
 
-    Used when merging OAuth tokens with other persisted keys such as
-    ``deployment_inference``.
+    Used when merging OAuth tokens with other persisted keys.
+    Deployment bindings live in ``~/.arena/inference.json``.
     """
     path = (
         Path(os.fspath(credentials_path)).expanduser().resolve()

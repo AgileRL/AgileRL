@@ -10,6 +10,7 @@ import click
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig, build_client
 from agilerl.arena.exceptions import ArenaError
+from agilerl.arena.inference.cache import load_active_agent, save_active_agent
 from agilerl.arena.output import (
     emit_csv_preview,
     emit_result,
@@ -553,61 +554,7 @@ def experiment_metrics(
                 emit_csv_preview(target_path.read_bytes(), max_rows=preview_rows)
 
 
-@experiment.command("deploy")
-@click.argument("experiment_name")
-@click.option(
-    "--checkpoint",
-    default=None,
-    help="Checkpoint to deploy. Omit to deploy the best checkpoint.",
-)
-@click.pass_obj
-def experiment_deploy(
-    config: CommandConfig,
-    experiment_name: str,
-    checkpoint: str | None,
-) -> None:
-    """Deploy an agent from an experiment to Arena inference."""
-    with arena_client(config) as client:
-        client.deploy_agent(experiment_name=experiment_name, checkpoint=checkpoint)
-        emit_result(
-            {
-                "deployed": True,
-                "experiment_name": experiment_name,
-                "checkpoint": checkpoint,
-            }
-        )
-
-
-def _numpy_leaf_jsonable(value: Any) -> Any:
-    """Convert nested NumPy arrays (and scalars) into JSON-friendly values."""
-    if hasattr(value, "tolist"):
-        return value.tolist()
-    if isinstance(value, dict):
-        return {k: _numpy_leaf_jsonable(v) for k, v in value.items()}
-    if isinstance(value, (tuple, list)):
-        return tuple(_numpy_leaf_jsonable(v) for v in value)
-    return value
-
-
-class _InferenceCliGroup(click.Group):
-    """Default subcommand ``run`` when argv does not start with a known subcommand.
-
-    Deployment literally named ``list``: use ``run list --obs ...``.
-    """
-
-    _HELP_TOKENS = frozenset(("--help", "-h"))
-
-    def resolve_command(
-        self, ctx: click.Context, args: list[str]
-    ) -> tuple[str | None, click.Command | None, list[str]]:
-        if args:
-            head = args[0]
-            if head not in self.commands and head not in self._HELP_TOKENS:
-                args.insert(0, "run")
-        return super().resolve_command(ctx, args)
-
-
-def _redact_inference_rows_for_display(
+def _redact_agent_rows_for_display(
     rows: list[dict[str, Any]],
     *,
     show_api_keys: bool,
@@ -628,16 +575,51 @@ def _redact_inference_rows_for_display(
     return out
 
 
-@main.group("inference", cls=_InferenceCliGroup)
-def inference_cli() -> None:
-    """List deployments or call ``POST /get_action`` (``--obs`` = JSON or base64 wire form).
+def _resolve_agent_target(
+    deployment_name: str | None,
+    experiment_name: str | None,
+    project_name: str | None,
+) -> tuple[str, str | None, str | None]:
+    """Use an explicit deployment name or the active agent from ``arena agent run``."""
+    if deployment_name:
+        return deployment_name.strip(), experiment_name, project_name
+    active = load_active_agent()
+    if active is None:
+        msg = "No active agent. Set one with: arena agent run <deployment>"
+        raise click.UsageError(msg)
+    exp = experiment_name if experiment_name is not None else active.experiment_name
+    proj = project_name if project_name is not None else active.project_name
+    return active.deployment_name, exp, proj
 
-    Omit ``run`` to invoke ``run``; only ``list`` selects listing. For a deployment
-    named ``list``, call ``run list``.
-    """
+
+def _agent_deployment_options(func: click.Command) -> click.Command:
+    """Shared ``--refresh`` / experiment / project options for agent commands."""
+    func = click.option(
+        "--refresh",
+        is_flag=True,
+        default=False,
+        help="Refetch deployment URL and API key from Arena instead of using the local cache.",
+    )(func)
+    func = click.option(
+        "--experiment-name",
+        "experiment_name",
+        default=None,
+        help="Experiment name (exact) — narrows duplicate deployment names.",
+    )(func)
+    return click.option(
+        "--project-name",
+        "project_name",
+        default=None,
+        help="Project name (exact) — narrows duplicate deployment names.",
+    )(func)
 
 
-@inference_cli.command("list")
+@main.group("agent")
+def agent_cli() -> None:
+    """List, deploy, run, and generate with Arena agents."""
+
+
+@agent_cli.command("list")
 @click.option("--name", default=None, help="Exact deployment name filter.")
 @click.option(
     "--experiment-name",
@@ -658,83 +640,120 @@ def inference_cli() -> None:
     help="Include deployment api_key fields (default: redacted).",
 )
 @click.pass_obj
-def inference_list(
+def agent_list(
     config: CommandConfig,
     name: str | None,
     experiment_name: str | None,
     project_name: str | None,
     show_api_keys: bool,
 ) -> None:
-    """List inference deployments you can call."""
+    """List deployed agents."""
     with arena_client(config) as client:
         rows = client.list_inference_deployments(
             name=name,
             experiment_name=experiment_name,
             project_name=project_name,
         )
+        emit_result(_redact_agent_rows_for_display(rows, show_api_keys=show_api_keys))
+
+
+@agent_cli.command("deploy")
+@click.argument("experiment_name")
+@click.option(
+    "--checkpoint",
+    default=None,
+    help="Checkpoint to deploy. Omit to deploy the best checkpoint.",
+)
+@click.pass_obj
+def agent_deploy(
+    config: CommandConfig,
+    experiment_name: str,
+    checkpoint: str | None,
+) -> None:
+    """Deploy an agent from an experiment checkpoint."""
+    with arena_client(config) as client:
+        client.deploy_agent(experiment_name=experiment_name, checkpoint=checkpoint)
         emit_result(
-            _redact_inference_rows_for_display(rows, show_api_keys=show_api_keys)
+            {
+                "deployed": True,
+                "experiment_name": experiment_name,
+                "checkpoint": checkpoint,
+            }
         )
 
 
-@inference_cli.command("run")
+@agent_cli.command("run")
 @click.argument("deployment_name")
-@click.option(
-    "--refresh",
-    is_flag=True,
-    default=False,
-    help="Refetch deployment URL and API key from Arena instead of using the local cache.",
-)
-@click.option(
-    "--experiment-name",
-    "experiment_name",
-    default=None,
-    help="Experiment name (exact) — narrows duplicate deployment names.",
-)
-@click.option(
-    "--project-name",
-    "project_name",
-    default=None,
-    help="Project name (exact) — narrows duplicate deployment names.",
-)
-@click.option(
-    "--obs",
-    "obs_raw",
-    required=True,
-    help="Observation: JSON tree of base64 blobs (request ``obs`` field) or single base64 .npy string.",
-)
+@_agent_deployment_options
 @click.pass_obj
-def inference_run(
+def agent_run(
     config: CommandConfig,
     deployment_name: str,
     refresh: bool,
     experiment_name: str | None,
     project_name: str | None,
-    obs_raw: str,
 ) -> None:
-    """Query a deployed model by deployment name (uses cached URL/key after first fetch)."""
+    """Select a deployment as the active agent for ``arena agent generate``."""
     with arena_client(config) as client:
-        obs = client.parse_inference_observation(obs_raw)
-        with client.open_inference_agent(
+        client.ensure_inference_binding(
             deployment_name,
             refresh=refresh,
             experiment_name=experiment_name,
             project_name=project_name,
-        ) as agent:
-            status, action, next_hidden = agent.get_action(obs)
-
-        hidden_out = None
-        if next_hidden is not None:
-            hidden_out = {k: _numpy_leaf_jsonable(v) for k, v in next_hidden.items()}
-
+        )
+        save_active_agent(
+            deployment_name,
+            experiment_name=experiment_name,
+            project_name=project_name,
+        )
         emit_result(
             {
-                "deployment": deployment_name,
-                "status": status,
-                "action": _numpy_leaf_jsonable(action),
-                "hidden_state": hidden_out,
+                "active_agent": deployment_name.strip(),
+                "experiment_name": experiment_name,
+                "project_name": project_name,
             }
         )
+
+
+@agent_cli.command("generate")
+@click.argument("deployment_name", required=False, default=None)
+@_agent_deployment_options
+@click.option(
+    "--prompt",
+    required=True,
+    help="Prompt text for the LLM deployment.",
+)
+@click.pass_obj
+def agent_generate(
+    config: CommandConfig,
+    deployment_name: str | None,
+    refresh: bool,
+    experiment_name: str | None,
+    project_name: str | None,
+    prompt: str,
+) -> None:
+    """Stream a completion (``POST /generate_stream``).
+
+    Omit *deployment_name* to use the agent set by ``arena agent run``.
+    """
+    target, experiment_name, project_name = _resolve_agent_target(
+        deployment_name, experiment_name, project_name
+    )
+    with arena_client(config) as client:
+        with client.open_inference_agent(
+            target,
+            refresh=refresh,
+            experiment_name=experiment_name,
+            project_name=project_name,
+        ) as agent:
+            completion = "".join(agent.generate_stream(prompt))
+            emit_result(
+                {
+                    "deployment": target,
+                    "prompt": prompt,
+                    "completion": completion,
+                }
+            )
 
 
 @main.group("projects")
