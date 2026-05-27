@@ -1023,35 +1023,6 @@ class GRPO(LLMAlgorithm):
         lm_head_weight = lm_head.weight
         lm_head_bias = lm_head.bias
 
-        def _get_hidden(input_ids, attention_mask, use_cache=False, position_ids=None):
-            """Run a forward pass and return hidden states fed into the language-model head.
-
-            :param input_ids: Token IDs ``[batch, seq_len]``.
-            :type input_ids: torch.Tensor
-            :param attention_mask: Attention mask ``[batch, seq_len]``.
-            :type attention_mask: torch.Tensor
-            :param use_cache: Passed to the underlying model ``forward``.
-            :type use_cache: bool
-            :param position_ids: Optional explicit position IDs.
-            :type position_ids: torch.Tensor | None
-            :return: Hidden states immediately before the LM head ``[batch, seq_len, hidden]``.
-            :rtype: torch.Tensor
-            """
-            captured = []
-            hook = lm_head.register_forward_pre_hook(
-                lambda m, inputs: captured.append(inputs[0])
-            )
-            try:
-                self.actor(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    use_cache=use_cache,
-                    position_ids=position_ids,
-                )
-            finally:
-                hook.remove()
-            return captured[0]
-
         attention_mask = (batch_ids != self.pad_token_id).long()
         model_kwargs = {
             "input_ids": batch_ids,
@@ -1062,9 +1033,16 @@ class GRPO(LLMAlgorithm):
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
             model_kwargs["position_ids"] = position_ids
-        with self.select_adapter("actor"):
+        with (
+            self._patch_lm_head_to_identity(),
+            self.select_adapter("actor"),
+            self._amp_ctx(),
+        ):
             self.actor.train()
-            policy_hidden = _get_hidden(**model_kwargs)  # (B, seq_len, H)
+            actor_output = self.actor(**model_kwargs)
+        policy_hidden = (
+            actor_output[0] if isinstance(actor_output, tuple) else actor_output.logits
+        )  # (B, seq_len, H)
         target_ids = batch_ids[:, 1:].contiguous()  # (B, seq_len-1)
         loss, aux = LigerFusedLinearGRPOFunction.apply(
             policy_hidden,
