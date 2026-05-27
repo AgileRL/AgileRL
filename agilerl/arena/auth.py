@@ -109,6 +109,8 @@ class ArenaOAuth2:
 
     CREDENTIALS_DIR = Path.home() / ".arena"
     CREDENTIALS_FILE = CREDENTIALS_DIR / "credentials.json"
+
+    # TODO: Remove this once we have a production URL
     # KEYCLOAK_URL = "https://auth.arena.agilerl.com"
     # KEYCLOAK_URL = "https://arena-dev-auth.agilerl.rlops.ai/"
     KEYCLOAK_URL = "http://localhost:8023"

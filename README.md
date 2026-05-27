@@ -82,7 +82,7 @@ In the charts below, a single AgileRL run, which automatically tunes hyperparame
 <p align="center">
   <img src=https://user-images.githubusercontent.com/47857277/227481592-27a9688f-7c0a-4655-ab32-90d659a71c69.png min-width="100%" width="600">
 </p>
-<p align="center">AgileRL offers an order of magnitude speed up in hyperparameter optimization vs popular reinforcement learning training frameworks combined with Optuna. Remove the need for multiple training runs and save yourself hours.</p>
+<p align="center"><small>AgileRL offers an order of magnitude speed up in hyperparameter optimization vs popular reinforcement learning training frameworks combined with Optuna. Remove the need for multiple training runs and save yourself hours.</small></p>
 
 AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-style (parallel API). The charts below highlight the performance of our MADDPG and MATD3 algorithms with evolutionary hyper-parameter optimisation (HPO), benchmarked against epymarl's MADDPG algorithm with grid-search HPO for the simple speaker listener and simple spread environments.
 
@@ -125,7 +125,7 @@ trainer = LocalTrainer(
     algorithm="DQN",
     environment="LunarLander-v3",
     training=TrainingSpec(pop_size=4), # Train four agents simultaneously
-    hpo=True, # Enable evolutionary HPO using default mutation probabilities, tournament selection, and RL hyperparameters to mutate
+    hpo=True, # Enable evolutionary HPO using default settings
 )
 population, fitnesses = trainer.train()
 ```
@@ -134,7 +134,79 @@ This trains a population of four DQN agents that share experiences but learn ind
 (default value for `evo_steps` in `TrainingSpec`), tournament selection identifies the best
 performers and mutations are applied to explore the hyperparameter space. See [Evolutionary Hyperparameter Optimization](https://docs.agilerl.com/en/latest/evo_hyperparam_opt/index.html) for details on how evolutionary HPO works.
 
-Or via a YAML manifest (example can be found [here](https://github.com/AgileRL/AgileRL/blob/main/configs/training/dqn/dqn.yaml)):
+Or via a YAML manifest:
+
+<details>
+<summary>DQN-LunarLander-v3 manifest (<code>configs/training/dqn/dqn.yaml</code>)</summary>
+
+```yaml
+---
+algorithm:
+    name: DQN
+    batch_size: 128
+    lr: 6.3e-4
+    learn_step: 4
+    gamma: 0.99
+    tau: 0.001
+    double: false
+    cudagraphs: false
+
+environment:
+    name: LunarLander-v3
+    num_envs: 16
+
+mutation:
+    probabilities:
+        no_mut: 0.4
+        arch_mut: 0.2
+        new_layer: 0.2
+        params_mut: 0.2
+        act_mut: 0.2
+        rl_hp_mut: 0.2
+    rl_hp_selection:
+        lr:
+            min: 0.0000625
+            max: 0.01
+        batch_size:
+            min: 8
+            max: 512
+        learn_step:
+            min: 1
+            max: 10
+    mutation_sd: 0.1
+    rand_seed: 42
+
+network:
+    latent_dim: 128
+    arch: mlp
+    encoder_config:
+        hidden_size:
+            - 128
+    head_config:
+        hidden_size:
+            - 128
+
+replay_buffer:
+    max_size: 100_000
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true
+
+training:
+    max_steps: 1_000_000
+    target_score: 200.0
+    pop_size: 4
+    evo_steps: 10_000
+    eval_steps:
+    eval_loop: 1
+    learning_delay: 0
+    eps_start: 1.0
+    eps_end: 0.1
+    eps_decay: 0.99
+```
+
+</details>
 
 **Python**
 
@@ -159,7 +231,7 @@ implementing your own [evolvable algorithms](https://docs.agilerl.com/en/latest/
 
 ### Custom Training Pipelines
 
-For full control — custom environments, network architectures, or training loops — you can build each component individually:
+For full control over training, you can build each component individually:
 
 <details>
 <summary>Custom RL pipeline example</summary>
@@ -248,7 +320,7 @@ This approach gives you the flexibility to swap in your own Gymnasium or Petting
 
 ## Training on Arena
 
-[Arena](https://arena.agilerl.com) is the RLOps platform from AgileRL. We provide tools to create and validate custom reinforcement learning environments on the platform and train RL agents on managed cloud infrastructure — no cluster setup required.
+[Arena](https://arena.agilerl.com) is the RLOps platform from AgileRL. We provide tools to create and validate custom reinforcement learning environments on the platform and train RL agents on managed cloud infrastructure specifically tailored to RL workloads.
 
 AgileRL ships an **Arena SDK** (Python client) and an **Arena CLI** for interacting with the platform. Install them with:
 
@@ -267,11 +339,7 @@ client = ArenaClient()
 client.login()
 
 # Register and validate a custom environment
-client.validate_environment(
-    name="my-env",
-    source="path/to/my_env.py",      # directory, file, or .tar.gz
-    entrypoint="my_env:MyCustomEnv",
-)
+client.validate_environment(source="path/to/my_env.py")
 
 # Train on validated custom environment
 client.submit_experiment(
@@ -289,10 +357,7 @@ The same operations are available from the command line:
 arena login
 
 # Upload and validate
-arena env validate
-    --name my-env \
-    --source path/to/my_env.py \
-    --entrypoint my_env:MyCustomEnv
+arena env validate --source path/to/my_env.py
 
 # Train on validated custom environment
 arena experiment submit --manifest path/to/manifest.yaml --project my-project
@@ -314,9 +379,9 @@ We are constantly updating our tutorials to showcase the latest features of Agil
 | [Training on Arena](https://docs.agilerl.com/en/latest/tutorials/arena_training/index.html) | Upload and validate custom environments, submit training jobs on managed cloud infrastructure, and deploy trained agents for inference. | [PPO - BipedalWalker Custom Environment](https://docs.agilerl.com/en/latest/tutorials/arena_training/ppo_custom_env.html) |
 | [LLM Finetuning](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/index.html) | Learn how to finetune an LLM using AgileRL. | [GRPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/index.html) |
 
-## Evolvable algorithms (more coming soon!)
+## Evolvable Algorithms (more coming soon!)
 
-  ### Single-agent algorithms
+  ### Single-agent
 
   | RL         | Algorithm |
   | ---------- | --------- |
@@ -324,19 +389,19 @@ We are constantly updating our tutorials to showcase the latest features of Agil
   | [Off-Policy](https://docs.agilerl.com/en/latest/off_policy/index.html) | [Deep Q Learning (DQN)](https://docs.agilerl.com/en/latest/api/algorithms/dqn.html) <br>  [Rainbow DQN](https://docs.agilerl.com/en/latest/api/algorithms/dqn_rainbow.html) <br> [Deep Deterministic Policy Gradient (DDPG)](https://docs.agilerl.com/en/latest/api/algorithms/ddpg.html) <br> [Twin Delayed Deep Deterministic Policy Gradient (TD3)](https://docs.agilerl.com/en/latest/api/algorithms/td3.html) |
   | [Offline](https://docs.agilerl.com/en/latest/offline_training/index.html)    | [Conservative Q-Learning (CQL)](https://docs.agilerl.com/en/latest/api/algorithms/cql.html) <br>  [Implicit Language Q-Learning (ILQL)](https://docs.agilerl.com/en/latest/api/algorithms/ilql.html) |
 
-  ### Multi-agent algorithms
+  ### Multi-agent
 
   | RL         | Algorithm |
   | ---------- | --------- |
   | [Multi-agent](https://docs.agilerl.com/en/latest/multi_agent_training/index.html) | [Multi-Agent Deep Deterministic Policy Gradient (MADDPG)](https://docs.agilerl.com/en/latest/api/algorithms/maddpg.html) <br> [Multi-Agent Twin-Delayed Deep Deterministic Policy Gradient (MATD3)](https://docs.agilerl.com/en/latest/api/algorithms/matd3.html)  <br> [Independent Proximal Policy Optimization (IPPO)](https://docs.agilerl.com/en/latest/api/algorithms/ippo.html)|
 
-  ### Contextual multi-armed bandit algorithms
+  ### Contextual multi-armed bandit
 
   | RL         | Algorithm |
   | ---------- | --------- |
   | [Bandits](https://docs.agilerl.com/en/latest/bandits/index.html) | [Neural Contextual Bandits with UCB-based Exploration (NeuralUCB)](https://docs.agilerl.com/en/latest/api/algorithms/neural_ucb.html) <br> [Neural Contextual Bandits with Thompson Sampling (NeuralTS)](https://docs.agilerl.com/en/latest/api/algorithms/neural_ts.html) |
 
-  ### LLM Fine-tuning Algorithms
+  ### LLM Fine-tuning
 
   | RL         | Algorithm |
   | ---------- | --------- |

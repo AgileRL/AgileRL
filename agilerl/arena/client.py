@@ -138,6 +138,7 @@ class ArenaClient:
     :param upload_timeout: Timeout in seconds for file-upload requests.
     """
 
+    # TODO: Remove this once we have a production URL
     # BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
     # BASE_URL: ClassVar[str] = "https://arena-dev.agilerl.rlops.ai"
     BASE_URL: ClassVar[str] = "http://localhost:3001"
