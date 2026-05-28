@@ -155,3 +155,6 @@ wandb/
 # AI assistant instructions
 CLAUDE.md
 AGENTS.md
+
+# Results
+**/results/**
