@@ -6,81 +6,71 @@
 
 algorithm:
     name: PPO
-    batch_size: 512
-    lr: 0.0001
-    learn_step: 4800
+    batch_size: 1600
+    lr: 0.0006
+    learn_step: 51200
     gamma: 0.994
     gae_lambda: 0.95
-    action_std_init: 0.5
-    clip_coef: 0.15
-    ent_coef: 0.005
+    action_std_init: 1.0
+    clip_coef: 0.3
+    ent_coef: 0.01
     vf_coef: 0.5
     max_grad_norm: 0.5
-    target_kl: 0.01
-    update_epochs: 4
+    target_kl:
+    update_epochs: 8
     share_encoders: false
 
 environment:
     name: PandaRobotiqPushCube-v1
-    num_envs: 16
-    config:
-        env_id: PandaRobotiqPushCube-v1
-        env_kwargs:
-            flatten_obs: true
-
-network:
-    latent_dim: 128
-    max_latent_dim: 512
-    arch: mlp
-    encoder_config:
-        hidden_size:
-            - 256
-            - 256
-        activation: Sigmoid
-        min_mlp_nodes: 64
-        max_mlp_nodes: 512
-    head_config:
-        hidden_size:
-            - 128
-        activation: Sigmoid
-        min_mlp_nodes: 64
-        max_mlp_nodes: 512
-        output_vanish: true
+    num_envs: 256
 
 mutation:
     probabilities:
-        no_mut: 0.4
-        arch_mut: 0.2
-        new_layer: 0.2
-        params_mut: 0.2
+        no_mut: 1.0
+        arch_mut: 0.0
+        new_layer: 0.0
+        params_mut: 0.0
         act_mut: 0.0
-        rl_hp_mut: 0.2
-    rl_hp_selection:
-        lr:
-            min: 0.00005
-            max: 0.001
-        batch_size:
-            min: 512
-            max: 8192
-        learn_step:
-            min: 4096
-            max: 65536
-        ent_coef:
-            min: 0.0
-            max: 0.01
-        update_epochs:
-            min: 2
-            max: 10
+        rl_hp_mut: 0.0
     mutation_sd: 0.1
     rand_seed: 42
+
+network:
+    latent_dim: 64
+    max_latent_dim: 64
+    arch: mlp
+    encoder_config:
+        hidden_size:
+            - 64
+            - 64
+            - 64
+            - 64
+        activation: GELU
+        min_mlp_nodes: 64
+        max_mlp_nodes: 256
+        layer_norm: false
+    head_config:
+        hidden_size:
+            - 64
+            - 64
+            - 64
+            - 64
+        activation: GELU
+        min_hidden_layers: 1
+        max_hidden_layers: 4
+        min_mlp_nodes: 64
+        max_mlp_nodes: 256
+        output_vanish: true
+        layer_norm: false
 
 tournament_selection:
     tournament_size: 2
     elitism: true
 
 training:
-    max_steps: 50_000_000
-    pop_size: 4
-    evo_steps: 960_000
-    eval_steps:
-    eval_loop: 8
+    max_steps: 2_000_000_000
+    target_score:
+    pop_size: 1
+    evo_steps: 1638400
+    eval_steps: 3000
+    eval_loop: 1
