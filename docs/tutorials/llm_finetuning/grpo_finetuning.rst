@@ -178,7 +178,7 @@ and then instantiate the ``ReasoningGym`` object which converts a Hugging Face d
 
     .. code-block:: python
 
-        conversation = [
+        conversation_template = [
             {
                 "role": "system",
                 "content": "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.",
