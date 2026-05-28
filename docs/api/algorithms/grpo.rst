@@ -24,6 +24,19 @@ clipped surrogate), ``"gspo"`` (sequence-level importance ratio, see :ref:`GSPO<
 importance-weighted log-prob objective, see :ref:`CISPO<cispo>`). The :class:`~agilerl.algorithms.cispo.CISPO` and
 :class:`~agilerl.algorithms.gspo.GSPO` classes are thin subclasses that pin ``loss_type`` to the matching variant.
 
+Variance Reduction
+------------------
+
+GRPO replaces PPO's learned value head with **group-relative normalization**:
+for each prompt, ``group_size`` rollouts are drawn and their returns are
+z-scored within the group to form the advantage. The upside is that there is
+no critic to train, fit or tune, which is attractive for LLM scale; the
+downside is that the baseline degenerates when the group's returns collapse
+(e.g. all rollouts succeed or all fail), and the quality of the variance
+reduction is tied to the group size. Compare with the
+:ref:`learned value baseline used by LLM PPO<llmppo>` and
+:ref:`Return Batch Normalization (ReBN) used by LLM REINFORCE<llmreinforce>`.
+
 
 Example
 -------

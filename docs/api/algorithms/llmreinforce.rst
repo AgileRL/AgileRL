@@ -7,8 +7,9 @@ LLM REINFORCE
 score-function policy-gradient method. ``LLMREINFORCE`` brings this approach to
 causal language model finetuning with turn-aware trajectories.
 
-In AgileRL, the algorithm uses Return Batch Normalization (ReBN) to improve
-stability in practice:
+In AgileRL, the algorithm uses Return Batch Normalization (ReBN) — as
+popularized by the `GEM paper <https://arxiv.org/abs/2510.01051>`_ — to
+improve stability in practice:
 
 * **Turn-level Monte Carlo returns:** discounted returns are computed across
   turns for each sampled trajectory.
@@ -16,6 +17,29 @@ stability in practice:
   ``(sample, turn)`` pairs before being broadcast to token-level advantages.
 * **Value-head-free training:** unlike PPO-style actor-critic updates, this
   path optimizes the policy directly from normalized returns.
+
+Variance Reduction
+------------------
+
+LLM policy-gradient algorithms differ mostly in *how* they reduce the variance
+of the Monte Carlo return signal. Three families show up in this codebase:
+
+* **Learned value baseline (:ref:`LLM PPO<llmppo>`)** — subtract a learned
+  state-value estimate to form an advantage. Strong asymptotic variance
+  reduction, but spends parameters and compute on a value head and is
+  sensitive to value-function staleness.
+* **Group-relative normalization (:ref:`GRPO<grpo>` and variants)** — sample
+  a group of ``G`` rollouts per prompt and z-score their returns within the
+  group. No critic to train; effective when rewards are sparse and rollouts
+  are cheap, but the baseline degenerates as the group's returns collapse and
+  it ties variance reduction to having a large group size.
+* **Return Batch Normalization (this algorithm)** — z-score returns across
+  every valid ``(sample, turn)`` pair in the batch. No critic and no group
+  requirement, and it remains well-defined under arbitrary discount factors
+  and per-step dense rewards (where group-relative normalization is
+  awkward). The trade-off is that the baseline is global to the batch, so it
+  reduces less variance than a state-conditioned critic on tasks where
+  reward depends sharply on the prompt.
 
 Example
 -------
