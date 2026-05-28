@@ -41,6 +41,19 @@ of the Monte Carlo return signal. Three families show up in this codebase:
   reduces less variance than a state-conditioned critic on tasks where
   reward depends sharply on the prompt.
 
+.. note::
+
+   ReBN itself is a specific application of the long-standing "advantage
+   normalization" trick — z-scoring the policy-gradient signal across a
+   batch — that has been standard in PPO implementations since
+   `OpenAI Baselines <https://github.com/openai/baselines>`_ and was
+   systematically studied by
+   `Engstrom et al. 2020 <https://arxiv.org/abs/2005.12729>`_ and
+   `Andrychowicz et al. 2021 <https://arxiv.org/abs/2006.05990>`_. The
+   `GEM paper <https://arxiv.org/abs/2510.01051>`_ names the specific
+   variant that operates on per-transition Monte Carlo returns across the
+   whole batch (rather than on GAE advantages or within a per-prompt group).
+
 Example
 -------
 
