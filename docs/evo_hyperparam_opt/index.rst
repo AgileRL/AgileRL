@@ -87,58 +87,58 @@ AgileRL algorithms inherit from the :class:`EvolvableAlgorithm <agilerl.algorith
 and the architecture of its network constituents. A :class:`MutationRegistry <agilerl.algorithms.core.registry.MutationRegistry>` is automatically created upon initialisation that keeps track
 of the hyperparameters and evolvable networks registered for mutation. Specifically, algorithms can register mutable attributes in the following ways:
 
-    - Using :func:`EvolvableAlgorithm.register_network_group() <agilerl.algorithms.core.base.EvolvableAlgorithm.register_network_group>` to register a
-      :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` of evolvable networks.
+1. Using :func:`EvolvableAlgorithm.register_network_group() <agilerl.algorithms.core.base.EvolvableAlgorithm.register_network_group>` to register a
+   :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` of evolvable networks.
 
-    .. note::
-        Any ``EvolvableAlgorithm`` should register at least one ``NetworkGroup`` corresponding to the policy (i.e. the network used to select actions) by setting ``policy=True``.
+.. note::
+    Any ``EvolvableAlgorithm`` should register at least one ``NetworkGroup`` corresponding to the policy (i.e. the network used to select actions) by setting ``policy=True``.
 
-    - All AgileRL algorithms automatically configure sensible default RL hyperparameters for mutation when ``hp_config=None`` (usually the learning rate, batch size, and learning step). The ranges are derived
-      dynamically from the algorithm's initial hyperparameter values. If you need to override these defaults, you can pass a custom
-      :class:`HyperparameterConfig <agilerl.algorithms.core.registry.HyperparameterConfig>` with the :class:`RLParameter <agilerl.algorithms.core.registry.RLParameter>`'s
-      you wish to mutate. For example, to customize the mutation ranges for ``DQN``:
+1. All AgileRL algorithms automatically configure sensible default RL hyperparameters for mutation when ``hp_config=None`` (usually the learning rate, batch size, and learning step). The ranges
+   are derived dynamically from the algorithm's initial hyperparameter values. If you need to override these defaults, you can pass a custom
+   :class:`HyperparameterConfig <agilerl.algorithms.core.registry.HyperparameterConfig>` with the :class:`RLParameter <agilerl.algorithms.core.registry.RLParameter>`'s
+   you wish to mutate. For example, to customize the mutation ranges for ``DQN``:
 
-    .. code-block:: python
+.. code-block:: python
 
-        from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+    from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
-        # Override default mutation ranges for specific hyperparameters
-        hp_config = HyperparameterConfig(
-            lr=RLParameter(min=1e-4, max=1e-2),
-            batch_size=RLParameter(min=32, max=256),
-            learn_step=RLParameter(min=1, max=10, grow_factor=1.5, shrink_factor=0.75),
-        )
+    # Override default mutation ranges for specific hyperparameters
+    hp_config = HyperparameterConfig(
+        lr=RLParameter(min=1e-4, max=1e-2),
+        batch_size=RLParameter(min=32, max=256),
+        learn_step=RLParameter(min=1, max=10, grow_factor=1.5, shrink_factor=0.75),
+    )
 
-    - The optimizers used in an algorithm are also indirectly mutable since they include mutable parameters such as the learning rate, and optimize evolvable networks. For this reason,
-      all optimizers in AgileRL must be wrapped using :class:`OptimizerWrapper <agilerl.algorithms.core.optimizer_wrapper.OptimizerWrapper>`, specifying the ``torch.optim.Optimizer`` to be used
-      as well as the attributes containing the mutable networks it must optimize. For example, in ``PPO`` we would wrap the optimizer which updates both the actor and critic networks as follows:
+3. The optimizers used in an algorithm are also indirectly mutable since they include mutable parameters such as the learning rate, and optimize evolvable networks. For this reason,
+   all optimizers in AgileRL must be wrapped using :class:`OptimizerWrapper <agilerl.algorithms.core.optimizer_wrapper.OptimizerWrapper>`, specifying the ``torch.optim.Optimizer`` to be used
+   as well as the attributes containing the mutable networks it must optimize. For example, in ``PPO`` we would wrap the optimizer which updates both the actor and critic networks as follows:
 
-    .. code-block:: python
+.. code-block:: python
 
-        from agilerl.algorithms.core.base import EvolvableAlgorithm
-        from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
-        import torch.optim as optim
+    from agilerl.algorithms.core.base import EvolvableAlgorithm
+    from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
+    import torch.optim as optim
 
-        class CustomAlgorithm(EvolvableAlgorithm):
+    class CustomAlgorithm(EvolvableAlgorithm):
 
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
 
-                # Define the algorithm's attributes / networks
-                self.lr = 1e-4
-                self.actor = ... # EvolvableModule instance
-                self.critic = ... # EvolvableModule instance
+            # Define the algorithm's attributes / networks
+            self.lr = 1e-4
+            self.actor = ... # EvolvableModule instance
+            self.critic = ... # EvolvableModule instance
 
-                # NOTE: We must pass the attributes containing
-                # the mutable networks to the OptimizerWrapper
-                self.optimizer = OptimizerWrapper(
-                    optim.Adam,
-                    networks=[self.actor, self.critic],
-                    lr=self.lr
-                )
+            # NOTE: We must pass the attributes containing
+            # the mutable networks to the OptimizerWrapper
+            self.optimizer = OptimizerWrapper(
+                optim.Adam,
+                networks=[self.actor, self.critic],
+                lr=self.lr
+            )
 
-    .. note::
-        AgileRL expects ``OptimizerWrapper`` and ``NetworkGroup`` objects to be defined and registered in the ``__init__`` method of an algorithm.
+.. note::
+    AgileRL expects ``OptimizerWrapper`` and ``NetworkGroup`` objects to be defined and registered in the ``__init__`` method of an algorithm.
 
 Architecture Mutations
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -152,16 +152,16 @@ architecture mutations through the :class:`EvolvableModule <agilerl.modules.base
 architecture mutations in networks with nested evolvable modules. This is particularly useful in RL algorithms, where we define default configurations
 suitable for a variety of tasks (i.e. combinations of observation and action spaces), which require very different architectures.
 
-.. seealso::
-
-   :ref:`evolvable_networks` for a full guide on evolvable modules and architecture mutations.
-
 For the above reason, we define the :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>` base class, which inherits from ``EvolvableModule``.
 This abstraction allows us to define common networks used in RL algorithms very simply, since it automatically creates an appropriate encoder for the passed observation space. After,
 we just need to create a head to the the network that processes the encoded observations into an appropriate number of outputs for e.g. policies or critics.
 
 It is common for RL algorithms to use multiple networks throughout training (e.g. actors and critics) to mitigate risks intrinsic to the RL learning procedure such as e.g. managing the
 trade-off between exploration and exploitation. How we apply architecture mutations in such cases differs slightly in single- and multi-agent settings.
+
+.. seealso::
+
+   :ref:`evolvable_networks` for a full guide on evolvable modules and architecture mutations.
 
 Single-Agent
 ^^^^^^^^^^^^

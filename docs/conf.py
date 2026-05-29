@@ -11,7 +11,7 @@ copyright = "2023, AgileRL"  # noqa: A001
 author = "Nick Ustaran-Anderegg"
 
 release = "0.1"
-version = "0.1.18"
+version = "2.8.0"
 
 # -- General configuration
 
