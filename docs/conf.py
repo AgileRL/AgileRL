@@ -27,7 +27,7 @@ extensions = [
     "sphinx_tabs.tabs",
     "sphinx_toolbox.collapse",
     "agilerl_directives",
-    # "sphinx_github_changelog",
+    "sphinx_github_changelog",
     "notfound.extension",
     "sphinxcontrib.googleanalytics",
 ]
