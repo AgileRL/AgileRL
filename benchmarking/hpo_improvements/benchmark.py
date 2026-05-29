@@ -33,6 +33,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import gymnasium as gym  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+import torch  # noqa: E402
 import yaml  # noqa: E402
 
 import plotting  # noqa: E402
@@ -44,12 +45,103 @@ from registry import (  # noqa: E402
 from reproducibility import seed_everything  # noqa: E402
 
 from agilerl.algorithms import PPO  # noqa: E402
+from agilerl.models.env import GymEnvSpec  # noqa: E402
+from agilerl.models.manifest import TrainingManifest  # noqa: E402
 from agilerl.training.trainer import LocalTrainer  # noqa: E402
 
 logger = logging.getLogger("hpo_benchmark")
 
 RESULTS_DIR = SCRIPT_DIR / "results"
 MAX_RENDER_STEPS = 3000
+
+
+# --------------------------------------------------------------------------- #
+# EnvPool helpers
+# --------------------------------------------------------------------------- #
+def _make_envpool_env(env_id: str, num_envs: int, seed: int) -> Any:
+    """Return an EnvPool-backed vectorized Gymnasium environment.
+
+    EnvPool seeds at creation time; callers must **not** call
+    ``env.reset(seed=...)`` afterwards.
+
+    :param env_id: Gymnasium environment id (e.g. ``"Ant-v5"``).
+    :type env_id: str
+    :param num_envs: Number of parallel environments.
+    :type num_envs: int
+    :param seed: Seed applied at creation time for reproducibility.
+    :type seed: int
+    :return: Vectorized EnvPool environment with Gymnasium API.
+    :rtype: Any
+    """
+    try:
+        import envpool
+    except ModuleNotFoundError as exc:
+        msg = (
+            "EnvPool is not installed. "
+            "Install it before running this benchmark, e.g. `uv add envpool`."
+        )
+        raise ImportError(msg) from exc
+
+    make_fn = (
+        envpool.make_gymnasium if hasattr(envpool, "make_gymnasium") else envpool.make
+    )
+    env = make_fn(env_id, num_envs=num_envs, seed=seed)
+    # MuJoCo v5 observations are already flat; FlattenObservation is a no-op
+    # but keeps the interface consistent with any future non-flat envs.
+    env = gym.wrappers.vector.FlattenObservation(env)
+    return env
+
+
+class _EnvPoolLocalTrainer(LocalTrainer):
+    """``LocalTrainer`` that uses a pre-built EnvPool vector environment.
+
+    Based on the same pattern used in
+    ``hpo_improvements/panda_robotiq_push_cube/train.py``.
+    """
+
+    _prebuilt_env: Any = None
+
+    def _make_env(self) -> Any:
+        if self._prebuilt_env is not None:
+            return self._prebuilt_env
+        return super()._make_env()
+
+    @classmethod
+    def from_manifest_with_env(
+        cls,
+        manifest: dict[str, Any] | TrainingManifest,
+        vector_env: Any,
+        *,
+        device: str | torch.device = "cpu",
+    ) -> "_EnvPoolLocalTrainer":
+        """Build a trainer from a manifest dict and a pre-built EnvPool env.
+
+        :param manifest: YAML manifest dict or validated ``TrainingManifest``.
+        :param vector_env: Pre-built (and already seeded) EnvPool environment.
+        :param device: Torch device string.
+        """
+        validated = (
+            TrainingManifest.get_validated(manifest, mode="python")
+            if not isinstance(manifest, TrainingManifest)
+            else manifest
+        )
+        env_data = {
+            k: v for k, v in dict(validated.environment).items() if v is not None
+        }
+        env_spec = GymEnvSpec(**env_data)
+        cls._prebuilt_env = vector_env
+        try:
+            return cls(
+                algorithm=validated.algorithm,
+                environment=env_spec,
+                training=validated.training,
+                mutation=validated.mutation,
+                tournament=validated.tournament_selection,
+                replay_buffer=validated.replay_buffer,
+                device=device,
+            )
+        finally:
+            cls._prebuilt_env = None
 
 
 # --------------------------------------------------------------------------- #
@@ -279,10 +371,13 @@ def run_environment(
     pop_size = int(manifest.get("training", {}).get("pop_size", 1) or 1)
 
     # Fresh, reproducible agent per environment.
+    # EnvPool is seeded at creation; do not call env.reset(seed=...) afterwards.
     seed_everything(seed)
-    trainer = LocalTrainer.from_manifest(manifest, device=device)
-    # First-ever reset is the only one we seed (later resets stay deterministic).
-    trainer.env.reset(seed=seed)
+    num_envs = int(manifest.get("environment", {}).get("num_envs", 1) or 1)
+    envpool_env = _make_envpool_env(env_name, num_envs, seed)
+    trainer = _EnvPoolLocalTrainer.from_manifest_with_env(
+        manifest, envpool_env, device=device
+    )
 
     elite_path = env_dir / f"elite_{algo}.pt"
     log_path = env_dir / "train.log"
