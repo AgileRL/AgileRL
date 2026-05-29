@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import urlparse
 
 import pytest
 
@@ -240,7 +241,9 @@ class TestFromResponseBody:
             {"detail": "See https://docs.agilerl.com/errors/123 for details"}
         )
         err = ArenaAPIError.from_response_body(raw, status_code=400)
-        assert "docs.agilerl.com" in err.detail
+        parsed = urlparse("https://docs.agilerl.com/errors/123")
+        assert parsed.hostname == "docs.agilerl.com"
+        assert parsed.geturl() in err.detail
 
 
 class TestSanitizeDetail:
