@@ -19,11 +19,18 @@ from __future__ import annotations
 import argparse
 import copy
 import logging
+import os
 import sys
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+# Must be set before PyTorch's C++ extension is loaded (i.e. before `import torch`).
+# On MPS, some ops (e.g. aten::linalg_qr) are not yet implemented; this flag makes
+# them silently fall back to CPU rather than raising a NotImplementedError.
+# It is a no-op on CUDA and CPU devices.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 # Allow running as a plain script: make sibling modules importable.
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -154,7 +161,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--name", help="Benchmark base name (used in run/folder names)")
     p.add_argument("--config", help="Path to YAML config, relative to this script")
     p.add_argument("--seed", type=int, help="Global seed for reproducibility")
-    p.add_argument("--device", help="Torch device, e.g. 'cpu' or 'cuda'")
+    p.add_argument("--device", help="Torch device, e.g. 'cpu', 'cuda', or 'mps'")
     p.add_argument(
         "--envs",
         help="Comma/space separated env names, or 'all'",
@@ -178,6 +185,45 @@ def _prompt(value: str | None, message: str) -> str:
     if value is not None and str(value) != "":
         return str(value)
     return input(message).strip()
+
+
+def resolve_device(device: str) -> str:
+    """Validate *device* and return a usable torch device string.
+
+    Checks that the requested backend is actually available at runtime and
+    warns (rather than crashes) when it is not, falling back to CPU.
+
+    * ``"cuda"`` — requires a CUDA-capable GPU (``torch.cuda.is_available()``).
+    * ``"mps"``  — requires Apple Silicon / AMD on macOS with PyTorch ≥ 2.0
+                   (``torch.backends.mps.is_available()``).
+    * ``"cpu"``  — always available.
+
+    :param device: Requested device string (case-insensitive).
+    :type device: str
+    :return: A valid torch device string (``"cpu"``, ``"cuda"``, or ``"mps"``).
+    :rtype: str
+    """
+    device = device.strip().lower()
+    if device.startswith("cuda"):
+        if not torch.cuda.is_available():
+            logger.warning("CUDA requested but not available — falling back to CPU.")
+            return "cpu"
+        return device  # preserve e.g. "cuda:1"
+    if device == "mps":
+        if (
+            not getattr(torch.backends, "mps", None)
+            or not torch.backends.mps.is_available()
+        ):
+            logger.warning(
+                "MPS requested but not available on this system — falling back to CPU. "
+                "MPS requires macOS 12.3+, Apple Silicon or AMD GPU, and PyTorch ≥ 2.0."
+            )
+            return "cpu"
+        return "mps"
+    if device != "cpu":
+        logger.warning("Unknown device '%s' — falling back to CPU.", device)
+        return "cpu"
+    return "cpu"
 
 
 def load_manifest_dict(config_path: Path) -> dict[str, Any]:
@@ -306,11 +352,20 @@ def render_best_agent(
     # catch -- which would kill the whole benchmark. So we skip rendering unless
     # a usable GL backend is available.
     import os
+    import platform
 
-    if not os.environ.get("MUJOCO_GL") and not os.environ.get("DISPLAY"):
+    # On macOS, MuJoCo renders via glfw (Quartz) and needs neither DISPLAY nor
+    # MUJOCO_GL.  On Linux without a display, glfw aborts at the C level (not
+    # catchable), so we require either DISPLAY or a headless MUJOCO_GL backend.
+    on_macos = platform.system() == "Darwin"
+    if (
+        not on_macos
+        and not os.environ.get("MUJOCO_GL")
+        and not os.environ.get("DISPLAY")
+    ):
         logger.warning(
             "Skipping render for %s: no DISPLAY and MUJOCO_GL is unset. "
-            "Set MUJOCO_GL=egl (GPU) or osmesa (CPU) to enable video.",
+            "Set MUJOCO_GL=egl (GPU) or MUJOCO_GL=osmesa (CPU) to enable video on Linux.",
             env_name,
         )
         return
@@ -321,7 +376,9 @@ def render_best_agent(
         agent = PPO.load(str(elite_path), device=device)
         agent.set_training_mode(False)
 
-        render_env = gym.make(env_name, render_mode="rgb_array")
+        render_env = gym.wrappers.FlattenObservation(
+            gym.make(env_name, render_mode="rgb_array")
+        )
         obs, _ = render_env.reset(seed=seed)
         frames: list[np.ndarray] = []
         done = False
@@ -338,7 +395,7 @@ def render_best_agent(
             imageio.mimsave(str(out_path), frames, fps=30)
             logger.info("Saved render: %s (%d frames)", out_path, len(frames))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Rendering failed for %s: %s", env_name, exc)
+        logger.exception("Rendering failed for %s: %s", env_name, exc)
 
 
 # --------------------------------------------------------------------------- #
@@ -470,7 +527,7 @@ def main(argv: list[str] | None = None) -> None:
             training["evo_steps"] = args.max_steps
 
     seed = int(_prompt(args.seed, "Seed (int): "))
-    device = _prompt(args.device, "Device (e.g. cpu/cuda): ")
+    device = resolve_device(_prompt(args.device, "Device (e.g. cpu/cuda/mps): "))
 
     valid = allowed_envs(algo)
     print(f"\nAlgorithm '{algo}'. Permitted environments:")
