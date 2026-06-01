@@ -43,22 +43,14 @@ class TestLoadCredentials:
         cred_file.write_text('{"refresh_token": "rt"}', encoding="utf-8")
         assert load_credentials(cred_file) is None
 
-    def test_returns_dict_on_valid_file(self, tmp_path):
-        cred_file = tmp_path / "creds.json"
-        data = {"access_token": "at", "refresh_token": "rt"}
-        cred_file.write_text(json.dumps(data), encoding="utf-8")
-        result = load_credentials(cred_file)
-        assert result == data
+    def test_returns_dict_on_valid_file(self, credentials_file):
+        result = load_credentials(credentials_file)
+        assert result == {"access_token": "at", "refresh_token": "rt"}
 
-    def test_handles_os_error(self, tmp_path):
-        cred_file = tmp_path / "unreadable.json"
-        cred_file.write_text('{"access_token": "at"}', encoding="utf-8")
-        cred_file.chmod(0o000)
-        try:
-            result = load_credentials(cred_file)
-            assert result is None
-        finally:
-            cred_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    def test_handles_os_error(self, credentials_file):
+        with patch.object(Path, "read_text", side_effect=OSError("read failed")):
+            result = load_credentials(credentials_file)
+        assert result is None
 
 
 # ---------------------------------------------------------------------------

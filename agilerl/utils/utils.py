@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING, Any
 import gymnasium as gym
 import numpy as np
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -398,9 +398,10 @@ def create_population(
     :return: Population of agents
     :rtype: list[EvolvableAlgorithm]
     """
+    algo_name = algo.replace(" ", "")
     warnings.warn(
-        f"create_population() is deprecated. Use {algo}.population() instead "
-        f"(e.g. {algo}.population(size=4, observation_space=obs, action_space=act, ...)).",
+        f"create_population() is deprecated. Use {algo_name}.population() instead "
+        f"(e.g. {algo_name}.population(size=4, observation_space=obs, action_space=act, ...)).",
         DeprecationWarning,
         stacklevel=2,
     )
