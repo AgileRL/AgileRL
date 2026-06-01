@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import types
 from unittest.mock import MagicMock, patch
@@ -1371,6 +1372,36 @@ class TestLocalTrainerIntegration:
             **kwargs,
         )
 
+    @staticmethod
+    def _mock_llm_tokenizer() -> MagicMock:
+        """Tokenizer stand-in so integration tests do not hit Hugging Face."""
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.chat_template = None
+        mock_tokenizer.eos_token = "<eos>"
+        mock_tokenizer.eos_token_id = 0
+        return mock_tokenizer
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _llm_trainer_patches(mock_pop: list[MagicMock]):
+        """Patches population, accelerator, and tokenizer loading for LLM tests."""
+        mock_tokenizer = TestLocalTrainerIntegration._mock_llm_tokenizer()
+        with (
+            patch(
+                "agilerl.training.trainer.create_population_from_spec",
+                return_value=mock_pop,
+            ),
+            patch(
+                "agilerl.training.trainer.create_llm_accelerator",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "agilerl.training.trainer.AutoTokenizer.from_pretrained",
+                return_value=mock_tokenizer,
+            ),
+        ):
+            yield
+
     # -- On-policy: PPO + CartPole-v1 ---------------------------------------
 
     def test_ppo_cartpole(self):
@@ -1622,16 +1653,7 @@ class TestLocalTrainerIntegration:
 
         mock_pop = [MagicMock()]
 
-        with (
-            patch(
-                "agilerl.training.trainer.create_population_from_spec",
-                return_value=mock_pop,
-            ),
-            patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
-            ),
-        ):
+        with self._llm_trainer_patches(mock_pop):
             trainer = LocalTrainer(
                 algorithm=algo_spec,
                 environment=env_spec,
@@ -1705,16 +1727,7 @@ class TestLocalTrainerIntegration:
 
         mock_pop = [MagicMock()]
 
-        with (
-            patch(
-                "agilerl.training.trainer.create_population_from_spec",
-                return_value=mock_pop,
-            ),
-            patch(
-                "agilerl.training.trainer.create_llm_accelerator",
-                return_value=MagicMock(),
-            ),
-        ):
+        with self._llm_trainer_patches(mock_pop):
             trainer = LocalTrainer(
                 algorithm=algo_spec,
                 environment=env_spec,

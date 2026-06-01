@@ -21,6 +21,21 @@ from agilerl.arena.auth import (
 from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 
 
+def _chmod_mode_bits_visible(base_dir: Path) -> bool:
+    """True when chmod(0o700) is reflected in st_mode (not true on Windows / DrvFs)."""
+    if os.name == "nt" or sys.platform == "win32":
+        return False
+    probe_dir = base_dir / ".chmod_mode_probe"
+    probe_dir.mkdir(exist_ok=True)
+    try:
+        os.chmod(probe_dir, stat.S_IRWXU)
+        return (probe_dir.stat().st_mode & 0o777) == stat.S_IRWXU
+    except OSError:
+        return False
+    finally:
+        probe_dir.rmdir()
+
+
 # ---------------------------------------------------------------------------
 # load_credentials
 # ---------------------------------------------------------------------------
@@ -148,18 +163,18 @@ class TestWriteCredentials:
             ArenaOAuth2.CREDENTIALS_FILE = cred_file
 
             data = {"access_token": "at123", "refresh_token": "rt456"}
-            if sys.platform == "win32":
-                # Windows does not expose Unix permission bits via stat().
-                with patch("agilerl.arena.auth.os.chmod") as mock_chmod:
-                    ArenaOAuth2._write_credentials(data)
-                mock_chmod.assert_any_call(cred_dir, stat.S_IRWXU)
-                mock_chmod.assert_any_call(cred_file, stat.S_IRUSR | stat.S_IWUSR)
-            else:
+            if _chmod_mode_bits_visible(tmp_path):
                 ArenaOAuth2._write_credentials(data)
                 assert (cred_dir.stat().st_mode & 0o777) == stat.S_IRWXU
                 assert (cred_file.stat().st_mode & 0o777) == (
                     stat.S_IRUSR | stat.S_IWUSR
                 )
+            else:
+                # Native Windows, WSL on /mnt/c, etc.: verify chmod calls only.
+                with patch("agilerl.arena.auth.os.chmod") as mock_chmod:
+                    ArenaOAuth2._write_credentials(data)
+                mock_chmod.assert_any_call(cred_dir, stat.S_IRWXU)
+                mock_chmod.assert_any_call(cred_file, stat.S_IRUSR | stat.S_IWUSR)
 
             assert cred_dir.is_dir()
             assert cred_file.is_file()
