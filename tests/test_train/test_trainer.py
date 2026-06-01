@@ -1446,15 +1446,15 @@ class TestLocalTrainerIntegration:
         finally:
             trainer.env.close()
 
-    # -- Off-policy continuous: DDPG + LunarLanderContinuous ----------------
+    # -- Off-policy continuous: DDPG + Pendulum  ------------------
 
     def test_ddpg_continuous(self):
-        """DDPG (off-policy, continuous) on LunarLander."""
+        """DDPG (off-policy, continuous) on Pendulum-v1."""
         from agilerl.models.env import GymEnvSpec
 
         trainer = LocalTrainer(
             algorithm=DDPGSpec(learn_step=1),
-            environment=GymEnvSpec(name="LunarLanderContinuous-v3", num_envs=1),
+            environment=GymEnvSpec(name="Pendulum-v1", num_envs=1),
             training=self._training(),
             replay_buffer=ReplayBufferSpec(max_size=1_000),
         )
@@ -1764,11 +1764,11 @@ class TestStringEnvironmentResolution:
         mock_create_pop.return_value = [MagicMock()]
         trainer = LocalTrainer(
             algorithm="DQN",
-            environment="LunarLander-v3",
+            environment="CartPole-v1",
             training=training_spec,
         )
         assert isinstance(trainer.env_spec, GymEnvSpec)
-        assert trainer.env_spec.name == "LunarLander-v3"
+        assert trainer.env_spec.name == "CartPole-v1"
         assert trainer.env is not None
         assert hasattr(trainer.env, "single_observation_space")
 

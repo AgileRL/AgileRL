@@ -205,8 +205,12 @@ class TestRendererErrorEvent:
         assert "b:B" in row_status
 
     def test_error_without_live_promotes_training_env_not_found(self):
-        from agilerl.arena.exceptions import ArenaEnvironmentNotFoundError
+        from agilerl.arena.exceptions import (
+            ArenaEnvironmentNotFoundError,
+            ArenaError,
+        )
 
+        ArenaError._cli_mode = False
         renderer = StreamRichRenderer(error_cls=ArenaTrainingError)
         event = ErrorEvent(
             message="Environment 'LunarLander-v3' not found.",
@@ -217,7 +221,8 @@ class TestRendererErrorEvent:
         with pytest.raises(ArenaEnvironmentNotFoundError) as exc_info:
             renderer.handle_event(event)
 
-        assert "list_environments" in str(exc_info.value)
+        assert "list_environments" in exc_info.value.sdk_hint
+        assert "arena env list" in exc_info.value.cli_hint
 
     def test_error_with_live_shows_env_not_found_cli_hint(self):
         renderer = StreamRichRenderer()
