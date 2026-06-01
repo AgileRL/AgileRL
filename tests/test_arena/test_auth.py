@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -147,18 +148,23 @@ class TestWriteCredentials:
             ArenaOAuth2.CREDENTIALS_FILE = cred_file
 
             data = {"access_token": "at123", "refresh_token": "rt456"}
-            ArenaOAuth2._write_credentials(data)
+            if sys.platform == "win32":
+                # Windows does not expose Unix permission bits via stat().
+                with patch("agilerl.arena.auth.os.chmod") as mock_chmod:
+                    ArenaOAuth2._write_credentials(data)
+                mock_chmod.assert_any_call(cred_dir, stat.S_IRWXU)
+                mock_chmod.assert_any_call(cred_file, stat.S_IRUSR | stat.S_IWUSR)
+            else:
+                ArenaOAuth2._write_credentials(data)
+                assert (cred_dir.stat().st_mode & 0o777) == stat.S_IRWXU
+                assert (cred_file.stat().st_mode & 0o777) == (
+                    stat.S_IRUSR | stat.S_IWUSR
+                )
 
             assert cred_dir.is_dir()
             assert cred_file.is_file()
             written = json.loads(cred_file.read_text(encoding="utf-8"))
             assert written == data
-
-            dir_mode = cred_dir.stat().st_mode & 0o777
-            assert dir_mode == stat.S_IRWXU
-
-            file_mode = cred_file.stat().st_mode & 0o777
-            assert file_mode == (stat.S_IRUSR | stat.S_IWUSR)
         finally:
             ArenaOAuth2.CREDENTIALS_DIR = orig_dir
             ArenaOAuth2.CREDENTIALS_FILE = orig_file
