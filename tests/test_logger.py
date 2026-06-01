@@ -299,14 +299,15 @@ class TestTensorboardLogger:
         assert "tensorboard_logs" in str(logger._log_path)
         mock_sw.assert_called_once()
 
-    def test_init_custom_dir_and_name(self):
+    def test_init_custom_dir_and_name(self, tmp_path):
+        log_dir = tmp_path / "tb_test"
         mock_sw = MagicMock()
         with patch("agilerl.logger.SummaryWriter", mock_sw):
             from agilerl.logger import TensorboardLogger
 
-            logger = TensorboardLogger(log_dir="/tmp/tb_test", experiment_name="my_exp")
-        assert "my_exp" in str(logger._log_path)
-        assert "/tmp/tb_test" in str(logger._log_path)
+            logger = TensorboardLogger(log_dir=log_dir, experiment_name="my_exp")
+        assert "my_exp" in logger._log_path.name
+        assert logger._log_path.parent.resolve() == log_dir.resolve()
 
     def test_write_scalars_and_histograms(self):
         mock_writer = MagicMock()
