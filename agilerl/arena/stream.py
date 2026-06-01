@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any
+
+from typing_extensions import Self
 
 from agilerl.arena.exceptions import _sanitize_detail
 

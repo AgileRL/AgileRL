@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Any, Literal, Self, TypeVar
+from typing import Any, Literal, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -8,6 +8,7 @@ from pydantic import (
     field_serializer,
     model_validator,
 )
+from typing_extensions import Self
 
 from agilerl import HAS_LLM_DEPENDENCIES
 

@@ -50,6 +50,7 @@ def mock_client() -> MagicMock:
             "preview_experiment_metrics_csv",
             "deploy_agent",
             "list_inference_deployments",
+            "ensure_inference_binding",
             "open_inference_agent",
             "list_projects",
             "create_project",
@@ -428,11 +429,14 @@ class TestEnvDeleteCommand:
         )
 
     def test_delete_aborted(self, runner, mock_client):
+        mock_client.delete_environment.return_value = None
         with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["env", "delete", "my-env"], input="n\n")
+            result = runner.invoke(main, ["env", "delete", "my-env"])
         assert result.exit_code == 0
-        assert "Aborted" in result.output
-        mock_client.delete_environment.assert_not_called()
+        assert "deleted successfully" not in result.output
+        mock_client.delete_environment.assert_called_once_with(
+            name="my-env", version=None, confirm=False
+        )
 
     def test_delete_with_version(self, runner, mock_client):
         mock_client.delete_environment.return_value = None
@@ -442,7 +446,7 @@ class TestEnvDeleteCommand:
             )
         assert result.exit_code == 0
         mock_client.delete_environment.assert_called_once_with(
-            name="my-env", version="v2"
+            name="my-env", version="v2", confirm=True
         )
 
     def test_delete_non_empty_result(self, runner, mock_client):
@@ -459,7 +463,7 @@ class TestEnvDuplicateCommand:
             result = runner.invoke(main, ["env", "duplicate", "my-env", "v2-copy"])
         assert result.exit_code == 0
         mock_client.duplicate_environment_version.assert_called_once_with(
-            name="my-env", new_version_name="v2-copy", version=None
+            name="my-env", new_version="v2-copy", version=None
         )
 
     def test_duplicate_with_version(self, runner, mock_client):
@@ -471,7 +475,7 @@ class TestEnvDuplicateCommand:
             )
         assert result.exit_code == 0
         mock_client.duplicate_environment_version.assert_called_once_with(
-            name="my-env", new_version_name="v2-copy", version="v1"
+            name="my-env", new_version="v2-copy", version="v1"
         )
 
 
@@ -539,6 +543,13 @@ class TestExperimentListCommand:
         mock_client.list_experiments.assert_called_once_with(project="proj1")
 
     def test_list_missing_project(self, runner, mock_client):
+        from agilerl.arena.exceptions import ArenaConfigError
+
+        mock_client.list_experiments.side_effect = ArenaConfigError(
+            "No project specified.",
+            sdk_hint="Pass a project name or set a default.",
+            cli_hint="Use --project or set a default with 'arena projects set-default <name>'.",
+        )
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["experiments", "list"])
         assert result.exit_code != 0

@@ -367,7 +367,7 @@ class TestMetricsReport:
         assert "Agent 0" in text
         assert "Agent 1" in text
         assert "Mean" in text
-        assert "mutations" in text
+        assert "last_mutation" in text
         assert "steps/s" in text
 
     def test_render_nested_metrics(self):

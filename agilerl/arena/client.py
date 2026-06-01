@@ -9,9 +9,10 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Literal, Self
+from typing import Any, ClassVar, Literal
 
 import httpx
+from typing_extensions import Self
 
 from agilerl.arena.auth import (
     ArenaOAuth2,
@@ -573,11 +574,12 @@ class ArenaClient:
                 version,
             )
 
-        confirm_prompt = input("Do you wish to continue? [y/N]: ").strip().lower()
-        confirm = (confirm_prompt in ("y", "yes")) or confirm
         if not confirm:
-            logger.info("No environment was deleted for %s.", name)
-            return None
+            confirm_prompt = input("Do you wish to continue? [y/N]: ").strip().lower()
+            if confirm_prompt not in ("y", "yes"):
+                logger.info("No environment was deleted for %s.", name)
+                return None
+
         payload = {"name": name, "version": version}
         return self._request("DELETE", "/api/cli/v1/environments/delete", json=payload)
 

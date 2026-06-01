@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, model_validator
+from typing_extensions import Self
 
 from agilerl.models.algo import RLAlgorithmSpec, off_policy, register
 from agilerl.models.networks import RainbowQNetworkSpec

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import functools
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, get_args
+from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args
 
 import yaml
 from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer, model_validator
+from typing_extensions import Self
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.models.algo import (
@@ -117,6 +118,9 @@ def _resolve_network(data: Any) -> dict[str, Any]:
         if isinstance(data, NetworkSpec):
             data_dict["encoder_config"]["arch"] = data.encoder_config.arch
         return data_dict
+
+    if isinstance(data, dict) and "pretrained_model_name_or_path" in data:
+        return FinetuningNetworkSpec.model_validate(data).model_dump(mode="json")
 
     normalized = normalize_manifest_network(data)
     spec = NetworkSpec.model_validate(normalized)

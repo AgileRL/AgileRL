@@ -55,6 +55,22 @@ _FLAT = [((6,), 2)]
 _IMG = [((250, 160, 3), 2)]
 _IMG_SQUARE = [((3, 64, 64), 2)]
 
+_WANDB_SUMMARY_KEYS = (
+    "train/global_step",
+    "train/steps_per_second",
+    "train/mean_score",
+    "eval/mean_fitness",
+    "eval/best_fitness",
+)
+
+
+def _assert_wandb_summary_log(mock_wandb_log: MagicMock) -> None:
+    """Assert final wandb.log includes population summary keys (may include per-agent keys)."""
+    mock_wandb_log.assert_called()
+    logged = mock_wandb_log.call_args[0][0]
+    for key in _WANDB_SUMMARY_KEYS:
+        assert key in logged
+
 
 class DummyEnv:
     def __init__(self, state_size, action_size, vect=True, num_envs=2):
@@ -1862,15 +1878,7 @@ class TestTrainOffPolicy:
                 config=ANY,
             )
             # Assert that wandb.log was called with expected log parameters
-            mock_wandb_log.assert_called_with(
-                {
-                    "train/global_step": ANY,
-                    "train/steps_per_second": ANY,
-                    "train/mean_score": ANY,
-                    "eval/mean_fitness": ANY,
-                    "eval/best_fitness": ANY,
-                },
-            )
+            _assert_wandb_summary_log(mock_wandb_log)
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
@@ -1936,15 +1944,7 @@ class TestTrainOffPolicy:
                 config=ANY,
             )
             # Assert that wandb.log was called with expected log parameters
-            mock_wandb_log.assert_called_with(
-                {
-                    "train/global_step": ANY,
-                    "train/steps_per_second": ANY,
-                    "train/mean_score": ANY,
-                    "eval/mean_fitness": ANY,
-                    "eval/best_fitness": ANY,
-                },
-            )
+            _assert_wandb_summary_log(mock_wandb_log)
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
@@ -4836,15 +4836,7 @@ class TestTrainBandits:
                 config=ANY,
             )
             # Assert that wandb.log was called with expected log parameters
-            mock_wandb_log.assert_called_with(
-                {
-                    "train/global_step": ANY,
-                    "train/steps_per_second": ANY,
-                    "train/mean_score": ANY,
-                    "eval/mean_fitness": ANY,
-                    "eval/best_fitness": ANY,
-                },
-            )
+            _assert_wandb_summary_log(mock_wandb_log)
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
@@ -4912,15 +4904,7 @@ class TestTrainBandits:
                 config=ANY,
             )
             # Assert that wandb.log was called with expected log parameters
-            mock_wandb_log.assert_called_with(
-                {
-                    "train/global_step": ANY,
-                    "train/steps_per_second": ANY,
-                    "train/mean_score": ANY,
-                    "eval/mean_fitness": ANY,
-                    "eval/best_fitness": ANY,
-                },
-            )
+            _assert_wandb_summary_log(mock_wandb_log)
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
+from typing_extensions import Self
 
 if TYPE_CHECKING:
     import numpy as np

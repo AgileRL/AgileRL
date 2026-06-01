@@ -6,11 +6,12 @@ import json
 import logging
 from dataclasses import dataclass
 from functools import singledispatch
-from typing import Any, Self
+from typing import Any
 
 import click
 from rich.live import Live
 from rich.table import Table
+from typing_extensions import Self
 
 from agilerl.arena import console, error_console
 from agilerl.arena.exceptions import ArenaAPIError, ArenaError, resolve_api_error_class
