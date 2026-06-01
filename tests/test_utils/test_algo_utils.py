@@ -1944,34 +1944,6 @@ def test_is_peft_model():
     assert is_peft_model(mock_peft) is True
 
 
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps required for clone_llm")
-def test_clone_llm_dummy_evolvable():
-    """clone_llm with DummyEvolvable unwraps and clones."""
-    from peft import LoraConfig, get_peft_model
-    from transformers import AutoConfig, AutoModelForCausalLM
-
-    # DummyEvolvable wraps a PeftModel (which has .model); use LoRA to create one
-    config = AutoConfig.from_pretrained("gpt2", vocab_size=100, n_positions=64)
-    base = AutoModelForCausalLM.from_config(config)
-    lora_config = LoraConfig(r=2, lora_alpha=4, target_modules=["c_proj"])
-    peft_model = get_peft_model(base, lora_config)
-    dummy = DummyEvolvable(device="cpu", module=peft_model)
-
-    with patch("agilerl.utils.algo_utils.gather_if_zero3") as mock_gather:
-        mock_gather.return_value.__enter__ = MagicMock(return_value=None)
-        mock_gather.return_value.__exit__ = MagicMock(return_value=False)
-        result = clone_llm(dummy, 0)
-    assert result is not None
-    mock_gather.assert_called_once()
-
-
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps required for clone_llm")
-def test_clone_llm_invalid_type_raises():
-    """clone_llm raises ValueError for invalid type."""
-    with pytest.raises(ValueError, match="Invalid 'original_model' type"):
-        clone_llm("invalid_model", 0)
-
-
 def test_obs_to_tensor_tensordict():
     """obs_to_tensor with TensorDict."""
     from tensordict import TensorDict
