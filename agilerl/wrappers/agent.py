@@ -8,7 +8,7 @@ import dill
 import numpy as np
 import torch
 from gymnasium import spaces
-from tensordict import is_tensor_collection
+from tensordict import TensorDictBase
 
 from agilerl.algorithms import PPO
 from agilerl.algorithms.core import (
@@ -236,9 +236,9 @@ class RSNorm(AgentWrapper[AgentType]):
 
     .. warning::
         This wrapper is currently only supported for off-policy algorithms since it relies on
-        passed experiences to be formatted as a tuple of PyTorch tensors. Currently
-        AgileRL does not use a Buffer class to store experiences for on-policy algorithms, albeit this
-        will be released in a soon-to-come update!
+        experiences passed as a :class:`tensordict.TensorDict` (as produced by the replay
+        buffer). For on-policy PPO, experiences may be omitted so the wrapper normalizes
+        observations stored in the rollout buffer before learning.
 
     :param agent: Agent to be wrapped
     :type agent: RLAlgorithm, MultiAgentRLAlgorithm
@@ -291,16 +291,17 @@ class RSNorm(AgentWrapper[AgentType]):
         :rtype: RunningMeanStd | dict[str, RunningMeanStd] | tuple[RunningMeanStd, ...]
         """
         if isinstance(observation_space, spaces.Dict):
+            spaces_map = observation_space.spaces
             if norm_obs_keys is not None:
-                observation_space = {
+                spaces_map = {
                     key: value
-                    for key, value in observation_space.spaces.items()
+                    for key, value in spaces_map.items()
                     if key in norm_obs_keys
                 }
 
             return {
                 key: RunningMeanStd(epsilon, shape=value.shape, device=device)
-                for key, value in observation_space.spaces.items()
+                for key, value in spaces_map.items()
             }
 
         if isinstance(observation_space, spaces.Tuple):
@@ -311,33 +312,41 @@ class RSNorm(AgentWrapper[AgentType]):
 
         return RunningMeanStd(epsilon, shape=observation_space.shape, device=device)
 
-    def _normalize_observation(self, observation: ObservationType) -> ObservationType:
+    def _normalize_observation(
+        self,
+        observation: ObservationType,
+        *,
+        obs_rms: RunningStatsType | None = None,
+    ) -> ObservationType:
         """Normalize the observation using the RunningMeanStd object(s).
 
         :param observation: Observation from the environment
         :type observation: ObservationType
+        :param obs_rms: Optional running-statistics object(s) to use instead of
+            ``self.obs_rms`` (required for per-agent stats in multi-agent mode).
 
         :return: Normalized observation
         :rtype: ObservationType
         """
-        if isinstance(self.obs_rms, dict):
+        obs_rms = self.obs_rms if obs_rms is None else obs_rms
+        if isinstance(obs_rms, dict):
             norm_observation = {}
-            for key, rms in self.obs_rms.items():
+            for key, rms in obs_rms.items():
                 norm_observation[key] = (observation[key] - rms.mean) / (
                     rms.var + rms.epsilon
                 ).sqrt()
 
             observation = norm_observation
-        elif isinstance(self.obs_rms, tuple):
+        elif isinstance(obs_rms, tuple):
             norm_observation = []
-            for i, rms in enumerate(self.obs_rms):
+            for i, rms in enumerate(obs_rms):
                 norm_obs = (observation[i] - rms.mean) / (rms.var + rms.epsilon).sqrt()
                 norm_observation.append(norm_obs)
 
             observation = tuple(norm_observation)
         else:
-            observation = (observation - self.obs_rms.mean) / (
-                self.obs_rms.var + self.obs_rms.epsilon
+            observation = (observation - obs_rms.mean) / (
+                obs_rms.var + obs_rms.epsilon
             ).sqrt()
 
         return observation
@@ -353,25 +362,36 @@ class RSNorm(AgentWrapper[AgentType]):
         """
         if self.multi_agent:
             for agent_id, obs in observation.items():
-                observation[agent_id] = self._normalize_observation(obs)
+                agent_rms = self.obs_rms[agent_id]
+                observation[agent_id] = self._normalize_observation(
+                    obs, obs_rms=agent_rms
+                )
             return observation
 
         return self._normalize_observation(observation)
 
-    def _update_statistics(self, observation: ObservationType) -> None:
+    def _update_statistics(
+        self,
+        observation: ObservationType,
+        *,
+        obs_rms: RunningStatsType | None = None,
+    ) -> None:
         """Update the running statistics using the observation.
 
         :param observation: Observation from the environment
         :type observation: ObservationType
+        :param obs_rms: Optional running-statistics object(s) to use instead of
+            ``self.obs_rms`` (required for per-agent stats in multi-agent mode).
         """
-        if isinstance(self.obs_rms, dict):
-            for key, rms in self.obs_rms.items():
+        obs_rms = self.obs_rms if obs_rms is None else obs_rms
+        if isinstance(obs_rms, dict):
+            for key, rms in obs_rms.items():
                 rms.update(observation[key])
-        elif isinstance(self.obs_rms, tuple):
-            for i, rms in enumerate(self.obs_rms):
+        elif isinstance(obs_rms, tuple):
+            for i, rms in enumerate(obs_rms):
                 rms.update(observation[i])
         else:
-            self.obs_rms.update(observation)
+            obs_rms.update(observation)
 
     def update_statistics(self, observation: ObservationType) -> None:
         """Update the running statistics using the observation.
@@ -380,8 +400,8 @@ class RSNorm(AgentWrapper[AgentType]):
         :type observation: ObservationType
         """
         if self.multi_agent:
-            for obs in observation.values():
-                self._update_statistics(obs)
+            for agent_id, obs in observation.items():
+                self._update_statistics(obs, obs_rms=self.obs_rms[agent_id])
         else:
             self._update_statistics(observation)
 
@@ -405,14 +425,14 @@ class RSNorm(AgentWrapper[AgentType]):
 
     def learn(
         self,
-        experiences: ExperiencesType | None = None,
+        experiences: TensorDictBase | None = None,
         *args: Any,
         **kwargs: Any,
     ) -> Any:
         """Learns from the experiences after normalizing the observations.
 
         :param experiences: Experiences from the environment
-        :type experiences: ExperiencesType
+        :type experiences: TensorDictBase
         :param args: Additional positional arguments
         :type args: Any
         :param kwargs: Additional keyword arguments
@@ -444,21 +464,13 @@ class RSNorm(AgentWrapper[AgentType]):
 
             return self.wrapped_learn(*args, **kwargs)
 
-        # NOTE: We want to move towards always passing experiences as TensorDict objects
-        if is_tensor_collection(experiences):
-            experiences["obs"] = self.normalize_observation(experiences["obs"])
-            experiences["next_obs"] = self.normalize_observation(
-                experiences["next_obs"],
-            )
-        else:
-            experiences = (
-                self.normalize_observation(experiences[0]),  # Observations
-                experiences[1],  # Actions
-                experiences[2],  # Rewards
-                self.normalize_observation(experiences[3]),  # Next observations
-                *experiences[4:],  # Dones, values, next_done
-            )
+        # NOTE: All AgileRL off-policy algorithms now expect experiences to be a TensorDict.
+        if not isinstance(experiences, TensorDictBase):
+            msg = "Experiences must be a TensorDict."
+            raise ValueError(msg)
 
+        experiences["obs"] = self.normalize_observation(experiences["obs"])
+        experiences["next_obs"] = self.normalize_observation(experiences["next_obs"])
         return self.wrapped_learn(experiences, *args, **kwargs)
 
 

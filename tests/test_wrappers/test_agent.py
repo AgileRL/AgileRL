@@ -302,10 +302,11 @@ class TestRSNormNormalizeObservation:
 
     def test_normalize_observation_multi_agent(self, setup_rs_norm_multi_agent):
         wrapper, _ = setup_rs_norm_multi_agent
-        obs = {
+        raw_obs = {
             "agent_1": torch.tensor([1.0, 2.0, 3.0]),
             "other_agent_1": torch.tensor([1.0, 2.0]),
         }
+        obs = {agent_id: tensor.clone() for agent_id, tensor in raw_obs.items()}
         wrapper.obs_rms["agent_1"].mean = torch.tensor([1.0, 1.0, 1.0])
         wrapper.obs_rms["agent_1"].var = torch.tensor([1.0, 1.0, 1.0])
         wrapper.obs_rms["agent_1"].epsilon = 1e-4
@@ -313,20 +314,20 @@ class TestRSNormNormalizeObservation:
         wrapper.obs_rms["other_agent_1"].var = torch.tensor([1.0, 1.0])
         wrapper.obs_rms["other_agent_1"].epsilon = 1e-4
 
-        normalized_obs = wrapper._normalize_observation(obs)
         expected_obs = {
-            "agent_1": (obs["agent_1"] - wrapper.obs_rms["agent_1"].mean)
+            "agent_1": (raw_obs["agent_1"] - wrapper.obs_rms["agent_1"].mean)
             / torch.sqrt(
                 wrapper.obs_rms["agent_1"].var + wrapper.obs_rms["agent_1"].epsilon,
             ),
             "other_agent_1": (
-                obs["other_agent_1"] - wrapper.obs_rms["other_agent_1"].mean
+                raw_obs["other_agent_1"] - wrapper.obs_rms["other_agent_1"].mean
             )
             / torch.sqrt(
                 wrapper.obs_rms["other_agent_1"].var
                 + wrapper.obs_rms["other_agent_1"].epsilon,
             ),
         }
+        normalized_obs = wrapper.normalize_observation(obs)
         assert torch.allclose(
             normalized_obs["agent_1"], expected_obs["agent_1"], atol=1e-2
         )
@@ -434,16 +435,17 @@ class TestRSNormGetAction:
 
 
 class TestRSNormLearn:
-    def test_learn(self, setup_rs_norm):
-        wrapper, mock_agent = setup_rs_norm
+    def test_learn_rejects_non_tensordict(self, setup_rs_norm):
+        wrapper, _ = setup_rs_norm
         experiences = (
-            torch.tensor([1.0, 2.0, 3.0]),  # State
-            torch.tensor([0]),  # Action
-            torch.tensor([1.0]),  # Reward
-            torch.tensor([4.0, 5.0, 6.0]),  # Next state
-            torch.tensor([0]),  # Done
+            torch.tensor([1.0, 2.0, 3.0]),
+            torch.tensor([0]),
+            torch.tensor([1.0]),
+            torch.tensor([4.0, 5.0, 6.0]),
+            torch.tensor([0]),
         )
-        wrapper.learn(experiences)
+        with pytest.raises(ValueError, match="TensorDict"):
+            wrapper.learn(experiences)
 
     @pytest.mark.parametrize(
         "observation_space",
