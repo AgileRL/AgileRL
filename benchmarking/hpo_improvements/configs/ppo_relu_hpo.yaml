@@ -1,18 +1,14 @@
 ---
-# PPO with NO HPO (single agent, never mutated).
+# PPO with HPO (population of 4, elitism, typical mutation probabilities).
 #
-# Hyperparameters from "ReLU to the Rescue: Improve Your On-Policy Actor-Critic
+# Base hyperparameters from "ReLU to the Rescue: Improve Your On-Policy Actor-Critic
 # with Positive Advantages" (Jesson et al., 2024), Table 3, Appendix D.1 -- the
 # PPO column for Gymnasium MuJoCo (CleanRL implementation).
 #
-# Mapping notes (paper -> AgileRL):
-#   num. envs = 1, num. steps = 2048  -> learn_step = 2048 (1 env x 2048 steps)
-#   num. minibatch = 32 over a 2048-step rollout -> batch_size = 2048/32 = 64
-#   width 64 / tanh / 2 hidden layers -> latent_dim 64, encoder [64], head [64]
-#   norm. adv. / norm. obs. / norm. reward / orthogonal init / lr annealing are
-#     handled internally by AgileRL's PPO and are not separate YAML knobs.
-#   The environment `name` here is a placeholder; the benchmark script overrides
-#   it per selected environment.
+# HPO additions over ppo_relu_no_hpo.yaml:
+#   pop_size = 4, elitism = true, tournament_size = 2
+#   mutation probabilities follow common AgileRL MLP/MuJoCo practice
+#   rl_hp_selection ranges are centred on the paper's base values
 
 algorithm:
     name: PPO
@@ -33,6 +29,33 @@ algorithm:
 environment:
     name: Ant-v5
     num_envs: 16
+
+mutation:
+    probabilities:
+        no_mut: 0.4
+        arch_mut: 0.2
+        new_layer: 0.2
+        params_mut: 0.2
+        act_mut: 0.0
+        rl_hp_mut: 0.2
+    rl_hp_selection:
+        lr:
+            min: 0.00005
+            max: 0.001
+        batch_size:
+            min: 64
+            max: 2048
+        learn_step:
+            min: 4096
+            max: 65536
+        ent_coef:
+            min: 0.0
+            max: 0.05
+        update_epochs:
+            min: 4
+            max: 20
+    mutation_sd: 0.1
+    rand_seed: 42
 
 network:
     latent_dim: 64
@@ -56,14 +79,14 @@ network:
         output_vanish: true
         layer_norm: false
 
-# No `mutation` or `tournament_selection` blocks => no HPO: a single agent is
-# trained and never mutated or selected. Adding those blocks (with pop_size > 1)
-# switches this same script into an HPO regime.
+tournament_selection:
+    tournament_size: 2
+    elitism: true
 
 training:
     max_steps: 3_000_000
     target_score:
-    pop_size: 1
-    evo_steps: 32768
+    pop_size: 4
+    evo_steps: 131072
     eval_steps:
     eval_loop: 1
