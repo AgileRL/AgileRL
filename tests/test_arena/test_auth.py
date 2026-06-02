@@ -16,6 +16,7 @@ from agilerl.arena.auth import (
     ArenaOAuth2,
     is_oauth_access_token_valid,
     load_credentials,
+    load_credentials_payload,
     oauth_access_token_expires_at,
 )
 from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
@@ -73,13 +74,17 @@ class TestLoadCredentials:
 # JWT helpers (OAuth access tokens from Keycloak)
 # ---------------------------------------------------------------------------
 def _jwt_with_exp(exp: int) -> str:
+    return _jwt_payload({"exp": exp})
+
+
+def _jwt_payload(payload: dict) -> str:
     import base64
 
     def seg(obj: dict) -> str:
         raw = json.dumps(obj, separators=(",", ":")).encode()
         return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
-    return f"{seg({'alg': 'none'})}.{seg({'exp': exp})}.x"
+    return f"{seg({'alg': 'none'})}.{seg(payload)}.x"
 
 
 class TestOAuthAccessTokenJwt:
@@ -96,6 +101,28 @@ class TestOAuthAccessTokenJwt:
     def test_is_valid_false_after_exp_skew(self):
         with patch("agilerl.arena.auth.time.time", return_value=2000.0):
             assert not is_oauth_access_token_valid(_jwt_with_exp(1000))
+
+    def test_expires_at_none_for_jwt_without_exp(self):
+        assert oauth_access_token_expires_at(_jwt_payload({})) is None
+
+    def test_expires_at_none_for_malformed_jwt(self):
+        assert oauth_access_token_expires_at("a.b") is None
+
+
+class TestLoadCredentialsPayload:
+    def test_returns_empty_when_missing(self, tmp_path):
+        assert load_credentials_payload(tmp_path / "missing.json") == {}
+
+    def test_returns_empty_for_invalid_json(self, tmp_path):
+        path = tmp_path / "creds.json"
+        path.write_text("{bad", encoding="utf-8")
+        assert load_credentials_payload(path) == {}
+
+    def test_returns_dict_when_valid(self, credentials_file):
+        assert load_credentials_payload(credentials_file) == {
+            "access_token": "at",
+            "refresh_token": "rt",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +272,31 @@ class TestDeviceLogin:
         call_kw = mock_kc.token.call_args.kwargs
         assert call_kw["grant_type"] == ("urn:ietf:params:oauth:grant-type:device_code")
         assert call_kw["device_code"] == "dc123"
+
+    @patch("agilerl.arena.auth.webbrowser")
+    @patch("agilerl.arena.auth.time")
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_webbrowser_open_failure_logs_warning(
+        self, mock_kc_cls, mock_time, mock_wb
+    ):
+        mock_kc = mock_kc_cls.return_value
+        mock_kc.device.return_value = {
+            "device_code": "dc",
+            "verification_uri_complete": "https://example.com",
+            "interval": 1,
+        }
+        mock_kc.token.return_value = {"access_token": "at"}
+        mock_time.monotonic.side_effect = [0, 1]
+        mock_wb.open.return_value = False
+
+        with (
+            patch.object(ArenaOAuth2, "_write_credentials"),
+            patch("agilerl.arena.auth.logger") as mock_logger,
+        ):
+            ArenaOAuth2().device_login(timeout=30)
+
+        mock_logger.warning.assert_called_once()
+        assert "Could not open browser" in mock_logger.warning.call_args[0][0]
 
     @patch("agilerl.arena.auth.webbrowser")
     @patch("agilerl.arena.auth.time")
@@ -417,6 +469,21 @@ class TestRevoke:
 
             mock_kc.logout.assert_called_once_with("rt123")
             assert not cred_file.exists()
+        finally:
+            ArenaOAuth2.CREDENTIALS_FILE = orig_file
+
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_unlink_oserror_is_silent(self, mock_kc_cls, tmp_path):
+        mock_kc = mock_kc_cls.return_value
+        cred_file = tmp_path / "creds.json"
+        cred_file.write_text("{}", encoding="utf-8")
+
+        orig_file = ArenaOAuth2.CREDENTIALS_FILE
+        try:
+            ArenaOAuth2.CREDENTIALS_FILE = cred_file
+            with patch.object(Path, "unlink", side_effect=OSError("permission denied")):
+                ArenaOAuth2().revoke("rt")
+            mock_kc.logout.assert_called_once()
         finally:
             ArenaOAuth2.CREDENTIALS_FILE = orig_file
 

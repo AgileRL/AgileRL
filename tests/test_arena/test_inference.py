@@ -798,6 +798,104 @@ class TestSaveBinding:
         assert entry["api_key"] == "key1"
 
 
+class TestAgentHttpHelpers:
+    def test_url_returns_absolute_path_unchanged(self):
+        agent = Agent.__new__(Agent)
+        agent._base_url = "http://test"
+        assert agent._url("https://other.example/v1") == "https://other.example/v1"
+
+    def test_request_json_rejects_non_dict_body(self):
+        agent = Agent.__new__(Agent)
+        agent._base_url = "http://test"
+        agent._http = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = ["not", "a", "dict"]
+        agent._http.request.return_value = mock_resp
+        with pytest.raises(ArenaInferenceError, match="JSON object"):
+            agent._request_json("GET", "/status")
+
+    def test_request_json_rejects_success_false(self):
+        agent = Agent.__new__(Agent)
+        agent._base_url = "http://test"
+        agent._http = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"success": False, "detail": "nope"}
+        mock_resp.text = "nope"
+        agent._http.request.return_value = mock_resp
+        with pytest.raises(ArenaInferenceError):
+            agent._request_json("POST", "/predict", json_body={})
+
+    def test_request_stream_wraps_httpx_error(self):
+        agent = Agent.__new__(Agent)
+        agent._base_url = "http://test"
+        agent._http = MagicMock()
+        agent._http.stream.side_effect = httpx.ConnectError("refused")
+        with pytest.raises(ArenaInferenceError, match="Network error"):
+            list(agent._request_stream("/generate_stream", json_body={"prompt": "hi"}))
+
+    def test_ensure_rejects_wrong_modality(self):
+        agent = Agent.__new__(Agent)
+        agent.metadata = _default_metadata(llm=True, algo="GRPO")
+        with pytest.raises(ArenaInferenceError, match="not RL"):
+            agent._ensure(rl=True)
+
+    def test_validate_prompts_rejects_empty_list(self):
+        with pytest.raises(ArenaInferenceError, match="At least one prompt"):
+            Agent._validate_prompts([])
+
+    def test_multi_agent_get_action_rejects_non_dict_observation(self):
+        agent = Agent.__new__(Agent)
+        agent.metadata = _default_metadata(multi_agent=True)
+        with pytest.raises(ArenaInferenceError, match="dict\\[agent_id"):
+            agent._build_payload(
+                np.array([1.0]),
+                batched=False,
+                hidden_state=None,
+                info=None,
+                env_defined_actions=None,
+            )
+
+    def test_parse_get_action_rejects_non_dict_multi_agent_action(self):
+        with pytest.raises(ArenaInferenceError, match="multi-agent action dict"):
+            Agent._parse_get_action_response(
+                {"action": Agent.serialize(np.array([1.0]), batched=False)},
+                batched=False,
+                multi_agent=True,
+                recurrent=False,
+            )
+
+
+class TestInferenceCacheOnDisk:
+    def test_load_store_corrupt_json_returns_empty(self, monkeypatch, tmp_path):
+        inference_file = tmp_path / "inference.json"
+        inference_file.write_text("{not json", encoding="utf-8")
+        monkeypatch.setattr(
+            "agilerl.arena.inference.cache.INFERENCE_FILE", inference_file
+        )
+        assert load_binding("dep") is None
+
+    def test_load_active_agent_empty_deployment_name(self, monkeypatch, tmp_path):
+        inference_file = tmp_path / "inference.json"
+        inference_file.write_text(
+            json.dumps({"active_agent": {"deployment": "  "}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "agilerl.arena.inference.cache.INFERENCE_FILE", inference_file
+        )
+        assert load_active_agent() is None
+
+    def test_save_binding_round_trip(self, monkeypatch, tmp_path):
+        inference_file = tmp_path / ".arena" / "inference.json"
+        monkeypatch.setattr(
+            "agilerl.arena.inference.cache.INFERENCE_FILE", inference_file
+        )
+        save_binding("dep-a", "http://x", "key")
+        assert load_binding("dep-a") == ("http://x", "key")
+
+
 class TestNormalizedDeploymentName:
     def test_strips_whitespace(self):
         assert normalized_deployment_name("  my-dep  ") == "my-dep"

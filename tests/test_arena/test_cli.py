@@ -55,6 +55,8 @@ def mock_client() -> MagicMock:
             "list_projects",
             "create_project",
             "delete_project",
+            "set_default_project",
+            "get_default_project",
         ]
     )
 
@@ -877,6 +879,29 @@ class TestProjectsDeleteCommand:
         assert result.exit_code == 0
         assert "Aborted" in result.output
         mock_client.delete_project.assert_not_called()
+
+
+class TestProjectsDefaultCommand:
+    def test_set_default(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["projects", "set-default", "my-proj"])
+        assert result.exit_code == 0
+        mock_client.set_default_project.assert_called_once_with("my-proj")
+        assert "my-proj" in result.output
+
+    def test_get_default_when_set(self, runner, mock_client):
+        mock_client.get_default_project.return_value = "my-proj"
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["projects", "get-default"])
+        assert result.exit_code == 0
+        assert result.output.strip() == "my-proj"
+
+    def test_get_default_when_unset(self, runner, mock_client):
+        mock_client.get_default_project.return_value = None
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["projects", "get-default"])
+        assert result.exit_code == 0
+        assert "No default project set" in result.output
 
 
 class TestRedactAgentRows:
