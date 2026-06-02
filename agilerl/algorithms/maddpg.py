@@ -43,6 +43,17 @@ from agilerl.utils.algo_utils import (
 SupportedActionSpace = spaces.Discrete | spaces.Box
 
 
+def _masked_mean(loss: torch.Tensor, active_mask: torch.Tensor | None) -> torch.Tensor:
+    """Mean over batch elements where ``active_mask`` is 1 (async ghost steps excluded)."""
+    if active_mask is None:
+        return loss.mean()
+    weight = active_mask.float()
+    while weight.ndim < loss.ndim:
+        weight = weight.unsqueeze(-1)
+    weight = weight.expand_as(loss)
+    return (loss * weight).sum() / weight.sum().clamp(min=1.0)
+
+
 class MADDPG(MultiAgentRLAlgorithm):
     """Multi-Agent Deep Deterministic Policy Gradient (MADDPG).
 
@@ -660,6 +671,12 @@ class MADDPG(MultiAgentRLAlgorithm):
         rewards = experiences["reward"]
         next_states = experiences["next_obs"]
         dones = experiences["done"]
+        active_masks = experiences.get("active_mask", None)
+        if active_masks is not None:
+            active_masks = {
+                agent_id: mask.to(self.device)
+                for agent_id, mask in active_masks.items()
+            }
 
         actions = {
             agent_id: agent_actions.to(self.device)
@@ -704,6 +721,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                 actions,
                 rewards,
                 dones,
+                active_masks[agent_id] if active_masks is not None else None,
             )
             if self.has_grouped_agents():
                 grouped_losses[self.get_group_id(agent_id)].append(losses)
@@ -735,6 +753,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         actions: StandardTensorDict,
         rewards: StandardTensorDict,
         dones: StandardTensorDict,
+        active_mask: torch.Tensor | None = None,
     ) -> tuple[float, float]:
         """Inner call to each agent for the learning/algo training steps, up until the soft updates.
         Applies all forward/backward props.
@@ -826,10 +845,11 @@ class MADDPG(MultiAgentRLAlgorithm):
             dim=1,
         )
         if self.accelerator is not None:
-            with critic.no_sync():
-                actor_loss = -critic(states, stacked_detached_actions).mean()
+            with actor.no_sync():
+                actor_q = -critic(states, stacked_detached_actions)
         else:
-            actor_loss = -critic(states, stacked_detached_actions).mean()
+            actor_q = -critic(states, stacked_detached_actions)
+        actor_loss = _masked_mean(actor_q, active_mask)
 
         # actor loss backprop
         actor_optimizer.zero_grad()

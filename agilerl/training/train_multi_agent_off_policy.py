@@ -23,12 +23,31 @@ from agilerl.utils.utils import (
 )
 from agilerl.vector import PzDummyVecEnv
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+from agilerl.wrappers.agent import AsyncAgentsWrapper
+
+
+def _off_policy_get_action(
+    agent: MADDPG | MATD3 | AsyncAgentsWrapper,
+    obs: dict,
+    infos: dict,
+) -> tuple[dict, dict, dict | None, dict | None]:
+    """Unpack get_action for plain vs async-wrapped off-policy agents."""
+    result = agent.get_action(obs=obs, infos=infos)
+    if isinstance(agent, AsyncAgentsWrapper) and agent.agent.algo in {
+        "MADDPG",
+        "MATD3",
+    }:
+        env_action, raw_action, active_mask, joint_obs = result
+        return env_action, raw_action, active_mask, joint_obs
+    env_action, raw_action = result
+    return env_action, raw_action, None, None
+
 
 if TYPE_CHECKING:
     from tensordict import TensorDictBase
 
 InitDictType = dict[str, Any] | None
-PopulationType = list[MADDPG | MATD3]
+PopulationType = list[MADDPG | MATD3 | AsyncAgentsWrapper]
 
 logger = logging.getLogger(__name__)
 
@@ -236,7 +255,12 @@ def train_multi_agent_off_policy(
 
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
-                action, raw_action = agent.get_action(obs=obs, infos=info)
+                action, raw_action, active_mask, joint_obs = _off_policy_get_action(
+                    agent,
+                    obs,
+                    info,
+                )
+                obs_for_buffer = joint_obs if joint_obs is not None else obs
 
                 # Act in environment
                 next_obs, reward, termination, truncation, info = env.step(action)
@@ -255,13 +279,27 @@ def train_multi_agent_off_policy(
                 scores += score_increment
                 steps += num_envs
 
+                # Async wrapper: joint next_obs via ZOH caches (same path as get_action).
+                if isinstance(agent, AsyncAgentsWrapper) and agent.agent.algo in {
+                    "MADDPG",
+                    "MATD3",
+                }:
+                    _, _, _, next_obs_for_buffer = _off_policy_get_action(
+                        agent,
+                        next_obs,
+                        info,
+                    )
+                else:
+                    next_obs_for_buffer = next_obs
+
                 # Make a tensorclass out of the transition for easy adding to the replay buffer
                 transition: TensorDictBase = MultiAgentTransition(
-                    obs=obs,
+                    obs=obs_for_buffer,
                     action=raw_action,
                     reward=reward,
-                    next_obs=next_obs,
+                    next_obs=next_obs_for_buffer,
                     done=termination,
+                    active_mask=active_mask,
                 )
                 transition = transition.to_tensordict()
                 transition.batch_size = [num_envs]

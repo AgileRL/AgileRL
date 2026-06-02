@@ -133,6 +133,7 @@ class MultiAgentTransition:
     reward: dict[str, ArrayOrTensor]
     next_obs: MultiAgentObservationType
     done: dict[str, ArrayOrTensor]
+    active_mask: dict[str, ArrayOrTensor] | None = None
 
     def __post_init__(self) -> None:
         self.obs = _to_agent_td(self.obs)
@@ -140,6 +141,8 @@ class MultiAgentTransition:
         self.action = _to_agent_td(self.action)
         self.reward = _to_agent_td(self.reward)
         self.done = _to_agent_td(self.done)
+        if self.active_mask is not None:
+            self.active_mask = _to_agent_td(self.active_mask)
 
 
 class ReplayDataset(IterableDataset):
