@@ -40,10 +40,9 @@ if str(SCRIPT_DIR) not in sys.path:
 import gymnasium as gym  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+import plotting  # noqa: E402
 import torch  # noqa: E402
 import yaml  # noqa: E402
-
-import plotting  # noqa: E402
 from registry import (  # noqa: E402
     allowed_envs,
     normalization_scores,
@@ -95,8 +94,7 @@ def _make_envpool_env(env_id: str, num_envs: int, seed: int) -> Any:
     env = make_fn(env_id, num_envs=num_envs, seed=seed)
     # MuJoCo v5 observations are already flat; FlattenObservation is a no-op
     # but keeps the interface consistent with any future non-flat envs.
-    env = gym.wrappers.vector.FlattenObservation(env)
-    return env
+    return gym.wrappers.vector.FlattenObservation(env)
 
 
 class _EnvPoolLocalTrainer(LocalTrainer):
@@ -120,7 +118,7 @@ class _EnvPoolLocalTrainer(LocalTrainer):
         vector_env: Any,
         *,
         device: str | torch.device = "cpu",
-    ) -> "_EnvPoolLocalTrainer":
+    ) -> _EnvPoolLocalTrainer:
         """Build a trainer from a manifest dict and a pre-built EnvPool env.
 
         :param manifest: YAML manifest dict or validated ``TrainingManifest``.
@@ -301,7 +299,7 @@ def fetch_wandb_history(project: str, run_name: str) -> pd.DataFrame:
     try:
         runs = api.runs(path, filters={"displayName": run_name})
         run = runs[0] if len(runs) else None
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("W&B filter query failed (%s); scanning recent runs.", exc)
 
     if run is None:
@@ -310,7 +308,7 @@ def fetch_wandb_history(project: str, run_name: str) -> pd.DataFrame:
                 (r for r in api.runs(path, order="-created_at") if r.name == run_name),
                 None,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("W&B run scan failed: %s", exc)
 
     if run is None:
@@ -394,7 +392,7 @@ def render_best_agent(
         if frames:
             imageio.mimsave(str(out_path), frames, fps=30)
             logger.info("Saved render: %s (%d frames)", out_path, len(frames))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception("Rendering failed for %s: %s", env_name, exc)
 
 
@@ -459,13 +457,13 @@ def run_environment(
 
     try:
         hp_names = list(best_agent.registry.hp_config.names())
-    except Exception:  # noqa: BLE001
+    except Exception:
         hp_names = None
 
     # Close the (async) training env before spinning up a render env.
     try:
         trainer.env.close()
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
     # Render the best agent.
@@ -514,7 +512,8 @@ def main(argv: list[str] | None = None) -> None:
     config_rel = _prompt(args.config, "Config path (relative to script): ")
     config_path = (SCRIPT_DIR / config_rel).resolve()
     if not config_path.is_file():
-        raise FileNotFoundError(f"Config not found: {config_path}")
+        msg = f"Config not found: {config_path}"
+        raise FileNotFoundError(msg)
 
     base_manifest = load_manifest_dict(config_path)
     algo = base_manifest["algorithm"]["name"]
@@ -537,7 +536,7 @@ def main(argv: list[str] | None = None) -> None:
     raw = _prompt(
         args.envs, "\nEnvironments to run (space/comma separated, or 'all'): "
     )
-    selection = [s for s in raw.replace(",", " ").split()]
+    selection = list(raw.replace(",", " ").split())
     env_names = resolve_env_selection(algo, selection)
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -577,7 +576,7 @@ def main(argv: list[str] | None = None) -> None:
             )
             if result is not None:
                 curves[env_name] = result
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: PERF203
             logger.exception("Environment %s failed: %s", env_name, exc)
 
     if curves:

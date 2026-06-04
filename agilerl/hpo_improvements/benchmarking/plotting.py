@@ -7,14 +7,17 @@ benchmark specification.
 
 from __future__ import annotations
 
-import matplotlib
+from typing import TYPE_CHECKING
 
-matplotlib.use("Agg")  # headless backend for saving figures
+import matplotlib as mpl
+
+mpl.use("Agg")  # headless backend for saving figures
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 
-from registry import NormalizationScores
+if TYPE_CHECKING:
+    import pandas as pd
+    from registry import NormalizationScores
 
 GLOBAL_STEP_COL = "train/global_step"
 BEST_FITNESS_COL = "eval/best_fitness"
@@ -142,7 +145,7 @@ def plot_mutation_schedule(
             }
         )
     else:
-        hp_names = [hp for hp in hp_names]
+        hp_names = list(hp_names)
 
     if not hp_names:
         # Nothing to plot; emit a placeholder so the artifact always exists.
@@ -162,9 +165,9 @@ def plot_mutation_schedule(
     axes = np.atleast_1d(axes).ravel()
 
     rows = np.arange(len(data))
-    for ax, hp in zip(axes, hp_names):
+    for ax, hp in zip(axes, hp_names, strict=False):
         series = np.full(len(data), np.nan)
-        for r, agent in zip(rows, best_idx):
+        for r, agent in zip(rows, best_idx, strict=False):
             col = f"train/agent_{agent}/{hp}"
             if col in data.columns:
                 series[r] = data.iloc[r][col]
