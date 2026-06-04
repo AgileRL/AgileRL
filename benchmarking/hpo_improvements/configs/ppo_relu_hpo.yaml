@@ -54,6 +54,14 @@ mutation:
         update_epochs:
             min: 4
             max: 20
+        # gamma is a discount factor near 1.0, so the default multiplicative
+        # factors (1.2 / 0.8) are far too coarse. These gentle factors move
+        # gamma by ~+-0.005 per mutation (0.99 -> ~0.995 / ~0.985).
+        gamma:
+            min: 0.9
+            max: 0.999
+            grow_factor: 1.005
+            shrink_factor: 0.995
     mutation_sd: 0.1
     rand_seed: 42
 
@@ -84,7 +92,7 @@ tournament_selection:
     elitism: true
 
 training:
-    max_steps: 3_000_000
+    max_steps: 6_000_000
     target_score:
     pop_size: 4
     evo_steps: 131072

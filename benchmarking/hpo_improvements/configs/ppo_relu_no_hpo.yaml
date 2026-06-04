@@ -61,7 +61,7 @@ network:
 # switches this same script into an HPO regime.
 
 training:
-    max_steps: 3_000_000
+    max_steps: 6_000_000
     target_score:
     pop_size: 1
     evo_steps: 32768
