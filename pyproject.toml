@@ -28,7 +28,7 @@ dependencies = [
     "pre-commit~=3.8.0",
     "pygame~=2.6.0",
     "pymunk>=6.2,<7.3",
-    "redis~=4.4.4",
+    "redis>=4.4.4,<8.1.0",
     "SuperSuit~=3.9.0",
     "termcolor~=1.1.0",
     "torch==2.9.0; sys_platform != 'darwin'",
