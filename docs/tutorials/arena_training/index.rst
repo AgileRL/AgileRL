@@ -21,7 +21,7 @@ custom environments, submit training jobs on scalable compute, and deploy traine
 Tutorials
 ---------
 
-- :doc:`PPO on a Custom Gym Environment <ppo_custom_env>` — Upload and validate a **BipedalWalker** custom
+- :doc:`PPO on a Custom Gym Environment <ppo_custom_env>` — Upload and validate an **Acrobot** custom
   environment on Arena, train PPO with evolutionary HPO, and deploy the trained agent for inference.
 
 .. toctree::

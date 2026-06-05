@@ -118,7 +118,8 @@ Once your environment / dataset has been validated successfully, you will be abl
 RL Environments
 ^^^^^^^^^^^^^^^
 
-The following commands assume the script ``my_module.py`` contains the ``MyEnvClass`` class in the ``my_env/`` directory.
+The following commands use ``acrobot.py``, which defines the ``AcrobotEnv`` class.
+See :ref:`tutorial_arena_end_to_end` for a full walkthrough.
 
 .. tab-set::
    :sync-group: interface
@@ -129,16 +130,20 @@ The following commands assume the script ``my_module.py`` contains the ``MyEnvCl
       .. code-block:: python
 
          # Upload, create, and validate in one step
-         result = client.validate_environment(source="my_env")
+         result = client.validate_environment(
+             source="custom-gym-env/acrobot.py",
+             name="acrobot-env",
+         )
 
          # With an explicit entrypoint (when multiple exist in the same path)
          result = client.validate_environment(
-             source="my_env",
-             entrypoint="my_module:MyEnvClass",
+             source="acrobot.py",
+             name="acrobot-env",
+             entrypoint="acrobot:AcrobotEnv",
          )
 
          # Re-validate an already-registered environment
-         result = client.validate_environment(name="my-env", version="v1")
+         result = client.validate_environment(name="acrobot-env", version="v1")
 
    .. tab-item:: CLI
       :sync: cli
@@ -146,13 +151,18 @@ The following commands assume the script ``my_module.py`` contains the ``MyEnvCl
       .. code-block:: bash
 
          # Upload and validate in one step
-         arena env validate --source my_env
+         arena env validate \
+             --source acrobot.py \
+             --name acrobot-env
 
          # With an explicit entrypoint (when multiple exist in the same path)
-         arena env validate --source my_env --entrypoint my_module:MyEnvClass
+         arena env validate \
+             --source acrobot.py \
+             --name acrobot-env \
+             --entrypoint acrobot:AcrobotEnv
 
          # Re-validate an already-registered environment
-         arena env validate my-env --version v1
+         arena env validate acrobot-env --version v1
 
 LLM Datasets
 ^^^^^^^^^^^^^
@@ -410,8 +420,7 @@ Here is an example manifest for training DQN on LunarLander-v3:
       .. code-block:: bash
 
          # Submit an experiment
-         arena experiments submit \
-             --manifest dqn.yaml \
+         arena experiments submit dqn.yaml \
              --resource-id arena-medium \
              --num-nodes 2 \
              --project my-project \

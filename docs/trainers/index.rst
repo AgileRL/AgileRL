@@ -527,7 +527,11 @@ Here is an example using the same ``dqn.yaml`` manifest file as in the :ref:`loc
 
       .. code-block:: bash
 
-         arena experiments submit -m dqn.yaml
+         arena experiments submit dqn.yaml \
+             --resource-id arena-medium \
+             --num-nodes 2 \
+             --project my-project \
+             --experiment-name lunar-lander-dqn
 
 .. seealso::
 

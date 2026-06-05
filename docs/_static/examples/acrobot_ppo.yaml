@@ -4,7 +4,7 @@ algorithm:
     lr: 0.0003
     gamma: 0.99
     batch_size: 128
-    learn_step: 4096
+    learn_step: 2048
     gae_lambda: 0.95
     action_std_init: 0.6
     clip_coef: 0.2
@@ -13,11 +13,11 @@ algorithm:
     update_epochs: 4
 
 environment:
-    name: bipedal-walker-env
+    name: acrobot-env
     version: v1
 
 training:
-    max_steps: 10_000_000
+    max_steps: 1_000_000
     evo_steps: 10_000
     pop_size: 8
 
@@ -47,23 +47,23 @@ mutation:
             max: 10
 
 network:
-    latent_dim: 256
-    max_latent_dim: 512
+    latent_dim: 64
+    max_latent_dim: 128
     arch: mlp
     encoder_config:
         hidden_size:
-            - 256
+            - 64
         activation: ReLU
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
+        min_mlp_nodes: 32
+        max_mlp_nodes: 256
     head_config:
         hidden_size:
-            - 256
+            - 64
         activation: ReLU
         min_hidden_layers: 1
         max_hidden_layers: 3
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
+        min_mlp_nodes: 32
+        max_mlp_nodes: 256
 
 tournament:
     tournament_size: 2
