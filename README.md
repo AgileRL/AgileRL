@@ -360,7 +360,7 @@ arena login
 arena env validate --source path/to/my_env.py
 
 # Train on validated custom environment
-arena experiment submit --manifest path/to/manifest.yaml --project my-project
+arena experiment submit path/to/manifest.yaml --project my-project
 ```
 
 For the full CLI and Python SDK reference—including authentication, environment validation, experiments, and deployment—see the [Arena Client](https://docs.agilerl.com/en/latest/arena/index.html) documentation.

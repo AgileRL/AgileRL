@@ -1,109 +1,126 @@
 import io
-import json
 import os
 import tarfile
 from pathlib import Path
-from typing import Any
+
+from agilerl.arena.exceptions import ArenaFileNotFoundError
 
 
-def file_to_bytes(file: Path | os.PathLike[str]) -> bytes:
-    """Convert a file to bytes.
-
-    :param file: Path to the file.
-    :returns: Bytes of the file.
-    :raises FileNotFoundError: If the path is not found.
-    """
-    path = Path(os.fspath(file)).resolve()
-    if not path.is_file():
-        msg = f"File not found: {path}"
-        raise FileNotFoundError(msg)
-    return path.read_bytes()
-
-
-def resolve_env_config(
-    config: dict[str, Any] | str | os.PathLike[str] | None,
-) -> bytes | None:
-    """Resolve the environment configuration from a dictionary or file.
-
-    :param config: Environment configuration.
-    :returns: Bytes of the configuration.
-    :raises FileNotFoundError: If the configuration file is not found.
-    """
-    if config is None:
+def extract_filename(disposition: str | None) -> str | None:
+    """Parse a filename from a Content-Disposition header value."""
+    if not disposition:
         return None
-    if isinstance(config, dict):
-        return json.dumps(config, indent=2).encode("utf-8")
+    for part in disposition.split(";"):
+        part = part.strip()
+        if part.startswith("filename="):
+            return part.removeprefix("filename=").strip('"')
+    return None
 
-    return file_to_bytes(config)
 
+def order_dataset_fields(
+    row: dict[str, str | None | int],
+) -> dict[str, str | None | int]:
+    """Return a copy of a dataset row with ``name`` and ``hf_dataset_id`` first.
 
-def resolve_env_requirements(
-    requirements: str | os.PathLike[str] | None,
-) -> bytes | None:
-    """Resolve the environment requirements from a file.
-
-    :param requirements: Path to the requirements file.
-    :returns: Bytes of the requirements.
-    :raises FileNotFoundError: If the requirements file is not found.
+    :param row: The dataset row to order.
+    :type row: dict[str, str | None | int]
+    :returns: The ordered dataset row.
+    :rtype: dict[str, str | None | int]
     """
-    if requirements is None:
-        return None
+    ordered = {
+        "name": row.get("name"),
+        "hf_dataset_id": row.get("hf_dataset_id"),
+    }
+    for key, value in row.items():
+        if key not in ordered:
+            ordered[key] = value
+    return ordered
 
-    return file_to_bytes(requirements)
+
+def sort_dataset_search_by_downloads(
+    results: list[dict[str, str | None | int]],
+) -> list[dict[str, str | None | int]]:
+    """Sort HuggingFace search rows by ``downloads`` descending."""
+    return sorted(results, key=lambda row: row.get("downloads") or 0, reverse=True)
 
 
-def prepare_env_upload(
-    source: Path | os.PathLike[str],
+def multipart_text_fields(
+    fields: dict[str, str | None],
+) -> dict[str, tuple[None, str]]:
+    """Convert text form fields to httpx multipart ``files`` entries.
+
+    Arena dataset create expects ``multipart/form-data`` even when no file is
+    uploaded. Pass the return value as ``files=`` and omit ``data=``.
+    """
+    return {key: (None, value) for key, value in fields.items() if value is not None}
+
+
+def prepare_env_upload(source: str | os.PathLike[str] | bytes) -> tuple[str, bytes]:
+    """Resolve an environment source into an upload-ready ``(name, bytes)`` pair.
+
+    *source* may be:
+
+    * A path to a directory — compressed into ``.tar.gz`` automatically.
+    * A path to a single file — compressed into ``.tar.gz`` automatically.
+    * A path to an existing ``.tar.gz`` file — read as-is.
+    * Raw ``bytes`` — used directly (assumed to be a valid ``.tar.gz``).
+
+    :param source: The source of the environment.
+    :type source: str | os.PathLike[str] | bytes
+    :returns: The name and bytes of the prepared environment.
+    :rtype: tuple[str, bytes]
+    :raises ArenaFileNotFoundError: If *source* is a path that does not exist.
+    """
+    if isinstance(source, bytes):
+        return ("environment.tar.gz", source)
+
+    path = Path(os.fspath(source)).expanduser().resolve()
+
+    # Directory
+    if path.is_dir():
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for child in sorted(path.rglob("*")):
+                if child.is_file():
+                    tar.add(str(child), arcname=child.relative_to(path).as_posix())
+        return (f"{path.name}.tar.gz", buf.getvalue())
+
+    # Single file
+    if path.is_file():
+        if path.suffixes[-2:] == [".tar", ".gz"] or path.suffix == ".tgz":
+            return (path.name, path.read_bytes())
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            tar.add(str(path), arcname=path.name)
+        return (f"{path.stem}.tar.gz", buf.getvalue())
+
+    msg = f"Source path not found: {path}"
+    raise ArenaFileNotFoundError(msg)
+
+
+def prepare_file_upload(
+    source: str | os.PathLike[str] | bytes,
     *,
-    config: dict[str, Any] | str | os.PathLike[str] | None = None,
-    requirements: str | os.PathLike[str] | None = None,
-    description: str | None = None,
-    exclude_dirs: tuple[str, ...] = (),
-) -> bytes:
-    """Prepare an environment for upload to Arena.
+    default_name: str,
+    content_type: str,
+) -> tuple[str, bytes, str]:
+    """Resolve a path or raw bytes into an httpx multipart file tuple.
 
-    :param source: Path to the environment source directory.
-    :type source: Path | os.PathLike[str]
-    :param config: Environment configuration.
-    :type config: dict[str, Any] | str | os.PathLike[str] | None
-    :param requirements: Environment requirements.
-    :type requirements: str | os.PathLike[str] | None
-    :param exclude_dirs: Directories to exclude from the upload.
-    :type exclude_dirs: tuple[str, ...]
-    :param description: Description of the environment.
-    :type description: str | None
-    :returns: Bytes of the prepared environment.
+    :param source: File path or raw file contents.
+    :type source: str | os.PathLike[str] | bytes
+    :param default_name: Filename used when *source* is raw bytes.
+    :type default_name: str
+    :param content_type: MIME type for the upload part.
+    :type content_type: str
+    :returns: ``(filename, contents, content_type)`` for httpx ``files=``.
+    :rtype: tuple[str, bytes, str]
+    :raises ArenaFileNotFoundError: If *source* is a path that does not exist.
     """
-    source = Path(os.fspath(source)).resolve()
-    config_bytes = resolve_env_config(config)
-    requirements_bytes = resolve_env_requirements(requirements)
+    if isinstance(source, bytes):
+        return (default_name, source, content_type)
 
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        if source.is_dir():
-            for child in sorted(source.rglob("*")):
-                if not child.is_file():
-                    continue
-                rel = child.relative_to(source)
-                if rel.name in exclude_dirs:
-                    continue
-                tar.add(str(child), arcname=rel.as_posix())
-        else:
-            tar.add(str(source), arcname=source.name)
-
-        if config_bytes is not None:
-            info = tarfile.TarInfo(name="config.json")
-            info.size = len(config_bytes)
-            tar.addfile(info, io.BytesIO(config_bytes))
-
-        if requirements_bytes is not None:
-            info = tarfile.TarInfo(name="requirements.txt")
-            info.size = len(requirements_bytes)
-            tar.addfile(info, io.BytesIO(requirements_bytes))
-
-        if description is not None:
-            info = tarfile.TarInfo(name="description.txt")
-            info.size = len(description)
-            tar.addfile(info, io.BytesIO(description.encode()))
-
-    return buf.getvalue()
+    path = Path(os.fspath(source)).expanduser().resolve()
+    if not path.is_file():
+        msg = f"Upload file not found: {path}"
+        raise ArenaFileNotFoundError(msg)
+    return (path.name, path.read_bytes(), content_type)

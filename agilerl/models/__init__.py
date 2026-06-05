@@ -30,7 +30,7 @@ from agilerl.models.hpo import (  # noqa: F401
     MutationSpec,
     TournamentSelectionSpec,
 )
-from agilerl.models.manifest import TrainingManifest  # noqa: F401
+from agilerl.models.manifest import ArenaManifest, TrainingManifest  # noqa: F401
 from agilerl.models.networks import (  # noqa: F401
     CnnSpec,
     ContinuousQNetworkSpec,

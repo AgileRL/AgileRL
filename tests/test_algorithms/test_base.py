@@ -506,6 +506,67 @@ class TestRLAlgorithmInit:
             )
 
 
+class TestSwapChannelsInEvolvableAlgorithms:
+    """Cover ``swap_channels`` init and preprocess paths on RL/MARL base classes."""
+
+    @pytest.fixture
+    def channels_last_box(self):
+        return spaces.Box(low=0, high=255, shape=(84, 84, 3), dtype=np.uint8)
+
+    @pytest.fixture
+    def discrete_space(self):
+        return spaces.Discrete(4)
+
+    def test_rl_algorithm_transposes_channels_last_space(
+        self, channels_last_box, discrete_space
+    ):
+        agent = DummyRLAlgorithm(channels_last_box, discrete_space, index=0)
+
+        assert agent.swap_channels is True
+        assert agent.observation_space.shape == (3, 84, 84)
+        assert agent.env_observation_space.shape == (84, 84, 3)
+
+        obs_hwc = np.random.randint(0, 255, (84, 84, 3), dtype=np.uint8)
+        preprocessed = agent.preprocess_observation(obs_hwc)
+        assert preprocessed.shape[1:] == (3, 84, 84)
+
+    def test_marl_algorithm_transposes_when_any_agent_is_channels_last(
+        self, channels_last_box, discrete_space
+    ):
+        obs_spaces = {
+            "agent_0": channels_last_box,
+            "agent_1": channels_last_box,
+        }
+        act_spaces = {
+            "agent_0": discrete_space,
+            "agent_1": discrete_space,
+        }
+
+        agent = DummyMARLAlgorithm(
+            obs_spaces,
+            act_spaces,
+            agent_ids=["agent_0", "agent_1"],
+            index=0,
+        )
+
+        assert agent.swap_channels is True
+        assert agent.possible_observation_spaces["agent_0"].shape == (3, 84, 84)
+        assert agent.env_observation_spaces["agent_0"].shape == (84, 84, 3)
+
+        obs = {
+            "agent_0": np.random.randint(0, 255, (2, 84, 84, 3), dtype=np.uint8),
+            "agent_1": np.random.randint(0, 255, (2, 84, 84, 3), dtype=np.uint8),
+        }
+        preprocessed = agent.preprocess_observation(obs, group_ids=["agent"])
+        assert preprocessed["agent"].shape[1:] == (3, 84, 84)
+
+    def test_rl_algorithm_no_swap_for_channels_first_image(self, discrete_space):
+        chw_space = spaces.Box(low=0, high=255, shape=(3, 84, 84), dtype=np.uint8)
+        agent = DummyRLAlgorithm(chw_space, discrete_space, index=0)
+        assert agent.swap_channels is False
+        assert agent.observation_space.shape == (3, 84, 84)
+
+
 class TestMultiAgentRLAlgorithmInit:
     @pytest.mark.parametrize(
         "observation_space",

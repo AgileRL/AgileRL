@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import io
 import json
 import logging
 import os
-import tarfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -24,7 +22,6 @@ from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,
     ArenaConfigError,
-    ArenaFileNotFoundError,
     ArenaTrainingError,
     ArenaValidationError,
 )
@@ -37,62 +34,15 @@ from agilerl.arena.inference.cache import (
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
 from agilerl.models.manifest import ArenaManifest
+from agilerl.utils.arena_utils import (
+    extract_filename,
+    multipart_text_fields,
+    order_dataset_fields,
+    prepare_env_upload,
+    prepare_file_upload,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def _extract_filename(disposition: str | None) -> str | None:
-    """Parse a filename from a Content-Disposition header value."""
-    if not disposition:
-        return None
-    for part in disposition.split(";"):
-        part = part.strip()
-        if part.startswith("filename="):
-            return part.removeprefix("filename=").strip('"')
-    return None
-
-
-def prepare_env_upload(source: str | os.PathLike[str] | bytes) -> tuple[str, bytes]:
-    """Resolve an environment source into an upload-ready ``(name, bytes)`` pair.
-
-    *source* may be:
-
-    * A path to a directory — compressed into ``.tar.gz`` automatically.
-    * A path to a single file — compressed into ``.tar.gz`` automatically.
-    * A path to an existing ``.tar.gz`` file — read as-is.
-    * Raw ``bytes`` — used directly (assumed to be a valid ``.tar.gz``).
-
-    :param source: The source of the environment.
-    :type source: str | os.PathLike[str] | bytes
-    :returns: The name and bytes of the prepared environment.
-    :rtype: tuple[str, bytes]
-    :raises ArenaFileNotFoundError: If *source* is a path that does not exist.
-    """
-    if isinstance(source, bytes):
-        return ("environment.tar.gz", source)
-
-    path = Path(os.fspath(source)).expanduser().resolve()
-
-    # Directory
-    if path.is_dir():
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            for child in sorted(path.rglob("*")):
-                if child.is_file():
-                    tar.add(str(child), arcname=child.relative_to(path).as_posix())
-        return (f"{path.name}.tar.gz", buf.getvalue())
-
-    # Single file
-    if path.is_file():
-        if path.suffixes[-2:] == [".tar", ".gz"] or path.suffix == ".tgz":
-            return (path.name, path.read_bytes())
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            tar.add(str(path), arcname=path.name)
-        return (f"{path.stem}.tar.gz", buf.getvalue())
-
-    msg = f"Source path not found: {path}"
-    raise ArenaFileNotFoundError(msg)
 
 
 @dataclass(slots=True)
@@ -114,6 +64,7 @@ class _TokenStore:
 
 # Deprecated hint: tier ids are dynamic — use :meth:`ArenaClient.list_resources`.
 ArenaResource = Literal["arena-small", "arena-medium", "arena-large"]
+DATASET_CATEGORIES = frozenset({"sft", "preference", "reasoning"})
 
 
 class ArenaClient:
@@ -150,6 +101,7 @@ class ArenaClient:
         "/api/cli/v1/environments/create-and-validate": ArenaValidationError,
         "/api/cli/v1/environments/validate": ArenaValidationError,
         "/api/cli/v1/environments/profile": ArenaValidationError,
+        "/api/cli/v1/datasets/create": ArenaValidationError,
         "/api/cli/v1/experiments/jobs/submit": ArenaTrainingError,
     }
 
@@ -380,17 +332,12 @@ class ArenaClient:
         :returns: True if the environment exists, False otherwise.
         :rtype: bool
         """
-        resp = self._request(
+        resp: dict[str, bool | str] = self._request(
             "GET",
             "/api/cli/v1/environments/exists",
             params={"name": name, "version": version},
         )
-
-        if isinstance(resp, dict):
-            for key in ("exists", "is_registered", "isRegistered"):
-                if key in resp:
-                    return bool(resp[key])
-        return bool(resp)
+        return bool(resp.get("exists", False))
 
     def list_environment_entrypoints(
         self,
@@ -411,13 +358,8 @@ class ArenaClient:
             "/api/cli/v1/environments/entrypoints",
             params={"name": name, "version": version},
         )
-        logger.info(
-            "Found %d entrypoints for environment %s:%s.",
-            len(resp["entrypoints"]),
-            name,
-            resp["version"],
-        )
-        return resp["entrypoints"]
+        logger.info("Found %d entrypoints for environment %s.", len(resp), name)
+        return resp
 
     def validate_environment(
         self,
@@ -430,6 +372,7 @@ class ArenaClient:
         entrypoint: str | None = None,
         description: str | None = None,
         multi_agent: bool = False,
+        language_based: bool = False,
         do_rollouts: bool = False,
     ) -> dict[str, Any]:
         """Validate a custom environment on Arena.
@@ -456,6 +399,9 @@ class ArenaClient:
         :type description: str | None
         :param multi_agent: Whether the environment is multi-agent. Default is False.
         :type multi_agent: bool
+        :param language_based: Whether the environment follows the GEM API (language-based).
+            Default is False.
+        :type language_based: bool
         :param do_rollouts: Whether to perform environment rollouts during validation. Setting this to True will
             run 100 random episodes and collect additional information such as the average random reward and visualize
             the rendered environment. Default is False.
@@ -485,6 +431,7 @@ class ArenaClient:
                 entrypoint=entrypoint,
                 description=description,
                 multi_agent=multi_agent,
+                language_based=language_based,
                 do_rollouts=do_rollouts,
             ).collect()
 
@@ -581,7 +528,13 @@ class ArenaClient:
                 return None
 
         payload = {"name": name, "version": version}
-        return self._request("DELETE", "/api/cli/v1/environments/delete", json=payload)
+        result: dict[str, Any] = self._request(
+            "DELETE", "/api/cli/v1/environments/delete", json=payload
+        )
+        deleted_version = result.get("version", version)
+        msg_suffix = f":{deleted_version}" if version else ""
+        logger.info("Environment %s%s deleted successfully.", name, msg_suffix)
+        return result
 
     def duplicate_environment_version(
         self,
@@ -619,6 +572,198 @@ class ArenaClient:
         return resp
 
     # -------------------------------------------------------------------------
+    ### Datasets ###
+    # -------------------------------------------------------------------------
+
+    def list_datasets(
+        self,
+        *,
+        name: str | None = None,
+        search: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List datasets or search HuggingFace datasets.
+
+        :param name: Filter by registered dataset name.
+        :type name: str | None
+        :param search: HuggingFace dataset search query.
+        :type search: str | None
+        :returns: List of datasets or search results from Arena.
+        :rtype: list[dict[str, Any]]
+        """
+        params: dict[str, str] | None = None
+        if name is not None or search is not None:
+            params = {}
+            if name is not None:
+                params["name"] = name
+            if search is not None:
+                params["search"] = search
+        result = self._request("GET", "/api/cli/v1/datasets", params=params)
+        if not isinstance(result, list):
+            return result
+        return [
+            order_dataset_fields(item) if isinstance(item, dict) else item
+            for item in result
+        ]
+
+    def dataset_exists(self, name: str) -> dict[str, bool | str]:
+        """Check whether a dataset name is registered for the active org.
+
+        :param name: Dataset name.
+        :type name: str
+        :returns: ``exists``, optional ``id``, and ``datasetType`` when present.
+        :rtype: dict[str, bool | str]
+        """
+        return self._request(
+            "GET",
+            "/api/cli/v1/datasets/exists",
+            params={"name": name},
+        )
+
+    def create_dataset(
+        self,
+        *,
+        name: str,
+        category: str,
+        column_mapping: str | dict[str, Any],
+        description: str | None = None,
+        file: str | os.PathLike[str] | bytes | None = None,
+        hf_dataset_name: str | None = None,
+        hf_config: str | None = None,
+        hf_split: str | None = None,
+    ) -> dict[str, Any]:
+        """Create an LLM dataset on Arena.
+
+        Upload a local CSV, import from HuggingFace, or create metadata only
+        (no file or HF fields). Validation is performed by the Arena API.
+
+        :param name: Dataset name.
+        :type name: str
+        :param category: Dataset category (e.g. ``reasoning``, ``preference``).
+        :type category: str
+        :param column_mapping: Column mapping as a JSON string or dict.
+        :type column_mapping: str | dict[str, Any]
+        :param description: Optional description.
+        :type description: str | None
+        :param file: Local CSV file path or raw bytes.
+        :type file: str | os.PathLike[str] | bytes | None
+        :param hf_dataset_name: HuggingFace dataset id for import.
+        :type hf_dataset_name: str | None
+        :param hf_config: HuggingFace dataset config name.
+        :type hf_config: str | None
+        :param hf_split: HuggingFace split (required when importing from HF).
+        :type hf_split: str | None
+        :returns: Created dataset metadata from Arena.
+        :rtype: dict[str, Any]
+        """
+        data, upload_files = self._build_create_dataset_multipart(
+            name=name,
+            category=category,
+            column_mapping=column_mapping,
+            description=description,
+            file=file,
+            hf_dataset_name=hf_dataset_name,
+            hf_config=hf_config,
+            hf_split=hf_split,
+        )
+        files = multipart_text_fields(data)
+        files.update(upload_files)
+        resp: dict[str, Any] = self._request(
+            "POST",
+            "/api/cli/v1/datasets/create",
+            files=files,
+            timeout=self._upload_timeout,
+        )
+        if resp and resp.get("is_ready", False) and resp.get("uploaded", False):
+            logger.info("Dataset %s created successfully.", name)
+
+        return resp
+
+    def delete_dataset(
+        self,
+        name: str,
+        *,
+        confirm: bool = False,
+    ) -> dict[str, Any] | None:
+        """Archive a dataset by name.
+
+        :param name: Dataset name.
+        :type name: str
+        :param confirm: When ``True``, skip the interactive confirmation prompt.
+        :type confirm: bool
+        :returns: Archive result, or ``None`` if the user declined confirmation.
+        :rtype: dict[str, Any] | None
+        """
+        if not confirm:
+            confirm_prompt = (
+                input(
+                    f"Delete dataset {name!r}? [y/N]: ",
+                )
+                .strip()
+                .lower()
+            )
+            if confirm_prompt not in ("y", "yes"):
+                logger.info("Dataset %s was not deleted.", name)
+                return None
+
+        resp = self._request(
+            "DELETE",
+            "/api/cli/v1/datasets/delete",
+            json={"name": name},
+        )
+        logger.info("Dataset %s deleted successfully.", name)
+        return resp
+
+    @staticmethod
+    def _validate_dataset_category(category: str) -> str:
+        normalized = category.strip().lower()
+        if normalized not in DATASET_CATEGORIES:
+            supported = ", ".join(sorted(DATASET_CATEGORIES))
+            msg = (
+                f"Invalid dataset category {category!r}. "
+                f"Supported categories: {supported}"
+            )
+            raise ArenaValidationError(msg)
+        return normalized
+
+    @staticmethod
+    def _build_create_dataset_multipart(
+        *,
+        name: str,
+        category: str,
+        column_mapping: str | dict[str, Any],
+        description: str | None = None,
+        file: str | os.PathLike[str] | bytes | None = None,
+        hf_dataset_name: str | None = None,
+        hf_config: str | None = None,
+        hf_split: str | None = None,
+    ) -> tuple[dict[str, str], dict[str, tuple[str, Any, str]]]:
+        """Build multipart form fields for dataset creation."""
+        category = ArenaClient._validate_dataset_category(category)
+        column_mapping_str = (
+            json.dumps(column_mapping)
+            if isinstance(column_mapping, dict)
+            else column_mapping
+        )
+        data = {
+            "name": name,
+            "category": category,
+            "column_mapping": column_mapping_str,
+            "description": description,
+            "hf_dataset_name": hf_dataset_name,
+            "hf_config": hf_config,
+            "hf_split": hf_split,
+        }
+
+        files: dict[str, tuple[str, Any, str]] = {}
+        if file is not None:
+            files["file"] = prepare_file_upload(
+                file,
+                default_name="dataset.csv",
+                content_type="text/csv",
+            )
+        return data, files
+
+    # -------------------------------------------------------------------------
     ### Training Jobs ###
     # -------------------------------------------------------------------------
 
@@ -626,33 +771,59 @@ class ArenaClient:
         self,
         manifest: str | os.PathLike[str] | dict[str, Any],
         *,
-        resource_id: int | None = None,
+        resource_id: str | int | None = None,
         num_nodes: int | None = None,
         project: str | None = None,
         experiment_name: str | None = None,
+        reward_file: str | os.PathLike[str] | bytes | None = None,
+        completion: str | None = None,
     ) -> dict[str, Any]:
         """Submit an experiment (a training job).
 
         :param manifest: Training manifest as a YAML/JSON file path, raw YAML
             string, or a pre-parsed dict.
         :type manifest: str | os.PathLike[str] | dict[str, Any]
-        :param resource_id: The Arena resource to submit the experiment to.
-        :type resource_id: int | None
+        :param resource_id: Arena cluster type or resource id for the job.
+        :type resource_id: str | int | None
         :param num_nodes: The number of nodes to use for training.
         :type num_nodes: int | None
         :param project: The project to submit the experiment to.
         :type project: str | None
         :param experiment_name: The name of the experiment to submit.
         :type experiment_name: str | None
+        :param reward_file: Python reward module for reasoning dataset jobs.
+            When set, the request is sent as ``multipart/form-data``.
+        :type reward_file: str | os.PathLike[str] | bytes | None
+        :param completion: Optional model completion for reward validation.
+            When omitted, the server uses the reference answer from the first
+            dataset row.
+        :type completion: str | None
         """
-        # Pre-flight Pydantic manifest validation prior to submitting to Arena
         validated = ArenaManifest.get_validated(manifest, mode="json")
+        resolved_project = self._resolve_project(project)
+
+        if reward_file is not None:
+            files = self._build_submit_experiment_multipart(
+                manifest=validated,
+                project=resolved_project,
+                resource_id=resource_id,
+                num_nodes=num_nodes,
+                experiment_name=experiment_name,
+                reward_file=reward_file,
+                completion=completion,
+            )
+            return self._open_stream(
+                "POST",
+                "/api/cli/v1/experiments/jobs/submit",
+                files=files,
+                timeout=self._upload_timeout,
+            ).collect()
 
         payload: dict[str, Any] = {
             "manifest": validated,
             "resource_id": resource_id,
             "num_nodes": num_nodes,
-            "project": self._resolve_project(project),
+            "project": resolved_project,
             "experiment_name": experiment_name,
         }
         return self._open_stream(
@@ -666,10 +837,12 @@ class ArenaClient:
         self,
         manifest: str | os.PathLike[str] | dict[str, Any],
         *,
-        resource_id: int | None = None,
+        resource_id: str | int | None = None,
         num_nodes: int | None = None,
         project: str | None = None,
         experiment_name: str | None = None,
+        reward_file: str | os.PathLike[str] | bytes | None = None,
+        completion: str | None = None,
     ) -> dict[str, Any]:
         """Submit a training job to Arena (alias for :meth:`submit_experiment`)."""
         return self.submit_experiment(
@@ -678,7 +851,37 @@ class ArenaClient:
             num_nodes=num_nodes,
             project=project,
             experiment_name=experiment_name,
+            reward_file=reward_file,
+            completion=completion,
         )
+
+    @staticmethod
+    def _build_submit_experiment_multipart(
+        *,
+        manifest: dict[str, Any],
+        project: str | None,
+        resource_id: str | int | None,
+        num_nodes: int | None,
+        experiment_name: str | None,
+        reward_file: str | os.PathLike[str] | bytes,
+        completion: str | None,
+    ) -> dict[str, tuple[None, str] | tuple[str, bytes, str]]:
+        """Build multipart form parts for reasoning submit with reward validation."""
+        text_fields: dict[str, str | None] = {
+            "manifest": json.dumps(manifest),
+            "project": project,
+            "resource_id": str(resource_id) if resource_id is not None else None,
+            "num_nodes": str(num_nodes) if num_nodes is not None else None,
+            "experiment_name": experiment_name,
+            "completion": completion,
+        }
+        files = multipart_text_fields(text_fields)
+        files["reward_file"] = prepare_file_upload(
+            reward_file,
+            default_name="reward.py",
+            content_type="text/x-python",
+        )
+        return files
 
     def list_experiments(self, project: str | None = None) -> list[dict[str, Any]]:
         """List all experiments in a project.
@@ -861,7 +1064,7 @@ class ArenaClient:
             path = Path(output_path)
             if path.is_dir():
                 filename = (
-                    _extract_filename(disposition) or f"{experiment_name}_metrics.csv"
+                    extract_filename(disposition) or f"{experiment_name}_metrics.csv"
                 )
                 path = path / filename
 
@@ -1156,16 +1359,17 @@ class ArenaClient:
         entrypoint: str | None,
         description: str | None,
         multi_agent: bool,
+        language_based: bool,
         do_rollouts: bool,
     ) -> NDJsonStream:
         """Upload, create, and validate an environment."""
         # Resolve the environment source into bytes for upload
         archive_name, archive_bytes = prepare_env_upload(source)
-
         data: dict[str, str] = {
             "name": name,
             "version": version,
             "multi_agent": str(multi_agent).lower(),
+            "language_based": str(language_based).lower(),
             "do_rollouts": str(do_rollouts).lower(),
         }
         if entrypoint:
@@ -1179,25 +1383,21 @@ class ArenaClient:
 
         # Check env_config and resolve to bytes for upload
         if env_config is not None:
-            env_cfg = Path(os.fspath(env_config)).expanduser().resolve()
-            if not env_cfg.is_file():
-                msg = f"Upload file not found: {env_cfg}"
-                raise ArenaFileNotFoundError(msg)
-            files["env_config"] = (
-                env_cfg.name,
-                env_cfg.read_bytes(),
-                "application/x-yaml",
+            files["env_config"] = prepare_file_upload(
+                env_config,
+                default_name="env_config.yaml",
+                content_type="application/x-yaml",
             )
         else:
             files["env_config"] = ("env_config.yaml", b"", "application/x-yaml")
 
         # Check requirements and resolve to bytes for upload
         if requirements is not None:
-            reqs = Path(os.fspath(requirements)).expanduser().resolve()
-            if not reqs.is_file():
-                msg = f"Upload file not found: {reqs}"
-                raise ArenaFileNotFoundError(msg)
-            files["requirements"] = (reqs.name, reqs.read_bytes(), "text/plain")
+            files["requirements"] = prepare_file_upload(
+                requirements,
+                default_name="requirements.txt",
+                content_type="text/plain",
+            )
         else:
             files["requirements"] = ("requirements.txt", b"", "text/plain")
 

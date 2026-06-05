@@ -6,17 +6,12 @@ import json
 import os
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
-from agilerl.arena.client import (
-    ArenaClient,
-    _TokenStore,
-    _extract_filename,
-    prepare_env_upload,
-)
+from agilerl.arena.client import ArenaClient, _TokenStore
 from agilerl.arena.auth import ArenaOAuth2
 from agilerl.arena.exceptions import (
     ArenaAPIError,
@@ -27,7 +22,7 @@ from agilerl.arena.exceptions import (
     ArenaValidationError,
 )
 from agilerl.arena.output import StreamRichRenderer
-from agilerl.arena.stream import NDJsonStream, StreamEvent
+from agilerl.arena.stream import NDJsonStream
 
 
 def _jwt_with_exp(exp: int) -> str:
@@ -702,70 +697,6 @@ class TestValidateEnvironment:
             )
 
 
-class TestPrepareEnvUpload:
-    def test_directory_is_compressed(self, tmp_path):
-        env_dir = tmp_path / "my_env"
-        env_dir.mkdir()
-        (env_dir / "main.py").write_text("print('hello')")
-        (env_dir / "utils.py").write_text("x = 1")
-
-        name, data = prepare_env_upload(env_dir)
-        assert name == "my_env.tar.gz"
-        assert isinstance(data, bytes) and len(data) > 0
-
-        import tarfile, io
-
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-            members = sorted(tar.getnames())
-        assert members == ["main.py", "utils.py"]
-
-    def test_directory_recurses_subdirs(self, tmp_path):
-        env_dir = tmp_path / "env"
-        (env_dir / "sub").mkdir(parents=True)
-        (env_dir / "a.py").write_text("a")
-        (env_dir / "sub" / "b.py").write_text("b")
-
-        name, data = prepare_env_upload(env_dir)
-        import tarfile, io
-
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-            members = sorted(tar.getnames())
-        assert members == ["a.py", "sub/b.py"]
-
-    def test_file_is_read_as_is(self, tmp_path):
-        archive = tmp_path / "env.tar.gz"
-        archive.write_bytes(b"fake-archive-content")
-
-        name, data = prepare_env_upload(archive)
-        assert name == "env.tar.gz"
-        assert data == b"fake-archive-content"
-
-    def test_bytes_passthrough(self):
-        raw = b"raw-bytes"
-        name, data = prepare_env_upload(raw)
-        assert name == "environment.tar.gz"
-        assert data is raw
-
-    def test_missing_path_raises(self):
-        with pytest.raises(ArenaFileNotFoundError, match="not found"):
-            prepare_env_upload("/does/not/exist.tar.gz")
-
-    def test_single_non_tar_file_wrapped_in_tar_gz(self, tmp_path):
-        script = tmp_path / "foo.py"
-        script.write_text("print('hello')")
-
-        name, data = prepare_env_upload(script)
-        assert name == "foo.tar.gz"
-        assert isinstance(data, bytes) and len(data) > 0
-
-        import io
-        import tarfile
-
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-            members = tar.getnames()
-        assert members == ["foo.py"]
-
-
 class TestDefaultProjectConfig:
     def test_read_config_missing_file(self):
         with patch.object(ArenaClient, "CONFIG_FILE", Path("/nonexistent/config.json")):
@@ -941,6 +872,26 @@ class TestValidateEnvironmentParams:
         )
         call_kwargs = api_key_client._open_stream.call_args[1]
         assert call_kwargs["data"]["multi_agent"] == "true"
+
+    def test_create_forwards_language_based(self, api_key_client, tmp_path):
+        archive = tmp_path / "env.tar.gz"
+        archive.write_bytes(b"fake")
+        cfg = tmp_path / "env_config.yaml"
+        cfg.write_text("key: val")
+        reqs = tmp_path / "requirements.txt"
+        reqs.write_text("numpy")
+
+        mock_stream = _mock_ndjson_stream()
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.validate_environment(
+            name="MyEnv",
+            source=archive,
+            env_config=cfg,
+            requirements=reqs,
+            language_based=True,
+        )
+        call_kwargs = api_key_client._open_stream.call_args[1]
+        assert call_kwargs["data"]["language_based"] == "true"
 
     def test_create_forwards_description(self, api_key_client, tmp_path):
         archive = tmp_path / "env.tar.gz"
@@ -1176,27 +1127,6 @@ class TestSendStreaming:
         assert "Network error" in exc_info.value.detail
 
 
-class TestExtractFilename:
-    def test_returns_none_for_none(self):
-        assert _extract_filename(None) is None
-
-    def test_returns_none_for_empty_string(self):
-        assert _extract_filename("") is None
-
-    def test_extracts_unquoted_filename(self):
-        assert _extract_filename("attachment; filename=report.csv") == "report.csv"
-
-    def test_extracts_quoted_filename(self):
-        assert _extract_filename('attachment; filename="report.csv"') == "report.csv"
-
-    def test_returns_none_when_no_filename_part(self):
-        assert _extract_filename("inline") is None
-
-    def test_handles_extra_params(self):
-        result = _extract_filename("attachment; foo=bar; filename=data.csv; baz=qux")
-        assert result == "data.csv"
-
-
 class TestLoginForceWithApiKey:
     def test_force_clears_api_key_and_runs_device_login(self, api_key_client):
         client = api_key_client
@@ -1310,6 +1240,44 @@ class TestExperimentMethods:
         call_kwargs = api_key_client._open_stream.call_args[1]
         assert call_kwargs["json"]["manifest"] == {"algorithm": "PPO"}
         assert call_kwargs["json"]["project"] == "proj"
+        assert "files" not in call_kwargs
+
+    @patch("agilerl.arena.client.ArenaManifest.get_validated")
+    def test_submit_experiment_with_reward_file(
+        self, mock_validated, api_key_client, tmp_path
+    ):
+        mock_validated.return_value = {
+            "algorithm": {"name": "GRPO"},
+            "environment": {"name": "ds", "num_envs": 16},
+        }
+        reward_path = tmp_path / "reward.py"
+        reward_path.write_text(
+            "def reward(question, answer, completion):\n    return 1.0\n",
+        )
+        mock_stream = _mock_ndjson_stream({"job_id": 2})
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+
+        result = api_key_client.submit_experiment(
+            manifest={"algorithm": {"name": "GRPO"}},
+            resource_id="arena-medium",
+            num_nodes=2,
+            project="proj",
+            experiment_name="exp-reasoning",
+            reward_file=reward_path,
+            completion="wrong answer",
+        )
+
+        assert result == {"job_id": 2}
+        call_kwargs = api_key_client._open_stream.call_args[1]
+        assert "json" not in call_kwargs
+        files = call_kwargs["files"]
+        assert json.loads(files["manifest"][1]) == mock_validated.return_value
+        assert files["project"] == (None, "proj")
+        assert files["resource_id"] == (None, "arena-medium")
+        assert files["num_nodes"] == (None, "2")
+        assert files["experiment_name"] == (None, "exp-reasoning")
+        assert files["completion"] == (None, "wrong answer")
+        assert files["reward_file"][0] == "reward.py"
 
     @patch("agilerl.arena.client.ArenaManifest.get_validated")
     def test_submit_training_job_alias(self, mock_validated, api_key_client):

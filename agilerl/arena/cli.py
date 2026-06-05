@@ -16,6 +16,7 @@ from agilerl.arena.output import (
     emit_result,
     handle_error,
 )
+from agilerl.utils.arena_utils import sort_dataset_search_by_downloads
 
 ArenaError.enable_cli_mode()
 
@@ -153,7 +154,7 @@ def user_credits(
 
 @main.group("resources")
 def resources_group() -> None:
-    """List training compute tiers (resource_id values) available on Arena."""
+    """List available training compute tiers."""
 
 
 @resources_group.command("list")
@@ -181,7 +182,7 @@ def resources_list(config: CommandConfig) -> None:
 
 @main.group("env")
 def env() -> None:
-    """Manage your custom Gym / PettingZoo environments in Arena."""
+    """Manage your custom Gym / PettingZoo / GEM environments."""
 
 
 @env.command("list")
@@ -268,6 +269,12 @@ def env_entrypoints(
     help="Optional description of the environment.",
 )
 @click.option("--multi-agent/--single-agent", default=False, show_default=True)
+@click.option(
+    "--language-based/--classic",
+    default=False,
+    show_default=True,
+    help="Environment follows the GEM API.",
+)
 @click.option("--do-rollouts/--no-do-rollouts", default=False, show_default=True)
 @click.pass_obj
 def env_validate(
@@ -281,6 +288,7 @@ def env_validate(
     entrypoint: str | None,
     description: str | None,
     multi_agent: bool,
+    language_based: bool,
     do_rollouts: bool,
 ) -> None:
     """Validate an environment on Arena.
@@ -304,6 +312,7 @@ def env_validate(
             entrypoint=entrypoint,
             description=description,
             multi_agent=multi_agent,
+            language_based=language_based,
             do_rollouts=do_rollouts,
         )
 
@@ -362,9 +371,7 @@ def env_delete(
 ) -> None:
     """Delete an environment version (or all versions if version is None) from Arena."""
     with arena_client(config) as client:
-        result = client.delete_environment(name=name, version=version, confirm=yes)
-        if result is not None:
-            click.echo(f"Environment {name}:{version} deleted successfully.")
+        client.delete_environment(name=name, version=version, confirm=yes)
 
 
 @env.command("duplicate")
@@ -387,17 +394,141 @@ def env_duplicate(
         )
 
 
+_DATASET_CATEGORIES = ("reasoning", "preference", "sft")
+
+
+@main.group("datasets")
+def datasets_group() -> None:
+    """Manage your language model datasets in Arena."""
+
+
+@datasets_group.command("list")
+@click.option("--search", default=None, help="Search HuggingFace datasets.")
+@click.pass_obj
+def datasets_list(config: CommandConfig, search: str | None) -> None:
+    """List datasets registered for your organization."""
+    with arena_client(config) as client:
+        result = client.list_datasets(search=search)
+        if search is not None:
+            for res in result:
+                res.pop("description", None)
+            result = sort_dataset_search_by_downloads(result)
+
+        emit_result(result)
+
+
+@datasets_group.command("exists")
+@click.argument("name")
+@click.pass_obj
+def datasets_exists(config: CommandConfig, name: str) -> None:
+    """Check whether a dataset name exists in Arena."""
+    with arena_client(config) as client:
+        emit_result(client.dataset_exists(name=name))
+
+
+@datasets_group.command("create")
+@click.argument("name")
+@click.option(
+    "--category",
+    required=True,
+    type=click.Choice(_DATASET_CATEGORIES, case_sensitive=False),
+    help="Dataset category.",
+)
+@click.option(
+    "--column-mapping",
+    default=None,
+    help="Column mapping as a JSON object string.",
+)
+@click.option(
+    "--column-mapping-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to a JSON file containing the column mapping.",
+)
+@click.option("--description", default=None, help="Optional description.")
+@click.option(
+    "--file",
+    "dataset_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Local CSV file to upload.",
+)
+@click.option(
+    "--hf-dataset",
+    "hf_dataset_name",
+    default=None,
+    help="HuggingFace dataset id to import.",
+)
+@click.option(
+    "--hf-config",
+    default=None,
+    help="HuggingFace dataset config (default on the server: default).",
+)
+@click.option(
+    "--hf-split",
+    default=None,
+    help="HuggingFace split (required when using --hf-dataset).",
+)
+@click.pass_obj
+def datasets_create(
+    config: CommandConfig,
+    name: str,
+    category: str,
+    column_mapping: str | None,
+    column_mapping_file: Path | None,
+    description: str | None,
+    dataset_file: Path | None,
+    hf_dataset_name: str | None,
+    hf_config: str | None,
+    hf_split: str | None,
+) -> None:
+    """Create a dataset on Arena."""
+    mapping = (
+        column_mapping_file.read_text()
+        if column_mapping_file is not None
+        else column_mapping
+    )
+    with arena_client(config) as client:
+        client.create_dataset(
+            name=name,
+            category=category,
+            column_mapping=mapping,
+            description=description,
+            file=dataset_file,
+            hf_dataset_name=hf_dataset_name,
+            hf_config=hf_config,
+            hf_split=hf_split,
+        )
+
+
+@datasets_group.command("delete")
+@click.argument("name")
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Confirm deletion without interactive prompt.",
+)
+@click.pass_obj
+def datasets_delete(
+    config: CommandConfig,
+    name: str,
+    yes: bool,
+) -> None:
+    """Archive a dataset by name."""
+    with arena_client(config) as client:
+        client.delete_dataset(name=name, confirm=yes)
+
+
 @main.group("experiments")
 def experiment() -> None:
     """Manage experiments (training jobs) by name."""
 
 
 @experiment.command("submit")
-@click.option(
-    "--manifest",
+@click.argument(
+    "manifest",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    required=True,
-    help="Path to manifest file.",
 )
 @click.option(
     "--resource-id",
@@ -423,6 +554,23 @@ def experiment() -> None:
     default=None,
     help="Name of the experiment.",
 )
+@click.option(
+    "--reward-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Python reward function for reasoning dataset jobs (multipart submit). "
+        "Required when the manifest targets a reasoning dataset."
+    ),
+)
+@click.option(
+    "--completion",
+    default=None,
+    help=(
+        "Model completion for reward validation. Defaults to the reference "
+        "answer from the first dataset row when omitted."
+    ),
+)
 @click.pass_obj
 def experiment_submit(
     config: CommandConfig,
@@ -431,6 +579,8 @@ def experiment_submit(
     num_nodes: int | None,
     project: str | None,
     experiment_name: str | None,
+    reward_file: Path | None,
+    completion: str | None,
 ) -> None:
     """Submit an experiment from a manifest."""
     with arena_client(config) as client:
@@ -440,6 +590,8 @@ def experiment_submit(
             num_nodes=num_nodes,
             project=project,
             experiment_name=experiment_name,
+            reward_file=reward_file,
+            completion=completion,
         )
 
 

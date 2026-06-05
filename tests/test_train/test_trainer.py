@@ -333,6 +333,54 @@ class TestGetTrainingKwargs:
         assert "n_step_memory" not in kwargs
 
 
+class TestLocalTrainerHpo:
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_hpo_enables_default_mutation_and_tournament_specs(
+        self, mock_create_pop, env, training_spec
+    ):
+        mock_create_pop.return_value = [MagicMock()]
+        trainer = LocalTrainer(
+            algorithm="PPO",
+            environment=env,
+            training=training_spec,
+            mutation=None,
+            tournament=None,
+            hpo=True,
+        )
+        assert trainer.mutation_spec is not None
+        assert trainer.tournament_selection_spec is not None
+
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_hpo_does_not_override_explicit_specs(
+        self, mock_create_pop, env, training_spec, mutation_spec, tournament_spec
+    ):
+        mock_create_pop.return_value = [MagicMock()]
+        trainer = LocalTrainer(
+            algorithm="DQN",
+            environment=env,
+            training=training_spec,
+            mutation=mutation_spec,
+            tournament=tournament_spec,
+            hpo=True,
+        )
+        assert trainer.mutation_spec is mutation_spec
+        assert trainer.tournament_selection_spec is tournament_spec
+
+
+class TestArenaTrainerMissingDependencies:
+    def test_raises_import_error_when_arena_client_unavailable(self, training_spec):
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
+        with (
+            patch("agilerl.training.trainer.ArenaClient", None),
+            pytest.raises(ImportError, match="Arena dependencies are not installed"),
+        ):
+            ArenaTrainer(
+                algorithm="PPO",
+                environment=env_spec,
+                training=training_spec,
+            )
+
+
 class TestLocalTrainerConstruction:
     @patch("agilerl.training.trainer.create_population_from_spec")
     def test_string_algorithm(self, mock_create_pop, env, training_spec):
@@ -619,6 +667,32 @@ class TestArenaTrainerManifest:
 
 
 class TestArenaTrainerTrain:
+    @patch("agilerl.training.trainer.ArenaManifest.get_validated")
+    def test_train_validates_with_arena_manifest(
+        self, mock_get_validated, mock_client, ppo_spec, training_spec
+    ):
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
+        trainer = ArenaTrainer(
+            algorithm=ppo_spec,
+            environment=env_spec,
+            training=training_spec,
+            client=mock_client,
+        )
+        validated = {
+            "algorithm": {"name": "PPO"},
+            "environment": {"name": "CartPole-v1"},
+            "training": {"max_steps": 500},
+            "mutation": {},
+            "tournament_selection": {},
+            "network": {},
+        }
+        mock_get_validated.return_value = validated
+        result = trainer.train()
+
+        mock_get_validated.assert_called_once()
+        mock_client.submit_training_job.assert_called_once_with(validated)
+        assert result["job_id"] == "test-123"
+
     def test_train_submits_manifest(self, mock_client, ppo_spec, training_spec):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
@@ -633,6 +707,8 @@ class TestArenaTrainerTrain:
         submitted_manifest = mock_client.submit_training_job.call_args[0][0]
         assert isinstance(submitted_manifest, dict)
         assert submitted_manifest["algorithm"]["name"] == "PPO"
+        assert "mutation" in submitted_manifest
+        assert "tournament_selection" in submitted_manifest
         assert result["job_id"] == "test-123"
 
     def test_train_submits_manifest_with_serializable_payload(

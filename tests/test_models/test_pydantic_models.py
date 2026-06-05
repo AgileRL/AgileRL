@@ -655,6 +655,26 @@ class TestManifestResolveAlgorithm:
             with pytest.raises(ImportError, match="LLM dependencies"):
                 _resolve_algorithm({"name": "GRPO", "group_size": 4})
 
+    def test_resolve_arena_only_strips_dqn_cudagraphs(self):
+        """Arena manifests ignore ``cudagraphs`` on DQN."""
+        from agilerl.models.algorithms.dqn import DQNSpec
+        from agilerl.models.manifest import _resolve_algorithm
+
+        spec = _resolve_algorithm(
+            {"name": "DQN", "cudagraphs": True},
+            arena_only=True,
+        )
+        assert isinstance(spec, DQNSpec)
+        assert spec.cudagraphs is False
+
+    def test_resolve_local_keeps_dqn_cudagraphs(self):
+        from agilerl.models.algorithms.dqn import DQNSpec
+        from agilerl.models.manifest import _resolve_algorithm
+
+        spec = _resolve_algorithm({"name": "DQN", "cudagraphs": True})
+        assert isinstance(spec, DQNSpec)
+        assert spec.cudagraphs is True
+
 
 class TestTrainingSpec:
     """Lines 247-248 in training.py."""

@@ -75,6 +75,9 @@ def _resolve_algorithm(data: Any, *, arena_only: bool = False) -> AlgoSpecT:
         msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
         raise ImportError(msg)
 
+    if arena_only:
+        _strip_arena_excluded_algo_fields(name, data)
+
     return entry.spec_cls(**data)
 
 
@@ -138,6 +141,17 @@ _ALGO_NON_SERIALIZABLE_FIELDS: set[str] = {
     "actor_networks",
 }
 
+# Algorithm fields accepted locally but omitted from Arena manifests.
+_ARENA_ALGO_FIELD_EXCLUSIONS: dict[str, frozenset[str]] = {
+    "DQN": frozenset({"cudagraphs"}),
+}
+
+
+def _strip_arena_excluded_algo_fields(name: str, data: dict[str, Any]) -> None:
+    """Remove Arena-ineligible algorithm fields from *data* in place."""
+    for field in _ARENA_ALGO_FIELD_EXCLUSIONS.get(name, ()):
+        data.pop(field, None)
+
 
 def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
     """Serialize an algorithm spec to a JSON-safe dict for manifest storage.
@@ -155,6 +169,14 @@ def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
     return dumped
 
 
+def _serialize_algorithm_for_arena(spec: AlgoSpecT) -> dict[str, Any]:
+    """Serialize an algorithm spec for Arena, omitting unsupported fields."""
+    dumped = _serialize_algorithm(spec)
+    for field in _ARENA_ALGO_FIELD_EXCLUSIONS.get(spec.name, ()):
+        dumped.pop(field, None)
+    return dumped
+
+
 # NOTE: Use of PlainSerializer here I believe results in not being able to serialize a
 # TrainingManifest's algorithm section in "python" mode i.e. the non-serializable fields
 # are lost. Not really an issue because we serialize the algo spec directly (not through
@@ -167,7 +189,7 @@ AlgorithmFromManifest = Annotated[
 ArenaAlgorithmFromManifest = Annotated[
     AlgoSpecT,
     BeforeValidator(functools.partial(_resolve_algorithm, arena_only=True)),
-    PlainSerializer(_serialize_algorithm, return_type=dict[str, Any]),
+    PlainSerializer(_serialize_algorithm_for_arena, return_type=dict[str, Any]),
 ]
 EnvironmentFromManifest = Annotated[
     dict[str, Any], BeforeValidator(_coerce_environment)

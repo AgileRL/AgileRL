@@ -367,6 +367,7 @@ class TestEnvValidateCommand:
             entrypoint=None,
             description=None,
             multi_agent=False,
+            language_based=False,
             do_rollouts=False,
         )
 
@@ -396,7 +397,18 @@ class TestEnvValidateCommand:
         assert result.exit_code == 0
         call_kwargs = mock_client.validate_environment.call_args.kwargs
         assert call_kwargs["multi_agent"] is True
+        assert call_kwargs["language_based"] is False
         assert call_kwargs["do_rollouts"] is True
+
+    def test_validate_language_based(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                ["env", "validate", "my-gem-env", "--language-based"],
+            )
+        assert result.exit_code == 0
+        call_kwargs = mock_client.validate_environment.call_args.kwargs
+        assert call_kwargs["language_based"] is True
 
 
 class TestEnvProfileCommand:
@@ -487,9 +499,7 @@ class TestExperimentSubmitCommand:
         manifest.write_text("experiment: test")
         mock_client.submit_experiment.return_value = {"id": "exp-123"}
         with _patched_arena_client(mock_client):
-            result = runner.invoke(
-                main, ["experiments", "submit", "--manifest", str(manifest)]
-            )
+            result = runner.invoke(main, ["experiments", "submit", str(manifest)])
         assert result.exit_code == 0
         mock_client.submit_experiment.assert_called_once_with(
             manifest=manifest,
@@ -497,11 +507,15 @@ class TestExperimentSubmitCommand:
             num_nodes=2,
             project=None,
             experiment_name=None,
+            reward_file=None,
+            completion=None,
         )
 
     def test_submit_all_options(self, runner, mock_client, tmp_path):
         manifest = tmp_path / "m.yaml"
         manifest.write_text("x: 1")
+        reward = tmp_path / "reward.py"
+        reward.write_text("def reward(q, a, c):\n    return 0.0\n")
         mock_client.submit_experiment.return_value = {"id": "exp-456"}
         with _patched_arena_client(mock_client):
             result = runner.invoke(
@@ -509,7 +523,6 @@ class TestExperimentSubmitCommand:
                 [
                     "experiments",
                     "submit",
-                    "--manifest",
                     str(manifest),
                     "--resource-id",
                     "arena-large",
@@ -519,6 +532,10 @@ class TestExperimentSubmitCommand:
                     "proj1",
                     "--experiment-name",
                     "my-exp",
+                    "--reward-file",
+                    str(reward),
+                    "--completion",
+                    "test output",
                 ],
             )
         assert result.exit_code == 0
@@ -528,6 +545,8 @@ class TestExperimentSubmitCommand:
             num_nodes=4,
             project="proj1",
             experiment_name="my-exp",
+            reward_file=reward,
+            completion="test output",
         )
 
     def test_submit_missing_manifest(self, runner, mock_client):

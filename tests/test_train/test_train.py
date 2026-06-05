@@ -42,6 +42,7 @@ from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_
 from agilerl.training.train_multi_agent_on_policy import train_multi_agent_on_policy
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
+from agilerl.population import Population
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import make_multi_agent_vect_envs
 
@@ -2216,6 +2217,142 @@ class TestTrainOffPolicy:
                 verbose=False,
             )
         mock_wandb_finish.assert_called()
+
+
+class TestTrainTargetEarlyReturn:
+    """Cover ``population.should_stop`` early-return branches in train loops."""
+
+    @staticmethod
+    def _population_with_min_evo(agents: list) -> Population:
+        return Population(agents=agents, min_evo_steps=0)
+
+    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    def test_train_off_policy_returns_when_target_met(self, env):
+        agent = DummyAgentOffPolicy(5, env, 0.4)
+        agent.fitness = [100.0]
+        population = self._population_with_min_evo([agent])
+
+        with (
+            patch(
+                "agilerl.training.train_off_policy.Population",
+                return_value=population,
+            ),
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch.object(population, "finish") as mock_finish,
+        ):
+            agents, fitnesses = train_off_policy(
+                env,
+                "env_name",
+                "algo",
+                [agent],
+                DummyMemory(),
+                max_steps=100,
+                evo_steps=2,
+                target=-1.0,
+                wb=True,
+                verbose=False,
+            )
+
+        assert agents is population.agents
+        assert fitnesses == population.last_fitnesses
+        mock_finish.assert_called_once()
+
+    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    def test_train_on_policy_returns_when_target_met(self, env):
+        agent = DummyAgentOnPolicy(5, env)
+        agent.fitness = [100.0]
+        population = self._population_with_min_evo([agent])
+
+        with (
+            patch(
+                "agilerl.training.train_on_policy.Population",
+                return_value=population,
+            ),
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch.object(population, "finish") as mock_finish,
+        ):
+            agents, fitnesses = train_on_policy(
+                env,
+                "env_name",
+                "algo",
+                [agent],
+                max_steps=100,
+                evo_steps=2,
+                target=-1.0,
+                wb=True,
+                verbose=False,
+            )
+
+        assert agents is population.agents
+        assert fitnesses == population.last_fitnesses
+        mock_finish.assert_called_once()
+
+    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    def test_train_offline_returns_when_target_met(self, env, dummy_h5py_data):
+        agent = DummyAgentOffPolicy(5, env, 0.4)
+        agent.fitness = [100.0]
+        population = self._population_with_min_evo([agent])
+        memory = DummyMemory()
+        seed_transition = Transition(
+            obs=np.random.randn(2, *env.state_size[1:]),
+            action=np.random.randn(2, env.action_size),
+            reward=np.random.uniform(0, 1, 2),
+            done=np.random.choice([True, False], 2),
+            next_obs=np.random.randn(2, *env.state_size[1:]),
+        ).to_tensordict()
+        seed_transition.batch_size = [2]
+        memory.add(seed_transition)
+
+        with (
+            patch(
+                "agilerl.training.train_offline.Population",
+                return_value=population,
+            ),
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch.object(population, "finish") as mock_finish,
+        ):
+            agents, fitnesses = train_offline(
+                env,
+                "env_name",
+                "algo",
+                [agent],
+                memory,
+                dataset=dummy_h5py_data,
+                max_steps=100,
+                evo_steps=2,
+                target=-1.0,
+                wb=True,
+                verbose=False,
+            )
+
+        assert agents is population.agents
+        assert fitnesses == population.last_fitnesses
+        mock_finish.assert_called_once()
+
+    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    def test_train_offline_requires_dataset_or_minari(self, env):
+        agent = DummyAgentOffPolicy(5, env, 0.4)
+        memory = DummyMemory()
+
+        with pytest.raises(ValueError, match="minari_dataset_id"):
+            train_offline(
+                env,
+                "env_name",
+                "algo",
+                [agent],
+                memory,
+                dataset=None,
+                minari_dataset_id=None,
+                max_steps=2,
+                evo_steps=2,
+                verbose=False,
+            )
 
 
 class TestTrainOnPolicy:

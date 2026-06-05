@@ -4,6 +4,7 @@ Utils
 .. toctree::
    :maxdepth: 1
 
+   arena_utils
    utils
    algo_utils
    cache

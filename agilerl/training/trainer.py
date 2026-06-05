@@ -18,6 +18,7 @@ from agilerl.algorithms.core.base import (
 from agilerl.models import (
     ALGO_REGISTRY,
     AlgoSpecT,
+    ArenaManifest,
     FinetuningNetworkSpec,
     LLMAlgorithmSpec,
     MutationSpec,
@@ -645,7 +646,7 @@ class ArenaTrainer(Trainer):
         :rtype: ArenaTrainer
         """
         # Validate manifest and resolve environment spec.
-        validated_manifest = TrainingManifest.get_validated(manifest, mode="python")
+        validated_manifest = ArenaManifest.get_validated(manifest, mode="python")
         env_spec = cls._resolve_env_spec(validated_manifest)
 
         return cls(
@@ -686,7 +687,7 @@ class ArenaTrainer(Trainer):
         :returns: Arena API response including ``job_id`` and ``status``.
         :rtype: dict[str, Any]
         """
-        manifest = self.to_manifest()
+        manifest = ArenaManifest.get_validated(self.to_manifest(), mode="json")
         return self._client.submit_training_job(manifest)
 
     def resume_from_checkpoint(self, job_id: str, max_steps: int) -> None:

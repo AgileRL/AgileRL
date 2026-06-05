@@ -1524,6 +1524,12 @@ def _make_mock_peft_actor():
 class _StubLLMAlgorithm(LLMAlgorithm):
     """Concrete stub of the abstract LLMAlgorithm for testing."""
 
+    def __init__(self, *args, **kwargs):
+        actor_network = kwargs.get("actor_network")
+        super().__init__(*args, **kwargs)
+        if actor_network is not None:
+            self.actor = actor_network
+
     def learn(self, *a, **kw):
         return None
 
@@ -1604,6 +1610,142 @@ def _make_llm_agent(
     agent.registry.groups = []
     agent.registry.optimizers = []
     return agent
+
+
+class TestLLMAlgorithmPopulation:
+    """Tests for :meth:`LLMAlgorithm.population`."""
+
+    @staticmethod
+    def _population_kwargs() -> dict:
+        return {
+            "batch_size": 4,
+            "lr": 1e-4,
+            "max_grad_norm": 0.0,
+            "clone": True,
+            "calc_position_embeddings": False,
+            "seed": 42,
+            "pad_token_id": 0,
+            "pad_token": "<pad>",
+            "use_liger_loss": False,
+            "lora_config": MagicMock(),
+        }
+
+    @staticmethod
+    def _population_init_context():
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            with (
+                patch.object(LLMAlgorithm, "_initialize_actors"),
+                patch.object(LLMAlgorithm, "_configure_vllm"),
+                patch.object(LLMAlgorithm, "wrap_models"),
+                patch.object(EvolvableAlgorithm, "_registry_init"),
+                patch(
+                    "agilerl.algorithms.core.base.broadcast_object_list",
+                    side_effect=lambda obj_list, from_process=0: list(obj_list),
+                ),
+            ):
+                yield
+
+        return _ctx()
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES,
+        reason="LLM dependencies not installed",
+    )
+    def test_population_builds_requested_size_without_accelerator(self):
+        with (
+            self._population_init_context(),
+            patch(
+                "agilerl.algorithms.core.base.clone_llm",
+                return_value=_make_mock_peft_actor(),
+            ) as mock_clone,
+        ):
+            population = _StubLLMAlgorithm.population(
+                size=3,
+                accelerator=None,
+                device="cpu",
+                actor_network=_make_mock_peft_actor(),
+                **self._population_kwargs(),
+            )
+
+        assert len(population) == 3
+        assert mock_clone.call_count == 2
+        assert population[0].index == 0
+        assert population[1].index == 1
+        assert population[2].index == 2
+        assert population[1].accelerator is None
+        assert population[2].accelerator is None
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES,
+        reason="LLM dependencies not installed",
+    )
+    def test_population_with_accelerator_clones_deepspeed_state(self):
+        """Population clones via ``get_state_dict`` when an accelerator is set."""
+        import agilerl.algorithms.core.base as algo_base
+
+        acc = _make_mock_accelerator(num_processes=1)
+        agent_0 = _make_llm_agent(accelerator=acc)
+
+        with self._population_init_context():
+            with (
+                patch(
+                    "agilerl.algorithms.core.base.clone_llm",
+                    return_value=_make_mock_peft_actor(),
+                ) as mock_clone,
+                patch(
+                    "agilerl.algorithms.core.base.get_state_dict",
+                    return_value={"layer": torch.tensor(1.0)},
+                ) as mock_get_sd,
+            ):
+                cloned_actor = algo_base.clone_llm(
+                    agent_0.actor,
+                    zero_stage=0,
+                    state_dict=algo_base.get_state_dict(agent_0.actor),
+                )
+                agent_1 = _StubLLMAlgorithm(
+                    index=1,
+                    accelerator=_make_mock_accelerator(num_processes=1),
+                    device="cpu",
+                    actor_network=cloned_actor,
+                    **self._population_kwargs(),
+                )
+
+        mock_get_sd.assert_called_once_with(agent_0.actor)
+        mock_clone.assert_called_once()
+        assert agent_1.actor is cloned_actor
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES,
+        reason="LLM dependencies not installed",
+    )
+    def test_population_resume_from_checkpoint_loads_each_agent(self):
+        checkpoint_path = "/tmp/llm_checkpoint"
+
+        with (
+            self._population_init_context(),
+            patch(
+                "agilerl.algorithms.core.base.clone_llm",
+                return_value=_make_mock_peft_actor(),
+            ),
+            patch.object(_StubLLMAlgorithm, "load_checkpoint") as mock_load,
+        ):
+            population = _StubLLMAlgorithm.population(
+                size=2,
+                accelerator=None,
+                device="cpu",
+                actor_network=_make_mock_peft_actor(),
+                resume_from_checkpoint=checkpoint_path,
+                **self._population_kwargs(),
+            )
+
+        assert len(population) == 2
+        assert mock_load.call_count == 2
+        mock_load.assert_any_call(checkpoint_path)
+        assert population[0].index == 0
+        assert population[1].index == 1
 
 
 class TestLLMAlgorithmLoad:

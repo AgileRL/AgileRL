@@ -338,10 +338,8 @@ class AlgorithmSpec(BaseModel):
                 import h5py
 
                 kwargs["dataset"] = h5py.File(env_spec.dataset_path, "r")
-
         if self.bandit:
             kwargs["episode_steps"] = training.episode_steps
-
         if self.agent_type == AgentType.MultiAgent:
             kwargs["sum_scores"] = training.sum_scores
 

@@ -117,7 +117,12 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     )
     from safetensors.torch import load_file
 
-    from agilerl.utils.llm_utils import create_model_from_name_or_path, gather_if_zero3
+    from agilerl.utils.algo_utils import clone_llm
+    from agilerl.utils.llm_utils import (
+        create_model_from_name_or_path,
+        gather_if_zero3,
+        get_state_dict,
+    )
 
 if TYPE_CHECKING or HAS_DEEPSPEED:
     from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
@@ -2832,9 +2837,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: A list of LLM algorithms.
         :rtype: list[LLMAlgorithm]
         """
-        from agilerl.utils.algo_utils import clone_llm
-        from agilerl.utils.llm_utils import get_state_dict
-
         agent_0 = cls(index=0, accelerator=accelerator, device=device, **kwargs)
         if resume_from_checkpoint is not None:
             agent_0.load_checkpoint(resume_from_checkpoint)
@@ -2852,12 +2854,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     else get_state_dict(agent_0.actor)
                 ),
             )
+            clone_kwargs = dict(kwargs)
+            clone_kwargs.pop("actor_network", None)
             agent = cls(
                 index=i,
                 accelerator=agent_accelerator,
                 device=device,
                 actor_network=cloned_actor,
-                **kwargs,
+                **clone_kwargs,
             )
             if resume_from_checkpoint is not None:
                 agent.load_checkpoint(resume_from_checkpoint)
