@@ -118,6 +118,9 @@ class DPO(LLMAlgorithm):
         reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
         use_separate_reference_adapter: bool = True,
+        quantization_config: Any | None = None,
+        activation_offload: bool = False,
+        lora_target_scope: str | None = None,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -157,6 +160,9 @@ class DPO(LLMAlgorithm):
             reduce_memory_peak=reduce_memory_peak,
             cast_logprobs_to_fp32=cast_logprobs_to_fp32,
             use_separate_reference_adapter=use_separate_reference_adapter,
+            quantization_config=quantization_config,
+            activation_offload=activation_offload,
+            lora_target_scope=lora_target_scope,
         )
         self.beta = beta
         self.nll_alpha = nll_alpha

@@ -95,7 +95,7 @@ def pytest_collection_modifyitems(config, items):
       invocation handles both. The cap is set by:
 
       1. **GPU memory.** Each container has a dedicated ~14.6 GiB GPU. Peak
-         per-test usage: ~4.4 GiB (``test_grpo_move_model_to_vllm``), ~3.0
+         per-test usage: ~4.4 GiB (``test_grpo_sync_actor_to_vllm``), ~3.0
          GiB (``test_grpo_learn``), ~2.5 GiB
          (``test_grpo_clone_with_accelerator_vllm``); median ~1.5 GiB.
          With every test factory constructing ``VLLMConfig`` with

@@ -15,6 +15,7 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
+from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym, masked_whiten
@@ -475,6 +476,32 @@ class TestPPOInit:
                 gradient_checkpointing=False,
             )
 
+    def test_init_liger_token_chunk_size_must_be_positive_or_none(self):
+        actor = create_module(10, 8, 100, "cpu")
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=16,
+            target_modules=["lin"],
+            task_type="CAUSAL_LM",
+            modules_to_save=["summary"],
+        )
+        with pytest.raises(
+            ValueError, match="liger_token_chunk_size must be a positive int or None"
+        ):
+            LLMPPO(
+                actor_network=actor,
+                pad_token_id=99,
+                pad_token="<pad>",
+                lora_config=lora,
+                liger_token_chunk_size=0,
+                wrap=False,
+                gradient_checkpointing=False,
+            )
+
+    def test_init_stores_liger_token_chunk_size(self):
+        ppo = _cpu_llmppo(liger_token_chunk_size=256)
+        assert ppo.liger_token_chunk_size == 256
+
     def test_init_turn_value_reduction_must_be_valid(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
@@ -563,14 +590,14 @@ class TestPPOGetAction:
                 "_prepare_vllm_for_generation",
                 wraps=ppo._prepare_vllm_for_generation,
             ) as mock_prepare,
-            patch.object(ppo, "_move_model_to_vllm", return_value=None) as mock_move,
+            patch.object(ppo, "_sync_actor_to_vllm", return_value=None) as mock_move,
             patch.object(
                 ppo,
                 "_generate_with_vllm_colocate",
-                return_value=(mocked_ids, mocked_masks),
+                return_value=(mocked_ids, mocked_masks, None),
             ) as mock_generate,
         ):
-            completion_ids, action_masks = ppo.get_action(prompts, training=False)
+            completion_ids, action_masks, _ = ppo.get_action(prompts, training=False)
 
         mock_prepare.assert_called_once()
         mock_move.assert_called_once()
@@ -599,7 +626,7 @@ class TestPPOGetAction:
             for _ in range(batch_size)
         ]
         for training in (True, False):
-            completion_ids, action_masks = ppo.get_action(prompts, training=training)
+            completion_ids, action_masks, _ = ppo.get_action(prompts, training=training)
             assert_vllm_get_action_contract(
                 completion_ids=completion_ids,
                 action_masks=action_masks,
@@ -629,7 +656,7 @@ class TestPPOGetAction:
         ]
 
         with patch.object(ppo, "_get_unwrapped_actor", return_value=_NoParamModule()):
-            completion_ids, action_masks = ppo.get_action(prompts, training=True)
+            completion_ids, action_masks, _ = ppo.get_action(prompts, training=True)
 
         assert_vllm_get_action_contract(
             completion_ids=completion_ids,
@@ -1063,7 +1090,7 @@ class TestPPOTest:
         completion = torch.ones(1, 6, dtype=torch.long)
         action_mask = torch.ones(1, 5, dtype=torch.bool)
         with patch.object(
-            ppo, "get_action", return_value=([completion], [action_mask])
+            ppo, "get_action", return_value=ActionResult([completion], [action_mask])
         ) as get_action:
             out = ppo.test(env, loop=2)
 
@@ -1193,6 +1220,38 @@ class TestPPOLossLiger:
         assert "vf_loss" in metrics
         # total_loss = fake_loss (0.5) + vf_loss (real, computed from values)
         assert isinstance(total_loss, torch.Tensor)
+
+    def test_token_mode_forwards_configured_liger_token_chunk_size(self) -> None:
+        ppo = _cpu_llmppo(liger_token_chunk_size=123)
+        B, T = 2, 5
+        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
+        mask = torch.ones(B, T - 1, dtype=torch.float32)
+        old_lp = torch.zeros(B, T - 1)
+        ref_lp = torch.zeros(B, T - 1)
+        returns = torch.zeros(B, T - 1)
+        adv = torch.randn(B, T - 1) * 0.1
+        old_values = torch.zeros(B, T - 1)
+        turn_ids = torch.zeros(B, T - 1, dtype=torch.long)
+        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
+
+        with (
+            patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True),
+            patch("agilerl.algorithms.ppo_llm.apply_fused_policy_loss") as mock_apply,
+        ):
+            mock_apply.return_value = (torch.tensor(0.5, requires_grad=True), fake_aux)
+            ppo._ppo_loss_liger(
+                ids,
+                mask,
+                old_lp,
+                ref_lp,
+                returns,
+                adv,
+                old_values,
+                turn_ids,
+                "token",
+            )
+
+        assert mock_apply.call_args.kwargs["token_chunk_size"] == 123
 
     def test_turn_mode_passes_turn_args_to_liger(self) -> None:
         """Turn-granularity passes ``turn_ids`` and ``max_turns`` into the

@@ -15,6 +15,7 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
+from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym
@@ -487,6 +488,31 @@ class TestREINFORCEInit:
                 gradient_checkpointing=False,
             )
 
+    def test_init_liger_token_chunk_size_must_be_positive_or_none(self):
+        actor = create_dummy_actor(10, 8, 100, "cpu")
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=16,
+            target_modules=["lin"],
+            task_type="CAUSAL_LM",
+        )
+        with pytest.raises(
+            ValueError, match="liger_token_chunk_size must be a positive int or None"
+        ):
+            REINFORCE(
+                actor_network=actor,
+                pad_token_id=99,
+                pad_token="<pad>",
+                lora_config=lora,
+                liger_token_chunk_size=0,
+                wrap=False,
+                gradient_checkpointing=False,
+            )
+
+    def test_init_stores_liger_token_chunk_size(self):
+        rf = _cpu_llmreinforce(liger_token_chunk_size=256)
+        assert rf.liger_token_chunk_size == 256
+
     def test_init_clone_requires_pretrained_like_actor(self):
         with pytest.raises(AssertionError, match="PeftModelProtocol"):
             REINFORCE(
@@ -535,14 +561,14 @@ class TestREINFORCEGetAction:
                 "_prepare_vllm_for_generation",
                 wraps=rf._prepare_vllm_for_generation,
             ) as mock_prepare,
-            patch.object(rf, "_move_model_to_vllm", return_value=None) as mock_move,
+            patch.object(rf, "_sync_actor_to_vllm", return_value=None) as mock_move,
             patch.object(
                 rf,
                 "_generate_with_vllm_colocate",
-                return_value=(mocked_ids, mocked_masks),
+                return_value=(mocked_ids, mocked_masks, None),
             ) as mock_generate,
         ):
-            completion_ids, action_masks = rf.get_action(prompts, training=False)
+            completion_ids, action_masks, _ = rf.get_action(prompts, training=False)
 
         mock_prepare.assert_called_once()
         mock_move.assert_called_once()
@@ -565,7 +591,7 @@ class TestREINFORCEGetAction:
             for _ in range(3)
         ]
         for training in (True, False):
-            completion_ids, action_masks = rf.get_action(prompts, training=training)
+            completion_ids, action_masks, _ = rf.get_action(prompts, training=training)
             assert_vllm_get_action_contract(
                 completion_ids=completion_ids,
                 action_masks=action_masks,
@@ -590,7 +616,7 @@ class TestREINFORCEGetAction:
         ]
 
         with patch.object(rf, "_get_unwrapped_actor", return_value=_NoParamModule()):
-            completion_ids, action_masks = rf.get_action(prompts, training=True)
+            completion_ids, action_masks, _ = rf.get_action(prompts, training=True)
 
         assert_vllm_get_action_contract(
             completion_ids=completion_ids,
@@ -930,7 +956,7 @@ class TestREINFORCETest:
         completion = torch.ones(1, 6, dtype=torch.long)
         action_mask = torch.ones(1, 5, dtype=torch.bool)
         with patch.object(
-            rf, "get_action", return_value=([completion], [action_mask])
+            rf, "get_action", return_value=ActionResult([completion], [action_mask])
         ) as get_action:
             out = rf.test(env, loop=2)
 
@@ -1036,6 +1062,27 @@ class TestReinforceLossLiger:
         assert metrics["pg_loss"] == pytest.approx(0.25)
         assert metrics["entropy"] == pytest.approx(0.35)
         assert loss is fake_loss
+
+    def test_forwards_configured_liger_token_chunk_size(self) -> None:
+        rf = _cpu_llmreinforce(liger_token_chunk_size=123)
+        B, T = 2, 5
+        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
+        mask = torch.ones(B, T - 1, dtype=torch.float32)
+        old_lp = torch.zeros(B, T - 1)
+        ref_lp = torch.zeros(B, T - 1)
+        adv = torch.randn(B, T - 1) * 0.1
+        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
+
+        with (
+            patch("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True),
+            patch(
+                "agilerl.algorithms.reinforce_llm.apply_fused_policy_loss"
+            ) as mock_apply,
+        ):
+            mock_apply.return_value = (torch.tensor(0.4, requires_grad=True), fake_aux)
+            rf._reinforce_loss_liger(ids, mask, old_lp, ref_lp, adv)
+
+        assert mock_apply.call_args.kwargs["token_chunk_size"] == 123
 
 
 class TestREINFORCELearnWithLiger:

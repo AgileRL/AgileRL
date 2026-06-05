@@ -99,6 +99,15 @@ def _lora_config_from_init_hp(INIT_HP: dict[str, Any]) -> Any | None:
     )
 
 
+def _common_llm_init_hp(INIT_HP: dict[str, Any]) -> dict[str, Any]:
+    """Shared ``create_population`` kwargs for GRPO / LLMPPO / LLMREINFORCE."""
+    return {
+        "seed": INIT_HP.get("SEED", 42),
+        "use_liger_loss": INIT_HP.get("USE_LIGER_LOSS", False),
+        "cast_logprobs_to_fp32": INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
+    }
+
+
 def _prepare_llm_algo_kwargs(
     algo_kwargs: dict[str, Any],
     *,
@@ -150,8 +159,42 @@ def _prepare_llm_algo_kwargs(
             "MICRO_BATCH_SIZE_PER_GPU",
             batch_size,
         )  # NOTE we should take a look into deepspeed auto batch-sizing
-    if "reduce_memory_peak" not in merged and "REDUCE_MEMORY_PEAK" in INIT_HP:
-        merged["reduce_memory_peak"] = bool(INIT_HP["REDUCE_MEMORY_PEAK"])
+    # Plain passthroughs: (merged_key, init_hp_key, caster, present_when_truthy).
+    # reduce_memory_peak/activation_offload fire on key membership (so an explicit
+    # False is honoured); lora_target_scope/liger_token_chunk_size fire only on a
+    # truthy value. liger_token_chunk_size cuts Liger backward peak memory.
+    _passthroughs = (
+        ("reduce_memory_peak", "REDUCE_MEMORY_PEAK", bool, False),
+        ("activation_offload", "ACTIVATION_OFFLOAD", bool, False),
+        ("lora_target_scope", "LORA_TARGET_SCOPE", lambda v: v, True),
+        ("liger_token_chunk_size", "LIGER_TOKEN_CHUNK_SIZE", int, True),
+    )
+    for merged_key, init_hp_key, caster, present_when_truthy in _passthroughs:
+        present = (
+            bool(INIT_HP.get(init_hp_key))
+            if present_when_truthy
+            else init_hp_key in INIT_HP
+        )
+        if merged_key not in merged and present:
+            merged[merged_key] = caster(INIT_HP[init_hp_key])
+    # Trainer-side bitsandbytes quantization driven from config / INIT_HP.
+    # An explicit quantization_config in algo_kwargs always wins; otherwise a
+    # QUANTIZATION preset name or BitsAndBytesConfig kwargs dict is resolved.
+    if "quantization_config" not in merged and INIT_HP.get("QUANTIZATION") is not None:
+        from agilerl.utils.llm_utils import build_bnb_quantization_config
+
+        quant_config = build_bnb_quantization_config(INIT_HP["QUANTIZATION"])
+        if quant_config is not None:
+            merged["quantization_config"] = quant_config
+    # ATTN_IMPLEMENTATION: inject a non-"auto" value into model_config so the
+    # algorithm's create_model call treats it as authoritative (overrides the
+    # auto-pick and legacy AGILERL_ATTN_IMPLEMENTATION env var); "auto"/absent
+    # leaves model_config alone so the auto-pick path still runs.
+    attn_impl = INIT_HP.get("ATTN_IMPLEMENTATION")
+    if attn_impl and attn_impl != "auto":
+        mc = dict(merged.get("model_config") or {})
+        mc.setdefault("attn_implementation", attn_impl)
+        merged["model_config"] = mc
     return merged
 
 
@@ -785,16 +828,14 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
-                seed=INIT_HP.get("SEED", 42),
-                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
-                use_fused_linear_logprobs=INIT_HP.get(
-                    "USE_FUSED_LINEAR_LOGPROBS",
-                    INIT_HP.get("USE_FUSED_LINEAR", False),
-                ),
-                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
+                **_common_llm_init_hp(INIT_HP),
                 use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
                 adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
                 loss_type=INIT_HP.get("LOSS_TYPE", "grpo"),
+                importance_sampling_level=INIT_HP.get(
+                    "IMPORTANCE_SAMPLING_LEVEL", "token"
+                ),
+                action_granularity=INIT_HP.get("ACTION_GRANULARITY", "auto"),
                 whiten_advantages=INIT_HP.get("WHITEN_ADVANTAGES", False),
                 adv_clip_range=INIT_HP.get("ADV_CLIP_RANGE"),
                 filter_zero_adv=INIT_HP.get(
@@ -805,6 +846,16 @@ def create_population(
                     "ADV_FILTER_EPS",
                     INIT_HP.get("ADVANTAGE_FILTER_EPS", 0.0),
                 ),
+                vllm_importance_sampling_correction=INIT_HP.get(
+                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", False
+                ),
+                vllm_importance_sampling_apply=INIT_HP.get(
+                    "VLLM_IMPORTANCE_SAMPLING_APPLY", True
+                ),
+                vllm_importance_sampling_cap=INIT_HP.get(
+                    "VLLM_IMPORTANCE_SAMPLING_CAP", 2.0
+                ),
+                use_sequence_packing=INIT_HP.get("USE_SEQUENCE_PACKING", False),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -976,6 +1027,9 @@ def create_population(
                 gamma=INIT_HP.get("GAMMA", 1.0),
                 gae_lambda=INIT_HP.get("GAE_LAMBDA", 1.0),
                 action_granularity=INIT_HP.get("ACTION_GRANULARITY", "auto"),
+                importance_sampling_level=INIT_HP.get(
+                    "IMPORTANCE_SAMPLING_LEVEL", "auto"
+                ),
                 lr_actor=INIT_HP.get("LR_ACTOR", INIT_HP.get("LR", 5e-6)),
                 lr_critic=INIT_HP.get("LR_CRITIC"),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
@@ -992,13 +1046,7 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
-                seed=INIT_HP.get("SEED", 42),
-                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
-                use_fused_linear_logprobs=INIT_HP.get(
-                    "USE_FUSED_LINEAR_LOGPROBS",
-                    INIT_HP.get("USE_FUSED_LINEAR", False),
-                ),
-                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
+                **_common_llm_init_hp(INIT_HP),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -1054,6 +1102,9 @@ def create_population(
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
                 gamma=INIT_HP.get("GAMMA", 0.99),
                 action_granularity=INIT_HP.get("ACTION_GRANULARITY", "auto"),
+                importance_sampling_level=INIT_HP.get(
+                    "IMPORTANCE_SAMPLING_LEVEL", "token"
+                ),
                 lr=INIT_HP.get("LR", 5e-7),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
@@ -1069,13 +1120,7 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
-                seed=INIT_HP.get("SEED", 42),
-                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
-                use_fused_linear_logprobs=INIT_HP.get(
-                    "USE_FUSED_LINEAR_LOGPROBS",
-                    INIT_HP.get("USE_FUSED_LINEAR", False),
-                ),
-                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
+                **_common_llm_init_hp(INIT_HP),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -1225,6 +1270,74 @@ def tournament_selection_and_mutation(
     return population
 
 
+# Ordered W&B logging tiers. Each tier strictly subsumes the previous one:
+#   off       — no W&B logging at all (master kill switch).
+#   essential — scalars only: loss, kl, reward, accuracy, completion_length, step.
+#   standard  — adds GPU memory snapshots, per-step timing breakdown, throughput,
+#               and quantization / LoRA / vLLM config fields recorded at init.
+#               All cheap scalars; this is the default.
+#   detailed  — adds histograms (per-sample completion length, episode rewards).
+#               Costs a host sync per histogram per step.
+#   debug     — adds prompt/completion sample tables every logged step.
+#               Tokenizer decode + storage growth → opt-in only.
+WB_LEVEL_OFF = "off"
+WB_LEVEL_ESSENTIAL = "essential"
+WB_LEVEL_STANDARD = "standard"
+WB_LEVEL_DETAILED = "detailed"
+WB_LEVEL_DEBUG = "debug"
+WB_LEVELS: tuple[str, ...] = (
+    WB_LEVEL_OFF,
+    WB_LEVEL_ESSENTIAL,
+    WB_LEVEL_STANDARD,
+    WB_LEVEL_DETAILED,
+    WB_LEVEL_DEBUG,
+)
+_WB_LEVEL_RANK: dict[str, int] = {name: idx for idx, name in enumerate(WB_LEVELS)}
+
+
+def normalize_wb_level(value: str | None, default: str = WB_LEVEL_STANDARD) -> str:
+    """Validate and canonicalize a W&B logging level string.
+
+    Falls back to ``default`` when ``value`` is ``None`` or empty. Raises
+    ``ValueError`` for anything that isn't one of :data:`WB_LEVELS`.
+    """
+    if value is None or value == "":
+        return default
+    candidate = value.strip().lower()
+    if candidate not in _WB_LEVEL_RANK:
+        msg = f"Unknown wb_level {value!r}. Expected one of: {', '.join(WB_LEVELS)}."
+        raise ValueError(msg)
+    return candidate
+
+
+def wb_level_at_least(level: str, threshold: str) -> bool:
+    """Return ``True`` if ``level`` is >= ``threshold`` in the tier ordering."""
+    return _WB_LEVEL_RANK[level] >= _WB_LEVEL_RANK[threshold]
+
+
+def gpu_memory_snapshot(prefix: str = "Sys") -> dict[str, float]:
+    """Snapshot current CUDA memory state as a flat dict of GiB scalars.
+
+    Returns an empty dict if CUDA is unavailable. ``torch.cuda.memory_allocated``
+    is essentially free (queries the caching allocator, no device sync); peak
+    stats are also cheap and reset by callers when they want a fresh window.
+    """
+    if not torch.cuda.is_available():
+        return {}
+    gib = 1024.0**3
+    return {
+        f"{prefix}/GPU Allocated GiB": torch.cuda.memory_allocated() / gib,
+        f"{prefix}/GPU Reserved GiB": torch.cuda.memory_reserved() / gib,
+        f"{prefix}/GPU Max Allocated GiB": torch.cuda.max_memory_allocated() / gib,
+    }
+
+
+def reset_gpu_memory_peak() -> None:
+    """Reset the CUDA peak-memory counter so the next snapshot is window-scoped."""
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
 def init_wandb(
     algo: str,
     env_name: str,
@@ -1254,11 +1367,6 @@ def init_wandb(
     api_key = wandb_api_key or os.environ.get("WANDB_API_KEY")
     if api_key:
         wandb.login(key=api_key)
-    else:
-        warnings.warn(
-            "No wandb API key provided; set WANDB_API_KEY or pass wandb_api_key for online logging.",
-            stacklevel=2,
-        )
 
     config_dict = {}
     if init_hyperparams is not None:

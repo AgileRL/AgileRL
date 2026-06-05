@@ -5,65 +5,78 @@ Fused linear log-prob optimizations
 
 When you train an LLM with reinforcement learning, the model still has to turn
 each hidden vector into a score for every vocabulary token. That intermediate
-usually has shape ``(batch, sequence length, vocab size)``. For large vocabs (typically >100k)
-that tensor alone can dominate GPU memory, even though many algorithms only
-need the log-probability of the **token that was actually chosen** at each
-position—a much smaller ``(batch, sequence length)`` result.
+usually has shape ``(batch, sequence length, vocab size)``. For large vocabs
+(typically >100k) that tensor alone can dominate GPU memory, even though most
+RL algorithms only need the log-probability of the **token that was actually
+chosen** at each position — a much smaller ``(batch, sequence length)`` result.
 
-AgileRL offers two **optional** speed/memory switches. They are meant to
-implement the same training objective as the standard code, up to normal
-floating-point differences.
+AgileRL never materializes the full ``(B, T, V)`` logits tensor for log-prob
+computation. Instead it identity-patches ``lm_head`` so the model forward
+returns hidden states, then computes per-token log-probs with a **chunked
+matmul** over the ``lm_head`` weight, bounding the transient logits workspace
+to ``(chunk_rows, V)``. This is unconditional — there is no flag to turn it on
+or off — and it applies to both:
 
-* ``use_liger_loss`` defaults to ``None``, which resolves to ``True`` when
-  ``liger-kernel`` is importable and ``False`` otherwise. Pass ``False``
-  explicitly to force the standard path even when Liger is installed.
-* ``use_fused_linear_logprobs`` defaults to ``None``, which resolves to the
-  same value as the resolved ``use_liger_loss``. Without Liger the
-  gradient-time path already materializes the full ``(B, T, V)`` logits, so
-  fusing the no-grad rollout alone wouldn't lower overall peak — and would
-  force the model to expose a discoverable ``lm_head``. Pass ``True``
-  explicitly to fuse only the rollout side without enabling Liger.
+* the no-grad rollout side (old-policy and reference log-probs), and
+* the gradient-time policy log-probs: the chunked matmul is routed through a
+  gradient-checkpointed autograd Function that recomputes each chunk's logits
+  in the backward pass, so the spike stays bounded in **both** directions.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 28 38 34
+Because ``lm_head`` is needed as a standalone weight for this matmul, it is
+excluded from LoRA adapters and (when quantizing) kept unquantized so the
+manual matmul stays exact.
 
-   * - Flag
-     - What it does
-     - When it runs
-   * - ``use_fused_linear_logprobs``
-     - Chunked ``lm_head`` + log-softmax + gather: never stores the full
-       ``(..., vocab)`` logits tensor at once.
-     - Rollout-side work only (e.g. "old" and reference log-probs) when
-       gradients are off—no impact on how the policy loss backprops.
-   * - ``use_liger_loss``
-     - Fused chunking for the **policy / KL part of the loss**, including
-       backward through ``lm_head``, using `Liger Kernel
-       <https://github.com/linkedin/Liger-Kernel>`_ primitives under the hood.
-     - While the loss is being differentiated (PPO, REINFORCE, GRPO, CISPO,
-       GSPO family).
+Speed
+-----
 
-``use_fused_linear_logprobs`` is pure AgileRL code and does **not** require
-``liger-kernel``. ``use_liger_loss`` **does** require ``liger-kernel``; if you
-explicitly pass ``True`` without it installed you get a warning and the flag
-is turned off. Leaving it at the default ``None`` simply opts out of the
-fused loss when Liger is missing — no warning. If you use ``use_liger_loss``
-with LoRA, ``lm_head`` is excluded from LoRA adapters (with a warning) because
-the fused kernel expects a single full head weight matrix.
+The per-chunk matmul + ``log_softmax`` reduction is compiled with
+``torch.compile`` (Triton kernels) on the first CUDA call, with an automatic
+eager fallback when compilation is unavailable (CPU/MPS, no Triton, or an
+unsupported backend). Set ``AGILERL_DISABLE_FUSED_COMPILE=1`` to force the
+eager path.
 
-``cast_logprobs_to_fp32`` (on ``LLMAlgorithm``) controls whether the
-**chunked log-prob reductions** in the standard and
-``use_fused_linear_logprobs`` paths run the numerically sensitive
-``logsumexp`` / gather steps in fp32, then cast back. It defaults to ``None``,
-which resolves to the same value as the resolved ``use_liger_loss``: Liger
-users get fp32 (consistent with Liger's own gradient-time math and cheap
-because the fused rollout workspace is small), while non-Liger users get
-bf16 to avoid a ~10 GB fp32 chunk workspace landing on top of the full
-``(B, T, V)`` bf16 logits on the unfused grad path. Set ``True`` explicitly
-if you want fp32 precision and have the memory headroom; set ``False`` to
-force bf16 even with Liger. Note that the Liger gradient-time kernels use
-their own fused math and **ignore** this flag for the loss backward — it
-only governs the rollout-side log-prob reductions.
+The chunk size (``chunk_rows`` of the flattened ``(B*T)`` workspace) is
+**vocab-aware**: it is sized so one fp32 ``(chunk_rows, V)`` slab stays near a
+fixed byte budget (large-vocab models get fewer rows per chunk, small-vocab
+models more). Override it with ``AGILERL_FUSED_LOGPROBS_CHUNK_ROWS``.
+
+The Liger loss
+--------------
+
+``use_liger_loss`` (default ``False``) is the one remaining loss switch. It
+fuses the **policy / KL part of the loss**, including the backward through
+``lm_head``, into `Liger Kernel <https://github.com/linkedin/Liger-Kernel>`_
+Triton primitives — a single fused pass that is faster than the standard path
+when it applies. It requires ``liger-kernel``; passing ``True`` without it
+installed warns and falls back to ``False``.
+
+Memory behavior of the Liger path depends on the importance-sampling level:
+
+* **Token-level** GRPO / CISPO / PPO / REINFORCE: the hidden states are
+  token-flattened to ``(B*T, 1, H)`` so the fused kernel chunks **tokens** —
+  each chunk materializes only ``(token_chunk, vocab)`` logits. Bounded.
+  ``AGILERL_LIGER_TOKEN_CHUNK`` (default 2048) sets the tokens-per-chunk.
+* **Turn- and sequence-level** (e.g. GSPO): pooling couples a turn/sequence's
+  tokens, so a token chunk would only see part of the pooled unit — the
+  flatten trick cannot apply. The fused kernel processes one whole sequence
+  per chunk and materializes ``(seq_len, vocab)`` per trajectory, which is
+  **not** memory-bounded at long context. AgileRL warns and, where it can,
+  routes these to the standard path; set ``use_liger_loss=False`` for bounded
+  memory (the standard path is always fused-linear/bounded).
+
+So the rule of thumb: keep ``use_liger_loss=True`` for token-level objectives
+(fastest, bounded); use ``use_liger_loss=False`` for turn-/sequence-level
+objectives at long context.
+
+Precision
+---------
+
+``cast_logprobs_to_fp32`` (on ``LLMAlgorithm``, default ``True``) controls
+whether the chunked log-prob reductions (``gather`` / ``logsumexp``) run in
+fp32 before casting back to the input dtype. Because the workspace is only a
+single ``(chunk_rows, V)`` slab, fp32 is cheap. The Liger gradient-time
+kernels use their own fused math and **ignore** this flag for the loss
+backward — it only governs the log-prob reductions.
 
 Usage
 -----
@@ -72,27 +85,17 @@ Usage
 
     from agilerl.algorithms import GRPO, CISPO, GSPO, LLMPPO, LLMREINFORCE
 
-    # Both fused paths are on by default when liger-kernel is installed.
-    agent = GRPO(...)
-
-    # Force the standard PyTorch paths even if Liger is available.
-    agent = GRPO(
-        ...,
-        use_liger_loss=False,
-        use_fused_linear_logprobs=False,
-    )
-
-Tiny batches (only a few hundred tokens total) may not see much benefit from
-chunking and can even be slightly slower; very large sequences may still run out
-of memory for non-vocabulary reasons (attention, backbone activations).
+    # Bounded fused log-probs are always on. Liger is opt-in for the loss.
+    agent = GRPO(...)                    # standard (always-bounded) loss path
+    agent = GRPO(..., use_liger_loss=True)  # fused Liger loss (token-level bounded)
 
 Example: what changes in memory?
 --------------------------------
 
 Illustrative peak **workspace** for the vocabulary projection only: same batch,
-sequence, and vocab, comparing storing full logits once versus fusing/chunking so
-only a thin slice of vocab scores exists at a time. Numbers are
-order-of-magnitude; real runs add the rest of the model on top.
+sequence, and vocab, comparing storing full logits once versus chunking so only
+a thin slice of vocab scores exists at a time. Numbers are order-of-magnitude;
+real runs add the rest of the model on top.
 
 .. list-table::
    :header-rows: 1
@@ -101,9 +104,9 @@ order-of-magnitude; real runs add the rest of the model on top.
    * - Setting
      - Dominant temporary tensor
      - Rough size (bf16) for ``B=8``, ``T=2048``, ``V≈152k``
-   * - Standard ``lm_head``
+   * - Full ``lm_head`` logits (not used by AgileRL)
      - Logits ``(8, 2048, V)``
      - ~5 GB for that tensor alone
-   * - ``use_fused_linear_logprobs`` (chunked)
-     - One chunk of logits ``(chunk_rows, V)`` at a time (e.g. chunk_rows ≈ 1024)
-     - ~0.3 GB peak for that slice (≈10–50× smaller slice, depending on chunk size)
+   * - Chunked fused log-probs (always on)
+     - One chunk of logits ``(chunk_rows, V)`` at a time
+     - ~0.3 GB peak for that slice (≈10–50× smaller, depending on chunk size)

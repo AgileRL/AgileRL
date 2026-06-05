@@ -122,7 +122,7 @@ class TestREINFORCETest:
         )
 
         for training in (True, False):
-            completion_ids, action_masks = rf.get_action(prompts, training=training)
+            completion_ids, action_masks, _ = rf.get_action(prompts, training=training)
             assert_vllm_get_action_contract(
                 completion_ids=completion_ids,
                 action_masks=action_masks,

@@ -62,4 +62,5 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
    :caption: Topics
 
    fused_logprobs
+   quantization
    llm_checkpoints

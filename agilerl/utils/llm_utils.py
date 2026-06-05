@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import copy
+import gc
 import logging
+import os
 import random
+import re
 import shutil
 import textwrap
 import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -22,8 +27,11 @@ if TYPE_CHECKING or HAS_DEEPSPEED:
 logger = logging.getLogger(__name__)
 
 if HAS_LLM_DEPENDENCIES:
+    # ``AutoTokenizer`` is re-exported as a no-deps fallback symbol (asserted by
+    # test_llm_utils_fallback_types_when_no_llm_dependencies); keep it imported
+    # so the with-deps and no-deps branches define the same names.
     from datasets import Dataset
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from transformers.modeling_utils import PreTrainedModel
 
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
@@ -33,10 +41,20 @@ else:
     Dataset = Any
     AutoModelForCausalLM = Any  # type: ignore[assignment,misc]
     AutoModelForCausalLMWithValueHead = Any  # type: ignore[assignment,misc]
+    BitsAndBytesConfig = Any  # type: ignore[assignment,misc]
 
 _DEPRECATED_LLM_ENV_NAMES = frozenset(
     ("apply_chat_template", "ReasoningGym", "PreferenceGym", "SFTGym"),
 )
+
+#: Named bitsandbytes quantization presets usable from YAML / ``INIT_HP``.
+#: ``"nf4"`` matches the QLoRA recipe (4-bit NF4, bf16 compute, double quant)
+#: with bf16 quant storage so DeepSpeed ZeRO-3 can shard the packed weights.
+_BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
+
+# Gemma 4 wraps projections in *ClippableLinear; PEFT must target the inner ``.linear``
+# submodule via regex (see https://github.com/huggingface/peft/issues/3129).
+_CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
 
 
 def __getattr__(name: str) -> Any:
@@ -88,6 +106,30 @@ def max_prompt_tokens_for_sliding_window(
         else 1
     )
     return max(0, max_model_len - gen_reserve)
+
+
+def validate_llm_context_lengths(
+    max_model_len: int,
+    max_output_tokens: int | None,
+) -> None:
+    """Reject configs that leave no prompt room under sliding-window rollouts.
+
+    :param max_model_len: Total context length (prompt + completion ceiling).
+    :type max_model_len: int
+    :param max_output_tokens: Per-generation token cap; skipped when ``None``.
+    :type max_output_tokens: int | None
+    :raises ValueError: If ``max_output_tokens >= max_model_len``.
+    """
+    if max_output_tokens is None:
+        return
+    if max_output_tokens >= max_model_len:
+        msg = (
+            f"max_output_tokens ({max_output_tokens}) must be less than "
+            f"max_model_len ({max_model_len}); equal or larger values leave no "
+            "prompt budget for multi-turn rollouts "
+            f"(max_prompt_tokens={max_prompt_tokens_for_sliding_window(max_model_len, max_output_tokens)})."
+        )
+        raise ValueError(msg)
 
 
 def normalize_reasoning_prompt_batch(
@@ -178,6 +220,537 @@ def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
         return model.state_dict()
 
 
+def build_bnb_quantization_config(
+    spec: str | dict[str, Any] | None,
+) -> BitsAndBytesConfig | None:
+    """Build a trainer-side ``BitsAndBytesConfig`` from a YAML-friendly spec.
+
+    Lets ``QUANTIZATION`` be set declaratively in a config file / ``INIT_HP``
+    instead of constructing a :class:`~transformers.BitsAndBytesConfig` in
+    Python. Accepted forms:
+
+    * ``None`` or ``"none"`` -- no quantization (BF16 baseline); returns ``None``.
+    * ``"int8"`` -- LLM.int8() 8-bit weights.
+    * ``"nf4"`` -- 4-bit NF4 with bf16 compute, bf16 quant storage and double
+      quantisation (the QLoRA recipe, ZeRO-3 compatible).
+    * ``dict`` -- forwarded verbatim as ``BitsAndBytesConfig(**spec)`` for full
+      control; ``bnb_4bit_compute_dtype`` / ``bnb_4bit_quant_storage`` may be
+      given as dtype strings (e.g. ``"bfloat16"``), which transformers resolves.
+
+    :param spec: Quantization preset name, ``BitsAndBytesConfig`` kwargs dict,
+        or ``None``.
+    :return: A configured ``BitsAndBytesConfig``, or ``None`` for no quantization.
+    """
+    if spec is None:
+        return None
+    if not HAS_LLM_DEPENDENCIES:
+        msg = "Quantization requires optional LLM dependencies (install agilerl[llm])."
+        raise ImportError(msg)
+    if isinstance(spec, BitsAndBytesConfig):
+        return spec
+    if isinstance(spec, dict):
+        return BitsAndBytesConfig(**spec)
+    if isinstance(spec, str):
+        mode = spec.strip().lower()
+        if mode in ("none", ""):
+            return None
+        if mode == "int8":
+            return BitsAndBytesConfig(load_in_8bit=True)
+        if mode == "nf4":
+            return BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_quant_storage=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+            )
+        msg = (
+            f"Unknown quantization preset {spec!r}; expected one of "
+            f"{sorted(_BNB_QUANT_PRESETS)} or a BitsAndBytesConfig kwargs dict."
+        )
+        raise ValueError(msg)
+    msg = (
+        f"QUANTIZATION must be a preset name, a BitsAndBytesConfig kwargs dict, "
+        f"or None; got {type(spec).__name__}."
+    )
+    raise TypeError(msg)
+
+
+def model_has_clippable_linear_wrappers(model: nn.Module) -> bool:
+    """Return True when the model uses *ClippableLinear projection wrappers."""
+    return any(
+        mod.__class__.__name__.endswith(_CLIPPABLE_LINEAR_WRAPPER_SUFFIX)
+        for mod in model.modules()
+    )
+
+
+def discover_clippable_projection_leaf_names(model: nn.Module) -> list[str]:
+    """Return leaf names (e.g. ``q_proj``) of *ClippableLinear wrapper modules."""
+    names: set[str] = set()
+    for name, mod in model.named_modules():
+        if mod.__class__.__name__.endswith(_CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
+            names.add(name.rsplit(".", 1)[-1])
+    return sorted(names)
+
+
+def discover_clippable_inner_linear_module_keys(model: nn.Module) -> list[str]:
+    """Return full ``named_modules`` keys for inner ``.linear`` weights in wrappers."""
+    named = dict(model.named_modules())
+    keys: list[str] = []
+    for name, mod in model.named_modules():
+        if not mod.__class__.__name__.endswith(_CLIPPABLE_LINEAR_WRAPPER_SUFFIX):
+            continue
+        inner_key = f"{name}.linear"
+        inner = named.get(inner_key)
+        if inner is not None and _is_peft_adaptable_linear(inner):
+            keys.append(inner_key)
+    return sorted(keys)
+
+
+def _is_peft_adaptable_linear(module: nn.Module) -> bool:
+    """Return True when PEFT LoRA can wrap this weight module."""
+    if isinstance(module, nn.Linear):
+        return True
+    return module.__class__.__name__ in ("Linear4bit", "Linear8bitLt")
+
+
+def peft_target_key_matches(key: str, target_modules: str | list[str]) -> bool:
+    """Mirror PEFT 0.19 ``target_modules`` matching (``fullmatch`` or suffix list)."""
+    if isinstance(target_modules, str):
+        return re.fullmatch(target_modules, key) is not None
+    if key in target_modules:
+        return True
+    return any(key.endswith(f".{target_key}") for target_key in target_modules)
+
+
+def _peft_key_is_excluded(key: str, exclude_modules: list[str] | None) -> bool:
+    if not exclude_modules:
+        return False
+    return any(
+        key == excluded or key.endswith(f".{excluded}") or excluded in key
+        for excluded in exclude_modules
+    )
+
+
+def list_peft_matched_module_keys(
+    model: nn.Module,
+    target_modules: str | list[str],
+    *,
+    exclude_modules: list[str] | None = None,
+) -> list[str]:
+    """List module keys that PEFT would adapt for the given target spec."""
+    matched: list[str] = []
+    for key, _ in model.named_modules():
+        if _peft_key_is_excluded(key, exclude_modules):
+            continue
+        if peft_target_key_matches(key, target_modules):
+            matched.append(key)
+    return matched
+
+
+def _looks_like_peft_target_regex(spec: str) -> bool:
+    """Heuristic: user already passed a PEFT ``target_modules`` regex."""
+    return spec.startswith(".*") or r"\." in spec or "(" in spec
+
+
+def build_clippable_linear_lora_target_regex(
+    projection_names: list[str],
+) -> str:
+    r"""Build a PEFT regex that targets inner ``.linear`` inside *ClippableLinear.
+
+    Example::
+
+        .*\.(q_proj|k_proj|v_proj)\.linear
+
+    For projections under a multimodal scope, use
+    :func:`build_scoped_lora_target_regex` instead (it also matches plain
+    ``nn.Linear`` projections under the scope).
+
+    See https://github.com/huggingface/peft/issues/3129
+    """
+    if not projection_names:
+        msg = "At least one projection name is required for the LoRA target regex."
+        raise ValueError(msg)
+    alts = "|".join(re.escape(name) for name in sorted(set(projection_names)))
+    # Optional prefix so top-level and nested keys both fullmatch.
+    return rf"(?:.*\.)?({alts})\.linear"
+
+
+def build_scoped_lora_target_regex(
+    projection_names: list[str],
+    scope: str,
+) -> str:
+    r"""PEFT regex for projections under a multimodal scope (e.g. ``language_model``).
+
+    Matches both:
+
+    * *ClippableLinear* inner weights (``…q_proj.linear``) on vision/audio towers
+    * Plain ``nn.Linear`` leaves (``…q_proj``) on the language model in Gemma 4
+
+    PEFT uses ``re.fullmatch`` on ``named_modules()`` keys (peft#3129).
+    """
+    if not projection_names:
+        msg = "At least one projection name is required for the LoRA target regex."
+        raise ValueError(msg)
+    alts = "|".join(re.escape(name) for name in sorted(set(projection_names)))
+    scope_esc = re.escape(scope.strip("."))
+    return rf".*\.{scope_esc}.*\.(?:{alts})(?:\.linear)?$"
+
+
+def _normalize_projection_leaf_name(name: str) -> str:
+    """Strip a trailing ``.linear`` so YAML can use either ``q_proj`` or ``q_proj.linear``."""
+    return name.removesuffix(".linear")
+
+
+def _projection_names_for_clippable_lora(
+    model: nn.Module, raw_targets: str | list[str]
+) -> list[str] | None:
+    """Resolve projection leaf names, or ``None`` if ``raw_targets`` is already regex."""
+    raw_list = [raw_targets] if isinstance(raw_targets, str) else list(raw_targets)
+    if any(_looks_like_peft_target_regex(t) for t in raw_list):
+        return None
+
+    names: list[str] = []
+    for target in raw_list:
+        if target == "all-linear":
+            names.extend(discover_clippable_projection_leaf_names(model))
+        else:
+            names.append(_normalize_projection_leaf_name(target))
+    return sorted(set(names))
+
+
+def build_clippable_linear_lora_target_suffixes(
+    projection_names: list[str],
+) -> list[str]:
+    """Build PEFT list targets ``q_proj.linear`` (suffix match, avoids regex pitfalls)."""
+    return [f"{name}.linear" for name in sorted(set(projection_names))]
+
+
+def _infer_clippable_lora_scope(model: nn.Module) -> str | None:
+    """Infer ``language_model`` / ``audio_tower`` scope only when all inner keys live under it."""
+    inner_keys = discover_clippable_inner_linear_module_keys(model)
+    if not inner_keys:
+        return None
+    for scope in ("language_model", "audio_tower"):
+        if all(
+            key == scope or key.startswith(f"{scope}.") or f".{scope}." in key
+            for key in inner_keys
+        ):
+            return scope
+    return None
+
+
+def _clone_lora_config_with_targets(
+    lora_config: Any, target_modules: str | list[str]
+) -> Any:
+    """Return a new ``LoraConfig`` with updated ``target_modules``."""
+    if hasattr(lora_config, "to_dict"):
+        cfg_dict = lora_config.to_dict()
+        cfg_dict["target_modules"] = target_modules
+        return lora_config.__class__(**cfg_dict)
+    adapted = copy.deepcopy(lora_config)
+    adapted.target_modules = target_modules
+    return adapted
+
+
+def _example_module_keys_for_lora_scope(
+    model: nn.Module,
+    scope: str,
+    *,
+    limit: int = 3,
+) -> list[str]:
+    """Sample ``named_modules`` keys under a scope (for error messages)."""
+    scope_token = scope.strip(".")
+    keys = [
+        key
+        for key, _ in model.named_modules()
+        if f".{scope_token}." in key or key.startswith(f"{scope_token}.")
+    ]
+    return keys[:limit]
+
+
+def adapt_lora_config_for_model(
+    model: nn.Module,
+    lora_config: Any,
+    *,
+    lora_target_scope: str | None = None,
+) -> Any:
+    r"""Rewrite ``LoraConfig.target_modules`` for PEFT (regex or suffix list).
+
+    For *ClippableLinear* models (Gemma 4 vision/audio), short names like ``q_proj``
+    substring-match the wrapper and fail injection; use regex targets on the inner
+    ``.linear`` (https://github.com/huggingface/peft/issues/3129).
+
+    When ``lora_target_scope`` is set (e.g. ``language_model``), only modules under
+    that path are targeted. The scoped regex matches plain ``nn.Linear`` language
+    layers and ``.linear`` inside ClippableLinear towers. Unscoped fallbacks are
+    not used when the scope is explicit.
+    """
+    raw_targets = lora_config.target_modules
+    projection_names = _projection_names_for_clippable_lora(model, raw_targets)
+    if projection_names is None:
+        return lora_config
+
+    exclude_modules = list(getattr(lora_config, "exclude_modules", None) or [])
+
+    explicit_scope = lora_target_scope is not None
+    scope = lora_target_scope if explicit_scope else _infer_clippable_lora_scope(model)
+
+    if scope is not None:
+        if not projection_names:
+            msg = (
+                "lora_target_scope is set but no projection names were resolved "
+                f"from target_modules={raw_targets!r}."
+            )
+            raise ValueError(msg)
+        target_spec = build_scoped_lora_target_regex(projection_names, scope)
+        matched = list_peft_matched_module_keys(
+            model, target_spec, exclude_modules=exclude_modules
+        )
+        if not matched:
+            examples = _example_module_keys_for_lora_scope(model, scope)
+            msg = (
+                f"No modules matched scoped LoRA target_modules for scope={scope!r} "
+                f"(regex={target_spec!r}). "
+                f"Example keys under scope: {examples}. "
+                "Check LORA_TARGET_SCOPE and TARGET_MODULES match the model layout."
+            )
+            raise ValueError(msg)
+        if raw_targets == target_spec:
+            return lora_config
+        adapted = _clone_lora_config_with_targets(lora_config, target_spec)
+        logger.info(
+            "Adapted LoRA target_modules via scoped regex (%s) (%d modules), e.g. %s",
+            scope,
+            len(matched),
+            ", ".join(matched[:2]) + ("..." if len(matched) > 2 else ""),
+        )
+        return adapted
+
+    if not model_has_clippable_linear_wrappers(model):
+        return lora_config
+
+    if not projection_names:
+        msg = (
+            "Model uses ClippableLinear wrappers but no projection names were "
+            "resolved for LoRA targeting."
+        )
+        raise ValueError(msg)
+
+    suffix_targets = build_clippable_linear_lora_target_suffixes(projection_names)
+    candidate_specs: list[tuple[str, str | list[str]]] = [
+        ("suffix list", suffix_targets),
+        ("regex", build_clippable_linear_lora_target_regex(projection_names)),
+    ]
+
+    for label, target_spec in candidate_specs:
+        matched = list_peft_matched_module_keys(
+            model, target_spec, exclude_modules=exclude_modules
+        )
+        if not matched:
+            continue
+        if raw_targets == target_spec:
+            return lora_config
+        adapted = _clone_lora_config_with_targets(lora_config, target_spec)
+        logger.info(
+            "Adapted LoRA target_modules for ClippableLinear wrappers via %s "
+            "(%d modules), e.g. %s",
+            label,
+            len(matched),
+            ", ".join(matched[:2]) + ("..." if len(matched) > 2 else ""),
+        )
+        return adapted
+
+    sample_inner = discover_clippable_inner_linear_module_keys(model)[:5]
+    tried = [f"{label}={spec!r}" for label, spec in candidate_specs]
+    msg = (
+        "No modules matched LoRA target_modules for ClippableLinear layers. "
+        f"Tried: {'; '.join(tried)}. "
+        f"Example inner linear keys: {sample_inner}. "
+        "Set LORA_TARGET_SCOPE in INIT_HP if the tower path differs, or pass a "
+        "custom target_modules regex."
+    )
+    raise ValueError(msg)
+
+
+def log_cuda_memory_snapshot(label: str, device_index: int = 0) -> None:
+    """Log allocated/reserved CUDA memory (GiB) for colocated vLLM/HF debugging."""
+    if not torch.cuda.is_available():
+        return
+    device = torch.device(f"cuda:{device_index}")
+    alloc_gib = torch.cuda.memory_allocated(device) / (1024**3)
+    reserved_gib = torch.cuda.memory_reserved(device) / (1024**3)
+    logger.info(
+        "%s: CUDA[%s] allocated=%.2f GiB reserved=%.2f GiB",
+        label,
+        device_index,
+        alloc_gib,
+        reserved_gib,
+    )
+
+
+def format_colocated_vllm_oom_hint(
+    device_index: int = 0,
+    *,
+    kv_cache_memory_bytes: int | None = None,
+    gpu_memory_utilization: float | None = None,
+    max_model_len: int | None = None,
+    trainer_on_gpu: bool = True,
+) -> str:
+    """Build a human-readable VRAM summary after vLLM ``wake_up`` OOM."""
+    if not torch.cuda.is_available():
+        return "CUDA is not available on this host."
+
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device_index)
+    alloc_bytes = torch.cuda.memory_allocated(device_index)
+    free_gib = free_bytes / (1024**3)
+    total_gib = total_bytes / (1024**3)
+    alloc_gib = alloc_bytes / (1024**3)
+
+    lines = [
+        f"CUDA device {device_index}: {total_gib:.2f} GiB total, "
+        f"{alloc_gib:.2f} GiB torch-allocated, {free_gib:.2f} GiB free (driver).",
+    ]
+    if kv_cache_memory_bytes is not None:
+        kv_gib = kv_cache_memory_bytes / (1024**3)
+        shortfall = max(0.0, kv_gib - free_gib)
+        lines.append(
+            f"vLLM kv_cache_memory_bytes requests {kv_gib:.2f} GiB on wake_up; "
+            f"≈{shortfall:.2f} GiB more free VRAM is needed if that allocation failed."
+        )
+    if gpu_memory_utilization is not None:
+        lines.append(
+            f"vLLM gpu_memory_utilization={gpu_memory_utilization} is also checked at "
+            "init (requires that fraction of total VRAM to appear free)."
+        )
+    if max_model_len is not None:
+        lines.append(
+            f"max_model_len={max_model_len} sets the KV slot length cap (long contexts "
+            "need large KV pools even when max_num_seqs=1)."
+        )
+    if trainer_on_gpu:
+        lines.append(
+            "The DeepSpeed trainer was still on GPU when wake_up ran. With sleep_mode, "
+            "AgileRL moves trainer weights to CPU before wake_up; ZeRO optimizer state "
+            "may still remain on GPU."
+        )
+    lines.append(
+        "Check nvidia-smi right before the failure. To reduce peak: unset "
+        "kv_cache_memory_bytes, lower max_model_len, lower vllm gpu_memory_utilization, "
+        "or use a smaller max_num_seqs / group_size."
+    )
+    return "\n".join(lines)
+
+
+def resolve_attn_implementation(requested: str | None = None) -> str:
+    """Pick the most memory-efficient attention implementation available.
+
+    Long-context RL rollouts make attention the memory bottleneck. SDPA's flash
+    backend is only used when there is no explicit attention mask, but
+    sliding-window models (e.g. Gemma) pass an explicit mask, so SDPA falls back
+    to a backend that materialises the full TxT scores/bias (OOM at ~30k
+    tokens). ``flash_attention_2`` (the ``flash_attn`` package) uses native
+    windowed-causal attention with O(T) memory and no TxT mask, so prefer it
+    when installed; otherwise fall back to SDPA.
+
+    The ``AGILERL_ATTN_IMPLEMENTATION`` env var overrides the auto choice (but
+    not an explicit caller value), e.g. set it to ``"flex_attention"`` for
+    PyTorch's built-in FlexAttention — block-sparse masked attention with O(T)
+    memory and no TxT mask, which handles sliding-window models at long context
+    without needing the ``flash_attn`` package.
+
+    :param requested: An explicit choice from the caller. Anything other than
+        ``None`` / ``"auto"`` is returned unchanged (caller stays authoritative).
+    :return: The attention implementation string for ``from_pretrained`` /
+        ``from_config``.
+    """
+    if requested is None or requested == "auto":
+        env = os.environ.get("AGILERL_ATTN_IMPLEMENTATION")
+        if env:
+            requested = env
+    if requested is not None and requested != "auto":
+        return requested
+    import importlib.util
+
+    if importlib.util.find_spec("flash_attn") is not None:
+        return "flash_attention_2"
+    return "sdpa"
+
+
+def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -> None:
+    """Inject SRAM-safe Triton ``kernel_options`` into transformers' flex-attn path.
+
+    FlexAttention's default Triton config for large head dims (e.g. Gemma's
+    head_dim=256) needs more shared memory than an A100 has (~208 KB required vs
+    ~163 KB available), so the autotuner finds "no valid triton configs"
+    (OutOfMemoryError: out of resource: triton_tem_fused_flex_attention_0).
+    The flex attention function accepts ``kernel_options`` to shrink the block
+    sizes / pipeline stages; this registers a wrapper over the
+    ``"flex_attention"`` entry that supplies safe defaults when the caller
+    passes none. Idempotent; no-op if transformers/flex is unavailable.
+
+    **Auto-detect**: when ``options`` is ``None``, the visible GPU's compute
+    capability is checked. Hopper (SM90+ / H100, H200) has ~228 KB usable
+    shared memory per SM — enough for the stock kernel's ~208 KB tiles — so
+    the patch is skipped and FlexAttention's autotuner picks larger blocks
+    for better throughput. On A100 (SM80) and earlier the SRAM-safe small
+    blocks are installed. Pass an explicit ``options`` dict to override the
+    auto-decision either way.
+
+    :param options: Override the default kernel options (forward + backward
+        block sizes, ``num_warps``, ``num_stages``). When given, the
+        capability auto-skip is bypassed and the supplied options are
+        installed unconditionally.
+    """
+    try:
+        from transformers.integrations.flex_attention import flex_attention_forward
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+    except Exception:
+        return
+    if getattr(flex_attention_forward, "_agilerl_kernel_opts_patched", False):
+        return
+
+    # Auto-skip on Hopper+. The stock kernel's ~208 KB tiles fit in Hopper's
+    # ~228 KB usable shared memory, so leaving the autotuner alone lets it
+    # pick larger, faster blocks. Below SM90 (A100 ~164 KB, Ampere consumer
+    # ~100 KB) the stock config OOMs the kernel launch, so fall through to
+    # install the small-block safe defaults.
+    if options is None and torch.cuda.is_available():
+        try:
+            capability = torch.cuda.get_device_capability()
+        except Exception:
+            capability = (0, 0)
+        if capability >= (9, 0):
+            return
+
+    # head_dim=256 makes the Q/K/V tiles (BLOCK x head_dim) the dominant SRAM
+    # cost, so use small 32-wide blocks to fit the A100's ~163 KB shared memory.
+    opts = options or {
+        # Forward kernel blocks.
+        "BLOCK_M": 32,
+        "BLOCK_N": 32,
+        # Backward kernel blocks (training).
+        "BLOCK_M1": 16,
+        "BLOCK_N1": 32,
+        "BLOCK_M2": 32,
+        "BLOCK_N2": 16,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
+
+    def _flex_with_opts(module, query, key, value, attention_mask, **kwargs):
+        kwargs.setdefault("kernel_options", opts)
+        return flex_attention_forward(
+            module, query, key, value, attention_mask, **kwargs
+        )
+
+    _flex_with_opts._agilerl_kernel_opts_patched = True
+    try:
+        ALL_ATTENTION_FUNCTIONS["flex_attention"] = _flex_with_opts
+    except Exception:
+        ALL_ATTENTION_FUNCTIONS.register("flex_attention", _flex_with_opts)
+
+
 def create_model_from_name_or_path(
     model_name_or_path: str,
     model_config: dict[str, Any] | None = None,
@@ -188,7 +761,10 @@ def create_model_from_name_or_path(
 
     :param model_name_or_path: The name or path of the model to create.
     :type model_name_or_path: str
-    :param model_config: The configuration of the model to create.
+    :param model_config: Extra keyword arguments forwarded to ``from_pretrained``
+        (e.g. a ``quantization_config``). ``torch_dtype`` and
+        ``attn_implementation`` are filled in as defaults when not already
+        present, so passing a config never silently disables SDPA attention.
     :type model_config: dict[str, Any ] | None
     :param use_value_head: Flag to indicate if a value head should be added to the model, defaults to False
     :type use_value_head: bool, optional
@@ -197,11 +773,21 @@ def create_model_from_name_or_path(
     :return: The created model.
     :rtype: PreTrainedModel
     """
-    if model_config is None:
-        model_config = {
-            "torch_dtype": torch.bfloat16 if not use_accelerator else torch.float16,
-            "attn_implementation": "sdpa",
-        }
+    # Merge our SDPA + dtype defaults into whatever the caller supplied rather
+    # than only applying them when ``model_config is None``.
+    # ``setdefault`` keeps any explicit caller value authoritative.
+    model_config = dict(model_config) if model_config else {}
+    model_config.setdefault(
+        "torch_dtype", torch.bfloat16 if not use_accelerator else torch.float16
+    )
+    # Auto-select the best available attention backend (flash_attention_2 when
+    # the flash_attn package is installed, else sdpa). ``resolve_*`` treats an
+    # explicit caller value (incl. "flex_attention") as authoritative.
+    model_config["attn_implementation"] = resolve_attn_implementation(
+        model_config.get("attn_implementation")
+    )
+    if model_config["attn_implementation"] == "flex_attention":
+        patch_flex_attention_kernel_options()
     if add_value_head:
         return AutoModelForCausalLMWithValueHead.from_pretrained(
             pretrained_model_name_or_path=model_name_or_path,
@@ -310,6 +896,181 @@ def pool_by_turns(
     return turn_values
 
 
+def validate_importance_sampling_level(level: str, *, allow_auto: bool) -> None:
+    """Raise ``ValueError`` unless ``level`` is a recognised IS pooling level.
+
+    Valid levels are ``"token"``, ``"turn"`` and ``"sequence"``; ``"auto"`` is
+    additionally accepted when ``allow_auto`` is ``True``.
+
+    :param level: The importance-sampling pooling level to validate.
+    :param allow_auto: Whether ``"auto"`` is an accepted value.
+    :raises ValueError: If ``level`` is not in the valid set.
+    """
+    valid = {"token", "turn", "sequence"}
+    if allow_auto:
+        valid.add("auto")
+    if level not in valid:
+        msg = (
+            f"importance_sampling_level must be one of {sorted(valid)}, got {level!r}."
+        )
+        raise ValueError(msg)
+
+
+def pool_log_ratio_by_level(
+    token_log_ratio: torch.Tensor,
+    action_mask: torch.Tensor,
+    turn_ids: torch.Tensor | None,
+    level: str,
+    num_turns: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pool per-token log-ratios to a token/turn/sequence importance-sampling unit.
+
+    Returns the per-unit pooled log-ratio (the log importance weights) and the
+    matching unit mask, mirroring the pooling used by :func:`clipped_is_surrogate`:
+
+    * ``"token"``    — identity: per-token log-ratio, ``action_mask`` as units.
+    * ``"turn"``     — length-normalized mean of token log-ratios per turn
+      (``turn_ids`` required); a turn is active when any of its tokens appear.
+    * ``"sequence"`` — length-normalized mean over the completion's action
+      tokens; the sequence is active when it has at least one action token.
+
+    Operates only on ``(B, T)`` tensors (no vocab axis), so it is memory-bounded.
+
+    :param token_log_ratio: ``(B, T)`` per-token ``log pi - log pi_old``.
+    :param action_mask: ``(B, T)`` action-token mask.
+    :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action);
+        required for the turn level.
+    :param level: ``"token"`` / ``"turn"`` / ``"sequence"``.
+    :param num_turns: Number of turns for the turn level; inferred from
+        ``turn_ids`` when ``None``.
+    :return: ``(log_importance_weights, unit_mask)`` at the requested level.
+    :raises ValueError: If ``level`` is unknown or turn ids are missing.
+    """
+    if level == "token":
+        return token_log_ratio, action_mask
+    if level == "turn":
+        if turn_ids is None:
+            msg = "turn-level surrogate requires turn_ids."
+            raise ValueError(msg)
+        if num_turns is None:
+            num_turns = int(turn_ids.max().item()) + 1
+        # Pool only over action tokens, exactly like the sequence branch: a
+        # non-action token (``action_mask == 0``) belongs to no turn, so the
+        # per-turn mean stays mask-aware and a single full-completion turn
+        # collapses to the sequence-level mean. Callers that already mark
+        # non-action tokens with ``turn_ids == -1`` are unaffected (no-op).
+        effective_turn_ids = torch.where(
+            action_mask.to(torch.bool),
+            turn_ids,
+            torch.full_like(turn_ids, -1),
+        )
+        log_importance_weights = pool_by_turns(
+            token_log_ratio, effective_turn_ids, num_turns, reduction="mean"
+        )
+        # Per-turn action-token counts via the same pooling; a turn is active
+        # iff it owns at least one action token.
+        turn_token_counts = pool_by_turns(
+            torch.ones_like(token_log_ratio),
+            effective_turn_ids,
+            num_turns,
+            reduction="sum",
+        )
+        unit_mask = (turn_token_counts > 0).to(log_importance_weights.dtype)
+        return log_importance_weights, unit_mask
+    if level == "sequence":
+        mask_f = action_mask.to(token_log_ratio.dtype)
+        count = mask_f.sum(dim=-1, keepdim=True)
+        log_importance_weights = (token_log_ratio * mask_f).sum(
+            dim=-1, keepdim=True
+        ) / count.clamp(min=1.0)
+        unit_mask = (count > 0).to(token_log_ratio.dtype)
+        return log_importance_weights, unit_mask
+    msg = (
+        f"Unknown importance_sampling_level '{level}'. "
+        "Expected one of ['token', 'turn', 'sequence']."
+    )
+    raise ValueError(msg)
+
+
+def clipped_min_surrogate(
+    log_importance_weights: torch.Tensor,
+    advantages: torch.Tensor,
+    unit_mask: torch.Tensor,
+    clip_min: float,
+    clip_max: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Clipped PPO min-surrogate from per-unit log importance weights.
+
+    Exponentiates the log importance weights, clamps the ratio to
+    ``[clip_min, clip_max]``, and reduces the masked pessimistic (min)
+    surrogate over the active units.
+
+    :param log_importance_weights: Per-unit pooled log-ratio.
+    :param advantages: Per-unit advantages (same shape).
+    :param unit_mask: Mask selecting active units (same shape).
+    :param clip_min: Lower clip bound for the ratio (e.g. ``1 - clip_coef``).
+    :param clip_max: Upper clip bound for the ratio (e.g. ``1 + clip_coef``).
+    :return: ``(pg_loss, clipfrac)`` scalars.
+    """
+    ratio = torch.exp(log_importance_weights)
+    clipped_ratio = torch.clamp(ratio, clip_min, clip_max)
+    clipfrac = masked_mean((ratio != clipped_ratio).float(), unit_mask)
+    pg_loss = masked_mean(
+        torch.max(-advantages * ratio, -advantages * clipped_ratio), unit_mask
+    )
+    return pg_loss, clipfrac
+
+
+def clipped_is_surrogate(
+    token_log_ratio: torch.Tensor,
+    advantages: torch.Tensor,
+    action_mask: torch.Tensor,
+    turn_ids: torch.Tensor | None,
+    importance_sampling_level: str,
+    clip_coef: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Clipped PPO-style policy surrogate at a token/turn/sequence IS level.
+
+    The importance ratio (and the advantage paired with it) is pooled to
+    ``importance_sampling_level``:
+
+    * ``"token"``    — per-token ratio, clip per token.
+    * ``"turn"``     — length-normalized mean of token log-ratios per turn,
+      clip per turn (``turn_ids`` required).
+    * ``"sequence"`` — length-normalized mean over the whole completion, clip
+      per sequence.
+
+    Thin composition of :func:`pool_log_ratio_by_level` (ratio + advantage
+    pooling) and :func:`clipped_min_surrogate` (clip + min-surrogate). Shared by
+    the non-Liger PPO and REINFORCE paths. Operates only on ``(B, T)`` tensors
+    (no vocab axis), so it is memory-bounded.
+
+    :param token_log_ratio: ``(B, T)`` per-token ``log pi - log pi_old``.
+    :param advantages: ``(B, T)`` per-token advantages.
+    :param action_mask: ``(B, T)`` action-token mask.
+    :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action);
+        required for turn level.
+    :param importance_sampling_level: ``"token"`` / ``"turn"`` / ``"sequence"``.
+    :param clip_coef: Symmetric clip coefficient (clip to ``[1-c, 1+c]``).
+    :return: ``(pg_loss, clipfrac)`` scalars.
+    """
+    num_turns = (
+        int(turn_ids.max().item()) + 1
+        if importance_sampling_level == "turn" and turn_ids is not None
+        else None
+    )
+    log_importance_weights, unit_mask = pool_log_ratio_by_level(
+        token_log_ratio, action_mask, turn_ids, importance_sampling_level, num_turns
+    )
+    # Pool advantages with the identical mechanics (discard the redundant mask).
+    adv, _ = pool_log_ratio_by_level(
+        advantages, action_mask, turn_ids, importance_sampling_level, num_turns
+    )
+    return clipped_min_surrogate(
+        log_importance_weights, adv, unit_mask, 1 - clip_coef, 1 + clip_coef
+    )
+
+
 def create_llm_accelerator(
     *,
     deepspeed_plugin: Any | None = None,
@@ -385,6 +1146,30 @@ def get_llm_accelerator(
         return base_accelerator
 
     return Accelerator()
+
+
+def cuda_tensor_bytes_in_module(module: torch.nn.Module) -> int:
+    """Sum nbytes of parameters and buffers still on a CUDA device."""
+    total = 0
+    for tensor in (*module.parameters(), *module.buffers()):
+        if tensor.is_cuda:
+            total += tensor.numel() * tensor.element_size()
+    return total
+
+
+def offload_colocated_trainer_from_gpu(unwrapped_model: torch.nn.Module) -> int:
+    """Force the trainer module tree onto CPU before colocated vLLM ``LLM()`` init.
+
+    Unlike :func:`move_params_to_cpu`, always calls ``.to("cpu")`` even when the
+    first parameter already reports CPU (bitsandbytes / ``device_map="cpu"`` can
+    leave most weights on GPU). Returns remaining CUDA tensor bytes afterward.
+    """
+    unwrapped_model.to("cpu")
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+    return cuda_tensor_bytes_in_module(unwrapped_model)
 
 
 def move_params_to_gpu(unwrapped_model: torch.nn.Module, device: torch.device) -> None:
@@ -813,3 +1598,237 @@ def calculate_k3_kl(log_p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
     """
     diff = log_p - log_q
     return torch.exp(diff) - diff - 1.0
+
+
+# ---------------------------------------------------------------------------
+# vLLM / CUDA capability helpers (benchmark CLI, colocated rollout)
+# ---------------------------------------------------------------------------
+
+#: Default rollout adapter name / id for colocated vLLM (``LoRARequest``).
+VLLM_ROLLOUT_LORA_NAME = "actor"
+VLLM_ROLLOUT_LORA_INT_ID = 1
+
+
+def resolve_vllm_max_lora_rank(
+    vllm_max_lora_rank: int,
+    lora_rank: int | None,
+) -> int:
+    """Ensure vLLM ``max_lora_rank`` is at least the trainer LoRA rank."""
+    trainer_rank = int(lora_rank or 0)
+    return max(int(vllm_max_lora_rank), trainer_rank)
+
+
+def resolve_vllm_max_num_batched_tokens(
+    max_num_seqs: int,
+    max_model_len: int,
+    explicit: int | None = None,
+) -> int:
+    """Resolve vLLM ``max_num_batched_tokens`` for colocated rollout.
+
+    Do not use ``max_num_seqs * max_model_len`` (e.g. 8x32768 = 262144): that
+    drives torch.compile inductor benchmark tensors of ~5+ GiB during ``LLM()``
+    init and multimodal encoder-cache budgets, which OOMs on a 40GB GPU even
+    when the trainer is offloaded. Default caps prefill batching while keeping
+    at least one full ``max_model_len`` context for chunked prefill.
+    """
+    if explicit is not None:
+        return int(explicit)
+    worst_case = max_num_seqs * max_model_len
+    # Allow concurrent prefills up to 8k tokens per slot unless that exceeds one
+    # max-length context (then cap at max_model_len).
+    concurrent_budget = max(max_model_len, max_num_seqs * 8192)
+    return min(worst_case, concurrent_budget)
+
+
+def resolve_peft_adapter_export_dir(staging_dir: Path, adapter_name: str) -> Path:
+    """Return the directory vLLM expects for a PEFT adapter export.
+
+    ``PeftModel.save_pretrained(..., selected_adapters=[name])`` normally writes
+    ``staging_dir/name/``; some layouts write directly into ``staging_dir``.
+    """
+    nested = staging_dir / adapter_name
+    if nested.is_dir() and (nested / "adapter_config.json").is_file():
+        return nested
+    if (staging_dir / "adapter_config.json").is_file():
+        return staging_dir
+    return nested
+
+
+def build_vllm_llm_init_kwargs(
+    vllm_config: Any,
+    *,
+    trainer_model_name_or_path: str,
+    max_model_len: int,
+    process_index: int = 0,
+    lora_rank: int | None = None,
+) -> dict[str, Any]:
+    """Build kwargs for ``vllm.LLM`` from :class:`~agilerl.utils.algo_utils.VLLMConfig`."""
+    vllm_model = (
+        vllm_config.vllm_model_name_or_path
+        if vllm_config.vllm_model_name_or_path is not None
+        else trainer_model_name_or_path
+    )
+    kwargs: dict[str, Any] = {
+        "model": vllm_model,
+        "tensor_parallel_size": vllm_config.tensor_parallel_size,
+        "gpu_memory_utilization": vllm_config.gpu_memory_utilization,
+        "max_num_seqs": vllm_config.max_num_seqs,
+        "max_model_len": max_model_len,
+        "distributed_executor_backend": "external_launcher",
+        "seed": process_index // vllm_config.tensor_parallel_size,
+        "max_num_batched_tokens": resolve_vllm_max_num_batched_tokens(
+            vllm_config.max_num_seqs,
+            max_model_len,
+            getattr(vllm_config, "max_num_batched_tokens", None),
+        ),
+        "model_impl": "vllm",
+        "enable_sleep_mode": vllm_config.sleep_mode,
+    }
+    if vllm_config.dtype is not None:
+        kwargs["dtype"] = vllm_config.dtype
+    if vllm_config.quantization is not None:
+        kwargs["quantization"] = vllm_config.quantization
+    if vllm_config.kv_cache_dtype is not None:
+        kwargs["kv_cache_dtype"] = vllm_config.kv_cache_dtype
+    if getattr(vllm_config, "kv_cache_memory_bytes", None) is not None:
+        kwargs["kv_cache_memory_bytes"] = vllm_config.kv_cache_memory_bytes
+    if getattr(vllm_config, "enforce_eager", None) is not None:
+        # Force vLLM to skip CUDA-graph capture. Saves the ~2 GiB CUDA-graph
+        # private pool (useful for colocated trainer/rollout setups with a
+        # tight GPU budget) at the cost of slightly slower per-step decode.
+        kwargs["enforce_eager"] = vllm_config.enforce_eager
+    if getattr(vllm_config, "enable_lora", False):
+        kwargs["enable_lora"] = True
+        kwargs["max_lora_rank"] = resolve_vllm_max_lora_rank(
+            vllm_config.max_lora_rank,
+            lora_rank,
+        )
+        kwargs["max_loras"] = vllm_config.max_loras
+    return kwargs
+
+
+def build_vllm_rollout_lora_request(
+    lora_path: str | Path,
+    *,
+    load_inplace: bool = False,
+    lora_name: str = VLLM_ROLLOUT_LORA_NAME,
+    lora_int_id: int = VLLM_ROLLOUT_LORA_INT_ID,
+) -> Any:
+    """Build a vLLM :class:`~vllm.lora.request.LoRARequest` for rollout."""
+    from vllm.lora.request import LoRARequest
+
+    return LoRARequest(
+        lora_name=lora_name,
+        lora_int_id=lora_int_id,
+        lora_path=str(lora_path),
+        load_inplace=load_inplace,
+    )
+
+
+def peft_lora_state_dict_key_to_module_key(key: str) -> str:
+    """Strip PEFT LoRA weight suffixes so ``target_modules`` matching applies."""
+    for marker in (
+        ".lora_A.",
+        ".lora_B.",
+        ".lora_embedding_A.",
+        ".lora_embedding_B.",
+    ):
+        if marker in key:
+            return key.split(marker, maxsplit=1)[0]
+    return key
+
+
+def remap_peft_lora_key_for_vllm(key: str) -> str:
+    """Normalize PEFT keys (e.g. ClippableLinear ``.linear.lora_A``) for vLLM."""
+    key = key.replace(".linear.lora_A.", ".lora_A.").replace(
+        ".linear.lora_B.", ".lora_B."
+    )
+    return key.replace(".base_layer.", ".")
+
+
+def filter_peft_state_dict_for_vllm_lora(
+    state_dict: dict[str, torch.Tensor],
+    target_modules: str | list[str],
+) -> dict[str, torch.Tensor]:
+    """Keep LoRA tensors whose modules match the trainer ``target_modules`` spec."""
+    filtered: dict[str, torch.Tensor] = {}
+    for key, tensor in state_dict.items():
+        module_key = peft_lora_state_dict_key_to_module_key(key)
+        if not peft_target_key_matches(module_key, target_modules):
+            continue
+        filtered[remap_peft_lora_key_for_vllm(key)] = tensor
+    return filtered
+
+
+def _json_safe_value(obj: Any) -> Any:
+    """Recursively convert PEFT config values to JSON-serializable types."""
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, set):
+        return [_json_safe_value(v) for v in sorted(obj, key=str)]
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe_value(v) for v in obj]
+    if isinstance(obj, dict):
+        return {str(k): _json_safe_value(v) for k, v in obj.items()}
+    return str(obj)
+
+
+def save_peft_adapter_for_vllm_rollout(
+    peft_model: Any,
+    staging_dir: Path | str,
+    adapter_name: str,
+    *,
+    target_modules: str | list[str],
+    is_main_process: bool = True,
+) -> Path:
+    """Export a PEFT adapter checkpoint that vLLM can load for colocated rollout.
+
+    Keeps only tensors that match the same ``target_modules`` spec used for PEFT
+    training (from :func:`adapt_lora_config_for_model`). Rewrites ClippableLinear
+    ``.linear`` suffixes in keys for vLLM.
+    """
+    if not HAS_LLM_DEPENDENCIES:
+        msg = "save_peft_adapter_for_vllm_rollout requires peft and transformers."
+        raise ImportError(msg)
+
+    from peft import get_peft_model_state_dict
+    from safetensors.torch import save_file
+
+    staging = Path(staging_dir)
+    adapter_path = staging / adapter_name
+    if not is_main_process:
+        return resolve_peft_adapter_export_dir(staging, adapter_name)
+
+    state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
+    n_before = len(state)
+    state = filter_peft_state_dict_for_vllm_lora(state, target_modules)
+    if not state:
+        msg = (
+            f"No LoRA tensors left for vLLM export after filtering with "
+            f"target_modules={target_modules!r} (had {n_before} tensors). "
+            "Ensure adapt_lora_config_for_model ran with the intended "
+            "LORA_TARGET_SCOPE before training."
+        )
+        raise ValueError(msg)
+    if n_before != len(state):
+        logger.info(
+            "vLLM LoRA export: kept %d / %d tensors (target_modules=%r)",
+            len(state),
+            n_before,
+            target_modules,
+        )
+
+    adapter_path.mkdir(parents=True, exist_ok=True)
+    save_file(state, adapter_path / "adapter_model.safetensors")
+
+    peft_cfg = peft_model.peft_config[adapter_name]
+    cfg_dict = _json_safe_value(peft_cfg.to_dict())
+    cfg_dict["target_modules"] = _json_safe_value(target_modules)
+
+    import json
+
+    (adapter_path / "adapter_config.json").write_text(
+        json.dumps(cfg_dict, indent=2),
+        encoding="utf-8",
+    )
+    return adapter_path

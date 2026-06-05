@@ -124,6 +124,9 @@ class SFT(LLMAlgorithm):
         use_liger_loss: bool = False,
         reduce_memory_peak: bool = False,
         use_separate_reference_adapter: bool = False,
+        quantization_config: Any | None = None,
+        activation_offload: bool = False,
+        lora_target_scope: str | None = None,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -161,6 +164,9 @@ class SFT(LLMAlgorithm):
             name="SFT",
             gradient_checkpointing=gradient_checkpointing,
             reduce_memory_peak=reduce_memory_peak,
+            quantization_config=quantization_config,
+            activation_offload=activation_offload,
+            lora_target_scope=lora_target_scope,
         )
         self.temperature = 0
         self.use_vllm = False
