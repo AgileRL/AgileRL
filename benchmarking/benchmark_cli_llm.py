@@ -383,14 +383,23 @@ def _maybe_print_config(
 # Online RL family: runtime (vLLM) flags + entry point
 # --------------------------------------------------------------------------- #
 def add_runtime_arguments(
-    parser: argparse.ArgumentParser, *, default_model: str
+    parser: argparse.ArgumentParser,
+    *,
+    default_model: str,
+    vllm_defaults: dict[str, Any] | None = None,
 ) -> None:
     """Add the model / vLLM / trainer-quantization runtime flags.
 
     These are *not* hyperparameters — they configure the trainer + rollout
     engine and keep their established names so documented sweep commands keep
     working.
+
+    :param vllm_defaults: Per-script overrides for the vLLM flag *defaults*
+        (``gpu_memory_utilization``, ``max_num_seqs``, ``sleep_mode``). Lets a
+        throughput-oriented benchmark (e.g. reasoning) keep its own rollout
+        defaults while still exposing the same flags.
     """
+    vllm_defaults = vllm_defaults or {}
     parser.add_argument(
         "--model",
         type=str,
@@ -459,7 +468,7 @@ def add_runtime_arguments(
     vllm.add_argument(
         "--vllm-gpu-memory-utilization",
         type=float,
-        default=0.25,
+        default=vllm_defaults.get("gpu_memory_utilization", 0.25),
         help="Fraction of GPU memory vLLM may reserve (weights + KV pool).",
     )
     vllm.add_argument(
@@ -471,13 +480,13 @@ def add_runtime_arguments(
     vllm.add_argument(
         "--vllm-max-num-seqs",
         type=int,
-        default=1,
+        default=vllm_defaults.get("max_num_seqs", 1),
         help="vLLM max concurrent sequences during rollout.",
     )
     vllm.add_argument(
         "--vllm-sleep-mode",
         action=argparse.BooleanOptionalAction,
-        default=None,
+        default=vllm_defaults.get("sleep_mode", None),
         help="Put vLLM to sleep between rollouts. Default: on when POP_SIZE==1.",
     )
     vllm.add_argument(
@@ -574,12 +583,15 @@ def parse_llm_benchmark_cli(
     description: str,
     epilog: str | None = None,
     add_script_arguments: Any = None,
+    vllm_defaults: dict[str, Any] | None = None,
     argv: list[str] | None = None,
 ) -> LLMBenchmarkConfig:
     """Parse an online-RL benchmark command line into a :class:`LLMBenchmarkConfig`.
 
     :param add_script_arguments: Optional ``callable(parser)`` for script-specific
         flags (e.g. ``--env-name`` on the multi-turn benchmark).
+    :param vllm_defaults: Optional per-script overrides for the vLLM flag defaults
+        (see :func:`add_runtime_arguments`).
     """
     algo, raw_init, raw_mut = _resolve_algo(argv, default_config, "GRPO")
     init_cls = select_init_hp_class(algo)
@@ -608,7 +620,9 @@ def parse_llm_benchmark_cli(
         dest_prefix="mut_",
     )
     _add_override_args(parser)
-    add_runtime_arguments(parser, default_model=default_model)
+    add_runtime_arguments(
+        parser, default_model=default_model, vllm_defaults=vllm_defaults
+    )
     add_llm_wandb_arguments(parser)
     if add_script_arguments is not None:
         add_script_arguments(parser)

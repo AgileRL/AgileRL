@@ -1,6 +1,3 @@
-from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
-from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl import HAS_LLM_DEPENDENCIES
 
 if not HAS_LLM_DEPENDENCIES:
@@ -8,20 +5,33 @@ if not HAS_LLM_DEPENDENCIES:
         "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`.",
     )
 
+import argparse
 import re
 
-import yaml
 from datasets import load_dataset
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
+import benchmark_cli_llm
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_reasoning
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym, create_llm_accelerator
 from agilerl.utils.utils import create_population
 
-MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
-DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
+DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+DEFAULT_DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
+DEFAULT_CONFIG = "configs/training/llm_finetuning/ppo_llm.yaml"
+
+# Reasoning is throughput-oriented (batched single-turn generation), so it runs
+# vLLM with a larger memory budget and many concurrent sequences by default.
+REASONING_VLLM_DEFAULTS = {
+    "gpu_memory_utilization": 0.8,
+    "max_num_seqs": 12,
+    "sleep_mode": True,
+}
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
@@ -88,17 +98,41 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
 
 def combined_rewards(completion, solution, prompt):
-
     return (
         equation_reward_func([completion], [solution], [prompt])[0]
         + format_reward_func([completion], [solution])[0]
     )
 
 
-def main(init_hp, mut_p):
+def _add_reasoning_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=DEFAULT_DATASET,
+        help=f"HuggingFace dataset id (default: {DEFAULT_DATASET}).",
+    )
+    parser.add_argument(
+        "--eval-interval",
+        type=int,
+        default=10,
+        help="finetune_llm_reasoning evaluation_interval.",
+    )
+    parser.add_argument(
+        "--evo-steps",
+        type=int,
+        default=4,
+        help="Evolution frequency (steps between tournament + mutation).",
+    )
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    train_dataset, test_dataset = make_dataset(DATASET)
+
+def main(resolved: benchmark_cli_llm.LLMBenchmarkConfig) -> None:
+    args = resolved.args
+    init_hp = resolved.init_hp
+    mut_p = resolved.mutation_params
+    model_path = args.model
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    train_dataset, test_dataset = make_dataset(args.dataset)
 
     conversation_template = [
         {
@@ -125,16 +159,7 @@ def main(init_hp, mut_p):
     )
 
     use_vllm = bool(init_hp.get("USE_VLLM", True))
-    vllm_config = (
-        VLLMConfig(
-            tensor_parallel_size=1,
-            gpu_memory_utilization=0.8,
-            max_num_seqs=12,
-            sleep_mode=True,
-        )
-        if use_vllm
-        else None
-    )
+    vllm_config = VLLMConfig(**resolved.build_vllm_kwargs()) if use_vllm else None
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
         lr=RLParameter(min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]),
@@ -149,7 +174,7 @@ def main(init_hp, mut_p):
         population_size=init_hp["POP_SIZE"],
         accelerator=accelerator,
         tokenizer=tokenizer,
-        model_name=MODEL_PATH,
+        model_name=model_path,
         vllm_config=vllm_config,
     )
 
@@ -175,12 +200,17 @@ def main(init_hp, mut_p):
         pop=pop,
         env=env,
         init_hp=init_hp,
-        evaluation_interval=10,
-        wb=False,
+        evaluation_interval=args.eval_interval,
+        wb=resolved.wandb.enabled,
+        wb_level=args.wb_level,
+        wandb_api_key=resolved.wandb.api_key,
+        wandb_project=resolved.wandb.project,
+        wandb_entity=resolved.wandb.entity,
+        wandb_run_name=resolved.wandb.run_name,
         save_elite=True,
         elite_path="saved_llms",
         max_reward=2.0,
-        evo_steps=4,
+        evo_steps=args.evo_steps,
         mutation=mutations,
         tournament=tournament,
         accelerator=accelerator,
@@ -191,8 +221,11 @@ def main(init_hp, mut_p):
 
 
 if __name__ == "__main__":
-    with open("configs/training/llm_finetuning/ppo_llm.yaml") as file:
-        config = yaml.safe_load(file)
-    init_hp = config["INIT_HP"]
-    mut_p = config["MUTATION_PARAMS"]
-    main(init_hp, mut_p)
+    resolved = benchmark_cli_llm.parse_llm_benchmark_cli(
+        default_config=DEFAULT_CONFIG,
+        default_model=DEFAULT_MODEL,
+        description="Reasoning (Countdown) LLM benchmarking with evolutionary HPO.",
+        add_script_arguments=_add_reasoning_arguments,
+        vllm_defaults=REASONING_VLLM_DEFAULTS,
+    )
+    main(resolved)

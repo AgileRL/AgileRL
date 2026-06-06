@@ -24,13 +24,13 @@ if not HAS_LLM_DEPENDENCIES:
 
 from datetime import datetime
 
-import yaml
 from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
+import benchmark_cli_llm
 from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -38,8 +38,9 @@ from agilerl.training.train_llm import finetune_llm_sft
 from agilerl.utils.llm_utils import compare_responses, sample_eval_prompts
 from agilerl.llm_envs import SFTGym
 
-MODEL_PATH = "Qwen/Qwen2.5-0.5B"
+DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B"
 DATASET = "HumanLLMs/Human-Like-DPO-Dataset"
+DEFAULT_CONFIG = "configs/training/sft.yaml"
 
 
 def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
@@ -55,17 +56,24 @@ def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
     return splits["train"], splits["test"]
 
 
-def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
+def main(
+    init_hp: dict,
+    mut_p: dict,
+    model_path: str = DEFAULT_MODEL,
+    save_path: str = "outputs",
+) -> None:
     """Run the SFT benchmarking loop.
 
     :param init_hp: Initial hyperparameter dict loaded from the YAML config.
     :type init_hp: dict
     :param mut_p: Mutation parameter dict loaded from the YAML config.
     :type mut_p: dict
+    :param model_path: HF model id or path for the trainer.
+    :type model_path: str
     :param save_path: Directory to save elite LoRA checkpoint, defaults to ``"outputs"``.
     :type save_path: str
     """
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
@@ -95,7 +103,7 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
     print("Defining SFT agent population...")
     pop = [
         SFT(
-            model_name=MODEL_PATH,
+            model_name=model_path,
             pad_token_id=init_hp["PAD_TOKEN_ID"],
             pad_token=init_hp["PAD_TOKEN"],
             batch_size=init_hp["BATCH_SIZE"],
@@ -162,11 +170,17 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
 
 
 if __name__ == "__main__":
-    save_path = f"outputs/{datetime.now().strftime('%Y%m%d_%H%M%S')}_SFT"
-    with open("configs/training/sft.yaml") as f:
-        config = yaml.safe_load(f)
+    resolved = benchmark_cli_llm.parse_offline_llm_cli(
+        default_config=DEFAULT_CONFIG,
+        default_model=DEFAULT_MODEL,
+        description="Supervised Fine-Tuning (SFT) benchmarking.",
+    )
+    save_path = resolved.args.save_path or (
+        f"outputs/{datetime.now().strftime('%Y%m%d_%H%M%S')}_SFT"
+    )
     main(
-        init_hp=config["INIT_HP"],
-        mut_p=config["MUTATION_PARAMS"],
+        init_hp=resolved.init_hp,
+        mut_p=resolved.mutation_params,
+        model_path=resolved.args.model,
         save_path=save_path,
     )

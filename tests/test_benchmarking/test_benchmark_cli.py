@@ -448,6 +448,34 @@ def test_all_documented_quantization_rst_flags_parse():
     assert resolved.mutation_params["MIN_GROUP_SIZE"] == 2
 
 
+def test_vllm_defaults_per_script():
+    # reasoning-style throughput defaults flow through to build_vllm_kwargs.
+    resolved = benchmark_cli_llm.parse_llm_benchmark_cli(
+        default_config=CISPO_CFG,
+        default_model=DEFAULT_MODEL,
+        description="test",
+        vllm_defaults={
+            "gpu_memory_utilization": 0.8,
+            "max_num_seqs": 12,
+            "sleep_mode": True,
+        },
+        argv=[],
+    )
+    kwargs = resolved.build_vllm_kwargs()
+    assert kwargs["gpu_memory_utilization"] == 0.8
+    assert kwargs["max_num_seqs"] == 12
+    assert kwargs["sleep_mode"] is True
+    # An explicit flag still overrides the per-script default.
+    resolved2 = benchmark_cli_llm.parse_llm_benchmark_cli(
+        default_config=CISPO_CFG,
+        default_model=DEFAULT_MODEL,
+        description="test",
+        vllm_defaults={"gpu_memory_utilization": 0.8},
+        argv=["--vllm-gpu-memory-utilization", "0.3"],
+    )
+    assert resolved2.build_vllm_kwargs()["gpu_memory_utilization"] == 0.3
+
+
 def test_build_vllm_kwargs_with_rollout_flags():
     resolved = _resolve(
         CISPO_CFG,
