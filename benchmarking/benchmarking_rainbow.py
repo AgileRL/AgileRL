@@ -1,6 +1,6 @@
 import torch
-import yaml
 
+import benchmark_cli
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components import (
     MultiStepReplayBuffer,
@@ -167,9 +167,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
 
 if __name__ == "__main__":
-    with open("configs/training/dqn/dqn_rainbow.yaml") as file:
-        rainbow_dqn_config = yaml.safe_load(file)
-    INIT_HP = rainbow_dqn_config["INIT_HP"]
-    MUTATION_PARAMS = rainbow_dqn_config["MUTATION_PARAMS"]
-    NET_CONFIG = rainbow_dqn_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)
+    parser = benchmark_cli.build_classic_parser(
+        description="Rainbow DQN benchmarking.",
+        default_config="configs/training/dqn/dqn_rainbow.yaml",
+    )
+    config, _args = benchmark_cli.resolve_classic(parser)
+    main(
+        config["INIT_HP"],
+        config["MUTATION_PARAMS"],
+        config["NET_CONFIG"],
+        use_net=False,
+    )

@@ -2,10 +2,10 @@ import importlib
 
 import supersuit as ss
 import torch
-import yaml
 from accelerate import Accelerator
 from pettingzoo.utils import env_logger
 
+import benchmark_cli
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -159,11 +159,16 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
 
 
 if __name__ == "__main__":
-    config = "configs/training/multi_agent/ippo.yaml"
-    with open(config) as file:
-        config = yaml.safe_load(file)
-    INIT_HP = config["INIT_HP"]
-    MUTATION_PARAMS = config["MUTATION_PARAMS"]
-    NET_CONFIG = config["NET_CONFIG"]
-    DISTRIBUTED_TRAINING = config["DISTRIBUTED_TRAINING"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING)
+    sections = (*benchmark_cli.CLASSIC_SECTIONS, "DISTRIBUTED_TRAINING")
+    parser = benchmark_cli.build_classic_parser(
+        description="Multi-agent on-policy (IPPO) benchmarking.",
+        default_config="configs/training/multi_agent/ippo.yaml",
+        sections=sections,
+    )
+    config, _args = benchmark_cli.resolve_classic(parser, sections=sections)
+    main(
+        config["INIT_HP"],
+        config["MUTATION_PARAMS"],
+        config["NET_CONFIG"],
+        config["DISTRIBUTED_TRAINING"],
+    )

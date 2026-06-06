@@ -174,11 +174,16 @@ def add_config_arguments(
         and ``MUTATION_PARAMS`` are standard; classic RL benchmarks add
         ``NET_CONFIG``.
     """
+    config_help = (
+        f"Path to the YAML config file (default: {default_config})."
+        if default_config is not None
+        else "Path to a YAML config file (optional; defaults to the script's built-in config)."
+    )
     parser.add_argument(
         "--config",
         type=str,
         default=default_config,
-        help=f"Path to the YAML config file (default: {default_config}).",
+        help=config_help,
     )
     parser.add_argument(
         "--print-config",
@@ -251,7 +256,7 @@ def maybe_print_config_and_exit(
 def build_classic_parser(
     *,
     description: str,
-    default_config: str,
+    default_config: str | None,
     sections: tuple[str, ...] = CLASSIC_SECTIONS,
 ) -> argparse.ArgumentParser:
     """Build a standard parser for a classic (non-LLM) RL benchmark.
@@ -275,6 +280,7 @@ def resolve_classic(
     argv: list[str] | None = None,
     wandb_section: str = INIT_HP_SECTION,
     wandb_key: str = "WANDB",
+    base_config: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], argparse.Namespace]:
     """Parse args, load the config, apply overrides and resolve W&B.
 
@@ -282,9 +288,21 @@ def resolve_classic(
     default) so classic training loops that read ``wb=INIT_HP['WANDB']`` pick it
     up with no further wiring. ``--print-config`` is honoured here (prints and
     exits). Returns the resolved config dict and the parsed namespace.
+
+    :param base_config: Fallback config used when ``--config`` is not given (for
+        scripts that define their config inline rather than in a YAML file). A
+        shallow copy is taken so the caller's literal is not mutated.
     """
     args = parser.parse_args(argv)
-    config = load_config(args.config)
+    if getattr(args, "config", None):
+        config = load_config(args.config)
+    elif base_config is not None:
+        config = {
+            key: dict(value) if isinstance(value, dict) else value
+            for key, value in base_config.items()
+        }
+    else:
+        parser.error("no --config given and the script has no built-in config")
     apply_section_overrides(config, args, sections=sections)
     if getattr(args, "no_wandb", False):
         config.setdefault(wandb_section, {})[wandb_key] = False

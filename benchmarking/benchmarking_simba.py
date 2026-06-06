@@ -1,6 +1,6 @@
 import torch
-import yaml
 
+import benchmark_cli
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
@@ -123,9 +123,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("configs/training/ddpg/ddpg_simba.yaml") as file:
-        config = yaml.safe_load(file)
-    INIT_HP = config["INIT_HP"]
-    MUTATION_PARAMS = config["MUTATION_PARAMS"]
-    NET_CONFIG = config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    parser = benchmark_cli.build_classic_parser(
+        description="SimBa (DDPG) benchmarking.",
+        default_config="configs/training/ddpg/ddpg_simba.yaml",
+    )
+    config, _args = benchmark_cli.resolve_classic(parser)
+    main(
+        config["INIT_HP"],
+        config["MUTATION_PARAMS"],
+        config["NET_CONFIG"],
+    )

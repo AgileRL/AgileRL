@@ -1,8 +1,8 @@
 import gymnasium as gym
 import torch
-import yaml
 from gymnasium.wrappers import ReshapeObservation
 
+import benchmark_cli
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -109,10 +109,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("configs/training/ppo/ppo.yaml") as file:
-        ppo_config = yaml.safe_load(file)
-
-    INIT_HP = ppo_config["INIT_HP"]
-    MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]
-    NET_CONFIG = ppo_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    parser = benchmark_cli.build_classic_parser(
+        description="On-policy RL (PPO) benchmarking.",
+        default_config="configs/training/ppo/ppo.yaml",
+    )
+    config, _args = benchmark_cli.resolve_classic(parser)
+    main(
+        config["INIT_HP"],
+        config["MUTATION_PARAMS"],
+        config["NET_CONFIG"],
+    )

@@ -1,8 +1,9 @@
 from typing import TYPE_CHECKING
 
 import torch
-import yaml
 from gymnasium import spaces
+
+import benchmark_cli
 
 from tutorials.utils import require_package
 
@@ -138,9 +139,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
 
 if __name__ == "__main__":
-    with open("configs/training/neural_ucb.yaml") as file:
-        bandit_config = yaml.safe_load(file)
-    INIT_HP = bandit_config["INIT_HP"]
-    MUTATION_PARAMS = bandit_config["MUTATION_PARAMS"]
-    NET_CONFIG = bandit_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)
+    parser = benchmark_cli.build_classic_parser(
+        description="Contextual bandits (NeuralUCB / NeuralTS) benchmarking.",
+        default_config="configs/training/neural_ucb.yaml",
+    )
+    config, _args = benchmark_cli.resolve_classic(parser)
+    main(
+        config["INIT_HP"],
+        config["MUTATION_PARAMS"],
+        config["NET_CONFIG"],
+        use_net=True,
+    )

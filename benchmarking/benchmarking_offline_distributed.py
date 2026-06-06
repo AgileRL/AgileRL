@@ -1,6 +1,7 @@
 import h5py
 from accelerate import Accelerator
 
+import benchmark_cli
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -141,4 +142,20 @@ if __name__ == "__main__":
         },
     }
 
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    parser = benchmark_cli.build_classic_parser(
+        description="Distributed offline RL (CQN) benchmarking.",
+        default_config=None,
+    )
+    config, _args = benchmark_cli.resolve_classic(
+        parser,
+        base_config={
+            "INIT_HP": INIT_HP,
+            "MUTATION_PARAMS": MUTATION_PARAMS,
+            "NET_CONFIG": NET_CONFIG,
+        },
+    )
+    main(
+        config["INIT_HP"],
+        config["MUTATION_PARAMS"],
+        config["NET_CONFIG"],
+    )

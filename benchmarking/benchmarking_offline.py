@@ -1,8 +1,8 @@
 import h5py
 import torch
-import yaml
 from torch import nn
 
+import benchmark_cli
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -139,10 +139,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("configs/training/cqn.yaml") as file:
-        cqn_config = yaml.safe_load(file)
-    INIT_HP = cqn_config["INIT_HP"]
-    MUTATION_PARAMS = cqn_config["MUTATION_PARAMS"]
-    NET_CONFIG = cqn_config["NET_CONFIG"]
-    # DISTRIBUTED_TRAINING = cqn_config["DISTRIBUTED_TRAINING"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    parser = benchmark_cli.build_classic_parser(
+        description="Offline RL (CQN) benchmarking.",
+        default_config="configs/training/cqn.yaml",
+    )
+    config, _args = benchmark_cli.resolve_classic(parser)
+    main(
+        config["INIT_HP"],
+        config["MUTATION_PARAMS"],
+        config["NET_CONFIG"],
+    )

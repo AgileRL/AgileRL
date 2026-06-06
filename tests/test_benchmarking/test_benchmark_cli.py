@@ -95,6 +95,44 @@ def test_classic_core_overrides_and_wandb(tmp_path):
     assert config["NET_CONFIG"]["X"] == 1
 
 
+def test_classic_base_config_inline(capsys):
+    # Scripts with an inline config (no YAML) pass base_config; --config absent.
+    base = {
+        "INIT_HP": {"ALGO": "CQN", "LR": 1e-3},
+        "MUTATION_PARAMS": {"NO_MUT": 0.4},
+        "NET_CONFIG": {"encoder_config": {"hidden_size": [32, 32]}},
+    }
+    parser = benchmark_cli.build_classic_parser(
+        description="inline", default_config=None
+    )
+    config, _ = benchmark_cli.resolve_classic(
+        parser, argv=["--init-hp-override", "LR=0.5"], base_config=base
+    )
+    assert config["INIT_HP"]["LR"] == 0.5
+    # The caller's literal must not be mutated by the override.
+    assert base["INIT_HP"]["LR"] == 1e-3
+
+
+def test_classic_custom_sections():
+    cfg = {
+        "INIT_HP": {"ALGO": "IPPO"},
+        "MUTATION_PARAMS": {"NO_MUT": 0.1},
+        "NET_CONFIG": {"x": 1},
+        "DISTRIBUTED_TRAINING": {"ENABLED": False},
+    }
+    sections = (*benchmark_cli.CLASSIC_SECTIONS, "DISTRIBUTED_TRAINING")
+    parser = benchmark_cli.build_classic_parser(
+        description="ma", default_config=None, sections=sections
+    )
+    config, _ = benchmark_cli.resolve_classic(
+        parser,
+        argv=["--distributed-training-override", "ENABLED=true"],
+        sections=sections,
+        base_config=cfg,
+    )
+    assert config["DISTRIBUTED_TRAINING"]["ENABLED"] is True
+
+
 def test_classic_print_config_exits(tmp_path, capsys):
     cfg = tmp_path / "ppo.yaml"
     cfg.write_text(yaml.safe_dump({"INIT_HP": {"ALGO": "PPO"}, "MUTATION_PARAMS": {}}))

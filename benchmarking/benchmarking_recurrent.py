@@ -3,8 +3,8 @@ from typing import ClassVar
 import gymnasium as gym
 import numpy as np
 import torch
-import yaml
 
+import benchmark_cli
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -168,9 +168,13 @@ def main_recurrent(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("configs/training/ppo/ppo_recurrent.yaml") as file:
-        config = yaml.safe_load(file)
-    INIT_HP = config["INIT_HP"]
-    MUTATION_PARAMS = config["MUTATION_PARAMS"]
-    NET_CONFIG = config["NET_CONFIG"]
-    main_recurrent(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    parser = benchmark_cli.build_classic_parser(
+        description="Recurrent on-policy RL (PPO) benchmarking.",
+        default_config="configs/training/ppo/ppo_recurrent.yaml",
+    )
+    config, _args = benchmark_cli.resolve_classic(parser)
+    main_recurrent(
+        config["INIT_HP"],
+        config["MUTATION_PARAMS"],
+        config["NET_CONFIG"],
+    )
