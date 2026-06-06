@@ -405,7 +405,6 @@ class TestSFTLearn:
         model_factory,
     ) -> None:
         """Patch MPS on CI so ``torch.mps.empty_cache()`` in ``learn()`` is exercised."""
-        empty = _patch_mps_learn_hooks(monkeypatch, "agilerl.algorithms.sft")
         sft = generate_sft(
             accelerator_factory,
             model_factory,
@@ -418,6 +417,10 @@ class TestSFTLearn:
             micro_batch_size_per_gpu=None,
             from_name=False,
         )
+        # Patch MPS only *after* the agent is built: patching is_available()
+        # before construction makes the device resolve to "mps", and the dummy
+        # actor's ``.to("mps")`` then crashes on a non-MPS (Linux/CI) torch build.
+        empty = _patch_mps_learn_hooks(monkeypatch, "agilerl.algorithms.sft")
         seq_len = 5 + 10
         prompt_len = 4
         experiences = {
@@ -790,6 +793,7 @@ class TestSFTGetLogprobs:
     )
     @pytest.mark.parametrize("batch_size", [1])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+    @pytest.mark.gpu  # real Qwen2 forward is Liger/Triton-fused → needs CUDA
     def test_sft_get_logprobs(
         self,
         deepspeed_env,
@@ -838,6 +842,7 @@ class TestSFTBackwardPass:
     )
     @pytest.mark.parametrize("batch_size", [1])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+    @pytest.mark.gpu  # real Qwen2 forward is Liger/Triton-fused → needs CUDA
     def test_sft_backward_pass(
         self,
         deepspeed_env,

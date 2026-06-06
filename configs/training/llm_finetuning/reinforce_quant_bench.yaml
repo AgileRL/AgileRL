@@ -1,0 +1,80 @@
+---
+# REINFORCE benchmark config for quantization benchmarking (mirrors
+# cispo_quant_bench.yaml for the gemma-4 multimodal / long-context setup).
+#
+# REINFORCE uses Return Batch Normalization (ReBN), NOT group-relative
+# advantages, so the GRPO-family knobs GROUP_SIZE / ADV_NORM / FILTER_ZERO_ADV
+# do not apply (REINFORCE has no group_size; the multi-turn rollout uses
+# group_size=1 — one completion per prompt — and ReBN normalizes returns across
+# the whole batch). Increase BATCH_SIZE for more ReBN samples.
+
+MUTATION_PARAMS:
+    NO_MUT: 0.1
+    RL_HP_MUT: 0.6
+    MUT_SD: 0.1
+    RAND_SEED: 42
+    MIN_LR: 0.0000001
+    MAX_LR: 0.00001
+    MIN_BETA: 0.0001
+    MAX_BETA: 0.01
+
+INIT_HP:
+    ALGO: LLMREINFORCE
+    # Advantage granularity (the ReBN advantage axis). "turn" computes per-turn
+    # ReBN advantages, "token" per-token, "auto" uses token unless the batch is
+    # multi-turn. Independent of IMPORTANCE_SAMPLING_LEVEL below. Requires the
+    # env to supply turn_ids (+ per-turn returns) for "turn".
+    ADVANTAGE_GRANULARITY: turn
+    # IS / ratio-pooling level for the clipped surrogate (independent of
+    # ADVANTAGE_GRANULARITY). token / turn / sequence. Turn and sequence levels
+    # have no fused Liger kernel, so they run on the decoupled standard path,
+    # which is always memory-bounded via the fused-linear-logprob path.
+    IMPORTANCE_SAMPLING_LEVEL: turn
+    BATCH_SIZE: 1
+    # KL penalty against the reference policy, folded into the advantage. 0 =
+    # pure REINFORCE (reference still computed for the KL logging metric).
+    BETA: 0
+    # PPO-style clipped surrogate coefficient (safe multi-epoch updates).
+    CLIP_COEF: 0.2
+    # Discount factor across turns for the multi-turn ReBN returns.
+    GAMMA: 1.0
+    ELITISM: true
+    EVAL_LOOP: 1
+    LR: 0.00005
+    MAX_GRAD_NORM: 1
+    MAX_MODEL_LEN: 32768
+    # Per-turn generation cap; must be < MAX_MODEL_LEN or prompt budget is 0.
+    MAX_OUTPUT_TOKENS: 1024
+    # Per-episode interaction-turn cap used by the rollout wrapper.
+    MAX_TURNS: 50
+    MICRO_BATCH_SIZE_PER_GPU: 1
+    POP_SIZE: 1
+    # Trainer-side bnb quant (none | int8 | nf4). Overridden by --trainer-quantization.
+    QUANTIZATION: none
+    # HF activation offload; or use --trainer-activation-offload.
+    ACTIVATION_OFFLOAD: false
+    # For multimodal models, only apply LoRA to e.g. the language model part.
+    LORA_TARGET_SCOPE: language_model
+    TARGET_MODULES:
+        - q_proj.linear
+        - k_proj.linear
+        - v_proj.linear
+        - o_proj.linear
+        - up_proj.linear
+        - down_proj.linear
+        - gate_proj.linear
+    TEMPERATURE: 1.0
+    TOURN_SIZE: 2
+    UPDATE_EPOCHS: 1
+    USE_VLLM: true
+    # This config uses turn-level IS, which has no fused Liger kernel: under
+    # Liger it would process one whole sequence per chunk and materialize a
+    # (seq_len, vocab) logits tensor per trajectory -> OOM at long context.
+    # (Token-level REINFORCE Liger IS now bounded via token-flattening, but
+    # turn-level cannot be token-chunked.) Keep Liger off here; the standard
+    # path is always memory-bounded via the fused-linear-logprob path.
+    USE_LIGER_LOSS: false
+    LORA_R: 16
+    LORA_ALPHA: 32
+    LORA_DROPOUT: 0
+    LORA_BIAS: none

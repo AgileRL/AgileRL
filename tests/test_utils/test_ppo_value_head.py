@@ -112,6 +112,14 @@ class TestResolveHiddenSize:
         cfg = SimpleNamespace(hidden_size=16)
         assert _resolve_hidden_size(cfg) == 16
 
+    def test_falls_back_to_nested_text_config_hidden_size(self):
+        cfg = SimpleNamespace(text_config=SimpleNamespace(hidden_size=2560))
+        assert _resolve_hidden_size(cfg) == 2560
+
+    def test_falls_back_to_nested_text_config_dict_hidden_size(self):
+        cfg = SimpleNamespace(text_config={"hidden_size": 1536})
+        assert _resolve_hidden_size(cfg) == 1536
+
     def test_raises_without_hidden_dimensions(self):
         cfg = SimpleNamespace()
         with pytest.raises(ValueError, match="Cannot infer value-head hidden size"):

@@ -15,6 +15,23 @@ from tests.utils import (
 )
 
 
+def _cuda_bf16_available() -> bool:
+    """True only when a usable CUDA device supports bf16.
+
+    ``torch.cuda.is_bf16_supported()`` calls ``current_device()`` internally,
+    which raises ``RuntimeError`` when the CUDA driver is loaded but no device
+    is visible (e.g. ``CUDA_VISIBLE_DEVICES=`` on the CPU CI runner, where
+    ``is_available()`` can still report True). Guard against that so model
+    construction falls back to fp32 instead of crashing.
+    """
+    if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
+        return False
+    try:
+        return torch.cuda.is_bf16_supported()
+    except RuntimeError:
+        return False
+
+
 @pytest.fixture(autouse=True)
 def cleanup_after_test(request):
     if torch.cuda.is_available() and (num_gpus := torch.cuda.device_count()) > 0:
@@ -99,11 +116,7 @@ def generate_model(pretrained_model_name_or_path, add_value_head=False):
         return model
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        dtype=(
-            torch.bfloat16
-            if (torch.cuda.is_available() and torch.cuda.is_bf16_supported())
-            else torch.float32
-        ),
+        dtype=torch.bfloat16 if _cuda_bf16_available() else torch.float32,
         attn_implementation="sdpa",
     )
     model.gradient_checkpointing_enable()

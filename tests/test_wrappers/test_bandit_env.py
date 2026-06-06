@@ -23,8 +23,10 @@ class TestBanditEnvInit:
         assert isinstance(env, BanditEnv)
         assert isinstance(action_space, int)
         assert isinstance(context_dim, tuple)
-        assert action_space == int(targets.nunique()[0])
-        assert context_dim == (len(np.array(features.loc[0])) * int(targets.nunique()),)
+        assert action_space == int(targets.nunique().iloc[0])
+        assert context_dim == (
+            len(np.array(features.loc[0])) * int(targets.nunique().iloc[0]),
+        )
 
 
 class TestBanditEnvStep:

@@ -390,8 +390,13 @@ def _unfused_turn_reference(
     safe_turn_ids = turn_ids.clamp(min=0)
     B, T = per_token_logps.shape
     max_turns = turn_mask.shape[1]
-    turn_log_ratio = torch.zeros(B, max_turns, dtype=token_log_ratio.dtype)
-    turn_log_ratio.scatter_add_(1, safe_turn_ids, masked_token_log_ratio)
+    turn_log_ratio_sum = torch.zeros(B, max_turns, dtype=token_log_ratio.dtype)
+    turn_log_ratio_sum.scatter_add_(1, safe_turn_ids, masked_token_log_ratio)
+    # Length-normalized mean per turn (GSPO-consistent), matching the fused
+    # impl — not the old sum-pool. Divide by the active-token count per turn.
+    turn_token_count = torch.zeros(B, max_turns, dtype=token_log_ratio.dtype)
+    turn_token_count.scatter_add_(1, safe_turn_ids, token_mask.float())
+    turn_log_ratio = turn_log_ratio_sum / turn_token_count.clamp(min=1.0)
 
     ratio = torch.exp(turn_log_ratio)
     clipped = torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
@@ -605,7 +610,7 @@ class TestLlmPpoLossFnTurnMode:
         """Passing ``turn_ids`` without ``max_turns`` / ``full_turn_mask``
         is a programming error and should raise."""
         log_probs = torch.log_softmax(torch.randn(2, 4, 16), dim=-1)
-        with pytest.raises(ValueError, match="turn-mode"):
+        with pytest.raises(ValueError, match="turn-level"):
             llm_policy_loss_fn(
                 log_probs=log_probs,
                 selected_token_ids=torch.randint(0, 16, (2, 4)),

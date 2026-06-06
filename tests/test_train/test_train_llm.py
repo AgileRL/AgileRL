@@ -10,6 +10,7 @@ pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
 from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMREINFORCE
+from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.sft import SFT
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.training.train_llm import (
@@ -79,7 +80,9 @@ def _make_multiturn_mock_agent(*, spec=LLMPPO):
             batch = int(input_ids.shape[0]) if hasattr(input_ids, "shape") else 1
         else:
             batch = len(obs)
-        return ([torch.ones(1, 5, dtype=torch.long) for _ in range(batch)], None)
+        return ActionResult(
+            [torch.ones(1, 5, dtype=torch.long) for _ in range(batch)], None
+        )
 
     mock_agent.get_action.side_effect = _mock_get_action
     if spec is GRPO:
@@ -120,7 +123,7 @@ class TestFinetuneLlmReasoning:
         mock_agent = MagicMock(spec=GRPO)
         mock_agent.fitness = [0.0]
         mock_agent.local_rank = "0"  # Main process
-        mock_agent.get_action.return_value = (
+        mock_agent.get_action.return_value = ActionResult(
             [torch.ones(1, 100) for _ in range(2)],
             Mock(),
         )
@@ -186,7 +189,7 @@ class TestFinetuneLlmReasoning:
         mock_agent.registry.hp_config.config = {"lr": 0.001, "batch_size": 32}
         mock_agent.fitness = [0.0]
         mock_agent.local_rank = "0"  # Main process
-        mock_agent.get_action.return_value = (
+        mock_agent.get_action.return_value = ActionResult(
             [torch.ones(1, 100) for _ in range(2)],
             Mock(),
         )
@@ -252,7 +255,7 @@ class TestFinetuneLlmReasoning:
         mock_agent.algo = "GRPO"
         mock_agent.fitness = [0.0]
         mock_agent.local_rank = "0"  # Main process
-        mock_agent.get_action.return_value = (
+        mock_agent.get_action.return_value = ActionResult(
             [torch.ones(1, 100) for _ in range(2)],
             Mock(),
         )
@@ -371,7 +374,7 @@ class TestFinetuneLlmReasoning:
         mock_agent.algo = "GRPO"
         mock_agent.fitness = [0.0]
         mock_agent.local_rank = "0"  # Main process
-        mock_agent.get_action.return_value = (
+        mock_agent.get_action.return_value = ActionResult(
             [torch.ones(1, 100) for _ in range(2)],
             Mock(),
         )
@@ -424,7 +427,7 @@ class TestFinetuneLlmReasoning:
         mock_agent.algo = "GRPO"
         mock_agent.fitness = [0.0]
         mock_agent.local_rank = "0"  # Main process
-        mock_agent.get_action.return_value = (
+        mock_agent.get_action.return_value = ActionResult(
             [torch.ones(1, 100) for _ in range(2)],
             Mock(),
         )
@@ -479,7 +482,7 @@ class TestFinetuneLlmReasoning:
         mock_agent.algo = "GRPO"
         mock_agent.fitness = [0.0]
         mock_agent.local_rank = "0"  # Main process
-        mock_agent.get_action.return_value = (
+        mock_agent.get_action.return_value = ActionResult(
             [torch.ones(1, 100) for _ in range(2)],
             Mock(),
         )
@@ -553,7 +556,7 @@ class TestFinetuneLlmReasoning:
         mock_agent.registry.hp_config = MagicMock()
         mock_agent.registry.hp_config.config = {}
         mock_agent.fitness = [0.0]
-        mock_agent.get_action.return_value = (
+        mock_agent.get_action.return_value = ActionResult(
             [torch.ones(1, 100) for _ in range(2)],
             Mock(),
         )
@@ -604,7 +607,7 @@ class TestFinetuneLlmReasoning:
         mock_agent.registry.hp_config = MagicMock()
         mock_agent.registry.hp_config.config = {}
         mock_agent.fitness = [0.0]
-        mock_agent.get_action.return_value = (
+        mock_agent.get_action.return_value = ActionResult(
             [torch.ones(1, 100) for _ in range(2)],
             Mock(),
         )
@@ -658,7 +661,7 @@ class TestFinetuneLlmReasoning:
         mock_agent.registry.hp_config = MagicMock()
         mock_agent.registry.hp_config.config = {}
         mock_agent.fitness = [0.0]
-        mock_agent.get_action.return_value = (
+        mock_agent.get_action.return_value = ActionResult(
             [torch.ones(1, 100) for _ in range(2)],
             Mock(),
         )
@@ -704,7 +707,7 @@ class TestFinetuneLlmReasoning:
         agent_a = MagicMock(spec=GRPO)
         agent_a.algo = "GRPO"
         agent_a.fitness = [0.0]
-        agent_a.get_action.return_value = ([torch.ones(1, 4)], Mock())
+        agent_a.get_action.return_value = ActionResult([torch.ones(1, 4)], Mock())
         agent_a.learn.return_value = (0.5, 0.2)
         agent_a.batch_size_per_process = 1
         agent_a.batch_size = 1
@@ -715,7 +718,7 @@ class TestFinetuneLlmReasoning:
         agent_b = MagicMock(spec=GRPO)
         agent_b.algo = "GRPO"
         agent_b.fitness = [0.0]
-        agent_b.get_action.return_value = ([torch.ones(1, 4)], Mock())
+        agent_b.get_action.return_value = ActionResult([torch.ones(1, 4)], Mock())
         agent_b.learn.return_value = (0.5, 0.2)
         agent_b.batch_size_per_process = 1
         agent_b.batch_size = 1
@@ -773,7 +776,7 @@ class TestFinetuneLlmReasoning:
         mock_agent.registry.hp_config = MagicMock()
         mock_agent.registry.hp_config.config = {}
         mock_agent.fitness = [0.0]
-        mock_agent.get_action.return_value = (
+        mock_agent.get_action.return_value = ActionResult(
             [torch.ones(1, 100) for _ in range(2)],
             Mock(),
         )
@@ -1801,19 +1804,31 @@ class TestFinetuneLlmMultiturn:
         assert mock_agent.test.call_count == 0
         n_metrics = 4 if agent_spec is GRPO else 7
         assert mock_agg.call_count == num_outer * n_metrics
-        if agent_spec is GRPO:
-            mock_agent.learn.assert_called_with(ANY)
-        else:
-            mock_agent.learn.assert_called_with(ANY, turn_ids=ANY)
+        # All LLM algos (GRPO included) now receive per-turn ids in the
+        # multiturn loop, so learn() is always called with turn_ids.
+        mock_agent.learn.assert_called_with(ANY, turn_ids=ANY)
         assert mock_save.call_count == 1
 
-    def test_finetune_llm_multiturn_grpo_requires_batch_multiple_of_group_size(self):
+    def test_finetune_llm_multiturn_allows_batch_size_indivisible_by_group_size(self):
+        """The batch>group case is unconstrained too: batch_size=3, group_size=2
+        (three prompts, two completions each) must pass startup validation rather
+        than being rejected. Patch the rollout to a sentinel and assert the call
+        reaches it — i.e. it gets past the (now-removed) divisibility guard.
+        """
         mock_agent = _make_multiturn_mock_agent(spec=GRPO)
         mock_agent.group_size = 2
-        mock_agent.batch_size = 16
-        mock_agent.batch_size_per_process = 16
-        mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
-        with pytest.raises(ValueError, match="divisible by"):
+        mock_agent.batch_size = 3
+        mock_agent.batch_size_per_process = 3
+
+        sentinel = RuntimeError("reached rollout")
+        with (
+            patch("agilerl.training.train_llm.trange"),
+            patch(
+                "agilerl.training.train_llm.collect_rollouts_llm",
+                side_effect=sentinel,
+            ),
+            pytest.raises(RuntimeError, match="reached rollout"),
+        ):
             finetune_llm_multiturn(
                 pop=[mock_agent],
                 max_turns=1,
@@ -2233,17 +2248,30 @@ class TestFinetuneLlmMultiturn:
         assert acc.wait_for_everyone.call_count >= 1
         assert mock_agent.test.call_count >= 1
 
-    def test_finetune_llm_multiturn_raises_when_group_size_not_divisible_by_batch_size(
+    def test_finetune_llm_multiturn_allows_group_size_indivisible_by_batch_size(
         self,
     ):
+        """batch_size and group_size need not divide each other for GRPO.
+
+        The rollout vec env keeps each prompt's group whole (group-contiguous),
+        so e.g. batch_size=2, group_size=3 (two prompts, three completions each)
+        is valid and must pass startup validation rather than being rejected.
+        We patch the rollout to raise a sentinel and assert the call reaches it
+        — i.e. it gets past the (now-removed) divisibility guard.
+        """
         agent = _make_multiturn_mock_agent(spec=GRPO)
         agent.group_size = 3
         agent.batch_size = 2
         agent.batch_size_per_process = 2
 
-        with pytest.raises(
-            ValueError,
-            match="Group size \\(3\\) must be divisible by batch size \\(2\\)",
+        sentinel = RuntimeError("reached rollout")
+        with (
+            patch("agilerl.training.train_llm.trange"),
+            patch(
+                "agilerl.training.train_llm.collect_rollouts_llm",
+                side_effect=sentinel,
+            ),
+            pytest.raises(RuntimeError, match="reached rollout"),
         ):
             finetune_llm_multiturn(
                 pop=[agent],
@@ -2591,7 +2619,7 @@ def test_finetune_llm_checkpoint_triggering_non_divisible_steps(finetune_fn):
     if finetune_fn is finetune_llm_reasoning:
         agent = MagicMock(spec=GRPO)
         agent.algo = "GRPO"
-        agent.get_action.return_value = ([torch.ones(1, 4)], Mock())
+        agent.get_action.return_value = ActionResult([torch.ones(1, 4)], Mock())
         agent.learn.return_value = (0.5, 0.2)
         env = MagicMock()
         env.reset.return_value = "prompts"
@@ -2650,6 +2678,7 @@ def test_collect_rollouts_llm_breaks_when_vector_env_has_no_active_prompts():
         [torch.zeros(1, 7, dtype=torch.long)],
         [torch.ones(2, dtype=torch.float32)],
         1,
+        None,  # all_sampling_logps (added to get_trajectories' return)
     )
 
     _ = collect_rollouts_llm(
@@ -2722,7 +2751,7 @@ def test_inner_loop_breaks_after_max_steps_first_agent(finetune_fn, agent_spec):
         agent1 = MagicMock(spec=GRPO)
         for agent in (agent0, agent1):
             agent.algo = "GRPO"
-            agent.get_action.return_value = ([torch.ones(1, 5)], Mock())
+            agent.get_action.return_value = ActionResult([torch.ones(1, 5)], Mock())
             agent.learn.return_value = (0.5, 0.2)
             agent.test.return_value = torch.tensor([0.8])
             agent.batch_size = 1

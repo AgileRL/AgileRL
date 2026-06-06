@@ -21,6 +21,7 @@ from agilerl.utils.llm_utils import (
     PreferenceGym,
     ReasoningGym,
     align_deepspeed_lr,
+    clipped_is_surrogate,
     create_llm_accelerator,
     get_llm_accelerator,
     get_model_name_or_path,
@@ -1195,6 +1196,30 @@ class TestMaxPromptTokensForSlidingWindow:
         assert max_prompt_tokens_for_sliding_window(0, None) == 0
 
 
+class TestValidateLlmContextLengths:
+    def test_skips_when_max_output_tokens_none(self):
+        from agilerl.utils.llm_utils import validate_llm_context_lengths
+
+        validate_llm_context_lengths(32768, None)
+
+    def test_accepts_strictly_smaller_max_output_tokens(self):
+        from agilerl.utils.llm_utils import validate_llm_context_lengths
+
+        validate_llm_context_lengths(32768, 1024)
+
+    def test_raises_when_max_output_equals_max_model_len(self):
+        from agilerl.utils.llm_utils import validate_llm_context_lengths
+
+        with pytest.raises(ValueError, match="max_output_tokens \\(32768\\)"):
+            validate_llm_context_lengths(32768, 32768)
+
+    def test_raises_when_max_output_exceeds_max_model_len(self):
+        from agilerl.utils.llm_utils import validate_llm_context_lengths
+
+        with pytest.raises(ValueError, match="max_prompt_tokens=0"):
+            validate_llm_context_lengths(64, 256)
+
+
 class TestNormalizeReasoningPromptBatch:
     def test_passes_list_through(self):
         from agilerl.utils.llm_utils import normalize_reasoning_prompt_batch
@@ -1351,6 +1376,82 @@ class TestPoolByTurnsBadReduction:
         turn_ids = torch.tensor([[0, 0]])
         with pytest.raises(ValueError, match="Invalid reduction: unsupported"):
             pool_by_turns(token_values, turn_ids, num_turns=1, reduction="unsupported")
+
+
+class TestClippedIsSurrogate:
+    """The shared token/turn/sequence clipped surrogate used by the non-Liger
+    PPO and REINFORCE paths. token/turn/sequence are points on one
+    ratio-pooling axis, so the level collapses cleanly at the limits."""
+
+    @staticmethod
+    def _setup():
+        torch.manual_seed(0)
+        B, T = 3, 6
+        token_log_ratio = torch.randn(B, T)
+        advantages = torch.randn(B, T)
+        mask = torch.ones(B, T)
+        mask[0, 5:] = 0  # ragged sequence
+        return token_log_ratio, advantages, mask, B, T
+
+    def test_turn_each_token_own_turn_equals_token(self):
+        tlr, adv, mask, _B, T = self._setup()
+        turn_each = torch.where(
+            mask.bool(),
+            torch.arange(T).unsqueeze(0).expand_as(mask).long(),
+            torch.full_like(mask, -1, dtype=torch.long),
+        )
+        pg_tok, cf_tok = clipped_is_surrogate(tlr, adv, mask, turn_each, "token", 0.2)
+        pg_turn, cf_turn = clipped_is_surrogate(tlr, adv, mask, turn_each, "turn", 0.2)
+        assert torch.allclose(pg_tok, pg_turn, atol=1e-5)
+        assert torch.allclose(cf_tok, cf_turn, atol=1e-5)
+
+    def test_single_turn_equals_sequence(self):
+        tlr, adv, mask, B, T = self._setup()
+        turn_one = torch.where(
+            mask.bool(),
+            torch.zeros(B, T, dtype=torch.long),
+            torch.full((B, T), -1, dtype=torch.long),
+        )
+        pg_turn, _ = clipped_is_surrogate(tlr, adv, mask, turn_one, "turn", 0.2)
+        pg_seq, _ = clipped_is_surrogate(tlr, adv, mask, turn_one, "sequence", 0.2)
+        assert torch.allclose(pg_turn, pg_seq, atol=1e-5)
+
+    def test_sequence_pools_ratio_and_advantage(self):
+        """Sequence level uses the length-normalized mean log-ratio and the
+        mean advantage over a completion's action tokens."""
+        tlr = torch.tensor([[0.2, 0.4, 1.0, -5.0]])
+        adv = torch.tensor([[1.0, 3.0, 2.0, 99.0]])
+        mask = torch.tensor([[1.0, 1.0, 1.0, 0.0]])  # last token non-action
+        pg, _ = clipped_is_surrogate(tlr, adv, mask, None, "sequence", 0.2)
+        mean_lr = (0.2 + 0.4 + 1.0) / 3
+        mean_adv = (1.0 + 3.0 + 2.0) / 3
+        ratio = torch.exp(torch.tensor(mean_lr))
+        clipped = torch.clamp(ratio, 0.8, 1.2)
+        expected = torch.max(-mean_adv * ratio, -mean_adv * clipped)
+        assert torch.allclose(pg, expected, atol=1e-5)
+
+    def test_turn_requires_turn_ids(self):
+        tlr, adv, mask, _B, _T = self._setup()
+        with pytest.raises(ValueError, match="turn-level surrogate requires turn_ids"):
+            clipped_is_surrogate(tlr, adv, mask, None, "turn", 0.2)
+
+    def test_unknown_level_raises(self):
+        tlr, adv, mask, _B, _T = self._setup()
+        with pytest.raises(ValueError, match="Unknown importance_sampling_level"):
+            clipped_is_surrogate(tlr, adv, mask, None, "bogus", 0.2)
+
+    def test_gradient_flows_to_log_ratio(self):
+        """All levels are differentiable w.r.t. the token log-ratio."""
+        for level, turn_ids in (
+            ("token", None),
+            ("sequence", None),
+            ("turn", torch.zeros(3, 6, dtype=torch.long)),
+        ):
+            tlr, adv, mask, _B, _T = self._setup()
+            tlr = tlr.clone().requires_grad_(True)
+            pg, _ = clipped_is_surrogate(tlr, adv, mask, turn_ids, level, 0.2)
+            pg.backward()
+            assert tlr.grad is not None and torch.isfinite(tlr.grad).all()
 
 
 class TestCreateModelFromNameOrPathValueHead:

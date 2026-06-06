@@ -1,0 +1,148 @@
+class TestTokenObservationWrapperChatTemplateBoundary:
+    """Verify the assistant→user→assistant boundary is computed via the
+    tokenizer's chat template rather than hard-coded ChatML markers."""
+
+    def test_gemma_style_template_emits_full_boundary(self) -> None:
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
+
+        out = w._chat_template_boundary_ids("FEEDBACK")
+
+        assert out is not None
+        decoded = "".join(chr(int(x)) for x in out[0].tolist())
+        # Must close the assistant turn, open a user turn with the feedback,
+        # close it, then open a fresh model turn. Placeholder must not leak.
+        assert TokenObservationWrapper._BOUNDARY_PLACEHOLDER not in decoded
+        assert decoded.startswith("<end_of_turn>\n<start_of_turn>user\n")
+        assert "FEEDBACK" in decoded
+        assert decoded.endswith("<start_of_turn>model\n")
+
+    def test_qwen_style_template_emits_full_boundary(self) -> None:
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_chatml)
+
+        out = w._chat_template_boundary_ids("FEEDBACK")
+
+        assert out is not None
+        decoded = "".join(chr(int(x)) for x in out[0].tolist())
+        assert TokenObservationWrapper._BOUNDARY_PLACEHOLDER not in decoded
+        assert decoded.startswith("<|im_end|>\n<|im_start|>user\n")
+        assert "FEEDBACK" in decoded
+        assert decoded.endswith("<|im_start|>assistant\n")
+
+    def test_llama_style_template_emits_full_boundary(self) -> None:
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_llama)
+
+        out = w._chat_template_boundary_ids("FEEDBACK")
+
+        assert out is not None
+        decoded = "".join(chr(int(x)) for x in out[0].tolist())
+        assert TokenObservationWrapper._BOUNDARY_PLACEHOLDER not in decoded
+        # Should close assistant via <|eot_id|> then open a user header.
+        assert decoded.startswith("<|eot_id|><|start_header_id|>user")
+        assert "FEEDBACK" in decoded
+        assert decoded.endswith("<|start_header_id|>assistant<|end_header_id|>\n\n")
+
+    def test_returns_none_when_template_renderer_raises(self) -> None:
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_raises)
+        assert w._chat_template_boundary_ids("F") is None
+
+    def test_returns_none_when_placeholder_is_stripped(self) -> None:
+        # Pathological template whose render drops content entirely; the
+        # placeholder doesn't survive, so we can't slice. Caller falls back.
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_drops_content)
+        assert w._chat_template_boundary_ids("F") is None
+
+    def test_full_tokenize_feedback_falls_back_to_chatml(self) -> None:
+        # If the chat-template path returns None (no apply_chat_template at
+        # all on the tokenizer), _tokenize_feedback falls back to ChatML so
+        # we never crash.
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _ChrTokenizerWithChatTemplateBroken()
+        out = w._tokenize_feedback("F")
+        assert out.shape[0] == 1 and out.shape[1] > 0
+
+
+def _render_gemma_chat(messages, add_generation_prompt: bool) -> str:
+    parts = []
+    for m in messages:
+        role = "model" if m["role"] == "assistant" else m["role"]
+        parts.append(f"<start_of_turn>{role}\n{m['content']}<end_of_turn>\n")
+    if add_generation_prompt:
+        parts.append("<start_of_turn>model\n")
+    return "".join(parts)
+
+
+def _render_chatml(messages, add_generation_prompt: bool) -> str:
+    parts = []
+    for m in messages:
+        parts.append(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n")
+    if add_generation_prompt:
+        parts.append("<|im_start|>assistant\n")
+    return "".join(parts)
+
+
+def _render_llama(messages, add_generation_prompt: bool) -> str:
+    parts = ["<|begin_of_text|>"]
+    for m in messages:
+        parts.append(
+            f"<|start_header_id|>{m['role']}<|end_header_id|>\n\n"
+            f"{m['content']}<|eot_id|>"
+        )
+    if add_generation_prompt:
+        parts.append("<|start_header_id|>assistant<|end_header_id|>\n\n")
+    return "".join(parts)
+
+
+def _render_raises(messages, add_generation_prompt: bool) -> str:
+    raise RuntimeError("template error")
+
+
+def _render_drops_content(messages, add_generation_prompt: bool) -> str:
+    """Template that drops content entirely — placeholder cannot be located."""
+    body = "|".join(m["role"] for m in messages)
+    if add_generation_prompt:
+        body += "|gen"
+    return body
+
+
+class _ChatTemplateRecordingTokenizer:
+    """Tokenizer that delegates rendering to a passed-in callable."""
+
+    pad_token_id = 0
+    pad_token = "<pad>"
+
+    def __init__(self, renderer):
+        self._renderer = renderer
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize: bool = True,
+        add_generation_prompt: bool = True,
+    ):
+        if tokenize:
+            text = self._renderer(messages, add_generation_prompt)
+            return {"input_ids": [[ord(c) for c in text]]}
+        return self._renderer(messages, add_generation_prompt)
+
+    def encode(self, s: str, add_special_tokens: bool = True) -> list[int]:
+        del add_special_tokens
+        return [ord(c) for c in s]
+
+    def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
+        del skip_special_tokens
+        return "".join(chr(int(x)) for x in ids)
+
+
+class _ChrTokenizerWithChatTemplateBroken(_ChrTokenizer):
+    """Has no apply_chat_template at all, so the boundary diff path errors."""

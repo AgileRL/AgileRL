@@ -31,9 +31,11 @@ from transformers import AutoTokenizer
 from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.configuration_utils import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
+from transformers.generation.utils import GenerationMixin
 from vllm import LLM
 
 from agilerl.algorithms import CISPO, GRPO, GSPO
+from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
@@ -111,7 +113,7 @@ class DummyForwardOutput:
         self.logits = logits
 
 
-class DummyMLPPreTrainedModel(PreTrainedModel):
+class DummyMLPPreTrainedModel(PreTrainedModel, GenerationMixin):
     config_class = DummyConfig
     base_model_prefix = "dummy_mlp"
 
@@ -130,15 +132,24 @@ class DummyMLPPreTrainedModel(PreTrainedModel):
                 else torch.float32
             )
         )
+        hidden_size = 32
+        # Standard causal-LM shape (embed -> body -> lm_head) so the
+        # (now unconditional) fused-linear-logprob path can identity-patch
+        # ``lm_head`` and read the hidden state. ``linear_1`` stays the LoRA
+        # target the fixtures expect.
+        self.embed = nn.Embedding(
+            self.vocab_size, hidden_size, device=device, dtype=self.datatype
+        )
         self.linear_1 = nn.Linear(
-            self.input_size + self.max_tokens,
-            32,
+            hidden_size,
+            hidden_size,
             device=device,
             dtype=self.datatype,
         )
-        self.linear_2 = nn.Linear(
-            32,
-            (self.input_size + self.max_tokens) * self.vocab_size,
+        self.lm_head = nn.Linear(
+            hidden_size,
+            self.vocab_size,
+            bias=False,
             device=device,
             dtype=self.datatype,
         )
@@ -153,15 +164,10 @@ class DummyMLPPreTrainedModel(PreTrainedModel):
         *args,
         **kwargs,
     ) -> DummyForwardOutput:
-        input_ids = input_ids.to(self.datatype)
-        output = self.linear_2(self.linear_1(input_ids)).reshape(
-            input_ids.shape[0],
-            self.input_size + self.max_tokens,
-            self.vocab_size,
-        )
-        return DummyForwardOutput(
-            logits=output,
-        )
+        # ``lm_head`` may be identity-patched by the fused-linear-logprob path,
+        # in which case this returns the hidden state instead of logits.
+        hidden = self.linear_1(self.embed(input_ids.long()))
+        return DummyForwardOutput(logits=self.lm_head(hidden))
 
     def generate(self, *args, **kwargs):
         input_ids = kwargs.get("input_ids")
@@ -417,9 +423,6 @@ def generate_grpo(
         max_model_len=max_tokens + 5,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
-        # DummyEvolvable lacks an lm_head, so disable the fused-linear-logprobs
-        # path when no real HF model is provided.
-        use_fused_linear_logprobs=pretrained_model_name_or_path is not None,
     )
     return grpo
 
@@ -504,17 +507,38 @@ class _GrpoLossStub:
         clip_coef_max: float,
         beta: float,
         use_kl_advantage_shaping: bool,
+        importance_sampling_level: str = "token",
+        group_size: int = 2,
+        adv_norm: str = "mean_std",
+        advantage_granularity: str = "auto",
+        vllm_importance_sampling_apply: bool = True,
+        vllm_importance_sampling_cap: float = 2.0,
+        device: str = "cpu",
     ) -> None:
         self.clip_coef_min = clip_coef_min
         self.clip_coef_max = clip_coef_max
         self.beta = beta
         self.use_kl_advantage_shaping = use_kl_advantage_shaping
+        self.importance_sampling_level = importance_sampling_level
+        self.group_size = group_size
+        self.adv_norm = adv_norm
+        self.advantage_granularity = advantage_granularity
+        self.vllm_importance_sampling_apply = vllm_importance_sampling_apply
+        self.vllm_importance_sampling_cap = vllm_importance_sampling_cap
+        self.device = device
 
     _apply_kl_advantage_shaping = GRPO._apply_kl_advantage_shaping
     _reduce_masked_loss = GRPO._reduce_masked_loss
+    _log_importance_weights = GRPO._log_importance_weights
+    _compute_policy_loss = GRPO._compute_policy_loss
     _grpo_loss_standard = GRPO._grpo_loss_standard
     _gspo_loss = GRPO._gspo_loss
     _cispo_loss = GRPO._cispo_loss
+    _calculate_turn_advantage = GRPO._calculate_turn_advantage
+    _calculate_advantage = GRPO._calculate_advantage
+    _resolve_advantage_granularity = GRPO._resolve_advantage_granularity
+    _align_sampling_logprobs = GRPO._align_sampling_logprobs
+    _sampling_mismatch_metrics = GRPO._sampling_mismatch_metrics
 
 
 def _build_branch_experiences(
@@ -1824,6 +1848,7 @@ class TestGRPOLigerLossDispatch:
         with (
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
+            patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
             patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),  # noqa: avoid touching the actor's forward
             patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
             patch.object(
@@ -1833,20 +1858,13 @@ class TestGRPOLigerLossDispatch:
             ),
         ):
             mock_fn.apply.return_value = (fake_loss, fake_aux)
-            # Provide a stand-in for the pre-hook capture mechanism: when the
-            # actor is called inside ``_get_hidden``, immediately invoke the
-            # registered pre-hook with a fake hidden-state tensor so the
-            # captured list is populated.
+            # With ``lm_head`` identity-patched, ``actor_output.logits`` *is*
+            # the hidden-state tensor — return a stub whose ``.logits``
+            # attribute is the fake hidden tensor.
             hidden = torch.randn(1, 2, 8, requires_grad=True)
-
-            def _fake_actor_call(**kwargs):
-                # Fire each forward-pre-hook on the fake lm_head so the
-                # capture list gets populated.
-                for hook in fake_lm_head._forward_pre_hooks.values():
-                    hook(fake_lm_head, (hidden,))
-                return MagicMock()
-
-            grpo.actor.side_effect = _fake_actor_call
+            fake_output = MagicMock()
+            fake_output.logits = hidden
+            grpo.actor.side_effect = lambda **kwargs: fake_output
 
             grpo._liger_loss(
                 batch_ids=torch.ones((1, 2), dtype=torch.long),
@@ -1870,6 +1888,216 @@ class TestGRPOLigerLossDispatch:
             assert positional[13] == grpo.clip_coef_max
         else:  # "clip_coef_max - 1.0"
             assert positional[13] == pytest.approx(grpo.clip_coef_max - 1.0)
+
+    @pytest.mark.parametrize("loss_type", ["grpo", "cispo"])
+    @pytest.mark.parametrize("adv_shape", [(1,), (1, 1)])
+    def test_token_level_handles_single_sample_minibatch(
+        self, loss_type: str, adv_shape: tuple
+    ) -> None:
+        """A 1-sample minibatch must not crash the token-level Liger path.
+
+        Regression: advantages for ``batch=1`` arrive as ``(1,)`` (or ``(1, 1)``);
+        a naive ``squeeze(-1)`` collapses ``(1,)`` to a 0-dim scalar, which the
+        token-level advantage-shape detection then rejects with a ``ValueError``.
+        """
+        grpo = _make_cpu_grpo_for_branch_tests(loss_type=loss_type, beta=0.0)
+        assert grpo.importance_sampling_level == "token"
+        fake_lm_head = nn.Linear(8, 16, bias=True)
+        fake_loss = torch.tensor(0.5, requires_grad=True)
+        fake_aux = (torch.tensor(0.1), torch.tensor(0.0))
+
+        with (
+            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+            patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
+            patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
+            patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
+            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
+            patch.object(
+                LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
+            ),
+        ):
+            mock_fn.apply.return_value = (fake_loss, fake_aux)
+            fake_output = MagicMock()
+            fake_output.logits = torch.randn(1, 2, 8, requires_grad=True)
+            grpo.actor.side_effect = lambda **kwargs: fake_output
+
+            loss, _ = grpo._liger_loss(
+                batch_ids=torch.ones((1, 2), dtype=torch.long),
+                action_mask=torch.ones((1, 1), dtype=torch.bool),
+                advantages=torch.ones(adv_shape, dtype=torch.float32),
+                old_log_probs=torch.zeros((1, 1), dtype=torch.float32),
+                reference_log_probs=torch.zeros((1, 1), dtype=torch.float32),
+            )
+        # The per-token advantage broadcast must have received a (1,) vector,
+        # not a 0-dim scalar — confirm via the kernel call and a finite loss.
+        adv_per_token = mock_fn.apply.call_args.args[4]
+        assert adv_per_token.shape == (1,)  # batch(1) * n_act(1)
+        assert torch.isfinite(loss)
+
+
+class _CtxFreeActor(nn.Module):
+    """A context-independent "model": ``hidden = embed(input_ids)``.
+
+    With no attention there is no cross-sequence contamination, so a packed
+    forward must reproduce the padded forward's hidden states exactly at every
+    real token — which is what lets us assert byte-level equivalence of the
+    packed vs padded Liger path. Records the last ``input_ids`` shape so the
+    test can confirm packing actually engaged (one ``(1, N)`` row vs ``(B, T)``).
+    """
+
+    def __init__(self, vocab: int, hidden: int) -> None:
+        super().__init__()
+        self.embed = nn.Embedding(vocab, hidden)
+        self.last_input_shape: tuple[int, ...] | None = None
+
+    def forward(self, input_ids=None, **kwargs):  # noqa: D401 - test stub
+        self.last_input_shape = tuple(input_ids.shape)
+        return SimpleNamespace(logits=self.embed(input_ids))
+
+
+class _DummyLigerFn:
+    """Deterministic stand-in for ``LigerFusedLinearGRPOFunction``.
+
+    Mirrors only the property that matters for packing equivalence: the loss is
+    summed over masked-in (action) tokens and ignores everything else. The real
+    kernel consumes ``hidden[:, :n_act]`` for the next-token shift, so we slice
+    the hidden seq dim down to the mask's action length before reducing.
+    """
+
+    @staticmethod
+    def apply(*args):
+        policy_hidden = args[0]
+        mask = args[3]
+        h = policy_hidden
+        if h.dim() == 3 and h.shape[1] != mask.shape[1]:
+            h = h[:, : mask.shape[1], :]
+        per_token = h.reshape(*mask.shape, -1).sum(-1)
+        loss = (per_token * mask.to(per_token.dtype)).sum()
+        return loss, [torch.zeros((), dtype=per_token.dtype)]
+
+
+class TestGRPOLigerSequencePacking:
+    """Sequence packing co-exists with the Liger fused-loss path.
+
+    The transformer forward runs on a packed padding-free row, then the hidden
+    states are scattered back onto the padded frame so the kernel call is
+    unchanged. For a context-independent actor (no cross-sequence attention) the
+    packed and padded paths must yield the same masked loss, and the packed run
+    must actually feed the actor a single ``(1, N)`` row.
+    """
+
+    @pytest.mark.parametrize(
+        "loss_type,expected_level",
+        [("grpo", "token"), ("cispo", "token"), ("gspo", "sequence")],
+    )
+    def test_packed_liger_matches_padded(self, loss_type, expected_level):
+        grpo = _make_cpu_grpo_for_branch_tests(loss_type=loss_type, beta=0.0)
+        grpo.pad_token_id = 0
+        assert grpo.importance_sampling_level == expected_level
+
+        # Actor + lm_head live on grpo.device (cuda on a GPU box): _liger_loss
+        # moves its inputs there, so the collaborators must match.
+        vocab, hidden = 16, 8
+        actor = _CtxFreeActor(vocab, hidden).to(grpo.device)
+        grpo.actor = actor
+        lm_head = nn.Linear(hidden, vocab).to(grpo.device)
+
+        # Right-padded batch with varied real lengths -> packing has work to do.
+        lengths = [5, 3, 4]
+        b_size, t = len(lengths), max(lengths)
+        torch.manual_seed(0)
+        batch_ids = torch.zeros(b_size, t, dtype=torch.long)
+        for b, length in enumerate(lengths):
+            batch_ids[b, :length] = torch.randint(1, vocab, (length,))
+        # Action mask over the (B, T-1) next-token frame: mark within-sequence
+        # predictions (all masked-in positions are real, non-pad tokens).
+        action_mask = torch.zeros(b_size, t - 1, dtype=torch.bool)
+        for b, length in enumerate(lengths):
+            action_mask[b, : length - 1] = True
+        advantages = torch.randn(b_size)
+        old_log_probs = torch.randn(b_size, t - 1)
+        reference_log_probs = torch.zeros(b_size, t - 1)
+
+        def run():
+            with (
+                patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+                patch(
+                    "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction",
+                    _DummyLigerFn,
+                ),
+                patch.object(grpo, "_get_lm_head", return_value=lm_head),
+                patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
+                patch.object(grpo, "_get_unwrapped_actor", return_value=actor),
+                patch.object(
+                    LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
+                ),
+            ):
+                loss, _ = grpo._liger_loss(
+                    batch_ids=batch_ids,
+                    action_mask=action_mask,
+                    advantages=advantages,
+                    old_log_probs=old_log_probs,
+                    reference_log_probs=reference_log_probs,
+                )
+            return loss, actor.last_input_shape
+
+        # Padded baseline.
+        grpo.use_sequence_packing = False
+        loss_padded, padded_shape = run()
+        assert padded_shape == (b_size, t)
+
+        # Packed: same numbers, but the forward sees one (1, N) row.
+        grpo.use_sequence_packing = True
+        grpo.model_config = {"attn_implementation": "flash_attention_2"}
+        # Pre-set the consolidated warn-once flag to silence the canonical
+        # non-token-IS memory notice (now owned by the base helper).
+        grpo._liger_non_token_warned = True
+        assert grpo._packing_mode() == "varlen"
+        loss_packed, packed_shape = run()
+        assert packed_shape == (1, sum(lengths))
+
+        # The masked loss must be unchanged by packing, and non-trivial.
+        assert torch.isfinite(loss_padded) and loss_padded.abs() > 0
+        assert torch.allclose(loss_packed, loss_padded, atol=1e-5)
+
+    def test_packing_disabled_on_dense_backend_falls_back(self):
+        """An unsupported (dense) backend disables packing: the forward stays
+        padded even with ``use_sequence_packing=True``."""
+        grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
+        grpo.pad_token_id = 0
+        vocab, hidden = 16, 8
+        actor = _CtxFreeActor(vocab, hidden).to(grpo.device)
+        grpo.actor = actor
+        lm_head = nn.Linear(hidden, vocab).to(grpo.device)
+        grpo.use_sequence_packing = True
+        grpo.model_config = {"attn_implementation": "sdpa"}
+
+        batch_ids = torch.tensor([[1, 2, 3, 0], [4, 5, 0, 0]], dtype=torch.long)
+        action_mask = torch.tensor(
+            [[True, True, False], [True, False, False]], dtype=torch.bool
+        )
+        with (
+            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+            patch(
+                "agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction", _DummyLigerFn
+            ),
+            patch.object(grpo, "_get_lm_head", return_value=lm_head),
+            patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
+            patch.object(grpo, "_get_unwrapped_actor", return_value=actor),
+            patch.object(
+                LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
+            ),
+            pytest.warns(UserWarning, match="varlen/block-sparse"),
+        ):
+            grpo._liger_loss(
+                batch_ids=batch_ids,
+                action_mask=action_mask,
+                advantages=torch.randn(2),
+                old_log_probs=torch.zeros(2, 3),
+                reference_log_probs=torch.zeros(2, 3),
+            )
+        # Dense backend -> no packing -> padded (B, T) forward.
+        assert actor.last_input_shape == (2, 4)
 
 
 class TestGRPOGetAction:
@@ -1903,7 +2131,9 @@ class TestGRPOGetAction:
             for _ in range(3)
         ]
         for training in (True, False):
-            completion_ids, action_masks = grpo.get_action(prompts, training=training)
+            completion_ids, action_masks, _ = grpo.get_action(
+                prompts, training=training
+            )
             expected_group_size = grpo.group_size if training else 1
             assert all(ids.shape[0] == expected_group_size for ids in completion_ids)
             assert_vllm_get_action_contract(
@@ -1926,7 +2156,7 @@ class TestGRPOGetAction:
         ]
         no_param_actor = SimpleNamespace(parameters=lambda: iter(()))
         with patch.object(grpo, "_get_unwrapped_actor", return_value=no_param_actor):
-            completion_ids, action_masks = grpo.get_action(prompts, training=False)
+            completion_ids, action_masks, _ = grpo.get_action(prompts, training=False)
         assert len(completion_ids) == 1
         assert len(action_masks) == 1
         grpo.clean_up()
@@ -1972,7 +2202,7 @@ class TestGRPOGetAction:
                 side_effect=fake_stitch,
             ),
         ):
-            completion_ids, _ = grpo.get_action(prompts, training=True)
+            completion_ids, _, _ = grpo.get_action(prompts, training=True)
 
         # The single-row stitch prefix should have been broadcast to group_size.
         assert observed_stitch["stitch_shape"] == (3, 2)
@@ -2052,6 +2282,7 @@ class TestGRPOGetAction:
                 return_value=(
                     [torch.ones(1, 10, dtype=torch.long)],
                     [torch.ones(1, 9, dtype=torch.bool)],
+                    None,
                 ),
             ) as mock_generate_with_vllm_colocate,
         ):
@@ -2155,7 +2386,7 @@ class TestGRPOMoveModelToVllm:
     )
     @pytest.mark.vllm
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
-    def test_grpo_move_model_to_vllm(
+    def test_grpo_sync_actor_to_vllm(
         self,
         deepspeed_env,
         grpo_factory,
@@ -2186,51 +2417,20 @@ class TestGRPOMoveModelToVllm:
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        # Change lora B so that the parameters are different
-        for name, param in grpo.actor.named_parameters():
-            if "lora_B" in name and param is not None:
-                param.data.normal_()
-        model_ref = grpo.accelerator.unwrap_model(grpo.actor)
-        model_ref.set_adapter("actor")
-        model_ref.merge_adapter()
-        merged_model_ref = copy.deepcopy(model_ref)
-        model_ref.unmerge_adapter()
-        grpo._move_model_to_vllm()
+        assert grpo.vllm_config.enable_lora
+        grpo._sync_actor_to_vllm()
+        assert grpo._vllm_lora_loaded
+        adapter_dir = grpo._vllm_lora_staging_dir / "actor"
+        assert adapter_dir.is_dir()
+        assert (adapter_dir / "adapter_config.json").is_file()
+        loaded_loras = grpo.llm.llm_engine.list_loras()
+        from agilerl.utils.llm_utils import VLLM_ROLLOUT_LORA_INT_ID
 
-        # Tiny LLM fixture is Qwen2, whose params live under "model." (not
-        # "model.decoder." like OPT). The PEFT-merged copy adds the standard
-        # "base_model.model." LoRA prefix on top of the underlying HF param names.
-        llm_prefix = "model."
-        merged_prefix = "base_model.model.model."
+        assert VLLM_ROLLOUT_LORA_INT_ID in loaded_loras
+        assert grpo._vllm_rollout_lora_request is not None
 
-        for (
-            name,
-            param,
-        ) in grpo.llm.llm_engine.model_executor.driver_worker.model_runner.model.named_parameters():
-            name = merged_prefix + name.removeprefix(llm_prefix)
-            if name in merged_model_ref.state_dict():
-                if param.shape != merged_model_ref.state_dict()[name].shape:
-                    continue
-                assert torch.allclose(
-                    param.to(torch.bfloat16),
-                    merged_model_ref.state_dict()[name],
-                )
-
-        # Test with original_module — exercises the skip path in
-        # _move_model_to_vllm. The shape is irrelevant (entry is filtered out
-        # before being loaded into vLLM) but we match the tiny Qwen2 hidden_size
-        # for consistency.
-        fake_named_params = [
-            (
-                "base_model.model.model.layers.0.input_layernorm.weight.original_module",
-                torch.randn(32),
-            ),
-        ]
-        model_ref = grpo.accelerator.unwrap_model(grpo.actor)
-        with patch.object(
-            model_ref, "named_parameters", return_value=fake_named_params
-        ):
-            grpo._move_model_to_vllm()
+        grpo._vllm_moved = False
+        grpo._sync_actor_to_vllm()
 
         grpo.clean_up()
 
@@ -2261,7 +2461,7 @@ class TestGRPOGenerateWithVllmColocate:
             SimpleNamespace(outputs=[SimpleNamespace(token_ids=[10])]),
             SimpleNamespace(outputs=[SimpleNamespace(token_ids=[11, 12])]),
         ]
-        completion_ids, action_masks = grpo._generate_with_vllm_colocate(
+        completion_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
             prompts=prompts,
             group_size=2,
             temperature=0.7,
@@ -2306,7 +2506,7 @@ class TestGRPOGenerateWithVllmColocate:
             ),
             patch.object(torch.distributed, "get_rank", return_value=1),
         ):
-            completion_ids, action_masks = grpo._generate_with_vllm_colocate(
+            completion_ids, action_masks, _ = grpo._generate_with_vllm_colocate(
                 prompts=prompts,
                 group_size=1,
                 temperature=0.7,
@@ -2409,6 +2609,15 @@ class TestGRPOCalculateAdvantage:
         expected = (rewards - rewards.mean(dim=1, keepdim=True)).flatten().unsqueeze(1)
         assert torch.equal(calculated_advantage, expected)
 
+    def test_calculate_advantage_group_size_one_is_finite(self):
+        stub = _GrpoMathStub(group_size=1, adv_norm="mean_std")
+        rewards = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
+        calculated_advantage = stub._calculate_advantage(rewards)
+        assert calculated_advantage.isfinite().all()
+        assert torch.allclose(
+            calculated_advantage, torch.zeros_like(calculated_advantage)
+        )
+
 
 class TestGRPOGrpoLossStandard:
     def test_grpo_loss_standard_kl_advantage_shaping_path(self):
@@ -2460,6 +2669,293 @@ class TestGRPOGspoLoss:
         )
         assert torch.isfinite(loss)
         assert torch.isfinite(kl)
+
+    def test_gspo_memory_efficient_pipeline_matches_naive(self):
+        """End-to-end GSPO memory-efficient path: Stage-1 fused log-probs
+        (vocab-chunked, gradient-checkpointed lm_head) feeding the
+        sequence-level Stage-2 loss must match computing log-probs from
+        materialized ``(B, T, V)`` logits — in both loss value and the
+        gradient back to the policy hidden states. This is the path GSPO
+        uses with ``use_liger_loss=False`` (the fused-linear-logprob path is
+        always on).
+        """
+        stub = _GrpoLossStub(
+            clip_coef_min=0.8,
+            clip_coef_max=1.2,
+            beta=0.04,
+            use_kl_advantage_shaping=False,
+        )
+        torch.manual_seed(0)
+        B, T, H, V = 4, 6, 16, 1024  # T = action tokens (already shifted)
+        weight = torch.randn(V, H) * 0.02
+        bias = torch.randn(V) * 0.02
+        targets = torch.randint(0, V, (B, T))
+        mask = torch.ones(B, T, dtype=torch.bool)
+        mask[1, T - 2 :] = False  # ragged sequence
+        advantages = torch.randn(B, 1)
+        temperature = 0.7
+
+        def naive_logps(hidden):
+            logits = (hidden @ weight.t() + bias) / temperature
+            return (
+                torch.log_softmax(logits.float(), dim=-1)
+                .gather(dim=-1, index=targets.unsqueeze(-1))
+                .squeeze(-1)
+            )
+
+        # Frozen old/ref logprobs (no grad) from an arbitrary reference hidden.
+        ref_hidden = torch.randn(B, T, H)
+        with torch.no_grad():
+            old_log_probs = naive_logps(ref_hidden) - 0.1
+            reference_log_probs = naive_logps(ref_hidden) + 0.05
+
+        base_hidden = torch.randn(B, T, H)
+
+        # Naive path: materialize logits, log_softmax, then GSPO loss.
+        hid_naive = base_hidden.clone().requires_grad_(True)
+        loss_naive, kl_naive = stub._gspo_loss(
+            mask,
+            naive_logps(hid_naive),
+            old_log_probs,
+            reference_log_probs,
+            advantages,
+        )
+        loss_naive.backward()
+
+        # Fused path: vocab-chunked gradient-checkpointed log-probs, same loss.
+        hid_fused = base_hidden.clone().requires_grad_(True)
+        fused_logps = LLMAlgorithm._logprobs_from_hidden_fused_grad(
+            hid_fused,
+            weight,
+            bias,
+            targets,
+            temperature=temperature,
+            cast_to_fp32=True,
+            _chunk_rows=5,
+        )
+        loss_fused, kl_fused = stub._gspo_loss(
+            mask,
+            fused_logps,
+            old_log_probs,
+            reference_log_probs,
+            advantages,
+        )
+        loss_fused.backward()
+
+        assert torch.allclose(loss_fused, loss_naive, rtol=1e-4, atol=1e-5)
+        assert torch.allclose(kl_fused, kl_naive, rtol=1e-4, atol=1e-5)
+        assert torch.allclose(hid_fused.grad, hid_naive.grad, rtol=1e-4, atol=1e-5)
+
+
+class TestGRPOTurnLevel:
+    """Turn-level (pool-per-turn) importance sampling + advantages for the
+    GRPO family. Turn-level sits between token and sequence (GSPO) on the IS
+    axis: pool the per-token log-ratio over each turn's tokens.
+    """
+
+    def _stub(self, **kwargs):
+        defaults = dict(
+            clip_coef_min=0.8,
+            clip_coef_max=1.2,
+            beta=0.04,
+            use_kl_advantage_shaping=False,
+            importance_sampling_level="turn",
+            group_size=2,
+            adv_norm="mean_std",
+        )
+        defaults.update(kwargs)
+        return _GrpoLossStub(**defaults)
+
+    def test_log_importance_weights_turn_collapses_to_token(self):
+        """With each token its own turn, turn pooling == token-level."""
+        stub = self._stub()
+        torch.manual_seed(0)
+        B, T = 3, 6
+        token_log_ratio = torch.randn(B, T)
+        mask = torch.ones(B, T)
+        mask[0, 5:] = 0
+        turn_each = torch.arange(T).unsqueeze(0).repeat(B, 1)
+        out = stub._log_importance_weights(token_log_ratio, mask, turn_each, "turn")
+        assert torch.allclose(out * mask, token_log_ratio * mask, atol=1e-6)
+
+    def test_log_importance_weights_turn_collapses_to_sequence(self):
+        """A single turn covering the whole completion == sequence-level."""
+        stub = self._stub()
+        torch.manual_seed(1)
+        B, T = 4, 7
+        token_log_ratio = torch.randn(B, T)
+        mask = torch.ones(B, T)
+        mask[1, 4:] = 0
+        turn_one = torch.zeros(B, T, dtype=torch.long)
+        seq = stub._log_importance_weights(token_log_ratio, mask, None, "sequence")
+        turn = stub._log_importance_weights(token_log_ratio, mask, turn_one, "turn")
+        assert torch.allclose(turn * mask, seq * mask, atol=1e-6)
+
+    def test_log_importance_weights_turn_manual(self):
+        """Per-turn length-normalized mean, scattered back to tokens."""
+        stub = self._stub()
+        token_log_ratio = torch.tensor([[0.2, 0.4, 1.0, -0.2]])
+        mask = torch.tensor([[1.0, 1.0, 1.0, 0.0]])
+        turn_ids = torch.tensor([[0, 0, 1, -1]])
+        out = stub._log_importance_weights(token_log_ratio, mask, turn_ids, "turn")
+        turn0 = (0.2 + 0.4) / 2
+        turn1 = 1.0
+        assert out[0, 0].item() == pytest.approx(turn0)
+        assert out[0, 1].item() == pytest.approx(turn0)
+        assert out[0, 2].item() == pytest.approx(turn1)
+
+    def test_calculate_turn_advantage_group_relative_per_turn(self):
+        """Each turn is normalized within its group, independently."""
+        stub = self._stub(group_size=2)
+        rewards = torch.tensor(
+            [[1.0, 2.0], [3.0, 0.0], [-1.0, 5.0], [1.0, 1.0]]
+        )  # 2 groups of 2, 2 turns
+        adv = stub._calculate_turn_advantage(rewards)
+        assert adv.shape == (4, 2)
+        # group 0 (rows 0,1), turn 0: [1,3] -> centered/std
+        g = torch.tensor([1.0, 3.0])
+        ref = (g - g.mean()) / (g.std() + 1e-8)
+        assert torch.allclose(adv[:2, 0], ref, atol=1e-5)
+
+    def test_turn_advantage_single_turn_matches_trajectory(self):
+        """One turn reduces to the per-trajectory group-relative advantage."""
+        stub = self._stub(group_size=2)
+        rewards = torch.tensor([[1.0], [3.0], [-1.0], [2.0]])
+        turn_adv = stub._calculate_turn_advantage(rewards).squeeze(-1)
+        traj_adv = GRPO._calculate_advantage(stub, rewards.squeeze(-1)).squeeze(-1)
+        assert torch.allclose(turn_adv, traj_adv, atol=1e-6)
+
+    @pytest.mark.parametrize("objective", ["grpo", "cispo"])
+    def test_turn_level_pipeline_matches_naive(self, objective):
+        """End-to-end memory-efficient turn-level path: fused-grad Stage-1
+        log-probs feeding the turn-pooled Stage-2 loss matches computing
+        log-probs from materialized logits, in loss value and policy
+        gradient.
+        """
+        stub = self._stub(importance_sampling_level="turn")
+        loss_fn = stub._cispo_loss if objective == "cispo" else stub._grpo_loss_standard
+
+        torch.manual_seed(0)
+        B, T, H, V = 4, 6, 16, 1024
+        weight = torch.randn(V, H) * 0.02
+        bias = torch.randn(V) * 0.02
+        targets = torch.randint(0, V, (B, T))
+        temperature = 0.7
+        mask = torch.ones(B, T)
+        mask[1, 5:] = 0
+        turn_ids = torch.zeros(B, T, dtype=torch.long)
+        turn_ids[:, 3:] = 1
+        turn_ids = torch.where(mask.bool(), turn_ids, torch.full_like(turn_ids, -1))
+        turn_adv = stub._calculate_turn_advantage(torch.randn(B, 2))
+        advantages = turn_adv.gather(1, turn_ids.clamp(min=0)) * mask  # (B, T)
+
+        ref_hidden = torch.randn(B, T, H)
+
+        def naive_logps(hidden):
+            logits = (hidden @ weight.t() + bias) / temperature
+            return (
+                torch.log_softmax(logits.float(), dim=-1)
+                .gather(dim=-1, index=targets.unsqueeze(-1))
+                .squeeze(-1)
+            )
+
+        with torch.no_grad():
+            old = naive_logps(ref_hidden) - 0.1
+            ref = naive_logps(ref_hidden) + 0.05
+        base = torch.randn(B, T, H)
+
+        hid_naive = base.clone().requires_grad_(True)
+        loss_naive, _ = loss_fn(
+            mask, naive_logps(hid_naive), old, ref, advantages, turn_ids
+        )
+        loss_naive.backward()
+
+        hid_fused = base.clone().requires_grad_(True)
+        fused = LLMAlgorithm._logprobs_from_hidden_fused_grad(
+            hid_fused,
+            weight,
+            bias,
+            targets,
+            temperature=temperature,
+            cast_to_fp32=True,
+            _chunk_rows=5,
+        )
+        loss_fused, _ = loss_fn(mask, fused, old, ref, advantages, turn_ids)
+        loss_fused.backward()
+
+        assert torch.allclose(loss_fused, loss_naive, rtol=1e-4, atol=1e-5)
+        assert torch.allclose(hid_fused.grad, hid_naive.grad, rtol=1e-4, atol=1e-4)
+
+
+class TestGRPOAdvantageGranularityDecoupling:
+    """advantage granularity (advantage_granularity) is independent of the IS /
+    ratio-pooling level (importance_sampling_level) for the GRPO family."""
+
+    @staticmethod
+    def _stub(advantage_granularity, importance_sampling_level):
+        return _GrpoLossStub(
+            clip_coef_min=0.8,
+            clip_coef_max=1.2,
+            beta=0.0,
+            use_kl_advantage_shaping=False,
+            importance_sampling_level=importance_sampling_level,
+            advantage_granularity=advantage_granularity,
+        )
+
+    @pytest.mark.parametrize(
+        "advantage_granularity,is_level,expected",
+        [
+            ("auto", "token", "trajectory"),
+            ("auto", "turn", "turn"),
+            ("auto", "sequence", "trajectory"),
+            ("trajectory", "turn", "trajectory"),  # decoupled
+            ("turn", "token", "turn"),  # decoupled
+            ("turn", "sequence", "turn"),
+            ("trajectory", "token", "trajectory"),
+        ],
+    )
+    def test_resolve_advantage_granularity(
+        self, advantage_granularity, is_level, expected
+    ):
+        stub = self._stub(advantage_granularity, is_level)
+        assert stub._resolve_advantage_granularity() == expected
+
+    @pytest.mark.parametrize(
+        "is_level,adv_shape",
+        [("token", "turn"), ("sequence", "turn"), ("turn", "trajectory")],
+    )
+    def test_decoupled_advantage_is_combos_run(self, is_level, adv_shape):
+        """Any (advantage granularity, IS level) pairing produces a finite
+        loss — the surrogate broadcasts a per-turn (B,T) or per-trajectory
+        (B,1) advantage against a token/turn/sequence-pooled ratio."""
+        stub = self._stub("auto", is_level)
+        torch.manual_seed(0)
+        B, T = 4, 6
+        log_probs = torch.randn(B, T)
+        old = log_probs - 0.2
+        ref = log_probs + 0.05
+        mask = torch.ones(B, T)
+        mask[1, 5:] = 0
+        turn_ids = torch.where(
+            mask.bool(),
+            (torch.arange(T) >= 3).long().unsqueeze(0).expand(B, T),
+            torch.full((B, T), -1, dtype=torch.long),
+        )
+        if adv_shape == "turn":
+            turn_adv = stub._calculate_turn_advantage(torch.randn(B, 2))
+            advantages = turn_adv.gather(1, turn_ids.clamp(min=0)) * mask  # (B, T)
+        else:
+            advantages = stub._calculate_advantage(torch.randn(B))  # (B, 1)
+        loss_turn_ids = turn_ids if is_level == "turn" else None
+        loss, kl = stub._grpo_loss_standard(
+            mask, log_probs, old, ref, advantages, loss_turn_ids
+        )
+        assert torch.isfinite(loss) and torch.isfinite(kl)
+
+    def test_invalid_token_advantage_rejected(self):
+        """GRPO has no token-level advantage; the constructor must reject it."""
+        with pytest.raises(ValueError, match="advantage_granularity"):
+            _make_cpu_grpo_for_branch_tests(advantage_granularity="token")
 
 
 class TestGRPOCispoLoss:
@@ -3056,7 +3552,6 @@ class TestGRPOLearn:
         model_factory,
     ) -> None:
         """Patch MPS on CI so ``torch.mps.empty_cache()`` in ``learn()`` is exercised."""
-        empty = _patch_mps_learn_hooks(monkeypatch, "agilerl.algorithms.grpo")
         grpo = generate_grpo(
             accelerator_factory,
             model_factory,
@@ -3072,6 +3567,10 @@ class TestGRPOLearn:
             micro_batch_size_per_gpu=None,
             from_name=False,
         )
+        # Patch MPS only *after* the agent is built: patching is_available()
+        # before construction makes the device resolve to "mps", and the dummy
+        # actor's ``.to("mps")`` then crashes on a non-MPS (Linux/CI) torch build.
+        empty = _patch_mps_learn_hooks(monkeypatch, "agilerl.algorithms.grpo")
         for name, param in grpo.actor.named_parameters():
             if ("lora_A" in name or "lora_B" in name) and param is not None:
                 param.data.normal_(mean=0, std=0.01)
@@ -3967,7 +4466,7 @@ class TestGRPOTest:
         completion = torch.ones(1, 6, dtype=torch.long)
         action_mask = torch.ones(1, 5, dtype=torch.bool)
         with patch.object(
-            grpo, "get_action", return_value=([completion], [action_mask])
+            grpo, "get_action", return_value=ActionResult([completion], [action_mask])
         ) as get_action:
             out = grpo.test(env, loop=2)
 
@@ -4714,3 +5213,204 @@ class TestGRPOSyncDeepspeedGradientClipping:
 
         # Verify that optimizer clip_grad was updated
         assert mock_optimizer.clip_grad == 1.0
+
+
+class TestGRPOVLLMSamplingCorrection:
+    """vLLM-vs-trainer sampling-mismatch correction (truncated importance
+    sampling). The rollout is drawn from vLLM but the loss treats the trainer's
+    recomputed ``old_log_probs`` as the behaviour policy; the correction
+    reweights each token by ``clamp(exp(old - sampling), max=cap)``.
+    """
+
+    def _stub(self, **kwargs):
+        defaults = dict(
+            clip_coef_min=0.8,
+            clip_coef_max=1.2,
+            beta=0.0,
+            use_kl_advantage_shaping=False,
+            importance_sampling_level="token",
+            group_size=2,
+            adv_norm="mean_std",
+        )
+        defaults.update(kwargs)
+        return _GrpoLossStub(**defaults)
+
+    @staticmethod
+    def _lp(value):
+        return SimpleNamespace(logprob=value)
+
+    def test_sampled_token_logprobs_extraction(self):
+        from agilerl.algorithms.core.base import _vllm_sampled_token_logprobs
+
+        out = SimpleNamespace(
+            token_ids=[5, 9, 2],
+            logprobs=[
+                {5: self._lp(-0.1), 1: self._lp(-3.0)},
+                {9: self._lp(-0.5)},
+                {2: self._lp(-1.2)},
+            ],
+        )
+        assert _vllm_sampled_token_logprobs(out) == pytest.approx([-0.1, -0.5, -1.2])
+
+    def test_sampled_token_logprobs_handles_missing_nan_and_none(self):
+        from agilerl.algorithms.core.base import _vllm_sampled_token_logprobs
+
+        # token 5 missing from its dict; token 9 has NaN -> both fall back to 0.0
+        out = SimpleNamespace(
+            token_ids=[5, 9],
+            logprobs=[{1: self._lp(-3.0)}, {9: self._lp(float("nan"))}],
+        )
+        assert _vllm_sampled_token_logprobs(out) == [0.0, 0.0]
+        # logprobs absent entirely -> zeros of the right length
+        out2 = SimpleNamespace(token_ids=[1, 2, 3], logprobs=None)
+        assert _vllm_sampled_token_logprobs(out2) == [0.0, 0.0, 0.0]
+
+    def test_unit_ratio_when_sampling_equals_old(self):
+        """sampling == old -> ratio exp(0)=1 -> loss identical to baseline."""
+        stub = self._stub()
+        torch.manual_seed(0)
+        mask = torch.ones(2, 3)
+        log_probs = torch.randn(2, 3)
+        old = log_probs - 0.1
+        ref = log_probs.clone()
+        adv = torch.tensor([[1.0], [-1.0]])
+        base, _ = stub._compute_policy_loss(
+            mask, log_probs, old, ref, adv, None, level="token", objective="grpo"
+        )
+        corr, _ = stub._compute_policy_loss(
+            mask,
+            log_probs,
+            old,
+            ref,
+            adv,
+            None,
+            level="token",
+            objective="grpo",
+            sampling_log_probs=old.clone(),
+        )
+        assert torch.allclose(base, corr, atol=1e-7)
+
+    def test_apply_false_is_noop_on_loss(self):
+        """apply=False measures but never mutates the loss."""
+        stub = self._stub(vllm_importance_sampling_apply=False)
+        torch.manual_seed(1)
+        mask = torch.ones(2, 3)
+        log_probs = torch.randn(2, 3)
+        old = log_probs - 0.1
+        ref = log_probs.clone()
+        adv = torch.tensor([[1.0], [-1.0]])
+        sampling = old - 0.4  # non-trivial mismatch
+        base, _ = stub._compute_policy_loss(
+            mask, log_probs, old, ref, adv, None, level="token", objective="grpo"
+        )
+        corr, _ = stub._compute_policy_loss(
+            mask,
+            log_probs,
+            old,
+            ref,
+            adv,
+            None,
+            level="token",
+            objective="grpo",
+            sampling_log_probs=sampling,
+        )
+        assert torch.allclose(base, corr, atol=1e-7)
+
+    def test_correction_matches_reference_token_grpo(self):
+        """Exact match against a hand-rolled token-level GRPO reference."""
+        cap = 2.0
+        stub = self._stub(vllm_importance_sampling_cap=cap, beta=0.0)
+        torch.manual_seed(2)
+        mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
+        log_probs = torch.randn(2, 3)
+        old = log_probs - torch.randn(2, 3) * 0.1
+        ref = log_probs.clone()
+        adv = torch.tensor([[0.7], [-0.4]])
+        # Build a sampling tensor whose ratio spans below and above the clamp.
+        sampling = old - torch.tensor([[0.3, 0.0, 1.5], [-0.2, 0.9, 0.0]])
+
+        corr, _ = stub._compute_policy_loss(
+            mask,
+            log_probs,
+            old,
+            ref,
+            adv,
+            None,
+            level="token",
+            objective="grpo",
+            sampling_log_probs=sampling,
+        )
+
+        ratio = torch.exp(log_probs - old)
+        clipped = ratio.clamp(0.8, 1.2)
+        loss_i = -torch.min(ratio * adv, clipped * adv)
+        r = torch.exp((old - sampling) * mask).clamp(max=cap)
+        loss_i = loss_i * r
+        denom = mask.sum(-1).clamp(min=1.0)
+        expected = ((loss_i * mask).sum(-1) / denom).mean()
+        assert torch.allclose(corr, expected, atol=1e-6)
+
+    def test_sampling_mismatch_metrics(self):
+        stub = self._stub(vllm_importance_sampling_cap=2.0)
+        mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]])
+        old = torch.tensor([[-0.5, -1.0, -9.0], [-0.2, -0.3, -2.0]])
+        # log-diff over masked tokens: [0.1, 0.9, (masked)], [0.0, 1.0, 5.0]
+        sampling = old - torch.tensor([[0.1, 0.9, 3.0], [0.0, 1.0, 5.0]])
+        metrics = stub._sampling_mismatch_metrics(old, sampling, mask.bool())
+
+        mask_b = mask.bool()
+        log_diff = (old - sampling) * mask
+        denom = mask.sum().clamp(min=1.0)
+        exp_delta = (log_diff.abs().sum() / denom).item()
+        ratios = torch.exp(log_diff).clamp(max=2.0)[mask_b]
+        assert metrics["vllm_is_delta_mean"] == pytest.approx(exp_delta, rel=1e-6)
+        assert metrics["vllm_is_ratio_mean"] == pytest.approx(
+            ratios.mean().item(), rel=1e-6
+        )
+        # ratios that exceed cap (log-diff 0.9 -> 2.46 and 1.0 -> 2.72, 5.0 huge)
+        # are clamped; fraction clamped is 3 of the 5 masked tokens.
+        assert metrics["vllm_is_frac_clamped"] == pytest.approx(3 / 5, rel=1e-6)
+
+    def test_align_scatters_flat_logprobs_onto_action_positions(self):
+        stub = self._stub()
+        # Two rows; action mask marks the generated tokens (varying counts,
+        # non-contiguous to mimic prompt/observation gaps).
+        action_masks = torch.tensor(
+            [[False, True, True, False], [True, False, True, True]]
+        )
+        old = torch.full((2, 4), -9.0)
+        flat = [torch.tensor([-0.1, -0.2]), torch.tensor([-0.3, -0.4, -0.5])]
+        aligned, n_skipped = stub._align_sampling_logprobs(flat, action_masks, old)
+        assert n_skipped == 0
+        # Logprobs land exactly on the True positions, in order; elsewhere = old.
+        expected = torch.tensor([[-9.0, -0.1, -0.2, -9.0], [-0.3, -9.0, -0.4, -0.5]])
+        assert torch.allclose(aligned, expected, atol=1e-7)
+
+    def test_align_count_mismatch_falls_back_to_old_for_that_row(self):
+        stub = self._stub()
+        action_masks = torch.tensor([[True, True, False], [True, True, True]])
+        old = torch.tensor([[-1.0, -1.0, -1.0], [-2.0, -2.0, -2.0]])
+        # Row 0: 2 action tokens but only 1 logprob -> skip (keep old -> ratio 1).
+        # Row 1: matches -> scattered.
+        flat = [torch.tensor([-0.5]), torch.tensor([-0.3, -0.4, -0.6])]
+        aligned, n_skipped = stub._align_sampling_logprobs(flat, action_masks, old)
+        assert n_skipped == 1
+        assert torch.allclose(aligned[0], old[0])  # untouched
+        assert torch.allclose(aligned[1], torch.tensor([-0.3, -0.4, -0.6]), atol=1e-7)
+
+    def test_align_none_and_empty_return_none(self):
+        stub = self._stub()
+        masks = torch.ones(2, 3, dtype=torch.bool)
+        old = torch.zeros(2, 3)
+        assert stub._align_sampling_logprobs(None, masks, old) == (None, 0)
+        assert stub._align_sampling_logprobs([], masks, old) == (None, 0)
+
+    def test_align_handles_per_row_none(self):
+        stub = self._stub()
+        action_masks = torch.tensor([[True, True], [True, True]])
+        old = torch.tensor([[-1.0, -1.0], [-2.0, -2.0]])
+        flat = [None, torch.tensor([-0.1, -0.2])]
+        aligned, n_skipped = stub._align_sampling_logprobs(flat, action_masks, old)
+        assert n_skipped == 1
+        assert torch.allclose(aligned[0], old[0])
+        assert torch.allclose(aligned[1], torch.tensor([-0.1, -0.2]), atol=1e-7)

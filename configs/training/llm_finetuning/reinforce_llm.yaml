@@ -28,7 +28,7 @@ INIT_HP:
     EVAL_LOOP: 1
     USE_VLLM: true
     MICRO_BATCH_SIZE_PER_GPU: 4
-    ACTION_GRANULARITY: turn
+    ADVANTAGE_GRANULARITY: turn
     TARGET_MODULES:
         - q_proj
         - k_proj

@@ -13,8 +13,10 @@ from accelerate.state import AcceleratorState
 from peft import LoraConfig
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
+from transformers.generation.configuration_utils import GenerationConfig
 from transformers.modeling_utils import PreTrainedModel
 
+from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym
@@ -67,6 +69,11 @@ class DummyCausalInner(PreTrainedModel):
         super().__init__(config)
         self.name_or_path = "dummy-causal-llm"
         self.gradient_checkpointing_enabled = False
+        # Real ``PreTrainedModel``s expose a ``generation_config`` that the HF
+        # ``generate`` path (now reached through the PEFT wrappers) reads. This
+        # dummy doesn't inherit ``GenerationMixin`` so transformers skips the
+        # auto-init; set it explicitly to mirror a generation-capable model.
+        self.generation_config = GenerationConfig.from_model_config(config)
         hs = config.hidden_size
         vs = config.vocab_size
         self.embed = nn.Embedding(vs, hs, device=device)
@@ -302,13 +309,13 @@ class _ReinforceStub:
 
 
 class _RebnStub:
-    def __init__(self, gamma: float = 1.0, action_granularity: str = "auto"):
+    def __init__(self, gamma: float = 1.0, advantage_granularity: str = "auto"):
         self.gamma = gamma
-        self.action_granularity = action_granularity
+        self.advantage_granularity = advantage_granularity
 
     _compute_rebn_advantages = REINFORCE._compute_rebn_advantages
     _compute_rebn_advantages_token = REINFORCE._compute_rebn_advantages_token
-    _resolve_action_granularity = REINFORCE._resolve_action_granularity
+    _resolve_advantage_granularity = REINFORCE._resolve_advantage_granularity
 
 
 def _minimal_reasoning_gym(device: str, vocab_size: int, input_size: int, bs: int):
@@ -468,7 +475,7 @@ class TestREINFORCEInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_action_granularity_must_be_valid(self):
+    def test_init_advantage_granularity_must_be_valid(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -476,16 +483,41 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        with pytest.raises(ValueError, match="action_granularity"):
+        with pytest.raises(ValueError, match="advantage_granularity"):
             REINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                action_granularity="bad",
+                advantage_granularity="bad",
                 wrap=False,
                 gradient_checkpointing=False,
             )
+
+    def test_init_liger_token_chunk_size_must_be_positive_or_none(self):
+        actor = create_dummy_actor(10, 8, 100, "cpu")
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=16,
+            target_modules=["lin"],
+            task_type="CAUSAL_LM",
+        )
+        with pytest.raises(
+            ValueError, match="liger_token_chunk_size must be a positive int or None"
+        ):
+            REINFORCE(
+                actor_network=actor,
+                pad_token_id=99,
+                pad_token="<pad>",
+                lora_config=lora,
+                liger_token_chunk_size=0,
+                wrap=False,
+                gradient_checkpointing=False,
+            )
+
+    def test_init_stores_liger_token_chunk_size(self):
+        rf = _cpu_llmreinforce(liger_token_chunk_size=256)
+        assert rf.liger_token_chunk_size == 256
 
     def test_init_clone_requires_pretrained_like_actor(self):
         with pytest.raises(AssertionError, match="PeftModelProtocol"):
@@ -535,18 +567,20 @@ class TestREINFORCEGetAction:
                 "_prepare_vllm_for_generation",
                 wraps=rf._prepare_vllm_for_generation,
             ) as mock_prepare,
-            patch.object(rf, "_move_model_to_vllm", return_value=None) as mock_move,
+            patch.object(rf, "_sync_actor_to_vllm", return_value=None) as mock_move,
             patch.object(
                 rf,
                 "_generate_with_vllm_colocate",
-                return_value=(mocked_ids, mocked_masks),
+                return_value=(mocked_ids, mocked_masks, None),
             ) as mock_generate,
         ):
-            completion_ids, action_masks = rf.get_action(prompts, training=False)
+            completion_ids, action_masks, _ = rf.get_action(prompts, training=False)
 
         mock_prepare.assert_called_once()
         mock_move.assert_called_once()
-        mock_generate.assert_called_once_with(prompts, 1, temperature=0.01)
+        mock_generate.assert_called_once_with(
+            prompts, 1, temperature=0.01, capture_sampling_logps=False
+        )
         rf.llm.wake_up.assert_called_once()
         rf._prepare_vllm_for_training()
         rf.llm.sleep.assert_called_once()
@@ -565,7 +599,7 @@ class TestREINFORCEGetAction:
             for _ in range(3)
         ]
         for training in (True, False):
-            completion_ids, action_masks = rf.get_action(prompts, training=training)
+            completion_ids, action_masks, _ = rf.get_action(prompts, training=training)
             assert_vllm_get_action_contract(
                 completion_ids=completion_ids,
                 action_masks=action_masks,
@@ -590,7 +624,7 @@ class TestREINFORCEGetAction:
         ]
 
         with patch.object(rf, "_get_unwrapped_actor", return_value=_NoParamModule()):
-            completion_ids, action_masks = rf.get_action(prompts, training=True)
+            completion_ids, action_masks, _ = rf.get_action(prompts, training=True)
 
         assert_vllm_get_action_contract(
             completion_ids=completion_ids,
@@ -694,21 +728,21 @@ class TestREINFORCEComputeRebnAdvantagesToken:
         assert torch.allclose(advantages, torch.zeros_like(advantages))
 
 
-class TestREINFORCEResolveActionGranularity:
-    def test_resolve_action_granularity_auto_single_turn_batch_is_token(self):
-        stub = _RebnStub(action_granularity="auto")
+class TestREINFORCEResolveAdvantageGranularity:
+    def test_resolve_advantage_granularity_auto_single_turn_batch_is_token(self):
+        stub = _RebnStub(advantage_granularity="auto")
         turn_ids = torch.tensor([[0, 0, -1], [0, -1, -1]])
-        assert stub._resolve_action_granularity(turn_ids) == "token"
+        assert stub._resolve_advantage_granularity(turn_ids) == "token"
 
-    def test_resolve_action_granularity_auto_multi_turn_batch_is_turn(self):
-        stub = _RebnStub(action_granularity="auto")
+    def test_resolve_advantage_granularity_auto_multi_turn_batch_is_turn(self):
+        stub = _RebnStub(advantage_granularity="auto")
         turn_ids = torch.tensor([[0, 1, -1], [0, 0, 1]])
-        assert stub._resolve_action_granularity(turn_ids) == "turn"
+        assert stub._resolve_advantage_granularity(turn_ids) == "turn"
 
-    def test_resolve_action_granularity_override_token(self):
-        stub = _RebnStub(action_granularity="token")
+    def test_resolve_advantage_granularity_override_token(self):
+        stub = _RebnStub(advantage_granularity="token")
         turn_ids = torch.tensor([[0, 1, -1]])
-        assert stub._resolve_action_granularity(turn_ids) == "token"
+        assert stub._resolve_advantage_granularity(turn_ids) == "token"
 
 
 class TestREINFORCELearn:
@@ -823,7 +857,7 @@ class TestREINFORCELearn:
         )
 
     def test_learn_token_granularity(self):
-        rf = _cpu_llmreinforce(action_granularity="token", lr=0.05, update_epochs=1)
+        rf = _cpu_llmreinforce(advantage_granularity="token", lr=0.05, update_epochs=1)
         vocab = 100
         inp, mtok = 10, 8
         seq_len = inp + mtok
@@ -930,7 +964,7 @@ class TestREINFORCETest:
         completion = torch.ones(1, 6, dtype=torch.long)
         action_mask = torch.ones(1, 5, dtype=torch.bool)
         with patch.object(
-            rf, "get_action", return_value=([completion], [action_mask])
+            rf, "get_action", return_value=ActionResult([completion], [action_mask])
         ) as get_action:
             out = rf.test(env, loop=2)
 
@@ -1011,10 +1045,10 @@ class TestReinforceLossLiger:
         with (
             patch("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True),
             patch(
-                "agilerl.algorithms.reinforce_llm.LigerFusedLinearPolicyLossFunction"
+                "agilerl.algorithms.reinforce_llm.apply_fused_policy_loss"
             ) as mock_fn,
         ):
-            mock_fn.apply.return_value = (fake_loss, fake_aux)
+            mock_fn.return_value = (fake_loss, fake_aux)
             loss, metrics = rf._reinforce_loss_liger(
                 ids,
                 mask,
@@ -1023,12 +1057,12 @@ class TestReinforceLossLiger:
                 adv,
             )
 
-        mock_fn.apply.assert_called_once()
+        mock_fn.assert_called_once()
         # REINFORCE always passes beta=0 to Liger (KL is folded into the
         # advantage upstream); kl is reported as a metric only.
         # Find beta in the apply args — it's the 9th positional arg
-        # (input, weight, ids, mask, advs, bias, ref_lp, old_lp, beta, ...).
-        call_args = mock_fn.apply.call_args.args
+        # (input, weight, bias, ids, mask, advs, ref_lp, old_lp, beta, ...).
+        call_args = mock_fn.call_args.args
         assert call_args[8] == 0.0  # beta
 
         assert metrics["kl"] == pytest.approx(0.05)
@@ -1036,6 +1070,27 @@ class TestReinforceLossLiger:
         assert metrics["pg_loss"] == pytest.approx(0.25)
         assert metrics["entropy"] == pytest.approx(0.35)
         assert loss is fake_loss
+
+    def test_forwards_configured_liger_token_chunk_size(self) -> None:
+        rf = _cpu_llmreinforce(liger_token_chunk_size=123)
+        B, T = 2, 5
+        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
+        mask = torch.ones(B, T - 1, dtype=torch.float32)
+        old_lp = torch.zeros(B, T - 1)
+        ref_lp = torch.zeros(B, T - 1)
+        adv = torch.randn(B, T - 1) * 0.1
+        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
+
+        with (
+            patch("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True),
+            patch(
+                "agilerl.algorithms.reinforce_llm.apply_fused_policy_loss"
+            ) as mock_apply,
+        ):
+            mock_apply.return_value = (torch.tensor(0.4, requires_grad=True), fake_aux)
+            rf._reinforce_loss_liger(ids, mask, old_lp, ref_lp, adv)
+
+        assert mock_apply.call_args.kwargs["token_chunk_size"] == 123
 
 
 class TestREINFORCELearnWithLiger:
@@ -1076,3 +1131,64 @@ class TestREINFORCELearnWithLiger:
         assert learn_out["mean_loss"] == pytest.approx(0.3, rel=1e-6)
         assert learn_out["mean_kl"] == pytest.approx(0.05, rel=1e-6)
         assert learn_out["mean_pg_loss"] == pytest.approx(0.25, rel=1e-6)
+
+
+class TestREINFORCEVllmISCorrection:
+    """vLLM sampling-mismatch (truncated-IS) correction wiring across IS levels."""
+
+    @pytest.mark.parametrize("is_level", ["token", "turn", "sequence"])
+    def test_learn_emits_vllm_is_metrics_and_reweights(self, is_level):
+        rf = _cpu_llmreinforce(
+            importance_sampling_level=is_level, lr=0.05, update_epochs=1
+        )
+        # use_vllm=False auto-disables the correction in __init__; force it on to
+        # exercise the capture/align/metrics/reweight path that the base class now
+        # shares with GRPO.
+        rf.vllm_importance_sampling_correction = True
+        rf.vllm_importance_sampling_apply = True
+        rf.vllm_importance_sampling_cap = 2.0
+        vocab, inp, mtok = 100, 10, 8
+        seq_len = inp + mtok
+        completions = [torch.randint(0, vocab, (1, seq_len))]
+        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool)]
+        turn_ids = torch.tensor(
+            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
+            dtype=torch.long,
+        )[:, : seq_len - 1]
+        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
+        n_act = int(action_masks[0].sum())
+        # vLLM logprobs deliberately offset from the trainer recompute so the
+        # importance ratio != 1 and the reweight is non-trivial.
+        sampling_logps = [torch.full((n_act,), -3.0, dtype=torch.float32)]
+        metrics = rf.learn(
+            (completions, action_masks, rewards),
+            turn_ids=turn_ids,
+            sampling_logps=sampling_logps,
+        )
+        for key in ("vllm_is_delta_mean", "vllm_is_ratio_mean"):
+            assert key in metrics
+            assert isinstance(metrics[key], float)
+        assert metrics["vllm_is_ratio_mean"] > 0
+        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+
+
+class TestREINFORCESequencePacking:
+    """use_sequence_packing flag plumbing (inert on CPU / non-FA2 backends)."""
+
+    def test_flag_stored_and_learn_runs_with_padded_fallback(self):
+        rf = _cpu_llmreinforce(use_sequence_packing=True, lr=0.05, update_epochs=1)
+        # Stored on the base class; REINFORCE routes its gradient forward through
+        # _get_logprobs, which packs when a FlashAttention-2 / FlexAttention
+        # backend is present and otherwise (CPU eager) falls back to padded.
+        assert rf.use_sequence_packing is True
+        vocab, inp, mtok = 100, 10, 8
+        seq_len = inp + mtok
+        completions = [torch.randint(0, vocab, (1, seq_len))]
+        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool)]
+        turn_ids = torch.tensor(
+            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
+            dtype=torch.long,
+        )[:, : seq_len - 1]
+        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
+        metrics = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
+        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))

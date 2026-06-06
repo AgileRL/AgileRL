@@ -42,6 +42,18 @@ jobs:
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
             HF_HOME: /tmp/hf-cache
             TORCHINDUCTOR_CACHE_DIR: /tmp/inductor-cache
+            # The runner's NVIDIA driver (12020) is too old for the pinned
+            # torch, so any CUDA probe at import/collection raises "driver too
+            # old" and aborts the run -- torch.cuda._lazy_init (reached via
+            # is_bf16_supported / get_device_capability) and deepspeed's
+            # import-time accelerator check (accelerate/transformers import
+            # deepspeed whenever it is installed). Hiding the GPU makes every
+            # torch.cuda check return False/CPU *gracefully* (is_available()
+            # short-circuits before _lazy_init) and sends deepspeed to its CPU
+            # accelerator. The GPU is unusable with this torch+driver pair, so
+            # GPU-marked tests simply skip with no visible device.
+            CUDA_VISIBLE_DEVICES: ''
+            DS_ACCELERATOR: cpu
 
         steps:
             - uses: actions/checkout@v4

@@ -25,12 +25,20 @@ from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.typing import PopulationType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
 from agilerl.utils.utils import (
+    WB_LEVEL_DEBUG,
+    WB_LEVEL_DETAILED,
+    WB_LEVEL_OFF,
+    WB_LEVEL_STANDARD,
     _distributed_world_size,
     aggregate_metrics_across_gpus,
+    gpu_memory_snapshot,
     init_wandb,
+    normalize_wb_level,
+    reset_gpu_memory_peak,
     safe_aggregate_metrics,
     save_llm_checkpoint,
     tournament_selection_and_mutation,
+    wb_level_at_least,
 )
 
 InitDictType = dict[str, Any] | None
@@ -38,6 +46,204 @@ InitDictType = dict[str, Any] | None
 
 def _is_main_process(accelerator: Accelerator | None) -> bool:
     return accelerator is None or accelerator.is_main_process
+
+
+def _resolve_wb(wb: bool, wb_level: str) -> tuple[bool, str]:
+    """Normalize ``wb_level`` and collapse the ``off`` tier to ``wb=False``.
+
+    ``off`` is equivalent to ``wb=False``; collapsing here lets downstream
+    checks only test ``wb`` and lets call sites compare ``wb_level`` directly.
+    """
+    wb_level = normalize_wb_level(wb_level)
+    if wb_level == WB_LEVEL_OFF:
+        wb = False
+    return wb, wb_level
+
+
+def _maybe_add_gpu_snapshot(
+    wandb_dict: dict[str, Any],
+    wb: bool,
+    wb_level: str,
+    accelerator: Accelerator | None,
+) -> None:
+    """Add a GPU-memory snapshot to ``wandb_dict`` on the main process.
+
+    Gated on ``wb`` being enabled, the ``standard`` tier (or higher), and the
+    process being the main one — the snapshot is only logged once per step.
+    """
+    if (
+        wb
+        and wb_level_at_least(wb_level, WB_LEVEL_STANDARD)
+        and _is_main_process(accelerator)
+    ):
+        wandb_dict.update(gpu_memory_snapshot())
+
+
+def _grpo_sampling_kwargs(
+    agent: GRPO | LLMPPO | LLMREINFORCE | DPO | SFT,
+    sampling_logps: Any,
+    *,
+    present: bool,
+) -> dict[str, Any]:
+    """Return ``{"sampling_logps": ...}`` for the RL LLM agents, else ``{}``.
+
+    The vLLM sampling-mismatch correction is shared by the RL LLM agents
+    (GRPO family, LLMPPO, LLMREINFORCE); the logps are threaded into
+    ``learn()`` only when the agent is one of those and the caller-computed
+    ``present`` flag confirms some were captured. Harmless when an agent's
+    correction is disabled, since its ``get_action`` returns ``None`` then.
+    """
+    if isinstance(agent, (GRPO, LLMPPO, LLMREINFORCE)) and present:
+        return {"sampling_logps": sampling_logps}
+    return {}
+
+
+_DEBUG_ROLLOUTS_ENV = "AGILERL_DEBUG_ROLLOUTS"
+
+
+def _debug_rollout_step_budget() -> int:
+    """Return how many training iterations should dump rollout debug info."""
+    raw = os.environ.get(_DEBUG_ROLLOUTS_ENV)
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
+def _trajectory_debug_summary(traj: Any, max_chars: int = 400) -> dict[str, Any]:
+    """Decode the shared per-trajectory debug fields once.
+
+    Pulls ``traj.env``, calls ``get_debug_info()`` (when available), slices
+    ``prompt_text`` and the first turn's decoded generation to ``max_chars``,
+    and computes the episode ``reward_sum`` / turn count. Shared by the rollout
+    debug printer and the W&B sample-table builder so both decode identically.
+    """
+    env_wrap = traj.env
+    info = env_wrap.get_debug_info() if hasattr(env_wrap, "get_debug_info") else {}
+    prompt_text = (info.get("prompt_text") or "")[:max_chars]
+    turn_details = info.get("turn_details") or []
+    first_gen = ""
+    if turn_details:
+        first_gen = (turn_details[0].get("gen_text_decoded_from_ids") or "")[:max_chars]
+    reward_sum = 0.0
+    turn_rewards = getattr(env_wrap, "turn_rewards", None)
+    if turn_rewards:
+        try:
+            reward_sum = float(sum(turn_rewards))
+        except Exception:
+            reward_sum = 0.0
+    return {
+        "env_wrap": env_wrap,
+        "info": info,
+        "prompt_text": prompt_text,
+        "turn_details": turn_details,
+        "first_gen": first_gen,
+        "reward_sum": reward_sum,
+        "n_turns": info.get("n_turns", len(turn_details)),
+    }
+
+
+def _print_multiturn_rollout_debug(
+    *,
+    iteration: int,
+    rollout_env: "SyncMultiTurnVecEnv",
+    completion_ids_list: list[torch.Tensor],
+    max_trajectories: int = 2,
+    max_turns_per_traj: int = 2,
+    max_chars: int = 400,
+) -> None:
+    """Dump per-trajectory rollout state for debugging multi-turn training.
+
+    Enable by setting ``AGILERL_DEBUG_ROLLOUTS=<N>``: prints during the first
+    N iterations on the main process only. Designed to surface issues like
+    early termination (e.g. GEM env returning ``terminated=True`` on a
+    format-error reward), abnormally short rollouts, or rewards that are
+    all equal (which kills GRPO advantage signal).
+    """
+    trajectories = list(rollout_env.trajectories)
+    n_total = len(trajectories)
+    n_turns_per: list[int] = []
+    sum_rewards_per: list[float] = []
+    for traj in trajectories:
+        env_wrap = traj.env
+        if hasattr(env_wrap, "turn_boundaries"):
+            n_turns_per.append(len(env_wrap.turn_boundaries))
+        if hasattr(env_wrap, "turn_rewards"):
+            sum_rewards_per.append(float(sum(env_wrap.turn_rewards)))
+    completion_lengths = [int(x.shape[1]) for x in completion_ids_list]
+
+    print(f"\n[rollout-debug] iteration={iteration} n_trajectories={n_total}")
+    if n_turns_per:
+        print(
+            "[rollout-debug] turns/traj: "
+            f"min={min(n_turns_per)} max={max(n_turns_per)} "
+            f"mean={float(np.mean(n_turns_per)):.2f}"
+        )
+    if completion_lengths:
+        print(
+            "[rollout-debug] completion_tokens: "
+            f"min={min(completion_lengths)} max={max(completion_lengths)} "
+            f"mean={float(np.mean(completion_lengths)):.1f}"
+        )
+    if sum_rewards_per:
+        print(
+            "[rollout-debug] episode_reward_sum: "
+            f"min={min(sum_rewards_per):.4f} max={max(sum_rewards_per):.4f} "
+            f"mean={float(np.mean(sum_rewards_per)):.4f}"
+        )
+
+    for idx, traj in enumerate(trajectories[:max_trajectories]):
+        summary = _trajectory_debug_summary(traj, max_chars=max_chars)
+        env_wrap = summary["env_wrap"]
+        info = summary["info"]
+        print(
+            f"\n[rollout-debug] -- trajectory {idx} "
+            f"(batch={traj.batch_idx}, group={traj.group_idx}, done={traj.done}) --"
+        )
+        print(f"  n_turns         = {info.get('n_turns')}")
+        print(f"  n_total_tokens  = {info.get('n_total_tokens')}")
+        print(f"  n_action_tokens = {info.get('n_action_tokens')}")
+        print(f"  per_turn_rewards= {info.get('turn_rewards_raw')}")
+        prompt_text = summary["prompt_text"]
+        if prompt_text:
+            print(f"  raw_env_prompt[:{max_chars}]= {prompt_text!r}")
+        # Decoded initial prompt as the model actually sees it (chat-template
+        # wrapped). If the template tokens look wrong here, the model has no
+        # anchor for "what is an assistant turn" and will degenerate.
+        initial_len = getattr(env_wrap, "_initial_prompt_len", None)
+        full_ids = getattr(env_wrap, "full_ids", None)
+        tokenizer = getattr(env_wrap, "tokenizer", None)
+        if initial_len is not None and full_ids is not None and tokenizer is not None:
+            try:
+                wrapped_prompt = tokenizer.decode(
+                    full_ids[0, :initial_len].tolist(),
+                    skip_special_tokens=False,
+                )
+                print(
+                    f"  tokenized_initial_prompt[:{max_chars * 2}]= "
+                    f"{wrapped_prompt[: max_chars * 2]!r}"
+                )
+                # Trailing chars are where chat-template assistant-start markers
+                # live; print explicitly so they're easy to eyeball.
+                print(
+                    f"  tokenized_initial_prompt_tail[-120:]= {wrapped_prompt[-120:]!r}"
+                )
+            except Exception as exc:
+                print(f"  tokenized_initial_prompt= <decode failed: {exc!r}>")
+        for td in (info.get("turn_details") or [])[:max_turns_per_traj]:
+            gen_text = (td.get("gen_text_decoded_from_ids") or "")[:max_chars]
+            print(
+                f"  turn {td.get('turn')}: reward={td.get('reward')} "
+                f"gen_len={td.get('gen_len')}"
+            )
+            print(f"    gen[:{max_chars}]= {gen_text!r}")
+        feedback_texts = info.get("feedback_texts") or []
+        if feedback_texts:
+            print(
+                f"  first_env_feedback[:{max_chars}]= {feedback_texts[0][:max_chars]!r}"
+            )
 
 
 def _validate_llm_evolution_args(
@@ -96,6 +302,41 @@ def _validate_llm_mutation_probs(mutation: Mutations | None) -> None:
     )
 
 
+def _collect_trainable_params(pop: PopulationType) -> dict[str, Any]:
+    """Best-effort LoRA / trainable-param accounting for the first agent.
+
+    Recorded once at init so we can correlate later runs against LoRA size.
+    Wrapped in a broad except: introspecting peft-wrapped accelerator-managed
+    models can fail in odd ways, and a logging-only field shouldn't fault training.
+    """
+    out: dict[str, Any] = {}
+    try:
+        agent = pop[0]
+        actor = getattr(agent, "actor", None)
+        if actor is None:
+            return out
+        # Unwrap accelerate / peft / DDP layers if present.
+        inner = actor
+        for attr in ("module", "model"):
+            unwrapped = getattr(inner, attr, None)
+            if unwrapped is not None:
+                inner = unwrapped
+        total = 0
+        trainable = 0
+        for param in inner.parameters():
+            n = param.numel()
+            total += n
+            if param.requires_grad:
+                trainable += n
+        if total > 0:
+            out["trainable_params"] = trainable
+            out["total_params"] = total
+            out["trainable_param_ratio"] = trainable / total
+    except Exception:  # pragma: no cover — best-effort
+        pass
+    return out
+
+
 def _init_llm_wandb(
     init_hp: dict[str, Any],
     pop: PopulationType,
@@ -109,14 +350,20 @@ def _init_llm_wandb(
     wandb_project: str = "AgileRL",
     wandb_entity: str | None = None,
     wandb_run_name: str | None = None,
+    wb_level: str = WB_LEVEL_STANDARD,
 ) -> None:
     """Initialize W&B run metadata for the current LLM finetuning session."""
-    if not wb or (accelerator is not None and not accelerator.is_main_process):
+    if not wb or wb_level == WB_LEVEL_OFF:
+        return
+    if accelerator is not None and not accelerator.is_main_process:
         return
     init_hp["effective_data_batch_size"] = effective_data_batch_size
     init_hp["batch_size"] = init_hp.get("BATCH_SIZE", pop[0].batch_size)
     init_hp["distributed_training"] = accelerator is not None
     init_hp["model_name"] = pop[0].pretrained_model_name_or_path
+    init_hp["wb_level"] = wb_level
+    if wb_level_at_least(wb_level, WB_LEVEL_STANDARD):
+        init_hp.update(_collect_trainable_params(pop))
     if additional_fields is not None:
         init_hp.update(additional_fields)
 
@@ -227,6 +474,110 @@ def _normalize_learn_metrics(
         }
     msg = "Reasoning/multi-turn learn() tuple output has an unsupported shape."
     raise ValueError(msg)
+
+
+def _completion_lengths_per_traj(
+    completion_ids_list: list[torch.Tensor],
+) -> list[int]:
+    """Per-trajectory completion token count, robust to (1, T) and (T,) tensors."""
+    out: list[int] = []
+    for ids in completion_ids_list:
+        if ids.dim() == 0:
+            out.append(0)
+        elif ids.dim() == 1:
+            out.append(int(ids.shape[0]))
+        else:
+            out.append(int(ids.shape[-1]))
+    return out
+
+
+def _build_multiturn_sample_table(
+    rollout_env: "SyncMultiTurnVecEnv",
+    max_rows: int = 4,
+    max_chars: int = 400,
+) -> Any | None:
+    """Best-effort sample table of (prompt, completion, reward) for debug logs.
+
+    Returns ``None`` if the env doesn't expose ``get_debug_info`` or decoding
+    fails for every trajectory. Tokenizer decode is the dominant cost here,
+    which is why this is gated behind the ``debug`` tier + sample interval.
+    """
+    try:
+        trajectories = list(getattr(rollout_env, "trajectories", []))
+    except Exception:  # pragma: no cover
+        return None
+    if not trajectories:
+        return None
+    columns = ["traj", "turns", "reward_sum", "prompt", "first_completion"]
+    rows: list[list[Any]] = []
+    for idx, traj in enumerate(trajectories[:max_rows]):
+        summary = _trajectory_debug_summary(traj, max_chars=max_chars)
+        rows.append(
+            [
+                idx,
+                summary["n_turns"],
+                summary["reward_sum"],
+                summary["prompt_text"],
+                summary["first_gen"],
+            ]
+        )
+    if not rows:
+        return None
+    return wandb.Table(columns=columns, data=rows)
+
+
+def _augment_multiturn_wandb_dict(
+    wandb_dict: dict[str, Any],
+    *,
+    wb_level: str,
+    step_seconds: float,
+    rollout_seconds: float,
+    learn_seconds: float,
+    completion_ids_list: list[torch.Tensor],
+    episode_scores: torch.Tensor,
+    rollout_env: "SyncMultiTurnVecEnv",
+) -> None:
+    """Add tier-specific telemetry to a multiturn wandb_dict in place.
+
+    ``essential`` adds nothing on top of the existing scalars (they already
+    cover loss/kl/reward/accuracy/completion_length/global_step). Higher tiers
+    layer on cheap scalars, then histograms, then sample tables.
+    """
+    if not wb_level_at_least(wb_level, WB_LEVEL_STANDARD):
+        return
+
+    # Standard: cheap scalars only — timing, throughput, GPU memory.
+    lengths = _completion_lengths_per_traj(completion_ids_list)
+    total_tokens = float(sum(lengths))
+    wandb_dict["Sys/Step Seconds"] = step_seconds
+    wandb_dict["Sys/Rollout Seconds"] = rollout_seconds
+    wandb_dict["Sys/Learn Seconds"] = learn_seconds
+    if step_seconds > 0:
+        wandb_dict["Sys/Tokens Per Second"] = total_tokens / step_seconds
+    # This runs only after the STANDARD-tier gate above, and the sole caller
+    # invokes it under ``wb`` + main-process; pass those as constants so the
+    # snapshot lands exactly as the inline ``wb_level >= STANDARD`` check did.
+    _maybe_add_gpu_snapshot(wandb_dict, True, wb_level, None)
+
+    if not wb_level_at_least(wb_level, WB_LEVEL_DETAILED):
+        return
+
+    # Detailed: histograms. One CPU sync per histogram per step.
+    if lengths:
+        wandb_dict["Train/Completion Length Histogram"] = wandb.Histogram(lengths)
+    if episode_scores.numel() > 0:
+        wandb_dict["Train/Episode Reward Histogram"] = wandb.Histogram(
+            episode_scores.detach().cpu().numpy()
+        )
+
+    if not wb_level_at_least(wb_level, WB_LEVEL_DEBUG):
+        return
+
+    # Debug: prompt/completion sample table on every logged step. If this is
+    # too noisy, drop back to wb_level=detailed — the level switch is the knob.
+    table = _build_multiturn_sample_table(rollout_env)
+    if table is not None:
+        wandb_dict["Debug/Rollout Samples"] = table
 
 
 def build_train_wandb_dict(
@@ -561,6 +912,7 @@ def finetune_llm_reasoning(
     save_elite: bool | None = None,
     elite_path: str | None = None,
     wb: bool = False,
+    wb_level: str = WB_LEVEL_STANDARD,
     evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
     tournament: TournamentSelection | None = None,
@@ -626,6 +978,7 @@ def finetune_llm_reasoning(
         )
 
     _validate_llm_mutation_probs(mutation)
+    wb, wb_level = _resolve_wb(wb, wb_level)
 
     if not isinstance(pop[0], (GRPO, LLMPPO, LLMREINFORCE)):
         msg = (
@@ -654,6 +1007,7 @@ def finetune_llm_reasoning(
         wandb_project=wandb_project,
         wandb_entity=wandb_entity,
         wandb_run_name=wandb_run_name,
+        wb_level=wb_level,
     )
 
     if _is_main_process(accelerator):
@@ -704,7 +1058,13 @@ def finetune_llm_reasoning(
             current_prompts = prompts_by_agent[agent_idx] if uses_env_fn else prompts
 
             agent.set_reference_policy(training_env.num_epochs)
-            completion_ids, action_masks = agent.get_action(current_prompts)
+            action_result = agent.get_action(current_prompts)
+            completion_ids = action_result.completion_ids
+            action_masks = action_result.action_masks
+            # Per-row vLLM sampling logprobs captured during get_action (only
+            # when the GRPO-family mismatch correction is enabled); ``None``
+            # otherwise.
+            sampling_logps = action_result.sampling_logps
             completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
             # Use the reward function stored in env.step to calculate reward of the each answer from the group
@@ -716,7 +1076,10 @@ def finetune_llm_reasoning(
                 rewards,
             )
 
-            learn_output = agent.learn(experiences)
+            learn_kwargs = _grpo_sampling_kwargs(
+                agent, sampling_logps, present=sampling_logps is not None
+            )
+            learn_output = agent.learn(experiences, **learn_kwargs)
             metrics = _normalize_learn_metrics(
                 agent=agent,
                 learn_output=learn_output,
@@ -827,6 +1190,7 @@ def finetune_llm_reasoning(
                     max_reward=max_reward,
                     mode="reasoning",
                 )
+            _maybe_add_gpu_snapshot(wandb_dict, wb, wb_level, accelerator)
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb.log(wandb_dict)
         csv_logger.maybe_write(wandb_dict)
@@ -887,6 +1251,7 @@ def finetune_llm_preference(
     save_elite: bool | None = None,
     elite_path: str | None = None,
     wb: bool = False,
+    wb_level: str = WB_LEVEL_STANDARD,
     evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
     tournament: TournamentSelection | None = None,
@@ -952,6 +1317,7 @@ def finetune_llm_preference(
             stacklevel=2,
         )
     _validate_llm_mutation_probs(mutation)
+    wb, wb_level = _resolve_wb(wb, wb_level)
 
     if not isinstance(pop[0], DPO):
         msg = (
@@ -982,6 +1348,7 @@ def finetune_llm_preference(
         wandb_project=wandb_project,
         wandb_entity=wandb_entity,
         wandb_run_name=wandb_run_name,
+        wb_level=wb_level,
     )
 
     if accelerator is None or accelerator.is_main_process:
@@ -1130,6 +1497,7 @@ def finetune_llm_preference(
                     pop=pop,
                     mode="preference",
                 )
+            _maybe_add_gpu_snapshot(wandb_dict, wb, wb_level, accelerator)
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb.log(wandb_dict)
         csv_logger.maybe_write(wandb_dict)
@@ -1193,6 +1561,7 @@ def finetune_llm_multiturn(
     save_elite: bool | None = None,
     elite_path: str | None = None,
     wb: bool = False,
+    wb_level: str = WB_LEVEL_STANDARD,
     evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
     tournament: TournamentSelection | None = None,
@@ -1235,6 +1604,12 @@ def finetune_llm_multiturn(
     :type elite_path: str, optional
     :param wb: Whether to log to Weights and Biases, defaults to False.
     :type wb: bool, optional
+    :param wb_level: W&B verbosity tier (``off``/``essential``/``standard``/
+        ``detailed``/``debug``). ``standard`` (default) adds GPU memory + per-step
+        timing + throughput scalars on top of the essentials; ``detailed`` adds
+        completion-length and reward histograms; ``debug`` adds prompt/completion
+        sample tables on every logged step. ``off`` is equivalent to ``wb=False``.
+    :type wb_level: str, optional
     :param evo_steps: Steps between evolution (requires tournament and mutation).
     :type evo_steps: int, optional
     :param checkpoint_steps: Save checkpoint every N outer iterations when no evolution.
@@ -1261,6 +1636,7 @@ def finetune_llm_multiturn(
     """
     _validate_llm_evolution_args(evo_steps, tournament, mutation, checkpoint_steps)
     _validate_llm_mutation_probs(mutation)
+    wb, wb_level = _resolve_wb(wb, wb_level)
 
     if not isinstance(pop[0], (LLMPPO, LLMREINFORCE, GRPO)):
         msg = (
@@ -1277,28 +1653,17 @@ def finetune_llm_multiturn(
         init_hp["ALGO"] = pop[0].algo
 
     batch_size = init_hp.get("BATCH_SIZE", pop[0].batch_size)
-    for agent in pop:
-        effective_group_size = getattr(agent, "group_size", 1)
-        if isinstance(agent, GRPO):
-            if (
-                batch_size > effective_group_size
-                and batch_size % effective_group_size != 0
-            ):
-                msg = (
-                    f"Batch size ({batch_size}) must be divisible by "
-                    f"group_size ({effective_group_size}) for GRPO when group size is greater than batch size."
-                )
-                raise ValueError(msg)
-
-            if (
-                batch_size < effective_group_size
-                and effective_group_size % batch_size != 0
-            ):
-                msg = (
-                    f"Group size ({effective_group_size}) must be divisible by "
-                    f"batch size ({batch_size}) for GRPO when batch size is less than group size."
-                )
-                raise ValueError(msg)
+    # No batch_size/group_size divisibility constraint is required for GRPO. The
+    # rollout vec env (SyncMultiTurnVecEnv) maintains batch_size * group_size
+    # independent envs laid out group-contiguous (env_idx = batch_idx *
+    # group_size + group_idx), and GRPO.learn forms group-relative advantages by
+    # reshaping the flat batch with ``view(-1, group_size)``. The only invariant
+    # is that the sample count be a multiple of group_size, which
+    # batch_size * group_size satisfies by construction (GRPO.learn asserts it).
+    # Distributed runs keep whole groups per rank (each rank builds its own
+    # batch_size * group_size env; only metrics are gathered across ranks), so a
+    # group is never split. Hence any batch_size/group_size combination is valid
+    # (e.g. batch_size=2, group_size=5 -> two prompts, five completions each).
 
     env_name = init_hp.get("env_name", "gem_multiturn")
     data_increment = _distributed_world_size(accelerator)
@@ -1316,6 +1681,7 @@ def finetune_llm_multiturn(
         wandb_project=wandb_project,
         wandb_entity=wandb_entity,
         wandb_run_name=wandb_run_name,
+        wb_level=wb_level,
     )
 
     if accelerator is None or accelerator.is_main_process:
@@ -1365,7 +1731,18 @@ def finetune_llm_multiturn(
             break
         agent_metrics_dict = {}
         iteration_steps = 0
+        # Per-outer-step timing for standard-tier W&B telemetry. ``perf_counter``
+        # is essentially free; we accumulate per-agent rollout/learn times so the
+        # split survives multi-agent populations. Reset the GPU peak window so
+        # Sys/GPU Max Allocated GiB reflects this step, not the whole run.
+        step_t0 = time.perf_counter()
+        rollout_seconds_acc = 0.0
+        learn_seconds_acc = 0.0
+        last_completion_ids_list: list[torch.Tensor] = []
+        last_episode_scores = torch.empty(0)
+        reset_gpu_memory_peak()
         for agent_idx, agent in enumerate(pop):
+            rollout_t0 = time.perf_counter()
             (
                 completion_ids_list,
                 action_masks_list,
@@ -1373,6 +1750,7 @@ def finetune_llm_multiturn(
                 all_rewards,
                 batch_steps,
                 group_seed,
+                all_sampling_logps,
             ) = collect_rollouts_llm(
                 agent=agent,
                 env=rollout_env,
@@ -1381,6 +1759,18 @@ def finetune_llm_multiturn(
                 group_size=group_size,
                 group_seed=group_seed,
             )
+            rollout_seconds_acc += time.perf_counter() - rollout_t0
+
+            if (
+                _is_main_process(accelerator)
+                and agent_idx == 0
+                and i < _debug_rollout_step_budget()
+            ):
+                _print_multiturn_rollout_debug(
+                    iteration=i,
+                    rollout_env=rollout_env,
+                    completion_ids_list=completion_ids_list,
+                )
 
             # Normalize rewards to 2D [1, n_turns] per trajectory so padding
             # stacks into [batch, max_turns] rather than flattening to 1D.
@@ -1409,12 +1799,30 @@ def finetune_llm_multiturn(
                 rewards_2d,
             )
 
+            # Pass turn_ids to every multi-turn RL agent that accepts it
+            # (LLMPPO/LLMREINFORCE, and the GRPO family — GRPO/CISPO/GSPO —
+            # which use it for turn-level importance sampling + per-turn
+            # group-relative advantages). Agents that don't need it (e.g.
+            # token/sequence levels, GSPO) simply ignore it.
             learn_kwargs = (
                 {"turn_ids": turn_ids_padded}
-                if isinstance(agent, (LLMREINFORCE, LLMPPO))
+                if isinstance(agent, (LLMREINFORCE, LLMPPO, GRPO))
                 else {}
             )
+            # The vLLM sampling-mismatch correction is a GRPO-family feature;
+            # pass the per-trajectory logprobs only when some were captured.
+            learn_kwargs.update(
+                _grpo_sampling_kwargs(
+                    agent,
+                    all_sampling_logps,
+                    present=all_sampling_logps is not None,
+                )
+            )
+            learn_t0 = time.perf_counter()
             learn_output = agent.learn(experiences, **learn_kwargs)
+            learn_seconds_acc += time.perf_counter() - learn_t0
+            last_completion_ids_list = completion_ids_list
+            last_episode_scores = episode_scores.detach()
             metrics = _normalize_learn_metrics(
                 agent=agent,
                 learn_output=learn_output,
@@ -1537,6 +1945,7 @@ def finetune_llm_multiturn(
             if checkpoint_due:
                 save_llm_checkpoint(agent, elite_path)
 
+        step_seconds = time.perf_counter() - step_t0
         wandb_dict: dict[str, Any] = {}
         if agent_metrics_dict and (wb or log_csv):
             wandb_dict = build_train_wandb_dict(
@@ -1553,6 +1962,17 @@ def finetune_llm_multiturn(
                 eval_score_mode=True,
             )
             wandb_dict |= eval_wandb_dict
+            if wb and (accelerator is None or accelerator.is_main_process):
+                _augment_multiturn_wandb_dict(
+                    wandb_dict,
+                    wb_level=wb_level,
+                    step_seconds=step_seconds,
+                    rollout_seconds=rollout_seconds_acc,
+                    learn_seconds=learn_seconds_acc,
+                    completion_ids_list=last_completion_ids_list,
+                    episode_scores=last_episode_scores,
+                    rollout_env=rollout_env,
+                )
 
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb.log(wandb_dict)
@@ -1614,6 +2034,7 @@ def finetune_llm_sft(
     save_elite: bool | None = None,
     elite_path: str | None = None,
     wb: bool = False,
+    wb_level: str = WB_LEVEL_STANDARD,
     evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
     tournament: TournamentSelection | None = None,
@@ -1665,6 +2086,7 @@ def finetune_llm_sft(
         )
 
     _validate_llm_mutation_probs(mutation)
+    wb, wb_level = _resolve_wb(wb, wb_level)
 
     if not isinstance(pop[0], SFT):
         msg = (
@@ -1696,6 +2118,7 @@ def finetune_llm_sft(
         wandb_project=wandb_project,
         wandb_entity=wandb_entity,
         wandb_run_name=wandb_run_name,
+        wb_level=wb_level,
     )
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
@@ -1837,6 +2260,7 @@ def finetune_llm_sft(
                 pop=pop,
                 mode="sft",
             )
+            _maybe_add_gpu_snapshot(wandb_dict, wb, wb_level, accelerator)
         if wandb_dict and wb and _is_main_process(accelerator):
             wandb.log(wandb_dict)
         csv_logger.maybe_write(wandb_dict)

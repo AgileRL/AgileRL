@@ -21,6 +21,8 @@ import time — gate on :data:`agilerl.HAS_LIGER_KERNEL` before importing.
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 from agilerl import HAS_LIGER_KERNEL
@@ -56,6 +58,7 @@ def llm_policy_loss_fn(
     turn_ids: torch.Tensor | None = None,
     full_turn_mask: torch.Tensor | None = None,
     max_turns: int | None = None,
+    importance_sampling_level: str = "token",
     **_unused: object,
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
     """Per-chunk policy + KL loss with per-token or per-turn ratio clipping.
@@ -119,51 +122,79 @@ def llm_policy_loss_fn(
 
     token_global_count = full_attention_mask.float().sum().clamp(min=1.0)
 
-    if turn_ids is None:
+    # Per this fn's contract, ``turn_ids`` presence selects turn mode. Honour it
+    # when the caller left the level at its ``"token"`` default (advantages are
+    # then per-turn). Callers passing an explicit level — production token mode
+    # passes ``turn_ids=None``; turn/sequence pass their own level — are
+    # unaffected by this guard.
+    if turn_ids is not None and importance_sampling_level == "token":
+        importance_sampling_level = "turn"
+
+    if importance_sampling_level == "token":
         # Token mode: ratio + clip + max-formula at token level.
         ratio = torch.exp(token_log_ratio)
         clipped_ratio = torch.clamp(ratio, 1.0 - epsilon_low, 1.0 + epsilon_high)
         pg_unit_loss = torch.max(-advantages * ratio, -advantages * clipped_ratio)
         unit_mask = attention_mask
         unit_global_count = token_global_count
-    else:
-        # Turn mode: pool token log-ratios per turn, then clip + max at turn level.
-        if max_turns is None or full_turn_mask is None:
-            msg = (
-                "turn-mode loss requires max_turns and full_turn_mask. "
-                "Got turn_ids without one of them."
-            )
+    elif importance_sampling_level == "turn":
+        # Turn mode: length-normalized mean of token log-ratios per turn
+        # (geometric-mean ratio, matching GSPO's sequence pooling at turn
+        # granularity), then clip + max at turn level. ``advantages`` is
+        # per-turn ``(chunk_b, max_turns)``.
+        if max_turns is None or full_turn_mask is None or turn_ids is None:
+            msg = "turn-level loss requires turn_ids, max_turns and full_turn_mask."
             raise ValueError(msg)
         chunk_b = token_log_ratio.shape[0]
         # Mask non-action tokens out of the per-turn sum and clamp -1
         # turn_ids to bucket 0 (mask handles the exclusion).
         masked_token_log_ratio = token_log_ratio * attention_mask
         safe_turn_ids = turn_ids.clamp(min=0)
-        # Sum-pool token log-ratios into per-turn log-ratios. scatter_add
-        # is autograd-friendly along the value tensor, so gradients flow
-        # back through token_log_ratio -> per_token_logps -> log_probs.
-        turn_log_ratio = torch.zeros(
+        # Pool token log-ratios into per-turn log-ratios. scatter_add is
+        # autograd-friendly along the value tensor, so gradients flow back
+        # through token_log_ratio -> per_token_logps -> log_probs.
+        turn_log_ratio_sum = torch.zeros(
             chunk_b,
             max_turns,
             dtype=token_log_ratio.dtype,
             device=token_log_ratio.device,
+        ).scatter_add(1, safe_turn_ids, masked_token_log_ratio)
+        # Per-turn token count; also yields the per-chunk turn mask (a turn is
+        # active iff it has >= 1 action token).
+        chunk_turn_active = torch.zeros_like(turn_log_ratio_sum).scatter_add(
+            1, safe_turn_ids, attention_mask.to(token_log_ratio.dtype)
         )
-        turn_log_ratio = turn_log_ratio.scatter_add(
-            1, safe_turn_ids, masked_token_log_ratio
-        )
-        # Per-chunk turn mask: a turn is active in this chunk iff at
-        # least one of its tokens has mask=1.
-        chunk_turn_active = torch.zeros_like(turn_log_ratio)
-        chunk_turn_active = chunk_turn_active.scatter_add(
-            1, safe_turn_ids, attention_mask.float()
-        )
-        chunk_turn_mask = (chunk_turn_active > 0).to(turn_log_ratio.dtype)
+        chunk_turn_mask = (chunk_turn_active > 0).to(token_log_ratio.dtype)
+        turn_log_ratio = turn_log_ratio_sum / chunk_turn_active.clamp(min=1.0)
 
         ratio = torch.exp(turn_log_ratio)
         clipped_ratio = torch.clamp(ratio, 1.0 - epsilon_low, 1.0 + epsilon_high)
         pg_unit_loss = torch.max(-advantages * ratio, -advantages * clipped_ratio)
         unit_mask = chunk_turn_mask
         unit_global_count = full_turn_mask.float().sum().clamp(min=1.0)
+    elif importance_sampling_level == "sequence":
+        # Sequence mode: length-normalized mean over all action tokens of the
+        # completion (GSPO). ``advantages`` is per-sequence ``(chunk_b, 1)``.
+        mask_f = attention_mask.to(token_log_ratio.dtype)
+        seq_count = mask_f.sum(dim=-1, keepdim=True)  # (chunk_b, 1)
+        seq_log_ratio = (token_log_ratio * mask_f).sum(
+            dim=-1, keepdim=True
+        ) / seq_count.clamp(min=1.0)
+        chunk_seq_mask = (seq_count > 0).to(token_log_ratio.dtype)  # (chunk_b, 1)
+        ratio = torch.exp(seq_log_ratio)
+        clipped_ratio = torch.clamp(ratio, 1.0 - epsilon_low, 1.0 + epsilon_high)
+        pg_unit_loss = torch.max(-advantages * ratio, -advantages * clipped_ratio)
+        unit_mask = chunk_seq_mask
+        # Normalize by the number of active sequences in the full batch.
+        unit_global_count = (
+            (full_attention_mask.sum(dim=-1) > 0).to(token_log_ratio.dtype).sum()
+        ).clamp(min=1.0)
+    else:
+        msg = (
+            f"Unknown importance_sampling_level '{importance_sampling_level}'. "
+            "Expected one of ['token', 'turn', 'sequence']."
+        )
+        raise ValueError(msg)
 
     chunk_loss = (pg_unit_loss * unit_mask).sum() / unit_global_count
     if beta != 0.0 and kl_div is not None:
@@ -227,6 +258,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         turn_ids=None,
         full_turn_mask=None,
         max_turns=None,
+        importance_sampling_level="token",
     ):
         """Chunked forward + backward.
 
@@ -284,6 +316,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                 turn_ids=turn_ids_chunk,
                 full_turn_mask=full_turn_mask,
                 max_turns=max_turns,
+                importance_sampling_level=importance_sampling_level,
             )
 
         def fused_fwd_bwd(
@@ -401,8 +434,6 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
     @staticmethod
     def backward(ctx, grad_output, *grad_metrics):
         grads = LigerFusedLinearPPOBase.backward(ctx, grad_output)
-        # forward arity after ctx: 17 inputs (added turn_ids,
-        # full_turn_mask, max_turns to the original 14).
         return (
             *grads[
                 :6
@@ -418,7 +449,177 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             None,  # turn_ids
             None,  # full_turn_mask
             None,  # max_turns
+            None,  # importance_sampling_level
         )
+
+
+def resolve_token_chunk_size(explicit: int | None) -> int:
+    """Resolve the tokens-per-chunk bound for the token-flattened Liger path.
+
+    Returns ``explicit`` when given (the constructor / INIT_HP / kwarg value),
+    otherwise falls back to the legacy ``AGILERL_LIGER_TOKEN_CHUNK`` env var
+    (default ``2048``). Shared by :func:`apply_fused_policy_loss` and GRPO's
+    token-flattened loss path so both resolve the bound identically.
+
+    :param explicit: Explicit tokens-per-chunk, or ``None`` to use the env var.
+    :return: Tokens-per-chunk bounding the transient ``(chunk_tokens, vocab)``
+        logits tensor in the token-flattened fused kernel.
+    """
+    return explicit or int(os.environ.get("AGILERL_LIGER_TOKEN_CHUNK", "2048"))
+
+
+def flatten_tokens_for_fused_loss(
+    policy_hidden: torch.Tensor,
+    target_ids: torch.Tensor,
+    mask: torch.Tensor,
+    old_log_probs: torch.Tensor | None,
+    reference_log_probs: torch.Tensor | None = None,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
+]:
+    """Flatten token-level inputs from ``(B, T, ...)`` to ``(B*T, 1, ...)``.
+
+    For ``importance_sampling_level="token"`` the per-token objective is
+    token-independent, so the ``(B, T_act, H)`` hidden states are flattened to
+    ``(B*T_act, 1, H)`` and the fused kernel chunks over *tokens* instead of
+    sequences. This performs that reshape for hidden states plus the matching
+    ``(B, T_act) -> (B*T_act, 1)`` reshapes of the target ids, mask and (when
+    present) the old / reference logprobs. The hidden tensor is made
+    ``contiguous`` to mirror :func:`apply_fused_policy_loss`.
+
+    Advantages are intentionally **not** handled here: their pre-flatten shape
+    varies by caller (``apply_fused_policy_loss`` carries ``(B, T_act)``, while
+    GRPO resolves several shapes to a flat ``(n_tokens,)`` vector), so advantage
+    reshaping stays inline at each call site.
+
+    :param policy_hidden: ``(B, T_act, H)`` hidden states sliced to action
+        positions.
+    :param target_ids: ``(B, T_act)`` next-token target ids.
+    :param mask: ``(B, T_act)`` action-token mask.
+    :param old_log_probs: ``(B, T_act)`` old-policy logprobs, or ``None``.
+    :param reference_log_probs: ``(B, T_act)`` reference logprobs, or ``None``.
+    :return: ``(hidden, target_ids, mask, old_log_probs, reference_log_probs)``
+        all flattened to the token-level layout; the logprob entries stay
+        ``None`` when their input was ``None``.
+    """
+    b, t_act, h = policy_hidden.shape
+    n_tokens = b * t_act
+    return (
+        policy_hidden.reshape(n_tokens, 1, h).contiguous(),
+        target_ids.reshape(n_tokens, 1),
+        mask.reshape(n_tokens, 1),
+        old_log_probs.reshape(n_tokens, 1) if old_log_probs is not None else None,
+        reference_log_probs.reshape(n_tokens, 1)
+        if reference_log_probs is not None
+        else None,
+    )
+
+
+def apply_fused_policy_loss(
+    policy_hidden: torch.Tensor,
+    lm_head_weight: torch.Tensor,
+    lm_head_bias: torch.Tensor | None,
+    target_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    advantages: torch.Tensor,
+    ref_per_token_logps: torch.Tensor | None,
+    old_per_token_logps: torch.Tensor | None,
+    beta: float,
+    epsilon_low: float,
+    epsilon_high: float,
+    temperature: float,
+    importance_sampling_level: str,
+    turn_ids: torch.Tensor | None = None,
+    full_turn_mask: torch.Tensor | None = None,
+    max_turns: int | None = None,
+    token_chunk_size: int | None = None,
+) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+    """Run :class:`LigerFusedLinearPolicyLossFunction`, bounded at token level.
+
+    For ``importance_sampling_level="token"`` the per-token objective is
+    token-independent, so the ``(B, T_act, H)`` hidden states are flattened to
+    ``(B*T_act, 1, H)`` and the fused kernel chunks over *tokens* — each chunk
+    materializes only ``(token_chunk, vocab)`` logits in both the forward and
+    backward, the same memory-bounding trick GRPO/CISPO use. The global
+    token-count denominator is unchanged by flattening, so the result is exact.
+    ``token_chunk_size`` (kwarg) sets the tokens-per-chunk; falls back to the
+    legacy ``AGILERL_LIGER_TOKEN_CHUNK`` env var (default 2048) when ``None``.
+
+    Turn- and sequence-level pooling couple a turn/sequence's tokens, so they
+    cannot be token-chunked: a chunk would only see part of the pooled unit.
+    Those levels keep the batch path (one sequence per chunk), which holds a
+    ``(seq_len, vocab)`` logits tensor per trajectory — not memory-bounded.
+    Use the standard (fused-linear-logprob) path for bounded memory there.
+
+    :param policy_hidden: ``(B, T_act, H)`` hidden states already sliced to the
+        action positions (caller does the ``[:, :-1]`` shift).
+    :param target_ids: ``(B, T_act)`` next-token target ids.
+    :param attention_mask: ``(B, T_act)`` action-token mask.
+    :param advantages: token level ``(B, T_act)``; turn ``(B, max_turns)``;
+        sequence ``(B, 1)``.
+    :return: ``(loss, aux)`` straight from the fused Function.
+    """
+    if importance_sampling_level == "token":
+        b, t_act, _ = policy_hidden.shape
+        n_tokens = b * t_act
+        token_chunk_size = resolve_token_chunk_size(token_chunk_size)
+        (
+            hidden_flat,
+            target_ids_flat,
+            mask_flat,
+            old_log_probs_flat,
+            ref_log_probs_flat,
+        ) = flatten_tokens_for_fused_loss(
+            policy_hidden,
+            target_ids,
+            attention_mask,
+            old_per_token_logps,
+            ref_per_token_logps,
+        )
+        return LigerFusedLinearPolicyLossFunction.apply(
+            hidden_flat,
+            lm_head_weight,
+            target_ids_flat,
+            mask_flat,
+            advantages.reshape(n_tokens, 1),
+            lm_head_bias,
+            ref_log_probs_flat,
+            old_log_probs_flat,
+            beta,
+            epsilon_low,
+            epsilon_high,
+            temperature,
+            False,  # compiled
+            token_chunk_size,  # tokens per chunk
+            None,  # turn_ids
+            None,  # full_turn_mask
+            None,  # max_turns
+            "token",
+        )
+    return LigerFusedLinearPolicyLossFunction.apply(
+        policy_hidden.contiguous(),
+        lm_head_weight,
+        target_ids,
+        attention_mask,
+        advantages,
+        lm_head_bias,
+        ref_per_token_logps,
+        old_per_token_logps,
+        beta,
+        epsilon_low,
+        epsilon_high,
+        temperature,
+        False,  # compiled
+        1,  # chunk_size — one sequence per chunk
+        turn_ids,
+        full_turn_mask,
+        max_turns,
+        importance_sampling_level,
+    )
 
 
 class _LigerDPOWithAlpha(LigerFusedLinearPreferenceBase):

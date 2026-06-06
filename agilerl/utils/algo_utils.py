@@ -1425,6 +1425,12 @@ class VLLMConfig:
     :param max_num_seqs: Maximum number of sequences processed concurrently.  For GRPO,
         set this to at least ``group_size`` to avoid request queuing, defaults to 8.
     :type max_num_seqs: int, optional
+    :param max_num_batched_tokens: Cap on tokens vLLM may process in one scheduler
+        iteration (prefill batching / compile profiling).  ``None`` uses
+        :func:`~agilerl.utils.llm_utils.resolve_vllm_max_num_batched_tokens`
+        (not ``max_num_seqs * max_model_len``, which OOMs long-context colocated
+        init).  Set explicitly when you need full parallel max-length prefills.
+    :type max_num_batched_tokens: int | None, optional
     :param sleep_mode: Put vLLM to sleep between ``get_action`` calls to free GPU memory
         for training.  Cannot be used with agent populations on a single device,
         defaults to False.
@@ -1436,6 +1442,18 @@ class VLLMConfig:
     :param quantization: Quantization method passed to the vLLM ``LLM`` constructor
         (e.g. ``"awq"``, ``"gptq"``).  ``None`` disables quantization, defaults to None.
     :type quantization: str | None, optional
+    :param vllm_model_name_or_path: Optional HF id or path for the vLLM engine only.
+        When set, the trainer may use a different ``model_name`` (e.g. bnb NF4 base)
+        while rollout loads this checkpoint (e.g. an AWQ export).  ``None`` uses the
+        trainer model path, defaults to None.
+    :type vllm_model_name_or_path: str | None, optional
+    :param kv_cache_dtype: Bare passthrough to vLLM's ``kv_cache_dtype`` kwarg
+        (e.g. ``"fp8"`` on Hopper+ / Ada / Blackwell, ``"auto"``).  AgileRL does
+        not validate any value — the string is forwarded verbatim and vLLM
+        emits its own hardware errors / warnings.  ``None`` (the default) omits
+        the kwarg so vLLM keeps its own default.  FP8 KV requires compute
+        capability 8.9+; on A100 leave this unset.
+    :type kv_cache_dtype: str | None, optional
     :param stop_sequences: List of strings that terminate generation early (e.g.
         ``["</answer>"]``).  Passed as ``stop`` to ``SamplingParams``, defaults to None.
     :type stop_sequences: list[str] | None, optional
@@ -1446,6 +1464,35 @@ class VLLMConfig:
     :param frequency_penalty: Penalise tokens proportionally to how often they have
         appeared so far.  Passed to ``SamplingParams``, defaults to 0.0 (disabled).
     :type frequency_penalty: float, optional
+    :param enable_lora: Enable vLLM's built-in LoRA serving. When ``True`` (default),
+        colocated rollouts sync only PEFT adapter weights into vLLM via
+        :meth:`~agilerl.algorithms.core.base.LLMAlgorithm._move_lora_to_vllm`
+        instead of merging adapters into the base and reloading the full model
+        (the :meth:`~agilerl.algorithms.core.base.LLMAlgorithm._move_merged_base_to_vllm`
+        path).
+    :type enable_lora: bool, optional
+    :param max_lora_rank: Maximum LoRA rank passed to the vLLM ``LLM`` constructor.
+        Should be at least the trainer's ``lora_config.r``.  Defaults to 16.
+    :type max_lora_rank: int, optional
+    :param max_loras: Maximum number of LoRA adapters vLLM can hold concurrently.
+        Defaults to 1 (actor rollout only).
+    :type max_loras: int, optional
+    :param weight_sharing: Zero-copy base-weight sharing between vLLM and the HF
+        trainer for bitsandbytes QLoRA. When ``True``, the trainer does not load
+        its own 4-bit base copy; instead it aliases vLLM's already-quantized base
+        tensors (one base copy on the GPU) and only LoRA adapters are synced per
+        step. Requires ``sleep_mode=True``, ``quantization="bitsandbytes"`` and a
+        bitsandbytes trainer ``quantization_config``; uses standby sleep (frees
+        only the KV cache, keeps weights resident — so no base reload is ever
+        needed). Without it, bnb rollout + bnb trainer keep two
+        separate base copies and cycle via sleep/wake + base reload. Defaults to
+        False.
+    :type weight_sharing: bool, optional
+    :param weight_sharing_multimodal: Reserved toggle to also share the
+        vision/audio towers of a multimodal base (not just the language model).
+        Not implemented yet — v1 shares the language model only, which is all RL
+        text rollouts need. Defaults to False.
+    :type weight_sharing_multimodal: bool, optional
     :param kv_cache_memory_bytes: Manually pin KV cache size in bytes instead of
         letting vLLM auto-size from ``gpu_memory_utilization``.  When set, vLLM
         uses this exact value for the KV cache and skips the auto-sizing path
@@ -1474,11 +1521,20 @@ class VLLMConfig:
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.3
     max_num_seqs: int = 8
+    max_num_batched_tokens: int | None = None
     swap_space: float | None = None
     enforce_eager: bool | None = None
     sleep_mode: bool = False
     dtype: str | None = None
     quantization: str | None = None
+    vllm_model_name_or_path: str | None = None
+    kv_cache_dtype: str | None = None
+    enable_lora: bool = True
+    max_lora_rank: int = 16
+    max_loras: int = 1
+    weight_sharing: bool = False
+    strip_multimodal_towers: bool = False
+    weight_sharing_multimodal: bool = False
     stop_sequences: list[str] | None = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
@@ -1487,12 +1543,49 @@ class VLLMConfig:
     kv_cache_memory_bytes: int | None = None
 
     def __post_init__(self) -> None:
-        if self.sleep_mode:
+        if self.weight_sharing:
+            if not self.sleep_mode:
+                msg = (
+                    "weight_sharing=True requires sleep_mode=True (it relies on "
+                    "standby sleep to keep the shared base resident across "
+                    "sleep/wake)."
+                )
+                raise ValueError(msg)
+            if self.quantization != "bitsandbytes":
+                msg = (
+                    "weight_sharing=True requires quantization='bitsandbytes' "
+                    f"on the vLLM side, got {self.quantization!r}. Sharing only "
+                    "applies when vLLM and the trainer quantize the same base "
+                    "with bitsandbytes."
+                )
+                raise ValueError(msg)
+        elif self.quantization == "bitsandbytes" and self.sleep_mode:
             warnings.warn(
-                """VLLM sleep mode cannot be used with populations of agents on a single device. To use sleep mode, ensure,
-                you are training a single agent or, alternatively, use a different device for each agent.""",
+                "vLLM quantization='bitsandbytes' with sleep_mode but WITHOUT "
+                "weight_sharing: vLLM cannot reload a bnb base in-place after "
+                "sleep, and offloading risks trainer OOM. Set "
+                "weight_sharing=True for a zero-copy shared base with standby "
+                "sleep (the supported path for bitsandbytes colocated rollouts).",
                 stacklevel=2,
             )
+        if self.sleep_mode:
+            warnings.warn(
+                "VLLM sleep mode cannot be used with populations of agents on a "
+                "single device. To use sleep mode, ensure you are training a "
+                "single agent or, alternatively, use a different device for "
+                "each agent.",
+                stacklevel=2,
+            )
+            if self.gpu_memory_utilization <= 0.5:
+                warnings.warn(
+                    f"vLLM sleep_mode=True with gpu_memory_utilization="
+                    f"{self.gpu_memory_utilization} — conservative for rollout "
+                    f"after sleep, but vLLM still allocates its KV pool during "
+                    f"``LLM()`` init before ``sleep()`` frees GPU memory. On "
+                    f"smaller GPUs or long context, cap init with "
+                    f"kv_cache_memory_bytes or a lower gpu_memory_utilization.",
+                    stacklevel=2,
+                )
 
 
 def create_warmup_cosine_scheduler(
