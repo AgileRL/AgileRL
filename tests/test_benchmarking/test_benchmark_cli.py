@@ -43,6 +43,34 @@ def _resolve(default_config, argv):
     )
 
 
+# Exact-value assertions use a controlled config so they don't break when the
+# real benchmark YAMLs evolve; real configs are exercised by
+# test_real_llm_configs_resolve (resolve-without-error only).
+@pytest.fixture
+def grpo_cfg(tmp_path):
+    cfg = tmp_path / "grpo.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "INIT_HP": {
+                    "ALGO": "CISPO",
+                    "GROUP_SIZE": 4,
+                    "CLIP_COEF": [0.8, 2.0],
+                    "IMPORTANCE_SAMPLING_LEVEL": "token",
+                    "ACTION_GRANULARITY": "turn",
+                    "MAX_TURNS": 50,
+                    "QUANTIZATION": "nf4",
+                    "ACTIVATION_OFFLOAD": True,
+                    "TARGET_MODULES": ["q_proj", "k_proj"],
+                    "POP_SIZE": 1,
+                },
+                "MUTATION_PARAMS": {"NO_MUT": 0.1, "MIN_GROUP_SIZE": 2},
+            }
+        )
+    )
+    return str(cfg)
+
+
 # --------------------------------------------------------------------------- #
 # Generic core
 # --------------------------------------------------------------------------- #
@@ -174,8 +202,8 @@ def test_dataclass_hierarchy():
     assert not issubclass(benchmark_cli_llm.SFTInitHP, benchmark_cli_llm.LLMRLInitHP)
 
 
-def test_grpo_config_loads_from_yaml():
-    resolved = _resolve(CISPO_CFG, [])
+def test_grpo_config_loads_from_yaml(grpo_cfg):
+    resolved = _resolve(grpo_cfg, [])
     hp = resolved.init_hp
     assert resolved.algo == "CISPO"
     assert hp["ALGO"] == "CISPO"
@@ -191,6 +219,26 @@ def test_grpo_config_loads_from_yaml():
     assert hp["QUANTIZATION"] == "nf4"
     assert hp["ACTIVATION_OFFLOAD"] is True
     assert resolved.mutation_params["NO_MUT"] == 0.1
+
+
+def test_real_llm_configs_resolve():
+    # The real benchmark YAMLs must resolve cleanly through the pipeline (values
+    # may evolve, so this asserts structure, not specific numbers).
+    rl_configs = {
+        "GRPO": "grpo.yaml",
+        "GSPO": "gspo.yaml",
+        "CISPO": "cispo.yaml",
+        "LLMREINFORCE": "reinforce_llm.yaml",
+        "LLMPPO": "ppo_llm.yaml",
+    }
+    for expected_algo, name in rl_configs.items():
+        path = str(LLM_CONFIG_DIR / name)
+        resolved = _resolve(path, [])
+        assert resolved.algo == expected_algo
+        assert resolved.init_hp["ALGO"] == expected_algo
+    for name, expected_algo in (("dpo.yaml", "DPO"),):
+        resolved = _resolve_offline(str(LLM_CONFIG_DIR / name), [])
+        assert resolved.algo == expected_algo
 
 
 def test_grpo_cli_overrides():
@@ -353,8 +401,8 @@ def test_print_config_exits(capsys):
 # --------------------------------------------------------------------------- #
 # vLLM kwargs
 # --------------------------------------------------------------------------- #
-def test_build_vllm_kwargs_defaults():
-    resolved = _resolve(CISPO_CFG, [])
+def test_build_vllm_kwargs_defaults(grpo_cfg):
+    resolved = _resolve(grpo_cfg, [])
     kwargs = resolved.build_vllm_kwargs()
     assert kwargs["sleep_mode"] is True  # POP_SIZE == 1
     assert kwargs["weight_sharing"] is False
@@ -486,10 +534,10 @@ def test_all_documented_quantization_rst_flags_parse():
     assert resolved.mutation_params["MIN_GROUP_SIZE"] == 2
 
 
-def test_vllm_defaults_per_script():
+def test_vllm_defaults_per_script(grpo_cfg):
     # reasoning-style throughput defaults flow through to build_vllm_kwargs.
     resolved = benchmark_cli_llm.parse_llm_benchmark_cli(
-        default_config=CISPO_CFG,
+        default_config=grpo_cfg,
         default_model=DEFAULT_MODEL,
         description="test",
         vllm_defaults={
@@ -505,7 +553,7 @@ def test_vllm_defaults_per_script():
     assert kwargs["sleep_mode"] is True
     # An explicit flag still overrides the per-script default.
     resolved2 = benchmark_cli_llm.parse_llm_benchmark_cli(
-        default_config=CISPO_CFG,
+        default_config=grpo_cfg,
         default_model=DEFAULT_MODEL,
         description="test",
         vllm_defaults={"gpu_memory_utilization": 0.8},
