@@ -159,7 +159,7 @@ class TestPrepareEnvUpload:
 class TestPrepareFileUpload:
     def test_path_upload(self, tmp_path: Path):
         path = tmp_path / "cfg.yaml"
-        path.write_text("key: val\n")
+        path.write_bytes(b"key: val\n")
         name, payload, content_type = prepare_file_upload(
             path,
             default_name="default.yaml",
