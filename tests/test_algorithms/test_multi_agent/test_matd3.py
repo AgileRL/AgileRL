@@ -799,6 +799,153 @@ class TestMATD3Init:
 
         assert isinstance(matd3.criterion, nn.MSELoss)
 
+    @pytest.mark.gpu
+    @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
+    @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
+    def test_init_with_list_evo_networks(
+        self,
+        mlp_actor,
+        mlp_critic,
+        device,
+        observation_spaces,
+        action_spaces,
+        request,
+    ):
+        """List-form actor/critic networks are converted to ModuleDict internally."""
+        observation_spaces = request.getfixturevalue(observation_spaces)
+        action_spaces = request.getfixturevalue(action_spaces)
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        group_to_index = get_group_index_map(agent_ids)
+        evo_actors = ModuleDict(
+            {
+                group_id: MakeEvolvable(
+                    network=mlp_actor,
+                    input_tensor=torch.randn(1, observation_spaces[0].shape[0]),
+                    device=device,
+                )
+                for group_id in group_to_index
+            },
+        )
+        evo_critics_1 = ModuleDict(
+            {
+                group_id: MakeEvolvable(
+                    network=mlp_critic,
+                    input_tensor=torch.randn(
+                        1,
+                        observation_spaces[0].shape[0] + action_spaces[0].n,
+                    ),
+                    device=device,
+                )
+                for group_id in group_to_index
+            },
+        )
+        evo_critics_2 = ModuleDict(
+            {
+                group_id: MakeEvolvable(
+                    network=mlp_critic,
+                    input_tensor=torch.randn(
+                        1,
+                        observation_spaces[0].shape[0] + action_spaces[0].n,
+                    ),
+                    device=device,
+                )
+                for group_id in group_to_index
+            },
+        )
+        network_ids = list(
+            MATD3(
+                observation_spaces=observation_spaces,
+                action_spaces=action_spaces,
+                agent_ids=agent_ids,
+                device=device,
+            ).observation_space.keys()
+        )
+        actor_list = [evo_actors[network_id] for network_id in network_ids]
+        critic_list_1 = [evo_critics_1[network_id] for network_id in network_ids]
+        critic_list_2 = [evo_critics_2[network_id] for network_id in network_ids]
+
+        matd3 = MATD3(
+            observation_spaces=observation_spaces,
+            action_spaces=action_spaces,
+            agent_ids=agent_ids,
+            actor_networks=actor_list,
+            critic_networks=[critic_list_1, critic_list_2],
+            device=device,
+        )
+
+        assert set(matd3.actors.keys()) == set(network_ids)
+        assert all(isinstance(actor, MakeEvolvable) for actor in matd3.actors.values())
+
+    def test_action_noise_gaussian(self, ma_vector_space, device):
+        matd3 = MATD3(
+            observation_spaces=ma_vector_space,
+            action_spaces=copy.deepcopy(ma_vector_space),
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            device=device,
+            O_U_noise=False,
+        )
+        agent_id = matd3.agent_ids[0]
+        noise = matd3.action_noise(agent_id)
+        assert noise.shape == matd3.sample_gaussian[agent_id].shape
+
+    def test_reset_action_noise(self, ma_vector_space, device):
+        matd3 = MATD3(
+            observation_spaces=ma_vector_space,
+            action_spaces=copy.deepcopy(ma_vector_space),
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            device=device,
+        )
+        agent_id = matd3.agent_ids[0]
+        matd3.current_noise[agent_id][0, :] = 1.0
+        matd3.reset_action_noise([0])
+        assert torch.all(matd3.current_noise[agent_id][0, :] == 0)
+
+    def test_learn_without_grouped_agents(self, ma_vector_space, device):
+        batch_size = 64
+        agent_ids = ["alpha", "beta", "gamma"]
+        matd3 = MATD3(
+            observation_spaces=ma_vector_space,
+            action_spaces=copy.deepcopy(ma_vector_space),
+            agent_ids=agent_ids,
+            device=device,
+            batch_size=batch_size,
+        )
+        assert not matd3.has_grouped_agents()
+
+        obs_dim = ma_vector_space[0].shape[0]
+        act_dim = ma_vector_space[0].shape[0]
+        experiences = TensorDict(
+            {
+                "obs": TensorDict(
+                    {a: torch.randn(batch_size, obs_dim) for a in agent_ids},
+                    batch_size=[batch_size],
+                ),
+                "action": TensorDict(
+                    {a: torch.randn(batch_size, act_dim) for a in agent_ids},
+                    batch_size=[batch_size],
+                ),
+                "reward": TensorDict(
+                    {a: torch.randn(batch_size, 1) for a in agent_ids},
+                    batch_size=[batch_size],
+                ),
+                "next_obs": TensorDict(
+                    {a: torch.randn(batch_size, obs_dim) for a in agent_ids},
+                    batch_size=[batch_size],
+                ),
+                "done": TensorDict(
+                    {a: torch.randint(0, 2, (batch_size, 1)) for a in agent_ids},
+                    batch_size=[batch_size],
+                ),
+            },
+            batch_size=[batch_size],
+        )
+
+        for _ in range(2):
+            matd3.scores.append(0)
+            loss = matd3.learn(experiences)
+
+        assert set(loss.keys()) == set(agent_ids)
+
     @pytest.mark.parametrize(
         "actor_networks,critic_networks,expected_error,error_match",
         [

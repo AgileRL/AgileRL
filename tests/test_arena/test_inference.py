@@ -841,6 +841,42 @@ class TestAgentHttpHelpers:
         with pytest.raises(ArenaInferenceError, match="not RL"):
             agent._ensure(rl=True)
 
+    def test_agent_info_requires_metadata(self):
+        agent = Agent.__new__(Agent)
+        agent.metadata = None
+        with pytest.raises(ArenaInferenceError, match="Metadata not loaded"):
+            agent._agent_info()
+
+    def test_ensure_rejects_supervised_on_llm(self):
+        agent = Agent.__new__(Agent)
+        agent.metadata = _default_metadata(llm=True, supervised=False, algo="GRPO")
+        with pytest.raises(ArenaInferenceError, match="not supervised"):
+            agent._ensure(supervised=True)
+
+    def test_ensure_rejects_llm_on_rl(self):
+        agent = Agent.__new__(Agent)
+        agent.metadata = _default_metadata(llm=False, supervised=False, algo="DQN")
+        with pytest.raises(ArenaInferenceError, match="not an LLM"):
+            agent._ensure(llm=True)
+
+    def test_multi_agent_mask_rejects_non_dict(self):
+        with pytest.raises(ArenaInferenceError, match="action_mask must be dict"):
+            Agent._multi_agent_mask({"action_mask": np.array([1, 0])})
+
+    def test_build_payload_includes_env_defined_actions_from_info(self):
+        agent = Agent.__new__(Agent)
+        agent.metadata = _default_metadata(multi_agent=True)
+        obs = {"agent_0": np.array([1.0, 2.0], dtype=np.float32)}
+        eda = {"agent_0": np.array([0.5], dtype=np.float32)}
+        payload = agent._build_payload(
+            obs,
+            batched=False,
+            hidden_state=None,
+            info={"env_defined_actions": eda},
+            env_defined_actions=None,
+        )
+        assert "env_defined_actions" in payload
+
     def test_validate_prompts_rejects_empty_list(self):
         with pytest.raises(ArenaInferenceError, match="At least one prompt"):
             Agent._validate_prompts([])

@@ -57,6 +57,10 @@ def mock_client() -> MagicMock:
             "delete_project",
             "set_default_project",
             "get_default_project",
+            "list_datasets",
+            "dataset_exists",
+            "create_dataset",
+            "delete_dataset",
         ]
     )
 
@@ -553,6 +557,95 @@ class TestExperimentSubmitCommand:
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["experiments", "submit"])
         assert result.exit_code != 0
+
+
+class TestDatasetsListCommand:
+    def test_list_registered(self, runner, mock_client):
+        mock_client.list_datasets.return_value = [{"name": "my-ds", "category": "sft"}]
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["datasets", "list"])
+        assert result.exit_code == 0
+        mock_client.list_datasets.assert_called_once_with(search=None)
+
+    def test_search_strips_descriptions_and_sorts(self, runner, mock_client):
+        mock_client.list_datasets.return_value = [
+            {
+                "name": "low",
+                "hf_dataset_id": "org/low",
+                "description": "secret",
+                "downloads": 10,
+            },
+            {
+                "name": "high",
+                "hf_dataset_id": "org/high",
+                "description": "secret",
+                "downloads": 100,
+            },
+        ]
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["datasets", "list", "--search", "countdown"])
+        assert result.exit_code == 0
+        mock_client.list_datasets.assert_called_once_with(search="countdown")
+        assert "description" not in result.output
+        assert result.output.index("high") < result.output.index("low")
+
+
+class TestDatasetsExistsCommand:
+    def test_exists(self, runner, mock_client):
+        mock_client.dataset_exists.return_value = {"exists": True, "id": 3}
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["datasets", "exists", "my-ds"])
+        assert result.exit_code == 0
+        mock_client.dataset_exists.assert_called_once_with(name="my-ds")
+
+
+class TestDatasetsCreateCommand:
+    def test_create_with_column_mapping_file(self, runner, mock_client, tmp_path):
+        mapping_file = tmp_path / "mapping.json"
+        mapping_file.write_text('{"prompt": "question"}', encoding="utf-8")
+        csv_file = tmp_path / "data.csv"
+        csv_file.write_bytes(b"question,answer\nhi,bye\n")
+        mock_client.create_dataset.return_value = {"name": "new-ds", "id": 1}
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "datasets",
+                    "create",
+                    "new-ds",
+                    "--category",
+                    "reasoning",
+                    "--column-mapping-file",
+                    str(mapping_file),
+                    "--file",
+                    str(csv_file),
+                    "--description",
+                    "test set",
+                ],
+            )
+        assert result.exit_code == 0
+        mock_client.create_dataset.assert_called_once_with(
+            name="new-ds",
+            category="reasoning",
+            column_mapping='{"prompt": "question"}',
+            description="test set",
+            file=csv_file,
+            hf_dataset_name=None,
+            hf_config=None,
+            hf_split=None,
+        )
+
+
+class TestDatasetsDeleteCommand:
+    def test_delete_with_yes(self, runner, mock_client):
+        mock_client.delete_dataset.return_value = {"name": "old-ds", "archived": True}
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                ["datasets", "delete", "old-ds", "--yes"],
+            )
+        assert result.exit_code == 0
+        mock_client.delete_dataset.assert_called_once_with(name="old-ds", confirm=True)
 
 
 class TestExperimentListCommand:

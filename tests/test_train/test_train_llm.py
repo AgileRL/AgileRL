@@ -373,6 +373,77 @@ class TestFinetuneLlmReasoning:
             assert mock_agent.test.call_count == 3
             assert mock_tournament_selection_and_mutation.call_count == 6
 
+    def test_finetune_llm_reasoning_warns_checkpoint_steps_during_evolution(self):
+        mock_agent = _mock_grpo_agent()
+        mock_env = MagicMock()
+        mock_env.__len__.return_value = 3
+        mock_env.reset.return_value = "initial_prompts"
+        mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
+        mock_env.data_batch_size_per_gpu = 1
+
+        mutation = MagicMock()
+        mutation.architecture_mut = 0
+        mutation.new_layer_prob = 0
+        mutation.parameters_mut = 0
+        mutation.activation_mut = 0
+
+        with (
+            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.train_llm.save_llm_checkpoint"),
+            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.train_llm.tournament_selection_and_mutation",
+                return_value=[mock_agent],
+            ),
+            pytest.warns(
+                UserWarning,
+                match="checkpoint_steps.*evolution is active",
+            ),
+        ):
+            mock_pbar_fn.return_value = MagicMock()
+            mock_agg.return_value = 0.5
+            finetune_llm_reasoning(
+                pop=[mock_agent],
+                env=mock_env,
+                evaluation_interval=2,
+                evo_steps=1,
+                tournament=Mock(),
+                mutation=mutation,
+                checkpoint_steps=3,
+            )
+
+    def test_finetune_llm_reasoning_saves_elite_at_end(self):
+        weaker = _mock_grpo_agent()
+        weaker.fitness = [0.1]
+        stronger = _mock_grpo_agent()
+        stronger.fitness = [0.9]
+
+        mock_env = MagicMock()
+        mock_env.__len__.return_value = 1
+        mock_env.reset.return_value = "initial_prompts"
+        mock_env.step.return_value = ("next_prompts", torch.tensor([2.0]))
+        mock_env.data_batch_size_per_gpu = 1
+
+        with (
+            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            _population_init_skip_per_mock_class(),
+        ):
+            mock_pbar_fn.return_value = MagicMock()
+            mock_agg.return_value = 0.5
+            finetune_llm_reasoning(
+                pop=[weaker, stronger],
+                env=mock_env,
+                evaluation_interval=10,
+                save_elite=True,
+                elite_path="/tmp/elite",
+            )
+
+            assert mock_save.call_args_list[-1] == call(stronger, "/tmp/elite")
+
     @pytest.mark.parametrize(
         "finetune_fn",
         [finetune_llm_reasoning, finetune_llm_preference],
@@ -613,6 +684,30 @@ class TestFinetuneLlmPreference:
         mock_env.step.return_value = example
         mock_env.data_batch_size_per_gpu = 1
         return mock_env
+
+    def test_finetune_llm_preference_saves_elite_at_end(self):
+        weaker = _mock_dpo_agent()
+        weaker.fitness = [0.2]
+        stronger = _mock_dpo_agent()
+        stronger.fitness = [0.8]
+        mock_env = self._pref_env(length=1)
+
+        with (
+            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            _population_init_skip_per_mock_class(),
+        ):
+            mock_pbar_fn.return_value = MagicMock()
+            finetune_llm_preference(
+                pop=[weaker, stronger],
+                env=mock_env,
+                evaluation_interval=10,
+                save_elite=True,
+                elite_path="/tmp/dpo-elite",
+            )
+
+            assert mock_save.call_args_list[-1] == call(stronger, "/tmp/dpo-elite")
 
     @pytest.mark.parametrize("use_accelerator", [True, False])
     def test_finetune_llm_preference_basic_training_loop(self, use_accelerator):

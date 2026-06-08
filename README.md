@@ -31,13 +31,30 @@ We are constantly adding more algorithms and features. AgileRL already includes 
 <p align="center">AgileRL offers 10x faster hyperparameter optimization than SOTA.</p>
 
 ## Table of Contents
-  * [Get Started](#get-started)
   * [Benchmarks](#benchmarks)
+  * [Get Started](#get-started)
+  * [Training](#training)
   * [Arena](#arena)
   * [Tutorials](#tutorials)
-  * [Algorithms implemented](#evolvable-algorithms-more-coming-soon)
-  * [Training](#training)
+  * [Algorithms](#evolvable-algorithms-more-coming-soon)
   * [Citing AgileRL](#citing-agilerl)
+
+## Benchmarks
+
+Reinforcement learning algorithms and libraries are usually benchmarked once the optimal hyperparameters for training are known, but it often takes hundreds or thousands of experiments to discover these. This is unrealistic and does not reflect the true, total time taken for training. What if we could remove the need to conduct all these prior experiments?
+
+In the charts below, a single AgileRL run, which automatically tunes hyperparameters, is benchmarked against Optuna's multiple training runs traditionally required for hyperparameter optimization, demonstrating the real time savings possible. Global steps is the sum of every step taken by any agent in the environment, including across an entire population.
+
+<p align="center">
+  <img src=https://user-images.githubusercontent.com/47857277/227481592-27a9688f-7c0a-4655-ab32-90d659a71c69.png min-width="100%" width="600">
+</p>
+<p align="center"><small>AgileRL offers an order of magnitude speed up in hyperparameter optimization vs popular reinforcement learning training frameworks combined with Optuna. Remove the need for multiple training runs and save yourself hours.</small></p>
+
+AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-style (parallel API). The charts below highlight the performance of our MADDPG and MATD3 algorithms with evolutionary hyper-parameter optimisation (HPO), benchmarked against epymarl's MADDPG algorithm with grid-search HPO for the simple speaker listener and simple spread environments.
+
+<p align="center">
+  <img src=https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png  min-width="100%" width="700">
+</p>
 
 ## Get Started
 
@@ -73,23 +90,6 @@ To install the ``nightly`` version of AgileRL with the latest features, use:
 pip install git+https://github.com/AgileRL/AgileRL.git@nightly
 ```
 
-## Benchmarks
-
-Reinforcement learning algorithms and libraries are usually benchmarked once the optimal hyperparameters for training are known, but it often takes hundreds or thousands of experiments to discover these. This is unrealistic and does not reflect the true, total time taken for training. What if we could remove the need to conduct all these prior experiments?
-
-In the charts below, a single AgileRL run, which automatically tunes hyperparameters, is benchmarked against Optuna's multiple training runs traditionally required for hyperparameter optimization, demonstrating the real time savings possible. Global steps is the sum of every step taken by any agent in the environment, including across an entire population.
-
-<p align="center">
-  <img src=https://user-images.githubusercontent.com/47857277/227481592-27a9688f-7c0a-4655-ab32-90d659a71c69.png min-width="100%" width="600">
-</p>
-<p align="center"><small>AgileRL offers an order of magnitude speed up in hyperparameter optimization vs popular reinforcement learning training frameworks combined with Optuna. Remove the need for multiple training runs and save yourself hours.</small></p>
-
-AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-style (parallel API). The charts below highlight the performance of our MADDPG and MATD3 algorithms with evolutionary hyper-parameter optimisation (HPO), benchmarked against epymarl's MADDPG algorithm with grid-search HPO for the simple speaker listener and simple spread environments.
-
-<p align="center">
-  <img src=https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png  min-width="100%" width="700">
-</p>
-
 ## Training Locally
 
 AgileRL provides the tools to train RL algorithms in a variety of ways, focusing on flexibility and modularity as a stepping stone for efficiently training
@@ -98,7 +98,7 @@ arbitrarily large populations of agents in a distributed manner on Arena.
 ### Training a Single Agent without Evolutionary HPO
 
 The simplest way to train an RL agent with AgileRL is through the
-[`LocalTrainer`](https://docs.agilerl.com/en/latest/trainers/index.html). Here is an example of training a DQN agent on the LunarLander-v3 environment:
+[`LocalTrainer`](https://docs.agilerl.com/en/latest/trainers/index.html). Here is an example of training a DQN agent on the `LunarLander-v3` environment:
 
 ```python
 from agilerl.training.trainer import LocalTrainer
@@ -132,7 +132,7 @@ population, fitnesses = trainer.train()
 
 This trains a population of four DQN agents that share experiences but learn individually. Every 10,000 steps
 (default value for `evo_steps` in `TrainingSpec`), tournament selection identifies the best
-performers and mutations are applied to explore the hyperparameter space. See [Evolutionary Hyperparameter Optimization](https://docs.agilerl.com/en/latest/evo_hyperparam_opt/index.html) for details on how evolutionary HPO works.
+performers and mutations are applied to explore the hyperparameter space. See [Evolutionary Hyperparameter Optimization](https://docs.agilerl.com/en/latest/evo_hyperparam_opt/index.html) for details on how evolutionary HPO works in AgileRL.
 
 Or via a YAML manifest:
 
@@ -322,7 +322,7 @@ This approach gives you the flexibility to swap in your own Gymnasium or Petting
 
 [Arena](https://arena.agilerl.com) is the RLOps platform from AgileRL. We provide tools to create and validate custom reinforcement learning environments on the platform and train RL agents on managed cloud infrastructure specifically tailored to RL workloads.
 
-AgileRL ships an **SDK** (Python client) and an **CLI** for interacting with the platform. Install them with:
+AgileRL ships a **Python SDK** and a **CLI** for interacting with the platform. Install them with:
 
 ```bash
 pip install agilerl[arena]
@@ -360,7 +360,7 @@ arena login
 arena env validate --source path/to/my_env.py
 
 # Train on validated custom environment
-arena experiment submit path/to/manifest.yaml --project my-project
+arena experiments submit path/to/manifest.yaml --project my-project
 ```
 
 For the full CLI and Python SDK reference—including authentication, environment validation, experiments, and deployment—see the [Arena Client](https://docs.agilerl.com/en/latest/arena/index.html) documentation.
