@@ -2639,15 +2639,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         self.vllm_importance_sampling_apply = bool(vllm_importance_sampling_apply)
         self.vllm_importance_sampling_cap = float(vllm_importance_sampling_cap)
-        if self.vllm_importance_sampling_correction and not use_vllm:
-            warnings.warn(
-                "vllm_importance_sampling_correction=True has no effect when "
-                "use_vllm=False: the rollout and training forwards then share "
-                "the same engine, so there is no sampling mismatch to correct. "
-                "Disabling it.",
-                stacklevel=2,
-            )
-            self.vllm_importance_sampling_correction = False
+        # NB: do not auto-disable the correction when ``use_vllm=False``. A
+        # decoupled (e.g. Ray async) rollout still draws samples from a separate
+        # vLLM engine while ``use_vllm`` is False on the trainer, so the
+        # sampling mismatch is real and the correction must stay honoured.
         # Warn-once flag for the Liger + vLLM sampling-mismatch incompatibility
         # (the fused kernel cannot apply a per-token importance weight).
         self._is_correction_liger_warned = False
