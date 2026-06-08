@@ -1478,16 +1478,17 @@ class VLLMConfig:
         Defaults to 1 (actor rollout only).
     :type max_loras: int, optional
     :param weight_sharing: Zero-copy base-weight sharing between vLLM and the HF
-        trainer for bitsandbytes QLoRA. When ``True``, the trainer does not load
-        its own 4-bit base copy; instead it aliases vLLM's already-quantized base
-        tensors (one base copy on the GPU) and only LoRA adapters are synced per
-        step. Requires ``sleep_mode=True``, ``quantization="bitsandbytes"`` and a
-        bitsandbytes trainer ``quantization_config``; uses standby sleep (frees
-        only the KV cache, keeps weights resident — so no base reload is ever
-        needed). Without it, bnb rollout + bnb trainer keep two
-        separate base copies and cycle via sleep/wake + base reload. Defaults to
-        False.
-    :type weight_sharing: bool, optional
+        LoRA trainer, for a bitsandbytes-quantized **or** dense (bf16/fp16) base.
+        When sharing, the trainer does not load its own base copy; it aliases
+        vLLM's already-loaded base tensors (one base copy on the GPU) and only
+        LoRA adapters are synced per step, via standby sleep (frees only the KV
+        cache, keeps weights resident — no base reload). Tri-state: ``True``
+        requires sharing (raises if a precondition fails); ``False`` keeps the
+        legacy two-copy path; ``None`` (default, "auto") shares whenever the
+        colocated preconditions hold (``sleep_mode`` + ``enable_lora`` +
+        ``tensor_parallel_size == 1`` + no user-supplied base model) and falls
+        back to the two-copy path otherwise.
+    :type weight_sharing: bool | None, optional
     :param weight_sharing_multimodal: Reserved toggle to also share the
         vision/audio towers of a multimodal base (not just the language model).
         Not implemented yet — v1 shares the language model only, which is all RL
@@ -1532,7 +1533,7 @@ class VLLMConfig:
     enable_lora: bool = True
     max_lora_rank: int = 16
     max_loras: int = 1
-    weight_sharing: bool = False
+    weight_sharing: bool | None = None
     strip_multimodal_towers: bool = False
     weight_sharing_multimodal: bool = False
     stop_sequences: list[str] | None = None
@@ -1543,7 +1544,7 @@ class VLLMConfig:
     kv_cache_memory_bytes: int | None = None
 
     def __post_init__(self) -> None:
-        if self.weight_sharing:
+        if self.weight_sharing is True:
             if not self.sleep_mode:
                 msg = (
                     "weight_sharing=True requires sleep_mode=True (it relies on "
@@ -1551,21 +1552,17 @@ class VLLMConfig:
                     "sleep/wake)."
                 )
                 raise ValueError(msg)
-            if self.quantization != "bitsandbytes":
-                msg = (
-                    "weight_sharing=True requires quantization='bitsandbytes' "
-                    f"on the vLLM side, got {self.quantization!r}. Sharing only "
-                    "applies when vLLM and the trainer quantize the same base "
-                    "with bitsandbytes."
-                )
-                raise ValueError(msg)
-        elif self.quantization == "bitsandbytes" and self.sleep_mode:
+        elif (
+            self.weight_sharing is False
+            and self.quantization == "bitsandbytes"
+            and self.sleep_mode
+        ):
             warnings.warn(
-                "vLLM quantization='bitsandbytes' with sleep_mode but WITHOUT "
-                "weight_sharing: vLLM cannot reload a bnb base in-place after "
-                "sleep, and offloading risks trainer OOM. Set "
-                "weight_sharing=True for a zero-copy shared base with standby "
-                "sleep (the supported path for bitsandbytes colocated rollouts).",
+                "vLLM quantization='bitsandbytes' with sleep_mode but "
+                "weight_sharing=False: vLLM cannot reload a bnb base in-place "
+                "after sleep, and offloading risks trainer OOM. Leave "
+                "weight_sharing unset (auto) or set it True for a zero-copy "
+                "shared base with standby sleep.",
                 stacklevel=2,
             )
         if self.sleep_mode:

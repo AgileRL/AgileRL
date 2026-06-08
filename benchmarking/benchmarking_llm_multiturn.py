@@ -88,8 +88,11 @@ def main(init_hp, mut_p):
 
     accelerator = create_llm_accelerator()
 
-    # Colocated vLLM rollout with zero-copy base-weight sharing for the bnb
-    # QLoRA trainer (one quantized base on the GPU; only LoRA adapters synced).
+    # Colocated vLLM rollout with zero-copy base-weight sharing (one base copy on
+    # the GPU; only LoRA adapters synced). vLLM mirrors the trainer's precision —
+    # bitsandbytes when the trainer quantizes, dense bf16 otherwise — and
+    # weight_sharing is left unset (auto): it engages whenever the colocated
+    # preconditions hold, for a quantized or dense base alike.
     use_vllm = bool(init_hp.get("USE_VLLM", True))
     vllm_config = (
         VLLMConfig(
@@ -97,9 +100,8 @@ def main(init_hp, mut_p):
             gpu_memory_utilization=0.9,
             max_num_seqs=10,
             sleep_mode=init_hp.get("POP_SIZE", 1) == 1,
-            quantization="bitsandbytes",
+            quantization=("bitsandbytes" if quantization_config is not None else None),
             dtype="bfloat16",
-            weight_sharing=True,
             strip_multimodal_towers=True,
         )
         if use_vllm

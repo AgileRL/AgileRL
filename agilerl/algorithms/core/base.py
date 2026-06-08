@@ -2679,31 +2679,44 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self._vllm_lora_loaded = False
         self._vllm_lora_staging_dir: Path | None = None
         self._vllm_rollout_lora_request: Any | None = None
-        # Zero-copy base-weight sharing (bnb QLoRA): the trainer aliases vLLM's
-        # quantized base instead of loading its own copy, and standby sleep
-        # keeps that single shared base resident (no reload). ``_vllm_standby``
-        # is set when the standby patch is applied in ``_configure_vllm``.
-        self._weight_sharing = bool(
+        # Zero-copy base-weight sharing: the trainer aliases vLLM's base
+        # (bitsandbytes-quantized or dense) instead of loading its own copy, and
+        # standby sleep keeps that single shared base resident (no reload). The
+        # tri-state ``VLLMConfig.weight_sharing`` (True / False / None=auto) is
+        # resolved here against the colocated preconditions; the
+        # user-supplied-base check is deferred to
+        # ``_initialize_colocated_vllm_and_actors`` (the base model is not known
+        # yet). ``_vllm_standby`` is set when the standby patch is applied in
+        # ``_configure_vllm``.
+        ws_requested = (
+            getattr(self.vllm_config, "weight_sharing", None)
+            if self.vllm_config is not None
+            else None
+        )
+        self._weight_sharing_requested = ws_requested
+        can_share = bool(
             self.use_vllm
             and self.vllm_config is not None
-            and getattr(self.vllm_config, "weight_sharing", False)
+            and getattr(self.vllm_config, "sleep_mode", False)
+            and getattr(self.vllm_config, "enable_lora", True)
+            and getattr(self.vllm_config, "tensor_parallel_size", 1) == 1
         )
+        if ws_requested is True and not can_share:
+            msg = (
+                "VLLMConfig(weight_sharing=True) requires the colocated sharing "
+                "preconditions: use_vllm=True, sleep_mode=True, enable_lora=True "
+                "and tensor_parallel_size==1. Got use_vllm="
+                f"{self.use_vllm}, sleep_mode="
+                f"{getattr(self.vllm_config, 'sleep_mode', None)}, enable_lora="
+                f"{getattr(self.vllm_config, 'enable_lora', None)}, "
+                "tensor_parallel_size="
+                f"{getattr(self.vllm_config, 'tensor_parallel_size', None)}. "
+                "Unset weight_sharing (auto) or fix the preconditions."
+            )
+            raise ValueError(msg)
+        self._weight_sharing = bool(can_share and ws_requested is not False)
         self._vllm_standby = False
         if self._weight_sharing:
-            if self.quantization_config is None:
-                msg = (
-                    "VLLMConfig(weight_sharing=True) requires a bitsandbytes "
-                    "trainer quantization_config (the trainer must share vLLM's "
-                    "4-bit base). Pass quantization_config or disable "
-                    "weight_sharing."
-                )
-                raise ValueError(msg)
-            if self.use_value_head:
-                msg = (
-                    "VLLMConfig(weight_sharing=True) does not support a value "
-                    "head; the shared base is a plain causal-LM."
-                )
-                raise ValueError(msg)
             # The trainer base aliases vLLM's GPU-resident tensors, so it must
             # never be shuttled to CPU between rollout and learn (that would
             # break the aliasing and un-resident the shared weights).
@@ -4002,23 +4015,38 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         add_adapters: bool = True,
     ) -> None:
         """Initialize colocated vLLM and HF trainer with a CUDA-safe ordering."""
-        if self._weight_sharing:
-            if base_model is not None:
+        if self._weight_sharing and base_model is not None:
+            # Sharing builds the trainer base from vLLM's loaded weights; vLLM
+            # loads from disk, so it cannot share an in-memory model. Honour an
+            # explicit request with an error; auto-disable otherwise.
+            if self._weight_sharing_requested is True:
                 msg = (
-                    "weight_sharing builds the trainer base from vLLM's loaded "
-                    "weights; a user-supplied base_model/actor_network is not "
-                    "supported. Disable weight_sharing or omit the base model."
+                    "VLLMConfig(weight_sharing=True) builds the trainer base "
+                    "from vLLM's loaded weights; a user-supplied "
+                    "base_model/actor_network is not supported. Omit the base "
+                    "model (load from pretrained_model_name_or_path) or unset "
+                    "weight_sharing."
                 )
                 raise ValueError(msg)
+            warnings.warn(
+                "colocated init: weight-sharing auto-disabled because a "
+                "user-supplied base_model/actor_network was provided (vLLM "
+                "cannot share an in-memory model); using the non-shared path.",
+                stacklevel=2,
+            )
+            self._weight_sharing = False
+
+        if self._weight_sharing:
             if self.accelerator is None or self.accelerator.process_index == 0:
                 warnings.warn(
                     "colocated init: weight-sharing order (vLLM-first; trainer "
-                    "aliases vLLM's bnb base, standby sleep keeps it resident)",
+                    "aliases vLLM's base, standby sleep keeps it resident)",
                     stacklevel=2,
                 )
             # vLLM first (left awake by _configure_vllm under weight_sharing).
             self._configure_vllm()
-            # Build the trainer base aliasing vLLM's live quantized weights.
+            # Build the trainer base aliasing vLLM's live (quantized or dense)
+            # weights.
             shared_base = self._build_shared_base_from_vllm()
             self._initialize_actors(shared_base, add_adapters)
             # Now sleep vLLM: standby frees only the KV cache; the shared base
@@ -4050,13 +4078,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self._initialize_actors(base_model, add_adapters)
 
     def _build_shared_base_from_vllm(self) -> PreTrainedModelProtocol:
-        """Build an HF base whose weights alias vLLM's loaded bnb tensors.
+        """Build an HF base whose weights alias vLLM's loaded tensors.
 
-        Loads the architecture config, then grafts vLLM's quantized
-        ``Params4bit`` weights and ``QuantState`` objects into an empty HF
-        skeleton so the trainer holds no separate 4-bit base copy. The result
-        is handed to :meth:`_initialize_actors` as ``base_model`` and PEFT-
-        wrapped there. ``compute_dtype`` follows the trainer bnb config.
+        Loads the architecture config, then grafts vLLM's shared weights into an
+        empty HF skeleton so the trainer holds no separate base copy: for a
+        quantized base the ``Params4bit`` weights + ``QuantState`` objects, for a
+        dense base the bf16/fp16 ``Params``. With ``use_value_head`` the shared
+        causal LM is wrapped in ``AutoModelForCausalLMWithValueHead`` (the value
+        head is trainer-only, not aliased). The result is handed to
+        :meth:`_initialize_actors` as ``base_model`` and PEFT-wrapped there.
 
         :return: An ``nn.Module`` aliasing vLLM's base, ready for PEFT wrapping.
         """
@@ -4064,10 +4094,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         hf_config = AutoConfig.from_pretrained(self.pretrained_model_name_or_path)
         bnb_config = self.quantization_config
-        compute_dtype = getattr(bnb_config, "bnb_4bit_compute_dtype", torch.bfloat16)
-        if not isinstance(compute_dtype, torch.dtype):
-            name = str(compute_dtype).removeprefix("torch.")
-            compute_dtype = getattr(torch, name, torch.bfloat16)
+        if bnb_config is not None:
+            compute_dtype = getattr(
+                bnb_config, "bnb_4bit_compute_dtype", torch.bfloat16
+            )
+            if not isinstance(compute_dtype, torch.dtype):
+                name = str(compute_dtype).removeprefix("torch.")
+                compute_dtype = getattr(torch, name, torch.bfloat16)
+        else:
+            # Dense base: shares vLLM's bf16/fp16 tensors; bf16 matches the
+            # rollout forward and the value head.
+            compute_dtype = torch.bfloat16
         attn_impl = (
             self.model_config.get("attn_implementation")
             if isinstance(self.model_config, dict)
@@ -4080,9 +4117,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             bnb_config,
             share_towers=getattr(self.vllm_config, "weight_sharing_multimodal", False),
             attn_implementation=attn_impl,
+            add_value_head=self.use_value_head,
         )
-        # Fail loudly if any base param was copied instead of aliased.
-        assert_shared_storage(self.llm, shared_base)
+        # Fail loudly if any base param was copied instead of aliased. For a
+        # value-head wrapper the inner causal LM carries the shared weights;
+        # assert against it (the wrapper prefixes module names with
+        # ``pretrained_model.``).
+        base_for_assert = (
+            shared_base.pretrained_model if self.use_value_head else shared_base
+        )
+        assert_shared_storage(self.llm, base_for_assert)
         return shared_base
 
     def _initialize_actors(
@@ -4162,24 +4206,24 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 or getattr(peft_target, "is_loaded_in_4bit", False)
                 or getattr(peft_target, "is_quantized", False)
             )
-            if quantized_base:
-                if self._weight_sharing:
-                    # The shared base aliases vLLM's bf16 tensors and is frozen.
-                    # Stock kbit-prep would upcast it to fp32 — allocating ~14 GiB
-                    # of transient copies (OOM at high gpu_memory_utilization) and
-                    # un-aliasing it. Use the no-upcast variant: freeze + enable
-                    # gradient checkpointing, keep the base bf16 and shared.
-                    peft_target = prepare_shared_base_for_kbit_training(
-                        peft_target,
-                        use_gradient_checkpointing=self.gradient_checkpointing,
-                        gradient_checkpointing_kwargs={"use_reentrant": False},
-                    )
-                else:
-                    peft_target = prepare_model_for_kbit_training(
-                        peft_target,
-                        use_gradient_checkpointing=self.gradient_checkpointing,
-                        gradient_checkpointing_kwargs={"use_reentrant": False},
-                    )
+            if self._weight_sharing:
+                # The shared base aliases vLLM's tensors and is frozen. Stock
+                # kbit-prep would upcast non-Params4bit weights to fp32 —
+                # allocating large transient copies (OOM at high
+                # gpu_memory_utilization) and un-aliasing the base. Use the
+                # no-upcast variant for both quantized and dense shared bases:
+                # freeze + enable gradient checkpointing, keep the base shared.
+                peft_target = prepare_shared_base_for_kbit_training(
+                    peft_target,
+                    use_gradient_checkpointing=self.gradient_checkpointing,
+                    gradient_checkpointing_kwargs={"use_reentrant": False},
+                )
+            elif quantized_base:
+                peft_target = prepare_model_for_kbit_training(
+                    peft_target,
+                    use_gradient_checkpointing=self.gradient_checkpointing,
+                    gradient_checkpointing_kwargs={"use_reentrant": False},
+                )
             # Gemma 4 etc.: LoRA must target inner ``.linear`` inside *ClippableLinear.
             lora_config = adapt_lora_config_for_model(
                 peft_target,

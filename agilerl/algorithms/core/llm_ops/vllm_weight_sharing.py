@@ -1,14 +1,16 @@
 """Zero-copy base-weight sharing between a colocated vLLM engine and the
-HF/PEFT QLoRA trainer (bitsandbytes 4-bit).
+HF/PEFT LoRA trainer (bitsandbytes-quantized or dense bf16/fp16).
 
-When both the rollout engine (vLLM) and the trainer (HF + PEFT) quantize the
-*same* base model with bitsandbytes, this module removes the trainer's separate
-4-bit copy: after vLLM loads the bnb base, its quantized weight tensors (and
-their bnb ``QuantState`` objects) are extracted *by reference* and grafted into
-an HF model skeleton, so the trainer's ``Linear4bit`` modules and vLLM share the
-exact same GPU storage. Only the LoRA adapters differ per side. Combined with
-:func:`patch_vllm_standby_sleep_mode`, the shared base never leaves the GPU and
-never needs reloading.
+The rollout engine (vLLM) and the trainer (HF + PEFT) load the *same* base
+model; this module removes the trainer's separate copy. After vLLM loads the
+base, its weight tensors (and, when quantized, their bnb ``QuantState`` objects)
+are extracted *by reference* and grafted into an HF model skeleton, so the
+trainer's linears and vLLM share the exact same GPU storage. For a quantized
+base the grafted modules are bnb ``Linear4bit``; for a dense base the shared
+``Params`` are grafted onto the skeleton's ``nn.Linear`` directly. Only the LoRA
+adapters (and, for PPO, a small trainer-only value head) differ per side.
+Combined with :func:`patch_vllm_standby_sleep_mode`, the shared base never
+leaves the GPU and never needs reloading.
 
 Scope (v1): the **language model only**. RL rollouts are text-only, so for a
 multimodal base the trainer skeleton is still the full model (so LoRA adapter
@@ -28,6 +30,7 @@ the shared tensors.
 from __future__ import annotations
 
 import gc
+import itertools
 import os
 import warnings
 from collections import OrderedDict
@@ -449,13 +452,29 @@ def _set_submodule(model: nn.Module, name: str, new_module: nn.Module) -> None:
         setattr(parent, leaf, new_module)
 
 
+def _plain_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Strip a tensor *subclass* to a plain ``Tensor`` view (shares storage).
+
+    vLLM wraps loaded weights in tensor subclasses (e.g. dense weights are
+    ``ModelWeightParameter`` with a custom ``__torch_dispatch__``).
+    ``nn.Parameter(subclass)`` raises because the subclass's ``detach()`` returns
+    a plain ``Tensor`` of a different type. ``as_subclass`` returns a view that
+    aliases the same storage (so zero-copy sharing is preserved) but whose type
+    is exactly ``torch.Tensor``, which ``nn.Parameter`` accepts.
+    """
+    if type(tensor) is torch.Tensor:
+        return tensor
+    return tensor.as_subclass(torch.Tensor)
+
+
 def _graft_param(
     model: nn.Module, name: str, tensor: torch.Tensor, requires_grad: bool = False
 ) -> None:
     """Set ``model.<name>`` to a ``Parameter`` wrapping ``tensor`` in place."""
     parent_path, _, leaf = name.rpartition(".")
     parent = _navigate(model, parent_path)
-    setattr(parent, leaf, torch.nn.Parameter(tensor, requires_grad=requires_grad))
+    param = torch.nn.Parameter(_plain_tensor(tensor), requires_grad=requires_grad)
+    setattr(parent, leaf, param)
 
 
 def _target_exists(model: nn.Module, name: str) -> bool:
@@ -531,6 +550,41 @@ def _emit_quant(
     out[f"{hf_name}.weight.quant_state"] = quant_states[idx]
 
 
+def _emit_dense(
+    out: OrderedDict[str, Any],
+    hf_name: str,
+    packed_weight: torch.Tensor,
+    offsets: list[int],
+    idx: int,
+) -> None:
+    """Record one (possibly fused) dense shard as an aliased HF weight slice.
+
+    Dense counterpart of :func:`_emit_quant`: the un-quantized fused projection
+    is split into HF sub-modules by slicing rows (no ``QuantState`` to carry).
+    """
+    out[f"{hf_name}.weight"] = packed_weight[offsets[idx] : offsets[idx + 1]]
+
+
+def _output_size_offsets(module: Any, subs: list[str], pname: str) -> list[int]:
+    """Per-shard row offsets for a fused projection, from vLLM ``output_sizes``.
+
+    Used to split a dense fused **weight** and any fused **bias** (which is dense
+    even on a quantized base, so it is never carried in ``bnb_shard_offsets``).
+    ``QKVParallelLinear`` / ``MergedColumnParallelLinear`` expose ``output_sizes``
+    (e.g. ``[q, k, v]`` / ``[gate, up]``); at TP=1 these are the full per-shard
+    sizes. Raises if they are absent or don't match the packed sub-module count.
+    """
+    output_sizes = getattr(module, "output_sizes", None)
+    if output_sizes is None or len(output_sizes) != len(subs):
+        msg = (
+            f"Cannot split the fused parameter {pname!r} into {len(subs)} "
+            f"shards: the vLLM module exposes output_sizes={output_sizes!r}, "
+            f"which does not match packed_modules_mapping={subs!r}."
+        )
+        raise RuntimeError(msg)
+    return list(itertools.accumulate([0, *output_sizes]))
+
+
 def _extract_with_layout(
     llm: Any,
     hf_config: Any,
@@ -587,14 +641,44 @@ def _extract_with_layout(
                     )
                     raise RuntimeError(msg)
             else:
+                # Dense (unquantized) weight. A fused projection
+                # (``qkv_proj`` / ``gate_up_proj``) must still be split into its
+                # HF sub-modules, but the per-shard sizes come from the vLLM
+                # linear's ``output_sizes`` (there is no ``bnb_shard_offsets``).
                 param.requires_grad_(False)
-                weight = param
-                if leaf == "embed_tokens":
-                    weight = _truncate_vocab(param, vocab_size)
-                out[f"{hf_prefix}.{owner}.weight"] = weight
+                subs = packed.get(leaf)
+                if subs is not None and len(subs) > 1:
+                    module = _navigate_safe(root, pname[: -len(".weight")])
+                    offsets = _output_size_offsets(module, subs, pname)
+                    parent_hf = f"{hf_prefix}.{owner.rsplit('.', 1)[0]}"
+                    for i, sub in enumerate(subs):
+                        _emit_dense(out, f"{parent_hf}.{sub}", param, offsets, i)
+                else:
+                    weight = param
+                    if leaf == "embed_tokens":
+                        weight = _truncate_vocab(param, vocab_size)
+                    out[f"{hf_prefix}.{owner}.weight"] = weight
+        elif name.endswith(".bias"):
+            # A fused projection's bias must be split into its HF sub-modules
+            # exactly like the weight, using ``output_sizes`` — for BOTH dense
+            # and quantized bases (the bias is dense either way and is not in
+            # ``bnb_shard_offsets``). Without this, models with attention biases
+            # (e.g. Qwen2) lose their q/k/v biases and the forward is wrong.
+            param.requires_grad_(False)
+            owner = name[: -len(".bias")]
+            leaf = owner.rsplit(".", 1)[-1]
+            subs = packed.get(leaf)
+            if subs is not None and len(subs) > 1:
+                module = _navigate_safe(root, pname[: -len(".bias")])
+                offsets = _output_size_offsets(module, subs, pname)
+                parent_hf = f"{hf_prefix}.{owner.rsplit('.', 1)[0]}"
+                for i, sub in enumerate(subs):
+                    out[f"{parent_hf}.{sub}.bias"] = param[offsets[i] : offsets[i + 1]]
+            else:
+                out[f"{hf_prefix}.{owner}.bias"] = param
         else:
-            # Bias or raw parameter (scales, router coefficients, per-layer
-            # parameters); carried through unchanged.
+            # Raw parameter (scales, router coefficients, per-layer parameters);
+            # carried through unchanged.
             param.requires_grad_(False)
             out[f"{hf_prefix}.{name}"] = param
 
@@ -613,7 +697,8 @@ def extract_vllm_bnb_state_dict(
 ) -> OrderedDict[str, Any]:
     """Extract an HF-named, zero-copy view of vLLM's language-model weights.
 
-    Generic module-walk over vLLM's live text decoder. For each parameter:
+    Generic module-walk over vLLM's live text decoder, handling both
+    bitsandbytes-quantized and dense (bf16/fp16) bases. For each parameter:
 
     * a bnb-quantized ``.weight`` (has ``bnb_quant_state``) becomes
       ``"{hf}.weight"`` (a slice/view of vLLM storage; shared) plus
@@ -621,8 +706,11 @@ def extract_vllm_bnb_state_dict(
       projections (``qkv_proj``/``gate_up_proj``) are split into their HF
       sub-modules using vLLM's ``packed_modules_mapping`` and the per-shard
       ``bnb_shard_offsets`` / ``bnb_quant_state``.
-    * any other ``.weight`` / bias / raw parameter (embeddings, norms, scales,
-      per-layer params) is carried through 1:1 (also shared).
+    * a dense ``.weight`` (no ``bnb_quant_state``) becomes ``"{hf}.weight"`` (a
+      shared view). A dense fused projection is split the same way but using the
+      vLLM linear's ``output_sizes`` for the per-shard boundaries.
+    * any other bias / raw parameter (embeddings, norms, scales, per-layer
+      params) is carried through 1:1 (also shared).
 
     Names are emitted in HF convention (e.g. ``model.layers.0.self_attn.q_proj``
     or ``model.language_model.layers.0...`` for a multimodal wrapper) so they
@@ -643,26 +731,33 @@ def build_shared_hf_model(
     bnb_config: Any,
     share_towers: bool = False,
     attn_implementation: str | None = None,
+    add_value_head: bool = False,
 ) -> nn.Module:
-    """Build an HF causal-LM whose language weights alias vLLM's bnb tensors.
+    """Build an HF causal-LM whose language weights alias vLLM's tensors.
 
     Constructs an empty (meta-device) HF model from ``hf_config`` then grafts
-    in vLLM's shared ``Params4bit`` weights + ``QuantState`` objects (via
-    :func:`extract_vllm_bnb_state_dict`). The language decoder holds **no**
-    base weight storage of its own — every quantized ``Linear4bit`` and every
-    embedding / norm / raw parameter points at vLLM's GPU memory. For a
-    multimodal base the full skeleton is built (so LoRA adapter names match
-    vLLM's layout) but the non-language towers are materialised as frozen,
-    uninitialised placeholders (never executed in a text forward).
+    in vLLM's shared weights (via :func:`extract_vllm_bnb_state_dict`). The
+    language decoder holds **no** base weight storage of its own: for a
+    quantized base every ``Linear4bit`` (aliased ``Params4bit`` + ``QuantState``)
+    and for a dense base every ``nn.Linear.weight`` points at vLLM's GPU memory;
+    embeddings / norms / raw params are shared either way. For a multimodal base
+    the full skeleton is built (so LoRA adapter names match vLLM's layout) but
+    the non-language towers are materialised as frozen, uninitialised
+    placeholders (never executed in a text forward).
 
-    :param llm: Constructed ``vllm.LLM`` (in-process engine, bnb base loaded).
+    :param llm: Constructed ``vllm.LLM`` (in-process engine, base loaded).
     :param hf_config: The HF ``PretrainedConfig`` for the model.
-    :param compute_dtype: Compute dtype for the bnb ``Linear4bit`` modules
-        (e.g. ``torch.bfloat16``); should match the trainer recipe.
-    :param bnb_config: The trainer's ``BitsAndBytesConfig`` (NF4 / double-quant
-        settings); used to construct matching ``Linear4bit`` / ``Params4bit``.
+    :param compute_dtype: Compute dtype for the bnb ``Linear4bit`` modules and
+        the value head (e.g. ``torch.bfloat16``); should match the trainer recipe.
+    :param bnb_config: The trainer's ``BitsAndBytesConfig`` when the base is
+        quantized (used to construct matching ``Linear4bit`` / ``Params4bit``),
+        or ``None`` for a dense base.
     :param share_towers: Reserved toggle for sharing vision/audio towers too;
         not implemented in v1 (text-only).
+    :param add_value_head: Wrap the shared causal-LM in
+        ``AutoModelForCausalLMWithValueHead`` (PPO). The base stays shared and
+        frozen; the value head is a small trainer-only module (not aliased,
+        never used by vLLM rollout).
     :return: An ``nn.Module`` ready for PEFT wrapping.
     :raises NotImplementedError: If ``share_towers`` is True.
     """
@@ -674,7 +769,6 @@ def build_shared_hf_model(
         raise NotImplementedError(msg)
 
     from accelerate import init_empty_weights
-    from bitsandbytes.nn.modules import Linear4bit, Params4bit
     from transformers import AutoModelForCausalLM
 
     from agilerl.utils.llm_utils import (
@@ -685,7 +779,8 @@ def build_shared_hf_model(
     # Walk the vLLM tree once: the state dict and the decoder layout together.
     shared, _internal, vllm_root, hf_prefix = _extract_with_layout(llm, hf_config)
     device = torch.device("cuda", torch.cuda.current_device())
-    bnb_kwargs = _bnb_linear_kwargs(bnb_config)
+    is_quantized = bnb_config is not None
+    bnb_kwargs = _bnb_linear_kwargs(bnb_config) if is_quantized else {}
     text_config = getattr(hf_config, "text_config", hf_config)
 
     # Empty skeleton: params live on meta (zero storage); buffers are real so
@@ -710,6 +805,8 @@ def build_shared_hf_model(
         for k in shared
         if k.endswith(".weight.quant_state")
     )
+    if quant_owners:
+        from bitsandbytes.nn.modules import Linear4bit, Params4bit
     for owner in quant_owners:
         handled.update(
             {f"{owner}.weight", f"{owner}.weight.quant_state", f"{owner}.bias"}
@@ -736,22 +833,38 @@ def build_shared_hf_model(
         layer.weight = Params4bit(data=weight, requires_grad=False, **bnb_kwargs)
         layer.weight.quant_state = quant_state
         if bias is not None:
-            layer.bias = torch.nn.Parameter(bias, requires_grad=False)
+            layer.bias = torch.nn.Parameter(_plain_tensor(bias), requires_grad=False)
         # bnb errors if a 4-bit weight is re-cast; freeze .to to no-ops.
         layer.to = partial(_override_to, layer)
         layer.weight.to = partial(_override_to, layer.weight)
         _set_submodule(model, target, layer)
 
-    # 2. Everything else (embeddings, norms, raw params, untied lm_head).
+    # 2. Everything else: embeddings, norms, raw params, untied lm_head, and —
+    # for a dense base — every shared linear weight/bias, grafted onto the
+    # skeleton's existing nn.Linear. ``.weight``/``.bias`` route through
+    # ``_quant_target`` so the ``.linear`` clipping-wrapper redirection (e.g.
+    # Gemma4ClippableLinear) and the "HF omits this module" skip apply uniformly.
     for key, val in shared.items():
         if key in handled:
             continue
-        if not _target_exists(model, key):
-            # vLLM-only parameter the HF model omits (e.g. k/v norms on a
-            # KV-shared layer); skip rather than graft onto a missing target.
+        grafted = False
+        for suffix in (".weight", ".bias"):
+            if key.endswith(suffix):
+                target = _quant_target(model, key[: -len(suffix)])
+                if target is not None:
+                    _graft_param(model, f"{target}{suffix}", val, requires_grad=False)
+                    grafted = True
+                break
+        else:
+            # Raw parameter (no .weight/.bias suffix).
+            if _target_exists(model, key):
+                _graft_param(model, key, val, requires_grad=False)
+                grafted = True
+        if not grafted:
+            # vLLM-only parameter the HF model omits (e.g. k/v projections +
+            # norms on KV-shared layers); skip rather than graft onto a missing
+            # target.
             skipped += 1
-            continue
-        _graft_param(model, key, val, requires_grad=False)
 
     if skipped:
         warnings.warn(
@@ -817,17 +930,32 @@ def build_shared_hf_model(
         )
 
     # Flag as bnb-4-bit so PEFT's kbit prep + get_peft_model treat it as QLoRA.
-    model.is_loaded_in_4bit = True
-    model.is_loaded_in_8bit = False
-    model.is_quantized = True
-    model.quantization_method = "bitsandbytes"
-    model.config.quantization_config = bnb_config
+    # A dense shared base sets none of these (it is not quantized).
+    if is_quantized:
+        model.is_loaded_in_4bit = True
+        model.is_loaded_in_8bit = False
+        model.is_quantized = True
+        model.quantization_method = "bitsandbytes"
+        model.config.quantization_config = bnb_config
+    # Freeze ``.to`` so accelerate/DeepSpeed can't re-cast the shared base: bnb
+    # errors on a 4-bit re-cast, and a dense bf16 ``.to(dtype)`` would copy and
+    # silently un-alias it from vLLM.
     model.to = partial(_override_to, model)
     model.eval()
 
     for _ in range(3):
         gc.collect()
         torch.cuda.empty_cache()
+
+    if add_value_head:
+        # Share the base; add a small trainer-only value head (PPO critic). The
+        # head is not aliased and never needed by vLLM rollout. The inner causal
+        # LM keeps its no-op ``.to``; the wrapper's ``.to`` still moves the head.
+        from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
+
+        wrapped = AutoModelForCausalLMWithValueHead(model)
+        wrapped.v_head.to(device=device, dtype=compute_dtype)
+        return wrapped
     return model
 
 

@@ -37,12 +37,16 @@ _PACKED = {
 }
 
 
-def _quant_linear(out_shards: list[int], in_features: int) -> nn.Module:
+def _quant_linear(
+    out_shards: list[int], in_features: int, bias: bool = False
+) -> nn.Module:
     """nn.Module with a fused, bnb-packed-style ``.weight`` Parameter.
 
     The real tensor would be packed uint8; for slicing/aliasing logic any
     contiguous tensor whose dim-0 carries the per-shard offsets works. Each
     shard gets its own ``QuantState``-like object (only ``.shape`` is read).
+    ``output_sizes`` mirrors vLLM's fused linear (used to split a fused bias,
+    which is dense even on a quantized base).
     """
     m = nn.Module()
     w = nn.Parameter(torch.randn(sum(out_shards), in_features), requires_grad=False)
@@ -55,6 +59,9 @@ def _quant_linear(out_shards: list[int], in_features: int) -> nn.Module:
         for i in range(len(out_shards))
     }
     m.weight = w
+    m.output_sizes = list(out_shards)
+    if bias:
+        m.bias = nn.Parameter(torch.randn(sum(out_shards)), requires_grad=False)
     return m
 
 
@@ -65,14 +72,18 @@ def _plain(out_features: int, in_features: int | None = None) -> nn.Module:
     return m
 
 
-def _decoder(vocab: int, hidden: int, n_layers: int, vocab_pad: int) -> nn.Module:
+def _decoder(
+    vocab: int, hidden: int, n_layers: int, vocab_pad: int, bias: bool = False
+) -> nn.Module:
     root = nn.Module()
     root.embed_tokens = _plain(vocab + vocab_pad, hidden)
     layers = []
     for _ in range(n_layers):
         layer = nn.Module()
         attn = nn.Module()
-        attn.qkv_proj = _quant_linear([hidden, hidden // 2, hidden // 2], hidden)
+        attn.qkv_proj = _quant_linear(
+            [hidden, hidden // 2, hidden // 2], hidden, bias=bias
+        )
         attn.o_proj = _quant_linear([hidden], hidden)
         attn.q_norm = _plain(hidden // 2)
         attn.k_norm = _plain(hidden // 2)
@@ -94,9 +105,19 @@ def _decoder(vocab: int, hidden: int, n_layers: int, vocab_pad: int) -> nn.Modul
 class _FakeInternal(nn.Module):
     packed_modules_mapping = _PACKED
 
-    def __init__(self, *, tie, multimodal, vocab=32, hidden=8, n_layers=1, vocab_pad=4):
+    def __init__(
+        self,
+        *,
+        tie,
+        multimodal,
+        vocab=32,
+        hidden=8,
+        n_layers=1,
+        vocab_pad=4,
+        bias=False,
+    ):
         super().__init__()
-        decoder = _decoder(vocab, hidden, n_layers, vocab_pad)
+        decoder = _decoder(vocab, hidden, n_layers, vocab_pad, bias=bias)
         if multimodal:
             self.language_model = nn.Module()
             self.language_model.model = decoder
@@ -116,9 +137,9 @@ def _wrap_llm(internal: nn.Module) -> SimpleNamespace:
     return SimpleNamespace(llm_engine=engine)
 
 
-def _make_fake(*, tie=True, multimodal=False, vocab=32, vocab_pad=4):
+def _make_fake(*, tie=True, multimodal=False, vocab=32, vocab_pad=4, bias=False):
     internal = _FakeInternal(
-        tie=tie, multimodal=multimodal, vocab=vocab, vocab_pad=vocab_pad
+        tie=tie, multimodal=multimodal, vocab=vocab, vocab_pad=vocab_pad, bias=bias
     )
     llm = _wrap_llm(internal)
     config = SimpleNamespace(
@@ -233,6 +254,21 @@ class TestExtractVllmBnbStateDict:
         assert k_view.shape[0] == offsets[2] - offsets[1]
         assert k_view.data_ptr() == qkv[offsets[1] : offsets[2]].data_ptr()
 
+    def test_fused_bias_split_to_subnames(self):
+        # Qwen2-style attention biases: the fused qkv_proj.bias splits into q/k/v
+        # via output_sizes (the bias is dense, not in bnb_shard_offsets).
+        # Regression for the silently-dropped-bias bug.
+        llm, config, internal = _make_fake(tie=True, bias=True)
+        out = extract_vllm_bnb_state_dict(llm, config)
+        lp = "model.layers.0.self_attn"
+        bias = internal.model.layers[0].self_attn.qkv_proj.bias
+        q, k, _v = internal.model.layers[0].self_attn.qkv_proj.output_sizes
+        assert out[f"{lp}.q_proj.bias"].data_ptr() == bias.data_ptr()
+        assert out[f"{lp}.k_proj.bias"].data_ptr() == bias[q : q + k].data_ptr()
+        assert out[f"{lp}.v_proj.bias"].data_ptr() == bias[q + k :].data_ptr()
+        # The fused name must NOT be emitted (HF has no qkv_proj).
+        assert f"{lp}.qkv_proj.bias" not in out
+
     def test_vocab_truncation_and_tied_lm_head_not_emitted(self):
         llm, config, _internal = _make_fake(tie=True, vocab=32, vocab_pad=4)
         out = extract_vllm_bnb_state_dict(llm, config)
@@ -258,6 +294,151 @@ class TestExtractVllmBnbStateDict:
         llm = _wrap_llm(nn.Module())
         config = SimpleNamespace(vocab_size=8, num_hidden_layers=1)
         with pytest.raises(RuntimeError, match="Could not locate the language-model"):
+            extract_vllm_bnb_state_dict(llm, config)
+
+
+# --- Dense (unquantized) fakes: vLLM exposes a fused projection's per-shard
+# sizes via ``output_sizes`` (and no ``bnb_quant_state``).
+
+
+def _dense_linear(
+    out_shards: list[int], in_features: int, bias: bool = False
+) -> nn.Module:
+    """nn.Module with a fused, dense ``.weight`` and vLLM-style ``output_sizes``.
+
+    Dense counterpart of ``_quant_linear``: no ``bnb_quant_state``; the per-shard
+    boundaries come from ``output_sizes`` (as vLLM's ``QKVParallelLinear`` /
+    ``MergedColumnParallelLinear`` expose them). A fused ``bias`` splits the same
+    way.
+    """
+    m = nn.Module()
+    m.weight = nn.Parameter(
+        torch.randn(sum(out_shards), in_features), requires_grad=False
+    )
+    m.output_sizes = list(out_shards)
+    if bias:
+        m.bias = nn.Parameter(torch.randn(sum(out_shards)), requires_grad=False)
+    return m
+
+
+def _dense_decoder(
+    vocab: int, hidden: int, n_layers: int, vocab_pad: int, bias: bool = False
+) -> nn.Module:
+    root = nn.Module()
+    root.embed_tokens = _plain(vocab + vocab_pad, hidden)
+    layers = []
+    for _ in range(n_layers):
+        layer = nn.Module()
+        attn = nn.Module()
+        attn.qkv_proj = _dense_linear(
+            [hidden, hidden // 2, hidden // 2], hidden, bias=bias
+        )
+        attn.o_proj = _plain(hidden, hidden)  # non-fused: carried 1:1
+        layer.self_attn = attn
+        mlp = nn.Module()
+        mlp.gate_up_proj = _dense_linear([hidden * 2, hidden * 2], hidden)
+        mlp.down_proj = _plain(hidden, hidden * 2)
+        layer.mlp = mlp
+        layer.input_layernorm = _plain(hidden)
+        layer.post_attention_layernorm = _plain(hidden)
+        layers.append(layer)
+    root.layers = nn.ModuleList(layers)
+    root.norm = _plain(hidden)
+    return root
+
+
+class _FakeDenseInternal(nn.Module):
+    packed_modules_mapping = _PACKED
+
+    def __init__(self, *, tie, vocab=32, hidden=8, n_layers=1, vocab_pad=4, bias=False):
+        super().__init__()
+        self.model = _dense_decoder(vocab, hidden, n_layers, vocab_pad, bias=bias)
+        if not tie:
+            self.lm_head = _plain(vocab + vocab_pad, hidden)
+
+
+def _make_dense_fake(*, tie=True, vocab=32, vocab_pad=4, bias=False):
+    internal = _FakeDenseInternal(tie=tie, vocab=vocab, vocab_pad=vocab_pad, bias=bias)
+    llm = _wrap_llm(internal)
+    config = SimpleNamespace(
+        vocab_size=vocab, num_hidden_layers=1, tie_word_embeddings=tie
+    )
+    return llm, config, internal
+
+
+class TestExtractDenseStateDict:
+    def test_dense_fused_split_to_hf_subnames(self):
+        llm, config, _internal = _make_dense_fake(tie=True)
+        out = extract_vllm_bnb_state_dict(llm, config)
+        lp = "model.layers.0"
+        for proj in (
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.o_proj",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+        ):
+            assert f"{lp}.{proj}.weight" in out
+            # Dense weights carry no quant_state.
+            assert f"{lp}.{proj}.weight.quant_state" not in out
+        for name in (
+            "model.embed_tokens.weight",
+            "model.norm.weight",
+            f"{lp}.input_layernorm.weight",
+            f"{lp}.post_attention_layernorm.weight",
+        ):
+            assert name in out
+
+    def test_dense_zero_copy_aliasing_of_shards(self):
+        llm, config, internal = _make_dense_fake(tie=True)
+        out = extract_vllm_bnb_state_dict(llm, config)
+        qkv = internal.model.layers[0].self_attn.qkv_proj.weight
+        hidden = qkv.shape[1]
+        q, k, v = hidden, hidden // 2, hidden // 2
+        # q starts at row 0; k at q; v at q+k (split via output_sizes).
+        assert (
+            out["model.layers.0.self_attn.q_proj.weight"].data_ptr() == qkv.data_ptr()
+        )
+        k_view = out["model.layers.0.self_attn.k_proj.weight"]
+        assert k_view.shape[0] == k
+        assert k_view.data_ptr() == qkv[q : q + k].data_ptr()
+        v_view = out["model.layers.0.self_attn.v_proj.weight"]
+        assert v_view.shape[0] == v
+        assert v_view.data_ptr() == qkv[q + k : q + k + v].data_ptr()
+
+    def test_dense_fused_bias_split(self):
+        # A dense fused qkv_proj.bias splits into q/k/v via output_sizes, aliased.
+        llm, config, internal = _make_dense_fake(tie=True, bias=True)
+        out = extract_vllm_bnb_state_dict(llm, config)
+        lp = "model.layers.0.self_attn"
+        bias = internal.model.layers[0].self_attn.qkv_proj.bias
+        q, k, _v = internal.model.layers[0].self_attn.qkv_proj.output_sizes
+        assert out[f"{lp}.q_proj.bias"].data_ptr() == bias.data_ptr()
+        assert out[f"{lp}.k_proj.bias"].data_ptr() == bias[q : q + k].data_ptr()
+        assert out[f"{lp}.v_proj.bias"].data_ptr() == bias[q + k :].data_ptr()
+        assert f"{lp}.qkv_proj.bias" not in out
+
+    def test_dense_non_fused_carried_1to1(self):
+        llm, config, internal = _make_dense_fake(tie=True)
+        out = extract_vllm_bnb_state_dict(llm, config)
+        o = internal.model.layers[0].self_attn.o_proj.weight
+        assert out["model.layers.0.self_attn.o_proj.weight"].data_ptr() == o.data_ptr()
+        down = internal.model.layers[0].mlp.down_proj.weight
+        assert out["model.layers.0.mlp.down_proj.weight"].data_ptr() == down.data_ptr()
+
+    def test_dense_vocab_truncation_and_untied_lm_head(self):
+        llm, config, _internal = _make_dense_fake(tie=False, vocab=32, vocab_pad=4)
+        out = extract_vllm_bnb_state_dict(llm, config)
+        assert out["model.embed_tokens.weight"].shape[0] == 32
+        assert out["lm_head.weight"].shape[0] == 32
+
+    def test_dense_fused_split_raises_without_output_sizes(self):
+        llm, config, internal = _make_dense_fake(tie=True)
+        # Drop output_sizes so the fused qkv weight cannot be named.
+        del internal.model.layers[0].self_attn.qkv_proj.output_sizes
+        with pytest.raises(RuntimeError, match="Cannot split the fused parameter"):
             extract_vllm_bnb_state_dict(llm, config)
 
 
@@ -374,7 +555,7 @@ class TestStandbyPatchSafeWithoutVllm:
 
 
 class TestVllmConfigBnbWithoutWeightSharingWarning:
-    """bnb rollout + sleep without weight_sharing hits the broken bnb reload."""
+    """Explicit weight_sharing=False + bnb + sleep hits the broken bnb reload."""
 
     def _warns_reload(self, **kwargs) -> bool:
         from agilerl.utils.algo_utils import VLLMConfig
@@ -383,8 +564,14 @@ class TestVllmConfigBnbWithoutWeightSharingWarning:
             VLLMConfig(**kwargs)
         return any("reload" in str(w.message) for w in record)
 
-    def test_bnb_sleep_without_sharing_warns(self):
-        assert self._warns_reload(quantization="bitsandbytes", sleep_mode=True)
+    def test_bnb_sleep_explicit_no_sharing_warns(self):
+        assert self._warns_reload(
+            quantization="bitsandbytes", sleep_mode=True, weight_sharing=False
+        )
+
+    def test_bnb_sleep_auto_default_does_not_warn_reload(self):
+        # weight_sharing unset (None = auto): no reload warning, auto will share.
+        assert not self._warns_reload(quantization="bitsandbytes", sleep_mode=True)
 
     def test_bnb_sleep_with_sharing_does_not_warn_reload(self):
         assert not self._warns_reload(
@@ -401,5 +588,30 @@ class TestVllmConfigBnbWithoutWeightSharingWarning:
 
         with _w.catch_warnings(record=True) as rec:
             _w.simplefilter("always")
-            VLLMConfig(quantization="bitsandbytes", sleep_mode=False)
+            VLLMConfig(
+                quantization="bitsandbytes", sleep_mode=False, weight_sharing=False
+            )
         assert not any("reload" in str(x.message) for x in rec)
+
+
+class TestVllmConfigWeightSharingValidation:
+    """Tri-state weight_sharing validation in VLLMConfig.__post_init__."""
+
+    def test_default_is_auto_none(self):
+        from agilerl.utils.algo_utils import VLLMConfig
+
+        assert VLLMConfig().weight_sharing is None
+
+    def test_explicit_true_allows_dense(self):
+        # weight_sharing=True no longer requires quantization='bitsandbytes':
+        # a dense (unquantized) base may be shared too.
+        from agilerl.utils.algo_utils import VLLMConfig
+
+        cfg = VLLMConfig(weight_sharing=True, sleep_mode=True)
+        assert cfg.weight_sharing is True
+
+    def test_explicit_true_requires_sleep_mode(self):
+        from agilerl.utils.algo_utils import VLLMConfig
+
+        with pytest.raises(ValueError, match="requires sleep_mode"):
+            VLLMConfig(weight_sharing=True, sleep_mode=False)
