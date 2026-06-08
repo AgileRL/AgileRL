@@ -112,7 +112,9 @@ class REINFORCE(LLMAlgorithm):
     :type min_output_tokens: int | None
     :param max_model_len: Maximum context window length.
     :type max_model_len: int | None
-    :param use_memory_efficient_params: Use memory efficient params.
+    :param use_memory_efficient_params: Deprecated and ignored. Colocated vLLM
+        shares its base with the trainer (one resident copy), so there is no
+        separate copy to shuttle CPU<->GPU. Kept for API compatibility.
     :type use_memory_efficient_params: bool
     :param lora_config: LoRA adapter configuration.
     :type lora_config: LoraConfigProtocol | None

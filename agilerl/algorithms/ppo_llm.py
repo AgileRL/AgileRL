@@ -133,7 +133,9 @@ class PPO(LLMAlgorithm):
     :type clone: bool, optional
     :param use_vllm: Whether to route generation through vLLM.
     :type use_vllm: bool, optional
-    :param use_memory_efficient_params: Enable memory-efficient parameter handling.
+    :param use_memory_efficient_params: Deprecated and ignored. Colocated vLLM
+        shares its base with the trainer (one resident copy), so there is no
+        separate copy to shuttle CPU<->GPU. Kept for API compatibility.
     :type use_memory_efficient_params: bool, optional
     :param vllm_config: vLLM runtime configuration.
     :type vllm_config: VLLMConfig | None, optional
