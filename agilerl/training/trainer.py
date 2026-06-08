@@ -688,7 +688,7 @@ class ArenaTrainer(Trainer):
         :rtype: dict[str, Any]
         """
         manifest = ArenaManifest.get_validated(self.to_manifest(), mode="json")
-        return self._client.submit_training_job(manifest)
+        return self._client.submit_experiment(manifest)
 
     def resume_from_checkpoint(self, job_id: str, max_steps: int) -> None:
         """Resume a training job from a checkpoint.
@@ -698,7 +698,7 @@ class ArenaTrainer(Trainer):
         :param max_steps: The maximum number of steps to train for.
         :type max_steps: int
         """
-        return self._client.resume_training_job(job_id, max_steps)
+        return self._client.resume_experiment(job_id, max_steps)
 
     def list_experiments(self, project: str) -> list[dict[str, Any]]:
         """List all experiments in the project.

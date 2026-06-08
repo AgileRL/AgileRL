@@ -385,7 +385,7 @@ def env_duplicate(
     new_version: str,
     version: str | None,
 ) -> None:
-    """Copy an existing environment version to a new version name."""
+    """Copy an existing environment version to a new version name. If no version is provided, the latest version will be duplicated."""
     with arena_client(config) as client:
         client.duplicate_environment_version(
             name=name,
@@ -847,7 +847,7 @@ def agent_run(
 ) -> None:
     """Select a deployment as the active agent for ``arena agent generate``."""
     with arena_client(config) as client:
-        client.ensure_inference_binding(
+        client._ensure_inference_binding(
             deployment_name,
             refresh=refresh,
             experiment_name=experiment_name,
@@ -884,7 +884,7 @@ def agent_generate(
     project_name: str | None,
     prompt: str,
 ) -> None:
-    """Stream a completion (``POST /generate_stream``).
+    """Stream a completion from a prompt through a deployed LLM agent.
 
     Omit *deployment_name* to use the agent set by ``arena agent run``.
     """

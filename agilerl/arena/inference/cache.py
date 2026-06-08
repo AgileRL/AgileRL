@@ -15,7 +15,13 @@ ACTIVE_AGENT_KEY = "active_agent"
 
 
 def normalized_deployment_name(name: str) -> str:
-    """CLI/cache key for a deployment name."""
+    """CLI/cache key for a deployment name.
+
+    :param name: The name of the deployment.
+    :type name: str
+    :return: The normalized deployment name.
+    :rtype: str
+    """
     return name.strip()
 
 
@@ -36,7 +42,14 @@ def _write_store(data: dict[str, Any]) -> None:
 
 
 def load_binding(name: str) -> tuple[str, str] | None:
-    """Return ``(url, api_key)`` for *name* if cached, else ``None``."""
+    """Return ``(url, api_key)`` for *name* if cached, else ``None``.
+
+    :param name: The name of the deployment.
+    :type name: str
+    :return: The URL and API key of the deployment.
+    :rtype: tuple[str, str] | None
+    If the deployment is not cached, return ``None``.
+    """
     data = _load_store()
     raw = data.get(DEPLOYMENTS_KEY)
     if not isinstance(raw, dict):
@@ -54,7 +67,15 @@ def load_binding(name: str) -> tuple[str, str] | None:
 
 
 def save_binding(name: str, url: str, api_key: str) -> None:
-    """Merge a deployment binding into ``~/.arena/inference.json``."""
+    """Merge a deployment binding into ``~/.arena/inference.json``.
+
+    :param name: The name of the deployment.
+    :type name: str
+    :param url: The URL of the deployment.
+    :type url: str
+    :param api_key: The API key of the deployment.
+    :type api_key: str
+    """
     data = _load_store()
     deployments = data.get(DEPLOYMENTS_KEY)
     if not isinstance(deployments, dict):

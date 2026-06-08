@@ -142,7 +142,7 @@ def mock_population():
 @pytest.fixture()
 def mock_client():
     client = MagicMock()
-    client.submit_training_job.return_value = {
+    client.submit_experiment.return_value = {
         "job_id": "test-123",
         "status": "PENDING",
     }
@@ -690,7 +690,7 @@ class TestArenaTrainerTrain:
         result = trainer.train()
 
         mock_get_validated.assert_called_once()
-        mock_client.submit_training_job.assert_called_once_with(validated)
+        mock_client.submit_experiment.assert_called_once_with(validated)
         assert result["job_id"] == "test-123"
 
     def test_train_submits_manifest(self, mock_client, ppo_spec, training_spec):
@@ -703,8 +703,8 @@ class TestArenaTrainerTrain:
         )
         result = trainer.train()
 
-        mock_client.submit_training_job.assert_called_once()
-        submitted_manifest = mock_client.submit_training_job.call_args[0][0]
+        mock_client.submit_experiment.assert_called_once()
+        submitted_manifest = mock_client.submit_experiment.call_args[0][0]
         assert isinstance(submitted_manifest, dict)
         assert submitted_manifest["algorithm"]["name"] == "PPO"
         assert "mutation" in submitted_manifest
@@ -722,7 +722,7 @@ class TestArenaTrainerTrain:
             client=mock_client,
         )
         trainer.train()
-        submitted_manifest = mock_client.submit_training_job.call_args[0][0]
+        submitted_manifest = mock_client.submit_experiment.call_args[0][0]
         assert submitted_manifest["algorithm"]["name"] == "PPO"
         assert submitted_manifest["training"]["max_steps"] == 500
 
@@ -731,7 +731,7 @@ class TestArenaTrainerDelegation:
     """Tests for ArenaTrainer methods that delegate to the underlying client."""
 
     def test_resume_from_checkpoint(self, mock_client, training_spec):
-        mock_client.resume_training_job.return_value = {"status": "RESUMED"}
+        mock_client.resume_experiment.return_value = {"status": "RESUMED"}
         env_spec = ArenaEnvSpec(name="CartPole-v1")
         trainer = ArenaTrainer(
             algorithm="PPO",
@@ -740,7 +740,7 @@ class TestArenaTrainerDelegation:
             client=mock_client,
         )
         trainer.resume_from_checkpoint("job-42", max_steps=1000)
-        mock_client.resume_training_job.assert_called_once_with("job-42", 1000)
+        mock_client.resume_experiment.assert_called_once_with("job-42", 1000)
 
     def test_list_experiments(self, mock_client, training_spec):
         mock_client.list_experiments.return_value = [{"name": "exp1"}]

@@ -50,7 +50,7 @@ def mock_client() -> MagicMock:
             "preview_experiment_metrics_csv",
             "deploy_agent",
             "list_inference_deployments",
-            "ensure_inference_binding",
+            "_ensure_inference_binding",
             "open_inference_agent",
             "list_projects",
             "create_project",
@@ -765,7 +765,7 @@ class TestAgentDeployCommand:
 
 class TestAgentRunCommand:
     def test_run_sets_active_agent(self, runner, mock_client):
-        mock_client.ensure_inference_binding.return_value = ("http://x", "key")
+        mock_client._ensure_inference_binding.return_value = ("http://x", "key")
         with (
             _patched_arena_client(mock_client),
             patch("agilerl.arena.cli.save_active_agent") as mock_save,
@@ -783,7 +783,7 @@ class TestAgentRunCommand:
                 ],
             )
         assert result.exit_code == 0
-        mock_client.ensure_inference_binding.assert_called_once_with(
+        mock_client._ensure_inference_binding.assert_called_once_with(
             "my-dep",
             refresh=False,
             experiment_name="exp1",

@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
 import httpx
 from typing_extensions import Self
@@ -44,6 +44,8 @@ from agilerl.utils.arena_utils import (
 
 logger = logging.getLogger(__name__)
 
+DATASET_CATEGORIES = frozenset({"sft", "preference", "reasoning"})
+
 
 @dataclass(slots=True)
 class _TokenStore:
@@ -60,11 +62,6 @@ class _TokenStore:
     def clear(self) -> None:
         self.access_token = None
         self.refresh_token = None
-
-
-# Deprecated hint: tier ids are dynamic — use :meth:`ArenaClient.list_resources`.
-ArenaResource = Literal["arena-small", "arena-medium", "arena-large"]
-DATASET_CATEGORIES = frozenset({"sft", "preference", "reasoning"})
 
 
 class ArenaClient:
@@ -833,28 +830,6 @@ class ArenaClient:
             timeout=self._upload_timeout,
         ).collect()
 
-    def submit_training_job(
-        self,
-        manifest: str | os.PathLike[str] | dict[str, Any],
-        *,
-        resource_id: str | int | None = None,
-        num_nodes: int | None = None,
-        project: str | None = None,
-        experiment_name: str | None = None,
-        reward_file: str | os.PathLike[str] | bytes | None = None,
-        completion: str | None = None,
-    ) -> dict[str, Any]:
-        """Submit a training job to Arena (alias for :meth:`submit_experiment`)."""
-        return self.submit_experiment(
-            manifest,
-            resource_id=resource_id,
-            num_nodes=num_nodes,
-            project=project,
-            experiment_name=experiment_name,
-            reward_file=reward_file,
-            completion=completion,
-        )
-
     @staticmethod
     def _build_submit_experiment_multipart(
         *,
@@ -904,8 +879,6 @@ class ArenaClient:
             "GET", "/api/cli/v1/experiments/list", params={"project": resolved}
         )
 
-    # TODO: Check with Rob
-    # Is the only extra arg we should allow 'max_steps' here?
     def resume_experiment(self, experiment_name: str, max_steps: int) -> dict[str, Any]:
         """Resume an experiment (a training job).
 
@@ -921,16 +894,6 @@ class ArenaClient:
             "/api/cli/v1/experiments/jobs/resume",
             json={"experiment_name": experiment_name, "max_steps": max_steps},
         )
-
-    def resume_training_job(
-        self, experiment_name: str, max_steps: int
-    ) -> dict[str, Any]:
-        """Resume a training job (alias for :meth:`resume_experiment`)."""
-        return self.resume_experiment(
-            experiment_name=experiment_name, max_steps=max_steps
-        )
-
-    # TODO: Update HPO params (maybe leave for v2 if too complicated)
 
     # TODO: Check this works
     def list_checkpoints(self, experiment_name: str) -> list[dict[str, Any]]:
@@ -1210,7 +1173,91 @@ class ArenaClient:
             return []
         return [r for r in rows if isinstance(r, dict)]
 
-    def fetch_deployment_for_inference(
+    def open_inference_agent(
+        self,
+        deployment_name: str,
+        *,
+        refresh: bool = False,
+        experiment_name: str | None = None,
+        project_name: str | None = None,
+        timeout: int | None = None,
+    ) -> Agent:
+        """Build an :class:`~agilerl.arena.inference.Agent` for a named deployment.
+
+        Attempts to load the deployment from the cache, and if not found, fetches it from the API.
+
+        :param deployment_name: The name of the deployment to open.
+        :type deployment_name: str
+        :param refresh: Whether to refresh the deployment metadata.
+        :type refresh: bool
+        :param experiment_name: The name of the experiment to list deployments for.
+        :type experiment_name: str | None
+        :param project_name: The name of the project to list deployments for.
+        :type project_name: str | None
+        :param timeout: The timeout for the request.
+        :type timeout: int | None
+        :returns: An :class:`~agilerl.arena.inference.Agent` instance.
+        :rtype: Agent
+        """
+        url, api_key = self._ensure_inference_binding(
+            deployment_name,
+            refresh=refresh,
+            experiment_name=experiment_name,
+            project_name=project_name,
+        )
+        return Agent(
+            url,
+            api_key=api_key,
+            timeout=timeout or self._request_timeout,
+        )
+
+    def close(self) -> None:
+        """Close the underlying HTTP connection pool."""
+        self._http.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        status = "authenticated" if self.is_authenticated else "unauthenticated"
+        return f"<ArenaClient(url={self._base_url!r}, {status})>"
+
+    # -------------------------------------------------------------------------
+    ### Utility Methods ###
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _deployment_url_and_api_key(row: dict[str, Any]) -> tuple[str, str]:
+        """Parse ``spec.url`` and deployment ``api_key`` from an API deployment row."""
+        spec = row.get("spec")
+        if not isinstance(spec, dict):
+            spec = {}
+        url = spec.get("url")
+        if not isinstance(url, str) or not url.strip():
+            msg = "Deployment has no inference URL (spec.url)."
+            raise ArenaAPIError(
+                msg,
+                cli_hint="Wait until provisioning completes, then retry with --refresh.",
+            )
+
+        raw_key = row.get("api_key")
+        if raw_key is None:
+            msg = "Deployment record had no api_key."
+            raise ArenaAPIError(
+                msg,
+                cli_hint="Retry with arena login and --refresh.",
+            )
+        api_key = str(raw_key).strip()
+        if not api_key:
+            msg = "Deployment api_key was empty."
+            raise ArenaAPIError(msg)
+
+        return url.strip(), api_key
+
+    def _fetch_deployment_for_inference(
         self,
         deployment_name: str,
         *,
@@ -1251,35 +1298,7 @@ class ArenaClient:
             raise ArenaAPIError(msg)
         return row
 
-    @staticmethod
-    def deployment_url_and_api_key(row: dict[str, Any]) -> tuple[str, str]:
-        """Parse ``spec.url`` and deployment ``api_key`` from an API deployment row."""
-        spec = row.get("spec")
-        if not isinstance(spec, dict):
-            spec = {}
-        url = spec.get("url")
-        if not isinstance(url, str) or not url.strip():
-            msg = "Deployment has no inference URL (spec.url)."
-            raise ArenaAPIError(
-                msg,
-                cli_hint="Wait until provisioning completes, then retry with --refresh.",
-            )
-
-        raw_key = row.get("api_key")
-        if raw_key is None:
-            msg = "Deployment record had no api_key."
-            raise ArenaAPIError(
-                msg,
-                cli_hint="Retry with arena login and --refresh.",
-            )
-        api_key = str(raw_key).strip()
-        if not api_key:
-            msg = "Deployment api_key was empty."
-            raise ArenaAPIError(msg)
-
-        return url.strip(), api_key
-
-    def ensure_inference_binding(
+    def _ensure_inference_binding(
         self,
         deployment_name: str,
         *,
@@ -1289,64 +1308,24 @@ class ArenaClient:
     ) -> tuple[str, str]:
         """Return cached ``(url, api_key)`` or fetch from the API, persist, and return."""
         key = normalized_deployment_name(deployment_name)
+
+        # Try to load the cached binding
         if not refresh:
             cached = load_binding(key)
             if cached is not None:
                 return cached
 
-        row = self.fetch_deployment_for_inference(
+        # Fetch the deployment from the API
+        row = self._fetch_deployment_for_inference(
             deployment_name,
             experiment_name=experiment_name,
             project_name=project_name,
         )
-        url, api_key = self.deployment_url_and_api_key(row)
+
+        # Save the deployment to the cache
+        url, api_key = self._deployment_url_and_api_key(row)
         save_binding(key, url, api_key)
         return url, api_key
-
-    def open_inference_agent(
-        self,
-        deployment_name: str,
-        *,
-        refresh: bool = False,
-        experiment_name: str | None = None,
-        project_name: str | None = None,
-        timeout: int | None = None,
-    ) -> Agent:
-        """Build an :class:`~agilerl.arena.inference.Agent` for a named deployment.
-
-        Deployment metadata is fetched on construction
-        (:attr:`~agilerl.arena.inference.Agent.metadata`). Use
-        :meth:`~agilerl.arena.inference.Agent.get_action` (RL),
-        :meth:`~agilerl.arena.inference.Agent.predict` (supervised), or
-        :meth:`~agilerl.arena.inference.Agent.generate` (LLM).
-
-        CLI: ``arena agent run <deployment>`` then ``arena agent generate --prompt '...'``.
-        """
-        url, api_key = self.ensure_inference_binding(
-            deployment_name,
-            refresh=refresh,
-            experiment_name=experiment_name,
-            project_name=project_name,
-        )
-        return Agent(
-            url,
-            api_key=api_key,
-            timeout=timeout or self._request_timeout,
-        )
-
-    def close(self) -> None:
-        """Close the underlying HTTP connection pool."""
-        self._http.close()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
-
-    def __repr__(self) -> str:
-        status = "authenticated" if self.is_authenticated else "unauthenticated"
-        return f"<ArenaClient(url={self._base_url!r}, {status})>"
 
     def _create_and_validate(
         self,

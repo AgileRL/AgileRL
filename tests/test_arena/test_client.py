@@ -544,14 +544,18 @@ class TestEnvironmentListMethods:
         assert api_key_client.environment_exists("CartPole-v1", "v1") is True
 
     def test_list_environment_entrypoints(self, api_key_client):
-        api_key_client._request = MagicMock(
-            return_value={
-                "entrypoints": ["main:MyEnv", "alt:AltEnv"],
-                "version": "v2",
-            }
-        )
+        payload = {
+            "entrypoints": ["main:MyEnv", "alt:AltEnv"],
+            "version": "v2",
+        }
+        api_key_client._request = MagicMock(return_value=payload)
         result = api_key_client.list_environment_entrypoints("MyEnv", version="v2")
-        assert result == ["main:MyEnv", "alt:AltEnv"]
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/environments/entrypoints",
+            params={"name": "MyEnv", "version": "v2"},
+        )
+        assert result == payload
 
     def test_environment_exists_is_registered_key(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"is_registered": False})
@@ -559,7 +563,8 @@ class TestEnvironmentListMethods:
 
     def test_environment_exists_non_dict_response(self, api_key_client):
         api_key_client._request = MagicMock(return_value=True)
-        assert api_key_client.environment_exists("MyEnv", "v1") is True
+        with pytest.raises(AttributeError):
+            api_key_client.environment_exists("MyEnv", "v1")
 
 
 class TestValidateEnvironment:
@@ -1279,17 +1284,6 @@ class TestExperimentMethods:
         assert files["completion"] == (None, "wrong answer")
         assert files["reward_file"][0] == "reward.py"
 
-    @patch("agilerl.arena.client.ArenaManifest.get_validated")
-    def test_submit_training_job_alias(self, mock_validated, api_key_client):
-        mock_validated.return_value = {"algorithm": "DQN"}
-        mock_stream = _mock_ndjson_stream({"ok": True})
-        api_key_client._open_stream = MagicMock(return_value=mock_stream)
-
-        result = api_key_client.submit_training_job(manifest={"algorithm": "DQN"})
-
-        assert result == {"ok": True}
-        api_key_client._open_stream.assert_called_once()
-
     def test_resume_experiment(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"resumed": True})
         result = api_key_client.resume_experiment("exp1", max_steps=1000)
@@ -1298,11 +1292,6 @@ class TestExperimentMethods:
             "/api/cli/v1/experiments/jobs/resume",
             json={"experiment_name": "exp1", "max_steps": 1000},
         )
-        assert result == {"resumed": True}
-
-    def test_resume_training_job_alias(self, api_key_client):
-        api_key_client._request = MagicMock(return_value={"resumed": True})
-        result = api_key_client.resume_training_job("exp1", max_steps=500)
         assert result == {"resumed": True}
 
     def test_list_checkpoints(self, api_key_client):
@@ -1507,28 +1496,28 @@ class TestInferenceDeployments:
         api_key_client._request = MagicMock(
             return_value=[{"name": "my-dep", "spec": {"url": "http://x"}}]
         )
-        result = api_key_client.fetch_deployment_for_inference("my-dep")
+        result = api_key_client._fetch_deployment_for_inference("my-dep")
         assert result == {"name": "my-dep", "spec": {"url": "http://x"}}
 
     def test_fetch_deployment_for_inference_no_match_raises(self, api_key_client):
         api_key_client._request = MagicMock(return_value=[])
         with pytest.raises(ArenaAPIError, match="No deployment found"):
-            api_key_client.fetch_deployment_for_inference("missing")
+            api_key_client._fetch_deployment_for_inference("missing")
 
     def test_fetch_deployment_for_inference_multiple_raises(self, api_key_client):
         api_key_client._request = MagicMock(return_value=[{"name": "d"}, {"name": "d"}])
         with pytest.raises(ArenaAPIError, match="Multiple deployments"):
-            api_key_client.fetch_deployment_for_inference("d")
+            api_key_client._fetch_deployment_for_inference("d")
 
     def test_fetch_deployment_for_inference_non_list_raises(self, api_key_client):
         api_key_client._request = MagicMock(return_value="not a list")
         with pytest.raises(ArenaAPIError, match="No deployment found"):
-            api_key_client.fetch_deployment_for_inference("dep")
+            api_key_client._fetch_deployment_for_inference("dep")
 
     def test_fetch_deployment_for_inference_non_dict_row_raises(self, api_key_client):
         api_key_client._request = MagicMock(return_value=["not-a-dict"])
         with pytest.raises(ArenaAPIError, match="Unexpected deployment"):
-            api_key_client.fetch_deployment_for_inference("dep")
+            api_key_client._fetch_deployment_for_inference("dep")
 
     def test_inference_deployment_list_params(self):
         params = ArenaClient._inference_deployments_list_params(
@@ -1546,33 +1535,33 @@ class TestInferenceDeployments:
 class TestDeploymentUrlAndApiKey:
     def test_happy_path(self):
         row = {"spec": {"url": "http://inference.example.com"}, "api_key": "key123"}
-        url, key = ArenaClient.deployment_url_and_api_key(row)
+        url, key = ArenaClient._deployment_url_and_api_key(row)
         assert url == "http://inference.example.com"
         assert key == "key123"
 
     def test_missing_spec_raises(self):
         row = {"api_key": "key123"}
         with pytest.raises(ArenaAPIError, match="no inference URL"):
-            ArenaClient.deployment_url_and_api_key(row)
+            ArenaClient._deployment_url_and_api_key(row)
 
     def test_empty_url_raises(self):
         row = {"spec": {"url": "  "}, "api_key": "key123"}
         with pytest.raises(ArenaAPIError, match="no inference URL"):
-            ArenaClient.deployment_url_and_api_key(row)
+            ArenaClient._deployment_url_and_api_key(row)
 
     def test_missing_api_key_raises(self):
         row = {"spec": {"url": "http://x"}}
         with pytest.raises(ArenaAPIError, match="no api_key"):
-            ArenaClient.deployment_url_and_api_key(row)
+            ArenaClient._deployment_url_and_api_key(row)
 
     def test_empty_api_key_raises(self):
         row = {"spec": {"url": "http://x"}, "api_key": "  "}
         with pytest.raises(ArenaAPIError, match="api_key was empty"):
-            ArenaClient.deployment_url_and_api_key(row)
+            ArenaClient._deployment_url_and_api_key(row)
 
     def test_strips_whitespace(self):
         row = {"spec": {"url": " http://x "}, "api_key": " key "}
-        url, key = ArenaClient.deployment_url_and_api_key(row)
+        url, key = ArenaClient._deployment_url_and_api_key(row)
         assert url == "http://x"
         assert key == "key"
 
@@ -1584,7 +1573,7 @@ class TestEnsureInferenceBinding:
         self, mock_load, mock_save, api_key_client
     ):
         mock_load.return_value = ("http://cached", "cached_key")
-        result = api_key_client.ensure_inference_binding("my-dep")
+        result = api_key_client._ensure_inference_binding("my-dep")
         assert result == ("http://cached", "cached_key")
         mock_save.assert_not_called()
 
@@ -1592,10 +1581,10 @@ class TestEnsureInferenceBinding:
     @patch("agilerl.arena.client.load_binding")
     def test_fetches_and_caches_on_refresh(self, mock_load, mock_save, api_key_client):
         mock_load.return_value = ("http://cached", "cached_key")
-        api_key_client.fetch_deployment_for_inference = MagicMock(
+        api_key_client._fetch_deployment_for_inference = MagicMock(
             return_value={"spec": {"url": "http://new"}, "api_key": "new_key"}
         )
-        result = api_key_client.ensure_inference_binding("my-dep", refresh=True)
+        result = api_key_client._ensure_inference_binding("my-dep", refresh=True)
         assert result == ("http://new", "new_key")
         mock_save.assert_called_once_with("my-dep", "http://new", "new_key")
 
@@ -1603,10 +1592,10 @@ class TestEnsureInferenceBinding:
     @patch("agilerl.arena.client.load_binding")
     def test_fetches_when_no_cache(self, mock_load, mock_save, api_key_client):
         mock_load.return_value = None
-        api_key_client.fetch_deployment_for_inference = MagicMock(
+        api_key_client._fetch_deployment_for_inference = MagicMock(
             return_value={"spec": {"url": "http://new"}, "api_key": "k"}
         )
-        result = api_key_client.ensure_inference_binding("dep")
+        result = api_key_client._ensure_inference_binding("dep")
         assert result == ("http://new", "k")
         mock_save.assert_called_once()
 
@@ -1614,7 +1603,7 @@ class TestEnsureInferenceBinding:
 class TestOpenInferenceAgent:
     @patch("agilerl.arena.client.Agent")
     def test_returns_agent_instance(self, mock_agent_cls, api_key_client):
-        api_key_client.ensure_inference_binding = MagicMock(
+        api_key_client._ensure_inference_binding = MagicMock(
             return_value=("http://url", "api_key")
         )
         mock_agent = MagicMock()
@@ -1631,7 +1620,7 @@ class TestOpenInferenceAgent:
 
     @patch("agilerl.arena.client.Agent")
     def test_custom_timeout(self, mock_agent_cls, api_key_client):
-        api_key_client.ensure_inference_binding = MagicMock(
+        api_key_client._ensure_inference_binding = MagicMock(
             return_value=("http://url", "key")
         )
         api_key_client.open_inference_agent("dep", timeout=120)
@@ -1640,12 +1629,12 @@ class TestOpenInferenceAgent:
 
     @patch("agilerl.arena.client.Agent")
     def test_forwards_refresh_and_filters(self, mock_agent_cls, api_key_client):
-        api_key_client.ensure_inference_binding = MagicMock(
+        api_key_client._ensure_inference_binding = MagicMock(
             return_value=("http://url", "key")
         )
         api_key_client.open_inference_agent(
             "dep", refresh=True, experiment_name="e", project_name="p"
         )
-        api_key_client.ensure_inference_binding.assert_called_once_with(
+        api_key_client._ensure_inference_binding.assert_called_once_with(
             "dep", refresh=True, experiment_name="e", project_name="p"
         )

@@ -55,7 +55,17 @@ __all__ = [
 
 
 class LLMParams(BaseModel):
-    """Sampling parameters for ``POST /generate`` and ``POST /generate_stream``."""
+    """LLM sampling parameters model.
+
+    :param max_new_tokens: The maximum number of new tokens to generate.
+    :type max_new_tokens: int
+    :param temperature: The temperature of the LLM.
+    :type temperature: float
+    :param top_p: The top-p value of the LLM.
+    :type top_p: float
+    :param do_sample: Whether to sample the LLM.
+    :type do_sample: bool
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -69,7 +79,19 @@ GenerateParams = LLMParams
 
 
 class AgentInfo(BaseModel):
-    """Agent flags from ``GET /status``."""
+    """Agent information model.
+
+    :param algo: The algorithm of the agent.
+    :type algo: str
+    :param multi_agent: Whether the agent is a multi-agent.
+    :type multi_agent: bool
+    :param llm: Whether the agent is an LLM.
+    :type llm: bool
+    :param recurrent: Whether the agent is recurrent.
+    :type recurrent: bool
+    :param supervised: Whether the agent is supervised.
+    :type supervised: bool
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -81,7 +103,17 @@ class AgentInfo(BaseModel):
 
 
 class StatusResponse(BaseModel):
-    """Response from ``GET /status``."""
+    """Status response model.
+
+    :param success: Whether the status request was successful.
+    :type success: bool
+    :param deployment_id: The deployment ID.
+    :type deployment_id: str
+    :param instance_id: The instance ID.
+    :type instance_id: str
+    :param agent: The agent info.
+    :type agent: AgentInfo
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -95,7 +127,15 @@ AgentMetadata = StatusResponse
 
 
 class PredictResult(BaseModel):
-    """Metadata from ``POST /predict`` (excluding deserialized tensors)."""
+    """Metadata from ``POST /predict`` (excluding deserialized tensors).
+
+    :param batch_size: The batch size of the prediction.
+    :type batch_size: int
+    :param inference_time_ms: The inference time in milliseconds.
+    :type inference_time_ms: float
+    :param success: Whether the prediction was successful.
+    :type success: bool
+    """
 
     model_config = ConfigDict(extra="ignore", frozen=True)
 
@@ -105,7 +145,13 @@ class PredictResult(BaseModel):
 
 
 class LLMCompletionResult(BaseModel):
-    """Single prompt/completion pair from ``POST /generate``."""
+    """Single prompt/completion pair from ``POST /generate``.
+
+    :param prompt: The prompt for the LLM completion.
+    :type prompt: str
+    :param completion: The completion for the LLM completion.
+    :type completion: str
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -117,7 +163,19 @@ GenerateCompletion = LLMCompletionResult
 
 
 class LLMResults(BaseModel):
-    """Response from ``POST /generate``."""
+    """LLM completion response model.
+
+    :param results: The results of the LLM completions.
+    :type results: list[LLMCompletionResult]
+    :param batch_size: The batch size of the LLM completions.
+    :type batch_size: int
+    :param inference_time_ms: The inference time in milliseconds.
+    :type inference_time_ms: float
+    :param tokens_per_second: The tokens per second of the LLM completions.
+    :type tokens_per_second: float
+    :param success: Whether the LLM completions were successful.
+    :type success: bool
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -245,16 +303,6 @@ class Agent:
         body = self._request_json("GET", "/status")
         return StatusResponse.model_validate(body)
 
-    def status(self, *, refresh: bool = False) -> StatusResponse:
-        """Return deployment metadata from ``GET /status``.
-
-        Fetched automatically on init when *probe_on_init* was ``True``.
-        """
-        if self.metadata is not None and not refresh:
-            return self.metadata
-        self.metadata = self._fetch_metadata()
-        return self.metadata
-
     def _agent_info(self) -> AgentInfo:
         if self.metadata is None:
             msg = "Metadata not loaded. Call status() or construct with probe_on_init=True."
@@ -346,6 +394,7 @@ class Agent:
         is_multi = agent.multi_agent
         batch_size = get_batch_size(observation) if batched else 1
 
+        # Multi-agent
         if is_multi:
             if not isinstance(observation, dict):
                 msg = (
@@ -360,6 +409,8 @@ class Agent:
             action_mask = self._multi_agent_mask(info)
             if action_mask is not None:
                 payload["action_mask"] = self.serialize(action_mask, batched)
+
+            # Environment-defined actions
             eda = env_defined_actions
             if eda is None and info is not None:
                 raw_eda = info.get("env_defined_actions")
@@ -369,6 +420,7 @@ class Agent:
                 payload["env_defined_actions"] = self.serialize(eda, batched)
             return payload
 
+        # Single-agent
         action_mask = info.get("action_mask") if info is not None else None
         payload = {
             "obs": self.serialize(observation, batched),
@@ -409,6 +461,19 @@ class Agent:
                     hidden_state = deserialized
         return action, hidden_state
 
+    def status(self, *, refresh: bool = False) -> StatusResponse:
+        """Return deployment metadata.
+
+        :param refresh: Whether to refresh the metadata.
+        :type refresh: bool
+        :return: The deployment metadata.
+        :rtype: StatusResponse
+        """
+        if self.metadata is not None and not refresh:
+            return self.metadata
+        self.metadata = self._fetch_metadata()
+        return self.metadata
+
     def get_action(
         self,
         observation: RLData,
@@ -418,10 +483,23 @@ class Agent:
         info: dict[str, RLData] | None = None,
         env_defined_actions: dict[str, RLData] | None = None,
     ) -> tuple[RLData, dict[str, np.ndarray] | None]:
-        """Get actions from a deployed RL agent (``POST /get_action``).
+        """Get actions from a deployed RL agent.
 
         For multi-agent deployments, pass *observation* as ``dict[agent_id, obs]``.
         Per-agent ``action_mask`` in *info* must be a dict keyed by agent id.
+
+        :param observation: The observation to the agent.
+        :type observation: RLData
+        :param batched: Whether to batch the observation.
+        :type batched: bool
+        :param hidden_state: The hidden state of the agent.
+        :type hidden_state: dict[str, np.ndarray] | None
+        :param info: The info of the agent.
+        :type info: dict[str, RLData] | None
+        :param env_defined_actions: The env defined actions of the agent.
+        :type env_defined_actions: dict[str, RLData] | None
+        :return: A tuple containing the action and the hidden state.
+        :rtype: tuple[RLData, dict[str, np.ndarray] | None]
         """
         self._ensure(rl=True)
         agent = self._agent_info()
@@ -446,9 +524,15 @@ class Agent:
         *,
         batched: bool = False,
     ) -> tuple[RLData, PredictResult]:
-        """Run supervised inference (``POST /predict``).
+        """Return a prediction from a supervised agent.
 
-        Request body is ``{"inputs": <serialized>}`` only.
+        :param inputs: The inputs to the agent.
+        :type inputs: RLData
+        :param batched: Whether to batch the inputs.
+        :type batched: bool
+        :return: A tuple containing the prediction and the metadata.
+        :rtype: tuple[RLData, PredictResult]
+        :raises ArenaInferenceError: If the agent is not supervised.
         """
         self._ensure(supervised=True)
         body = self._request_json(
@@ -466,7 +550,15 @@ class Agent:
         *,
         params: LLMParams | dict[str, Any] | None = None,
     ) -> LLMResults:
-        """Generate LLM completions (``POST /generate``)."""
+        """Generate LLM completions.
+
+        :param prompts: The prompts to the agent.
+        :type prompts: str | list[str]
+        :param params: The parameters to the agent.
+        :type params: LLMParams | dict[str, Any] | None
+        :return: The LLM results.
+        :rtype: LLMResults
+        """
         self._ensure(llm=True)
         prompt_list = [prompts] if isinstance(prompts, str) else list(prompts)
         self._validate_prompts(prompt_list)
@@ -486,7 +578,15 @@ class Agent:
         *,
         params: LLMParams | dict[str, Any] | None = None,
     ) -> Iterator[str]:
-        """Stream tokens for a single prompt (``POST /generate_stream``)."""
+        """Stream generated tokens for a single prompt.
+
+        :param prompt: The prompt to the agent.
+        :type prompt: str
+        :param params: The parameters to the agent.
+        :type params: LLMParams | dict[str, Any] | None
+        :return: An iterator of strings.
+        :rtype: Iterator[str]
+        """
         self._ensure(llm=True)
         self._validate_prompts([prompt])
         payload = {
@@ -500,10 +600,17 @@ class Agent:
         self._http.close()
 
     def __enter__(self) -> Self:
+        """Enter the context manager."""
         return self
 
     def __exit__(self, *exc: object) -> None:
+        """Exit the context manager."""
         self.close()
 
     def __repr__(self) -> str:
+        """Return the representation of the agent.
+
+        :return: The representation of the agent.
+        :rtype: str
+        """
         return f"<Agent endpoint={self._base_url!r}>"
