@@ -381,11 +381,13 @@ class TestEmitResult:
 
     @patch("agilerl.arena.output._print_rich")
     def test_catalog_skips_non_dict_versions(self, mock_print):
+        from agilerl.arena.output import _emit_environment_catalog
+
         catalog = {
             "MyEnv": "not-a-version-map",
             "Other": {"v1": {"validated": True, "profiled": False}},
         }
-        emit_result(catalog)
+        _emit_environment_catalog(catalog)
         mock_print.assert_called_once()
 
     def test_format_cell_json_for_nested_values(self):

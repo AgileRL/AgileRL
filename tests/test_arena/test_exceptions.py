@@ -183,6 +183,11 @@ class TestParseBody:
         result = ArenaError._parse_body(raw)
         assert result == {"error": "failed"}
 
+    def test_ndjson_skips_whitespace_only_lines(self):
+        raw = '   \n\t\n{"error": "line parsed"}'
+        result = ArenaError._parse_body(raw)
+        assert result == {"error": "line parsed"}
+
     def test_nested_envelope_non_message_inner_skipped(self):
         inner = json.dumps({"status": 1})
         raw = json.dumps({"detail": inner})

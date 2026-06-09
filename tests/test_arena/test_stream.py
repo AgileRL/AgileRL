@@ -543,6 +543,25 @@ class TestNDJsonStream:
         stream = NDJsonStream(mock)
         assert stream.collect() == {}
 
+    def test_iter_skips_blank_ndjson_lines(self):
+        payload = json.dumps(
+            {
+                "kind": "status",
+                "stage": "upload",
+                "status": "completed",
+                "message": "Done",
+                "detail": {"ok": True},
+            }
+        )
+        mock = MagicMock()
+        mock.iter_text.return_value = iter([f"\n\n{payload}\n"])
+        mock.close = MagicMock()
+
+        events = list(NDJsonStream(mock))
+
+        assert len(events) == 1
+        assert isinstance(events[0], StatusEvent)
+
     def test_trailing_buffer_without_newline(self):
         """Server sends JSON without trailing newline — event is still yielded."""
         payload = json.dumps(
@@ -565,6 +584,23 @@ class TestNDJsonStream:
         assert isinstance(events[0], StatusEvent)
         assert events[0].status == "completed"
         assert stream.result == {"ok": True}
+
+    def test_trailing_buffer_invokes_handler(self):
+        payload = json.dumps(
+            {
+                "kind": "log",
+                "message": "tail event",
+            }
+        )
+        mock = MagicMock()
+        mock.iter_text.return_value = iter([payload])
+        mock.close = MagicMock()
+        handler = MagicMock()
+
+        list(NDJsonStream(mock, handler=handler))
+
+        handler.assert_called_once()
+        assert isinstance(handler.call_args[0][0], LogEvent)
 
     def test_error_event_mid_stream_preserves_order(self):
         """ErrorEvent interleaved between CheckEvents — all yielded in order."""

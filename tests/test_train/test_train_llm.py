@@ -916,6 +916,36 @@ class TestFinetuneLlmPreference:
 
 
 class TestFinetuneLlmSft:
+    def test_finetune_llm_sft_saves_elite_at_end(self):
+        weaker = _mock_sft_agent()
+        weaker.fitness = [0.2]
+        stronger = _mock_sft_agent()
+        stronger.fitness = [0.8]
+
+        mock_env = MagicMock()
+        mock_env.__len__.return_value = 1
+        mock_env.reset.return_value = "initial_prompts"
+        mock_env.step.return_value = "next_prompts"
+        mock_env.data_batch_size_per_gpu = 1
+        mock_env.num_epochs = 1
+
+        with (
+            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            _population_init_skip_per_mock_class(),
+        ):
+            mock_pbar_fn.return_value = MagicMock()
+            finetune_llm_sft(
+                pop=[weaker, stronger],
+                env=mock_env,
+                evaluation_interval=10,
+                save_elite=True,
+                elite_path="/tmp/sft-elite",
+            )
+
+            assert mock_save.call_args_list[-1] == call(stronger, "/tmp/sft-elite")
+
     @pytest.mark.parametrize("use_accelerator", [True, False])
     def test_finetune_llm_sft_basic_training_loop(self, use_accelerator):
         mock_agent = _mock_sft_agent()
@@ -1336,6 +1366,72 @@ class TestFinetuneLlmMultiturn:
         num_outer = 3
         # agg called for: mean_score (1) + accuracy (1) per outer iteration
         assert mock_agg.call_count == num_outer * 2
+
+    def test_finetune_llm_multiturn_registers_accuracy_metric(self):
+        mock_agent = _make_multiturn_mock_agent()
+        mock_agent.metrics.additional_metrics = ["loss", "mean_reward"]
+
+        with (
+            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.train_llm.save_llm_checkpoint"),
+            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+            patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
+            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+        ):
+            mock_pbar_fn.return_value = MagicMock()
+            mock_agg.return_value = 0.5
+            mock_collect.return_value = _multiturn_collect_return(batch_steps=3)
+            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
+            finetune_llm_multiturn(
+                pop=[mock_agent],
+                env_factory=MagicMock(),
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
+                max_steps=9,
+                evaluation_interval=100,
+                max_reward=1.0,
+                verbose=False,
+                accelerator=None,
+            )
+
+        mock_agent.metrics.register.assert_called_with("accuracy")
+
+    def test_finetune_llm_multiturn_saves_elite_at_end(self):
+        weaker = _make_multiturn_mock_agent()
+        weaker.fitness = [0.1]
+        stronger = _make_multiturn_mock_agent()
+        stronger.fitness = [0.9]
+
+        with (
+            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+            patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
+            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+            _population_init_skip_per_mock_class(),
+        ):
+            mock_pbar_fn.return_value = MagicMock()
+            mock_agg.return_value = 0.5
+            mock_collect.return_value = _multiturn_collect_return(batch_steps=3)
+            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
+            finetune_llm_multiturn(
+                pop=[weaker, stronger],
+                env_factory=MagicMock(),
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
+                max_steps=9,
+                evaluation_interval=100,
+                save_elite=True,
+                elite_path="/tmp/multiturn-elite",
+                verbose=False,
+                accelerator=None,
+            )
+
+        assert mock_save.call_args_list[-1] == call(stronger, "/tmp/multiturn-elite")
 
     def test_finetune_llm_multiturn_init_hp_none_uses_agent_fields(self):
         mock_agent = _make_multiturn_mock_agent()

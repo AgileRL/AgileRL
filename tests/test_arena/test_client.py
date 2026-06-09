@@ -272,6 +272,13 @@ class TestArenaClientLogin:
         client._proactively_refresh_oauth()
         assert client._tokens.access_token == expired
 
+    def test_proactively_refresh_skips_when_api_key_set(self):
+        with patch("agilerl.arena.auth.KeycloakOpenID"):
+            client = ArenaClient(api_key="test-key")
+        client._auth.refresh_access_token = MagicMock()
+        client._proactively_refresh_oauth()
+        client._auth.refresh_access_token.assert_not_called()
+
 
 class TestArenaClientLogout:
     def test_logout_revokes_and_clears(self, token_client):
@@ -897,6 +904,20 @@ class TestValidateEnvironmentParams:
         )
         call_kwargs = api_key_client._open_stream.call_args[1]
         assert call_kwargs["data"]["language_based"] == "true"
+
+    def test_create_forwards_entrypoint(self, api_key_client, tmp_path):
+        archive = tmp_path / "env.tar.gz"
+        archive.write_bytes(b"fake")
+
+        mock_stream = _mock_ndjson_stream()
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.validate_environment(
+            name="MyEnv",
+            source=archive,
+            entrypoint="my_env:make",
+        )
+        call_kwargs = api_key_client._open_stream.call_args[1]
+        assert call_kwargs["data"]["entrypoint"] == "my_env:make"
 
     def test_create_forwards_description(self, api_key_client, tmp_path):
         archive = tmp_path / "env.tar.gz"

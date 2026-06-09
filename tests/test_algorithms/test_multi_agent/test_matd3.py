@@ -1002,6 +1002,60 @@ class TestMATD3Init:
                 torch_compiler=compile_mode,
             )
 
+    @pytest.mark.parametrize("compile_mode", [None, "default"])
+    @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
+    @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
+    def test_with_non_evolvable_critic_networks(
+        self,
+        mlp_actor,
+        compile_mode,
+        observation_spaces,
+        action_spaces,
+        device,
+        request,
+    ):
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        observation_spaces = request.getfixturevalue(observation_spaces)
+        action_spaces = request.getfixturevalue(action_spaces)
+        group_to_index = get_group_index_map(agent_ids)
+        evo_actors = ModuleDict(
+            {
+                group_id: MakeEvolvable(
+                    network=mlp_actor,
+                    input_tensor=torch.randn(1, observation_spaces[0].shape[0]),
+                    device=device,
+                )
+                for group_id in group_to_index
+            },
+        )
+        critic_networks = [
+            ModuleDict(
+                {
+                    "agent": nn.Linear(8, 1),
+                    "other_agent": nn.Linear(8, 1),
+                },
+            ),
+            ModuleDict(
+                {
+                    "agent": nn.Linear(8, 1),
+                    "other_agent": nn.Linear(8, 1),
+                },
+            ),
+        ]
+        with pytest.raises(
+            TypeError,
+            match="All critic networks must be instances of EvolvableModule",
+        ):
+            MATD3(
+                observation_spaces=observation_spaces,
+                action_spaces=action_spaces,
+                agent_ids=agent_ids,
+                actor_networks=evo_actors,
+                critic_networks=critic_networks,
+                device=device,
+                torch_compiler=compile_mode,
+            )
+
     @pytest.mark.gpu
     @pytest.mark.parametrize("compile_mode", [None, "default"])
     @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])

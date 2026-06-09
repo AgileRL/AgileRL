@@ -114,6 +114,24 @@ class TestMakeVectEnvs:
         assert isinstance(env, gym.vector.SyncVectorEnv)
         assert env.num_envs == 2
 
+    def test_extra_wrappers_applied(self):
+        class MarkingWrapper(gym.Wrapper):
+            def __init__(self, env):
+                super().__init__(env)
+                self.marked = True
+
+        env = make_vect_envs(
+            "CartPole-v1",
+            num_envs=1,
+            should_async_vector=False,
+            extra_wrappers=[MarkingWrapper],
+        )
+        try:
+            assert isinstance(env.envs[0], MarkingWrapper)
+            assert env.envs[0].marked is True
+        finally:
+            env.close()
+
     # Returns an AsyncVectorEnv object when given a valid environment name and number of environments
     def test_returns_asyncvectorenv_object(self):
         num_envs = 3
@@ -202,6 +220,35 @@ def test_make_multi_agent_vect_envs_returns_asyncvectorenv_object():
     )
     env.close()
     assert env.num_envs == num_envs
+
+
+def test_make_multi_agent_vect_envs_extra_wrappers():
+    from pettingzoo.utils.wrappers import BaseWrapper
+
+    from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+    from tests.pz_vector_test_utils import speaker_listener_like_env
+
+    class MarkingWrapper(BaseWrapper):
+        def __init__(self, env):
+            super().__init__(env)
+            self.marked = True
+
+    with patch(
+        "agilerl.utils.utils.AsyncPettingZooVecEnv",
+        wraps=AsyncPettingZooVecEnv,
+    ) as mock_cls:
+        env = make_multi_agent_vect_envs(
+            speaker_listener_like_env,
+            num_envs=1,
+            extra_wrappers=[MarkingWrapper],
+            continuous_actions=False,
+        )
+        try:
+            built = mock_cls.call_args[1]["env_fns"][0]()
+            assert isinstance(built, MarkingWrapper)
+            assert built.marked is True
+        finally:
+            env.close()
 
 
 # Returns an AsyncVectorEnv object when given a valid environment name and number of environments

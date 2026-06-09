@@ -56,6 +56,12 @@ class TestListDatasets:
             params=None,
         )
 
+    def test_list_non_list_response_passthrough(self, api_key_client):
+        payload = {"results": [{"name": "hf-ds", "downloads": 100}]}
+        api_key_client._request = MagicMock(return_value=payload)
+        result = api_key_client.list_datasets(search="countdown")
+        assert result is payload
+
     def test_list_orders_fields(self, api_key_client):
         api_key_client._request = MagicMock(
             return_value=[
@@ -136,6 +142,25 @@ class TestCreateDataset:
         assert _multipart_text(files, "hf_dataset_name") == "org/dataset"
         assert _multipart_text(files, "hf_config") == "default"
         assert _multipart_text(files, "hf_split") == "train"
+
+    def test_create_logs_success_when_ready_and_uploaded(self, api_key_client):
+        api_key_client._request = MagicMock(
+            return_value={
+                "name": "ds1",
+                "is_ready": True,
+                "uploaded": True,
+            },
+        )
+        with patch("agilerl.arena.client.logger") as mock_logger:
+            api_key_client.create_dataset(
+                name="ds1",
+                category="sft",
+                column_mapping={},
+            )
+        mock_logger.info.assert_called_once_with(
+            "Dataset %s created successfully.",
+            "ds1",
+        )
 
     def test_create_metadata_only(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"name": "meta"})
