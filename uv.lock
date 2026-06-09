@@ -158,7 +158,7 @@ requires-dist = [
     { name = "pre-commit", specifier = "~=3.8.0" },
     { name = "pygame", specifier = "~=2.6.0" },
     { name = "pymunk", specifier = ">=6.2,<7.3" },
-    { name = "redis", specifier = "~=4.4.4" },
+    { name = "redis", specifier = ">=4.4.4,<8.1.0" },
     { name = "supersuit", specifier = "~=3.9.0" },
     { name = "swig", marker = "sys_platform != 'win32' and extra == 'all'", specifier = "~=4.4.1" },
     { name = "swig", marker = "sys_platform != 'win32' and extra == 'box2d'", specifier = "~=4.4.1" },
@@ -4821,14 +4821,14 @@ cgraph = [
 
 [[package]]
 name = "redis"
-version = "4.4.4"
+version = "8.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "async-timeout" },
+    { name = "async-timeout", marker = "python_full_version < '3.11.3'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ff/af/f791fa76162d1e7655a34bca58876b43388209912c6a771756fc0c8f96da/redis-4.4.4.tar.gz", hash = "sha256:68226f7ede928db8302f29ab088a157f41061fa946b7ae865452b6d7838bbffb", size = 4549578, upload-time = "2023-03-29T13:56:54.795Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/53/ae/ed461cca5780b5fc8b9fe8ca0ed98d89508645fb9d880c24cc42c087678f/redis-8.0.0.tar.gz", hash = "sha256:a00c5355432051ac14e593b8b197fc76c887ee12d55a0984f69328a1115fdc49", size = 5101591, upload-time = "2026-05-28T12:45:13.5Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5c/68/da435219cd46d416bf5b59d66dbe36ae4aaf05b91b7be6e8241a87d4c9b1/redis-4.4.4-py3-none-any.whl", hash = "sha256:da92a39fec86438d3f1e2a1db33c312985806954fe860120b582a8430e231d8f", size = 238045, upload-time = "2023-03-29T13:56:53.197Z" },
+    { url = "https://files.pythonhosted.org/packages/27/e3/b519734372d305bd547534a9f32e4ce9f98552af753dce72cf3483a0ff0b/redis-8.0.0-py3-none-any.whl", hash = "sha256:c938c18338585009f0bc310f4c7e4e4b4d37639356c4ac072cedf3af570c8dc7", size = 499870, upload-time = "2026-05-28T12:45:11.697Z" },
 ]
 
 [[package]]
