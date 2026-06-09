@@ -777,9 +777,9 @@ def create_model_from_name_or_path(
     :return: The created model.
     :rtype: PreTrainedModel
     """
-    # Merge our SDPA + dtype defaults into whatever the caller supplied rather
-    # than only applying them when ``model_config is None``.
-    # ``setdefault`` keeps any explicit caller value authoritative.
+    # Start from the caller's config (if any) and fill in our SDPA + dtype
+    # defaults with ``setdefault``, so any explicit caller value stays
+    # authoritative.
     model_config = dict(model_config) if model_config else {}
     model_config.setdefault(
         "torch_dtype", torch.bfloat16 if not use_accelerator else torch.float16

@@ -2396,15 +2396,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         before being cast back to the input dtype, for numerically stable
         log-probs.
 
-        The default preserves prior behaviour exactly: the unfused path
-        was already promoting to fp32 unconditionally before this flag
-        existed. The flag exposes that promotion as configurable.
-
-        Setting ``False`` introduces a per-token bf16 quantisation error
-        (~0.1 at ``V≈128k``) which can bias PPO/GRPO importance-sampling
-        ratios. Use only if you've verified bf16 is acceptable for your
-        vocab/shape — it saves ~18 GB on the unfused path at ``B=8,
-        T=2048, V≈152k``, ~6 MB on the fused path.
+        Setting ``False`` runs the reduction in the input dtype, introducing a
+        per-token bf16 quantisation error (~0.1 at ``V≈128k``) which can bias
+        PPO/GRPO importance-sampling ratios. Use only if you've verified bf16 is
+        acceptable for your vocab/shape — it saves ~6 MB on the
+        fused-linear-logprob path.
     :type cast_logprobs_to_fp32: bool, optional
     """
 

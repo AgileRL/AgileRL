@@ -154,9 +154,8 @@ class PPO(LLMAlgorithm):
         chunked, like GRPO/CISPO); turn- and sequence-level pooling couple a
         turn/sequence's tokens, so they cannot be token-chunked inside the
         fused kernel — set ``use_liger_loss=False`` there for bounded memory
-        (the standard path is always fused-linear/bounded). Note: turn pooling
-        is now the length-normalized mean (GSPO-consistent), a change from the
-        previous product/sum form.
+        (the standard path is always fused-linear/bounded). Turn pooling uses
+        the length-normalized mean of token log-ratios (GSPO-consistent).
     :type importance_sampling_level: Literal["auto", "token", "turn", "sequence"], optional
     :param advantage_granularity: PPO action granularity. ``"turn"`` enforces
         turn-level updates, ``"token"`` enforces token-level updates, and

@@ -1025,8 +1025,7 @@ def prepare_shared_base_for_kbit_training(
     """
     if gradient_checkpointing_kwargs is None:
         gradient_checkpointing_kwargs = {}
-    for _name, param in model.named_parameters():
-        param.requires_grad = False
+    model.requires_grad_(False)
     if use_gradient_checkpointing:
         # With use_reentrant=True the input embeddings must require grad so the
         # checkpointed graph can backprop into the LoRA adapters; with
