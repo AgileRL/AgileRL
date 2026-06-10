@@ -14,8 +14,8 @@ import click
 
 from agilerl.arena.config import (
     CommandConfig,
-    build_client,
     _resolve_root_command_config,
+    build_client,
 )
 from agilerl.arena.exceptions import ArenaValidationError
 from agilerl.arena.output import emit_result
