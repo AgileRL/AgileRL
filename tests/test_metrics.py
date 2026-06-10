@@ -49,7 +49,7 @@ class TestAgentMetricsLogHistogram:
         m.register_histogram("actions")
         m.log_histogram("actions", np.array([1, 2, 3]))
         m.log_histogram("actions", np.array([4, 5]))
-        assert m._nonscalar_metrics["actions"] == [1, 2, 3, 4, 5]
+        assert list(m._nonscalar_metrics["actions"]) == [1, 2, 3, 4, 5]
 
 
 class TestAgentMetricsGetMean:
@@ -93,7 +93,7 @@ class TestAgentMetricsClear:
         m.clear()
 
         assert m._additional_metrics["loss"] == []
-        assert m._nonscalar_metrics["actions"] == []
+        assert list(m._nonscalar_metrics["actions"]) == []
         assert m.scores == []
 
     def test_clear_preserves_metric_registration(self):
@@ -126,7 +126,10 @@ class TestMultiAgentMetricsRegister:
     def test_register_histogram_creates_per_agent_storage(self):
         m = MultiAgentMetrics(["x", "y"])
         m.register_histogram("actions")
-        assert m._nonscalar_metrics["actions"] == {"x": [], "y": []}
+        assert {k: list(v) for k, v in m._nonscalar_metrics["actions"].items()} == {
+            "x": [],
+            "y": [],
+        }
 
 
 class TestMultiAgentMetricsLog:
@@ -144,8 +147,8 @@ class TestMultiAgentMetricsLog:
         m.register_histogram("dist")
         m.log_histogram("dist", "a", np.array([1, 2]))
         m.log_histogram("dist", "b", np.array([3]))
-        assert m._nonscalar_metrics["dist"]["a"] == [1, 2]
-        assert m._nonscalar_metrics["dist"]["b"] == [3]
+        assert list(m._nonscalar_metrics["dist"]["a"]) == [1, 2]
+        assert list(m._nonscalar_metrics["dist"]["b"]) == [3]
 
 
 class TestMultiAgentMetricsGetMean:
@@ -188,7 +191,10 @@ class TestMultiAgentMetricsClear:
         m.clear()
 
         assert m._additional_metrics["loss"] == {"a": [], "b": []}
-        assert m._nonscalar_metrics["actions"] == {"a": [], "b": []}
+        assert {k: list(v) for k, v in m._nonscalar_metrics["actions"].items()} == {
+            "a": [],
+            "b": [],
+        }
         assert m.scores == []
 
 
@@ -372,3 +378,17 @@ class TestBaseMetricsAbstractBodies:
     def test_get_histogram_raises(self):
         with pytest.raises(NotImplementedError):
             self._make_stub().get_histogram("x")
+
+
+class TestNonscalarWindow:
+    def test_histogram_accumulation_is_bounded(self):
+        m = AgentMetrics(nonscalar_window=5)
+        m.register_histogram("actions")
+        m.log_histogram("actions", np.arange(10))
+        assert list(m._nonscalar_metrics["actions"]) == [5, 6, 7, 8, 9]
+
+    def test_multi_agent_histogram_accumulation_is_bounded(self):
+        m = MultiAgentMetrics(["a"], nonscalar_window=3)
+        m.register_histogram("actions")
+        m.log_histogram("actions", "a", np.arange(5))
+        assert list(m._nonscalar_metrics["actions"]["a"]) == [2, 3, 4]

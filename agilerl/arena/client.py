@@ -664,12 +664,15 @@ class ArenaClient:
         )
         files = multipart_text_fields(data)
         files.update(upload_files)
-        resp: dict[str, Any] = self._request(
-            "POST",
-            "/api/cli/v1/datasets/create",
-            files=files,
-            timeout=self._upload_timeout,
-        )
+        try:
+            resp: dict[str, Any] = self._request(
+                "POST",
+                "/api/cli/v1/datasets/create",
+                files=files,
+                timeout=self._upload_timeout,
+            )
+        finally:
+            self._close_upload_files(upload_files)
         if resp and resp.get("is_ready", False) and resp.get("uploaded", False):
             logger.info("Dataset %s created successfully.", name)
 
@@ -809,12 +812,15 @@ class ArenaClient:
                 reward_file=reward_file,
                 completion=completion,
             )
-            return self._open_stream(
-                "POST",
-                "/api/cli/v1/experiments/jobs/submit",
-                files=files,
-                timeout=self._upload_timeout,
-            ).collect()
+            try:
+                return self._open_stream(
+                    "POST",
+                    "/api/cli/v1/experiments/jobs/submit",
+                    files=files,
+                    timeout=self._upload_timeout,
+                ).collect()
+            finally:
+                self._close_upload_files(files)
 
         payload: dict[str, Any] = {
             "manifest": validated,
@@ -1341,8 +1347,8 @@ class ArenaClient:
         do_rollouts: bool,
     ) -> NDJsonStream:
         """Upload, create, and validate an environment."""
-        # Resolve the environment source into bytes for upload
-        archive_name, archive_bytes = prepare_env_upload(source)
+        # Resolve the environment source into a streamable upload payload
+        archive_name, archive_payload = prepare_env_upload(source)
         data: dict[str, str] = {
             "name": name,
             "version": version,
@@ -1356,10 +1362,10 @@ class ArenaClient:
             data["description"] = description
 
         files: dict[str, tuple[str, Any, str]] = {
-            "file": (archive_name, archive_bytes, "application/gzip"),
+            "file": (archive_name, archive_payload, "application/gzip"),
         }
 
-        # Check env_config and resolve to bytes for upload
+        # Check env_config and resolve for upload
         if env_config is not None:
             files["env_config"] = prepare_file_upload(
                 env_config,
@@ -1369,7 +1375,7 @@ class ArenaClient:
         else:
             files["env_config"] = ("env_config.yaml", b"", "application/x-yaml")
 
-        # Check requirements and resolve to bytes for upload
+        # Check requirements and resolve for upload
         if requirements is not None:
             files["requirements"] = prepare_file_upload(
                 requirements,
@@ -1379,13 +1385,18 @@ class ArenaClient:
         else:
             files["requirements"] = ("requirements.txt", b"", "text/plain")
 
-        return self._open_stream(
-            "POST",
-            "/api/cli/v1/environments/create-and-validate",
-            data=data,
-            files=files,
-            timeout=self._upload_timeout,
-        )
+        try:
+            # The request body is fully sent by the time the stream is
+            # returned, so the upload handles can be closed afterwards.
+            return self._open_stream(
+                "POST",
+                "/api/cli/v1/environments/create-and-validate",
+                data=data,
+                files=files,
+                timeout=self._upload_timeout,
+            )
+        finally:
+            self._close_upload_files(files)
 
     def _try_restore_session(self) -> None:
         # Try to restore previously saved authentication credentials.
@@ -1492,6 +1503,7 @@ class ArenaClient:
             self._tokens.refresh_token = tokens.get(
                 "refresh_token", self._tokens.refresh_token
             )
+            self._rewind_upload_files(kwargs.get("files"))
             return self._send(
                 method,
                 path,
@@ -1512,6 +1524,7 @@ class ArenaClient:
                     "API key rejected; falling back to stored OAuth credentials."
                 )
                 self._api_key = None
+                self._rewind_upload_files(kwargs.get("files"))
                 return self._send(
                     method,
                     path,
@@ -1545,6 +1558,24 @@ class ArenaClient:
             raise error_cls.from_response_body(raw, status_code=resp.status_code)
 
         return resp
+
+    @staticmethod
+    def _close_upload_files(files: dict[str, tuple] | None) -> None:
+        """Close any open file handles in an httpx multipart ``files`` dict."""
+        for value in (files or {}).values():
+            payload = value[1] if isinstance(value, tuple) and len(value) > 1 else None
+            close = getattr(payload, "close", None)
+            if callable(close):
+                close()
+
+    @staticmethod
+    def _rewind_upload_files(files: dict[str, tuple] | None) -> None:
+        """Rewind seekable upload payloads so a retried request resends them."""
+        for value in (files or {}).values():
+            payload = value[1] if isinstance(value, tuple) and len(value) > 1 else None
+            seek = getattr(payload, "seek", None)
+            if callable(seek):
+                seek(0)
 
     @staticmethod
     def _read_response_body(resp: httpx.Response, *, stream: bool) -> str:

@@ -463,21 +463,27 @@ class Population(Generic[AgentT]):
             raise ValueError(msg)
 
         self._agents = agents
-        self.sample_agent = sample_agent
         self.min_evo_steps = min_evo_steps
         self.accelerator = accelerator
         self.loggers = loggers or []
 
         self.last_fitnesses: ScalarOrNestedRow = []
         self.evo_steps = 0
+        self._refresh_derived()
+
+    def _refresh_derived(self) -> None:
+        """Recompute views derived from the current agents.
+
+        Called on construction and whenever the population is replaced, so
+        no reference to a replaced agent is retained.
+        """
+        sample_agent = self._agents[0]
         self.is_multi_agent = all(
-            isinstance(agent, MultiAgentRLAlgorithm) for agent in agents
+            isinstance(agent, MultiAgentRLAlgorithm) for agent in self._agents
         )
-        self.additional_metric_names = self.sample_agent.metrics.additional_metrics
-        self.nonscalar_metric_names = self.sample_agent.metrics.nonscalar_metrics
-        self.agent_ids = (
-            self.sample_agent.metrics.agent_ids if self.is_multi_agent else None
-        )
+        self.additional_metric_names = sample_agent.metrics.additional_metrics
+        self.nonscalar_metric_names = sample_agent.metrics.nonscalar_metrics
+        self.agent_ids = sample_agent.metrics.agent_ids if self.is_multi_agent else None
 
     @property
     def agents(self) -> list[AgentT]:
@@ -511,6 +517,7 @@ class Population(Generic[AgentT]):
     def update(self, agents: list[AgentT]) -> None:
         """Replace the population (e.g. after tournament selection + mutation)."""
         self._agents = agents
+        self._refresh_derived()
 
     def increment_evo_step(self) -> None:
         """Increment the population-level evo-step counter."""

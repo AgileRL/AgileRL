@@ -667,7 +667,9 @@ class TestValidateEnvironment:
         assert call_args[0] == ("POST", "/api/cli/v1/environments/create-and-validate")
         file_tuple = call_args[1]["files"]["file"]
         assert file_tuple[0] == "my_env.tar.gz"
-        assert isinstance(file_tuple[1], bytes)
+        # Path sources are streamed from disk (open handle, closed after send)
+        assert not isinstance(file_tuple[1], bytes)
+        assert file_tuple[1].closed
         mock_stream.collect.assert_called_once()
         assert result == {"status": "ok"}
 

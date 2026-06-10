@@ -1,7 +1,8 @@
-import io
 import os
 import tarfile
+import tempfile
 from pathlib import Path
+from typing import BinaryIO
 
 from agilerl.arena.exceptions import ArenaFileNotFoundError
 
@@ -55,20 +56,39 @@ def multipart_text_fields(
     return {key: (None, value) for key, value in fields.items() if value is not None}
 
 
-def prepare_env_upload(source: str | os.PathLike[str] | bytes) -> tuple[str, bytes]:
-    """Resolve an environment source into an upload-ready ``(name, bytes)`` pair.
+def _tar_to_tempfile(add_entries) -> BinaryIO:
+    """Write a ``.tar.gz`` to an unlinked temporary file and rewind it.
+
+    Spooling to disk instead of memory keeps large artifact uploads from
+    holding the whole archive resident; httpx streams the open handle.
+    """
+    buf = tempfile.TemporaryFile()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        add_entries(tar)
+    buf.seek(0)
+    return buf
+
+
+def prepare_env_upload(
+    source: str | os.PathLike[str] | bytes,
+) -> tuple[str, BinaryIO | bytes]:
+    """Resolve an environment source into an upload-ready ``(name, payload)`` pair.
 
     *source* may be:
 
     * A path to a directory — compressed into ``.tar.gz`` automatically.
     * A path to a single file — compressed into ``.tar.gz`` automatically.
-    * A path to an existing ``.tar.gz`` file — read as-is.
+    * A path to an existing ``.tar.gz`` file — opened for streaming as-is.
     * Raw ``bytes`` — used directly (assumed to be a valid ``.tar.gz``).
+
+    Path inputs resolve to open binary handles so httpx streams the upload in
+    chunks instead of holding the whole artifact in memory; the caller is
+    responsible for closing them once the request has been sent.
 
     :param source: The source of the environment.
     :type source: str | os.PathLike[str] | bytes
-    :returns: The name and bytes of the prepared environment.
-    :rtype: tuple[str, bytes]
+    :returns: The name and payload (open handle or bytes) of the environment.
+    :rtype: tuple[str, BinaryIO | bytes]
     :raises ArenaFileNotFoundError: If *source* is a path that does not exist.
     """
     if isinstance(source, bytes):
@@ -78,21 +98,23 @@ def prepare_env_upload(source: str | os.PathLike[str] | bytes) -> tuple[str, byt
 
     # Directory
     if path.is_dir():
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+
+        def _add_dir(tar: tarfile.TarFile) -> None:
             for child in sorted(path.rglob("*")):
                 if child.is_file():
                     tar.add(str(child), arcname=child.relative_to(path).as_posix())
-        return (f"{path.name}.tar.gz", buf.getvalue())
+
+        return (f"{path.name}.tar.gz", _tar_to_tempfile(_add_dir))
 
     # Single file
     if path.is_file():
         if path.suffixes[-2:] == [".tar", ".gz"] or path.suffix == ".tgz":
-            return (path.name, path.read_bytes())
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            return (path.name, path.open("rb"))
+
+        def _add_file(tar: tarfile.TarFile) -> None:
             tar.add(str(path), arcname=path.name)
-        return (f"{path.stem}.tar.gz", buf.getvalue())
+
+        return (f"{path.stem}.tar.gz", _tar_to_tempfile(_add_file))
 
     msg = f"Source path not found: {path}"
     raise ArenaFileNotFoundError(msg)
@@ -103,8 +125,12 @@ def prepare_file_upload(
     *,
     default_name: str,
     content_type: str,
-) -> tuple[str, bytes, str]:
+) -> tuple[str, BinaryIO | bytes, str]:
     """Resolve a path or raw bytes into an httpx multipart file tuple.
+
+    Path inputs resolve to open binary handles so httpx streams the upload
+    in chunks instead of reading the whole file into memory; the caller is
+    responsible for closing them once the request has been sent.
 
     :param source: File path or raw file contents.
     :type source: str | os.PathLike[str] | bytes
@@ -112,8 +138,8 @@ def prepare_file_upload(
     :type default_name: str
     :param content_type: MIME type for the upload part.
     :type content_type: str
-    :returns: ``(filename, contents, content_type)`` for httpx ``files=``.
-    :rtype: tuple[str, bytes, str]
+    :returns: ``(filename, payload, content_type)`` for httpx ``files=``.
+    :rtype: tuple[str, BinaryIO | bytes, str]
     :raises ArenaFileNotFoundError: If *source* is a path that does not exist.
     """
     if isinstance(source, bytes):
@@ -123,4 +149,4 @@ def prepare_file_upload(
     if not path.is_file():
         msg = f"Upload file not found: {path}"
         raise ArenaFileNotFoundError(msg)
-    return (path.name, path.read_bytes(), content_type)
+    return (path.name, path.open("rb"), content_type)

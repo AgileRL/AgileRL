@@ -10,19 +10,33 @@ import numpy as np
 
 AdditionalMetricType = list[float] | dict[str, list[float]]
 
+# Default cap on accumulated raw histogram samples. Bundled training loops
+# clear accumulators every evo step, but custom loops may never clear, so
+# non-scalar metrics are bounded to avoid unbounded memory growth.
+NONSCALAR_WINDOW = 100_000
+
 
 class BaseMetrics(ABC):
     """Base class for per-agent metrics.
 
     :param fitness_window: Maximum number of fitness values to store.
     :type fitness_window: int
+    :param nonscalar_window: Maximum number of raw samples to keep per
+        non-scalar (histogram) metric.
+    :type nonscalar_window: int
     """
 
-    def __init__(self, *, fitness_window: int = 100) -> None:
+    def __init__(
+        self,
+        *,
+        fitness_window: int = 100,
+        nonscalar_window: int = NONSCALAR_WINDOW,
+    ) -> None:
         self._additional_metrics: dict[str, AdditionalMetricType] = {}
-        self._nonscalar_metrics: dict[str, list | dict[str, list]] = {}
+        self._nonscalar_metrics: dict[str, deque | dict[str, deque]] = {}
         self._hyperparameters: dict[str, float] = {}
         self._training_start_time: float = 0.0
+        self._nonscalar_window = nonscalar_window
         self.steps_per_second: float = 0.0
         self.steps: int = 0
         self.scores: list[float] = []
@@ -161,17 +175,27 @@ class AgentMetrics(BaseMetrics):
 
     :param fitness_window: Maximum number of fitness values to store.
     :type fitness_window: int
+    :param nonscalar_window: Maximum number of raw samples to keep per
+        non-scalar (histogram) metric.
+    :type nonscalar_window: int
     """
 
-    def __init__(self, *, fitness_window: int = 100) -> None:
-        super().__init__(fitness_window=fitness_window)
+    def __init__(
+        self,
+        *,
+        fitness_window: int = 100,
+        nonscalar_window: int = NONSCALAR_WINDOW,
+    ) -> None:
+        super().__init__(
+            fitness_window=fitness_window, nonscalar_window=nonscalar_window
+        )
 
     def _init_metric(self, name: str) -> None:
         """Initialize storage for a newly registered metric."""
         self._additional_metrics[name] = []
 
     def _init_nonscalar_metric(self, name: str) -> None:
-        self._nonscalar_metrics[name] = []
+        self._nonscalar_metrics[name] = deque(maxlen=self._nonscalar_window)
 
     def log(self, name: str, value: float) -> None:
         """Append a value to the accumulator for a registered metric.
@@ -234,8 +258,8 @@ class AgentMetrics(BaseMetrics):
         super().clear()
         for name in self._additional_metrics:
             self._additional_metrics[name] = []
-        for name in self._nonscalar_metrics:
-            self._nonscalar_metrics[name] = []
+        for accumulator in self._nonscalar_metrics.values():
+            accumulator.clear()
 
 
 class MultiAgentMetrics(BaseMetrics):
@@ -251,8 +275,16 @@ class MultiAgentMetrics(BaseMetrics):
     :type fitness_window: int
     """
 
-    def __init__(self, agent_ids: list[str], *, fitness_window: int = 100) -> None:
-        super().__init__(fitness_window=fitness_window)
+    def __init__(
+        self,
+        agent_ids: list[str],
+        *,
+        fitness_window: int = 100,
+        nonscalar_window: int = NONSCALAR_WINDOW,
+    ) -> None:
+        super().__init__(
+            fitness_window=fitness_window, nonscalar_window=nonscalar_window
+        )
 
         self.agent_ids: list[str] = list(agent_ids)
         self.scores: list[float] | list[list[float]] = []
@@ -266,7 +298,10 @@ class MultiAgentMetrics(BaseMetrics):
         self._additional_metrics[name] = {agent_id: [] for agent_id in self.agent_ids}
 
     def _init_nonscalar_metric(self, name: str) -> None:
-        self._nonscalar_metrics[name] = {agent_id: [] for agent_id in self.agent_ids}
+        self._nonscalar_metrics[name] = {
+            agent_id: deque(maxlen=self._nonscalar_window)
+            for agent_id in self.agent_ids
+        }
 
     def log(self, name: str, agent_id: str, value: float) -> None:
         """Append a value to the accumulator for a registered metric and sub-agent.
@@ -334,5 +369,6 @@ class MultiAgentMetrics(BaseMetrics):
         super().clear()
         for name in self._additional_metrics:
             self._additional_metrics[name] = {k: [] for k in self.agent_ids}
-        for name in self._nonscalar_metrics:
-            self._nonscalar_metrics[name] = {k: [] for k in self.agent_ids}
+        for per_agent in self._nonscalar_metrics.values():
+            for accumulator in per_agent.values():
+                accumulator.clear()

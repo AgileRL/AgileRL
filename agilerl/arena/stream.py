@@ -233,7 +233,10 @@ class NDJsonStream:
             for chunk in self._response.iter_text():
                 if not chunk:
                     continue
-                self._raw_chunks.append(chunk)
+                # Raw chunks are only needed as a fallback when the stream
+                # never yields a completed event; stop buffering once it has.
+                if self._result is None:
+                    self._raw_chunks.append(chunk)
                 buffer += chunk
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
@@ -357,5 +360,6 @@ class NDJsonStream:
             and event.detail
         ):
             self._result = event.detail
+            self._raw_chunks.clear()
         elif isinstance(event, ErrorEvent) and self._error is None:
             self._error = event
