@@ -218,7 +218,7 @@ called *Large* Language Models for a reason, and unless you are a very lucky ind
 have enough capacity on your individual computer to train even a 'small' LLM. If you want to train a
 larger, more powerful model, then this becomes even more infeasible. Instead, we can leverage distributed
 training, to share the workload across multiple devices and speed up training. To enable distributed
-training in this tutorial, we use deepspeed and accelerate.
+training in this tutorial, we use accelerate (torch-native DDP).
 
 .. code-block:: python
 
@@ -258,41 +258,34 @@ checkpoints of the trained agent that can be used later for inference. It also u
         num_epochs=1
     )
 
-Configuring Accelerate and DeepSpeed
-------------------------------------
+Configuring Accelerate
+----------------------
 To generate an accelerate file, run the command ``accelerate config`` in your terminal, following the instructions
-on screen to outline the details of the compute you intend to use for your finetuning, saying yes to the question
-"Do you want to use DeepSpeed?" and no to the question "Do you want to specify a json file to a DeepSpeed config?"
-if you want an auto-generated deepspeed config file. More information on the deepspeed configuration can be found
-in their `docs <https://www.deepspeed.ai/docs/config-json/>`_. The accelerate config will handle the details of
-the distribution and the GRPO class handles how the accelerator is used during training. You can then launch a training
-run using ``accelerate`` with the following command:
+on screen to outline the details of the compute you intend to use for your finetuning. For LoRA fine-tuning the
+default multi-GPU (DDP) setup is the recommended choice: only the small adapter gradients are synchronized
+between devices, and the base model weights stay whole on each rank (which colocated vLLM generation requires).
+The accelerate config handles the details of the distribution and the GRPO class handles how the accelerator
+is used during training. You can then launch a training run using ``accelerate`` with the following command:
 
 .. code-block:: bash
 
     accelerate launch path/to/training_script
 
-Alternatively, you can avoid ``accelerate config`` by defining your own accelerate-deepspeed config file and pass
+Alternatively, you can avoid ``accelerate config`` by defining your own accelerate config file and pass
 it as an argument to ``accelerate launch``:
 
 .. code-block:: bash
 
-    accelerate launch --config_file path/to/accelerate-deepspeed-config.yaml path/to/training_script
+    accelerate launch --config_file path/to/accelerate-config.yaml path/to/training_script
 
-Example config file:
+Example config file (see ``configs/accelerate/grpo_accelerate_config.yaml``):
 
 .. code-block:: yaml
 
     compute_environment: LOCAL_MACHINE
     debug: false
-    deepspeed_config:
-        gradient_accumulation_steps: 2
-        gradient_clipping: 1.5
-        offload_optimizer_device: cpu
-        offload_param_device: cpu
-        zero3_init_flag: false
-        zero_stage: 2
-    distributed_type: DEEPSPEED
+    gradient_accumulation_steps: 2
+    distributed_type: MULTI_GPU
     downcast_bf16: no
     enable_cpu_affinity: false
     machine_rank: 0
@@ -306,6 +299,12 @@ Example config file:
     tpu_use_cluster: false
     tpu_use_sudo: false
     use_cpu: false
+
+For models too large to train unsharded, AgileRL supports PyTorch FSDP2
+(``fsdp_version: 2``) — see ``configs/accelerate/fsdp2_accelerate_config.yaml``.
+Gradient clipping is configured via the ``max_grad_norm`` argument to the
+algorithm, and gradient accumulation via ``gradient_accumulation_steps`` in the
+accelerate config (or the ``micro_batch_size_per_gpu`` argument).
 
 Using a custom training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

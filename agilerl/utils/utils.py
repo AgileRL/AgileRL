@@ -37,7 +37,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
-from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
+from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
@@ -149,7 +149,7 @@ def _prepare_llm_algo_kwargs(
         merged["micro_batch_size_per_gpu"] = INIT_HP.get(
             "MICRO_BATCH_SIZE_PER_GPU",
             batch_size,
-        )  # NOTE we should take a look into deepspeed auto batch-sizing
+        )
     if "reduce_memory_peak" not in merged and "REDUCE_MEMORY_PEAK" in INIT_HP:
         merged["reduce_memory_peak"] = bool(INIT_HP["REDUCE_MEMORY_PEAK"])
     return merged
@@ -289,17 +289,9 @@ def observation_space_channels_to_first(
 
 
 def suppress_verbose_logging() -> None:
-    """Suppress verbose logging from DeepSpeed, Accelerate, and related libraries."""
-    # Suppress DeepSpeed logging
-    logging.getLogger("deepspeed").setLevel(logging.WARNING)
-
+    """Suppress verbose logging from Accelerate and related libraries."""
     # Suppress Accelerate logging
     logging.getLogger("accelerate").setLevel(logging.WARNING)
-
-    # Suppress specific DeepSpeed components
-    logging.getLogger("deepspeed.runtime.engine").setLevel(logging.WARNING)
-    logging.getLogger("deepspeed.runtime.zero").setLevel(logging.WARNING)
-    logging.getLogger("deepspeed.checkpoint").setLevel(logging.WARNING)
 
     # Suppress JAX logging (if used)
     logging.getLogger("jax").setLevel(logging.WARNING)
@@ -745,12 +737,7 @@ def create_population(
                 (
                     clone_llm(
                         actor_network,
-                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                        state_dict=(
-                            actor_network.state_dict()
-                            if accelerator is None
-                            else get_state_dict(actor_network)
-                        ),
+                        state_dict=get_state_dict(actor_network),
                     )
                     if idx != 0
                     else actor_network
@@ -838,12 +825,7 @@ def create_population(
                 (
                     clone_llm(
                         actor_network,
-                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                        state_dict=(
-                            actor_network.state_dict()
-                            if accelerator is None
-                            else get_state_dict(actor_network)
-                        ),
+                        state_dict=get_state_dict(actor_network),
                     )
                     if idx != 0
                     else actor_network
@@ -894,12 +876,7 @@ def create_population(
                 (
                     clone_llm(
                         actor_network,
-                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                        state_dict=(
-                            actor_network.state_dict()
-                            if accelerator is None
-                            else get_state_dict(actor_network)
-                        ),
+                        state_dict=get_state_dict(actor_network),
                     )
                     if idx != 0
                     else actor_network
@@ -952,12 +929,7 @@ def create_population(
                 (
                     clone_llm(
                         actor_network,
-                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                        state_dict=(
-                            actor_network.state_dict()
-                            if accelerator is None
-                            else get_state_dict(actor_network)
-                        ),
+                        state_dict=get_state_dict(actor_network),
                     )
                     if idx != 0
                     else actor_network
@@ -1032,12 +1004,7 @@ def create_population(
                 (
                     clone_llm(
                         actor_network,
-                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                        state_dict=(
-                            actor_network.state_dict()
-                            if accelerator is None
-                            else get_state_dict(actor_network)
-                        ),
+                        state_dict=get_state_dict(actor_network),
                     )
                     if idx != 0
                     else actor_network
@@ -1528,11 +1495,7 @@ def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
         setattr(agent, mut, mut_value)
 
         if mut in ("lr", "critic_lr"):
-            opt = (
-                agent.optimizer
-                if not isinstance(agent.optimizer.optimizer, DummyOptimizer)
-                else agent.actor.optimizer
-            )
+            opt = agent.optimizer.optimizer
             lr = (
                 (agent.lr, agent.lr_critic)
                 if getattr(agent, "lr_critic", None) is not None

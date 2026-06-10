@@ -3,11 +3,10 @@ import os
 import shutil
 import warnings
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
-from typing import TYPE_CHECKING, Any, ForwardRef, NoReturn, Union
+from typing import TYPE_CHECKING, Any, ForwardRef, Union
 
 import numpy as np
 import torch
@@ -21,7 +20,6 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     EvolvableAttributeType,
     EvolvableModuleProtocol,
@@ -48,7 +46,7 @@ if HAS_LLM_DEPENDENCIES:
     from peft import PeftModel, get_peft_model
     from transformers import PreTrainedModel
 
-    from agilerl.utils.llm_utils import gather_if_zero3
+    from agilerl.utils.llm_utils import gather_full_params
 
     PreTrainedModelType = PeftModel | PreTrainedModel
 else:
@@ -1755,16 +1753,13 @@ def _rename_peft_primary_adapter_keys_in_state_dict(
 
 
 def clone_llm(
-    original_model: PreTrainedModelType | DummyEvolvable,
-    zero_stage: int,
+    original_model: PreTrainedModelType,
     state_dict: dict[str, torch.Tensor] | None = None,
 ) -> PreTrainedModelType:
     """Clone the actor.
 
     :param original_model: Model to clone
     :type original_model: PreTrainedModelType
-    :param zero_stage: Zero stage to use, defaults to 0
-    :type zero_stage: int, optional
     :param state_dict: State dict to load, defaults to None
     :type state_dict: dict[str, torch.Tensor] | None, optional
     :return: Cloned model
@@ -1774,12 +1769,10 @@ def clone_llm(
             pass
         case PreTrainedModel():
             pass
-        case DummyEvolvable():
-            original_model = original_model.module
         case _:
             msg = f"Invalid 'original_model' type: {type(original_model)}"
             raise ValueError(msg)
-    with gather_if_zero3(zero_stage, list(original_model.parameters())):
+    with gather_full_params(original_model):
         model_config = original_model.config
         base_model = original_model.model
         model = type(base_model)(model_config)
@@ -1814,53 +1807,6 @@ def clone_llm(
                 )
             model.load_state_dict(sd, strict=False)
     return model
-
-
-class DummyOptimizer:
-    """Placeholder optimizer class to pass to the OptimizerWrapper when the optimizer is defined in the deepspeed config."""
-
-    def __init__(self, params: list[torch.Tensor], **kwargs) -> None:
-        """Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
-
-        :param params: Parameters to optimize.
-        :type params: list[torch.Tensor]
-        """
-
-    def step(self, closure: Callable[[], torch.Tensor] | None = None) -> NoReturn:
-        msg = (
-            "DummyOptimizer is a placeholder optimizer and should not be used."
-            "Please ensure you are calling accelerator.prepare() on the optimizer."
-        )
-        raise RuntimeError(
-            msg,
-        )
-
-    def zero_grad(self) -> NoReturn:
-        msg = (
-            "DummyOptimizer is a placeholder optimizer and should not be used."
-            "Please ensure you are calling accelerator.prepare() on the optimizer."
-        )
-        raise RuntimeError(
-            msg,
-        )
-
-    def state_dict(self) -> NoReturn:
-        msg = (
-            "DummyOptimizer is a placeholder optimizer and should not be used."
-            "Please ensure you are calling accelerator.prepare() on the optimizer."
-        )
-        raise RuntimeError(
-            msg,
-        )
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> NoReturn:
-        msg = (
-            "DummyOptimizer is a placeholder optimizer and should not be used."
-            "Please ensure you are calling accelerator.prepare() on the optimizer."
-        )
-        raise RuntimeError(
-            msg,
-        )
 
 
 def _reconcile_shapes(

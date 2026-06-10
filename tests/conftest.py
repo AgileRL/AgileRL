@@ -50,7 +50,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 # Tests that construct ``Accelerator()`` directly (instead of via the
-# ``deepspeed_env`` fixture) inherit torch's default MASTER_PORT. Parallel
+# ``distributed_env`` fixture) inherit torch's default MASTER_PORT. Parallel
 # xdist workers then race to bind the same port and one fails with
 # ``EADDRINUSE``. Give each worker a deterministic, unique MASTER_PORT here
 # so any later distributed init lands on a non-colliding port.
@@ -101,9 +101,9 @@ def pytest_collection_modifyitems(config, items):
          With every test factory constructing ``VLLMConfig`` with
          ``gpu_memory_utilization≈0.2`` and
          ``kv_cache_memory_bytes=32 * 1024 * 1024``, a vLLM worker reserves
-         ~3.2 GiB and ``gpu`` (DeepSpeed) tests use ~0.5 GiB; the worst-case
-         "4 vLLM workers + small DeepSpeed share" still fits in ~13 GiB.
-      2. **Port races.** Each worker's ``deepspeed_env`` fixture allocates a
+         ~3.2 GiB and ``gpu`` (distributed) tests use ~0.5 GiB; the worst-case
+         "4 vLLM workers + small distributed share" still fits in ~13 GiB.
+      2. **Port races.** Each worker's ``distributed_env`` fixture allocates a
          free ``MASTER_PORT`` via the standard bind-to-port-0 / close /
          return dance, which is TOCTOU. Above ~4 concurrent workers the
          collision rate produces ``EADDRINUSE`` during
@@ -111,14 +111,13 @@ def pytest_collection_modifyitems(config, items):
 
       ``vllm`` tests run in ``subprocess_runner.py``-spawned subprocesses, so
       worker-process state is reset between them. ``gpu`` tests run
-      in-process and can leak DeepSpeed groups / accelerator state to the
+      in-process and can leak process groups / accelerator state to the
       next test sharing the same group; the per-fixture cleanup
       (``AcceleratorState._reset_state(True)`` etc.) handles this in
       practice for the test sets in this repo, but **don't add many more
-      ``gpu``-marked tests without re-checking** — DeepSpeed has no clean
-      ``destroy_process_group`` path so sharing a worker between two
-      DeepSpeed-init tests can surface ``Group <ProcessGroup ...> is not
-      registered`` or ``EADDRINUSE``-on-MASTER_PORT.
+      ``gpu``-marked tests without re-checking** — sharing a worker between
+      two distributed-init tests can surface ``Group <ProcessGroup ...> is
+      not registered`` or ``EADDRINUSE``-on-MASTER_PORT.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
@@ -450,7 +449,6 @@ def dummy_rng():
 
 
 dist_env = {
-    "ACCELERATE_USE_DEEPSPEED": "true",
     "MASTER_ADDR": "localhost",
     "MASTER_PORT": "10999",
     "RANK": "0",
@@ -467,8 +465,8 @@ def get_free_port():
 
 
 @pytest.fixture
-def deepspeed_env():
-
+def distributed_env():
+    """Single-process torch.distributed environment for accelerated LLM tests."""
     dynamic_dist_env = dist_env.copy()
     dynamic_dist_env["MASTER_PORT"] = str(get_free_port())
     existing_vars = {}

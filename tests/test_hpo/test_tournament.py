@@ -330,10 +330,8 @@ class TestTournamentSelectionSelect:
         accelerator.is_main_process = True
         accelerator.wait_for_everyone = MagicMock()
         accelerator.state = MagicMock()
-        accelerator.state.deepspeed_plugin = MagicMock()
-        accelerator.state.deepspeed_plugin.deepspeed_config = {
-            "zero_optimization": {"stage": 1},
-        }
+        accelerator.state.deepspeed_plugin = None
+        accelerator.state.fsdp_plugin = None
         accelerator.free_memory = lambda *args: args
         accelerator.unwrap_model = lambda arg: arg
         accelerator.num_processes = num_processes

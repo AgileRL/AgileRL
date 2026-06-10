@@ -1,36 +1,44 @@
 import gc
+import os
 import torch
 import pytest
-from importlib.util import find_spec
 from accelerate.state import AcceleratorState
 from accelerate import Accelerator
-from accelerate.utils import DeepSpeedPlugin
 
 
-def generate_accelerator(use_deepspeed_optimizer, config):
-    if config is not None and not torch.cuda.is_available():
-        pytest.skip("DeepSpeed-configured LLM tests require CUDA support.")
-    if config is not None and find_spec("deepspeed") is None:
-        pytest.skip("DeepSpeed-configured LLM tests require deepspeed.")
+def generate_accelerator(mode, gradient_accumulation_steps=None):
+    """Build an ``Accelerator`` for LLM algorithm tests.
+
+    :param mode: ``None`` (no accelerator), ``"ddp"`` (plain torch-native
+        accelerator; DDP under multi-process launch, single-process here) or
+        ``"fsdp2"`` (FSDP2 sharding via ``fully_shard``, world size 1).
+    :param gradient_accumulation_steps: Optional accumulation steps to
+        configure on the accelerator.
+    """
+    if mode is not None and not torch.cuda.is_available():
+        pytest.skip("Accelerated LLM tests require CUDA support.")
 
     gc.collect()
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
-    if use_deepspeed_optimizer and (config is not None):
-        config["optimizer"] = {
-            "type": "AdamW",
-            "params": {
-                "lr": 1e-4,  # Smaller learning rate
-                "betas": [0.9, 0.999],
-                "eps": 1e-8,
-                "weight_decay": 0.01,
-            },
-        }
-    return (
-        Accelerator(deepspeed_plugin=DeepSpeedPlugin(hf_ds_config=config))
-        if config is not None
-        else None
-    )
+
+    if mode is None:
+        return None
+
+    kwargs = {}
+    if gradient_accumulation_steps is not None:
+        kwargs["gradient_accumulation_steps"] = gradient_accumulation_steps
+
+    if mode == "fsdp2":
+        from accelerate import FullyShardedDataParallelPlugin
+
+        os.environ["ACCELERATE_USE_FSDP"] = "true"
+        kwargs["fsdp_plugin"] = FullyShardedDataParallelPlugin(fsdp_version=2)
+    else:
+        os.environ.pop("ACCELERATE_USE_FSDP", None)
+
+    return Accelerator(**kwargs)
 
 
 @pytest.fixture(scope="function")

@@ -2,7 +2,8 @@ import pytest
 import torch
 import numpy as np
 
-pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
+pytest.importorskip("transformers", reason="LLM tests require transformers.")
+pytest.importorskip("peft", reason="LLM tests require peft.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
 from agilerl.rollouts.on_policy import collect_rollouts_llm

@@ -21,7 +21,7 @@ def reset_distributed_state():
     the environment variables that ``PartialState`` inspects when deciding
     whether to initialise a distributed backend.
 
-    Without this, DeepSpeed / LLM tests that run earlier in the session can
+    Without this, distributed LLM tests that run earlier in the session can
     leave ``torch.distributed`` initialised and env-vars like ``WORLD_SIZE``
     set, which causes subsequent ``Accelerator()`` calls to attempt a
     multi-worker rendezvous (hanging on macOS / Windows, or wrapping models

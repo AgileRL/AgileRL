@@ -7,17 +7,23 @@ import textwrap
 import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 from accelerate import Accelerator
 from torch import nn
 
-from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.typing import ReasoningPrompts
 
-if TYPE_CHECKING or HAS_DEEPSPEED:
-    import deepspeed
+try:
+    from torch.distributed.fsdp import FSDPModule, FullyShardedDataParallel
+
+    HAS_FSDP = True
+except ImportError:  # torch built without distributed support
+    FSDPModule = None
+    FullyShardedDataParallel = None
+    HAS_FSDP = False
 
 logger = logging.getLogger(__name__)
 
@@ -135,47 +141,123 @@ def normalize_reasoning_prompt_batch(
     return result
 
 
-@contextmanager
-def gather_if_zero3(
-    zero_stage: int,
-    params: list[torch.Tensor],
-    modifier_rank: int | None = None,
-) -> Generator[None, None, None]:
-    """Conditional context manager for setting the zero stage for the model.
+def is_fsdp_sharded(model: nn.Module) -> bool:
+    """Return ``True`` when ``model`` contains FSDP-sharded submodules.
 
-    :param zero_stage: The zero stage
-    :type zero_stage: int
-    :param params: The parameters to gather
-    :type params: list[torch.Tensor]
-    :param modifier_rank: The modifier rank
-    :type modifier_rank: int | None
+    Detects both FSDP2 (``fully_shard``) and legacy FSDP1 wrappers; only FSDP2
+    is supported by AgileRL (see :func:`gather_full_params`).
+
+    :param model: The model to inspect.
+    :type model: nn.Module
+    :return: Whether any submodule is FSDP-sharded.
+    :rtype: bool
     """
-    if zero_stage == 3:
-        if not HAS_DEEPSPEED:
-            msg = (
-                "DeepSpeed is required for ZeRO stage 3 parameter gathering, but it "
-                "is not installed."
-            )
-            raise ImportError(msg)
-        with deepspeed.zero.GatheredParameters(
-            params=params,
-            modifier_rank=modifier_rank,
+    if not HAS_FSDP:
+        return False
+    return any(
+        isinstance(module, (FSDPModule, FullyShardedDataParallel))
+        for module in model.modules()
+    )
+
+
+@contextmanager
+def gather_full_params(model: nn.Module) -> Generator[None, None, None]:
+    """Materialize full (unsharded) parameters for the duration of the context.
+
+    No-op for non-sharded models (single process, DDP). For FSDP2
+    (``fully_shard``) models, parameters are unsharded on entry and resharded
+    on exit.
+
+    .. warning::
+        Under FSDP2 the gathered parameters are **read-only**: writes target
+        the all-gather buffer, which is discarded on reshard. Use
+        :func:`load_full_state_dict` to write weights into a sharded model.
+
+    :param model: The model whose parameters should be gathered.
+    :type model: nn.Module
+    """
+    fsdp2_modules = (
+        [module for module in model.modules() if isinstance(module, FSDPModule)]
+        if HAS_FSDP
+        else []
+    )
+    if not fsdp2_modules:
+        if HAS_FSDP and any(
+            isinstance(module, FullyShardedDataParallel) for module in model.modules()
         ):
-            yield
-    else:
+            msg = (
+                "Legacy FSDP1 wrapping detected. AgileRL only supports FSDP2; "
+                "set `fsdp_version: 2` in your accelerate FSDP config."
+            )
+            raise NotImplementedError(msg)
         yield
+        return
+
+    for module in fsdp2_modules:
+        module.unshard()
+    try:
+        yield
+    finally:
+        for module in reversed(fsdp2_modules):
+            module.reshard()
+
+
+def load_full_state_dict(
+    model: nn.Module,
+    state_dict: dict[str, torch.Tensor],
+    strict: bool = False,
+) -> None:
+    """Load a full (unsharded) state dict into a model that may be FSDP-sharded.
+
+    For non-sharded models this is a plain ``load_state_dict``. For FSDP2
+    models, the full state dict is distributed onto the sharded parameters via
+    ``torch.distributed.checkpoint``.
+
+    :param model: The (possibly sharded) model to load weights into.
+    :type model: nn.Module
+    :param state_dict: Full state dict keyed like ``model.state_dict()``.
+    :type state_dict: dict[str, torch.Tensor]
+    :param strict: Whether to require an exact key match.
+    :type strict: bool
+    """
+    if is_fsdp_sharded(model):
+        from torch.distributed.checkpoint.state_dict import (
+            StateDictOptions,
+            set_model_state_dict,
+        )
+
+        set_model_state_dict(
+            model,
+            state_dict,
+            options=StateDictOptions(full_state_dict=True, strict=strict),
+        )
+    else:
+        model.load_state_dict(state_dict, strict=strict)
 
 
 def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
-    """Get the state dict of the model for zero3.
+    """Get the full state dict of a model, gathering FSDP-sharded parameters.
+
+    For FSDP2 models the state dict is materialized via
+    ``torch.distributed.checkpoint`` so the returned tensors own their storage
+    (plain unshard views would be freed on reshard).
 
     :param model: The model to get the state dict of.
     :type model: nn.Module
     :return: The state dict of the model.
     :rtype: dict[str, torch.Tensor]
     """
-    with gather_if_zero3(3, list(model.parameters()), modifier_rank=0):
-        return model.state_dict()
+    if is_fsdp_sharded(model):
+        from torch.distributed.checkpoint.state_dict import (
+            StateDictOptions,
+            get_model_state_dict,
+        )
+
+        return get_model_state_dict(
+            model,
+            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+        )
+    return model.state_dict()
 
 
 def create_model_from_name_or_path(
@@ -312,48 +394,69 @@ def pool_by_turns(
 
 def create_llm_accelerator(
     *,
+    fsdp_plugin: Any | None = None,
+    gradient_accumulation_steps: int | None = None,
     deepspeed_plugin: Any | None = None,
 ) -> Accelerator | None:
-    """Create an :class:`Accelerator` for LLM training with DeepSpeed.
-
-    This helper enforces a strict DeepSpeed contract for LLM workloads:
+    """Create an :class:`Accelerator` for LLM training.
 
     * **0 GPUs** — returns ``None`` (the ``accelerator=None`` code-path
       in :class:`~agilerl.algorithms.core.base.LLMAlgorithm` handles
       CPU-only training).
-    * When ``deepspeed_plugin`` is provided, returns an
-      ``Accelerator(deepspeed_plugin=...)``.
-    * Otherwise, instantiates ``Accelerator()`` and requires that a
-      DeepSpeed plugin is already present (for example via
-      ``accelerate config`` + ``accelerate launch``).
-      If no plugin is detected, raises ``RuntimeError`` with setup
-      instructions.
+    * Default — returns ``Accelerator()``: single-process on one GPU, or
+      torch-native DDP when launched with ``accelerate launch
+      --num_processes N``. This is the recommended mode for LoRA
+      fine-tuning (only adapter gradients are synchronized; base weights
+      stay whole on each rank, which colocated vLLM weight-sharing
+      requires).
+    * When ``fsdp_plugin`` is provided (or configured via ``accelerate
+      launch``), parameters are sharded with PyTorch FSDP2 — for models
+      too large to fit unsharded. Requires ``fsdp_version=2``.
 
-    :param deepspeed_plugin: Explicit DeepSpeed plugin instance. If
-        omitted, this function expects a launch-configured plugin to be
-        present in ``Accelerator.state``.
+    :param fsdp_plugin: Optional ``accelerate.FullyShardedDataParallelPlugin``
+        with ``fsdp_version=2`` for sharded training.
+    :type fsdp_plugin: Any | None
+    :param gradient_accumulation_steps: Optional number of micro-batches to
+        accumulate before each optimizer step.
+    :type gradient_accumulation_steps: int | None
+    :param deepspeed_plugin: Removed. DeepSpeed is no longer supported;
+        passing this raises ``ValueError``.
     :type deepspeed_plugin: Any | None
     :return: A configured ``Accelerator``, or ``None`` when no GPU is
         available.
     """
+    if deepspeed_plugin is not None:
+        msg = (
+            "DeepSpeed support has been removed from AgileRL. Multi-GPU LLM "
+            "training now uses torch-native DDP by default (just drop the "
+            "deepspeed_plugin argument), or PyTorch FSDP2 via fsdp_plugin= "
+            "for sharded training."
+        )
+        raise ValueError(msg)
+
     num_gpus = torch.cuda.device_count()
 
     if num_gpus == 0:
         logger.info("No GPUs detected — returning None (CPU-only path).")
         return None
 
-    if deepspeed_plugin is not None:
-        return Accelerator(deepspeed_plugin=deepspeed_plugin)
+    kwargs: dict[str, Any] = {}
+    if fsdp_plugin is not None:
+        kwargs["fsdp_plugin"] = fsdp_plugin
+    if gradient_accumulation_steps is not None:
+        kwargs["gradient_accumulation_steps"] = gradient_accumulation_steps
+    accelerator = Accelerator(**kwargs)
 
-    accelerator = Accelerator()
-    if accelerator.state.deepspeed_plugin is None:
-        msg = (
-            "DeepSpeed is required for create_llm_accelerator(), but no "
-            "DeepSpeed plugin was detected. Use one of: "
-            "(1) run `accelerate config` and launch with `accelerate launch ...`; "
-            "(2) pass `deepspeed_plugin=` explicitly to create_llm_accelerator()."
-        )
-        raise RuntimeError(msg)
+    fsdp_state_plugin = getattr(accelerator.state, "fsdp_plugin", None)
+    if fsdp_state_plugin is not None:
+        fsdp_version = getattr(fsdp_state_plugin, "fsdp_version", 1)
+        if fsdp_version != 2:
+            msg = (
+                "AgileRL only supports FSDP2. Set `fsdp_version: 2` in your "
+                "accelerate FSDP config (or pass "
+                "FullyShardedDataParallelPlugin(fsdp_version=2))."
+            )
+            raise ValueError(msg)
     return accelerator
 
 
@@ -606,34 +709,6 @@ def get_model_name_or_path(model: PreTrainedModel) -> str:
 
     msg = "Model name or path not found."
     raise ValueError(msg)
-
-
-def align_deepspeed_lr(lr: float, accelerator: Accelerator) -> float:
-    """Align the learning rate for DeepSpeed.
-
-    :param lr: The learning rate to align.
-    :type lr: float
-    :param accelerator: The accelerator to align the learning rate for.
-    :type accelerator: Accelerator
-    :return: The aligned learning rate.
-    :rtype: float
-    """
-    if accelerator is not None:
-        optim_lr = (
-            accelerator.state.deepspeed_plugin.deepspeed_config.get("optimizer", {})
-            .get("params", {})
-            .get("lr", None)
-        )
-        if optim_lr is not None and optim_lr != lr:
-            warnings.warn(
-                f"DeepSpeed learning rate is set to {optim_lr} but the argument 'lr' is set to {lr}. "
-                "Overwriting deepspeed learning rate with the argument 'lr'.",
-                stacklevel=2,
-            )
-            accelerator.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
-                "lr"
-            ] = lr
-    return lr
 
 
 def sample_eval_prompts(

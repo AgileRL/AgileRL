@@ -21,7 +21,7 @@ Evaluate a saved checkpoint interactively::
 
     python demos/llm/demo_llm_finetuning.py sft --eval --load-path outputs/sft/actor
 
-Multi-GPU / DeepSpeed via accelerate::
+Multi-GPU (torch-native DDP) via accelerate::
 
     accelerate launch demos/llm/demo_llm_finetuning.py sft
 """
@@ -40,7 +40,6 @@ import json
 from datetime import datetime
 
 import yaml
-from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, PeftModel
 from torch.utils.data import Dataset
@@ -51,7 +50,11 @@ from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_preference, finetune_llm_sft
-from agilerl.utils.llm_utils import compare_responses, sample_eval_prompts
+from agilerl.utils.llm_utils import (
+    compare_responses,
+    create_llm_accelerator,
+    sample_eval_prompts,
+)
 from agilerl.llm_envs import PreferenceGym, SFTGym
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
@@ -97,9 +100,7 @@ def main(
     train_dataset, test_dataset = make_dataset(DATASET)
 
     try:
-        accelerator = Accelerator()
-        if accelerator.state.deepspeed_plugin is None:
-            accelerator = None
+        accelerator = create_llm_accelerator()
     except Exception:
         accelerator = None
 

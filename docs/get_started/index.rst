@@ -23,7 +23,7 @@ Or install in development mode:
 If you wish to install all additional dependencies please specify `[all]` or
 if you want to install a specific family of dependencies specify that family
 directly. At present, we have just one family, `[llm]`, which contains the
-dependencies related to our LLM RFT algorithms (datasets, deepspeed, peft,
+dependencies related to our LLM RFT algorithms (datasets, peft,
 transformers, vllm).
 
 .. code-block:: bash

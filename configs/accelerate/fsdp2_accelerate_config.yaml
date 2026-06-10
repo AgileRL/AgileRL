@@ -1,9 +1,19 @@
 ---
+# FSDP2 (PyTorch fully_shard) config for models too large to train unsharded.
+# AgileRL requires fsdp_version: 2 — FSDP1 is not supported.
+# Note: colocated vLLM weight-sharing requires whole base weights, so use
+# this config for decoupled trainer/rollout setups (or HF generation) only.
 compute_environment: LOCAL_MACHINE        # Where training runs (LOCAL_MACHINE or cloud)
 debug: false                              # Enable verbose Accelerate debug logging
 gradient_accumulation_steps: 4            # Accumulate gradients over N micro-batches before update
 mixed_precision: bf16                     # Mixed precision mode (no, fp16, bf16)
-distributed_type: MULTI_GPU               # Torch-native DDP (NO, MULTI_GPU, FSDP, TPU)
+distributed_type: FSDP                    # Distribution strategy
+fsdp_config:
+    fsdp_version: 2                       # FSDP2 (per-parameter DTensor sharding); required
+    fsdp_reshard_after_forward: true      # Reshard params after forward (ZeRO-3-like memory)
+    fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP   # Shard per transformer block
+    fsdp_state_dict_type: FULL_STATE_DICT # Gather full state dicts for checkpointing
+    fsdp_cpu_ram_efficient_loading: true  # Stream weights to avoid host RAM spikes
 downcast_bf16: no                         # Downcast float ops to bf16 (yes, no)
 enable_cpu_affinity: false                # Pin processes to CPU cores for NUMA locality
 machine_rank: 0                           # Rank of this machine in multi-node setup
@@ -12,7 +22,4 @@ num_machines: 1                           # Total number of machines
 num_processes: 1                          # Total number of GPU processes across all machines
 rdzv_backend: static                      # Rendezvous backend for elastic training
 same_network: true                        # All machines on the same network
-tpu_env: []                               # TPU environment variables
-tpu_use_cluster: false                    # Use TPU pod slice cluster
-tpu_use_sudo: false                       # Use sudo for TPU commands
 use_cpu: false                            # Force CPU-only training

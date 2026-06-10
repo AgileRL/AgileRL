@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
 from accelerate.state import AcceleratorState
@@ -25,21 +24,6 @@ from tests.utils import (
     make_mock_vllm_instance,
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
-
-deepspeed_base_config = {
-    "bf16": {
-        "enabled": True,
-    },
-    "auto_cast": True,
-    "gradient_clipping": 0.5,
-    "gradient_accumulation_steps": 1,
-}
-
-deepspeed_config_stage_2 = deepspeed_base_config | {
-    "zero_optimization": {
-        "stage": 2,
-    },
-}
 
 
 class DummyConfig(PretrainedConfig):
@@ -200,8 +184,7 @@ def _cpu_llmppo(**kwargs):
 def generate_ppo(
     accelerator_factory,
     model_factory,
-    config,
-    use_deepspeed_optimizer,
+    accelerator_mode,
     vocab_size,
     input_size,
     max_tokens,
@@ -220,9 +203,7 @@ def generate_ppo(
     torch.cuda.empty_cache()
     AcceleratorState._reset_state(True)
 
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    if not use_deepspeed_optimizer and accelerator is not None:
-        accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
+    accelerator = accelerator_factory(accelerator_mode)
 
     if use_vllm:
         lora_config = None
@@ -789,7 +770,7 @@ class TestPPOLearn:
 
     @pytest.mark.parametrize("use_vllm", [False, True])
     def test_llmppo_learns_multiturn(self, use_vllm):
-        """Multi-turn learn path updates actor/critic adapters without vLLM/DeepSpeed."""
+        """Multi-turn learn path updates actor/critic adapters without vLLM or an accelerator."""
         torch.manual_seed(0)
         ppo = _cpu_llmppo(
             lr_actor=0.05,

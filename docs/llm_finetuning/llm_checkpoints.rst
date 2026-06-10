@@ -4,11 +4,10 @@ Saving and Loading LLM Checkpoints
 ==================================
 
 LLM checkpoints in AgileRL can persist just LoRA adapters, the full model, and
-optionally the optimizer/LR-scheduler state — with separate code paths for
-plain (single-process) training and distributed training via
-`DeepSpeed <https://www.deepspeed.ai/>`_ + `Accelerate
-<https://huggingface.co/docs/accelerate/index>`_. The defaults are
-``lora_only=True`` and ``save_optimizer=True``.
+optionally the optimizer/LR-scheduler state. The same on-disk format is
+written for plain (single-process) training and distributed training via
+`Accelerate <https://huggingface.co/docs/accelerate/index>`_ (DDP or FSDP2).
+The defaults are ``lora_only=True`` and ``save_optimizer=True``.
 
 Checkpoint layout on disk
 -------------------------
@@ -27,11 +26,9 @@ A typical checkpoint directory written by :meth:`save_checkpoint` looks like:
     ├── reference/                 # only if use_separate_reference_adapter=True
     │   ├── adapter_model.safetensors
     │   └── adapter_config.json
-    ├── critic/                    # only for algorithms with a value head
-    │   ├── adapter_model.safetensors
-    │   └── adapter_config.json
-    └── save_checkpoint/           # DeepSpeed sharded checkpoint; only when
-                                   # training with an Accelerator
+    └── critic/                    # only for algorithms with a value head
+        ├── adapter_model.safetensors
+        └── adapter_config.json
 
 Which adapter subdirectories appear depends on the algorithm:
 
@@ -50,7 +47,7 @@ Saving
         save_optimizer=True,   # default — persist optimizer + LR scheduler
     )
 
-The four combinations on the non-distributed path:
+The four combinations (identical for plain, DDP and FSDP2 runs):
 
 +---------------+--------------------+---------------------------------------------------+
 | ``lora_only`` | ``save_optimizer`` | Produces                                          |
@@ -67,11 +64,9 @@ The four combinations on the non-distributed path:
 |               |                    | — no optimizer state.                             |
 +---------------+--------------------+---------------------------------------------------+
 
-On the DeepSpeed path, ``save_optimizer=True`` writes a sharded checkpoint
-into ``<path>/save_checkpoint/`` via the engine instead of bundling optimizer
-state into ``attributes.pt``. ``lora_only=True`` still writes adapter
-directories. The ``lora_only=False, save_optimizer=False`` cell gathers ZeRO-3
-shards and injects the full ``state_dict`` into ``attributes.pt``.
+Under FSDP2, sharded parameters and optimizer state are gathered to full
+tensors before writing, so checkpoints are rank-count independent and can be
+loaded on a different number of GPUs.
 
 Common scenarios:
 
@@ -127,20 +122,15 @@ Common scenarios:
     # optimizer state — we don't need it:
     agent.load_checkpoint(path, load_optimizer=False)
 
-DeepSpeed and Accelerate
-------------------------
+Distributed training with Accelerate
+------------------------------------
 
-When an :class:`~accelerate.Accelerator` with a ``DeepSpeedPlugin`` is
-attached, the save/load paths differ as follows:
-
-* ``save_optimizer=True`` delegates to the DeepSpeed engine's own sharded
-  checkpoint format, written to ``<path>/save_checkpoint/``. The matching
-  load path reads the same directory.
-* ``save_optimizer=False`` falls back to the PEFT / torch-save path, which
-  produces the same adapter directories / ``attributes.pt`` as plain training.
-* ZeRO-3 sharded parameters are gathered via the appropriate gather context
-  before being written, so the on-disk layout is identical regardless of
-  ZeRO stage.
+The save/load paths are uniform across backends: adapter directories plus
+``attributes.pt``, with optimizer state embedded when ``save_optimizer=True``.
+Under FSDP2, parameters and optimizer state are gathered to full tensors via
+``torch.distributed.checkpoint`` before writing; note that loading adapter
+weights into an already-sharded model is not yet supported — load checkpoints
+before sharding, or run unsharded (single process or DDP).
 
 Multi-process correctness (only the main process writes ``attributes.pt``,
 followed by ``accelerator.wait_for_everyone()``) is handled internally — you

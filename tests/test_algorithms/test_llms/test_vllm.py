@@ -3,7 +3,6 @@ from contextlib import contextmanager
 import pytest
 import torch
 
-pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
 from agilerl.utils.algo_utils import VLLMConfig
@@ -67,7 +66,7 @@ class TestREINFORCETest:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_vllm_methods(
         self,
-        deepspeed_env,
+        distributed_env,
         reinforce_factory,
         accelerator_factory,
         model_factory,
@@ -77,12 +76,11 @@ class TestREINFORCETest:
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
-        del deepspeed_env
+        del distributed_env
         rf = reinforce_factory(
             accelerator_factory=accelerator_factory,
             model_factory=model_factory,
-            config=None,
-            use_deepspeed_optimizer=False,
+            accelerator_mode=None,
             vocab_size=vocab_size,
             input_size=input_size,
             max_tokens=max_tokens,

@@ -45,7 +45,6 @@ box2d = [
 ]
 llm = [
     "datasets==4.4.1",
-    "deepspeed~=0.17.1; sys_platform != 'win32'",
     "liger-kernel==0.7.0; sys_platform == 'linux'",
     "peft~=0.18.0",
     "transformers~=4.57.1",
@@ -56,7 +55,6 @@ all = [
     "swig~=4.4.1; sys_platform != 'win32'",
     "gymnasium[box2d]~=1.0.0; sys_platform != 'win32'",
     "datasets==4.4.1",
-    "deepspeed~=0.17.1; sys_platform != 'win32'",
     "liger-kernel==0.7.0; sys_platform == 'linux'",
     "peft~=0.18.0",
     "transformers~=4.57.1",
@@ -105,7 +103,7 @@ filterwarnings = [
 ]
 markers = [
     "vllm: tests that actually instantiate vllm.LLM (exclude with -m 'not vllm'). Pinned to a single xdist worker because vLLM's GPU memory profiling fails when peer workers free memory mid-init.",
-    "gpu: tests that use a GPU (CUDA, DeepSpeed, etc.) but do NOT initialise real vLLM (exclude with -m 'not gpu'). Safe to fan out across multiple xdist workers.",
+    "gpu: tests that use a GPU (CUDA, distributed backends, etc.) but do NOT initialise real vLLM (exclude with -m 'not gpu'). Safe to fan out across multiple xdist workers.",
 ]
 
 [tool.coverage.run]
@@ -129,13 +127,8 @@ build-backend = "hatchling.build"
 # This workaround tells uv to build box2d-py using the project environment directly
 # (not an isolated one), where it can see system PATH and find swig, which is already installed as a dependency
 # (no-build-isolation packages are built after the others).
-#
-# DeepSpeed can be built with env vars to specify compiler flags
-# e.g. DS_BUILD_FUSED_ADAM=1 is essential on L4 GPU
-# to pre-build the fused Adam kernel and prevent timeout during tests.
 no-build-isolation-package = [
     "box2d-py",
-    "deepspeed"
 ]
 
 [tool.hatch.build.targets.wheel]

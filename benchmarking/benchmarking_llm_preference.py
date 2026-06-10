@@ -9,7 +9,7 @@ use the demo script instead::
 To run (single GPU, no accelerate):
     python benchmarking/benchmarking_dpo.py
 
-To run with accelerate (multi-GPU / DeepSpeed):
+To run with accelerate (multi-GPU, torch-native DDP):
     accelerate launch benchmarking/benchmarking_dpo.py
 """
 
@@ -25,7 +25,6 @@ if not HAS_LLM_DEPENDENCIES:
 from datetime import datetime
 
 import yaml
-from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig
 from torch.utils.data import Dataset
@@ -38,6 +37,7 @@ from agilerl.training.train_llm import finetune_llm_preference
 from agilerl.llm_envs import PreferenceGym
 from agilerl.utils.llm_utils import (
     compare_responses,
+    create_llm_accelerator,
     sample_eval_prompts,
 )
 
@@ -73,9 +73,7 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
     train_dataset, test_dataset = make_dataset(DATASET)
 
     try:
-        accelerator = Accelerator()
-        if accelerator.state.deepspeed_plugin is None:
-            accelerator = None
+        accelerator = create_llm_accelerator()
     except Exception:
         accelerator = None
 

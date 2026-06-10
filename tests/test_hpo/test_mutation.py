@@ -7,7 +7,6 @@ import pytest
 import torch
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
-from accelerate.utils import DeepSpeedPlugin
 from gymnasium import spaces
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -1315,14 +1314,7 @@ class TestMutationsMutation:
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
     )
-    @pytest.mark.parametrize(
-        "use_accelerator, use_deepspeed_optimizer",
-        [
-            (True, True),
-            (True, False),
-            (False, False),
-        ],
-    )
+    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("algo", ["GRPO", "DPO"])
     @pytest.mark.parametrize(
         "hp_to_mutate",
@@ -1337,14 +1329,13 @@ class TestMutationsMutation:
         vector_space,
         monkeypatch,
         use_accelerator,
-        use_deepspeed_optimizer,
         algo,
         hp_to_mutate,
         grpo_hp_config,
-        deepspeed_env,
+        distributed_env,
     ):
         if use_accelerator and not torch.cuda.is_available():
-            pytest.skip("DeepSpeed accelerator LLM mutation tests require CUDA.")
+            pytest.skip("Accelerated LLM mutation tests require CUDA.")
 
         if hp_to_mutate == "max_grad_norm":
             grpo_hp_config = HyperparameterConfig(
@@ -1356,38 +1347,8 @@ class TestMutationsMutation:
         if use_accelerator:
             if torch.distributed.is_initialized():
                 torch.distributed.destroy_process_group()
-            try:
-                import deepspeed.comm.comm as ds_comm
-                import deepspeed.utils.groups as ds_groups
-
-                for attr in dir(ds_groups):
-                    if attr.startswith("_") and attr.endswith("_GROUP"):
-                        setattr(ds_groups, attr, None)
-                ds_comm.cdb = None
-            except ImportError:
-                pass
             AcceleratorState._reset_state(True)
-
-            deepspeed_config = {
-                "gradient_accumulation_steps": 1,
-                "zero_optimization": {
-                    "stage": 2,
-                },
-                "gradient_clipping": 0.3,
-            }
-            if use_deepspeed_optimizer:
-                deepspeed_config["optimizer"] = {
-                    "type": "AdamW",
-                    "params": {
-                        "lr": 1e-4,  # Smaller learning rate
-                        "betas": [0.9, 0.999],
-                        "eps": 1e-8,
-                        "weight_decay": 0.01,
-                    },
-                }
-            accelerator = Accelerator(
-                deepspeed_plugin=DeepSpeedPlugin(hf_ds_config=deepspeed_config),
-            )
+            accelerator = Accelerator()
         else:
             accelerator = None
         init_hp = {
@@ -1459,20 +1420,9 @@ class TestMutationsMutation:
             assert min_value <= new_value <= max_value
             assert old.index == individual.index
         for agent in mutated_population:
-            opt = (
-                agent.actor.optimizer
-                if (use_deepspeed_optimizer and use_accelerator)
-                else agent.optimizer.optimizer
-            )
+            opt = agent.optimizer.optimizer
             for param_group in opt.param_groups:
                 assert param_group["lr"] == agent.lr
-            if use_accelerator:
-                assert (
-                    agent.accelerator.state.deepspeed_plugin.deepspeed_config[
-                        "gradient_clipping"
-                    ]
-                    == agent.max_grad_norm
-                )
         for mut_agent, old_agent in zip(
             mutated_population, new_population, strict=False
         ):
@@ -1481,16 +1431,6 @@ class TestMutationsMutation:
         if use_accelerator:
             if torch.distributed.is_initialized():
                 torch.distributed.destroy_process_group()
-            try:
-                import deepspeed.comm.comm as ds_comm
-                import deepspeed.utils.groups as ds_groups
-
-                for attr in dir(ds_groups):
-                    if attr.startswith("_") and attr.endswith("_GROUP"):
-                        setattr(ds_groups, attr, None)
-                ds_comm.cdb = None
-            except ImportError:
-                pass
             AcceleratorState._reset_state(True)
 
     @pytest.mark.skipif(

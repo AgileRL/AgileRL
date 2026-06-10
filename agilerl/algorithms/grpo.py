@@ -98,8 +98,8 @@ class GRPO(LLMAlgorithm):
     :param calc_position_embeddings: Flag indicating whether to calculate position embeddings, defaults to True
     :type calc_position_embeddings: bool, optional
     :param micro_batch_size_per_gpu: If specified, gradient_accumulation_steps will be
-        calculated to achieve the target batch_size. If None, uses existing
-        gradient_accumulation_steps from DeepSpeed config, defaults to None
+        calculated to achieve the target batch_size. If None, uses the
+        accelerator's gradient_accumulation_steps, defaults to None
     :type micro_batch_size_per_gpu: int, optional
     :param max_output_tokens: Max number of answer tokens, defaults to None
     :type max_output_tokens: int, optional

@@ -6,7 +6,7 @@ import torch
 from accelerate import Accelerator
 
 pytest.importorskip("transformers", reason="LLM dependencies not installed")
-pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
+pytest.importorskip("peft", reason="LLM tests require peft.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
 from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMREINFORCE
