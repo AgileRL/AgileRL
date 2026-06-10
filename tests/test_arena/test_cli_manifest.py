@@ -80,14 +80,14 @@ class TestGetCliCapabilities:
         resp = MagicMock()
         resp.status_code = 404
         with patch.object(api_key_client._http, "request", return_value=resp):
-            assert api_key_client.get_cli_capabilities(force_refresh=True) is None
+            assert api_key_client._get_cli_capabilities(force_refresh=True) is None
 
     def test_invalid_json_body_returns_none(self, api_key_client: ArenaClient) -> None:
         resp = MagicMock()
         resp.status_code = 200
         resp.json.side_effect = ValueError("no JSON object")
         with patch.object(api_key_client._http, "request", return_value=resp):
-            assert api_key_client.get_cli_capabilities(force_refresh=True) is None
+            assert api_key_client._get_cli_capabilities(force_refresh=True) is None
 
     def test_wrong_schema_returns_none(self, api_key_client: ArenaClient) -> None:
         resp = MagicMock()
@@ -97,7 +97,7 @@ class TestGetCliCapabilities:
             "data": {"schemaVersion": 999},
         }
         with patch.object(api_key_client._http, "request", return_value=resp):
-            assert api_key_client.get_cli_capabilities(force_refresh=True) is None
+            assert api_key_client._get_cli_capabilities(force_refresh=True) is None
 
     def test_schema_version_string_one_accepted(
         self, api_key_client: ArenaClient
@@ -109,7 +109,7 @@ class TestGetCliCapabilities:
             "data": {"schemaVersion": "1", "enterprise": False},
         }
         with patch.object(api_key_client._http, "request", return_value=resp):
-            caps = api_key_client.get_cli_capabilities(force_refresh=True)
+            caps = api_key_client._get_cli_capabilities(force_refresh=True)
         assert caps == {"schemaVersion": "1", "enterprise": False}
 
 
@@ -122,7 +122,7 @@ class TestInvokeManifestCommand:
             "params": [],
         }
         with pytest.raises(ArenaValidationError):
-            api_key_client.invoke_manifest_command(invoke, {})
+            api_key_client._invoke_manifest_command(invoke, {})
 
     def test_accepts_on_prem_prefix_json(self, api_key_client: ArenaClient) -> None:
         invoke = {
@@ -134,7 +134,7 @@ class TestInvokeManifestCommand:
         with patch.object(
             api_key_client, "_request", return_value={"ok": True}
         ) as mocked:
-            api_key_client.invoke_manifest_command(invoke, {})
+            api_key_client._invoke_manifest_command(invoke, {})
         mocked.assert_called_once_with("POST", "/api/cli/v1/on-prem/enable")
 
     def test_post_with_empty_manifest_params_sends_json_body(
@@ -148,7 +148,7 @@ class TestInvokeManifestCommand:
         }
         body = {"name": "pool", "num_nodes": 2, "enabled": True}
         with patch.object(api_key_client, "_request", return_value={"id": 1}) as mocked:
-            api_key_client.invoke_manifest_command(invoke, body)
+            api_key_client._invoke_manifest_command(invoke, body)
         _args, kwargs = mocked.call_args
         assert kwargs["json"] == body
 
@@ -164,7 +164,7 @@ class TestInvokeManifestCommand:
         query = {"name": "pool", "setupType": "helm", "archivedType": "zip"}
         fake = (b"zip", "application/zip", None)
         with patch.object(api_key_client, "_request_raw", return_value=fake) as mocked:
-            api_key_client.invoke_manifest_command(invoke, query)
+            api_key_client._invoke_manifest_command(invoke, query)
         _args, kwargs = mocked.call_args
         assert kwargs["params"] == query
 
@@ -186,7 +186,7 @@ class TestInvokeManifestCommand:
         }
         fake = (b"hello", "application/octet-stream", None)
         with patch.object(api_key_client, "_request_raw", return_value=fake) as mocked:
-            out = api_key_client.invoke_manifest_command(invoke, {"name": "my-pool"})
+            out = api_key_client._invoke_manifest_command(invoke, {"name": "my-pool"})
         assert out == fake
         mocked.assert_called_once()
         _args, kwargs = mocked.call_args
@@ -378,7 +378,7 @@ class TestOnPremDynamicIntegration:
         register_on_prem_manifest_group(root)
 
         client_mock = MagicMock(spec=ArenaClient)
-        client_mock.get_cli_capabilities.return_value = CAP_FIXTURE_V2
+        client_mock._get_cli_capabilities.return_value = CAP_FIXTURE_V2
 
         build_patch = patch(
             "agilerl.arena.cli_manifest.build_client",
@@ -393,7 +393,7 @@ class TestOnPremDynamicIntegration:
                 obj=_command_config(),
             )
         assert res.exit_code == 0
-        assert client_mock.get_cli_capabilities.call_count >= 1
+        assert client_mock._get_cli_capabilities.call_count >= 1
         assert client_mock.close.call_count >= 1
 
     def test_on_prem_install_command_help(self) -> None:
@@ -403,7 +403,7 @@ class TestOnPremDynamicIntegration:
 
         register_on_prem_manifest_group(root)
         client_mock = MagicMock(spec=ArenaClient)
-        client_mock.get_cli_capabilities.return_value = CAP_FIXTURE_V2
+        client_mock._get_cli_capabilities.return_value = CAP_FIXTURE_V2
 
         with patch(
             "agilerl.arena.cli_manifest.build_client",
@@ -418,6 +418,33 @@ class TestOnPremDynamicIntegration:
         assert "--manager" in res.output
         assert "helm" in res.output.lower()
         assert "install-docker" in res.output
+
+    def test_entitlement_failure_shows_user_friendly_notice(self) -> None:
+        @click.group()
+        def root() -> None:
+            """root"""
+
+        register_on_prem_manifest_group(root)
+        client_mock = MagicMock(spec=ArenaClient)
+        client_mock._get_cli_capabilities.return_value = {
+            "schemaVersion": 1,
+            "enterprise": False,
+            "features": {"onPremCli": False},
+            "cli": {"manifestSchemaVersion": 2, "root": {}},
+        }
+
+        with patch(
+            "agilerl.arena.cli_manifest.build_client",
+            return_value=client_mock,
+        ):
+            res = CliRunner().invoke(
+                root,
+                ["on-prem", "help"],
+                obj=_command_config(),
+            )
+        assert res.exit_code == 0
+        assert "arena user profile" in res.output
+        assert "/api/cli/v1/capabilities" not in res.output
 
 
 class TestHelmReleaseIds:
@@ -462,18 +489,19 @@ class TestOnPremInstall:
         from agilerl.arena.cli_on_prem_install import _ensure_class
 
         client = MagicMock(spec=ArenaClient)
-        client.invoke_manifest_command.return_value = [{"name": "pool", "id": 9}]
+        client._invoke_manifest_command.return_value = [{"name": "pool", "id": 9}]
 
         row = _ensure_class(client, name="pool", num_nodes=2)
         assert row["name"] == "pool"
-        client.invoke_manifest_command.assert_called_once()
+        client._invoke_manifest_command.assert_called_once()
 
     def test_install_flow_uses_name_in_bundle_query(self) -> None:
         from agilerl.arena.cli_on_prem_install import run_on_prem_install
 
         client = MagicMock(spec=ArenaClient)
-        client.invoke_manifest_command.side_effect = [
+        client._invoke_manifest_command.side_effect = [
             {},
+            [{"name": "pool", "id": 9}],
             [{"name": "pool", "id": 9}],
         ]
 
@@ -481,7 +509,8 @@ class TestOnPremInstall:
             patch(
                 "agilerl.arena.cli_on_prem_install._download_bundle",
                 return_value=Path("/tmp/fake-bundle"),
-            ),
+            ) as download_mock,
+            patch("agilerl.arena.cli_on_prem_install._validate_wireguard_bundle"),
             patch(
                 "agilerl.arena.cli_on_prem_install._run_docker_swarm_install",
             ) as swarm_mock,
@@ -498,17 +527,18 @@ class TestOnPremInstall:
                 skip_enable=False,
             )
 
-        bundle_call = client.invoke_manifest_command.call_args_list[-1]
-        assert bundle_call[0][1]["name"] == "pool"
-        assert bundle_call[0][1]["setupType"] == "dockerSwarm"
+        download_mock.assert_called_once()
+        assert download_mock.call_args.kwargs["class_name"] == "pool"
+        assert download_mock.call_args.kwargs["setup_type"] == "dockerSwarm"
         swarm_mock.assert_called_once()
 
     def test_helm_install_does_not_require_manager(self) -> None:
         from agilerl.arena.cli_on_prem_install import run_on_prem_install
 
         client = MagicMock(spec=ArenaClient)
-        client.invoke_manifest_command.side_effect = [
+        client._invoke_manifest_command.side_effect = [
             {},
+            [{"name": "k8s-pool", "num_nodes": 3}],
             [{"name": "k8s-pool", "num_nodes": 3}],
         ]
 
@@ -516,6 +546,10 @@ class TestOnPremInstall:
             patch(
                 "agilerl.arena.cli_on_prem_install._download_bundle",
                 return_value=Path("/tmp/fake-helm-bundle"),
+            ),
+            patch("agilerl.arena.cli_on_prem_install._validate_wireguard_bundle"),
+            patch(
+                "agilerl.arena.cli_on_prem_install._wait_for_gateway_peer_registration",
             ),
             patch("agilerl.arena.cli_on_prem_install._run_helm_install") as helm_mock,
         ):
@@ -527,7 +561,7 @@ class TestOnPremInstall:
             )
 
         helm_mock.assert_called_once()
-        assert client.invoke_manifest_command.call_count == 3
+        assert client._invoke_manifest_command.call_count == 3
 
     def test_docker_swarm_requires_manager(self) -> None:
         from agilerl.arena.cli_on_prem_install import run_on_prem_install
@@ -538,13 +572,14 @@ class TestOnPremInstall:
                 client,
                 name="pool",
                 setup_type="dockerSwarm",
+                skip_enable=True,
             )
 
     def test_teardown_helm_uninstalls_and_deletes_class(self) -> None:
         from agilerl.arena.cli_on_prem_install import run_on_prem_teardown
 
         client = MagicMock(spec=ArenaClient)
-        client.invoke_manifest_command.side_effect = [
+        client._invoke_manifest_command.side_effect = [
             [{"name": "k8s-pool", "id": 1}],
             {},
         ]
@@ -572,7 +607,7 @@ class TestOnPremInstall:
         helm_mock.assert_called_once_with("k8s-pool", "k8s-pool")
         delete_call = [
             c
-            for c in client.invoke_manifest_command.call_args_list
+            for c in client._invoke_manifest_command.call_args_list
             if c[0][0].get("path", "").endswith("/classes/delete")
         ]
         assert len(delete_call) == 1

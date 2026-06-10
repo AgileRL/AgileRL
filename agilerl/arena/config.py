@@ -20,7 +20,7 @@ class CommandConfig:
     upload_timeout: int
 
 
-def resolve_root_command_config(ctx: click.Context) -> CommandConfig:
+def _resolve_root_command_config(ctx: click.Context) -> CommandConfig:
     """Build :class:`CommandConfig` for the Arena root group.
 
     ``main`` normally sets ``ctx.obj``, but eager ``-h`` / ``--help`` is handled

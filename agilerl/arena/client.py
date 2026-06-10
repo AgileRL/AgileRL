@@ -282,7 +282,12 @@ class ArenaClient:
     # -------------------------------------------------------------------------
 
     def get_current_user(self) -> dict[str, Any]:
-        """Get the authenticated user's profile details."""
+        """Get the authenticated user's profile details.
+
+        Includes account fields such as email and name. When the Arena server
+        exposes them, the payload may also contain entitlement flags (e.g.
+        enterprise / on-prem access) relevant to CLI feature gating.
+        """
         return self._request("GET", "/api/users/current")
 
     def get_user_credits(self) -> Any:
@@ -1629,16 +1634,10 @@ class ArenaClient:
             resp.headers.get("content-disposition"),
         )
 
-    def get_cli_capabilities(
+    def _get_cli_capabilities(
         self, *, force_refresh: bool = False
     ) -> dict[str, Any] | None:
-        """Fetch ``GET /api/cli/v1/capabilities`` and return the ``data`` object.
-
-        Caches per client instance. Returns ``None`` when the endpoint is
-        absent (**404**), the body is empty / not JSON, the envelope cannot be
-        parsed, **schemaVersion** is unsupported, or the client has no credentials
-        (**ArenaAuthError**). Other HTTP failures raise :class:`ArenaAPIError`.
-        """
+        """Fetch CLI capabilities document (internal; used by Arena CLI only)."""
         if self._cli_capabilities_cache is not None and not force_refresh:
             return self._cli_capabilities_cache
 
@@ -1703,20 +1702,9 @@ class ArenaClient:
         self._cli_capabilities_cache = data
         return data
 
-    def invoke_manifest_command(
-        self,
-        invoke: Mapping[str, Any],
-        parsed_args: Mapping[str, Any],
-    ) -> Any:
-        """Dispatch a manifest ``invoke`` dict using already-parsed CLI kwargs.
-
-        Validates HTTP path (**allowlisted** prefix), method, and response
-        kind. Splits arguments into query string vs JSON body based on each
-        parameter's ``in`` field (``client`` parameters are ignored here —
-        handle those in the CLI layer). ``binary`` responses return the
-        ``(bytes, content_type, content_disposition)`` tuple from
-        :meth:`_request_raw`; ``json`` responses return unwrapped ``data``.
-        """
+    def _validate_manifest_invoke(
+        self, invoke: Mapping[str, Any]
+    ) -> tuple[str, str, str, list[dict[str, Any]]]:
         path = invoke["path"]
         if not isinstance(path, str):
             msg = "Manifest path must be a string."
@@ -1754,6 +1742,15 @@ class ArenaClient:
                 msg = f"Unsupported manifest param type {ptyp!r}."
                 raise ArenaValidationError(msg)
 
+        return path, method, response_kind, params_list
+
+    def _partition_manifest_args(
+        self,
+        *,
+        method: str,
+        params_list: list[dict[str, Any]],
+        parsed_args: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         query: dict[str, Any] = {}
         body_obj: dict[str, Any] | None = None
 
@@ -1795,6 +1792,23 @@ class ArenaClient:
                 query = {**parsed_args, **query}
             elif method in {"POST", "PATCH", "PUT", "DELETE"} and body_obj is None:
                 body_obj = dict(parsed_args)
+
+        return query, body_obj
+
+    def _invoke_manifest_command(
+        self,
+        invoke: Mapping[str, Any],
+        parsed_args: Mapping[str, Any],
+    ) -> Any:
+        """Dispatch a manifest invoke dict using already-parsed CLI kwargs."""
+        path, method, response_kind, params_list = self._validate_manifest_invoke(
+            invoke
+        )
+        query, body_obj = self._partition_manifest_args(
+            method=method,
+            params_list=params_list,
+            parsed_args=parsed_args,
+        )
 
         req_kw: dict[str, Any] = {}
         if query:

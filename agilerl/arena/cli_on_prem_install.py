@@ -126,7 +126,7 @@ def _ensure_class(
     name: str,
     num_nodes: int,
 ) -> dict[str, Any]:
-    listed = client.invoke_manifest_command(_LIST_CLASSES_INVOKE, {})
+    listed = client._invoke_manifest_command(_LIST_CLASSES_INVOKE, {})
     existing = _class_by_name(listed, name)
     if existing is not None:
         click.echo(f"Using existing resource class {name!r}.")
@@ -139,7 +139,7 @@ def _ensure_class(
         "enabled": True,
         "metadata": _DEFAULT_METADATA,
     }
-    created = client.invoke_manifest_command(_CREATE_CLASS_INVOKE, body)
+    created = client._invoke_manifest_command(_CREATE_CLASS_INVOKE, body)
     if isinstance(created, dict):
         return created
     msg = "Create class response was not an object."
@@ -169,7 +169,7 @@ def _download_bundle(
     setup_type: SetupKind,
     dest_dir: Path,
 ) -> Path:
-    raw_b, _ctype, _disp = client.invoke_manifest_command(
+    raw_b, _ctype, _disp = client._invoke_manifest_command(
         _BUNDLE_INVOKE,
         {
             "name": class_name,
@@ -591,12 +591,12 @@ def _run_docker_swarm_teardown(
 
 
 def _delete_class_if_present(client: Any, name: str) -> None:
-    listed = client.invoke_manifest_command(_LIST_CLASSES_INVOKE, {})
+    listed = client._invoke_manifest_command(_LIST_CLASSES_INVOKE, {})
     if _class_by_name(listed, name) is None:
         click.echo(f"No Arena resource class {name!r}; skipping API delete.")
         return
     click.echo(f"Deleting on-prem resource class {name!r} from Arena…")
-    client.invoke_manifest_command(_DELETE_CLASS_INVOKE, {"name": name})
+    client._invoke_manifest_command(_DELETE_CLASS_INVOKE, {"name": name})
 
 
 def run_on_prem_teardown(
@@ -653,7 +653,7 @@ def run_on_prem_teardown(
 
     if disable_provider:
         click.echo("Disabling on-prem provider…")
-        client.invoke_manifest_command(_DISABLE_INVOKE, {})
+        client._invoke_manifest_command(_DISABLE_INVOKE, {})
 
     click.echo(f"On-prem teardown finished for class {name!r} ({kind}).")
 
@@ -662,8 +662,8 @@ def _run_helm_install(bundle_root: Path) -> None:
     setup = bundle_root / "setup.sh"
     if not setup.is_file():
         msg = (
-            "Helm bundle has no setup.sh. Re-run with --setup-type dockerSwarm "
-            "for SSH-based install, or check the platform bundle."
+            "Helm bundle has no setup.sh. Re-run ``arena on-prem install`` or "
+            "use ``--setup-type dockerSwarm`` for SSH-based install."
         )
         raise click.ClickException(msg)
     if not shutil.which("helm"):
@@ -714,9 +714,9 @@ def run_on_prem_install(
 
     if not skip_enable:
         click.echo("Enabling on-prem provider…")
-        client.invoke_manifest_command(_ENABLE_INVOKE, {})
+        client._invoke_manifest_command(_ENABLE_INVOKE, {})
 
-    listed = client.invoke_manifest_command(_LIST_CLASSES_INVOKE, {})
+    listed = client._invoke_manifest_command(_LIST_CLASSES_INVOKE, {})
     existing = _class_by_name(listed, name)
     create_nodes = _num_nodes_for_create(
         existing,
@@ -862,14 +862,12 @@ def build_install_command() -> click.Command:
     ) -> None:
         """Install an on-prem worker cluster for CLASS_NAME.
 
-        **dockerSwarm** — downloads the platform bundle and runs install-docker,
-        NVIDIA, swarm init/join, GPU node labels, and stack deploy on ``--manager``
-        and ``--workers`` via SSH (see agilerl-platform
-        ``resources/docker-swarm-setup/arena-train/SETUP.md``).
+        **dockerSwarm** — downloads the deployment bundle and runs install-docker,
+        NVIDIA setup, swarm init/join, GPU node labels, and stack deploy on
+        ``--manager`` and ``--workers`` via SSH.
 
         **helm** — downloads the Helm chart bundle and runs ``./setup.sh`` on this
-        machine; requires ``helm`` and a configured ``kubectl`` context only
-        (see ``resources/helm-setup/arena-train/SETUP.md``).
+        machine; requires Helm 3.x and a configured ``kubectl`` context.
         """
         worker_hosts = tuple(h.strip() for h in workers.split(",") if h.strip())
 

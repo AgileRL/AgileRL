@@ -15,7 +15,7 @@ import click
 from agilerl.arena.config import (
     CommandConfig,
     build_client,
-    resolve_root_command_config,
+    _resolve_root_command_config,
 )
 from agilerl.arena.exceptions import ArenaValidationError
 from agilerl.arena.output import emit_result
@@ -65,7 +65,7 @@ def capabilities_show_on_prem_root(config: CommandConfig) -> bool | None:
     """
     client = build_client(config)
     try:
-        caps = client.get_cli_capabilities(force_refresh=True)
+        caps = client._get_cli_capabilities(force_refresh=True)
     finally:
         client.close()
     if caps is None:
@@ -95,7 +95,7 @@ class ArenaRootGroup(click.Group):
 
     @staticmethod
     def _hide_on_prem(ctx: click.Context) -> bool:
-        cfg = resolve_root_command_config(ctx)
+        cfg = _resolve_root_command_config(ctx)
         return capabilities_show_on_prem_root(cfg) is not True
 
 
@@ -213,7 +213,7 @@ def build_manifest_click_command(
         from agilerl.arena.cli import arena_client
 
         with arena_client(config) as client:
-            result = client.invoke_manifest_command(invoke, parsed)
+            result = client._invoke_manifest_command(invoke, parsed)
 
         response_kind = invoke.get("responseKind")
         if response_kind == "binary":
@@ -314,7 +314,7 @@ class OnPremDynamicGroup(click.Group):
 
         client = build_client(config)
         try:
-            caps = client.get_cli_capabilities(force_refresh=True)
+            caps = client._get_cli_capabilities(force_refresh=True)
         finally:
             client.close()
 
@@ -327,40 +327,46 @@ class OnPremDynamicGroup(click.Group):
 
         if caps is None:
             self._register_notice(
-                "Arena server has no CLI capabilities document at "
-                "/api/cli/v1/capabilities (upgrade the platform). "
-                "See REST docs for on-prem endpoints.",
+                "On-prem commands are not available from this Arena server. "
+                "Contact your administrator or upgrade Arena.",
             )
             return
 
         if caps.get("schemaVersion") != CAPABILITIES_SCHEMA_VERSION:
             self._register_notice(
-                "Capabilities schemaVersion is not supported by this CLI — upgrade agilerl.",
+                "This agilerl version does not support on-prem CLI from your "
+                "Arena server. Upgrade agilerl.",
             )
             return
 
         if not caps_allow_on_prem_at_root(caps):
             self._register_notice(
-                "On-prem CLI is not enabled for this account "
-                "(need ``enterprise: true`` or ``features.onPremCli: true``). "
-                "Confirm ``GET /api/cli/v1/capabilities`` for your token.",
+                "On-prem CLI is not enabled for your account. "
+                "Run ``arena user profile`` to check your account, or contact "
+                "your administrator.",
             )
             return
 
         cli = caps.get("cli")
         if not isinstance(cli, dict):
-            self._register_notice("Capabilities response missing cli manifest.")
+            self._register_notice(
+                "On-prem CLI is temporarily unavailable. "
+                "Try again later or contact your administrator.",
+            )
             return
 
         if cli.get("manifestSchemaVersion") != MANIFEST_SCHEMA_VERSION:
             self._register_notice(
-                "CLI manifestSchemaVersion is not supported — upgrade agilerl.",
+                "This agilerl version is too old for on-prem CLI. Upgrade agilerl.",
             )
             return
 
         root = cli.get("root")
         if not isinstance(root, dict):
-            self._register_notice("Malformed CLI manifest (missing root).")
+            self._register_notice(
+                "On-prem CLI configuration from Arena is invalid. "
+                "Contact your administrator.",
+            )
             return
 
         attach_manifest_tree(self, root)
