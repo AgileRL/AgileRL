@@ -85,34 +85,22 @@ def set_seed():
 
 
 def generate_model(pretrained_model_name_or_path, add_value_head=False):
+    """Build a dense base model for ``actor_network``.
+
+    AgileRL attaches and manages its own LoRA adapters (PeftModel inputs are
+    rejected), so the factory returns the unwrapped base model.
+    """
     pytest.importorskip("peft", reason="LLM tests require peft.")
     pytest.importorskip("transformers", reason="LLM tests require transformers.")
-    from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM
 
-    peft_config = LoraConfig(
-        task_type="CAUSAL_LM",
-        r=16,
-        lora_alpha=64,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
-    )
     if add_value_head:
-        peft_config.modules_to_save = ["summary"]
         model = AutoModelForCausalLMWithValueHead.from_pretrained(
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             torch_dtype=torch.bfloat16,
             attn_implementation="sdpa",
         )
         model.gradient_checkpointing_enable()
-        model = get_peft_model(model, peft_config)
         return model
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -120,7 +108,6 @@ def generate_model(pretrained_model_name_or_path, add_value_head=False):
         attn_implementation="sdpa",
     )
     model.gradient_checkpointing_enable()
-    model = get_peft_model(model, peft_config)
     return model
 
 
