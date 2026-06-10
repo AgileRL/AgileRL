@@ -1282,7 +1282,14 @@ class TestConsolidateMutations:
             agent.accelerator.state = MagicMock()
             agent.accelerator.state.deepspeed_plugin = None
             agent.actor = MagicMock()
-        consolidate_mutations(population)
+        # Patch the broadcast: with torch.distributed initialised by an earlier
+        # test on the same worker, the real collective would try to pickle the
+        # MagicMock agents.
+        with patch(
+            "agilerl.utils.utils.broadcast_object_list",
+            side_effect=lambda obj_list, **kw: list(obj_list),
+        ):
+            consolidate_mutations(population)
         for agent in population:
             assert agent.mut == "lr"
             assert agent.lr == 0.01
