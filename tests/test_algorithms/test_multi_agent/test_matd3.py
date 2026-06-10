@@ -1969,6 +1969,8 @@ class TestMATD3Test:
         else:
             assert isinstance(mean_score, np.ndarray)
             assert len(mean_score) == 3
+        # Fitness must be recorded through the metrics tracker
+        assert len(matd3.fitness) == 1
         env.close()
         matd3.clean_up()
 

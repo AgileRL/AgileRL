@@ -644,6 +644,8 @@ class TestRainbowDQNTest:
         )
         mean_score = agent.test(env, max_steps=10)
         assert isinstance(mean_score, float)
+        # Fitness must be recorded through the metrics tracker
+        assert list(agent.fitness) == [mean_score]
         agent.clean_up()
 
 

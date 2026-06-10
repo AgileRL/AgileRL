@@ -508,7 +508,9 @@ class RainbowDQN(RLAlgorithm):
             loss_for_prior = elementwise_loss.detach().cpu().numpy()
             new_priorities = loss_for_prior + self.prior_eps
 
-        return loss.item(), idxs, new_priorities
+        loss_value = loss.item()
+        self.metrics.log("loss", loss_value)
+        return loss_value, idxs, new_priorities
 
     def soft_update(self) -> None:
         """Soft updates target network."""
@@ -566,5 +568,5 @@ class RainbowDQN(RLAlgorithm):
                 rewards.append(np.mean(completed_episode_scores))
 
         mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit
