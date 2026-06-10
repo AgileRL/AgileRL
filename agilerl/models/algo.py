@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
@@ -208,6 +209,36 @@ def bandit() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
     return decorator
 
 
+# TrainingSpec fields with no equivalent in the LLM fine-tuning loops
+_LLM_UNSUPPORTED_TRAINING_FIELDS = (
+    "target_score",
+    "eval_steps",
+    "eval_loop",
+    "learning_delay",
+    "eps_start",
+    "eps_end",
+    "eps_decay",
+    "overwrite_checkpoints",
+)
+
+
+def _warn_ignored_llm_training_fields(training: TrainingSpec) -> None:
+    """Warn when explicitly-set TrainingSpec fields are ignored by LLM loops."""
+    ignored = [
+        name
+        for name in _LLM_UNSUPPORTED_TRAINING_FIELDS
+        if name in training.model_fields_set
+        and getattr(training, name) != type(training).model_fields[name].default
+    ]
+    if ignored:
+        warnings.warn(
+            "TrainingSpec fields not supported by LLM fine-tuning are ignored: "
+            + ", ".join(ignored),
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 class AlgorithmSpec(BaseModel):
     """Base specification for all algorithms.
 
@@ -297,10 +328,14 @@ class AlgorithmSpec(BaseModel):
             if training.checkpoint_steps is not None:
                 kwargs["checkpoint_steps"] = training.checkpoint_steps
 
+            if training.checkpoint_path is not None:
+                kwargs["checkpoint_path"] = training.checkpoint_path
+
             kwargs["evaluation_interval"] = training.evaluation_interval
             if training.num_epochs is not None:
                 kwargs["num_epochs"] = training.num_epochs
 
+            _warn_ignored_llm_training_fields(training)
             return kwargs
 
         # Core RL algorithm kwargs
@@ -516,8 +551,8 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         """
         micro_batch_size_per_gpu = None
         if accelerator is not None:
-            micro_batch_size_per_gpu = min(
-                self.batch_size / accelerator.num_processes, 1
+            micro_batch_size_per_gpu = max(
+                self.batch_size // accelerator.num_processes, 1
             )
 
         use_vllm = getattr(self, "use_vllm", False)

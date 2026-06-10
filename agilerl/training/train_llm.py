@@ -180,6 +180,7 @@ def finetune_llm_reasoning(
     tensorboard_log_dir: str | None = None,
     evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
+    checkpoint_path: str | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
@@ -216,6 +217,8 @@ def finetune_llm_reasoning(
     :type evo_steps: int, optional
     :param checkpoint_steps: Number of steps between checkpoints, defaults to None
     :type checkpoint_steps: int, optional
+    :param checkpoint_path: Directory for periodic checkpoints; falls back to elite_path, defaults to None
+    :type checkpoint_path: str | None, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: TournamentSelection, optional
     :param mutation: Mutation object, defaults to None
@@ -397,7 +400,10 @@ def finetune_llm_reasoning(
                 checkpoint_due = True
                 max_steps_checkpoint_saved = True
             if checkpoint_due:
-                save_llm_checkpoint(agent, elite_path)
+                save_llm_checkpoint(
+                    agent,
+                    checkpoint_path if checkpoint_path is not None else elite_path,
+                )
 
         if _num_epochs_reached(envs, num_epochs):
             break
@@ -426,6 +432,7 @@ def finetune_llm_preference(
     tensorboard_log_dir: str | None = None,
     evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
+    checkpoint_path: str | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
@@ -461,6 +468,8 @@ def finetune_llm_preference(
     :type evo_steps: int, optional
     :param checkpoint_steps: Number of steps between checkpoints, defaults to None
     :type checkpoint_steps: int, optional
+    :param checkpoint_path: Directory for periodic checkpoints; falls back to elite_path, defaults to None
+    :type checkpoint_path: str | None, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: TournamentSelection, optional
     :param mutation: Mutation object, defaults to None
@@ -628,7 +637,10 @@ def finetune_llm_preference(
                 checkpoint_due = True
                 max_steps_checkpoint_saved = True
             if checkpoint_due:
-                save_llm_checkpoint(agent, elite_path)
+                save_llm_checkpoint(
+                    agent,
+                    checkpoint_path if checkpoint_path is not None else elite_path,
+                )
 
         if _num_epochs_reached(envs, num_epochs):
             break
@@ -656,6 +668,7 @@ def finetune_llm_sft(
     tensorboard_log_dir: str | None = None,
     evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
+    checkpoint_path: str | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
@@ -692,6 +705,8 @@ def finetune_llm_sft(
     :type evo_steps: int, optional
     :param checkpoint_steps: Steps between non-HPO saves, defaults to None
     :type checkpoint_steps: int, optional
+    :param checkpoint_path: Directory for periodic checkpoints; falls back to elite_path, defaults to None
+    :type checkpoint_path: str | None, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: TournamentSelection, optional
     :param mutation: Mutation object, defaults to None
@@ -843,7 +858,10 @@ def finetune_llm_sft(
                 checkpoint_due = True
                 max_steps_checkpoint_saved = True
             if checkpoint_due:
-                save_llm_checkpoint(agent, elite_path)
+                save_llm_checkpoint(
+                    agent,
+                    checkpoint_path if checkpoint_path is not None else elite_path,
+                )
 
         if env.num_epochs == num_epochs:
             break
@@ -874,6 +892,7 @@ def finetune_llm_multiturn(
     tensorboard_log_dir: str | None = None,
     evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
+    checkpoint_path: str | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
@@ -916,6 +935,8 @@ def finetune_llm_multiturn(
     :type evo_steps: int, optional
     :param checkpoint_steps: Save checkpoint every N outer iterations when no evolution.
     :type checkpoint_steps: int, optional
+    :param checkpoint_path: Directory for periodic checkpoints; falls back to elite_path, defaults to None
+    :type checkpoint_path: str | None, optional
     :param tournament: Tournament selection for evolution, defaults to None.
     :type tournament: TournamentSelection, optional
     :param mutation: Mutation operator for evolution, defaults to None.
@@ -1150,7 +1171,10 @@ def finetune_llm_multiturn(
                 checkpoint_due = True
                 max_steps_checkpoint_saved = True
             if checkpoint_due:
-                save_llm_checkpoint(agent, elite_path)
+                save_llm_checkpoint(
+                    agent,
+                    checkpoint_path if checkpoint_path is not None else elite_path,
+                )
 
         i += 1
 

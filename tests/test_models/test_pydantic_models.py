@@ -502,6 +502,48 @@ class TestAlgoSpecClassVars:
         assert kwargs["max_reward"] == 1.0
         assert kwargs["checkpoint_steps"] == 100
 
+    def test_llm_spec_forwards_checkpoint_path(self):
+        from agilerl.models.algo import LLMAlgorithmSpec
+        from agilerl.models.training import TrainingSpec
+
+        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
+        object.__setattr__(spec, "__dict__", {"batch_size": 8, "hp_config": None})
+        training = TrainingSpec(checkpoint_path="/ckpts", evaluation_interval=10)
+        env_spec = MagicMock()
+        env_spec.max_reward = None
+        kwargs = spec.get_training_kwargs(training=training, env_spec=env_spec)
+        assert kwargs["checkpoint_path"] == "/ckpts"
+
+    def test_llm_spec_warns_on_unsupported_training_fields(self):
+        from agilerl.models.algo import LLMAlgorithmSpec
+        from agilerl.models.training import TrainingSpec
+
+        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
+        object.__setattr__(spec, "__dict__", {"batch_size": 8, "hp_config": None})
+        training = TrainingSpec(
+            target_score=200.0, eval_steps=100, evaluation_interval=10
+        )
+        env_spec = MagicMock()
+        env_spec.max_reward = None
+        with pytest.warns(UserWarning, match="target_score, eval_steps"):
+            kwargs = spec.get_training_kwargs(training=training, env_spec=env_spec)
+        assert "target_score" not in kwargs
+        assert "eval_steps" not in kwargs
+
+    def test_llm_spec_no_warning_for_default_training_fields(self, recwarn):
+        from agilerl.models.algo import LLMAlgorithmSpec
+        from agilerl.models.training import TrainingSpec
+
+        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
+        object.__setattr__(spec, "__dict__", {"batch_size": 8, "hp_config": None})
+        # Setting an unsupported field to its default (as the trainer does for
+        # overwrite_checkpoints) must not warn
+        training = TrainingSpec(evaluation_interval=10, overwrite_checkpoints=False)
+        env_spec = MagicMock()
+        env_spec.max_reward = None
+        spec.get_training_kwargs(training=training, env_spec=env_spec)
+        assert not any("not supported by LLM" in str(w.message) for w in recwarn.list)
+
     def test_offline_spec_dataset_path(self):
         """get_training_kwargs for offline algo with dataset_path."""
         from agilerl.models.algo import RLAlgorithmSpec, offline
@@ -633,6 +675,37 @@ class TestBuildAlgorithmForwardsOnlySetFields:
 
 class TestLLMAlgorithmSpecBuild:
     """Lines 531-533, 554 in algo.py."""
+
+    def test_micro_batch_size_per_gpu_integer_split(self):
+        """Per-GPU micro batch is the integer per-process share, floored at 1."""
+        from agilerl.models.algorithms.grpo import GRPOSpec
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 0
+        mock_tokenizer.eos_token = "<|endoftext|>"
+        accelerator = MagicMock()
+        accelerator.num_processes = 2
+
+        spec = GRPOSpec(
+            pretrained_model_name_or_path="gpt2", group_size=4, batch_size=8
+        )
+        mock_algo_cls = MagicMock()
+        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+            spec.build_algorithm(
+                tokenizer=mock_tokenizer, index=0, accelerator=accelerator
+            )
+        assert mock_algo_cls.call_args.kwargs["micro_batch_size_per_gpu"] == 4
+
+        # Never fractional or zero when batch_size < num_processes
+        small = GRPOSpec(
+            pretrained_model_name_or_path="gpt2", group_size=4, batch_size=1
+        )
+        mock_algo_cls.reset_mock()
+        with patch.object(type(small), "algo_class", return_value=mock_algo_cls):
+            small.build_algorithm(
+                tokenizer=mock_tokenizer, index=0, accelerator=accelerator
+            )
+        assert mock_algo_cls.call_args.kwargs["micro_batch_size_per_gpu"] == 1
 
     def test_vllm_config_dict_coerced(self):
         """build_algorithm coerces dict vllm_config."""
