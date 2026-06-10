@@ -6,7 +6,7 @@ import gymnasium as gym
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator, DeepSpeedPlugin
+from accelerate import Accelerator
 from gymnasium import spaces
 from peft import LoraConfig
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -1273,20 +1273,20 @@ class TestConsolidateMutations:
             agent.lr = 0.01
             agent.lr_critic = None
             agent.optimizer = Mock()
-            agent.optimizer.param_groups = [{"lr": 0.01}]
-            agent.cosine_lr_schedule_config = {"warmup_steps": 0, "total_steps": 100}
+            agent.optimizer.optimizer = Mock()
+            agent.optimizer.optimizer.param_groups = [{"lr": 0.01}]
+            agent.cosine_lr_schedule_config = None
             agent.accelerator = MagicMock(spec=Accelerator)
             agent.accelerator.is_main_process = True
             agent.accelerator.wait_for_everyone = Mock()
             agent.accelerator.state = MagicMock()
-            agent.accelerator.state.deepspeed_plugin = MagicMock(spec=DeepSpeedPlugin)
-            agent.accelerator.state.deepspeed_plugin.deepspeed_config = {}
+            agent.accelerator.state.deepspeed_plugin = None
             agent.actor = MagicMock()
         consolidate_mutations(population)
         for agent in population:
             assert agent.mut == "lr"
             assert agent.lr == 0.01
-            assert agent.optimizer.param_groups[0]["lr"] == 0.01
+            assert agent.optimizer.optimizer.param_groups[0]["lr"] == 0.01
 
 
 def test_check_box2d_available_raises_when_box2d_missing(monkeypatch):
