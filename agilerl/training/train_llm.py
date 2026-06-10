@@ -807,7 +807,6 @@ def finetune_llm_sft(
                 pbar.update(increment)
                 displayed_steps += increment
 
-            population.increment_evo_step()
             population.report_metrics(clear=True)
 
         # Tournament selection and mutation

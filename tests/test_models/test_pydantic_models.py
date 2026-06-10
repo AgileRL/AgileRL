@@ -397,13 +397,13 @@ class TestBanditEnvSpec:
 
 
 class TestGymEnvSpecNonCallable:
-    """Lines 120-121 in env.py: constuct_custom_env_fn with non-callable entrypoint."""
+    """Lines 120-121 in env.py: construct_custom_env_fn with non-callable entrypoint."""
 
     def test_non_callable_entrypoint(self):
         from agilerl.models.env import GymEnvSpec
 
         with patch("agilerl.models.env.resolve_entrypoint_target", return_value=42):
-            factory = GymEnvSpec.constuct_custom_env_fn("some:entry")
+            factory = GymEnvSpec.construct_custom_env_fn("some:entry")
             with pytest.raises(TypeError, match="resolved to non-callable"):
                 factory()
 
@@ -415,7 +415,7 @@ class TestPzEnvSpecNonCallable:
         from agilerl.models.env import PzEnvSpec
 
         with patch("agilerl.models.env.resolve_entrypoint_target", return_value=42):
-            factory = PzEnvSpec.constuct_custom_env_fn("some:entry")
+            factory = PzEnvSpec.construct_custom_env_fn("some:entry")
             with pytest.raises(TypeError, match="resolved to non-callable"):
                 factory()
 
