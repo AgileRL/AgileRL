@@ -1147,6 +1147,25 @@ class TestRLAlgorithmLoadCheckpoint:
         assert new_agent.fitness == agent.fitness
         assert new_agent.steps == agent.steps
 
+    def test_load_pre_v2_8_checkpoint_with_list_steps(
+        self, tmpdir, vector_space, discrete_space
+    ):
+        """Pre-2.8 checkpoints stored steps as a cumulative list."""
+        agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
+        checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+        agent.save_checkpoint(checkpoint_path)
+
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        checkpoint["steps"] = [0, 1000, 2500]  # legacy format
+        torch.save(checkpoint, checkpoint_path)
+
+        new_agent = DummyRLAlgorithm(vector_space, discrete_space, index=0)
+        new_agent.load_checkpoint(checkpoint_path)
+        assert new_agent.steps == 2500
+        # Resuming training must keep working with an int counter
+        new_agent.metrics.increment_steps(10)
+        assert new_agent.steps == 2510
+
     def test_gpu_to_no_cuda_load_checkpoint_single_agent(self, tmpdir, vector_space):
         """Test saving agent on GPU and loading checkpoint when CUDA is completely unavailable."""
         import os

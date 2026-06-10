@@ -358,6 +358,22 @@ class TestTransposeImageSpace:
         s = spaces.Discrete(10)
         assert transpose_image_space(s) is s
 
+    def test_channels_first_box_unchanged(self):
+        """An already channels-first Box (e.g. stacked frames) is untouched."""
+        s = spaces.Box(0, 255, (4, 84, 84), np.uint8)
+        assert transpose_image_space(s) is s
+
+    def test_mixed_dict_only_transposes_channels_last_leaves(self):
+        s = spaces.Dict(
+            {
+                "camera": spaces.Box(0, 255, (84, 84, 3), np.uint8),
+                "frames": spaces.Box(0, 255, (4, 84, 84), np.uint8),
+            }
+        )
+        t = transpose_image_space(s)
+        assert t["camera"].shape == (3, 84, 84)
+        assert t["frames"].shape == (4, 84, 84)
+
 
 # ---------------------------------------------------------------------------
 # transpose_image_observation
@@ -410,6 +426,37 @@ class TestTransposeImageObservation:
         space = spaces.Discrete(5)
         obs = 3
         assert transpose_image_observation(obs, space) == 3
+
+    def test_channels_first_leaf_unchanged(self):
+        """An already channels-first 3-D leaf must not be transposed."""
+        space = spaces.Box(0, 255, (4, 84, 84), np.uint8)
+        obs = np.zeros((4, 84, 84), dtype=np.uint8)
+        result = transpose_image_observation(obs, space)
+        assert result.shape == (4, 84, 84)
+
+    def test_mixed_dict_only_transposes_channels_last_leaves(self):
+        space = spaces.Dict(
+            {
+                "camera": spaces.Box(0, 255, (84, 84, 3), np.uint8),
+                "frames": spaces.Box(0, 255, (4, 84, 84), np.uint8),
+            }
+        )
+        obs = {
+            "camera": np.zeros((84, 84, 3), dtype=np.uint8),
+            "frames": np.zeros((4, 84, 84), dtype=np.uint8),
+        }
+        result = transpose_image_observation(obs, space)
+        assert result["camera"].shape == (3, 84, 84)
+        assert result["frames"].shape == (4, 84, 84)
+
+    def test_runtime_call_with_transposed_space(self):
+        """Agents pass the already-transposed (CHW) space with HWC observations."""
+        space = spaces.Box(0, 255, (3, 84, 84), np.uint8)
+        hwc_obs = np.zeros((84, 84, 3), dtype=np.uint8)
+        assert transpose_image_observation(hwc_obs, space).shape == (3, 84, 84)
+        # An observation already in the target layout is returned unchanged
+        chw_obs = np.zeros((3, 84, 84), dtype=np.uint8)
+        assert transpose_image_observation(chw_obs, space) is chw_obs
 
 
 def test_key_in_nested_dict():

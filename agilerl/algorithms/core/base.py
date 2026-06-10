@@ -1143,6 +1143,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Load other attributes
         checkpoint.pop("network_info")
+        # Pre-2.8 checkpoints stored ``steps`` as a cumulative list; coerce to
+        # the int expected by the metrics tracker.
+        if isinstance(checkpoint.get("steps"), (list, tuple)):
+            legacy_steps = checkpoint["steps"]
+            checkpoint["steps"] = int(legacy_steps[-1]) if len(legacy_steps) else 0
         for attribute, value in checkpoint.items():
             if isinstance(value, torch.Tensor) and isinstance(
                 getattr(self, attribute, None), torch.Tensor

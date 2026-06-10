@@ -255,14 +255,14 @@ class AlgorithmSpec(BaseModel):
         raise NotImplementedError(msg)
 
     @staticmethod
-    def get_training_fn() -> Callable[..., tuple[PopulationT, list[list[float]]]]:
+    def get_training_fn() -> Callable[..., tuple[PopulationT, list[float]]]:
         """Return the training function for this algorithm.
 
         Concrete specs **must** override this to return their training
         function (e.g. ``train_off_policy``).
 
         :return: Training function
-        :rtype: Callable[..., tuple[PopulationT, list[list[float]]]]
+        :rtype: Callable[..., tuple[PopulationT, list[float]]]
         :raises NotImplementedError: If the training function is not implemented.
         """
         msg = "Algorithm specs must implement get_training_fn."

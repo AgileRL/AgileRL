@@ -448,7 +448,7 @@ class Population(Generic[AgentT]):
     def __init__(
         self,
         agents: list[AgentT],
-        min_evo_steps: int = 10,
+        min_evo_steps: int = 100,
         accelerator: Accelerator | None = None,
         loggers: list[Logger] | None = None,
     ) -> None:
@@ -535,6 +535,9 @@ class Population(Generic[AgentT]):
         """Check if all agents consistently exceed the target fitness and the minimum number
         of evo-steps has been reached.
 
+        Consistency is judged on the mean of each agent's last 10 recorded
+        fitness values.
+
         :param target: The target fitness to check.
         :type target: float | None
         :returns: True if all agents consistently exceed the target fitness, False otherwise.
@@ -546,7 +549,7 @@ class Population(Generic[AgentT]):
         return bool(
             np.all(
                 np.greater(
-                    [np.mean(a.fitness) for a in self._agents],
+                    [np.mean(a.fitness[-10:]) for a in self._agents],
                     target,
                 ),
             )

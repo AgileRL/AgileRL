@@ -426,7 +426,7 @@ class TestPopulationInit:
         pop = Population(agents=[agent])
         assert pop._agents == [agent]
         assert pop.sample_agent is agent
-        assert pop.min_evo_steps == 10
+        assert pop.min_evo_steps == 100
         assert pop.accelerator is None
         assert pop.loggers == []
         assert pop.last_fitnesses == []
@@ -547,6 +547,17 @@ class TestPopulationShouldStop:
         a = _make_mock_agent(fitness=[100.0])
         pop = _make_population([a], min_evo_steps=5, evo_steps=10)
         assert pop.should_stop(1.0) is True
+
+    def test_should_stop_judges_last_10_fitnesses_only(self):
+        """Early bad fitness must not prevent stopping once recent runs pass."""
+        a = _make_mock_agent(fitness=[-1000.0] * 50 + [100.0] * 10)
+        pop = _make_population([a], min_evo_steps=5, evo_steps=10)
+        assert pop.should_stop(1.0) is True
+
+    def test_should_stop_false_when_recent_fitness_below_target(self):
+        a = _make_mock_agent(fitness=[100.0] * 50 + [-1000.0] * 10)
+        pop = _make_population([a], min_evo_steps=5, evo_steps=10)
+        assert pop.should_stop(1.0) is False
 
 
 class TestPopulationClearAndFinish:

@@ -55,7 +55,7 @@ def train_on_policy(
     collect_rollouts_fn: (
         Callable[[OnPolicyAlgorithms, GymEnvType, int], None] | None
     ) = None,
-) -> tuple[PopulationType, list[list[float]]]:
+) -> tuple[PopulationType, list[float]]:
     """Run the general on-policy RL training; returns trained population of agents
     and their fitnesses.
 
@@ -117,7 +117,7 @@ def train_on_policy(
     :type collect_rollouts_fn: Callable or None, optional
 
     :return: Trained population of agents and their fitnesses
-    :rtype: list[RLAlgorithm], list[list[float]]
+    :rtype: list[RLAlgorithm], list[float]
     """
     assert isinstance(
         algo,
