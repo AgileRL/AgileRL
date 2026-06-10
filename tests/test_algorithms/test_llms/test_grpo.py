@@ -1171,6 +1171,7 @@ class TestGRPOInit:
     def test_init_grpo_deepspeed_plugin_raises(self):
         """A leftover DeepSpeed accelerate config is rejected with migration guidance."""
         accelerator = MagicMock(spec=Accelerator)
+        accelerator.state = MagicMock(spec=AcceleratorState)
         accelerator.state.deepspeed_plugin = MagicMock()
         with pytest.raises(ValueError, match="DeepSpeed support has been removed"):
             GRPO(
@@ -1192,6 +1193,7 @@ class TestGRPOInit:
     def test_init_grpo_fsdp1_plugin_raises(self):
         """FSDP1 accelerate configs are rejected; only FSDP2 is supported."""
         accelerator = MagicMock(spec=Accelerator)
+        accelerator.state = MagicMock(spec=AcceleratorState)
         accelerator.state.deepspeed_plugin = None
         accelerator.state.fsdp_plugin = MagicMock(fsdp_version=1)
         with pytest.raises(ValueError, match="only supports FSDP2"):
@@ -1619,7 +1621,6 @@ class TestGRPOGetAction:
             accelerator_factory,
             model_factory,
             None,
-            False,
             100,
             input_size,
             max_tokens,
@@ -1658,8 +1659,16 @@ class TestGRPOGetAction:
                 "attention_mask": torch.ones(1, 6, device=grpo.device),
             },
         ]
-        no_param_actor = SimpleNamespace(parameters=lambda: iter(()))
-        with patch.object(grpo, "_get_unwrapped_actor", return_value=no_param_actor):
+        real_actor = grpo._get_unwrapped_actor()
+
+        class _NoParamActor:
+            def parameters(self):
+                return iter(())
+
+            def __getattr__(self, name):
+                return getattr(real_actor, name)
+
+        with patch.object(grpo, "_get_unwrapped_actor", return_value=_NoParamActor()):
             completion_ids, action_masks = grpo.get_action(prompts, training=False)
         assert len(completion_ids) == 1
         assert len(action_masks) == 1
@@ -3467,7 +3476,6 @@ class TestGRPOTest:
             accelerator_factory,
             model_factory,
             None,
-            False,
             100,
             10,
             8,
@@ -3530,7 +3538,7 @@ class TestCloneLlm:
         peft_model = get_peft_model(base_model, peft_config, adapter_name="actor")
 
         # Clone the PEFT model
-        cloned_model = clone_llm(peft_model, 0, peft_model.state_dict())
+        cloned_model = clone_llm(peft_model, peft_model.state_dict())
 
         # Verify the cloned model is a PEFT model
         assert isinstance(cloned_model, type(peft_model))
@@ -3709,17 +3717,24 @@ class TestGRPOUpdateLr:
             opt,
             0.5,
             grpo.accelerator,
-            grpo.cosine_lr_schedule_config,
+            scheduler_config=None,
         )
         for param_group in opt.param_groups:
             assert param_group["lr"] == 0.5
+        assert grpo.lr_scheduler is None
 
-        # A fresh scheduler is returned whenever a schedule config is set,
-        # independent of the accelerator.
+        # A fresh warmup scheduler is returned whenever a schedule config is
+        # set, independent of the accelerator; it owns the lr from then on.
+        _, scheduler = LLMAlgorithm.update_lr(
+            opt,
+            0.5,
+            grpo.accelerator,
+            grpo.cosine_lr_schedule_config,
+        )
         if grpo.cosine_lr_schedule_config is not None:
-            assert grpo.lr_scheduler is not None
+            assert scheduler is not None
         else:
-            assert grpo.lr_scheduler is None
+            assert scheduler is None
         grpo.clean_up()
 
 
@@ -3861,7 +3876,7 @@ class TestGRPOSetReferencePolicy:
         )
 
         # Ensure adapters have different params
-        grpo.actor.set_adapter("actor")
+        grpo.use_adapter("actor")
         for name, param in grpo.actor.named_parameters():
             if "actor" in name:
                 param.data *= 2

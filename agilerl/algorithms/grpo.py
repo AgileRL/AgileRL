@@ -480,7 +480,7 @@ class GRPO(LLMAlgorithm):
                             ):
                                 stitch_ids = stitch_ids.repeat(group_size, 1)
                             initial_prompt_len = prompt.pop("initial_prompt_len", None)
-                            completion_id = self.actor.generate(
+                            completion_id = self._get_unwrapped_actor().generate(
                                 **prompt,
                                 generation_config=self.generation_config,
                             )

@@ -598,9 +598,14 @@ class TestPPOGetAction:
             max_output_tokens=8,
         )
 
+        real_actor = ppo._get_unwrapped_actor()
+
         class _NoParamModule:
             def parameters(self):
                 return iter(())
+
+            def __getattr__(self, name):
+                return getattr(real_actor, name)
 
         prompts = [
             {

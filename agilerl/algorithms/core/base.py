@@ -3178,6 +3178,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     self.gradient_checkpointing = False
                 self.actor = compile_model(self.actor, self.torch_compiler)
 
+        if self.accelerator is None:
+            # Accelerated runs move the model in ``accelerator.prepare``;
+            # plain runs move it here so optimizer params land on-device.
+            self.actor = self.actor.to(self.device)
+
         self.optimizer = OptimizerWrapper(
             AdamW,
             networks=[self.actor],
@@ -3618,13 +3623,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _peft_model(self) -> Any:
         """The PeftModel managing LoRA adapters.
 
-        When ``use_value_head=True`` the PeftModel lives inside the
-        value-head wrapper at ``self.actor.pretrained_model``.
-        Otherwise ``self.actor`` itself is the PeftModel.
+        The actor is unwrapped from accelerate wrappers first — DDP does not
+        forward attribute access to the wrapped module. When
+        ``use_value_head=True`` the PeftModel lives inside the value-head
+        wrapper at ``actor.pretrained_model``; otherwise the unwrapped actor
+        itself is the PeftModel.
         """
+        actor = self._get_unwrapped_actor()
         if self.use_value_head:
-            return self.actor.pretrained_model
-        return self.actor
+            return actor.pretrained_model
+        return actor
 
     def _restore_adapter_trainability(self, selected_adapters: list[str]) -> None:
         """Restore requires_grad=True for all trainable parameters of specified adapters.
@@ -4620,7 +4628,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: ``(parent_module, attr_name)``.
         :raises AttributeError: If no lm_head can be found.
         """
-        model = self.actor
+        model = self._get_unwrapped_actor()
         if self.use_value_head and hasattr(model, "pretrained_model"):
             # Value-head wrapper (e.g. AutoModelForCausalLMWithValueHead) →
             # the PEFT/causal-LM inner model.

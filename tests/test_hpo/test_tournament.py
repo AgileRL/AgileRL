@@ -338,7 +338,7 @@ class TestTournamentSelectionSelect:
 
         population = [
             GRPO(
-                actor_network=clone_llm(actor_network, 0),
+                actor_network=clone_llm(actor_network),
                 pad_token_id=init_hp.get("PAD_TOKEN_ID"),
                 pad_token="<pad>",
                 hp_config=None,

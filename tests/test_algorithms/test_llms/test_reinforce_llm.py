@@ -559,9 +559,14 @@ class TestREINFORCEGetAction:
     def test_llmreinforce_get_action_hf_path_handles_actor_without_parameters(self):
         rf = _cpu_llmreinforce(use_vllm=False, max_model_len=128, max_output_tokens=8)
 
+        real_actor = rf._get_unwrapped_actor()
+
         class _NoParamModule:
             def parameters(self):
                 return iter(())
+
+            def __getattr__(self, name):
+                return getattr(real_actor, name)
 
         prompts = [
             {

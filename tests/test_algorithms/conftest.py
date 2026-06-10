@@ -14,9 +14,17 @@ def generate_accelerator(mode, gradient_accumulation_steps=None):
         ``"fsdp2"`` (FSDP2 sharding via ``fully_shard``, world size 1).
     :param gradient_accumulation_steps: Optional accumulation steps to
         configure on the accelerator.
+
+    Accelerated modes need CUDA. Setting ``AGILERL_TEST_CPU_ACCELERATOR=1``
+    lets the ``"ddp"`` mode run on a CPU-only machine (gloo backend) for
+    local debugging; ``"fsdp2"`` always requires CUDA.
     """
     if mode is not None and not torch.cuda.is_available():
-        pytest.skip("Accelerated LLM tests require CUDA support.")
+        cpu_ddp_ok = (
+            mode == "ddp" and os.environ.get("AGILERL_TEST_CPU_ACCELERATOR") == "1"
+        )
+        if not cpu_ddp_ok:
+            pytest.skip("Accelerated LLM tests require CUDA support.")
 
     gc.collect()
     if torch.cuda.is_available():

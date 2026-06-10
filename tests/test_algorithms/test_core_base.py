@@ -1,57 +1,34 @@
 """Tests for agilerl.algorithms.core.base module.
 
+For LLMAlgorithm.save_checkpoint / load_checkpoint, the following cases are
+considered exhaustively. The same on-disk format is written for plain, DDP
+and FSDP2 runs, so the grid is
 
-
-For LLMAlgorithm.save_checkpoint / load_checkpoint, the following cases are considered
-exhaustively.
-
-There are 16 cells we care about, defined by the grid
     lora_only:       True / False
     save_optimizer:  True / False
-    use_deepspeed:   True / False
 × {save, load}.
 
 Expected behaviour per cell (the spec this file enforces):
 
-SAVE — deepspeed path
-    lora_only=T, save_optim=T  →  deepspeed save (exclude frozen params)
-    lora_only=F, save_optim=T  →  deepspeed save (include frozen params)
-    lora_only=T, save_optim=F  →  peft (save adapters)
-    lora_only=F, save_optim=F  →  gather params + torch save
-                                  (actor model in attributes.pt)
+SAVE
+    lora_only=T, save_optim=T  →  peft save (adapter dirs) + optim in attributes.pt
+    lora_only=F, save_optim=T  →  actor state_dict + optim in attributes.pt
+    lora_only=T, save_optim=F  →  peft save (adapter dirs only)
+    lora_only=F, save_optim=F  →  actor state_dict in attributes.pt, no optim
 
-SAVE — plain torch/peft path
-    lora_only=T, save_optim=T  →  peft save + optim in attributes.pt
-    lora_only=F, save_optim=T  →  torch save  (actor + optim in attributes.pt)
-    lora_only=T, save_optim=F  →  peft save
-    lora_only=F, save_optim=F  →  torch save  (actor in attributes.pt, no optim)
-
-LOAD — deepspeed path
-    LoRA=T, Optim=T  →  load deepspeed
-    LoRA=F, Optim=T  →  load deepspeed
-    LoRA=T, Optim=F  →  load peft
-    LoRA=F, Optim=F  →  load torch state dict from attributes.pt
-
-LOAD — plain torch/peft path
-    LoRA=T, Optim=T  →  load peft + torch load (optim)
-    LoRA=F, Optim=T  →  torch load
-    LoRA=T, Optim=F  →  load peft
-    LoRA=F, Optim=F  →  torch load
+LOAD
+    LoRA=T, Optim=T  →  load peft adapters + optim state from attributes.pt
+    LoRA=F, Optim=T  →  load actor state_dict + optim state from attributes.pt
+    LoRA=T, Optim=F  →  load peft adapters
+    LoRA=F, Optim=F  →  load actor state_dict
+    (Optim=T against a save_optim=F checkpoint warns and keeps the fresh
+    optimizer.)
 
 Test organisation:
-  * ``grpo_factory`` — session-scoped, expensive agent build happens once.
-  * ``llm_simple_checkpoint_save`` / ``llm_mocked_deepspeed_checkpoint_save`` — session-scoped, parametrised over
-    the 4 cells. Each cell runs ``save_checkpoint`` once and tests read from
-    the resulting artefacts.
-  * ``llm_simple_checkpoint_load`` / ``llm_mocked_deepspeed_checkpoint_load`` — function-scoped
-    because load tests mutate agent state (stamp sentinels, step optimizer).
-  * Test bodies use the fixture's ``lora_only`` / ``save_optimizer`` fields
-    as a truth table rather than branching per cell — each test runs 4x
-    (once per parametrised fixture variant).
-
-DeepSpeed tests spy-wrap ``actor.save_checkpoint`` / ``load_checkpoint``
-(they'd normally talk to a distributed backend we don't have); we assert the
-right branch was taken with the right kwargs.
+  * ``grpo_factory`` — function-scoped tiny GRPO build.
+  * ``llm_simple_checkpoint`` / ``llm_simple_checkpoint_load`` — parametrised
+    over the 4 cells. Each cell runs ``save_checkpoint`` once and tests read
+    from the resulting artefacts.
 """
 
 from __future__ import annotations
@@ -88,7 +65,6 @@ from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.modules import EvolvableMLP
-from agilerl.modules.dummy import DummyEvolvable
 from agilerl.algorithms.grpo import GRPO
 
 from tests.test_algorithms.test_base import DummyMARLAlgorithm, DummyRLAlgorithm
@@ -99,7 +75,6 @@ pytest.importorskip("peft", reason="LLM checkpoint tests require peft.")
 pytest.importorskip("transformers", reason="LLM checkpoint tests require transformers.")
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
-    from tests.test_algorithms.test_llms.test_grpo import deepspeed_config_stage_2
     from peft import LoraConfig, get_peft_model
 
 
@@ -1451,30 +1426,29 @@ class TestLoadCheckpointLLMBreak:
 
 
 def _make_mock_accelerator(
-    ds_config=None,
+    gradient_accumulation_steps=1,
     num_processes=1,
     is_main_process=True,
     process_index=0,
 ):
-    """Create a mock Accelerator that passes isinstance checks."""
-    if ds_config is None:
-        ds_config = {
-            "zero_optimization": {"stage": 0},
-            "train_micro_batch_size_per_gpu": "auto",
-        }
+    """Create a mock torch-native Accelerator that passes isinstance and
+    backend-validation checks."""
     acc = MagicMock(spec=Accelerator)
     type(acc).num_processes = PropertyMock(return_value=num_processes)
     type(acc).is_main_process = PropertyMock(return_value=is_main_process)
     type(acc).process_index = PropertyMock(return_value=process_index)
     type(acc).local_process_index = PropertyMock(return_value=process_index)
     type(acc).device = PropertyMock(return_value=torch.device("cpu"))
+    type(acc).gradient_accumulation_steps = PropertyMock(
+        return_value=gradient_accumulation_steps
+    )
 
-    plugin = MagicMock()
-    plugin.deepspeed_config = ds_config
     acc.state = MagicMock()
-    acc.state.deepspeed_plugin = plugin
+    acc.state.deepspeed_plugin = None
+    acc.state.fsdp_plugin = None
     acc.prepare = MagicMock(side_effect=lambda *a: a)
     acc.free_memory = MagicMock(side_effect=lambda *a: (None,) * len(a))
+    acc.unwrap_model = MagicMock(side_effect=lambda m: m)
     return acc
 
 
@@ -1613,25 +1587,22 @@ class TestLLMAlgorithmLoad:
 
 
 class TestLLMAlgorithmRecompile:
-    def test_recompile_no_deepspeed(self):
+    def test_recompile_noop_without_compiler(self):
         agent = _make_llm_agent()
         agent.recompile()
         assert agent.torch_compiler is None
-        assert agent._uses_deepspeed is False
 
-    def test_recompile_skips_compile_when_deepspeed(self):
-        """DeepSpeed engine is incompatible with torch.compile wrapping."""
-        agent = _make_llm_agent()
+    def test_recompile_skips_compile_with_accelerator(self):
+        """Compilation is skipped for distributed runs."""
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
         agent.torch_compiler = "default"
-        agent._uses_deepspeed = True
         with patch("agilerl.algorithms.core.base.compile_model") as mock_compile:
             agent.recompile()
             mock_compile.assert_not_called()
 
-    def test_recompile_calls_compile_when_not_deepspeed_and_compiler_set(self):
+    def test_recompile_calls_compile_when_plain_and_compiler_set(self):
         agent = _make_llm_agent()
         agent.torch_compiler = "default"
-        agent._uses_deepspeed = False
         network = MagicMock()
         compiled = MagicMock()
         with (
@@ -1649,37 +1620,32 @@ class TestLLMAlgorithmRecompile:
         assert agent.actor is compiled
 
 
-class TestLLMSelectOptimClass:
-    def test_returns_adamw_without_accelerator(self):
-        agent = _make_llm_agent(accelerator=None)
-        from torch.optim import AdamW
+class TestLLMValidateDistributedBackend:
+    def test_rejects_deepspeed_plugin(self):
+        acc = _make_mock_accelerator()
+        acc.state.deepspeed_plugin = MagicMock()
+        with pytest.raises(ValueError, match="DeepSpeed support has been removed"):
+            _make_llm_agent(accelerator=acc)
 
-        assert agent._select_optim_class() is AdamW
+    def test_rejects_fsdp1_plugin(self):
+        acc = _make_mock_accelerator()
+        acc.state.fsdp_plugin = MagicMock(fsdp_version=1)
+        with pytest.raises(ValueError, match="only supports FSDP2"):
+            _make_llm_agent(accelerator=acc)
 
-    def test_returns_dummy_optimizer_with_ds_optimizer(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "optimizer": {"type": "Adam", "params": {"lr": 1e-4}},
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
+    def test_accepts_fsdp2_plugin(self):
+        acc = _make_mock_accelerator()
+        acc.state.fsdp_plugin = MagicMock(fsdp_version=2)
         agent = _make_llm_agent(accelerator=acc)
-        from agilerl.utils.algo_utils import DummyOptimizer
+        assert agent.accelerator is acc
 
-        assert agent._select_optim_class() is DummyOptimizer
-
-    def test_returns_adamw_without_ds_optimizer(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
-        agent = _make_llm_agent(accelerator=acc)
-        from torch.optim import AdamW
-
-        assert agent._select_optim_class() is AdamW
+    def test_assert_not_sharded_raises_when_sharded(self):
+        agent = _make_llm_agent()
+        with (
+            patch("agilerl.algorithms.core.base.is_fsdp_sharded", return_value=True),
+            pytest.raises(NotImplementedError, match="FSDP2-sharded"),
+        ):
+            agent._assert_not_sharded("Test operation")
 
 
 class TestLLMUpdateLr:
@@ -1705,55 +1671,31 @@ class TestLLMUpdateLr:
         assert acc is None
         assert scheduler is None
 
-    def test_update_lr_without_deepspeed_plugin(self):
+    def test_update_lr_with_accelerator_no_scheduler(self):
         opt = torch.optim.Adam([torch.tensor([1.0], requires_grad=True)], lr=1e-3)
-        acc = MagicMock()
-        acc.state.deepspeed_plugin = None
+        acc = _make_mock_accelerator()
         returned_acc, scheduler = LLMAlgorithm.update_lr(opt, 5e-4, accelerator=acc)
         assert returned_acc is acc
         assert scheduler is None
         assert opt.param_groups[0]["lr"] == 5e-4
 
-    def test_update_lr_without_deepspeed_config(self):
+    def test_update_lr_with_accelerator_builds_scheduler(self):
+        """A fresh scheduler is returned with an accelerator too — the old
+        DeepSpeed-config syncing branches are gone."""
         opt = torch.optim.Adam([torch.tensor([1.0], requires_grad=True)], lr=1e-3)
-        acc = MagicMock()
-        plugin = MagicMock(spec=[])
-        acc.state.deepspeed_plugin = plugin
-        returned_acc, scheduler = LLMAlgorithm.update_lr(opt, 5e-4, accelerator=acc)
+        acc = _make_mock_accelerator()
+        sched_config = MagicMock()
+        with patch(
+            "agilerl.algorithms.core.base.create_warmup_cosine_scheduler"
+        ) as mock_sched:
+            mock_sched.return_value = MagicMock()
+            returned_acc, scheduler = LLMAlgorithm.update_lr(
+                opt, 5e-4, accelerator=acc, scheduler_config=sched_config
+            )
         assert returned_acc is acc
-        assert scheduler is None
-
-    def test_update_lr_updates_scheduler_config(self):
-        opt = torch.optim.Adam([torch.tensor([1.0], requires_grad=True)], lr=1e-3)
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "scheduler": {"params": {"warmup_max_lr": 1e-3}},
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
-        result_acc, _ = LLMAlgorithm.update_lr(opt, 5e-4, accelerator=acc)
-        assert (
-            acc.state.deepspeed_plugin.deepspeed_config["scheduler"]["params"][
-                "warmup_max_lr"
-            ]
-            == 5e-4
-        )
-
-    def test_update_lr_updates_optimizer_config(self):
-        opt = torch.optim.Adam([torch.tensor([1.0], requires_grad=True)], lr=1e-3)
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "optimizer": {"params": {"lr": 1e-3}},
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
-        LLMAlgorithm.update_lr(opt, 5e-4, accelerator=acc)
-        assert (
-            acc.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"]["lr"]
-            == 5e-4
-        )
+        assert scheduler is not None
+        mock_sched.assert_called_once()
+        assert opt.param_groups[0]["lr"] == 5e-4
 
     def test_update_lr_accepts_actor_critic_lr_tuple(self):
         actor_param = torch.tensor([1.0], requires_grad=True)
@@ -1773,27 +1715,6 @@ class TestLLMUpdateLr:
 
         assert opt.param_groups[0]["lr"] == 3e-4
         assert opt.param_groups[1]["lr"] == 4e-4
-
-
-class TestLLMSaveDistributedActor:
-    def test_save_with_accelerator(self, tmp_path):
-        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
-        agent._save_distributed_actor(str(tmp_path / "save_dir"))
-        agent.actor.save_checkpoint.assert_called_once()
-
-    def test_save_without_accelerator_warns(self):
-        agent = _make_llm_agent(accelerator=None)
-        agent.accelerator = None
-        with pytest.warns(UserWarning, match="Distributed actor save not supported"):
-            agent._save_distributed_actor("/some/path")
-
-
-class TestLLMLoadDistributedActor:
-    def test_load_without_accelerator_warns(self):
-        agent = _make_llm_agent(accelerator=None)
-        agent.accelerator = None
-        with pytest.warns(UserWarning, match="Distributed actor load not supported"):
-            agent._load_distributed_actor("/some/path")
 
 
 class TestLLMWrapModels:
@@ -1833,12 +1754,7 @@ class TestLLMCleanUp:
     def test_clean_up_with_accelerator(self):
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
-        original_actor = agent.actor
-        original_actor.empty_partition_cache = MagicMock()
-        original_actor.destroy = MagicMock()
         LLMAlgorithm.clean_up(agent)
-        original_actor.empty_partition_cache.assert_called_once()
-        original_actor.destroy.assert_called_once()
         acc.free_memory.assert_called_once()
         acc.wait_for_everyone.assert_called_once()
 
@@ -2356,61 +2272,30 @@ class TestLLMConfigureBatchSize:
         assert agent.batch_size_per_process == 4
 
     def test_raises_when_batch_not_divisible_by_processes(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "train_micro_batch_size_per_gpu": "auto",
-            },
-            num_processes=3,
-        )
+        acc = _make_mock_accelerator(num_processes=3)
         with pytest.raises(ValueError, match="divisible by the number of processes"):
             _make_llm_agent(accelerator=acc, clone=False)
 
     def test_micro_batch_auto_derived(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "gradient_accumulation_steps": 2,
-                "train_micro_batch_size_per_gpu": "auto",
-            },
-            num_processes=2,
-        )
+        acc = _make_mock_accelerator(gradient_accumulation_steps=2, num_processes=2)
         agent = _make_llm_agent(accelerator=acc, clone=False)
         assert agent.micro_batch_size_per_gpu == 1
 
     def test_micro_batch_explicit(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "train_micro_batch_size_per_gpu": "auto",
-            },
-            num_processes=1,
-        )
+        acc = _make_mock_accelerator(num_processes=1)
         agent = _make_llm_agent(
             accelerator=acc, clone=False, micro_batch_size_per_gpu=2
         )
         assert agent.micro_batch_size_per_gpu == 2
+        assert agent.gradient_accumulation_steps == 2
 
     def test_micro_batch_explicit_not_divisible_raises(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "train_micro_batch_size_per_gpu": "auto",
-            },
-            num_processes=1,
-        )
+        acc = _make_mock_accelerator(num_processes=1)
         with pytest.raises(ValueError, match="micro_batch_size_per_gpu"):
             _make_llm_agent(accelerator=acc, clone=False, micro_batch_size_per_gpu=3)
 
     def test_auto_micro_batch_zero_raises(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "gradient_accumulation_steps": 1,
-                "train_micro_batch_size_per_gpu": "auto",
-            },
-            num_processes=1,
-        )
+        acc = _make_mock_accelerator(num_processes=1)
         with pytest.raises(
             ValueError,
             match="micro_batch_size_per_gpu is equal to zero, which is not allowed.",
@@ -2440,51 +2325,33 @@ class TestLLMConfigureBatchSize:
                 )
 
     def test_batch_not_divisible_by_grad_accum_raises(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "gradient_accumulation_steps": 3,
-                "train_micro_batch_size_per_gpu": "auto",
-            },
-            num_processes=1,
-        )
+        acc = _make_mock_accelerator(gradient_accumulation_steps=3, num_processes=1)
         with pytest.raises(ValueError, match="gradient accumulation"):
             _make_llm_agent(accelerator=acc, clone=False)
 
 
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
 class TestLLMInitWarnings:
-    def test_cosine_lr_with_accelerator_warns_and_nullifies(self):
+    def test_cosine_lr_with_accelerator_is_kept(self):
+        """LR schedules now work with an accelerator (no DeepSpeed-config
+        optimizer to conflict with)."""
         acc = _make_mock_accelerator()
         sched = MagicMock()
         agent = _make_llm_agent(
             accelerator=acc,
             cosine_lr_schedule_config=sched,
         )
-        assert agent.cosine_lr_schedule_config is None
+        assert agent.cosine_lr_schedule_config is sched
 
     def test_reduce_memory_peak_deprecated_warns(self):
         with pytest.warns(DeprecationWarning, match="reduce_memory_peak is deprecated"):
             _make_llm_agent(reduce_memory_peak=True)
 
-    def test_lr_overwrite_warning_from_deepspeed(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "optimizer": {"params": {"lr": 0.999}},
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
-        with pytest.warns(
-            UserWarning,
-            match="Overwriting deepspeed learning rate with the argument 'lr'.",
-        ):
-            agent = _make_llm_agent(accelerator=acc)
+    def test_lr_string_coerced_to_float(self):
+        """YAML loaders may supply lr as a string; the constructor coerces it."""
+        agent = _make_llm_agent()
+        assert isinstance(agent.lr, float)
         assert agent.lr == 0.0001
-        assert (
-            acc.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"]["lr"]
-            == 0.0001
-        )
 
     def test_no_lora_config_applies_default(self):
         class _NonPeftActor:
@@ -2541,62 +2408,10 @@ class TestLLMInitWarnings:
             )
         assert agent.lora_config is not None
 
-    def test_max_grad_norm_overwrite_warning(self):
+    def test_max_grad_norm_kept_as_attribute(self):
         acc = _make_mock_accelerator()
-        with pytest.warns(UserWarning, match="max_grad_norm"):
-            _make_llm_agent(accelerator=acc, max_grad_norm=1.5)
-
-    def test_zero_stage_3_warning(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 3},
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
-        with pytest.warns(UserWarning, match="ZeRO Stage 3"):
-            _make_llm_agent(accelerator=acc)
-
-    def test_mutation_hook_registered_with_accelerator(self):
-        acc = _make_mock_accelerator()
-        agent = _make_llm_agent(accelerator=acc, max_grad_norm=1.0)
-        agent.registry.hooks = ["_sync_deepspeed_gradient_clipping"]
-        agent._sync_deepspeed_gradient_clipping = MagicMock()
-        agent.mutation_hook()
-        agent._sync_deepspeed_gradient_clipping.assert_called_once()
-
-
-class TestLLMSyncDeepSpeedGradientClipping:
-    def test_sync_updates_ds_config_and_optimizer(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "gradient_clipping": 0.5,
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
         agent = _make_llm_agent(accelerator=acc, max_grad_norm=1.5)
-        agent.actor.optimizer = MagicMock()
-        agent.actor.optimizer.grad_clip = 0.5
-        agent.actor.optimizer.clip_grad = 0.5
-        agent._sync_deepspeed_gradient_clipping()
-        assert acc.state.deepspeed_plugin.deepspeed_config["gradient_clipping"] == 1.5
-        assert agent.actor.optimizer.grad_clip == 1.5
-        assert agent.actor.optimizer.clip_grad == 1.5
-
-    def test_sync_noop_without_accelerator(self):
-        agent = _make_llm_agent(accelerator=None)
-        agent.accelerator = None
-        agent._sync_deepspeed_gradient_clipping()
-
-    def test_sync_noop_without_gradient_clipping_key(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
-        agent = _make_llm_agent(accelerator=acc)
-        agent._sync_deepspeed_gradient_clipping()
+        assert agent.max_grad_norm == 1.5
 
 
 class TestLLMGetLmHead:
@@ -3224,607 +3039,85 @@ class TestLLMSimpleCheckpointLoad:
 
 
 # --------------------------------------------------------------------------- #
-# SAVE — deepspeed path                                                        #
+# SAVE/LOAD — accelerated path (real Accelerator; identical on-disk format)    #
 # --------------------------------------------------------------------------- #
 
 
-def _fit_deepspeed_mock(agent, zero_stage: int = 2) -> None:
-    """Mutate ``agent`` so it looks like a DeepSpeed-wrapped agent for
-    dispatch tests. Mock accelerator, overridden zero_stage, and a reasonable
-    unwrap_model that just returns the wrapped model."""
-    agent.accelerator = _make_mock_accelerator()
-    agent.accelerator.unwrap_model = MagicMock(side_effect=lambda m: m)
-    agent._uses_deepspeed = True
-    agent.zero_stage = zero_stage
-
-
-def _inner_actor(agent):
-    """Strip the DummyEvolvable wrapper; returns the inner peft model.
-
-    save_pretrained / load_state_dict are called on this inner object,
-    not on agent.actor itself, so spies for those must be attached here.
-    """
-    from agilerl.modules.dummy import DummyEvolvable
-
-    actor = agent.actor
-    while isinstance(actor, DummyEvolvable):
-        actor = actor.module
-    return actor
-
-
-@pytest.fixture(scope="session", params=SAVE_LOAD_OPTIONS)
-def llm_mocked_deepspeed_checkpoint_save(request, grpo_factory, tmp_path_factory):
-    """Spy-wrapped DeepSpeed save per cell. Session-scoped — 4 deepcopies of
-    the template, each saved once."""
-    lora_only, save_optimizer = request.param
-    agent = grpo_factory
-    _fit_deepspeed_mock(agent)
-
-    # save_checkpoint is called as ``self.actor.save_checkpoint(...)`` on the
-    # DummyEvolvable wrapper. save_pretrained is called on the unwrapped
-    # inner peft model, so that spy must live there.
-    save_ckpt_spy = MagicMock()
-    agent.actor.save_checkpoint = save_ckpt_spy
-    inner = _inner_actor(agent)
-    save_pretrained_spy = MagicMock(wraps=inner.save_pretrained)
-    inner.save_pretrained = save_pretrained_spy
-
-    tmp_path = tmp_path_factory.mktemp(
-        f"ds_save_lora={lora_only}_optim={save_optimizer}"
-    )
-    agent.save_checkpoint(
-        str(tmp_path),
-        lora_only=lora_only,
-        save_optimizer=save_optimizer,
-    )
-    return SimpleNamespace(
-        agent=agent,
-        path=tmp_path,
-        lora_only=lora_only,
-        save_optimizer=save_optimizer,
-        save_checkpoint_spy=save_ckpt_spy,
-        save_pretrained_spy=save_pretrained_spy,
-    )
-
-
-class TestLLMDeepspeedCheckpointSave:
-    """Dispatch-only spy tests: replace ``actor.save_checkpoint`` with a
-    MagicMock and assert the right branch was called with the right kwargs.
-
-    LIMITATION: these do NOT verify DeepSpeed actually wrote correct bytes
-    to disk — the real engine is mocked out. For end-to-end confidence see
-    ``TestDeepspeedSaveE2E`` below (CUDA-only, @pytest.mark.gpu).
-    These spy tests run on any machine and catch dispatch regressions.
-    """
-
-    def test_llm_deepspeed_checkpoint_save_called_if_save_optimizer(
-        self, llm_mocked_deepspeed_checkpoint_save
-    ):
-        spy = llm_mocked_deepspeed_checkpoint_save.save_checkpoint_spy
-        if llm_mocked_deepspeed_checkpoint_save.save_optimizer:
-            assert spy.call_count == 1
-            kwargs = spy.call_args.kwargs
-            assert (
-                kwargs.get("exclude_frozen_parameters")
-                == llm_mocked_deepspeed_checkpoint_save.lora_only
-            )
-        else:
-            assert spy.call_count == 0
-
-    def test_llm_deepspeed_checkpoint_save_save_pretrained_called_if_lora_only(
-        self, llm_mocked_deepspeed_checkpoint_save
-    ):
-        spy = llm_mocked_deepspeed_checkpoint_save.save_pretrained_spy
-        assert (spy.call_count >= 1) == llm_mocked_deepspeed_checkpoint_save.lora_only
-
-    def test_llm_deepspeed_checkpoint_save_attributes_pt_has_actor_state_dict_only_when_full_no_optim(
-        self,
-        llm_mocked_deepspeed_checkpoint_save,
-    ):
-        ck = load_attributes_checkpoint(llm_mocked_deepspeed_checkpoint_save.path)
-        ni = ck.get("network_info", {}) or {}
-        modules = ni.get("modules", {}) if isinstance(ni, dict) else {}
-        has_actor_sd = "actor_state_dict" in modules
-        expected = (not llm_mocked_deepspeed_checkpoint_save.lora_only) and (
-            not llm_mocked_deepspeed_checkpoint_save.save_optimizer
-        )
-        assert has_actor_sd == expected
-
-
-# --------------------------------------------------------------------------- #
-# LOAD — deepspeed path                                                        #
-# --------------------------------------------------------------------------- #
-
-
-@pytest.fixture(params=SAVE_LOAD_OPTIONS)
-def llm_mocked_deepspeed_checkpoint_load(request, grpo_factory, tmp_path):
-    """Fresh agent + pre-saved deepspeed-shape checkpoint per load test.
-
-    Function-scoped because each test patches in method-level spies and we
-    want a clean baseline per test.
-    """
-    from pathlib import Path
-
-    lora_only, save_optimizer = request.param
-
-    # Saver: writes a cell-specific checkpoint to tmp_path. The real
-    # DeepSpeed save is stubbed (can't run without a distributed backend)
-    # but we still need the expected tag directory on disk so that the load
-    # side's ``Path.glob('save_checkpoint')`` assertion passes.
-    saver = grpo_factory
-    _fit_deepspeed_mock(saver)
-
-    def _fake_ds_save(path_str, *args, tag="save_checkpoint", **kwargs):
-        (Path(path_str) / tag).mkdir(parents=True, exist_ok=True)
-
-    saver.actor.save_checkpoint = MagicMock(side_effect=_fake_ds_save)
-    saver.save_checkpoint(
-        str(tmp_path),
-        lora_only=lora_only,
-        save_optimizer=save_optimizer,
-    )
-
-    # Loader: spy its engine load so we can assert dispatch.
-    loader = grpo_factory
-    _fit_deepspeed_mock(loader)
-    load_ckpt_spy = MagicMock(return_value=(str(tmp_path / "save_checkpoint"), None))
-    loader.actor.load_checkpoint = load_ckpt_spy
-
-    return SimpleNamespace(
-        agent=loader,
-        path=tmp_path,
-        lora_only=lora_only,
-        save_optimizer=save_optimizer,
-        load_checkpoint_spy=load_ckpt_spy,
-    )
-
-
-class TestDeepspeedLoad:
-    """Dispatch-only spy tests. Same limitations as TestDeepspeedSave — these
-    assert the correct load branch was taken but do not verify DeepSpeed
-    actually restored state. See ``TestDeepspeedLoadE2E`` for real roundtrip.
-    """
-
-    def test_llm_deepspeed_checkpoint_load_called_if_save_optimizer(
-        self, llm_mocked_deepspeed_checkpoint_load
-    ):
-        s = llm_mocked_deepspeed_checkpoint_load
-        from unittest.mock import patch
-
-        inner = _inner_actor(s.agent)
-        # Stub the non-deepspeed branches so they don't actually try to read
-        # adapter files / overwrite state — we only care about dispatch here.
-        with (
-            patch.object(s.agent, "_load_model_checkpoint"),
-            patch.object(inner, "load_state_dict"),
-        ):
-            s.agent.load_checkpoint(str(s.path), load_optimizer=s.save_optimizer)
-        assert (s.load_checkpoint_spy.call_count == 1) == s.save_optimizer
-
-    def test_llm_deepspeed_checkpoint_load_peft_adapter_load_when_lora_only_and_no_optim(
-        self,
-        llm_mocked_deepspeed_checkpoint_load,
-    ):
-        s = llm_mocked_deepspeed_checkpoint_load
-        from unittest.mock import patch
-
-        inner = _inner_actor(s.agent)
-        with (
-            patch.object(s.agent, "_load_model_checkpoint") as peft_spy,
-            patch.object(inner, "load_state_dict"),
-        ):
-            s.agent.load_checkpoint(str(s.path), load_optimizer=s.save_optimizer)
-        # peft load is entered for both LoRA-only cells:
-        #   * (lora_only=T, save_optim=F): PEFT-only restore path
-        #   * (lora_only=T, save_optim=T): DS resume + PEFT adapter refresh
-        expected = s.lora_only
-        assert (peft_spy.call_count == 1) == expected
-
-    def test_llm_deepspeed_checkpoint_load_state_dict_load_when_full_and_no_optim(
-        self, llm_mocked_deepspeed_checkpoint_load
-    ):
-        s = llm_mocked_deepspeed_checkpoint_load
-        from unittest.mock import patch
-
-        inner = _inner_actor(s.agent)
-        with (
-            patch.object(s.agent, "_load_model_checkpoint"),
-            patch.object(inner, "load_state_dict") as sd_spy,
-        ):
-            s.agent.load_checkpoint(str(s.path), load_optimizer=s.save_optimizer)
-        # load_state_dict on the unwrapped actor is called only for
-        # (lora_only=F, save_optim=F).
-        expected = (not s.lora_only) and (not s.save_optimizer)
-        assert (sd_spy.call_count == 1) == expected
-
-    def test_llm_deepspeed_full_load_without_optimizer_falls_back_to_ds_model_only_restore(
-        self, grpo_factory, tmp_path
-    ):
-        from pathlib import Path
-        from unittest.mock import patch
-
-        # Arrange: save a DeepSpeed full-model checkpoint with optimizer state.
-        # This shape stores model shards in save_checkpoint/ and does not inject
-        # actor_state_dict into attributes.pt.
-        saver = grpo_factory
-        _fit_deepspeed_mock(saver)
-
-        def _fake_ds_save(path_str, *args, tag="save_checkpoint", **kwargs):
-            (Path(path_str) / tag).mkdir(parents=True, exist_ok=True)
-
-        saver.actor.save_checkpoint = MagicMock(side_effect=_fake_ds_save)
-        saver.save_checkpoint(
-            str(tmp_path),
-            lora_only=False,
-            save_optimizer=True,
-        )
-
-        # Act/Assert: loading with load_optimizer=False falls back to DS
-        # model-only restore (no optimizer/lr scheduler state).
-        loader = grpo_factory
-        _fit_deepspeed_mock(loader)
-        load_ckpt_spy = MagicMock(
-            return_value=(str(tmp_path / "save_checkpoint"), None)
-        )
-        loader.actor.load_checkpoint = load_ckpt_spy
-        with (
-            patch.object(loader, "_load_model_checkpoint"),
-        ):
-            loader.load_checkpoint(str(tmp_path), load_optimizer=False)
-        assert load_ckpt_spy.call_count == 1
-        kwargs = load_ckpt_spy.call_args.kwargs
-        assert kwargs["tag"] == "save_checkpoint"
-        assert kwargs["load_optimizer_states"] is False
-        assert kwargs["load_lr_scheduler_states"] is False
-
-
-# --------------------------------------------------------------------------- #
-# ZeRO-3 gather behaviour                                                      #
-# --------------------------------------------------------------------------- #
-
-
-class TestLLMGatherIfZero3OnSave:
-    """Sanity-check that gather_if_zero3 is entered when zero_stage=3.
-
-    Two save cells gather: the save_pretrained branch (lora_only=True) and
-    the full torch-save branch (lora_only=False, save_optim=False). One test
-    per branch — no full-grid parametrisation needed.
-    """
-
-    def test_llm_gather_entered_on_peft_save_when_zero3(self, grpo_factory, tmp_path):
-        from contextlib import contextmanager
-        from unittest.mock import patch
-
-        agent = grpo_factory
-        _fit_deepspeed_mock(agent, zero_stage=3)
-        agent.actor.save_checkpoint = MagicMock()
-
-        calls = []
-
-        @contextmanager
-        def gather_spy(zero_stage, params, modifier_rank=None):
-            calls.append(zero_stage)
-            yield
-
-        with patch(
-            "agilerl.algorithms.core.base.gather_if_zero3",
-            side_effect=gather_spy,
-        ):
-            agent.save_checkpoint(
-                str(tmp_path),
-                lora_only=True,
-                save_optimizer=False,
-            )
-        assert 3 in calls, "gather_if_zero3 was not entered for lora_only save"
-
-    def test_llm_gather_entered_on_full_save_when_zero3(self, grpo_factory, tmp_path):
-        from contextlib import contextmanager
-        from unittest.mock import patch
-
-        agent = grpo_factory
-        _fit_deepspeed_mock(agent, zero_stage=3)
-        agent.actor.save_checkpoint = MagicMock()
-
-        calls = []
-
-        @contextmanager
-        def gather_spy(zero_stage, params, modifier_rank=None):
-            calls.append(zero_stage)
-            yield
-
-        with patch(
-            "agilerl.algorithms.core.base.gather_if_zero3",
-            side_effect=gather_spy,
-        ):
-            agent.save_checkpoint(
-                str(tmp_path),
-                lora_only=False,
-                save_optimizer=False,
-            )
-        assert 3 in calls, "gather_if_zero3 was not entered for full save"
-
-
-# --------------------------------------------------------------------------- #
-# E2E DeepSpeed tests — real save/load, CUDA-only, @pytest.mark.gpu           #
-# --------------------------------------------------------------------------- #
-# These run a real Accelerator with a DeepSpeedPlugin and exercise the full
-# save/load pipeline end-to-end.
-
-
-def _require_cuda_deepspeed() -> None:
-    """Skip if the environment can't run real DeepSpeed."""
-    if not HAS_LLM_DEPENDENCIES:
-        pytest.skip("E2E deepspeed tests require the 'llm' extras.")
+def _require_cuda() -> None:
     if not torch.cuda.is_available():
-        pytest.skip("E2E deepspeed tests require CUDA")
+        pytest.skip("Accelerated checkpoint tests require CUDA.")
 
 
-def build_deepspeed_grpo(accelerator):
-    """Build a real DeepSpeed-wrapped GRPO for end-to-end tests.
+def build_accelerated_grpo():
+    """Tiny GRPO wrapped by a real ``Accelerator()`` (single process)."""
+    from accelerate.state import AcceleratorState
 
-    Same synthetic ``create_module`` used in the mocked tests, but with
-    ``wrap=True`` so ``accelerator.prepare(...)`` wraps the model into a
-    DeepSpeedEngine. Device is resolved to CUDA by ``GRPO.__init__`` when an
-    accelerator is attached.
-    """
-    actor = create_module(
-        input_size=6,
-        max_tokens=4,
-        vocab_size=64,
-        device="cuda",
-    )
-    return GRPO(
-        actor_network=actor,
-        pad_token_id=63,
-        pad_token="<pad>",
-        batch_size=4,
-        group_size=2,
-        max_output_tokens=4,
-        max_model_len=12,
-        lora_config=SMALL_LORA,
-        accelerator=accelerator,
-        wrap=True,
-        gradient_checkpointing=False,
-        device="cuda",
-        use_separate_reference_adapter=True,
-    )
+    AcceleratorState._reset_state(True)
+    return generate_tiny_grpo(accelerator=Accelerator())
 
 
 @pytest.fixture(params=SAVE_LOAD_OPTIONS)
-def llm_deepspeed_checkpoint_save(
-    request,
-    deepspeed_env,
-    accelerator_factory,
-    tmp_path,
-):
-    """Real DeepSpeed save per cell — ONE real accelerator+agent per test.
-
-    Function-scoped (Accelerator is not reusable across tests because
-    the cleanup_after_test autouse fixture resets accelerator state).
-    """
-    _require_cuda_deepspeed()
+def llm_accelerated_checkpoint(request, distributed_env, tmp_path):
+    """Save per cell with a real accelerator; same unified format as plain."""
+    _require_cuda()
     lora_only, save_optimizer = request.param
-    accelerator = accelerator_factory(
-        use_deepspeed_optimizer=False,
-        config=deepspeed_config_stage_2,
-    )
-    agent = build_deepspeed_grpo(accelerator)
+    agent = build_accelerated_grpo()
     agent.save_checkpoint(
         str(tmp_path),
         lora_only=lora_only,
         save_optimizer=save_optimizer,
     )
-    return SimpleNamespace(
+    yield SimpleNamespace(
         agent=agent,
         path=tmp_path,
         lora_only=lora_only,
         save_optimizer=save_optimizer,
     )
+    agent.clean_up()
 
 
-class TestLLMDeepspeedCheckpointSave:
-    """Real DeepSpeed save → assertions against bytes on disk (no spies).
+@pytest.mark.gpu
+class TestLLMAcceleratedCheckpointSaveLoad:
+    """The accelerated path writes the SAME artifacts as the plain path:
+    adapter dirs when lora_only, actor/optimizer state inside attributes.pt,
+    and never an engine tag directory."""
 
-    All artefact assertions in a single parametrised test to keep the number
-    of real DeepSpeed builds small (1 per cell = 4 total).
-
-                                deepspeed tag dir   adapter dirs   actor_state_dict
-                                (<path>/save_checkpoint/*)         in attributes.pt
-        lora_only=T, optim=T    present             present        absent
-        lora_only=T, optim=F    absent              present        absent
-        lora_only=F, optim=T    present             absent         absent
-        lora_only=F, optim=F    absent              absent         present
-    """
-
-    pytestmark = pytest.mark.gpu
-
-    def test_llm_deepspeed_checkpoint_save_artifacts_match_cell(
-        self, llm_deepspeed_checkpoint_save
+    def test_accelerated_save_attributes_pt_always_written(
+        self, llm_accelerated_checkpoint
     ):
-        s = llm_deepspeed_checkpoint_save
+        assert (llm_accelerated_checkpoint.path / "attributes.pt").exists()
 
-        # attributes.pt always present.
-        assert (s.path / "attributes.pt").exists()
-
-        # DeepSpeed engine's own tag directory if save_optimizer=True.
-        assert (s.path / "save_checkpoint").is_dir() == s.save_optimizer
-
-        # PEFT adapter dirs if lora_only=True (both actor + reference because
-        # use_separate_reference_adapter=True in the fixture).
-        actor_adapter = s.path / "actor" / "adapter_model.safetensors"
-        ref_adapter = s.path / "reference" / "adapter_model.safetensors"
-        assert actor_adapter.exists() == s.lora_only
-        assert ref_adapter.exists() == s.lora_only
-
-        # attributes.pt payload:
-        #   - ``_lora_only`` flag always matches the save call.
-        #   - ``actor_state_dict`` only lands in attrs.pt for the (F, F)
-        #     deepspeed cell (gather+torch-save branch).
-        ck = load_attributes_checkpoint(s.path)
-        assert ck.get("_lora_only") == s.lora_only
-        modules = ck.get("network_info", {}).get("modules", {})
-        has_actor_sd = "actor_state_dict" in modules
-        expected = (not s.lora_only) and (not s.save_optimizer)
-        assert has_actor_sd == expected, (
-            f"actor_state_dict presence in attributes.pt wrong for cell "
-            f"(lora_only={s.lora_only}, save_optimizer={s.save_optimizer})"
-        )
-
-
-@pytest.fixture(params=SAVE_LOAD_OPTIONS)
-def llm_deepspeed_checkpoint_load(
-    request,
-    deepspeed_env,
-    accelerator_factory,
-    tmp_path,
-):
-    """Fresh real-DeepSpeed agent per load test + the factory so the test can
-    build a second accelerator for the load-side agent.
-
-    Function-scoped — each test stamps sentinels then saves+loads, so agents
-    cannot be shared.
-    """
-    _require_cuda_deepspeed()
-    lora_only, save_optimizer = request.param
-    accelerator = accelerator_factory(
-        use_deepspeed_optimizer=False,
-        config=deepspeed_config_stage_2,
-    )
-    agent = build_deepspeed_grpo(accelerator)
-    return SimpleNamespace(
-        agent=agent,
-        path=tmp_path,
-        lora_only=lora_only,
-        save_optimizer=save_optimizer,
-        accelerator_factory=accelerator_factory,
-    )
-
-
-class TestLLMDeepspeedCheckpointSaveLoad:
-    """Real DeepSpeed roundtrip: stamp sentinels → save → fresh agent → load
-    → assert sentinels restored. One parametrised test per concern
-    (weights / optimizer) to keep the real DeepSpeed builds bounded.
-
-    NB: building the second accelerator via the factory triggers
-    ``AcceleratorState._reset_state`` which invalidates the first engine.
-    That's fine because the first agent is only needed for the save step.
-    """
-
-    pytestmark = pytest.mark.gpu
-
-    def test_llm_deepspeed_checkpoint_save_load_adapter_and_base_weight_roundtrip_e2e(
-        self, llm_deepspeed_checkpoint_load
+    def test_accelerated_save_writes_no_engine_tag_dir(
+        self, llm_accelerated_checkpoint
     ):
-        s = llm_deepspeed_checkpoint_load
-        lora_sentinel, base_sentinel, clobber = 0.1234, 0.4321, 9.9999
+        assert not (llm_accelerated_checkpoint.path / "save_checkpoint").exists()
 
-        # Stamp the actor's LoRA-A weight on the pre-save agent.
-        _, lora_param = get_param_by_name(s.agent, "lora_A.actor.weight")
-        with torch.no_grad():
-            lora_param.fill_(lora_sentinel)
-
-        # Full-save cells also round-trip base model weights, so stamp one.
-        if not s.lora_only:
-            _, base_param = get_param_by_name(s.agent, "linear_1.base_layer.weight")
-            with torch.no_grad():
-                base_param.fill_(base_sentinel)
-
-        s.agent.save_checkpoint(
-            str(s.path),
-            lora_only=s.lora_only,
-            save_optimizer=s.save_optimizer,
-        )
-
-        # Build the loading side on a fresh accelerator + agent.
-        new_accel = s.accelerator_factory(
-            use_deepspeed_optimizer=False,
-            config=deepspeed_config_stage_2,
-        )
-        new_agent = build_deepspeed_grpo(new_accel)
-
-        # Clobber a weight on new_agent so a silent no-op load would fail
-        # the sentinel comparison.
-        _, new_lora = get_param_by_name(new_agent, "lora_A.actor.weight")
-        with torch.no_grad():
-            new_lora.fill_(clobber)
-
-        new_agent.load_checkpoint(
-            str(s.path),
-            load_optimizer=s.save_optimizer,
-        )
-
-        # Re-fetch after load; load may rebuild adapter modules.
-        _, lora_post = get_param_by_name(new_agent, "lora_A.actor.weight")
-        assert torch.allclose(lora_post, torch.full_like(lora_post, lora_sentinel)), (
-            f"LoRA weight not restored for cell "
-            f"(lora_only={s.lora_only}, save_optimizer={s.save_optimizer})"
-        )
-        if not s.lora_only:
-            _, base_post = get_param_by_name(new_agent, "linear_1.base_layer.weight")
-            assert torch.allclose(
-                base_post, torch.full_like(base_post, base_sentinel)
-            ), (
-                f"base weight not restored for cell "
-                f"(lora_only={s.lora_only}, save_optimizer={s.save_optimizer})"
-            )
-
-    def test_llm_deepspeed_checkpoint_save_load_optimizer_state_roundtrip_e2e(
-        self, llm_deepspeed_checkpoint_load
+    def test_accelerated_save_adapter_dirs_present_if_lora_only(
+        self, llm_accelerated_checkpoint
     ):
-        """After a real backward+step, optimizer state should round-trip
-        through a save+load cycle when ``save_optimizer=True``.
-
-        We don't use a sentinel here — DeepSpeed's optimizer state is
-        partitioned/internal and the public state_dict shape isn't trivial to
-        tensor-stamp. A "state is non-empty after load" check is sufficient
-        to catch a silent fresh-optimizer regression.
-        """
-        s = llm_deepspeed_checkpoint_load
-        _, base_linear = get_param_by_name(s.agent, "linear_1.base_layer.weight")
-        in_features = int(base_linear.shape[1])
-        input_ids = torch.randint(0, 64, (1, in_features), device=s.agent.device)
-        attn_mask = torch.ones_like(input_ids)
-        out = s.agent.actor(input_ids=input_ids, attention_mask=attn_mask)
-        s.agent.actor.backward(out.logits.sum())
-        s.agent.optimizer.step()
-        before_inner = getattr(s.agent.optimizer, "optimizer", s.agent.optimizer)
-        before_sd = (
-            before_inner.state_dict() if hasattr(before_inner, "state_dict") else {}
+        actor_adapter = (
+            llm_accelerated_checkpoint.path / "actor" / "adapter_model.safetensors"
         )
+        assert actor_adapter.exists() == llm_accelerated_checkpoint.lora_only
 
-        s.agent.save_checkpoint(
-            str(s.path),
-            lora_only=s.lora_only,
-            save_optimizer=s.save_optimizer,
-        )
+    def test_accelerated_save_attributes_pt_contents_match_cell(
+        self, llm_accelerated_checkpoint
+    ):
+        ck = load_attributes_checkpoint(llm_accelerated_checkpoint.path)
+        ni = ck.get("network_info")
+        assert ck.get("_lora_only") == llm_accelerated_checkpoint.lora_only
+        has_actor_sd = "actor_state_dict" in ni["modules"]
+        assert has_actor_sd == (not llm_accelerated_checkpoint.lora_only)
+        has_optim = bool(ni["optimizers"])
+        assert has_optim == llm_accelerated_checkpoint.save_optimizer
 
-        new_accel = s.accelerator_factory(
-            use_deepspeed_optimizer=False,
-            config=deepspeed_config_stage_2,
-        )
-        new_agent = build_deepspeed_grpo(new_accel)
-        new_agent.load_checkpoint(
-            str(s.path),
-            load_optimizer=s.save_optimizer,
-        )
-
+    def test_accelerated_load_roundtrip(self, llm_accelerated_checkpoint):
+        s = llm_accelerated_checkpoint
         if s.save_optimizer:
-            inner = getattr(new_agent.optimizer, "optimizer", new_agent.optimizer)
-            sd = inner.state_dict() if hasattr(inner, "state_dict") else {}
-            assert normalize_optimizer_state(sd) == normalize_optimizer_state(
-                before_sd
-            ), (
-                f"optimizer state mismatch after DeepSpeed load for cell "
-                f"(lora_only={s.lora_only}, save_optimizer=True); "
-                f"got keys {list(sd.keys())}"
-            )
-
-
-# --------------------------------------------------------------------------- #
-# LoRA config merge — unit tests (static method, no fixtures)                 #
-# --------------------------------------------------------------------------- #
-
-from agilerl.algorithms.core.base import LLMAlgorithm  # noqa: E402
+            s.agent.load_checkpoint(str(s.path), load_optimizer=True)
+        else:
+            with pytest.warns(UserWarning, match="Optimizer state not found"):
+                s.agent.load_checkpoint(str(s.path), load_optimizer=True)
 
 
 def get_lora_config(
@@ -3940,8 +3233,8 @@ class TestMergeLoraConfigsRoundtrip:
     """
 
     def test_merged_lora_config_persists_on_agent_when_merge_enabled(self, tmp_path):
-        """The merged config should survive on ``self.lora_config``, mirroring
-        the deepspeed path's ``_restore_checkpoint_attributes`` behaviour."""
+        """The merged config should survive on ``self.lora_config`` (it is in
+        the ``_restore_checkpoint_attributes`` skip set)."""
         from unittest.mock import patch
 
         saver = _build_grpo_with_lora(
@@ -4012,8 +3305,8 @@ class TestMergeLoraConfigsRoundtrip:
 
 
 class TestLLMClone:
-    """LLMAlgorithm.clone requires full model infrastructure (DeepSpeed, real
-    model weights, etc.), so we test it indirectly via `_configure_batch_size`
+    """LLMAlgorithm.clone requires full model infrastructure (real model
+    weights etc.), so we test it indirectly via `_configure_batch_size`
     with `clone=True` to verify the clone-mode branch."""
 
     def test_clone_mode_skips_batch_config(self):
@@ -4022,26 +3315,18 @@ class TestLLMClone:
 
 
 @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
-class TestLLMConfigureBatchSizeNoDeepSpeedPlugin:
-    """``_configure_batch_size`` when ``accelerator.state.deepspeed_plugin`` is None."""
+class TestLLMConfigureBatchSizePlainAccelerator:
+    """A plain (torch-native) accelerator is valid — no plugin required."""
 
-    @staticmethod
-    def _accelerator_without_deepspeed(num_processes: int = 1):
-        acc = _make_mock_accelerator(num_processes=num_processes)
-        acc.state.deepspeed_plugin = None
-        return acc
-
-    def test_value_error_raises_when_no_deepspeed_plugin(self):
-        acc = self._accelerator_without_deepspeed()
-        with pytest.raises(
-            ValueError,
-            match="DeepSpeed plugin is not initialized. If using an accelerator,",
-        ):
-            _make_llm_agent(
-                accelerator=acc,
-                clone=False,
-                micro_batch_size_per_gpu=3,
-            )
+    def test_plain_accelerator_derives_grad_accumulation(self):
+        acc = _make_mock_accelerator(num_processes=1)
+        agent = _make_llm_agent(
+            accelerator=acc,
+            clone=False,
+            micro_batch_size_per_gpu=2,
+        )
+        assert agent.micro_batch_size_per_gpu == 2
+        assert agent.gradient_accumulation_steps == 2
 
 
 class TestLLMInitMiscPaths:
@@ -4082,10 +3367,9 @@ class TestLLMGenerateWithVllmColocate:
 
 class TestLLMMoveModelToVllm:
     def test_move_model_to_vllm_resolves_model_ref(self):
-        """``model_ref`` from unwrap (accelerator), ``DummyEvolvable.module``, or ``actor``."""
+        """``model_ref`` from unwrap (accelerator) or ``actor`` (plain)."""
         p = torch.nn.Parameter(torch.tensor([1.0]))
         named = [("base_model.model.layer.weight", p)]
-        gather = patch("agilerl.algorithms.core.base.gather_if_zero3")
 
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
@@ -4095,24 +3379,7 @@ class TestLLMMoveModelToVllm:
         unwrapped.prefix = "model"
         acc.unwrap_model = MagicMock(return_value=unwrapped)
         agent.llm = MagicMock()
-        with gather:
-            agent._move_model_to_vllm()
-        agent.llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights.assert_called()
-        agent.llm.reset_prefix_cache.assert_called_once()
-
-        agent = _make_llm_agent(accelerator=None)
-        inner = _make_mock_peft_actor()
-        inner.parameters = MagicMock(return_value=[p])
-        inner.named_parameters = MagicMock(return_value=named)
-        inner.merge_adapter = MagicMock()
-        inner.unmerge_adapter = MagicMock()
-        inner.set_adapter = MagicMock()
-        inner.prefix = "model"
-        agent.actor = DummyEvolvable(device="cpu", module=inner)
-        agent.llm = MagicMock()
-        with gather:
-            agent._move_model_to_vllm()
-        inner.merge_adapter.assert_called_once()
+        agent._move_model_to_vllm()
         agent.llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights.assert_called()
         agent.llm.reset_prefix_cache.assert_called_once()
 
@@ -4123,11 +3390,19 @@ class TestLLMMoveModelToVllm:
         actor.prefix = "model"
         agent.actor = actor
         agent.llm = MagicMock()
-        with gather:
-            agent._move_model_to_vllm()
+        agent._move_model_to_vllm()
         actor.merge_adapter.assert_called_once()
         agent.llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights.assert_called()
         agent.llm.reset_prefix_cache.assert_called_once()
+
+    def test_move_model_to_vllm_rejects_sharded_actor(self):
+        agent = _make_llm_agent(accelerator=None)
+        agent.llm = MagicMock()
+        with (
+            patch("agilerl.algorithms.core.base.is_fsdp_sharded", return_value=True),
+            pytest.raises(NotImplementedError, match="FSDP2-sharded"),
+        ):
+            agent._move_model_to_vllm()
 
 
 class TestMultiAgentPreprocessObservation:
@@ -4295,34 +3570,6 @@ class TestLLMInitMissingDeps:
                 )
 
 
-class TestLLMLoadDistributedActorWithAccelerator:
-    def test_load_distributed_actor_success(self, tmp_path):
-        acc = _make_mock_accelerator()
-        agent = _make_llm_agent(accelerator=acc)
-        tag_dir = tmp_path / "save_checkpoint"
-        tag_dir.mkdir()
-        agent.actor.load_checkpoint = MagicMock(return_value=(str(tag_dir), None))
-        agent._load_distributed_actor(str(tmp_path), tag="save_checkpoint")
-
-    def test_load_distributed_actor_failure(self, tmp_path):
-        acc = _make_mock_accelerator()
-        agent = _make_llm_agent(accelerator=acc)
-        tag_dir = tmp_path / "save_checkpoint"
-        tag_dir.mkdir()
-        agent.actor.load_checkpoint = MagicMock(side_effect=RuntimeError("fail"))
-        with pytest.raises(ValueError, match="Deepspeed failed"):
-            agent._load_distributed_actor(str(tmp_path), tag="save_checkpoint")
-
-    def test_load_distributed_actor_none_path(self, tmp_path):
-        acc = _make_mock_accelerator()
-        agent = _make_llm_agent(accelerator=acc)
-        tag_dir = tmp_path / "save_checkpoint"
-        tag_dir.mkdir()
-        agent.actor.load_checkpoint = MagicMock(return_value=(None, None))
-        with pytest.raises(ValueError, match="Deepspeed failed"):
-            agent._load_distributed_actor(str(tmp_path), tag="save_checkpoint")
-
-
 class TestLLMBackwardPassNonAccelerator:
     def test_backward_pass_calls_clip_grad_norm(self):
         agent = _make_llm_agent(accelerator=None)
@@ -4332,31 +3579,6 @@ class TestLLMBackwardPassNonAccelerator:
         with patch("agilerl.algorithms.core.base.clip_grad_norm_") as mock_clip:
             LLMAlgorithm._backward_pass(agent, loss)
         mock_clip.assert_called_once()
-
-
-class TestLLMSaveDistributedActorWithAccelerator:
-    def test_save_creates_dir(self, tmp_path):
-        acc = _make_mock_accelerator()
-        agent = _make_llm_agent(accelerator=acc)
-        save_dir = str(tmp_path / "ds_save")
-        with (
-            patch.object(
-                agent, "use_adapter", wraps=agent.use_adapter
-            ) as mock_use_adapter,
-            patch.object(
-                agent,
-                "_restore_adapter_trainability",
-                wraps=agent._restore_adapter_trainability,
-            ) as mock_restore_trainability,
-        ):
-            agent._save_distributed_actor(save_dir)
-        assert (tmp_path / "ds_save").exists()
-        agent.actor.save_checkpoint.assert_called_once()
-        mock_use_adapter.assert_called_once_with("actor")
-        restored_calls = [
-            call.args[0] for call in mock_restore_trainability.call_args_list
-        ]
-        assert ["actor"] in restored_calls
 
 
 class TestEvolvableAlgorithmCloneWithAccelerator:
@@ -4629,8 +3851,7 @@ class TestLLMMoveModelToVllmSkipsPrefixAndOriginalModule:
             ("base_model.model.dense.weight", torch.tensor([5.0])),
         ]
         acc.unwrap_model = MagicMock(return_value=model_ref)
-        with patch("agilerl.algorithms.core.base.gather_if_zero3"):
-            agent._move_model_to_vllm()
+        agent._move_model_to_vllm()
         load_weights = agent.llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights
         assert load_weights.call_count == 4
         names = [call.args[0][0][0] for call in load_weights.call_args_list]
@@ -4646,7 +3867,6 @@ class TestLLMCloneWithoutAccelerator:
     def test_clone_without_accelerator(self):
         agent = _make_llm_agent(accelerator=None, clone=True)
         agent.accelerator = None
-        agent.zero_stage = -1
         agent.use_vllm = False
         agent.lr_scheduler = MagicMock()
         agent.lr_scheduler.state_dict.return_value = {"step": 0}
@@ -4661,11 +3881,6 @@ class TestLLMCloneWithoutAccelerator:
         cloned.use_vllm = False
 
         with (
-            patch(
-                "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
-                return_value={},
-                create=True,
-            ),
             patch("agilerl.algorithms.core.base.clone_llm", return_value=MagicMock()),
             patch.object(
                 EvolvableAlgorithm,
@@ -4692,16 +3907,15 @@ class TestLLMCloneWithoutAccelerator:
         ):
             result = LLMAlgorithm.clone(agent, index=5, wrap=True)
         assert result is cloned
-        cloned.optimizer.optimizer.load_state_dict.assert_called_once()
+        cloned._load_gathered_optimizer_state_dict.assert_called_once()
 
 
 class TestLLMCloneWithAccelerator:
     """Cover LLMAlgorithm.clone accelerator branches."""
 
-    def test_clone_with_accelerator_no_deepspeed(self):
+    def test_clone_with_accelerator(self):
         acc = _make_mock_accelerator(num_processes=1)
         agent = _make_llm_agent(accelerator=acc)
-        agent.zero_stage = -1
         agent.use_vllm = False
         agent.lr_scheduler = MagicMock()
         acc.unwrap_model = MagicMock(return_value=agent.actor)
@@ -4715,11 +3929,6 @@ class TestLLMCloneWithAccelerator:
         cloned.mutation_hook = MagicMock()
 
         with (
-            patch(
-                "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
-                return_value={},
-                create=True,
-            ),
             patch("agilerl.algorithms.core.base.clone_llm", return_value=MagicMock()),
             patch("agilerl.algorithms.core.base.Accelerator", return_value=MagicMock()),
             patch.object(
@@ -4750,13 +3959,13 @@ class TestLLMCloneWithAccelerator:
         acc.wait_for_everyone.assert_called()
 
 
-class TestLLMCloneWithDeepSpeed:
-    """Cover clone lines for zero_stage >= 2."""
+class TestLLMCloneOptimizerStateTransfer:
+    """Accelerated clones receive the optimizer state via gathered state
+    dicts (no engine-checkpoint disk roundtrip)."""
 
-    def test_clone_with_zero_stage_2(self):
+    def test_clone_with_accelerator_copies_optimizer_state(self):
         acc = _make_mock_accelerator(num_processes=1)
         agent = _make_llm_agent(accelerator=acc)
-        agent.zero_stage = 2
         agent.use_vllm = False
         agent.lr_scheduler = MagicMock()
         acc.unwrap_model = MagicMock(return_value=agent.actor)
@@ -4794,11 +4003,10 @@ class TestLLMCloneWithDeepSpeed:
             patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
             patch.object(_RegistryMeta, "__call__", return_value=cloned),
             patch.object(LLMAlgorithm, "wrap_models"),
-            patch.object(LLMAlgorithm, "_save_distributed_actor"),
-            patch.object(LLMAlgorithm, "_load_distributed_actor"),
         ):
             result = LLMAlgorithm.clone(agent, index=7)
         assert result is cloned
+        cloned._load_gathered_optimizer_state_dict.assert_called_once()
 
 
 class TestLLMCloneWithVllm:
@@ -4807,7 +4015,6 @@ class TestLLMCloneWithVllm:
     def test_clone_preserves_vllm_references(self):
         agent = _make_llm_agent(accelerator=None, clone=True)
         agent.accelerator = None
-        agent.zero_stage = -1
         agent.use_vllm = True
         agent.llm = MagicMock()
         agent.lr_scheduler = MagicMock()
@@ -4823,11 +4030,6 @@ class TestLLMCloneWithVllm:
         cloned.use_vllm = True
 
         with (
-            patch(
-                "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
-                return_value={},
-                create=True,
-            ),
             patch("agilerl.algorithms.core.base.clone_llm", return_value=MagicMock()),
             patch.object(
                 EvolvableAlgorithm,
@@ -4871,9 +4073,6 @@ class TestLLMInitializeActors:
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
             ),
-            patch(
-                "agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_actor
-            ),
             patch.object(
                 agent, "use_adapter", wraps=agent.use_adapter
             ) as mock_use_adapter,
@@ -4896,9 +4095,6 @@ class TestLLMInitializeActors:
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
             ),
-            patch(
-                "agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_actor
-            ),
         ):
             LLMAlgorithm._initialize_actors(agent, None, add_adapters=True)
         mock_create.assert_called_once_with(
@@ -4920,9 +4116,6 @@ class TestLLMInitializeActors:
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
             ) as mock_gpm,
-            patch(
-                "agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_actor
-            ),
         ):
             LLMAlgorithm._initialize_actors(agent, peft_model, add_adapters=True)
 
@@ -4960,9 +4153,6 @@ class TestLLMInitializeActors:
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
             ),
-            patch(
-                "agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_actor
-            ),
         ):
             LLMAlgorithm._initialize_actors(
                 agent, MagicMock(spec=[]), add_adapters=True
@@ -4977,9 +4167,6 @@ class TestLLMInitializeActors:
         base_model = _make_mock_peft_actor()
 
         with (
-            patch(
-                "agilerl.algorithms.core.base.DummyEvolvable", return_value=base_model
-            ),
             patch.object(
                 agent, "use_adapter", wraps=agent.use_adapter
             ) as mock_use_adapter,
@@ -5004,7 +4191,6 @@ class TestLLMInitializeActors:
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_out
             ) as mock_gpm,
-            patch("agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_out),
         ):
             LLMAlgorithm._initialize_actors(agent, peft_in, add_adapters=True)
 
@@ -5082,27 +4268,22 @@ class TestLLMInitializeActors:
 
 
 class TestLLMInitializeActorsTorchCompiler:
-    """_initialize_actors handles torch_compiler / DeepSpeed / gradient_checkpointing combinations."""
+    """_initialize_actors handles torch_compiler / accelerator / gradient_checkpointing combinations."""
 
-    def test_torch_compiler_with_deepspeed_warns_and_skips_compile(self):
-        """Setting both torch_compiler and DeepSpeed only warns; no model wrap."""
-        agent = _make_llm_agent()
+    def test_torch_compiler_with_accelerator_warns_and_skips_compile(self):
+        """torch_compiler with a distributed run only warns; no compile wrap."""
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
         agent.torch_compiler = "default"
-        agent._uses_deepspeed = True
         agent.gradient_checkpointing = True
         base_model = _make_mock_peft_actor()
 
         with (
             patch("agilerl.algorithms.core.base.patch_lora_for_fused_forward"),
             patch("agilerl.algorithms.core.base.compile_model") as mock_compile,
-            patch(
-                "agilerl.algorithms.core.base.DummyEvolvable",
-                side_effect=lambda module, device: module,
-            ),
             patch.object(agent, "use_adapter"),
             pytest.warns(
                 UserWarning,
-                match="torch_compiler is not yet compatible with DeepSpeed",
+                match="torch_compiler is not yet supported for distributed",
             ),
         ):
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=False)
@@ -5110,13 +4291,12 @@ class TestLLMInitializeActorsTorchCompiler:
         mock_compile.assert_not_called()
         assert agent.gradient_checkpointing is True
 
-    def test_torch_compiler_without_deepspeed_disables_grad_checkpointing_and_compiles(
+    def test_torch_compiler_plain_disables_grad_checkpointing_and_compiles(
         self,
     ):
-        """Without DeepSpeed, gradient checkpointing is disabled and the model is compiled."""
+        """On the plain path, gradient checkpointing is disabled and the model is compiled."""
         agent = _make_llm_agent()
         agent.torch_compiler = "default"
-        agent._uses_deepspeed = False
         agent.gradient_checkpointing = True
         base_model = _make_mock_peft_actor()
         # Compile output must be an nn.Module: downstream code in
@@ -5128,10 +4308,6 @@ class TestLLMInitializeActorsTorchCompiler:
             patch(
                 "agilerl.algorithms.core.base.compile_model", return_value=compiled
             ) as mock_compile,
-            patch(
-                "agilerl.algorithms.core.base.DummyEvolvable",
-                side_effect=lambda module, device: module,
-            ),
             patch.object(agent, "use_adapter"),
             pytest.warns(
                 UserWarning,
@@ -5146,7 +4322,7 @@ class TestLLMInitializeActorsTorchCompiler:
 
 
 class TestLLMCloneActorNetwork:
-    """_clone_actor_network preserves value-head weights and respects zero_stage."""
+    """_clone_actor_network preserves value-head weights."""
 
     @staticmethod
     def _make_value_head_actor():
@@ -5163,23 +4339,15 @@ class TestLLMCloneActorNetwork:
     def test_value_head_branch_clones_inner_peft_and_copies_v_head(self):
         agent = _make_llm_agent(accelerator=None)
         agent.use_value_head = True
-        agent.zero_stage = None
         agent.actor = self._make_value_head_actor()
         original_v_head_weight = agent.actor.v_head.weight.detach().clone()
         cloned_inner = MagicMock()
 
-        with (
-            patch(
-                "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
-                return_value={"w": torch.tensor([1.0, 2.0])},
-            ) as mock_clone_sd,
-            patch(
-                "agilerl.algorithms.core.base.clone_llm", return_value=cloned_inner
-            ) as mock_clone_llm,
-        ):
+        with patch(
+            "agilerl.algorithms.core.base.clone_llm", return_value=cloned_inner
+        ) as mock_clone_llm:
             cloned = agent._clone_actor_network()
 
-        mock_clone_sd.assert_called_once()
         mock_clone_llm.assert_called_once()
         assert "w" in mock_clone_llm.call_args.kwargs["state_dict"]
         assert cloned is not agent.actor
@@ -5188,40 +4356,21 @@ class TestLLMCloneActorNetwork:
         # v_head was reloaded from the original (load_state_dict copies values).
         assert torch.equal(cloned.v_head.weight, original_v_head_weight)
 
-    def test_value_head_branch_skips_state_dict_clone_under_zero_stage_3(self):
-        agent = _make_llm_agent(accelerator=None)
-        agent.use_value_head = True
-        agent.zero_stage = 3
-        agent.actor = self._make_value_head_actor()
-        cloned_inner = MagicMock()
-
-        with (
-            patch(
-                "agilerl.algorithms.core.base.clone_tensors_for_torch_save"
-            ) as mock_clone_sd,
-            patch(
-                "agilerl.algorithms.core.base.clone_llm", return_value=cloned_inner
-            ) as mock_clone_llm,
-        ):
-            agent._clone_actor_network()
-
-        mock_clone_sd.assert_not_called()
-        assert mock_clone_llm.call_args.kwargs["state_dict"] is None
-
 
 class TestLLMMemoryEfficientParams:
-    """_memory_efficient_params context manager moves params on/off GPU outside ZeRO-3."""
+    """_memory_efficient_params context manager moves params on/off GPU when
+    the actor is not FSDP-sharded."""
 
-    def test_zero_stage_3_warns_and_yields_without_moving_params(self):
+    def test_sharded_actor_warns_and_yields_without_moving_params(self):
         agent = _make_llm_agent()
-        agent.zero_stage = 3
 
         with (
             patch("agilerl.algorithms.core.base.move_params_to_gpu") as mock_to_gpu,
             patch("agilerl.algorithms.core.base.move_params_to_cpu") as mock_to_cpu,
+            patch("agilerl.algorithms.core.base.is_fsdp_sharded", return_value=True),
             pytest.warns(
                 UserWarning,
-                match="Memory efficient params is not yet compatible with DeepSpeed ZeRO-3",
+                match="Memory efficient params is not compatible with FSDP2",
             ),
             agent._memory_efficient_params(),
         ):
@@ -5232,7 +4381,6 @@ class TestLLMMemoryEfficientParams:
 
     def test_default_path_moves_params_to_gpu_and_back_to_cpu(self):
         agent = _make_llm_agent()
-        agent.zero_stage = None
         agent.device = "cpu"
         unwrapped = MagicMock()
 
@@ -5254,7 +4402,6 @@ class TestLLMLoadAdapterWeights:
     def test_load_adapter_weights(self, tmp_path):
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
-        agent.zero_stage = -1
 
         model_ref = MagicMock()
         model_ref.parameters.return_value = []
@@ -5270,7 +4417,6 @@ class TestLLMLoadAdapterWeights:
         adapter_dir.mkdir()
 
         with (
-            patch("agilerl.algorithms.core.base.gather_if_zero3"),
             patch("agilerl.algorithms.core.base.load_file", return_value={}),
             patch("agilerl.algorithms.core.base.set_peft_model_state_dict"),
         ):
@@ -5339,8 +4485,8 @@ class TestLLMConfigureVllmAcceleratorPaths:
         else:
             assert kwargs["kv_cache_memory_bytes"] == kv_cache_memory_bytes
 
-    def test_configure_vllm_tp_size_gt_1(self, deepspeed_env):
-        del deepspeed_env
+    def test_configure_vllm_tp_size_gt_1(self, distributed_env):
+        del distributed_env
         acc = _make_mock_accelerator(num_processes=4)
         agent = _make_llm_agent(accelerator=acc)
         vllm_config = MagicMock()
@@ -5421,51 +4567,14 @@ class TestLLMConfigureVllmAcceleratorPaths:
                 agent._configure_vllm()
 
 
-class TestLLMSyncDeepSpeedGradientClippingMatch:
-    """Gradient clipping sync: update when mismatched, noop when matched."""
-
-    def test_sync_updates_when_values_mismatch(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "gradient_clipping": 0.5,
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
-        agent = _make_llm_agent(accelerator=acc, max_grad_norm=0.0)
-        agent.max_grad_norm = 2.0
-        acc.state.deepspeed_plugin.deepspeed_config["gradient_clipping"] = 0.5
-        agent._sync_deepspeed_gradient_clipping()
-        assert acc.state.deepspeed_plugin.deepspeed_config["gradient_clipping"] == 2.0
-
-    def test_sync_noop_when_values_match(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "gradient_clipping": 1.5,
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
-        agent = _make_llm_agent(accelerator=acc, max_grad_norm=1.5)
-        acc.state.deepspeed_plugin.deepspeed_config["gradient_clipping"] = 1.5
-        agent._sync_deepspeed_gradient_clipping()
-        assert acc.state.deepspeed_plugin.deepspeed_config["gradient_clipping"] == 1.5
-
-
 class TestLLMReinitOptFromConfig:
-    """_reinit_opt_from_config dispatches to LLMAlgorithm.update_lr."""
+    """_reinit_opt_from_config dispatches to LLMAlgorithm.update_lr with the
+    wrapper's own optimizer (no engine-optimizer fallback)."""
 
-    def test_reinit_opt_from_config_llm_with_actor_optimizer(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
+    def test_reinit_opt_from_config_llm(self):
+        acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
         agent.cosine_lr_schedule_config = None
-        agent.actor.optimizer = MagicMock()
-        agent.actor.optimizer.param_groups = [{"lr": 1e-4}]
 
         from agilerl.algorithms.core.registry import OptimizerConfig
 
@@ -5482,42 +4591,12 @@ class TestLLMReinitOptFromConfig:
         ) as mock_update:
             EvolvableAlgorithm._reinit_opt_from_config(agent, config)
         mock_update.assert_called_once()
-
-    def test_reinit_opt_from_config_llm_without_actor_optimizer(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
-        agent = _make_llm_agent(accelerator=acc)
-        agent.cosine_lr_schedule_config = None
-        if hasattr(agent.actor, "optimizer"):
-            del agent.actor.optimizer
-
-        from agilerl.algorithms.core.registry import OptimizerConfig
-
-        config = OptimizerConfig(
-            name="optimizer",
-            lr="lr",
-            networks=["actor"],
-            optimizer_cls=torch.optim.AdamW,
-            optimizer_kwargs={},
-        )
-
-        with patch.object(
-            LLMAlgorithm, "update_lr", return_value=(acc, None)
-        ) as mock_update:
-            EvolvableAlgorithm._reinit_opt_from_config(agent, config)
-        mock_update.assert_called_once()
+        args, kwargs = mock_update.call_args
+        passed_opt = args[0] if args else kwargs.get("optimizer")
+        assert passed_opt is agent.optimizer.optimizer
 
     def test_reinit_opt_from_config_llm_with_split_lr_config(self):
-        acc = _make_mock_accelerator(
-            ds_config={
-                "zero_optimization": {"stage": 0},
-                "train_micro_batch_size_per_gpu": "auto",
-            }
-        )
+        acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
         agent.cosine_lr_schedule_config = None
 
@@ -5864,61 +4943,3 @@ class TestLLMGenerateWithVllmColocateTP:
                 prompts, group_size=2, temperature=0.9
             )
         assert len(completion_ids) == 1
-
-
-class TestLLMCloneBroadcastMultiProcess:
-    """clone broadcasts temp directory in multi-process setting."""
-
-    def test_clone_multi_process_broadcasts_temp_dir(self):
-        acc = _make_mock_accelerator(num_processes=2)
-        agent = _make_llm_agent(accelerator=acc)
-        agent.zero_stage = -1
-        agent.use_vllm = False
-        agent.lr_scheduler = MagicMock()
-        acc.unwrap_model = MagicMock(return_value=agent.actor)
-
-        cloned = MagicMock()
-        cloned.accelerator = MagicMock()
-        cloned.lr_scheduler = MagicMock()
-        cloned.optimizer = MagicMock()
-        cloned.llm = None
-        cloned.use_vllm = False
-        cloned.mutation_hook = MagicMock()
-
-        with (
-            patch(
-                "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
-                return_value={},
-                create=True,
-            ),
-            patch("agilerl.algorithms.core.base.clone_llm", return_value=MagicMock()),
-            patch("agilerl.algorithms.core.base.Accelerator", return_value=MagicMock()),
-            patch(
-                "agilerl.algorithms.core.base.broadcast_object_list",
-                side_effect=lambda x, **kw: x,
-            ) as mock_broadcast,
-            patch.object(
-                EvolvableAlgorithm,
-                "inspect_attributes",
-                return_value={
-                    "index": 0,
-                    "batch_size": 4,
-                    "lr": 1e-4,
-                    "max_grad_norm": 0.0,
-                    "clone": True,
-                    "calc_position_embeddings": False,
-                    "seed": 42,
-                    "pad_token_id": 0,
-                    "pad_token": "<pad>",
-                    "use_liger_loss": False,
-                    "lora_config": MagicMock(),
-                    "actor_network": MagicMock(),
-                    "device": "cpu",
-                },
-            ),
-            patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
-            patch.object(_RegistryMeta, "__call__", return_value=cloned),
-            patch.object(LLMAlgorithm, "wrap_models"),
-        ):
-            LLMAlgorithm.clone(agent, index=3)
-        mock_broadcast.assert_called_once()

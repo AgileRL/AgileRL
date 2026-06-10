@@ -342,7 +342,7 @@ class REINFORCE(LLMAlgorithm):
                             )
                             stitch_ids = prompt.pop("stitch_prefix_ids", None)
                             initial_prompt_len = prompt.pop("initial_prompt_len", None)
-                            completion_id = self.actor.generate(
+                            completion_id = self._get_unwrapped_actor().generate(
                                 **prompt,
                                 generation_config=self.generation_config,
                             )
