@@ -666,7 +666,7 @@ class TestSFTSaveLoadCheckpoint:
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 accelerator=accelerator,
             )
-            new_sft.load_checkpoint(tmpdir, merge_lora_configs=True)
+            new_sft.load_checkpoint(tmpdir)
 
             for attr in EvolvableAlgorithm.inspect_attributes(sft):
                 if attr.startswith("_"):

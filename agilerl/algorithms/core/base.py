@@ -118,7 +118,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import (
         LoraConfig,
         get_peft_model,
-        get_peft_model_state_dict,
         prepare_model_for_kbit_training,
         set_peft_model_state_dict,
     )
@@ -2351,7 +2350,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :type use_liger_loss: bool
     :param lora_config: The LoRA config.
     :type lora_config: LoraConfigProtocol | None
-    :param use_separate_reference_adapter: Whether to use a separate reference adapter.
+    :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
+        adapter that reference-policy updates copy the actor adapter onto. When
+        ``False`` (default) the reference is the base model with adapters
+        disabled; since base weights are immutable, that reference stays the
+        initial policy for the whole run.
     :type use_separate_reference_adapter: bool
     :param use_value_head: Whether to use a separate value head.
     :type use_value_head: bool
@@ -2401,7 +2404,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :type cast_logprobs_to_fp32: bool, optional
     """
 
-    _separate_reference_adapter_deprecation_emitted = False
     _allowed_adapters = frozenset({"actor", "reference", "critic"})
 
     def __init__(
@@ -2595,7 +2597,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.memory_efficient_params_context = nullcontext
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
-        self._warn_separate_reference_adapter_deprecation()
         self.cast_logprobs_to_fp32 = cast_logprobs_to_fp32
         # Per-chunk row count for the fused-linear-logprob workspace. ``None``
         # uses the vocab-aware heuristic (_resolve_fused_logprobs_chunk_rows);
@@ -2639,6 +2640,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # Warn-once flag for the canonical Liger + non-token importance-sampling
         # "not memory-bounded" warning (see :meth:`_warn_liger_non_token_is`).
         self._liger_non_token_warned = False
+        # Warn-once flag for reference-update requests without a separate
+        # reference adapter (the implicit base reference cannot move).
+        self._frozen_reference_warned = False
 
         selected_adapters = ("actor",)
         if use_separate_reference_adapter:
@@ -2704,21 +2708,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
         return cast("TorchObsType", observation)
-
-    def _warn_separate_reference_adapter_deprecation(self) -> None:
-        """Warn once per process about the pending adapter-mode deprecation."""
-        if not self.use_separate_reference_adapter:
-            return
-        if LLMAlgorithm._separate_reference_adapter_deprecation_emitted:
-            return
-        warnings.warn(
-            "`use_separate_reference_adapter=True` is deprecated and will be "
-            "removed in a future release. Prefer using LoRA adapters while "
-            "keeping the base model untouched.",
-            category=DeprecationWarning,
-            stacklevel=2,
-        )
-        LLMAlgorithm._separate_reference_adapter_deprecation_emitted = True
 
     def save_checkpoint(
         self,
@@ -2787,12 +2776,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 category=DeprecationWarning,
             )
             lora_only = kwargs["weights_only"]
-        if lora_only and not self.use_separate_reference_adapter:
-            warnings.warn(
-                "lora_only=True requested, but use_separate_reference_adapter is False; base model (reference) weights will not be saved.",
-                stacklevel=2,
-                category=UserWarning,
-            )
 
         Path(path).mkdir(parents=True, exist_ok=True)
 
@@ -2873,7 +2856,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         load_optimizer: bool = False,
         overwrite_reference_adapter: bool = False,
         overwrite_critic_adapter: bool = True,
-        merge_lora_configs: bool = False,
     ) -> None:
         """Load adapter weights and algorithm state from a checkpoint directory.
 
@@ -2888,19 +2870,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             ``critic/`` adapter is present, else copied from ``actor``, else
             left as the live fresh LoRA init.
 
-        LoRA config reconciliation: when the checkpoint's config and the live
-        algorithm's config disagree, loading fails fast by default. Pass
-        ``merge_lora_configs=True`` to merge them for compatibility:
-
-          * ``r`` (rank) -> ``max(current, checkpoint)``; the smaller side's
-            weights are padded into the top-left rank slice of the larger
-            adapter (see :meth:`_pad_adapter_state_to_live_shape`).
-          * ``target_modules`` / ``modules_to_save`` -> union.
-          * Any other mismatched field -> current value wins, with a warning.
-
-        Any adapter whose live config ends up differing from the selected
-        target config is rebuilt via :meth:`_reconfigure_adapters_to_match` before
-        weights are loaded, so tensors always land in the correct shape.
+        The checkpoint's LoRA config must match the live algorithm's config;
+        a mismatch raises ``ValueError`` (re-create the agent with the
+        checkpoint's LoRA config to load it).
 
           No DeepSpeed:
             lora_only=T, load_optimizer=T  ->  PEFT adapter load + optimizer
@@ -2933,10 +2905,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             ``<path>/save_checkpoint``; otherwise optimizer state is read
             from ``attributes.pt``.
         :type load_optimizer: bool
-        :param merge_lora_configs: If ``True``, allow loading checkpoints whose
-            LoRA config differs from the live agent by reconciling them.
-            If ``False`` (default), mismatched LoRA configs raise ``ValueError``.
-        :type merge_lora_configs: bool
         """
         pickle_module = dill if self.accelerator is None else pickle
         checkpoint = torch.load(
@@ -2959,14 +2927,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         path,
                         overwrite_reference_adapter,
                         overwrite_critic_adapter,
-                        merge_lora_configs,
                     )
             elif lora_only:
                 self._load_model_checkpoint(
                     path,
                     overwrite_reference_adapter,
                     overwrite_critic_adapter,
-                    merge_lora_configs,
                 )
             else:
                 actor_state_dict = (
@@ -3003,16 +2969,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     "Optimizer state not found in checkpoint. Training will proceed using a NEW optimizer instance with random/initial default state. ",
                     stacklevel=2,
                 )
-            # Load checkpoint before super() so that we can merge the LoRA configs if they are mismatched
             if lora_only:
                 self._load_model_checkpoint(
                     path,
                     overwrite_reference_adapter,
                     overwrite_critic_adapter,
-                    merge_lora_configs,
                 )
             # ``super().load_checkpoint`` restores every attribute from the
-            # checkpoint, which would clobber the just-merged ``lora_config`` /
+            # checkpoint, which would clobber the live ``lora_config`` /
             # ``selected_adapters``. Stash and restore, mirroring the deepspeed
             # branch's ``_restore_checkpoint_attributes`` skip-list.
             live_lora_config = self.lora_config
@@ -3029,14 +2993,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         path: str,
         overwrite_reference_adapter: bool = False,
         overwrite_critic_adapter: bool = True,
-        merge_lora_configs: bool = False,
     ) -> None:
         """Restore LoRA adapter weights from a checkpoint directory.
 
-        Reconciles any LoRA config mismatch (e.g. rank mutation) between the checkpoint
-        and the live algorithm before loading weights. By default mismatches raise
-        ``ValueError``; pass ``merge_lora_configs=True`` to use
-        :meth:`_merge_lora_configs` compatibility behavior. Reference and Critic
+        The checkpoint's LoRA config must match the live algorithm's; a mismatch
+        (e.g. a different rank) raises ``ValueError``. Reference and Critic
         LoRA adapters in the checkpoint can be overwritten by the Actor using the
         ``overwrite_reference_adapter`` and ``overwrite_critic_adapter`` flags.
 
@@ -3045,34 +3006,23 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param overwrite_reference_adapter: If ``True`` do not overwrite the live reference
             adapter. Defaults to ``False``.
         :type overwrite_reference_adapter: bool
-        :param merge_lora_configs: Whether to merge mismatched LoRA configs instead
-            of failing fast.
-        :type merge_lora_configs: bool
         """
         ckpt_lora_config = self._load_checkpoint_lora_config(path)
         if ckpt_lora_config is not None:
-            if self.lora_config is None:
+            if self.lora_config is None or self._lora_configs_equivalent(
+                self.lora_config, ckpt_lora_config
+            ):
                 self.lora_config = ckpt_lora_config
-            elif self._lora_configs_equivalent(self.lora_config, ckpt_lora_config):
-                self.lora_config = ckpt_lora_config
-            elif merge_lora_configs:
-                self.lora_config = self._merge_lora_configs(
-                    self.lora_config, ckpt_lora_config
-                )
             else:
                 raise ValueError(
                     self._format_lora_config_mismatch_error(
                         self.lora_config, ckpt_lora_config
                     )
                 )
-            self._reconfigure_adapters_to_match(self.lora_config)
 
         for adapter in self.selected_adapters:
             if (Path(path) / adapter).exists():
-                # ``_load_adapter_weights`` itself invokes
-                # ``_pad_adapter_state_to_live_shape`` internally when ranks
-                # differ — no need to call it again out here.
-                self._load_adapter_weights(path, adapter, ckpt_lora_config)
+                self._load_adapter_weights(path, adapter)
 
         if "reference" in self.selected_adapters and overwrite_reference_adapter:
             self._copy_adapter_weights(
@@ -3462,7 +3412,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return accelerator, None
 
     def set_reference_policy(self, reference_update_tracker: int) -> None:
-        """Update the reference policy when the reference policy update tracker is greater than the current reference policy update tracker.
+        """Update the reference policy when the tracker advances past the stored value.
+
+        Base weights are immutable in AgileRL's LoRA-only training: with
+        ``use_separate_reference_adapter=True`` the actor adapter is copied onto
+        the ``reference`` adapter; without one the implicit reference (the base
+        model with adapters disabled) cannot move, so the update request is
+        acknowledged with a one-time warning and the KL anchor stays the initial
+        policy.
 
         :param reference_update_tracker: The reference policy update tracker
         :type reference_update_tracker: int
@@ -3471,98 +3428,24 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             "Reference policy update tracker should be greater than or equal to the current reference policy update tracker."
         )
         if reference_update_tracker > self.reference_update_tracker:
-            if self.accelerator is not None:
-                self.accelerator.wait_for_everyone()
             if self.use_separate_reference_adapter:
+                if self.accelerator is not None:
+                    self.accelerator.wait_for_everyone()
                 self._copy_adapter_weights(
                     source_adapter="actor", target_adapter="reference"
                 )
-            else:
-                unwrapped = self._get_unwrapped_actor()
-                peft_model = (
-                    unwrapped.pretrained_model if self.use_value_head else unwrapped
+            elif not self._frozen_reference_warned:
+                warnings.warn(
+                    "A reference-policy update was requested but "
+                    "use_separate_reference_adapter is False, so the reference "
+                    "stays the initial base policy. Set "
+                    "use_separate_reference_adapter=True for an updating "
+                    "reference.",
+                    stacklevel=2,
+                    category=UserWarning,
                 )
-                with gather_if_zero3(self.zero_stage, list(peft_model.parameters())):
-                    self._merge_adapter_into_base_in_place(
-                        peft_model=peft_model,
-                        adapter_name="actor",
-                    )
-                if self.accelerator is not None:
-                    self.accelerator.wait_for_everyone()
-                self.use_adapter("actor")
+                self._frozen_reference_warned = True
             self.reference_update_tracker += 1
-
-    def _merge_adapter_into_base_in_place(
-        self,
-        peft_model: Any,
-        adapter_name: str,
-    ) -> None:
-        """Manually add one LoRA adapter delta into dense base weights.
-
-        Unlike ``merge_adapter``, this does not flip LoRA layers to a merged
-        runtime mode, so actor LoRA params remain trainable after the merge.
-
-        :param peft_model: PEFT model that owns the adapter.
-        :type peft_model: Any
-        :param adapter_name: Adapter to merge into the dense base.
-        :type adapter_name: str
-        """
-        peft_model.set_adapter(adapter_name)
-        merged_any = False
-        with torch.no_grad():
-            for module in peft_model.base_model.model.modules():
-                is_lora_like = (
-                    hasattr(module, "lora_A")
-                    and hasattr(module, "lora_B")
-                    and hasattr(module, "lora_bias")
-                    and hasattr(module, "lora_variant")
-                    and hasattr(module, "get_base_layer")
-                    and hasattr(module, "get_delta_weight")
-                    and hasattr(module, "scaling")
-                )
-                if not is_lora_like or adapter_name not in module.lora_A:
-                    continue
-
-                base_layer = module.get_base_layer()
-                if adapter_name in module.lora_variant:
-                    module.lora_variant[adapter_name].merge_unsafe(
-                        module,
-                        adapter_name,
-                        base_layer.weight,
-                    )
-                else:
-                    delta_weight = module.get_delta_weight(adapter_name)
-                    base_layer.weight.data += delta_weight.to(base_layer.weight.dtype)
-
-                if module.lora_bias[adapter_name]:
-                    if getattr(base_layer, "bias", None) is None:
-                        msg = (
-                            "Cannot merge LoRA bias into base layer because bias is "
-                            "missing."
-                        )
-                        raise RuntimeError(msg)
-                    base_layer.bias.data += (
-                        module.lora_B[adapter_name].bias * module.scaling[adapter_name]
-                    ).to(base_layer.bias.dtype)
-
-                if hasattr(module, "reset_lora_parameters"):
-                    module.reset_lora_parameters(
-                        adapter_name,
-                        init_lora_weights=True,
-                    )
-                else:
-                    # Keep behavior aligned with PEFT defaults: A random init,
-                    # B zeros so the post-merge adapter delta starts neutral.
-                    torch.nn.init.kaiming_uniform_(
-                        module.lora_A[adapter_name].weight,
-                        a=5**0.5,
-                    )
-                    torch.nn.init.zeros_(module.lora_B[adapter_name].weight)
-                merged_any = True
-
-        if not merged_any:
-            msg = f"No LoRA tensors found for adapter '{adapter_name}'."
-            raise ValueError(msg)
 
     def use_adapter(self, adapter_name: str) -> None:
         """Switch the active PEFT adapter, handling all side-effects.
@@ -3697,24 +3580,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 stacklevel=2,
             )
 
-    def _warn_peft_model(
-        self,
-        peft_model: PeftModelProtocol,
-        *,
-        context: str,
-    ) -> PreTrainedModelProtocol:
-        """Merge active adapters into the base weights and drop the PEFT wrapper.
+    @staticmethod
+    def _reject_peft_model(*, context: str) -> None:
+        """Raise for user-supplied ``PeftModel`` inputs.
 
-        Emits ``UserWarning`` so callers know adapter tensors are not preserved as
-        separate PEFT adapters; forward behavior is kept in the merged dense model.
+        AgileRL attaches and manages its own LoRA adapters on an immutable base
+        model; it never merges foreign adapters into base weights.
         """
-        warnings.warn(
-            f"{context}: A PeftModel was passed; calling merge_and_unload() to merge active adapter weights "
-            "into the dense base model before attaching new randomly initialized AgileRL adapters.",
-            UserWarning,
-            stacklevel=2,
+        msg = (
+            f"{context}: a PeftModel was passed, but AgileRL manages its own "
+            "LoRA adapters on an immutable base model. Pass the base model "
+            "instead (merge your adapters first via PEFT's merge_and_unload() "
+            "if you want to keep their effect)."
         )
-        return peft_model.merge_and_unload()
+        raise ValueError(msg)
 
     @staticmethod
     def _position_ids_from_mask(mask: torch.Tensor) -> torch.Tensor:
@@ -4021,10 +3900,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     ) -> None:
         """Initialize the actor network.
 
-        If ``base_model`` is a user-supplied :class:`~peft.PeftModel` (with
-        ``add_adapters`` True), active adapters are merged into the dense base and
-        the PEFT wrapper is removed before attaching AgileRL adapters. The clone path
-        (``add_adapters`` False) passes through the model unchanged.
+        A user-supplied :class:`~peft.PeftModel` is rejected (with
+        ``add_adapters`` True): AgileRL manages its own adapters on an immutable
+        base, so pass the base model instead. The clone path (``add_adapters``
+        False) passes through the model unchanged.
 
         :param base_model: Base model
         :type base_model: PreTrainedModelProtocol
@@ -4063,19 +3942,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         if add_adapters:
             if isinstance(base_model, PeftModelProtocol):
-                base_model = self._warn_peft_model(
-                    base_model,
-                    context="actor_network",
-                )
-
+                self._reject_peft_model(context="actor_network")
             if self.use_value_head and isinstance(
                 getattr(base_model, "pretrained_model", None), PeftModelProtocol
             ):
-                inner = base_model.pretrained_model
-                base_model.pretrained_model = self._warn_peft_model(
-                    inner,
-                    context="actor_network.pretrained_model",
-                )
+                self._reject_peft_model(context="actor_network.pretrained_model")
 
             peft_target = (
                 base_model.pretrained_model if self.use_value_head else base_model
@@ -4116,7 +3987,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 lora_target_scope=self.lora_target_scope,
             )
             self.lora_config = lora_config
-            # User Peft is merged to dense above; always attach AgileRL adapters here.
             peft_target = get_peft_model(
                 peft_target,
                 lora_config,
@@ -5571,94 +5441,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return LoraConfig.from_pretrained(str(config_path.parent))
 
     @staticmethod
-    def _merge_lora_configs(
-        current: LoraConfig | None,
-        checkpoint: LoraConfig,
-    ) -> LoraConfig:
-        """Reconcile a checkpoint's LoRA config with the current one, favouring the current
-        where a choice must be made and warning on every mismatch.
-
-        Rules:
-
-        * ``r``: take ``max(current, checkpoint)`` (rank can grow via mutation).
-        * ``target_modules``, ``modules_to_save``: take the union when both are iterable,
-          otherwise keep current.
-        * Everything else: keep current, warn on mismatch.
-
-        :param current: The LoRA config the live algorithm was instantiated with. When
-            ``None`` the checkpoint's config is returned as-is.
-        :type current: peft.LoraConfig | None
-        :param checkpoint: The LoRA config stored alongside the checkpoint's actor adapter.
-        :type checkpoint: peft.LoraConfig
-        :return: A new ``LoraConfig`` representing the reconciled settings.
-        :rtype: peft.LoraConfig
-        """
-        if current is None:
-            return checkpoint
-
-        merged_kwargs = (
-            current.to_dict() if hasattr(current, "to_dict") else dict(vars(current))
-        )
-        ckpt_kwargs = (
-            checkpoint.to_dict()
-            if hasattr(checkpoint, "to_dict")
-            else dict(vars(checkpoint))
-        )
-
-        def _as_set(x: Any) -> set[str] | None:
-            if x is None:
-                return None
-            if isinstance(x, str):
-                return {x}
-            try:
-                return set(x)
-            except TypeError:
-                return None
-
-        for key, ckpt_val in ckpt_kwargs.items():
-            cur_val = merged_kwargs.get(key)
-            if key == "r":
-                cur_r = cur_val if isinstance(cur_val, int) else 0
-                ckpt_r = ckpt_val if isinstance(ckpt_val, int) else 0
-                new_r = max(cur_r, ckpt_r)
-                if cur_r != ckpt_r:
-                    warnings.warn(
-                        f"LoRA rank mismatch (current={cur_r}, checkpoint={ckpt_r}); "
-                        f"using max={new_r} and padding checkpoint weights into the extra rank slots.",
-                        stacklevel=2,
-                    )
-                merged_kwargs[key] = new_r
-                continue
-            if key in ("target_modules", "modules_to_save"):
-                cur_set = _as_set(cur_val)
-                ckpt_set = _as_set(ckpt_val)
-                if cur_set is None or ckpt_set is None:
-                    if cur_val != ckpt_val:
-                        warnings.warn(
-                            f"LoRA '{key}' differs (current={cur_val!r}, checkpoint={ckpt_val!r}); "
-                            "keeping the current value.",
-                            stacklevel=2,
-                        )
-                    continue
-                union = cur_set | ckpt_set
-                if cur_set != ckpt_set:
-                    warnings.warn(
-                        f"LoRA '{key}' differs (current={sorted(cur_set)}, checkpoint={sorted(ckpt_set)}); "
-                        f"using union={sorted(union)}.",
-                        stacklevel=2,
-                    )
-                merged_kwargs[key] = sorted(union)
-                continue
-            if cur_val != ckpt_val:
-                warnings.warn(
-                    f"LoRA '{key}' differs (current={cur_val!r}, checkpoint={ckpt_val!r}); "
-                    "keeping current value.",
-                    stacklevel=2,
-                )
-
-        return LoraConfig(**merged_kwargs)
-
-    @staticmethod
     def _format_lora_config_mismatch_error(
         current: LoraConfig,
         checkpoint: LoraConfig,
@@ -5694,13 +5476,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         current_summary = summarize(current)
         checkpoint_summary = summarize(checkpoint)
         return (
-            "LoRA configs differ; refusing to load checkpoint with "
-            "merge_lora_configs=False.\n"
+            "LoRA configs differ; refusing to load the checkpoint.\n"
             f"Current config: {current_summary}\n"
             f"Checkpoint config: {checkpoint_summary}\n"
-            "Resolution:\n"
-            "  1) Ensure the loading agent uses the checkpoint LoRA config, or\n"
-            "  2) call load_checkpoint(..., merge_lora_configs=True)."
+            "Resolution: re-create the agent with the checkpoint's LoRA config "
+            "before calling load_checkpoint."
         )
 
     @staticmethod
@@ -5731,53 +5511,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             b_dict.pop(key, None)
         return a_dict == b_dict
 
-    def _reconfigure_adapters_to_match(self, target_config: LoraConfig) -> None:
-        """Ensure every adapter in :attr:`selected_adapters` uses ``target_config``.
-
-        If an adapter's live config already matches, it is left untouched. Otherwise it
-        is rebuilt against ``target_config`` with freshly-initialised weights; callers
-        are expected to subsequently load weights into it (with rank padding where
-        needed).
-
-        :param target_config: The merged LoRA config that all adapters should match.
-        :type target_config: peft.LoraConfig
-        :return: None. Mutates the live PEFT model in place.
-        :rtype: None
-        """
-        peft_model = self._peft_model
-        if not isinstance(peft_model, PeftModelProtocol):
-            return
-
-        current_adapter = (
-            peft_model.active_adapter
-            if hasattr(peft_model, "active_adapter")
-            else "actor"
-        )
-        for name in self.selected_adapters:
-            live_cfg = peft_model.peft_config.get(name)
-            if live_cfg is not None and self._lora_configs_equivalent(
-                live_cfg, target_config
-            ):
-                continue
-            with gather_if_zero3(
-                self.zero_stage, list(peft_model.parameters()), modifier_rank=0
-            ):
-                if name in peft_model.peft_config:
-                    peft_model.delete_adapter(name)
-                peft_model.add_adapter(adapter_name=name, peft_config=target_config)
-        if current_adapter in peft_model.peft_config:
-            peft_model.set_adapter(current_adapter)
-        else:
-            peft_model.set_adapter("actor")
-
     def _load_adapter_weights(
         self,
         checkpoint_dir: str,
         adapter_name: str,
-        ckpt_lora_config: LoraConfig | None,
     ) -> None:
-        """Overwrite a live adapter's weights from disk, padding smaller LoRA ranks into
-        the current adapter shape where needed.
+        """Overwrite a live adapter's weights from disk.
 
         :param checkpoint_dir: Directory written by :meth:`save_checkpoint`; must contain
             ``<adapter_name>/adapter_model.safetensors``.
@@ -5785,9 +5524,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param adapter_name: Name of the adapter to overwrite (must already exist on the
             live PEFT model).
         :type adapter_name: str
-        :param ckpt_lora_config: The checkpoint's LoRA config, used to detect a rank
-            mismatch that requires padding. Pass ``None`` to skip padding entirely.
-        :type ckpt_lora_config: peft.LoraConfig | None
         :return: None. Mutates the live adapter's parameters in place.
         :rtype: None
         """
@@ -5800,16 +5536,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         with gather_if_zero3(
             self.zero_stage, list(unwrapped.parameters()), modifier_rank=0
         ):
-            if (
-                ckpt_lora_config is not None
-                and self.lora_config is not None
-                and getattr(ckpt_lora_config, "r", None)
-                != getattr(self.lora_config, "r", None)
-            ):
-                adapter_state = self._pad_adapter_state_to_live_shape(
-                    adapter_state, adapter_name, peft_model
-                )
-
             with torch.no_grad():
                 set_peft_model_state_dict(
                     peft_model, adapter_state, adapter_name=adapter_name
@@ -5822,44 +5548,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
-
-    @staticmethod
-    def _pad_adapter_state_to_live_shape(
-        adapter_state: dict[str, torch.Tensor],
-        adapter_name: str,
-        peft_model: Any,
-    ) -> dict[str, torch.Tensor]:
-        """Pad each checkpoint tensor into the live adapter's shape, copying into the
-        top-left slice and leaving the rest at the fresh-init values PEFT populated when
-        the adapter was (re-)created.
-
-        :param adapter_state: Raw state dict loaded from an
-            ``adapter_model.safetensors`` file.
-        :type adapter_state: dict[str, torch.Tensor]
-        :param adapter_name: Name of the live adapter whose shape should be matched.
-        :type adapter_name: str
-        :param peft_model: The underlying ``PeftModel``.
-        :type peft_model: peft.PeftModel
-        :return: A new state dict with every tensor reshaped to match the live adapter.
-        :rtype: dict[str, torch.Tensor]
-        """
-        live_state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
-        padded: dict[str, torch.Tensor] = {}
-        for key, ckpt_t in adapter_state.items():
-            live_t = live_state.get(key)
-            if live_t is None or tuple(live_t.shape) == tuple(ckpt_t.shape):
-                padded[key] = ckpt_t
-                continue
-            if any(ck > lv for ck, lv in zip(ckpt_t.shape, live_t.shape, strict=False)):
-                # Checkpoint rank > live rank shouldn't happen with max() merge, but
-                # fall back to a straight load so PEFT raises a clear error.
-                padded[key] = ckpt_t
-                continue
-            canvas = live_t.detach().clone()
-            slices = tuple(slice(0, d) for d in ckpt_t.shape)
-            canvas[slices] = ckpt_t.to(canvas.dtype).to(canvas.device)
-            padded[key] = canvas
-        return padded
 
     @staticmethod
     def _create_prompt_masks(

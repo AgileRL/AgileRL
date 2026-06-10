@@ -1611,23 +1611,22 @@ class TestGRPOInit:
 
     @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
     @pytest.mark.parametrize("config", [None])
-    def test_init_grpo_separate_reference_adapter_deprecation_warning(
+    def test_init_grpo_separate_reference_adapter_no_deprecation_warning(
         self,
         deepspeed_env,
         accelerator_factory,
         config,
         use_deepspeed_optimizer,
     ):
+        """use_separate_reference_adapter=True is the supported way to keep an
+        updating reference policy and must not emit a DeprecationWarning."""
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        LLMAlgorithm._separate_reference_adapter_deprecation_emitted = False
-        with pytest.warns(
-            DeprecationWarning,
-            match=r"use_separate_reference_adapter=True.*deprecated",
-        ):
-            vocab_size = 1000
-            input_size = 10
-            max_tokens = 20
-            group_size = 5
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             GRPO(
                 actor_network=create_module(
                     input_size=input_size,
@@ -1648,7 +1647,12 @@ class TestGRPOInit:
                 ),
                 accelerator=accelerator,
             )
-        LLMAlgorithm._separate_reference_adapter_deprecation_emitted = False
+        assert not [
+            w
+            for w in caught
+            if issubclass(w.category, DeprecationWarning)
+            and "use_separate_reference_adapter" in str(w.message)
+        ]
 
     def test_grpo_no_llm_dependencies(
         self, grpo_factory, model_factory, accelerator_factory
@@ -3811,7 +3815,7 @@ class TestGRPOSaveLoadCheckpoint:
                 # adds ``exclude_modules=["lm_head"]``).
                 use_liger_loss=grpo.use_liger_loss,
             )
-            new_grpo.load_checkpoint(tmpdir, merge_lora_configs=False)
+            new_grpo.load_checkpoint(tmpdir)
 
             for attr in EvolvableAlgorithm.inspect_attributes(grpo):
                 if not attr.startswith("_") and not attr.startswith("__"):
