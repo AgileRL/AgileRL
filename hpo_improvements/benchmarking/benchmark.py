@@ -1029,8 +1029,17 @@ def run_training(
     # runs -- it removes the dependency on the live wandb service socket, whose
     # Python 3.13 asyncio teardown can BrokenPipe at finish and abort the drain of
     # the not-yet-uploaded history backlog, leaving a run on W&B with a summary but
-    # no history at all. WANDB_DIR pins the offline run dir to a known location so
-    # we know what to sync.
+    # no history at all.
+    #
+    # The offline run dir must be pinned per (env, seed) so we know what to sync.
+    # WANDB_DIR alone is NOT enough in the sequential runner: run_training is called
+    # repeatedly in one process, and wandb reads WANDB_DIR only when its session
+    # first starts -- subsequent changes are ignored ("Changes to your wandb
+    # environment variables will be ignored because your wandb session has already
+    # started"). That made every run after the first write its offline data into the
+    # first run's dir, so fetch_and_plot found no history for any later run. Passing
+    # `dir` directly to wandb.init() (via addl_args) is a per-run setting that is
+    # honored on every call. The env var is kept for the first run / external tools.
     os.environ["WANDB_DIR"] = str(out_dir)
     os.environ["WANDB_MODE"] = "offline"
 
@@ -1039,7 +1048,10 @@ def run_training(
         population, _ = trainer.train(
             wb=True,
             wandb_api_key=wandb_api_key,
-            wandb_kwargs={"project": project, "addl_args": {"name": run_name}},
+            wandb_kwargs={
+                "project": project,
+                "addl_args": {"name": run_name, "dir": str(out_dir)},
+            },
             verbose=True,
         )
 

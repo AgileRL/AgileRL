@@ -114,7 +114,7 @@ training:
     max_steps: 12_500_000
     target_score:
     pop_size: 1
-    evo_steps: 250_000
+    evo_steps: 50_000
     eval_steps:
     eval_loop: 1
     learning_delay: 50_000

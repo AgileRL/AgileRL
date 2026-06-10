@@ -305,9 +305,6 @@ def plot_fitness_over_seeds(
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-    for x, best in best_curves:
-        order = np.argsort(x)
-        ax1.plot(x[order], best[order], color="grey", alpha=0.25, linewidth=1)
     rly_plot.plot_sample_efficiency_curve(
         grid_best,
         pe_best,
@@ -324,9 +321,6 @@ def plot_fitness_over_seeds(
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc="best")
 
-    for x, norm in norm_curves:
-        order = np.argsort(x)
-        ax2.plot(x[order], norm[order], color="grey", alpha=0.25, linewidth=1)
     rly_plot.plot_sample_efficiency_curve(
         grid,
         pe_norm,
@@ -481,8 +475,14 @@ def plot_performance_profile(
     tau_max = max(1.0, float(np.max(finite)))
     tau_list = np.linspace(0.0, tau_max, 100)
 
+    # create_performance_profile has no random_state argument (unlike
+    # get_interval_estimates); it draws from NumPy's global RNG, so seed that
+    # to keep the confidence band reproducible across re-plots.
+    np.random.seed(_BOOTSTRAP_SEED)
     distributions, distribution_cis = rly.create_performance_profile(
-        {algo_label: final}, tau_list, reps=_BOOTSTRAP_REPS
+        {algo_label: final},
+        tau_list,
+        reps=_BOOTSTRAP_REPS,
     )
 
     fig, ax = plt.subplots(figsize=(10, 6))
