@@ -391,7 +391,7 @@ class RLAlgorithmSpec(AlgorithmSpec):
             index=index,
             device=device,
             accelerator=accelerator,
-            **self.model_dump(mode="python"),
+            **self.model_dump(mode="python", exclude_unset=True),
         )
 
         if resume_from_checkpoint is not None:
@@ -446,7 +446,7 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
             index=index,
             device=device,
             accelerator=accelerator,
-            **self.model_dump(mode="python"),
+            **self.model_dump(mode="python", exclude_unset=True),
         )
 
         if resume_from_checkpoint is not None:
@@ -530,8 +530,10 @@ class LLMAlgorithmSpec(AlgorithmSpec):
 
             self.vllm_config = VLLMConfig(**vllm_cfg)
 
-        kwargs = vars(self).copy()
-        kwargs.pop("pretrained_model_name_or_path")
+        # Only forward explicitly-set fields so the algorithm's own defaults
+        # apply to everything a manifest omits, matching direct construction.
+        kwargs = {k: v for k, v in vars(self).items() if k in self.model_fields_set}
+        kwargs.pop("pretrained_model_name_or_path", None)
         if not use_vllm:
             kwargs.pop("max_model_len", None)
 

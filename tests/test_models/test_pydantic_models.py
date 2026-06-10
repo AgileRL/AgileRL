@@ -556,6 +556,81 @@ class TestAlgoSpecClassVars:
         mock_algo.load_checkpoint.assert_called_once_with("/some/path")
 
 
+class TestBuildAlgorithmForwardsOnlySetFields:
+    """Unset spec fields must fall through to the algorithm's own defaults."""
+
+    def test_rl_spec_forwards_only_set_fields(self):
+        from agilerl.models.algo import RLAlgorithmSpec
+
+        spec = RLAlgorithmSpec(learn_step=2)
+        mock_algo_cls = MagicMock()
+        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+            spec.build_algorithm(
+                observation_space=MagicMock(),
+                action_space=MagicMock(),
+                index=0,
+            )
+        kwargs = mock_algo_cls.call_args.kwargs
+        assert kwargs["learn_step"] == 2
+        assert "gamma" not in kwargs
+        assert "batch_size" not in kwargs
+
+    def test_multi_agent_spec_forwards_only_set_fields(self):
+        from agilerl.models.algo import MultiAgentRLAlgorithmSpec
+
+        spec = MultiAgentRLAlgorithmSpec(gamma=0.9)
+        mock_algo_cls = MagicMock()
+        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+            spec.build_algorithm(
+                observation_spaces={"a": MagicMock()},
+                action_spaces={"a": MagicMock()},
+                index=0,
+            )
+        kwargs = mock_algo_cls.call_args.kwargs
+        assert kwargs["gamma"] == 0.9
+        assert "learn_step" not in kwargs
+        assert "batch_size" not in kwargs
+
+    def test_llm_spec_forwards_only_set_fields(self):
+        from agilerl.models.algorithms.grpo import GRPOSpec
+
+        spec = GRPOSpec(pretrained_model_name_or_path="gpt2", beta=0.05, group_size=4)
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 0
+        mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_algo_cls = MagicMock()
+        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+            spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
+        kwargs = mock_algo_cls.call_args.kwargs
+        assert kwargs["beta"] == 0.05
+        assert kwargs["model_name"] == "gpt2"
+        # GRPO's own defaults (e.g. lr=5e-7) must apply when unset
+        assert "lr" not in kwargs
+        assert "batch_size" not in kwargs
+
+    def test_spec_built_algorithm_matches_direct_construction(self):
+        import gymnasium as gym
+
+        from agilerl.algorithms import DQN
+        from agilerl.models.algorithms.dqn import DQNSpec
+
+        observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(4,))
+        action_space = gym.spaces.Discrete(2)
+        from_spec = DQNSpec().build_algorithm(
+            observation_space=observation_space,
+            action_space=action_space,
+            index=0,
+        )
+        direct = DQN(
+            observation_space=observation_space,
+            action_space=action_space,
+        )
+        assert from_spec.lr == direct.lr
+        assert from_spec.batch_size == direct.batch_size
+        assert from_spec.gamma == direct.gamma
+        assert from_spec.learn_step == direct.learn_step
+
+
 class TestLLMAlgorithmSpecBuild:
     """Lines 531-533, 554 in algo.py."""
 
@@ -706,6 +781,32 @@ class TestReplayBufferSpecNStep:
         algo = MagicMock(spec=[])  # no gamma attribute
         with pytest.raises(ValueError, match="Gamma must be specified"):
             spec.init_n_step_buffer(algo, device="cpu")
+
+    def test_init_buffer_per_with_n_step_builds_per_main_memory(self):
+        """Combined PER + n-step: main memory is PER, n-step is secondary."""
+        from agilerl.components.replay_buffer import (
+            MultiStepReplayBuffer,
+            PrioritizedReplayBuffer,
+        )
+        from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
+
+        spec = ReplayBufferSpec(per_buffer=True, n_step_buffer=True)
+        algo = RainbowDQNSpec(net_config=None)
+        memory = spec.init_buffer(algo, device="cpu")
+        n_step_memory = spec.init_n_step_buffer(algo, device="cpu")
+        assert isinstance(memory, PrioritizedReplayBuffer)
+        assert isinstance(n_step_memory, MultiStepReplayBuffer)
+
+    def test_init_buffer_n_step_only_builds_multi_step_main_memory(self):
+        """n-step without PER keeps the main memory as the n-step buffer."""
+        from agilerl.components.replay_buffer import MultiStepReplayBuffer
+        from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
+
+        spec = ReplayBufferSpec(n_step_buffer=True)
+        algo = RainbowDQNSpec(net_config=None)
+        memory = spec.init_buffer(algo, device="cpu")
+        assert isinstance(memory, MultiStepReplayBuffer)
+        assert spec.init_n_step_buffer(algo, device="cpu") is None
 
 
 class TestLLMPPOSpec:
