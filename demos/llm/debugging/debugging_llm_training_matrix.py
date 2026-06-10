@@ -350,7 +350,6 @@ def build_evolution_components(
         tournament_size=min(2, population_size),
         elitism=True,
         population_size=population_size,
-        eval_loop=1,
     )
     mutation = Mutations(
         no_mutation=1.0,

@@ -182,7 +182,7 @@ for both the tournament and mutation arguments.
         pop=[rainbow_dqn],
         memory=memory,
         n_step_memory=n_step_memory,
-        INIT_HP=INIT_HP,
+        init_hp=INIT_HP,
         max_steps=INIT_HP["MAX_STEPS"],
         evo_steps=INIT_HP["EVO_STEPS"],
         eval_steps=INIT_HP["EVAL_STEPS"],
@@ -274,9 +274,10 @@ function and is an example of how we might choose to train an AgileRL agent.
                         # Sample replay buffer
                         # Learn according to agent's RL algorithm
                         experiences = memory.sample(rainbow_dqn.batch_size, rainbow_dqn.beta)
-                        n_step_experiences = n_step_memory.sample_from_indices(experiences[6])
-                        experiences += n_step_experiences
-                        loss, idxs, priorities = rainbow_dqn.learn(experiences, n_step=n_step, per=per)
+                        n_step_experiences = n_step_memory.sample_from_indices(experiences["idxs"])
+                        loss, idxs, priorities = rainbow_dqn.learn(
+                            experiences, n_experiences=n_step_experiences, per=per
+                        )
                         memory.update_priorities(idxs, priorities)
 
                 obs = next_obs

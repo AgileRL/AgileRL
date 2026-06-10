@@ -403,96 +403,85 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
       # RL training loop
       while np.less([agent.steps for agent in pop], MAX_STEPS).all():
          for agent in pop:  # Loop through population
+            agent.set_training_mode(True)
+
+            for _ in range(-(EVO_STEPS // -agent.learn_step)):
                obs = env.reset()[0]  # Reset environment at start of episode
                score = 0
-
-               observations = []
-               actions = []
-               log_probs = []
-               rewards = []
-               dones = []
-               values = []
-
                done = np.zeros(1)
 
-               for idx_step in range(500):
-                  # Get next action from agent
-                  action, log_prob, _, value = agent.get_action(obs)
+               agent.rollout_buffer.reset()
+               for _ in range(agent.learn_step):
+                  decision_obs = obs  # Observation used to select the skill
 
-                  # Clip to action space
-                  if isinstance(agent.action_space, spaces.Box):
-                      if agent.actor.squash_output:
-                          clipped_action = agent.actor.scale_action(action)
-                      else:
-                          clipped_action = np.clip(action, agent.action_space.low, agent.action_space.high)
-                  else:
-                      clipped_action = action
+                  # Get next action from agent
+                  action, log_prob, _, value = agent.get_action(decision_obs)
 
                   # Internal loop to execute trained skill
                   skill_agent = trained_skills[action[0]]["agent"]
                   skill_duration = trained_skills[action[0]]["skill_duration"]
                   reward = 0
+                  next_obs, next_done = obs, done
                   for skill_step in range(skill_duration):
                      # If landed, do nothing
                      if obs[0][6] or obs[0][7]:
-                           next_obs, skill_reward, termination, truncation, _ = env.step(
-                              [0]
-                           )
+                        next_obs, skill_reward, termination, truncation, _ = env.step(
+                           [0]
+                        )
                      else:
-                           skill_action, _, _, _ = skill_agent.get_action(obs)
-                           next_obs, skill_reward, termination, truncation, _ = env.step(
-                              skill_action
-                           )  # Act in environment
+                        skill_action, _, _, _ = skill_agent.get_action(obs)
+                        next_obs, skill_reward, termination, truncation, _ = env.step(
+                           skill_action
+                        )  # Act in environment
                      next_done = np.logical_or(termination, truncation).astype(np.int8)
                      reward += skill_reward
                      if np.any(termination) or np.any(truncation):
-                           break
+                        break
                      obs = next_obs
-                     done = next_done
                   score += reward
 
-                  observations.append(obs)
-                  actions.append(action)
-                  log_probs.append(log_prob)
-                  rewards.append(reward)
-                  dones.append(done)
-                  values.append(value)
+                  # Save experience in the agent's rollout buffer
+                  agent.rollout_buffer.add(
+                     obs=decision_obs,
+                     action=action,
+                     reward=np.atleast_1d(reward),
+                     done=np.atleast_1d(next_done),
+                     value=np.atleast_1d(value),
+                     log_prob=np.atleast_1d(log_prob),
+                     next_obs=next_obs,
+                  )
+
+                  obs = next_obs
+                  done = next_done
 
                agent.scores.append(score)
 
-               # Learn according to agent's RL algorithm
-               agent.learn(
-                  (
-                     observations,
-                     actions,
-                     log_probs,
-                     rewards,
-                     dones,
-                     values,
-                     next_obs,
-                     next_done,
-                  )
+               # Bootstrap the final state value and learn from the rollout buffer
+               _, _, _, last_value = agent.get_action(obs)
+               agent.rollout_buffer.compute_returns_and_advantages(
+                  last_value=np.atleast_1d(last_value),
+                  last_done=np.atleast_1d(done),
                )
+               agent.learn()
 
-               agent.steps += idx_step + 1
-               total_steps += idx_step + 1
+               agent.steps += agent.learn_step
+               total_steps += agent.learn_step
 
-         if (agent.steps) % EVO_STEPS == 0:
-            mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
-            if WANDB:
-                wandb.log(
-                    {
-                        "global_step": total_steps,
-                        "train/mean_score": np.mean(mean_scores),
-                    }
-                )
-            print(
-                f"""
-                --- Global Steps {total_steps} ---
-                Score:\t\t{mean_scores}
-                """,
-                end="\r",
-            )
+         mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
+         if WANDB:
+             wandb.log(
+                 {
+                     "global_step": total_steps,
+                     "train/mean_score": np.mean(mean_scores),
+                 }
+             )
+         print(
+             f"""
+             --- Global Steps {total_steps} ---
+             Score:\t\t{mean_scores}
+             """,
+             end="\r",
+         )
 
       if WANDB:
          wandb.finish()
