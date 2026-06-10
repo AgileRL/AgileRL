@@ -1464,30 +1464,21 @@ class VLLMConfig:
     :param frequency_penalty: Penalise tokens proportionally to how often they have
         appeared so far.  Passed to ``SamplingParams``, defaults to 0.0 (disabled).
     :type frequency_penalty: float, optional
-    :param enable_lora: Enable vLLM's built-in LoRA serving. When ``True`` (default),
-        colocated rollouts sync only PEFT adapter weights into vLLM via
-        :meth:`~agilerl.algorithms.core.base.LLMAlgorithm._move_lora_to_vllm`
-        instead of merging adapters into the base and reloading the full model
-        (the :meth:`~agilerl.algorithms.core.base.LLMAlgorithm._move_merged_base_to_vllm`
-        path).
-    :type enable_lora: bool, optional
     :param max_lora_rank: Maximum LoRA rank passed to the vLLM ``LLM`` constructor.
         Should be at least the trainer's ``lora_config.r``.  Defaults to 16.
     :type max_lora_rank: int, optional
     :param max_loras: Maximum number of LoRA adapters vLLM can hold concurrently.
         Defaults to 1 (actor rollout only).
     :type max_loras: int, optional
-    :param weight_sharing: Zero-copy base-weight sharing between vLLM and the HF
-        LoRA trainer, for a bitsandbytes-quantized **or** dense (bf16/fp16) base.
-        When sharing, the trainer does not load its own base copy; it aliases
-        vLLM's already-loaded base tensors (one base copy on the GPU) and only
-        LoRA adapters are synced per step, via standby sleep (frees only the KV
-        cache, keeps weights resident — no base reload). Tri-state: ``True``
-        requires sharing (raises if a precondition fails); ``False`` keeps the
-        legacy two-copy path; ``None`` (default, "auto") shares whenever the
-        colocated preconditions hold (``sleep_mode`` + ``enable_lora`` +
-        ``tensor_parallel_size == 1`` + no user-supplied base model) and falls
-        back to the two-copy path otherwise.
+    :param weight_sharing: **Deprecated and ignored.** Colocated vLLM now
+        *always* shares its base with the HF LoRA trainer (zero-copy: the trainer
+        aliases vLLM's already-loaded base — quantized or dense — instead of
+        loading its own copy, and only LoRA adapters are synced per step). The
+        legacy two-copy path was removed, so this flag has no effect; passing
+        ``False`` emits a deprecation warning. Retained for API compatibility;
+        defaults to None. A colocated config that *cannot* share
+        (``tensor_parallel_size > 1`` or a user-supplied in-memory base) now
+        raises rather than falling back.
     :type weight_sharing: bool | None, optional
     :param weight_sharing_multimodal: Reserved toggle to also share the
         vision/audio towers of a multimodal base (not just the language model).
@@ -1530,7 +1521,6 @@ class VLLMConfig:
     quantization: str | None = None
     vllm_model_name_or_path: str | None = None
     kv_cache_dtype: str | None = None
-    enable_lora: bool = True
     max_lora_rank: int = 16
     max_loras: int = 1
     weight_sharing: bool | None = None
@@ -1544,27 +1534,11 @@ class VLLMConfig:
     kv_cache_memory_bytes: int | None = None
 
     def __post_init__(self) -> None:
-        if self.weight_sharing is True:
-            if not self.sleep_mode:
-                msg = (
-                    "weight_sharing=True requires sleep_mode=True (it relies on "
-                    "standby sleep to keep the shared base resident across "
-                    "sleep/wake)."
-                )
-                raise ValueError(msg)
-        elif (
-            self.weight_sharing is False
-            and self.quantization == "bitsandbytes"
-            and self.sleep_mode
-        ):
-            warnings.warn(
-                "vLLM quantization='bitsandbytes' with sleep_mode but "
-                "weight_sharing=False: vLLM cannot reload a bnb base in-place "
-                "after sleep, and offloading risks trainer OOM. Leave "
-                "weight_sharing unset (auto) or set it True for a zero-copy "
-                "shared base with standby sleep.",
-                stacklevel=2,
-            )
+        # ``weight_sharing`` semantics are enforced by the LLM algorithm at
+        # construction (colocated vLLM always shares; the non-shared path was
+        # removed). sleep_mode is not a sharing gate — it only toggles the
+        # KV-freeing sleep cycle — so nothing about weight_sharing is validated
+        # here.
         if self.sleep_mode:
             warnings.warn(
                 "VLLM sleep mode cannot be used with populations of agents on a "

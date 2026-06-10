@@ -4217,11 +4217,11 @@ def _fake_save_peft_adapter_for_vllm_rollout(
     return adapter_dir
 
 
-def _setup_agent_for_vllm_lora_sync(agent, *, enable_lora: bool = True):
+def _setup_agent_for_vllm_lora_sync(agent):
     import tempfile
     from pathlib import Path
 
-    agent.vllm_config = VLLMConfig(enable_lora=enable_lora)
+    agent.vllm_config = VLLMConfig()
     agent._vllm_lora_staging_dir = Path(tempfile.mkdtemp())
     agent._vllm_lora_loaded = False
     agent._vllm_rollout_lora_request = None
@@ -4278,29 +4278,6 @@ class TestLLMSyncActorToVllm:
         inner.merge_adapter.assert_not_called()
         mock_save.assert_called_once()
         agent.llm.llm_engine.add_lora.assert_called_once()
-
-    def test_sync_actor_to_vllm_merged_base_path_when_lora_disabled(self):
-        """enable_lora=False routes to _move_merged_base_to_vllm."""
-        p = torch.nn.Parameter(torch.tensor([1.0]))
-        named = [("base_model.model.layer.weight", p)]
-        gather = patch("agilerl.algorithms.core.base.gather_if_zero3")
-
-        agent = _make_llm_agent(accelerator=None)
-        inner = _make_mock_peft_actor()
-        inner.parameters = MagicMock(return_value=[p])
-        inner.named_parameters = MagicMock(return_value=named)
-        inner.merge_adapter = MagicMock()
-        inner.unmerge_adapter = MagicMock()
-        inner.set_adapter = MagicMock()
-        agent.actor = DummyEvolvable(device="cpu", module=inner)
-        _setup_agent_for_vllm_lora_sync(agent, enable_lora=False)
-        agent.llm.llm_engine.model_executor.driver_worker.model_runner.model = (
-            MagicMock()
-        )
-        with gather, pytest.warns(UserWarning, match="enable_lora"):
-            agent._sync_actor_to_vllm()
-        inner.merge_adapter.assert_called_once()
-        agent.llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights.assert_called()
 
 
 class TestMultiAgentPreprocessObservation:
@@ -5431,45 +5408,6 @@ class TestLLMCloneActorNetwork:
 
         mock_clone_sd.assert_not_called()
         assert mock_clone_llm.call_args.kwargs["state_dict"] is None
-
-
-class TestLLMMemoryEfficientParams:
-    """_memory_efficient_params context manager moves params on/off GPU outside ZeRO-3."""
-
-    def test_zero_stage_3_warns_and_yields_without_moving_params(self):
-        agent = _make_llm_agent()
-        agent.zero_stage = 3
-
-        with (
-            patch("agilerl.algorithms.core.base.move_params_to_gpu") as mock_to_gpu,
-            patch("agilerl.algorithms.core.base.move_params_to_cpu") as mock_to_cpu,
-            pytest.warns(
-                UserWarning,
-                match="Memory efficient params is not yet compatible with DeepSpeed ZeRO-3",
-            ),
-            agent._memory_efficient_params(),
-        ):
-            pass
-
-        mock_to_gpu.assert_not_called()
-        mock_to_cpu.assert_not_called()
-
-    def test_default_path_moves_params_to_gpu_and_back_to_cpu(self):
-        agent = _make_llm_agent()
-        agent.zero_stage = None
-        agent.device = "cpu"
-        unwrapped = MagicMock()
-
-        with (
-            patch.object(agent, "_get_unwrapped_actor", return_value=unwrapped),
-            patch("agilerl.algorithms.core.base.move_params_to_gpu") as mock_to_gpu,
-            patch("agilerl.algorithms.core.base.move_params_to_cpu") as mock_to_cpu,
-        ):
-            with agent._memory_efficient_params():
-                mock_to_gpu.assert_called_once_with(unwrapped, "cpu")
-                mock_to_cpu.assert_not_called()
-
-        mock_to_cpu.assert_called_once_with(unwrapped)
 
 
 class TestLLMLoadAdapterWeights:

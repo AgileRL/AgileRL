@@ -554,64 +554,41 @@ class TestStandbyPatchSafeWithoutVllm:
         patch_vllm_standby_sleep_mode()
 
 
-class TestVllmConfigBnbWithoutWeightSharingWarning:
-    """Explicit weight_sharing=False + bnb + sleep hits the broken bnb reload."""
+class TestVllmConfigWeightSharingDeprecated:
+    """weight_sharing is deprecated/ignored in VLLMConfig.
 
-    def _warns_reload(self, **kwargs) -> bool:
-        from agilerl.utils.algo_utils import VLLMConfig
+    Colocated vLLM always shares (the LLM algorithm enforces it); VLLMConfig
+    retains the field for API compatibility but no longer validates it.
+    """
 
-        with pytest.warns(UserWarning) as record:
-            VLLMConfig(**kwargs)
-        return any("reload" in str(w.message) for w in record)
-
-    def test_bnb_sleep_explicit_no_sharing_warns(self):
-        assert self._warns_reload(
-            quantization="bitsandbytes", sleep_mode=True, weight_sharing=False
-        )
-
-    def test_bnb_sleep_auto_default_does_not_warn_reload(self):
-        # weight_sharing unset (None = auto): no reload warning, auto will share.
-        assert not self._warns_reload(quantization="bitsandbytes", sleep_mode=True)
-
-    def test_bnb_sleep_with_sharing_does_not_warn_reload(self):
-        assert not self._warns_reload(
-            quantization="bitsandbytes", sleep_mode=True, weight_sharing=True
-        )
-
-    def test_non_bnb_sleep_does_not_warn_reload(self):
-        assert not self._warns_reload(quantization="awq", sleep_mode=True)
-
-    def test_bnb_without_sleep_does_not_warn_reload(self):
-        from agilerl.utils.algo_utils import VLLMConfig
-
-        import warnings as _w
-
-        with _w.catch_warnings(record=True) as rec:
-            _w.simplefilter("always")
-            VLLMConfig(
-                quantization="bitsandbytes", sleep_mode=False, weight_sharing=False
-            )
-        assert not any("reload" in str(x.message) for x in rec)
-
-
-class TestVllmConfigWeightSharingValidation:
-    """Tri-state weight_sharing validation in VLLMConfig.__post_init__."""
-
-    def test_default_is_auto_none(self):
+    def test_default_is_none(self):
         from agilerl.utils.algo_utils import VLLMConfig
 
         assert VLLMConfig().weight_sharing is None
 
-    def test_explicit_true_allows_dense(self):
-        # weight_sharing=True no longer requires quantization='bitsandbytes':
-        # a dense (unquantized) base may be shared too.
+    def test_explicit_values_accepted_without_raising(self):
         from agilerl.utils.algo_utils import VLLMConfig
 
-        cfg = VLLMConfig(weight_sharing=True, sleep_mode=True)
-        assert cfg.weight_sharing is True
+        # No sleep_mode requirement, no quantization/reload validation: every
+        # value constructs and round-trips unchanged.
+        assert VLLMConfig(weight_sharing=True, sleep_mode=False).weight_sharing is True
+        assert VLLMConfig(weight_sharing=False).weight_sharing is False
+        assert (
+            VLLMConfig(
+                weight_sharing=True, quantization="bitsandbytes", sleep_mode=True
+            ).weight_sharing
+            is True
+        )
 
-    def test_explicit_true_requires_sleep_mode(self):
+    def test_no_reload_warning_emitted(self):
+        # The old bnb "cannot reload in-place" warning was removed.
+        import warnings as _w
+
         from agilerl.utils.algo_utils import VLLMConfig
 
-        with pytest.raises(ValueError, match="requires sleep_mode"):
-            VLLMConfig(weight_sharing=True, sleep_mode=False)
+        with _w.catch_warnings(record=True) as rec:
+            _w.simplefilter("always")
+            VLLMConfig(
+                quantization="bitsandbytes", sleep_mode=True, weight_sharing=False
+            )
+        assert not any("reload" in str(x.message) for x in rec)

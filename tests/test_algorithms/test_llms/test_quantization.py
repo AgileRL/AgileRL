@@ -12,8 +12,8 @@ Pure-Python tests: no real model load, no CUDA. Validates that:
   * `LLMAlgorithm` adds ``lm_head`` to ``llm_int8_skip_modules`` when a fused
     log-prob path is active.
   * `LLMAlgorithm` does NOT touch the skip list when no fused path is on.
-  * `VLLMConfig` defaults preserve backwards compatibility and the new
-    ``enable_lora`` / ``vllm_model_name_or_path`` fields are off by default.
+  * `VLLMConfig` defaults preserve backwards compatibility (e.g.
+    ``vllm_model_name_or_path`` is off by default).
 """
 
 from __future__ import annotations
@@ -38,7 +38,6 @@ pytest.importorskip(
 import torch  # noqa: E402
 from transformers import BitsAndBytesConfig  # noqa: E402
 
-from agilerl import HAS_VLLM  # noqa: E402
 from agilerl.utils.algo_utils import VLLMConfig  # noqa: E402
 from agilerl.utils.llm_utils import (  # noqa: E402
     adapt_lora_config_for_model,
@@ -295,20 +294,17 @@ class TestVLLMConfigDefaults:
         cfg = VLLMConfig()
         assert cfg.quantization is None
         assert cfg.vllm_model_name_or_path is None
-        assert cfg.enable_lora is True
         assert cfg.max_lora_rank == 16
         assert cfg.max_loras == 1
         assert cfg.kv_cache_dtype is None
 
-    def test_enable_lora_can_be_set(self):
+    def test_lora_fields_can_be_set(self):
         cfg = VLLMConfig(
-            enable_lora=True,
             max_lora_rank=32,
             max_loras=2,
             vllm_model_name_or_path="TheBloke/Llama-2-7B-AWQ",
             quantization="awq",
         )
-        assert cfg.enable_lora is True
         assert cfg.max_lora_rank == 32
         assert cfg.max_loras == 2
         assert cfg.vllm_model_name_or_path == "TheBloke/Llama-2-7B-AWQ"
@@ -458,14 +454,6 @@ class TestConfigureVllmKwargs:
         # Default kv_cache_dtype is None -> the builder omits the key entirely.
         assert "kv_cache_dtype" not in kwargs
 
-    def test_lora_disabled_omits_lora_keys(self):
-        cfg = VLLMConfig(enable_lora=False)
-        kwargs = build_vllm_llm_init_kwargs(
-            cfg, trainer_model_name_or_path="trainer/model", max_model_len=1024
-        )
-        assert "enable_lora" not in kwargs
-        assert "max_lora_rank" not in kwargs
-
     def test_kv_cache_dtype_injected_when_overridden(self):
         cfg = VLLMConfig(kv_cache_dtype="fp8")
         kwargs = build_vllm_llm_init_kwargs(
@@ -477,7 +465,6 @@ class TestConfigureVllmKwargs:
         cfg = VLLMConfig(
             quantization="awq",
             vllm_model_name_or_path="TheBloke/Llama-2-7B-AWQ",
-            enable_lora=True,
             max_lora_rank=32,
             max_loras=4,
         )
@@ -494,7 +481,7 @@ class TestConfigureVllmKwargs:
         assert kwargs["max_loras"] == 4
 
     def test_vllm_model_fallback_to_trainer_model(self):
-        cfg = VLLMConfig(enable_lora=True, quantization=None)
+        cfg = VLLMConfig(quantization=None)
         kwargs = build_vllm_llm_init_kwargs(
             cfg,
             trainer_model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
@@ -555,14 +542,14 @@ class TestOffloadColocatedTrainerFromGpu:
 
 
 class TestColocatedInitOrdering:
-    """HF trainer bnb load must run before vLLM when sleep mode is enabled."""
+    """Colocated vLLM always shares its base with the trainer (vLLM-first)."""
 
     @staticmethod
     def _stub_agent(**kwargs: object) -> LLMAlgorithm:
         # LLMAlgorithm is abstract (get_action/learn/test). Build a concrete
         # no-op subclass and bypass __init__ so we can unit-test the
-        # colocated-init ordering in isolation. ``object.__new__`` on the
-        # abstract class itself raises, so the concrete subclass is required.
+        # colocated-init flow in isolation. ``object.__new__`` on the abstract
+        # class itself raises, so the concrete subclass is required.
         class _ConcreteLLMAlgorithm(LLMAlgorithm):
             def get_action(self, *args: object, **kwargs: object) -> None:
                 raise NotImplementedError
@@ -577,91 +564,62 @@ class TestColocatedInitOrdering:
         agent.use_vllm = kwargs.get("use_vllm", True)
         agent.vllm_config = kwargs.get("vllm_config", VLLMConfig(sleep_mode=True))
         agent.quantization_config = kwargs.get("quantization_config")
-        agent._weight_sharing = kwargs.get("weight_sharing", False)
+        agent._weight_sharing = kwargs.get("weight_sharing", True)
         agent.accelerator = kwargs.get("accelerator")
         return agent
 
-    def test_trainer_quant_loads_before_vllm(self):
-        agent = self._stub_agent(
-            quantization_config=BitsAndBytesConfig(load_in_4bit=True),
-        )
+    def test_colocated_shares_vllm_first_then_sleeps(self):
+        # vLLM loads first, the trainer aliases its base, then vLLM sleeps;
+        # ``_initialize_actors`` receives the shared base built from vLLM.
+        agent = self._stub_agent()
+        shared = object()
         call_order: list[str] = []
-
-        def _actors(*_a, **_k):
-            call_order.append("actors")
-
-        def _offload():
-            call_order.append("offload")
 
         def _vllm():
             call_order.append("vllm")
 
+        def _build():
+            call_order.append("build")
+            return shared
+
+        def _actors(base, _add):
+            call_order.append("actors" if base is shared else "actors_wrong")
+
+        def _sleep():
+            call_order.append("sleep")
+
         with (
-            mock.patch.object(agent, "_initialize_actors", side_effect=_actors),
+            mock.patch.object(agent, "_configure_vllm", side_effect=_vllm),
             mock.patch.object(
-                agent,
-                "_offload_trainer_to_cpu_for_colocated_vllm",
-                side_effect=_offload,
+                agent, "_build_shared_base_from_vllm", side_effect=_build
             ),
-            mock.patch.object(agent, "_configure_vllm", side_effect=_vllm),
-        ):
-            agent._initialize_colocated_vllm_and_actors(None, True)
-
-        assert call_order == ["actors", "offload", "vllm"]
-
-    @pytest.mark.skipif(
-        not HAS_VLLM,
-        reason="exercises the real _offload_trainer_to_cpu_for_colocated_vllm, "
-        "which calls offload_colocated_trainer_from_gpu — imported into base only "
-        "under HAS_VLLM (vLLM is Linux-only).",
-    )
-    def test_trainer_quant_offloads_before_vllm_init(self):
-        agent = self._stub_agent(
-            quantization_config=BitsAndBytesConfig(load_in_4bit=True),
-        )
-        agent.actor = mock.MagicMock()
-        unwrapped = mock.MagicMock()
-        offload_before_vllm: list[bool] = []
-
-        def _offload(*_a, **_k):
-            offload_before_vllm.append(True)
-            return 0  # remaining CUDA bytes (the method compares this with > 0)
-
-        def _vllm():
-            assert offload_before_vllm, (
-                "trainer must be offloaded before vLLM init when using bnb"
-            )
-
-        with (
-            mock.patch.object(agent, "_initialize_actors"),
-            mock.patch.object(agent, "_get_unwrapped_actor", return_value=unwrapped),
-            mock.patch(
-                "agilerl.algorithms.core.base.offload_colocated_trainer_from_gpu",
-                side_effect=_offload,
-            ) as move_cpu,
-            mock.patch.object(agent, "_configure_vllm", side_effect=_vllm),
-        ):
-            agent._initialize_colocated_vllm_and_actors(None, True)
-
-        move_cpu.assert_called_once_with(unwrapped)
-
-    def test_no_trainer_quant_keeps_vllm_first(self):
-        agent = self._stub_agent(quantization_config=None)
-        call_order: list[str] = []
-
-        def _actors(*_a, **_k):
-            call_order.append("actors")
-
-        def _vllm():
-            call_order.append("vllm")
-
-        with (
             mock.patch.object(agent, "_initialize_actors", side_effect=_actors),
-            mock.patch.object(agent, "_configure_vllm", side_effect=_vllm),
+            mock.patch.object(agent, "_sleep_vllm_after_init", side_effect=_sleep),
         ):
             agent._initialize_colocated_vllm_and_actors(None, True)
 
-        assert call_order == ["vllm", "actors"]
+        assert call_order == ["vllm", "build", "actors", "sleep"]
+
+    def test_colocated_no_sleep_still_shares_but_skips_sleep(self):
+        agent = self._stub_agent(vllm_config=VLLMConfig(sleep_mode=False))
+        with (
+            mock.patch.object(agent, "_configure_vllm"),
+            mock.patch.object(
+                agent, "_build_shared_base_from_vllm", return_value=object()
+            ),
+            mock.patch.object(agent, "_initialize_actors") as actors,
+            mock.patch.object(agent, "_sleep_vllm_after_init") as sleep,
+        ):
+            agent._initialize_colocated_vllm_and_actors(None, True)
+        actors.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_colocated_rejects_user_supplied_base_model(self):
+        # The base is built from vLLM's loaded weights, so an in-memory
+        # actor_network cannot be shared.
+        agent = self._stub_agent()
+        with pytest.raises(ValueError, match="user-supplied base_model"):
+            agent._initialize_colocated_vllm_and_actors(mock.MagicMock(), True)
 
 
 class TestAdaptLoraConfigForClippableLinear:

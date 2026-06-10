@@ -1722,13 +1722,14 @@ def build_vllm_llm_init_kwargs(
         # private pool (useful for colocated trainer/rollout setups with a
         # tight GPU budget) at the cost of slightly slower per-step decode.
         kwargs["enforce_eager"] = vllm_config.enforce_eager
-    if getattr(vllm_config, "enable_lora", False):
-        kwargs["enable_lora"] = True
-        kwargs["max_lora_rank"] = resolve_vllm_max_lora_rank(
-            vllm_config.max_lora_rank,
-            lora_rank,
-        )
-        kwargs["max_loras"] = vllm_config.max_loras
+    # Colocated vLLM always serves LoRA: the trainer shares vLLM's base and syncs
+    # only the adapter per rollout.
+    kwargs["enable_lora"] = True
+    kwargs["max_lora_rank"] = resolve_vllm_max_lora_rank(
+        vllm_config.max_lora_rank,
+        lora_rank,
+    )
+    kwargs["max_loras"] = vllm_config.max_loras
     return kwargs
 
 

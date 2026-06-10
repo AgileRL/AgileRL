@@ -272,9 +272,13 @@ def generate_reinforce(
         )
         vllm_config = None
 
-    reinforce = REINFORCE(
-        actor_network=actor if not from_name else None,
-        model_name=pretrained_model_name_or_path if from_name else None,
+    # Colocated vLLM builds the trainer base from vLLM's loaded weights, so it
+    # cannot take an in-memory actor_network — construct from the model name
+    # whenever sharing (use_vllm) or when from_name is requested.
+    share_from_name = from_name or use_vllm
+    reinforce_kwargs = dict(
+        actor_network=actor if not share_from_name else None,
+        model_name=pretrained_model_name_or_path if share_from_name else None,
         lr=lr_use,
         pad_token_id=vocab_size - 1,
         pad_token="<pad>",
@@ -296,6 +300,17 @@ def generate_reinforce(
         # regardless of liger-kernel availability.
         use_liger_loss=False,
     )
+    if use_vllm:
+        # Colocated vLLM builds the trainer base FROM vLLM. These tests mock the
+        # vLLM engine (no real model to extract), so stand the dummy actor in for
+        # the shared base. Real zero-copy sharing is covered by the
+        # weight-sharing unit tests.
+        with patch.object(
+            REINFORCE, "_build_shared_base_from_vllm", return_value=actor
+        ):
+            reinforce = REINFORCE(**reinforce_kwargs)
+    else:
+        reinforce = REINFORCE(**reinforce_kwargs)
     return reinforce
 
 
@@ -357,24 +372,29 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        rf = REINFORCE(
-            actor_network=actor,
-            pad_token_id=99,
-            pad_token="<pad>",
-            lora_config=lora,
-            use_vllm=True,
-            vllm_config=VLLMConfig(
-                gpu_memory_utilization=0.2,
-                max_num_seqs=1,
-                sleep_mode=True,
-            ),
-            max_output_tokens=8,
-            max_model_len=32,
-            wrap=False,
-            gradient_checkpointing=False,
-            device="cpu",
-        )
-        # FIXME need to assert the instances are all set up correctly similar to test_grpo.py
+        # Colocated vLLM builds the trainer base FROM vLLM (mocked here): the
+        # dummy actor stands in for the shared base.
+        with patch.object(
+            REINFORCE, "_build_shared_base_from_vllm", return_value=actor
+        ):
+            rf = REINFORCE(
+                model_name="dummy/model",
+                actor_network=None,
+                pad_token_id=99,
+                pad_token="<pad>",
+                lora_config=lora,
+                use_vllm=True,
+                vllm_config=VLLMConfig(
+                    gpu_memory_utilization=0.2,
+                    max_num_seqs=1,
+                    sleep_mode=True,
+                ),
+                max_output_tokens=8,
+                max_model_len=32,
+                wrap=False,
+                gradient_checkpointing=False,
+                device="cpu",
+            )
         assert rf.use_vllm
         mock_instance.sleep.assert_called()
         rf.clean_up()
@@ -392,11 +412,15 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        with pytest.warns(
-            UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
+        with (
+            patch.object(REINFORCE, "_build_shared_base_from_vllm", return_value=actor),
+            pytest.warns(
+                UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
+            ),
         ):
             rf = REINFORCE(
-                actor_network=actor,
+                model_name="dummy/model",
+                actor_network=None,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,

@@ -401,9 +401,13 @@ def generate_grpo(
             lora_dropout=0.05,
         )
         vllm_config = None
-    grpo = GRPO(
-        actor_network=actor if not from_name else None,
-        model_name=pretrained_model_name_or_path if from_name else None,
+    # Colocated vLLM builds the trainer base from vLLM's loaded weights, so it
+    # cannot take an in-memory actor_network — construct from the model name
+    # whenever sharing (use_vllm) or when from_name is requested.
+    share_from_name = from_name or use_vllm
+    grpo_kwargs = dict(
+        actor_network=actor if not share_from_name else None,
+        model_name=pretrained_model_name_or_path if share_from_name else None,
         lr=1e-5,
         pad_token_id=vocab_size - 1,
         pad_token="<pad>",
@@ -424,6 +428,15 @@ def generate_grpo(
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
     )
+    if use_vllm:
+        # Colocated vLLM builds the trainer base FROM vLLM. These tests mock the
+        # vLLM engine (no real model to extract), so stand the dummy actor in for
+        # the shared base. Real zero-copy sharing is covered by the
+        # weight-sharing unit tests.
+        with patch.object(GRPO, "_build_shared_base_from_vllm", return_value=actor):
+            grpo = GRPO(**grpo_kwargs)
+    else:
+        grpo = GRPO(**grpo_kwargs)
     return grpo
 
 
@@ -628,11 +641,18 @@ class TestGRPOInit:
     ):
         mock_instance = make_mock_vllm_instance(vllm.LLM)
         MockLLM.return_value = mock_instance
-        with pytest.warns(
-            UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
+        actor = model_factory(TINY_LLM_FIXTURE_PATH)
+        # Colocated vLLM builds the trainer base FROM vLLM (mocked here): the
+        # tiny actor stands in for the shared base.
+        with (
+            patch.object(GRPO, "_build_shared_base_from_vllm", return_value=actor),
+            pytest.warns(
+                UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
+            ),
         ):
             grpo = GRPO(
-                actor_network=model_factory(TINY_LLM_FIXTURE_PATH),
+                model_name=TINY_LLM_FIXTURE_PATH,
+                actor_network=None,
                 pad_token_id=999,
                 pad_token="<pad>",
                 group_size=2,
@@ -802,6 +822,8 @@ class TestGRPOInit:
     ):
         mock_instance = make_mock_vllm_instance(vllm.LLM)
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        # Colocated vLLM no longer supports tensor parallelism (the in-process
+        # shared base assumes a single worker): TP>1 raises at construction.
         with (
             patch.object(
                 torch.distributed,
@@ -815,8 +837,9 @@ class TestGRPOInit:
             ),
             patch.object(vllm.LLM, "__init__", return_value=None),
             patch.object(vllm.LLM, "__new__", return_value=mock_instance),
+            pytest.raises(ValueError, match="tensor_parallel_size==1"),
         ):
-            grpo = GRPO(
+            GRPO(
                 actor_network=model_factory(pretrained_model_name_or_path),
                 pad_token_id=vocab_size - 1,
                 pad_token="<pad>",
@@ -837,8 +860,6 @@ class TestGRPOInit:
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 max_output_tokens=max_tokens,
             )
-            assert grpo.tp_group == "tp_group_calculated"
-        grpo.clean_up()
 
     @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
     @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
@@ -880,10 +901,7 @@ class TestGRPOInit:
             ),
             patch.object(vllm.LLM, "__init__", return_value=None),
             patch.object(vllm.LLM, "__new__", return_value=mock_instance),
-            pytest.raises(
-                ValueError,
-                match="Tensor parallel size 2 must be a multiple of the number of processes 1.",
-            ),
+            pytest.raises(ValueError, match="tensor_parallel_size==1"),
         ):
             GRPO(
                 actor_network=model_factory(pretrained_model_name_or_path),
@@ -939,7 +957,8 @@ class TestGRPOInit:
             ),
         ):
             GRPO(
-                actor_network=model_factory(pretrained_model_name_or_path),
+                model_name=pretrained_model_name_or_path,
+                actor_network=None,
                 pad_token_id=vocab_size - 1,
                 pad_token="<pad>",
                 device="cuda" if torch.cuda.is_available() else "cpu",
@@ -2417,7 +2436,6 @@ class TestGRPOMoveModelToVllm:
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        assert grpo.vllm_config.enable_lora
         grpo._sync_actor_to_vllm()
         assert grpo._vllm_lora_loaded
         adapter_dir = grpo._vllm_lora_staging_dir / "actor"
