@@ -221,6 +221,42 @@ class TestDummyVecEnvStep:
         _, _, done, _, _ = env.step(np.array([0]))
         assert done[0] is True or done[0] == True  # noqa: E712
 
+    def test_next_step_autoreset(self):
+        """The step after termination resets (gymnasium >= 1.0 convention)."""
+        env = DummyVecEnv(FakeGymEnv())
+        env.reset()
+        for _ in range(4):
+            _, _, done, _, _ = env.step(np.array([0]))
+            assert not done[0]
+        _, _, done, _, _ = env.step(np.array([0]))
+        assert done[0]
+
+        # Next step performs the reset instead of stepping the finished env:
+        # reset obs is all ones, a real step with action 0 would be all zeros.
+        obs, reward, done, trunc, info = env.step(np.array([0]))
+        np.testing.assert_array_equal(obs[0], np.ones(4, dtype=np.float32))
+        assert reward[0] == 0.0
+        assert not done[0]
+        assert not trunc[0]
+        assert "seed" in info  # reset info, not step info
+
+        # The new episode then continues normally
+        _, reward, done, _, info = env.step(np.array([0]))
+        assert reward[0] == 1.0
+        assert not done[0]
+        assert info["action_taken"] == 0
+
+    def test_reset_clears_pending_autoreset(self):
+        """An explicit reset must not be followed by a swallowed autoreset step."""
+        env = DummyVecEnv(FakeGymEnv())
+        env.reset()
+        for _ in range(5):
+            env.step(np.array([0]))
+        env.reset()
+        _, reward, _, _, info = env.step(np.array([0]))
+        assert reward[0] == 1.0
+        assert info["action_taken"] == 0
+
 
 class TestDummyVecEnvMisc:
     def test_render_delegates(self):
