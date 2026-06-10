@@ -13,6 +13,7 @@ otherwise every episode restarts from the same RNG state, which harms training.
 
 from __future__ import annotations
 
+import os
 import random
 
 import numpy as np
@@ -41,3 +42,7 @@ def seed_everything(seed: int, *, deterministic: bool = True) -> None:
     if deterministic:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        # Required for deterministic cuBLAS GEMMs; must be set before the first
+        # cuBLAS call (i.e. before training starts), which is why it lives here.
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        torch.use_deterministic_algorithms(True, warn_only=True)

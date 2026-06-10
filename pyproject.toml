@@ -14,7 +14,9 @@ dependencies = [
     "dill~=0.3.7",
     "fastrand~=1.3.0",
     "flatten_dict~=0.4.2",
-    "gymnasium[mujoco]~=1.0.0",
+    "gymnasium[mujoco,atari]~=1.0.0",
+    "ale-py~=0.10.1",
+    "opencv-python>=4.9",
     "google-cloud-storage~=2.5.0",
     "h5py~=3.15.0",
     "hydra-core~=1.3.2",
@@ -44,9 +46,13 @@ dependencies = [
     "datasets>=4.4.1",
     "envpool>=0.8.4",
     "imageio[ffmpeg]>=2.37.3",
+    "rliable>=1.2.0",
 ]
 
 [project.optional-dependencies]
+ray = [
+    "ray[default]>=2.3",
+]
 box2d = [
     "swig~=4.4.1; sys_platform != 'win32'",
     "gymnasium[box2d]~=1.0.0; sys_platform != 'win32'",
@@ -214,4 +220,4 @@ ignore = [
     "PIE790",        # unnecessary ...
     "PD011",         # .values -> .to_numpy()
 ]
-"{tests,benchmarking,demos,tutorials}/**" = ["ALL"]
+"{tests,benchmarking,demos,tutorials,hpo_improvements,hpo_improvements_deprecated}/**" = ["ALL"]

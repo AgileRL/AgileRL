@@ -1,0 +1,1240 @@
+"""Benchmark PPO across environment suites under different HPO regimes.
+
+Trains a fresh PPO agent (no HPO / AgileRL HPO / HPO improvements -- the regime
+is whatever the YAML's ``mutation`` block encodes) on each selected environment,
+logging to Weights & Biases, then pulls the run history back from W&B to produce
+per-environment and aggregate plots plus a rendered video of the best agent.
+
+Run directly from this folder, e.g.::
+
+    python benchmark.py --config configs/ppo_relu_no_hpo.yaml \
+        --project my_project --name run0 --seeds 1,2,3 --device cpu --envs all
+
+Pass ``--seeds`` (or a single ``--seed``) to train one ``(environment, seed)``
+run per seed sequentially; the per-environment over-seeds and cross-environment
+aggregate plots are then produced exactly as the Ray orchestrator does, so the
+sequential and parallel paths yield the same results without Ray. Any omitted
+argument is prompted for interactively. ``--config`` is interpreted relative to
+this script's directory.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import logging
+import os
+import sys
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+# Must be set before PyTorch's C++ extension is loaded (i.e. before `import torch`).
+# On MPS, some ops (e.g. aten::linalg_qr) are not yet implemented; this flag makes
+# them silently fall back to CPU rather than raising a NotImplementedError.
+# It is a no-op on CUDA and CPU devices.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+# Allow running as a plain script: make sibling modules importable.
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import gymnasium as gym  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import plotting  # noqa: E402
+import torch  # noqa: E402
+import yaml  # noqa: E402
+from registry import (  # noqa: E402
+    allowed_envs,
+    normalization_scores,
+    resolve_env_selection,
+)
+from reproducibility import seed_everything  # noqa: E402
+
+from agilerl.algorithms import DQN, PPO  # noqa: E402
+from agilerl.models.env import GymEnvSpec  # noqa: E402
+from agilerl.models.manifest import TrainingManifest  # noqa: E402
+from agilerl.training.trainer import LocalTrainer  # noqa: E402
+
+logger = logging.getLogger("hpo_benchmark")
+
+RESULTS_DIR = SCRIPT_DIR / "results"
+MAX_RENDER_STEPS = 3000
+
+# Filename of the rendered best-agent video, both on disk and on the W&B run.
+RENDER_FILENAME = "render.mp4"
+
+# Filename of the per-run training log, both on disk and on the W&B run.
+LOG_FILENAME = "train.log"
+
+
+def elite_filename(algo: str) -> str:
+    """Return the elite-checkpoint filename for *algo* (e.g. ``elite_PPO.pt``).
+
+    Centralised so the worker (which writes it), the W&B upload, and the
+    orchestrator (which downloads it) all agree on one name.
+    """
+    return f"elite_{algo}.pt"
+
+
+# --------------------------------------------------------------------------- #
+# EnvPool helpers
+# --------------------------------------------------------------------------- #
+def _make_envpool_env(env_id: str, num_envs: int, seed: int) -> Any:
+    """Return an EnvPool-backed vectorized Gymnasium environment.
+
+    EnvPool seeds at creation time; callers must **not** call
+    ``env.reset(seed=...)`` afterwards.
+
+    Works for both MuJoCo (PPO) and Atari (DQN) suites. MuJoCo v5 observations
+    are already flat 1-D vectors, so they are passed through
+    :class:`gymnasium.wrappers.vector.FlattenObservation`. Atari observations
+    are stacked 84x84 grayscale frames (shape ``(4, 84, 84)``) and must keep
+    their spatial structure for the CNN encoder, so flattening is skipped for
+    any environment whose single observation is more than 1-D.
+
+    :param env_id: EnvPool environment id (e.g. ``"Ant-v5"`` or ``"Pong-v5"``).
+    :type env_id: str
+    :param num_envs: Number of parallel environments.
+    :type num_envs: int
+    :param seed: Seed applied at creation time for reproducibility.
+    :type seed: int
+    :return: Vectorized EnvPool environment with Gymnasium API.
+    :rtype: Any
+    """
+    try:
+        import envpool
+    except ModuleNotFoundError as exc:
+        msg = (
+            "EnvPool is not installed. "
+            "Install it before running this benchmark, e.g. `uv add envpool`."
+        )
+        raise ImportError(msg) from exc
+
+    make_fn = (
+        envpool.make_gymnasium if hasattr(envpool, "make_gymnasium") else envpool.make
+    )
+    env = make_fn(env_id, num_envs=num_envs, seed=seed)
+    # Only flatten flat (vector) observations. Image observations such as
+    # Atari's (4, 84, 84) frame stack must keep their spatial structure so the
+    # CNN encoder can consume them.
+    single_space = getattr(env, "single_observation_space", env.observation_space)
+    if len(getattr(single_space, "shape", ())) <= 1:
+        env = gym.wrappers.vector.FlattenObservation(env)
+    return env
+
+
+class _EnvPoolLocalTrainer(LocalTrainer):
+    """``LocalTrainer`` that uses a pre-built EnvPool vector environment.
+
+    Based on the same pattern used in
+    ``hpo_improvements/panda_robotiq_push_cube/train.py``.
+    """
+
+    _prebuilt_env: Any = None
+
+    def _make_env(self) -> Any:
+        if self._prebuilt_env is not None:
+            return self._prebuilt_env
+        return super()._make_env()
+
+    @classmethod
+    def from_manifest_with_env(
+        cls,
+        manifest: dict[str, Any] | TrainingManifest,
+        vector_env: Any,
+        *,
+        device: str | torch.device = "cpu",
+    ) -> _EnvPoolLocalTrainer:
+        """Build a trainer from a manifest dict and a pre-built EnvPool env.
+
+        :param manifest: YAML manifest dict or validated ``TrainingManifest``.
+        :param vector_env: Pre-built (and already seeded) EnvPool environment.
+        :param device: Torch device string.
+        """
+        validated = (
+            TrainingManifest.get_validated(manifest, mode="python")
+            if not isinstance(manifest, TrainingManifest)
+            else manifest
+        )
+        env_data = {
+            k: v for k, v in dict(validated.environment).items() if v is not None
+        }
+        env_spec = GymEnvSpec(**env_data)
+        cls._prebuilt_env = vector_env
+        try:
+            return cls(
+                algorithm=validated.algorithm,
+                environment=env_spec,
+                training=validated.training,
+                mutation=validated.mutation,
+                tournament=validated.tournament_selection,
+                replay_buffer=validated.replay_buffer,
+                device=device,
+            )
+        finally:
+            cls._prebuilt_env = None
+
+
+# --------------------------------------------------------------------------- #
+# Input stage
+# --------------------------------------------------------------------------- #
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse CLI arguments. Missing values are prompted for interactively."""
+    p = argparse.ArgumentParser(description="AgileRL PPO HPO benchmark")
+    p.add_argument("--project", help="Weights & Biases project name")
+    p.add_argument("--name", help="Benchmark base name (used in run/folder names)")
+    p.add_argument("--config", help="Path to YAML config, relative to this script")
+    p.add_argument("--seed", type=int, help="Single global seed (if --seeds omitted)")
+    p.add_argument(
+        "--seeds",
+        default=None,
+        help="Comma/space separated seeds; each (env, seed) is run sequentially",
+    )
+    p.add_argument("--device", help="Torch device, e.g. 'cpu', 'cuda', or 'mps'")
+    p.add_argument(
+        "--envs",
+        help="Comma/space separated env names, or 'all'",
+    )
+    p.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Override training.max_steps (useful for quick checks)",
+    )
+    p.add_argument(
+        "--wandb-api-key",
+        default=None,
+        help="W&B API key (else WANDB_API_KEY env var is used)",
+    )
+    return p.parse_args(argv)
+
+
+def _prompt(value: str | None, message: str) -> str:
+    """Return ``value`` if set, else prompt the user."""
+    if value is not None and str(value) != "":
+        return str(value)
+    return input(message).strip()
+
+
+def _parse_seeds(args: argparse.Namespace) -> list[int]:
+    """Resolve the seed list from ``--seeds``, falling back to ``--seed`` / a prompt.
+
+    One ``(environment, seed)`` learning run is executed per seed, mirroring the
+    Ray orchestrator's grid so the sequential and parallel paths produce the same
+    per-environment over-seeds and aggregate plots.
+    """
+    if args.seeds:
+        return [int(s) for s in str(args.seeds).replace(",", " ").split()]
+    if args.seed is not None:
+        return [int(args.seed)]
+    raw = _prompt(None, "Seeds (space/comma separated, e.g. '1 2 3'): ")
+    return [int(s) for s in raw.replace(",", " ").split()]
+
+
+def resolve_device(device: str) -> str:
+    """Validate *device* and return a usable torch device string.
+
+    Checks that the requested backend is actually available at runtime and
+    warns (rather than crashes) when it is not, falling back to CPU.
+
+    * ``"cuda"`` — requires a CUDA-capable GPU (``torch.cuda.is_available()``).
+    * ``"mps"``  — requires Apple Silicon / AMD on macOS with PyTorch ≥ 2.0
+                   (``torch.backends.mps.is_available()``).
+    * ``"cpu"``  — always available.
+
+    :param device: Requested device string (case-insensitive).
+    :type device: str
+    :return: A valid torch device string (``"cpu"``, ``"cuda"``, or ``"mps"``).
+    :rtype: str
+    """
+    device = device.strip().lower()
+    if device.startswith("cuda"):
+        if not torch.cuda.is_available():
+            logger.warning("CUDA requested but not available — falling back to CPU.")
+            return "cpu"
+        return device  # preserve e.g. "cuda:1"
+    if device == "mps":
+        if (
+            not getattr(torch.backends, "mps", None)
+            or not torch.backends.mps.is_available()
+        ):
+            logger.warning(
+                "MPS requested but not available on this system — falling back to CPU. "
+                "MPS requires macOS 12.3+, Apple Silicon or AMD GPU, and PyTorch ≥ 2.0."
+            )
+            return "cpu"
+        return "mps"
+    if device != "cpu":
+        logger.warning("Unknown device '%s' — falling back to CPU.", device)
+        return "cpu"
+    return "cpu"
+
+
+def load_manifest_dict(config_path: Path) -> dict[str, Any]:
+    """Load a YAML manifest as a plain dict.
+
+    :param config_path: Path to the YAML config.
+    :type config_path: Path
+    :return: Parsed manifest dictionary.
+    :rtype: dict[str, Any]
+    """
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
+
+# --------------------------------------------------------------------------- #
+# Logging capture
+# --------------------------------------------------------------------------- #
+class _Tee:
+    """Write to multiple streams at once (console + file)."""
+
+    def __init__(self, *streams: Any) -> None:
+        self._streams = streams
+
+    def write(self, data: str) -> int:
+        for s in self._streams:
+            s.write(data)
+            s.flush()
+        return len(data)
+
+    def flush(self) -> None:
+        for s in self._streams:
+            s.flush()
+
+
+@contextmanager
+def tee_to_file(path: Path):
+    """Mirror stdout/stderr and root logging to ``path`` for the duration."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    orig_out, orig_err = sys.stdout, sys.stderr
+    file = open(path, "w")
+    file_handler = logging.StreamHandler(file)
+    file_handler.setLevel(logging.INFO)
+    root = logging.getLogger()
+    root.addHandler(file_handler)
+    try:
+        sys.stdout = _Tee(orig_out, file)
+        sys.stderr = _Tee(orig_err, file)
+        yield
+    finally:
+        sys.stdout, sys.stderr = orig_out, orig_err
+        root.removeHandler(file_handler)
+        file.close()
+
+
+# --------------------------------------------------------------------------- #
+# W&B history fetch
+# --------------------------------------------------------------------------- #
+def _find_wandb_run(project: str, run_name: str) -> Any:
+    """Locate a finished W&B run by display name.
+
+    :param project: W&B project name.
+    :param run_name: Display name of the run to fetch.
+    :return: A ``wandb.apis.public.Run`` or ``None`` if it cannot be found.
+    :rtype: Any
+    """
+    import wandb
+
+    api = wandb.Api()
+    entity = api.default_entity
+    path = f"{entity}/{project}" if entity else project
+
+    run = None
+    try:
+        runs = api.runs(path, filters={"displayName": run_name})
+        run = runs[0] if len(runs) else None
+    except Exception as exc:
+        logger.warning("W&B filter query failed (%s); scanning recent runs.", exc)
+
+    if run is None:
+        try:
+            run = next(
+                (r for r in api.runs(path, order="-created_at") if r.name == run_name),
+                None,
+            )
+        except Exception as exc:
+            logger.warning("W&B run scan failed: %s", exc)
+
+    if run is None:
+        logger.warning(
+            "Could not locate W&B run '%s' in project '%s'.", run_name, project
+        )
+    return run
+
+
+_TERMINAL_RUN_STATES = ("finished", "crashed", "failed", "killed")
+
+
+def _history_is_complete(run: Any, df: pd.DataFrame) -> bool:
+    """Return whether *df* holds the run's full history.
+
+    The final history point is flushed at ``wandb.finish()`` (e.g. the last
+    evaluation logged just before training returns), *separately* from the
+    points streamed during training. Right after finish the run already reports
+    a terminal state — and Ray marks its job SUCCEEDED — while ``scan_history``
+    has not yet ingested that final point, so an eager fetch silently drops it.
+
+    The authoritative target is the run **summary's** final ``train/global_step``:
+    the summary is synced at finish and is reliably present once the run is
+    terminal, *even while the history time-series is still being ingested*. We
+    therefore wait until the streamed history reaches that step.
+
+    ``lastHistoryStep`` is **not** used as the primary signal: it is itself
+    derived from ingested history, so it lags low in lockstep with the missing
+    point (reporting 2 when step 3 hasn't landed), which would let a truncated
+    history pass. It is only a fallback when no summary step is available.
+
+    :param run: A ``wandb.apis.public.Run``.
+    :param df: History streamed via ``scan_history`` so far.
+    :return: True if *df* reaches the run's final logged step (or completeness
+        cannot be verified for an already-terminal run).
+    """
+    if df.empty:
+        return False
+    # A still-running run will keep logging, so never accept early.
+    state = getattr(run, "state", None)
+    if state is not None and state not in _TERMINAL_RUN_STATES:
+        return False
+
+    # Primary signal: the summary's final global step (synced at finish).
+    summary = getattr(run, "summary", None)
+    target_step = None
+    if summary is not None:
+        try:
+            target_step = summary.get(plotting.GLOBAL_STEP_COL)
+        except Exception:
+            target_step = None
+    if target_step is not None and plotting.GLOBAL_STEP_COL in df.columns:
+        gs = df[plotting.GLOBAL_STEP_COL].dropna()
+        return not gs.empty and float(gs.max()) >= float(target_step)
+
+    # Fallback: server-side last-history-step index vs the fetched _step.
+    target = getattr(run, "lastHistoryStep", None)
+    if target is None or target < 0 or "_step" not in df.columns:
+        # Can't verify against a step target; accept what a terminal run gave us.
+        return True
+    last = df["_step"].dropna()
+    return not last.empty and int(last.max()) >= int(target)
+
+
+def fetch_wandb_history(
+    project: str,
+    run_name: str,
+    *,
+    max_wait: float = 180.0,
+    poll_interval: float = 5.0,
+) -> pd.DataFrame:
+    """Fetch the full logged history of a finished W&B run as a DataFrame.
+
+    Polls ``scan_history`` until it spans the run's authoritative last step (see
+    :func:`_history_is_complete`), guarding against the read-after-finish race
+    where the public history API has not yet caught up with ``wandb.finish()``
+    and returns a truncated history. The longest history seen is kept, so a slow
+    backend degrades to fewer points rather than to whatever the first poll
+    happened to return.
+
+    :param project: W&B project name.
+    :type project: str
+    :param run_name: Display name of the run to fetch.
+    :type run_name: str
+    :param max_wait: Seconds to keep polling for a complete history before
+        giving up and returning the most complete history seen.
+    :type max_wait: float
+    :param poll_interval: Seconds between polls.
+    :type poll_interval: float
+    :return: History dataframe (includes ``_runtime`` relative time), or empty.
+    :rtype: pandas.DataFrame
+    """
+    import time  # noqa: PLC0415
+
+    run = _find_wandb_run(project, run_name)
+    if run is None:
+        return pd.DataFrame()
+
+    deadline = time.monotonic() + max_wait
+    best = pd.DataFrame()
+    while True:
+        df = pd.DataFrame(list(run.scan_history()))
+        if len(df) > len(best):
+            best = df
+        if _history_is_complete(run, df):
+            return df
+        if time.monotonic() >= deadline:
+            summary = getattr(run, "summary", None)
+            target_step = summary.get(plotting.GLOBAL_STEP_COL) if summary else None
+            got_step = (
+                best[plotting.GLOBAL_STEP_COL].dropna().max()
+                if plotting.GLOBAL_STEP_COL in best.columns
+                and not best[plotting.GLOBAL_STEP_COL].dropna().empty
+                else "?"
+            )
+            logger.warning(
+                "W&B history for %s still incomplete after %.0fs (%d rows; "
+                "reached global_step %s of %s) — plotting with what is available.",
+                run_name,
+                max_wait,
+                len(best),
+                got_step,
+                target_step,
+            )
+            return best
+        time.sleep(poll_interval)
+        # Re-fetch so state / lastHistoryStep reflect server-side progress.
+        run = _find_wandb_run(project, run_name) or run
+
+
+def upload_run_files(
+    project: str, run_name: str, files: list[Path], root: Path
+) -> None:
+    """Attach local files to a finished W&B run so the driver can fetch them.
+
+    By the time a learning run returns from ``trainer.train(...)`` the W&B run is
+    already finished (its loggers are closed), so we cannot ``wandb.log`` more.
+    Instead we attach the artifacts to the existing run via the public API. Each
+    file is stored under its path relative to *root* (e.g. ``elite_PPO.pt``,
+    ``render.mp4``), the same names :func:`download_run_files` looks for.
+
+    This is what makes the Ray path work: the worker writes the checkpoint/render
+    to its (remote) node, uploads them here, and the orchestrator pulls them back
+    from W&B — the only channel shared between cluster and driver.
+
+    :param project: W&B project name.
+    :param run_name: Display name of the finished run to attach to.
+    :param files: Local files to upload (missing ones are skipped).
+    :param root: Directory the stored names are taken relative to.
+    """
+    files = [f for f in files if f.is_file()]
+    if not files:
+        return
+    run = _find_wandb_run(project, run_name)
+    if run is None:
+        logger.warning(
+            "No W&B run for %s; cannot upload %d file(s).", run_name, len(files)
+        )
+        return
+    for f in files:
+        try:
+            run.upload_file(str(f), root=str(root))
+            logger.info("Uploaded %s to W&B run %s", f.name, run_name)
+        except Exception:
+            logger.exception("Failed to upload %s to W&B run %s", f.name, run_name)
+
+
+def download_run_files(
+    project: str, run_name: str, dest_dir: Path, filenames: list[str]
+) -> None:
+    """Download named files from a finished W&B run into *dest_dir*.
+
+    Used by the parallel orchestrator to pull the elite checkpoint and render
+    MP4 that a remote Ray worker produced (and uploaded via
+    :func:`upload_run_files`) back into the local results tree. Files already
+    present locally are skipped, so the sequential path — where the worker wrote
+    them straight into *dest_dir* — does no redundant network round-trips.
+
+    :param project: W&B project name.
+    :param run_name: Display name of the finished run.
+    :param dest_dir: Local directory to download into.
+    :param filenames: Names of the run files to fetch (as stored on W&B).
+    """
+    missing = [n for n in filenames if not (dest_dir / n).is_file()]
+    if not missing:
+        return
+    run = _find_wandb_run(project, run_name)
+    if run is None:
+        return
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for name in missing:
+        try:
+            run.file(name).download(root=str(dest_dir), replace=True)
+            logger.info("Downloaded %s from W&B run %s", name, run_name)
+        except Exception:
+            logger.warning(
+                "W&B file '%s' not available for run %s (skipping).", name, run_name
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Rendering
+# --------------------------------------------------------------------------- #
+# Loaders for the elite checkpoint, keyed by algorithm name. Rendering is only
+# wired up for the algorithms with a registered environment suite (registry.py).
+_RENDER_LOADERS = {"PPO": PPO.load, "DQN": DQN.load}
+
+
+def _ale_render_id(env_id: str) -> str:
+    """Map an EnvPool Atari id to its Gymnasium ALE id (``Pong-v5`` -> ``ALE/Pong-v5``)."""
+    return env_id if env_id.startswith("ALE/") else f"ALE/{env_id}"
+
+
+def _make_atari_render_env(env_id: str) -> Any:
+    """Build a Gymnasium ALE env whose observations match the EnvPool training env.
+
+    EnvPool's Atari envs emit a 4-frame stack of 84x84 grayscale images (shape
+    ``(4, 84, 84)`` uint8) produced with frame-skip 4 and a random number of
+    initial no-ops (max 30). This reproduces that observation pipeline with
+    Gymnasium's :class:`~gymnasium.wrappers.AtariPreprocessing` and
+    :class:`~gymnasium.wrappers.FrameStackObservation` so the trained CNN sees
+    the same input format it trained on, while ``env.render()`` still returns the
+    full-colour ``(210, 160, 3)`` game frames for the MP4.
+
+    :param env_id: EnvPool Atari id (e.g. ``"Pong-v5"``).
+    :type env_id: str
+    :return: A Gymnasium env yielding ``(4, 84, 84)`` uint8 observations.
+    :rtype: Any
+    """
+    import ale_py  # noqa: F401  (importing registers the ALE/* namespace)
+
+    base = gym.make(
+        _ale_render_id(env_id),
+        render_mode="rgb_array",
+        frameskip=1,  # AtariPreprocessing applies the frame skip itself
+        repeat_action_probability=0.0,  # match EnvPool (no sticky actions)
+    )
+    env = gym.wrappers.AtariPreprocessing(
+        base,
+        noop_max=30,
+        frame_skip=4,
+        screen_size=84,
+        terminal_on_life_loss=False,
+        grayscale_obs=True,
+        scale_obs=False,
+    )
+    return gym.wrappers.FrameStackObservation(env, stack_size=4)
+
+
+def render_best_agent(
+    elite_path: Path,
+    env_name: str,
+    seed: int,
+    device: str,
+    out_path: Path,
+    algo: str,
+) -> None:
+    """Render one greedy episode of the saved elite agent to an MP4.
+
+    The render path is algorithm-aware: PPO agents play their (continuous)
+    MuJoCo env, while DQN agents play the Gymnasium ALE Atari env built by
+    :func:`_make_atari_render_env` and act with greedy (epsilon = 0) discrete
+    actions. Failures are logged but never raised, so a missing render backend
+    never aborts the benchmark.
+
+    :param elite_path: Path to the saved elite checkpoint.
+    :type elite_path: Path
+    :param env_name: Environment id (EnvPool/Gymnasium, e.g. ``"Ant-v5"`` or ``"Pong-v5"``).
+    :type env_name: str
+    :param seed: Seed for the render env's first reset.
+    :type seed: int
+    :param device: Torch device.
+    :type device: str
+    :param out_path: Destination .mp4 path.
+    :type out_path: Path
+    :param algo: Algorithm name (selects the checkpoint loader and env pipeline).
+    :type algo: str
+    """
+    is_atari = algo.upper() == "DQN"
+
+    # Headless MuJoCo rendering: export MUJOCO_GL=egl (GPU) or osmesa (CPU)
+    # before running. We do not set it here because MuJoCo selects its GL
+    # backend at import time and forcing EGL would break env creation on hosts
+    # without an EGL library.
+    #
+    # When MUJOCO_GL is unset and there is no DISPLAY, MuJoCo falls back to GLFW
+    # and aborts with a *native* error (libc++abi / SIGABRT) that Python cannot
+    # catch -- which would kill the whole benchmark. So we skip rendering unless
+    # a usable GL backend is available. ALE/Atari renders headless via rgb_array
+    # and needs neither DISPLAY nor MUJOCO_GL, so this guard is MuJoCo-only.
+    if not is_atari:
+        import os
+        import platform
+
+        # On macOS, MuJoCo renders via glfw (Quartz) and needs neither DISPLAY
+        # nor MUJOCO_GL.  On Linux without a display, glfw aborts at the C level
+        # (not catchable), so we require either DISPLAY or a headless backend.
+        on_macos = platform.system() == "Darwin"
+        if (
+            not on_macos
+            and not os.environ.get("MUJOCO_GL")
+            and not os.environ.get("DISPLAY")
+        ):
+            logger.warning(
+                "Skipping render for %s: no DISPLAY and MUJOCO_GL is unset. "
+                "Set MUJOCO_GL=egl (GPU) or MUJOCO_GL=osmesa (CPU) to enable video on Linux.",
+                env_name,
+            )
+            return
+
+    loader = _RENDER_LOADERS.get(algo.upper())
+    if loader is None:
+        logger.warning(
+            "Rendering not supported for algorithm '%s'; skipping %s.", algo, env_name
+        )
+        return
+
+    try:
+        import imageio
+
+        agent = loader(str(elite_path), device=device)
+        agent.set_training_mode(False)
+
+        if is_atari:
+            render_env = _make_atari_render_env(env_name)
+        else:
+            render_env = gym.wrappers.FlattenObservation(
+                gym.make(env_name, render_mode="rgb_array")
+            )
+
+        obs, _ = render_env.reset(seed=seed)
+        frames: list[np.ndarray] = []
+        done = False
+        steps = 0
+        while not done and steps < MAX_RENDER_STEPS:
+            frames.append(render_env.render())
+            if is_atari:
+                # Greedy discrete action; DQN.get_action defaults to epsilon = 0.
+                action = agent.get_action(np.expand_dims(obs, 0))
+                obs, _, term, trunc, _ = render_env.step(
+                    int(np.asarray(action).reshape(-1)[0])
+                )
+            else:
+                action = agent.get_action(np.expand_dims(obs, 0))[0]
+                obs, _, term, trunc, _ = render_env.step(np.asarray(action[0]))
+            done = bool(term) or bool(trunc)
+            steps += 1
+        render_env.close()
+
+        if frames:
+            imageio.mimsave(str(out_path), frames, fps=30)
+            logger.info("Saved render: %s (%d frames)", out_path, len(frames))
+    except Exception as exc:
+        logger.exception("Rendering failed for %s: %s", env_name, exc)
+
+
+# --------------------------------------------------------------------------- #
+# W&B fetch + plotting (shared with the Ray orchestrator)
+# --------------------------------------------------------------------------- #
+def fetch_and_plot(
+    *,
+    project: str,
+    run_name: str,
+    algo: str,
+    env_name: str,
+    pop_size: int,
+    env_dir: Path,
+    hp_names: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Pull a finished W&B run, write the CSV, plot, and return the curve.
+
+    This is the read-only, network-and-plot half of a learning run. It is shared
+    by the local sequential benchmark (:func:`run_environment`) and the Ray
+    orchestrator so both produce byte-for-byte identical plots and aggregate
+    curves. It needs only W&B and the normalization registry — never the
+    cluster-side training artifacts.
+
+    :param project: W&B project name.
+    :param run_name: Display name of the finished W&B run to fetch.
+    :param algo: Algorithm name (used to look up normalization scores).
+    :param env_name: Environment id.
+    :param pop_size: Population size (per-agent step normalization for the x-axis).
+    :param env_dir: Output directory for this run's CSV and plots.
+    :param hp_names: Optional hyperparameter names for the mutation-schedule plot.
+    :return: ``(x, best_fitness, normalized_fitness)`` — best fitness feeds the
+        per-environment over-seeds plot, normalized fitness the aggregate. None
+        if there is no plottable history.
+    :rtype: tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray] | None
+    """
+    env_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pull logged data back from W&B for plotting.
+    history = fetch_wandb_history(project, run_name)
+    if history.empty:
+        logger.warning("No W&B history for %s; skipping plots.", env_name)
+        return None
+    history.to_csv(env_dir / "wandb_history.csv", index=False)
+
+    # Pull the elite checkpoint and render back from W&B. For the sequential
+    # path these already sit in env_dir (skipped); for the Ray path they were
+    # produced on a remote worker and this is how they reach the driver.
+    download_run_files(
+        project,
+        run_name,
+        env_dir,
+        [elite_filename(algo), RENDER_FILENAME, LOG_FILENAME],
+    )
+
+    scores = normalization_scores(algo, env_name)
+    plotting.plot_fitness(
+        history, env_name, scores, pop_size, str(env_dir / "fitness.png")
+    )
+    plotting.plot_mutation_schedule(
+        history,
+        env_name,
+        pop_size,
+        str(env_dir / "mutation_schedule.png"),
+        hp_names=hp_names,
+    )
+
+    # Build the per-env normalized curve for the aggregate plot.
+    data = history.dropna(
+        subset=[plotting.GLOBAL_STEP_COL, plotting.BEST_FITNESS_COL]
+    ).sort_values(plotting.GLOBAL_STEP_COL)
+    if data.empty:
+        return None
+    x = data[plotting.GLOBAL_STEP_COL].to_numpy(dtype=float) / max(pop_size, 1)
+    best = data[plotting.BEST_FITNESS_COL].to_numpy(dtype=float)
+    y = np.array([scores.normalize(f) for f in best])
+    return x, best, y
+
+
+def plot_seed_aggregates(
+    curves: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]],
+    bench_dir: Path,
+    algo_label: str,
+) -> None:
+    """Draw per-env over-seeds plots and the cross-env aggregate from seed curves.
+
+    Shared by the sequential benchmark (:func:`main`) and the Ray orchestrator so
+    both reduce each environment's seeds to one IQM curve (with a
+    stratified-bootstrap CI) the exact same way, then feed those into the
+    aggregate normalized-fitness plot and the performance profile.
+
+    :param curves: Mapping env_name -> list of ``(x, best_fitness,
+        normalized_fitness)``, one entry per finished seed.
+    :param bench_dir: Benchmark output directory (plots are written under it).
+    :param algo_label: Display label for the algorithm + HPO method.
+    """
+    env_curves: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for env_name, seed_curves in curves.items():
+        out_path = bench_dir / env_name / "fitness_over_seeds.png"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        seed_stack = plotting.plot_fitness_over_seeds(
+            seed_curves, env_name, str(out_path), algo_label=algo_label
+        )
+        if seed_stack is not None:
+            env_curves[env_name] = seed_stack
+            logger.info(
+                "Saved over-seeds plot for %s (%d seeds).", env_name, len(seed_curves)
+            )
+
+    if not env_curves:
+        logger.warning("No run produced plottable data; skipping aggregate.")
+        return
+    plotting.plot_aggregate(
+        env_curves,
+        str(bench_dir / "aggregate_normalized_fitness.png"),
+        algo_label=algo_label,
+    )
+    plotting.plot_performance_profile(
+        env_curves,
+        str(bench_dir / "performance_profile.png"),
+        algo_label=algo_label,
+    )
+    logger.info("Saved aggregate plot across %d environments.", len(env_curves))
+
+
+# --------------------------------------------------------------------------- #
+# Training core (one learning run)
+# --------------------------------------------------------------------------- #
+def _silence_wandb_service_teardown() -> None:
+    """Make wandb's service teardown tolerant of socket errors (non-fatal).
+
+    On Python 3.13, wandb's asyncio-based service teardown can raise
+    ``BrokenPipeError`` from ``StreamWriter.wait_closed()`` when the run is
+    finished and the service socket is closed -- *after* the run history has
+    already been logged (a known CPython 3.13 asyncio ``wait_closed`` issue).
+    That error otherwise propagates out of ``trainer.train()`` and fails the
+    whole run even though training and logging succeeded.
+
+    We cannot dodge it by pinning an older wandb: the legacy (non-asyncio)
+    service was removed in wandb 0.21.0, while support for the new 86-char
+    ``wandb_v1_`` API keys only arrived in 0.22.3 -- so every key-compatible
+    version uses the asyncio service. Instead we wrap the teardown entry point
+    to log-and-swallow any teardown-time error. Idempotent; a no-op if the
+    internal class is absent (older/newer wandb layouts).
+
+    Two distinct failures are covered:
+
+    * The Python 3.13 ``BrokenPipeError`` on the first teardown.
+    * ``teardown()`` may only run once and raises ``AssertionError`` on a second
+      call. wandb invokes it both at run finalization and via an ``atexit`` hook
+      (``teardown_atexit``), so after the first call swallows a ``BrokenPipeError``
+      the ``atexit`` call would otherwise raise "Already torn down" and fail the
+      run *after* training, checkpointing and uploads have all succeeded. We
+      short-circuit when already torn down and swallow every teardown exception.
+    """
+    try:
+        from wandb.sdk.lib.service import service_connection
+    except Exception:
+        return
+
+    cls = getattr(service_connection, "ServiceConnection", None)
+    orig = getattr(cls, "teardown", None)
+    if cls is None or orig is None or getattr(orig, "_hpo_wrapped", False):
+        return
+
+    def _safe_teardown(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # A second teardown (e.g. the atexit hook after an explicit finish)
+        # would raise AssertionError("Already torn down."); skip it quietly.
+        if getattr(self, "_torn_down", False):
+            return None
+        try:
+            return orig(self, *args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - teardown errors are non-fatal here
+            logger.warning("Suppressed wandb service teardown error: %s", exc)
+            return None
+
+    _safe_teardown._hpo_wrapped = True  # type: ignore[attr-defined]
+    cls.teardown = _safe_teardown
+
+
+def _sync_offline_wandb_run(
+    wandb_dir: Path,
+    *,
+    wandb_api_key: str | None,
+    retries: int = 5,
+    timeout: int = 300,
+) -> bool:
+    """Upload a finished *offline* W&B run to the server synchronously.
+
+    With ``WANDB_MODE=offline`` the run's full history is written durably to
+    ``wandb_dir/wandb/`` during training, independent of the live service
+    socket. ``wandb sync`` then uploads that on-disk run in one synchronous,
+    retriable transfer, so the complete history reaches W&B even when the live
+    async upload would have dropped it (e.g. the Python 3.13 asyncio teardown
+    ``BrokenPipeError`` at ``wandb.finish()`` aborting the history-backlog drain).
+
+    :param wandb_dir: The ``WANDB_DIR`` used for the run; its ``wandb/`` subdir
+        holds the ``offline-run-*`` directory (and a ``latest-run`` symlink).
+    :param wandb_api_key: API key for the upload (else ``WANDB_API_KEY`` env).
+    :param retries: Attempts on transient failure (exponential backoff).
+    :param timeout: Per-attempt timeout in seconds.
+    :return: True if the sync succeeded.
+    :rtype: bool
+    """
+    import subprocess  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    runs_root = wandb_dir / "wandb"
+    target = runs_root / "latest-run"
+    if not target.exists():
+        # Fall back to the newest run dir if the convenience symlink is absent.
+        candidates = sorted(runs_root.glob("*run-*"))
+        if not candidates:
+            logger.warning("No offline W&B run found under %s to sync.", runs_root)
+            return False
+        target = candidates[-1]
+
+    # The sync subprocess must reach the server, so it runs without the offline
+    # WANDB_MODE this process set for training.
+    env = dict(os.environ)
+    env.pop("WANDB_MODE", None)
+    if wandb_api_key:
+        env["WANDB_API_KEY"] = wandb_api_key
+
+    for attempt in range(1, retries + 1):
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "wandb", "sync", str(target)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            if result.returncode == 0:
+                logger.info("Synced offline W&B run %s to the server.", target.name)
+                return True
+            logger.warning(
+                "wandb sync attempt %d/%d failed (rc=%d): %s",
+                attempt,
+                retries,
+                result.returncode,
+                (result.stderr or result.stdout or "")[-500:],
+            )
+        except Exception as exc:  # noqa: BLE001 - retry transient sync failures
+            logger.warning(
+                "wandb sync attempt %d/%d errored: %s", attempt, retries, exc
+            )
+        time.sleep(min(2**attempt, 30))
+
+    logger.error(
+        "Failed to sync offline W&B run %s after %d attempts.", target, retries
+    )
+    return False
+
+
+def run_training(
+    *,
+    base_manifest: dict[str, Any],
+    env_name: str,
+    algo: str,
+    seed: int,
+    device: str,
+    project: str,
+    run_name: str,
+    out_dir: Path,
+    wandb_api_key: str | None,
+    render: bool = True,
+) -> dict[str, Any]:
+    """Train a fresh agent for one (environment, seed), checkpoint and render.
+
+    This is the compute-heavy half of a learning run: it builds the EnvPool
+    environment, trains the population (with or without HPO, per the manifest),
+    saves the best agent, and optionally renders it. It deliberately does **not**
+    fetch W&B history or plot — that is the caller's job (see
+    :func:`fetch_and_plot`). The Ray entrypoint (``ray_code/worker.py``) wraps
+    this function in a remote task; the sequential benchmark calls it directly.
+
+    :param base_manifest: Parsed YAML manifest (will be deep-copied).
+    :param env_name: Gymnasium environment id (overrides the manifest's env name).
+    :param algo: Algorithm name (used only for the checkpoint filename).
+    :param seed: Global seed for reproducibility.
+    :param device: Torch device string (``cpu``/``cuda``/``mps``).
+    :param project: W&B project name.
+    :param run_name: W&B run display name.
+    :param out_dir: Directory for ``elite_{algo}.pt``, ``train.log`` and the render.
+    :param wandb_api_key: W&B API key (else ``WANDB_API_KEY`` env var is used).
+    :param render: Whether to render the best agent to an MP4.
+    :return: ``{"run_name", "pop_size", "hp_names", "elite_path"}``.
+    :rtype: dict[str, Any]
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Guard against wandb's Python 3.13 asyncio teardown raising a (harmless)
+    # BrokenPipeError that would otherwise fail this run after logging succeeds.
+    _silence_wandb_service_teardown()
+
+    manifest = copy.deepcopy(base_manifest)
+    manifest["environment"]["name"] = env_name
+    pop_size = int(manifest.get("training", {}).get("pop_size", 1) or 1)
+
+    # Fresh, reproducible agent. EnvPool is seeded at creation; do not call
+    # env.reset(seed=...) afterwards.
+    seed_everything(seed)
+    num_envs = int(manifest.get("environment", {}).get("num_envs", 1) or 1)
+    envpool_env = _make_envpool_env(env_name, num_envs, seed)
+    trainer = _EnvPoolLocalTrainer.from_manifest_with_env(
+        manifest, envpool_env, device=device
+    )
+
+    elite_path = out_dir / elite_filename(algo)
+    log_path = out_dir / LOG_FILENAME
+
+    # Log W&B *offline*: the full run history is written durably to disk during
+    # training and uploaded afterwards in one synchronous, retried `wandb sync`
+    # (see _sync_offline_wandb_run). This is the actual fix for the missing-history
+    # runs -- it removes the dependency on the live wandb service socket, whose
+    # Python 3.13 asyncio teardown can BrokenPipe at finish and abort the drain of
+    # the not-yet-uploaded history backlog, leaving a run on W&B with a summary but
+    # no history at all. WANDB_DIR pins the offline run dir to a known location so
+    # we know what to sync.
+    os.environ["WANDB_DIR"] = str(out_dir)
+    os.environ["WANDB_MODE"] = "offline"
+
+    logger.info("=== Training %s on %s (run '%s') ===", algo, env_name, run_name)
+    with tee_to_file(log_path):
+        population, _ = trainer.train(
+            wb=True,
+            wandb_api_key=wandb_api_key,
+            wandb_kwargs={"project": project, "addl_args": {"name": run_name}},
+            verbose=True,
+        )
+
+    # Save the best agent of the final population (works with or without HPO).
+    def _last_fitness(agent: Any) -> float:
+        fit = getattr(agent, "fitness", None)
+        return fit[-1] if fit else float("-inf")
+
+    best_agent = max(population, key=_last_fitness)
+    best_agent.save_checkpoint(str(elite_path))
+    logger.info("Saved best agent: %s", elite_path)
+
+    try:
+        hp_names = list(best_agent.registry.hp_config.names())
+    except Exception:
+        hp_names = None
+
+    # Close the (async) training env before spinning up a render env.
+    try:
+        trainer.env.close()
+    except Exception:
+        pass
+
+    render_path = out_dir / RENDER_FILENAME
+    if render:
+        render_best_agent(elite_path, env_name, seed, device, render_path, algo)
+
+    # Upload the offline run (full history + summary + console) to W&B as a
+    # synchronous, retried transfer. After this the run exists on the server with
+    # its complete history, so it is both fetchable and viewable on W&B. Done
+    # before upload_run_files so the run exists when the artifacts are attached.
+    _sync_offline_wandb_run(out_dir, wandb_api_key=wandb_api_key)
+
+    # Attach the elite checkpoint, render and training log to the finished W&B
+    # run so the orchestrator (which may be on a different machine than this
+    # worker) can pull them back via :func:`download_run_files`. The log is
+    # complete here: the tee_to_file block has already exited.
+    artifacts = [elite_path, log_path]
+    if render and render_path.is_file():
+        artifacts.append(render_path)
+    upload_run_files(project, run_name, artifacts, root=out_dir)
+
+    return {
+        "run_name": run_name,
+        "pop_size": pop_size,
+        "hp_names": hp_names,
+        "elite_path": str(elite_path),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Per-environment run
+# --------------------------------------------------------------------------- #
+def run_environment(
+    *,
+    base_manifest: dict[str, Any],
+    env_name: str,
+    algo: str,
+    seed: int,
+    device: str,
+    project: str,
+    base_name: str,
+    stamp: str,
+    bench_dir: Path,
+    wandb_api_key: str | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Train, log, fetch, render and plot for a single environment.
+
+    The training/checkpoint/render half is :func:`run_training` (also wrapped as
+    a Ray task by ``ray_code/worker.py``); the W&B-fetch + plot half is
+    :func:`fetch_and_plot`. Both halves are reused by the Ray orchestrator,
+    keeping a single source of truth.
+
+    :return: ``(x, best_fitness, normalized_fitness)`` for the plots, or None on
+        failure.
+    :rtype: tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray] | None
+    """
+    env_dir = bench_dir / env_name / f"s{seed}"
+    run_name = f"{base_name}-{algo}-{env_name}-s{seed}-{stamp}"
+
+    result = run_training(
+        base_manifest=base_manifest,
+        env_name=env_name,
+        algo=algo,
+        seed=seed,
+        device=device,
+        project=project,
+        run_name=run_name,
+        out_dir=env_dir,
+        wandb_api_key=wandb_api_key,
+        render=True,
+    )
+
+    return fetch_and_plot(
+        project=project,
+        run_name=run_name,
+        algo=algo,
+        env_name=env_name,
+        pop_size=result["pop_size"],
+        env_dir=env_dir,
+        hp_names=result["hp_names"],
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Entry point
+# --------------------------------------------------------------------------- #
+def main(argv: list[str] | None = None) -> None:
+    """Run the benchmark end to end."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    args = parse_args(argv)
+
+    project = _prompt(args.project, "W&B project name: ")
+    base_name = _prompt(args.name, "Benchmark run name: ")
+    config_rel = _prompt(args.config, "Config path (relative to script): ")
+    config_path = (SCRIPT_DIR / config_rel).resolve()
+    if not config_path.is_file():
+        msg = f"Config not found: {config_path}"
+        raise FileNotFoundError(msg)
+
+    base_manifest = load_manifest_dict(config_path)
+    algo = base_manifest["algorithm"]["name"]
+    if args.max_steps is not None:
+        training = base_manifest.setdefault("training", {})
+        training["max_steps"] = args.max_steps
+        # Keep evo_steps valid (manifest requires evo_steps <= max_steps).
+        evo = training.get("evo_steps")
+        if evo is not None and evo > args.max_steps:
+            training["evo_steps"] = args.max_steps
+
+    seeds = _parse_seeds(args)
+    device = resolve_device(_prompt(args.device, "Device (e.g. cpu/cuda/mps): "))
+
+    valid = allowed_envs(algo)
+    print(f"\nAlgorithm '{algo}'. Permitted environments:")
+    for name in valid:
+        print(f"  - {name}")
+    print("  - all")
+    raw = _prompt(
+        args.envs, "\nEnvironments to run (space/comma separated, or 'all'): "
+    )
+    selection = list(raw.replace(",", " ").split())
+    env_names = resolve_env_selection(algo, selection)
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    bench_dir = RESULTS_DIR / f"{base_name}-{algo}-{stamp}"
+    bench_dir.mkdir(parents=True, exist_ok=True)
+
+    # Persist the exact config used, plus seed/device/selection metadata.
+    saved = copy.deepcopy(base_manifest)
+    saved["benchmark"] = {
+        "seeds": seeds,
+        "device": device,
+        "project": project,
+        "name": base_name,
+        "datetime": stamp,
+        "environments": env_names,
+    }
+    with open(bench_dir / "config.yaml", "w") as f:
+        yaml.safe_dump(saved, f, sort_keys=False)
+
+    logger.info("Benchmark dir: %s", bench_dir)
+    logger.info("Environments: %s | seeds: %s", env_names, seeds)
+
+    # env -> one (x, best_fitness, normalized_fitness) per finished seed. Same
+    # shape the Ray orchestrator collects, so plot_seed_aggregates reduces seeds
+    # to IQM curves identically on both paths.
+    curves: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
+    for env_name in env_names:
+        for seed in seeds:
+            try:
+                result = run_environment(
+                    base_manifest=base_manifest,
+                    env_name=env_name,
+                    algo=algo,
+                    seed=seed,
+                    device=device,
+                    project=project,
+                    base_name=base_name,
+                    stamp=stamp,
+                    bench_dir=bench_dir,
+                    wandb_api_key=args.wandb_api_key,
+                )
+                if result is not None:
+                    curves.setdefault(env_name, []).append(result)
+            except Exception as exc:  # noqa: PERF203
+                logger.exception(
+                    "Environment %s (seed %d) failed: %s", env_name, seed, exc
+                )
+
+    if curves:
+        plot_seed_aggregates(curves, bench_dir, f"{algo.upper()} ({base_name})")
+    else:
+        logger.warning("No environment produced plottable data.")
+
+
+if __name__ == "__main__":
+    main()

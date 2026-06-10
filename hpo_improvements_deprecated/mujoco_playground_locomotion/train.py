@@ -16,13 +16,13 @@ from typing import Any
 
 import torch
 from accelerate import Accelerator
+from hpo_improvements.mujoco_playground_locomotion.env_wrapper import (
+    BatchedPlaygroundVectorEnv,
+)
 
 from agilerl.models.env import GymEnvSpec
 from agilerl.models.manifest import TrainingManifest
 from agilerl.training.trainer import LocalTrainer
-from hpo_improvements.mujoco_playground_locomotion.env_wrapper import (
-    BatchedPlaygroundVectorEnv,
-)
 
 logging.basicConfig(
     level=getattr(

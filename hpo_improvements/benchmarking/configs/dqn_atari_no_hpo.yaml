@@ -1,0 +1,123 @@
+---
+# DQN with NO HPO (single agent, never mutated) on the Atari 2600 suite.
+#
+# Hyperparameters from "Human-level control through deep reinforcement learning"
+# (Mnih et al., 2015), Extended Data Table 1 -- the list of hyperparameters
+# shared across all 49 games. Mapping notes (paper -> AgileRL):
+#
+#   minibatch size = 32                       -> batch_size = 32
+#   replay memory size = 1,000,000            -> replay_buffer.max_size = 100_000 (see note)
+#   agent history length = 4                  -> EnvPool Atari frame stack (default 4)
+#   action repeat = 4                         -> EnvPool Atari frame skip (default 4)
+#   update frequency = 4                      -> learn_step = 4
+#   discount factor = 0.99                    -> gamma = 0.99
+#   learning rate = 0.00025                   -> lr = 0.00025
+#   initial exploration = 1.0                 -> eps_start = 1.0
+#   final exploration = 0.1                   -> eps_end = 0.1
+#   final exploration frame = 1,000,000       -> eps_decay (see note below)
+#   replay start size = 50,000                -> learning_delay = 50_000
+#   no-op max = 30                            -> EnvPool Atari default (noop_max=30)
+#   target network update freq = 10,000       -> tau = 1 / 10,000 = 0.0001 (see note)
+#
+# Notes:
+#   * The paper uses RMSProp with *hard* target-network updates every 10,000
+#     parameter updates. AgileRL's DQN has no hard-sync knob: it uses Adam with a
+#     *soft* (Polyak) update `target <- tau * online + (1 - tau) * target` applied
+#     once per parameter update. A hard sync every N updates is approximated by a
+#     soft update with tau = 1 / N, so the paper's 10,000 maps to tau = 0.0001.
+#   * The paper anneals epsilon *linearly* from 1.0 to 0.1 over the first 1,000,000
+#     frames. AgileRL decays epsilon *multiplicatively* once per `num_envs` steps
+#     (eps <- max(eps_end, eps * eps_decay)). With num_envs = 8 there are
+#     1,000,000 / 8 = 125,000 decay events over the first 1M steps, so
+#     eps_decay = 0.1 ** (1 / 125000) ~= 0.99998 brings epsilon to ~0.1 by then.
+#   * Rewards are NOT clipped (EnvPool reward_clip defaults to False) so that the
+#     logged episodic return is the true game score, comparable to the human /
+#     random baselines in registry.py. The paper clips training rewards to [-1, 1].
+#   * Replay buffer is 100,000 transitions, not the paper's 1,000,000. AgileRL
+#     allocates the buffer on the training device and stores full 4-frame stacks
+#     for both obs and next_obs (no frame sharing), so 1M transitions need ~53 GiB
+#     of GPU memory (26.29 GiB per (1e6, 4, 84, 84) uint8 field). 100k fits a
+#     typical GPU (~5 GiB) and is a common DQN buffer size.
+#   * The environment `name` here is a placeholder; the benchmark script overrides
+#     it per selected Atari environment (EnvPool ids such as Pong-v5, Breakout-v5).
+#   * max_steps = 12,500,000 agent steps ~= 50,000,000 emulator frames at action
+#     repeat 4, matching the paper's training budget. Use --max-steps for quick
+#     checks.
+
+algorithm:
+    name: DQN
+    batch_size: 32
+    lr: 0.00025
+    learn_step: 4
+    gamma: 0.99
+    tau: 0.0001  # target network update frequency 10,000 -> Polyak tau = 1/10000
+    double: true
+    cudagraphs: true
+
+environment:
+    name: Pong-v5
+    num_envs: 8
+
+network:
+    # Nature DQN convolutional architecture: conv(32, 8x8, /4) -> conv(64, 4x4, /2)
+    # -> conv(64, 3x3, /1) -> FC(512) -> output. AgileRL's EvolvableCNN projects the
+    # flattened conv features to `latent_dim` (the FC-512 layer) and then applies the
+    # head MLP. The head must contain at least one hidden layer, so the closest
+    # faithful structure is latent_dim 512 + a single 512-unit head.
+    # The min/max bounds bracket the fixed sizes only to satisfy manifest
+    # validation; with no `mutation` block nothing is ever mutated.
+    latent_dim: 512
+    min_latent_dim: 256
+    max_latent_dim: 1024
+    arch: cnn
+    encoder_config:
+        channel_size:
+            - 32
+            - 64
+            - 64
+        kernel_size:
+            - 8
+            - 4
+            - 3
+        stride_size:
+            - 4
+            - 2
+            - 1
+        activation: ReLU
+        layer_norm: false
+        init_layers: true
+        min_channel_size: 32
+        max_channel_size: 256
+    head_config:
+        hidden_size:
+            - 512
+        activation: ReLU
+        output_activation:
+        layer_norm: false
+        init_layers: true
+        min_hidden_layers: 1
+        max_hidden_layers: 3
+        min_mlp_nodes: 128
+        max_mlp_nodes: 1024
+
+replay_buffer:
+    # 100,000 (not the paper's 1,000,000): AgileRL keeps the buffer on the
+    # training device and stores full 4-frame stacks for obs and next_obs, so 1M
+    # would need ~53 GiB of GPU memory. See the note in the header.
+    max_size: 100_000
+
+# No `mutation` or `tournament_selection` blocks => no HPO: a single agent is
+# trained and never mutated or selected. Adding those blocks (with pop_size > 1)
+# switches this same script into an HPO regime (see dqn_atari_hpo.yaml).
+
+training:
+    max_steps: 12_500_000
+    target_score:
+    pop_size: 1
+    evo_steps: 250_000
+    eval_steps:
+    eval_loop: 1
+    learning_delay: 50_000
+    eps_start: 1.0
+    eps_end: 0.1
+    eps_decay: 0.99998

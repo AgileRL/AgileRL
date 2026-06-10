@@ -7,7 +7,6 @@ import jax
 import numpy as np
 import pytest
 import torch
-
 from hpo_improvements.mujoco_playground_locomotion.env_wrapper import (
     ENV_DEFAULTS,
     BatchedPlaygroundVectorEnv,
