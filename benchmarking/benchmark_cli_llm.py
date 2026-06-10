@@ -365,6 +365,17 @@ def _apply_kv_overrides(target: dict, items: list[tuple[str, Any]]) -> None:
         target[key] = value
 
 
+def _apply_dotted_overrides(
+    init_hp: dict[str, Any],
+    mutation_params: dict[str, Any],
+    overrides: list[tuple[str, Any]],
+) -> None:
+    """Apply dotted ``init_hp.*`` / ``mutation_params.*`` overrides in place."""
+    benchmark_cli.apply_dotted_overrides(
+        {"INIT_HP": init_hp, "MUTATION_PARAMS": mutation_params}, overrides
+    )
+
+
 def _maybe_print_config(
     init_hp: dict, mutation_params: dict, args: argparse.Namespace
 ) -> None:
@@ -593,7 +604,9 @@ def parse_llm_benchmark_cli(
     :param vllm_defaults: Optional per-script overrides for the vLLM flag defaults
         (see :func:`add_runtime_arguments`).
     """
-    algo, raw_init, raw_mut = _resolve_algo(argv, default_config, "GRPO")
+    argv_list = list(sys.argv[1:] if argv is None else argv)
+    remaining, dotted = benchmark_cli.extract_dotted_overrides(argv_list)
+    algo, raw_init, raw_mut = _resolve_algo(remaining, default_config, "GRPO")
     init_cls = select_init_hp_class(algo)
 
     parser = argparse.ArgumentParser(
@@ -627,7 +640,7 @@ def parse_llm_benchmark_cli(
     if add_script_arguments is not None:
         add_script_arguments(parser)
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(remaining)
 
     init_hp = _init_hp_from_dataclass(
         init_cls, raw_init, args, algo, skip=_RL_FLAG_SKIP
@@ -640,6 +653,7 @@ def parse_llm_benchmark_cli(
 
     mutation_params = _mutation_from_dataclass(raw_mut, args)
     _apply_kv_overrides(mutation_params, args.mutation_override)
+    _apply_dotted_overrides(init_hp, mutation_params, dotted)
 
     _maybe_print_config(init_hp, mutation_params, args)
 
@@ -711,7 +725,9 @@ def parse_offline_llm_cli(
     argv: list[str] | None = None,
 ) -> OfflineLLMConfig:
     """Parse a DPO / SFT benchmark command line into an :class:`OfflineLLMConfig`."""
-    algo, raw_init, raw_mut = _resolve_algo(argv, default_config, "DPO")
+    argv_list = list(sys.argv[1:] if argv is None else argv)
+    remaining, dotted = benchmark_cli.extract_dotted_overrides(argv_list)
+    algo, raw_init, raw_mut = _resolve_algo(remaining, default_config, "DPO")
     init_cls = select_init_hp_class(algo)
 
     parser = argparse.ArgumentParser(
@@ -753,7 +769,7 @@ def parse_offline_llm_cli(
     if add_script_arguments is not None:
         add_script_arguments(parser)
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(remaining)
 
     init_hp = _init_hp_from_dataclass(
         init_cls, raw_init, args, algo, skip=_OFFLINE_FLAG_SKIP
@@ -771,6 +787,7 @@ def parse_offline_llm_cli(
 
     mutation_params = _mutation_from_dataclass(raw_mut, args)
     _apply_kv_overrides(mutation_params, args.mutation_override)
+    _apply_dotted_overrides(init_hp, mutation_params, dotted)
 
     _maybe_print_config(init_hp, mutation_params, args)
 

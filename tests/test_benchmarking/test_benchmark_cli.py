@@ -94,6 +94,39 @@ def test_parse_key_value_rejects_malformed():
         benchmark_cli.parse_key_value("no-equals-sign")
 
 
+def test_extract_dotted_overrides_parses_prime_rl_forms():
+    remaining, overrides = benchmark_cli.extract_dotted_overrides(
+        [
+            "--config",
+            "x.yaml",
+            "--init-hp.lr",
+            "1.0e-4",
+            "--net-config.encoder.hidden=128",
+            "--no-init-hp.use-vllm",
+            "--init-hp.target-modules",
+            "[q_proj, k_proj]",
+            "--group-size",
+            "8",
+        ]
+    )
+    # Flat flags (no dot in the flag name) are left for argparse to handle.
+    assert remaining == ["--config", "x.yaml", "--group-size", "8"]
+    assert overrides == [
+        ("init-hp.lr", 1e-4),
+        ("net-config.encoder.hidden", 128),
+        ("init-hp.use-vllm", False),
+        ("init-hp.target-modules", ["q_proj", "k_proj"]),
+    ]
+
+
+def test_extract_dotted_overrides_bare_flag_is_true():
+    remaining, overrides = benchmark_cli.extract_dotted_overrides(
+        ["--init-hp.use-liger-loss", "--no-wandb"]
+    )
+    assert remaining == ["--no-wandb"]
+    assert overrides == [("init-hp.use-liger-loss", True)]
+
+
 def test_classic_core_overrides_and_wandb(tmp_path):
     cfg = tmp_path / "ppo.yaml"
     cfg.write_text(
@@ -121,6 +154,38 @@ def test_classic_core_overrides_and_wandb(tmp_path):
     assert config["INIT_HP"]["LR"] == 0.01
     assert config["INIT_HP"]["WANDB"] is False
     assert config["NET_CONFIG"]["X"] == 1
+
+
+def test_classic_dotted_overrides(tmp_path):
+    cfg = tmp_path / "ppo.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "INIT_HP": {"ALGO": "PPO", "LR": 1e-3},
+                "MUTATION_PARAMS": {"NO_MUT": 0.1},
+                "NET_CONFIG": {"encoder_config": {"hidden": 64}},
+            }
+        )
+    )
+    parser = benchmark_cli.build_classic_parser(
+        description="classic", default_config=str(cfg)
+    )
+    config, _ = benchmark_cli.resolve_classic(
+        parser,
+        argv=[
+            "--init-hp.lr",
+            "0.02",
+            "--net-config.encoder-config.hidden",
+            "128",
+            "--mutation-params.new-key",
+            "true",
+        ],
+    )
+    # Dotted, kebab-case paths resolve case-insensitively onto the existing
+    # UPPER_SNAKE / snake config keys (prime-rl style).
+    assert config["INIT_HP"]["LR"] == 0.02
+    assert config["NET_CONFIG"]["encoder_config"]["hidden"] == 128
+    assert config["MUTATION_PARAMS"]["new_key"] is True
 
 
 def test_classic_base_config_inline(capsys):
@@ -277,6 +342,20 @@ def test_init_hp_override_escape_hatch():
     )
     assert resolved.init_hp["GAE_LAMBDA"] == 0.9
     assert resolved.mutation_params["RAND_SEED"] == 7
+
+
+def test_dotted_overrides_for_llm_sections():
+    resolved = _resolve(
+        CISPO_CFG,
+        [
+            "--init-hp.group-size",
+            "16",
+            "--mutation-params.min-group-size",
+            "3",
+        ],
+    )
+    assert resolved.init_hp["GROUP_SIZE"] == 16
+    assert resolved.mutation_params["MIN_GROUP_SIZE"] == 3
 
 
 def test_unmodeled_config_keys_pass_through():

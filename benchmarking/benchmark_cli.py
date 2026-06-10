@@ -87,6 +87,95 @@ def parse_key_value(raw: str) -> tuple[str, object]:
     return key, value
 
 
+def _normalise_path_token(token: str) -> str:
+    return token.strip().lower().replace("-", "_")
+
+
+def _resolve_path_key(mapping: dict[str, Any], token: str) -> str:
+    """Resolve a dotted-path ``token`` against the keys of ``mapping``.
+
+    Matching is case-insensitive and treats ``-`` / ``_`` as equivalent, so
+    ``init-hp`` finds ``INIT_HP`` and ``group-size`` finds ``GROUP_SIZE``. When
+    no key matches, the snake_case form is returned so freshly-created keys read
+    like the rest of the config.
+    """
+    if token in mapping:
+        return token
+    normalised = _normalise_path_token(token)
+    matches = [
+        key
+        for key in mapping
+        if isinstance(key, str) and _normalise_path_token(key) == normalised
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        msg = f"ambiguous path token {token!r}; matches keys {matches!r}"
+        raise ValueError(msg)
+    return normalised
+
+
+def set_dotted_value(config: dict[str, Any], path: str, value: Any) -> None:
+    """Set a dot-delimited ``path`` inside ``config``, creating dicts as needed."""
+    parts = [part for part in path.split(".") if part]
+    current: dict[str, Any] = config
+    traversed: list[str] = []
+    for part in parts[:-1]:
+        traversed.append(part)
+        key = _resolve_path_key(current, part)
+        next_node = current.setdefault(key, {})
+        if not isinstance(next_node, dict):
+            prefix = ".".join(traversed)
+            msg = f"cannot descend into non-mapping key {prefix!r}"
+            raise ValueError(msg)
+        current = next_node
+    current[_resolve_path_key(current, parts[-1])] = value
+
+
+def extract_dotted_overrides(
+    argv: list[str],
+) -> tuple[list[str], list[tuple[str, Any]]]:
+    """Pull prime-rl-style dotted overrides out of ``argv``.
+
+    Long flags whose name contains a dot are treated as nested config
+    overrides and removed from the argument list; everything else is returned
+    untouched so the caller's argparse parser still validates flat flags (and
+    rejects genuinely unknown ones) exactly as before.
+
+    Value resolution mirrors prime-rl's CLI: ``--a.b value`` consumes the next
+    token, ``--a.b=value`` is inline, ``--no-a.b`` sets ``False``, and a bare
+    ``--a.b`` (end of args, or another ``--`` flag next) sets ``True``. Values
+    are parsed as YAML so ``--a.b 8`` is an int and ``--a.b '[1, 2]'`` a list.
+
+    Returns ``(remaining, overrides)`` where ``overrides`` is a list of
+    ``(dotted_path, value)`` pairs.
+    """
+    remaining: list[str] = []
+    overrides: list[tuple[str, Any]] = []
+    i, n = 0, len(argv)
+    while i < n:
+        token = argv[i]
+        name = token[2:].partition("=")[0] if token.startswith("--") else ""
+        if not (token.startswith("--") and "." in name):
+            remaining.append(token)
+            i += 1
+            continue
+        flag, eq, inline = token[2:].partition("=")
+        if flag.startswith("no-"):
+            overrides.append((flag[3:], False))
+            i += 1
+        elif eq:
+            overrides.append((flag, yaml.safe_load(inline)))
+            i += 1
+        elif i + 1 < n and not argv[i + 1].startswith("--"):
+            overrides.append((flag, yaml.safe_load(argv[i + 1])))
+            i += 2
+        else:
+            overrides.append((flag, True))
+            i += 1
+    return remaining, overrides
+
+
 def load_config(path: str) -> dict[str, Any]:
     """Load a benchmark YAML config file into a plain dict."""
     with open(path) as handle:
@@ -229,6 +318,16 @@ def apply_section_overrides(
             target[key] = value
 
 
+def apply_dotted_overrides(
+    config: dict[str, Any],
+    overrides: list[tuple[str, Any]],
+) -> None:
+    """Apply ``(dotted_path, value)`` overrides (from
+    :func:`extract_dotted_overrides`) onto ``config``."""
+    for path, value in overrides:
+        set_dotted_value(config, path, value)
+
+
 def maybe_print_config_and_exit(
     config: dict[str, Any],
     args: argparse.Namespace,
@@ -293,7 +392,9 @@ def resolve_classic(
         scripts that define their config inline rather than in a YAML file). A
         shallow copy is taken so the caller's literal is not mutated.
     """
-    args = parser.parse_args(argv)
+    argv_list = list(sys.argv[1:] if argv is None else argv)
+    remaining, dotted = extract_dotted_overrides(argv_list)
+    args = parser.parse_args(remaining)
     if getattr(args, "config", None):
         config = load_config(args.config)
     elif base_config is not None:
@@ -304,6 +405,7 @@ def resolve_classic(
     else:
         parser.error("no --config given and the script has no built-in config")
     apply_section_overrides(config, args, sections=sections)
+    apply_dotted_overrides(config, dotted)
     if getattr(args, "no_wandb", False):
         config.setdefault(wandb_section, {})[wandb_key] = False
     maybe_print_config_and_exit(config, args, sections=sections)
