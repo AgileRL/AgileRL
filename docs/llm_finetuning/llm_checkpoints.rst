@@ -84,8 +84,8 @@ Common scenarios:
     # Release a deployable artefact — adapters only, no training state:
     agent.save_checkpoint(path, save_optimizer=False)
 
-    # Persist the full merged model (e.g. for hand-off to a non-AgileRL
-    # consumer that doesn't understand PEFT):
+    # Persist the full model state dict, base weights included (e.g. for
+    # hand-off to a consumer that can't re-create the base from the hub):
     agent.save_checkpoint(path, lora_only=False, save_optimizer=False)
 
 Loading
@@ -110,11 +110,9 @@ and, by default, copies the just-loaded ``actor`` adapter onto ``reference``
 so that SFT → DPO → GRPO pipelines work out of the box — the actor trained
 in stage *N* becomes the reference for stage *N+1*.
 
-LoRA config mismatch between the checkpoint and the live algorithm
-(e.g. after a rank mutation) is handled non-destructively: rank is merged as
-``max(current, checkpoint)`` with weights padded into the larger shape;
-``target_modules`` / ``modules_to_save`` are unioned. See
-:meth:`load_checkpoint` for details.
+The checkpoint's LoRA config must match the live algorithm's (rank,
+target modules, etc.); a mismatch raises ``ValueError``. Re-create the
+agent with the checkpoint's LoRA config to load it.
 
 Common scenarios:
 
