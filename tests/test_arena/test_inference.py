@@ -225,6 +225,20 @@ class TestBuildPayload:
         assert "action_mask" in payload
         assert "env_defined_actions" in payload
 
+    def test_multi_agent_recurrent_includes_hidden_state(self):
+        agent = self._make_agent()
+        agent.metadata = _default_metadata(multi_agent=True, recurrent=True)
+        obs = {"agent_0": np.array([1.0, 2.0]), "agent_1": np.array([3.0, 4.0])}
+        hs = {"agent_0": np.array([0.5, 0.5]), "agent_1": np.array([0.1, 0.2])}
+        payload = agent._build_payload(
+            obs,
+            batched=False,
+            hidden_state=hs,
+            info=None,
+            env_defined_actions=None,
+        )
+        assert payload["hidden_state"] is not None
+
     def test_multi_agent_rejects_array_action_mask(self):
         agent = self._make_agent()
         agent.metadata = _default_metadata(multi_agent=True)

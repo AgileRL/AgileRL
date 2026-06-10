@@ -406,6 +406,8 @@ class Agent:
                 "obs": self.serialize(observation, batched),
                 "batch_size": batch_size,
             }
+            if agent.recurrent:
+                payload["hidden_state"] = self.serialize(hidden_state, batched)
             action_mask = self._multi_agent_mask(info)
             if action_mask is not None:
                 payload["action_mask"] = self.serialize(action_mask, batched)

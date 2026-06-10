@@ -111,7 +111,7 @@ class ArenaClient:
         verbose: bool = True,
     ) -> None:
 
-        self._base_url = self.BASE_URL.rstrip("/")
+        self._base_url = (os.environ.get("ARENA_BASE_URL") or self.BASE_URL).rstrip("/")
         self._request_timeout = request_timeout
         self._upload_timeout = upload_timeout
 
@@ -943,8 +943,7 @@ class ArenaClient:
         if resolved_project is not None:
             params.append(("project", resolved_project))
         if metrics:
-            for m in metrics:
-                params.extend(("metric", m))
+            params.extend(("metric", m) for m in metrics)
         return self._request_raw(
             "GET",
             "/api/cli/v1/experiments/metrics",
@@ -1456,16 +1455,20 @@ class ArenaClient:
         headers = dict(request_headers)
         headers.update(self._auth_headers())
 
+        # An explicit ``timeout=None`` would disable timeouts entirely in
+        # httpx; fall back to the client default (``request_timeout``).
+        request_timeout = timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT
+
         # Send the request.
         try:
             if stream:
                 request = self._http.build_request(
-                    method, path, headers=headers, timeout=timeout, **kwargs
+                    method, path, headers=headers, timeout=request_timeout, **kwargs
                 )
                 resp = self._http.send(request, stream=True)
             else:
                 resp = self._http.request(
-                    method, path, headers=headers, timeout=timeout, **kwargs
+                    method, path, headers=headers, timeout=request_timeout, **kwargs
                 )
         except httpx.HTTPError as exc:
             raise ArenaAPIError(
@@ -1597,11 +1600,13 @@ class ArenaClient:
         **kwargs: Any,
     ) -> NDJsonStream:
         """Send a streaming request and return an :class:`NDJsonStream`."""
+        error_cls = self._ERROR_MAP.get(path, ArenaAPIError)
         handler = self._stream_handler
         renderer: StreamRichRenderer | None = None
         if handler is None and self._verbose:
-            error_cls = self._ERROR_MAP.get(path, ArenaAPIError)
             renderer = StreamRichRenderer(error_cls=error_cls)
             handler = renderer.handle_event
         resp = self._send(method, path, stream=True, timeout=timeout, **kwargs)
-        return NDJsonStream(resp, handler=handler, renderer=renderer)
+        return NDJsonStream(
+            resp, handler=handler, renderer=renderer, error_cls=error_cls
+        )
