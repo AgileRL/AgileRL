@@ -4777,7 +4777,10 @@ class TestLLMInitializeActors:
         agent.pretrained_model_name_or_path = "mock-path"
         agent.lora_config = MagicMock()
         peft_actor = _make_mock_peft_actor()
-        created_model = MagicMock()
+        # spec=[] so the created model doesn't duck-type as a PeftModel on
+        # Python <= 3.11 (a bare MagicMock satisfies any runtime protocol
+        # there; 3.12+ uses getattr_static and is immune).
+        created_model = MagicMock(spec=[])
 
         with (
             patch(

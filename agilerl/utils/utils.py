@@ -828,6 +828,10 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
+                # Agents after the first receive a clone_llm copy that already
+                # carries AgileRL's adapters — construct them via the clone
+                # path (reuse as-is) rather than re-attaching adapters.
+                clone=idx != 0 and act is not None,
                 **_common_llm_init_hp(INIT_HP),
                 use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
                 adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
@@ -916,6 +920,10 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
+                # Agents after the first receive a clone_llm copy that already
+                # carries AgileRL's adapters — construct them via the clone
+                # path (reuse as-is) rather than re-attaching adapters.
+                clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
             )
@@ -973,6 +981,10 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
+                # Agents after the first receive a clone_llm copy that already
+                # carries AgileRL's adapters — construct them via the clone
+                # path (reuse as-is) rather than re-attaching adapters.
+                clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
             )
@@ -1050,6 +1062,10 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
+                # Agents after the first receive a clone_llm copy that already
+                # carries AgileRL's adapters — construct them via the clone
+                # path (reuse as-is) rather than re-attaching adapters.
+                clone=idx != 0 and act is not None,
                 **_common_llm_init_hp(INIT_HP),
             )
             if torch_compiler is not None:
@@ -1126,6 +1142,10 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
+                # Agents after the first receive a clone_llm copy that already
+                # carries AgileRL's adapters — construct them via the clone
+                # path (reuse as-is) rather than re-attaching adapters.
+                clone=idx != 0 and act is not None,
                 **_common_llm_init_hp(INIT_HP),
             )
             if torch_compiler is not None:
