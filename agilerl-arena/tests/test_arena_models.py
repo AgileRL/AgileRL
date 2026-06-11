@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import logging
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -208,10 +208,13 @@ def test_training_spec_rejects_eps_start_below_eps_end() -> None:
         TrainingSpec(eps_start=0.1, eps_end=0.9)
 
 
-def test_registry_override_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
-    with caplog.at_level(logging.WARNING):
+def test_registry_override_logs_warning() -> None:
+    with patch("agilerl.arena.models.algo.logger") as mock_logger:
         ARENA_REGISTRY.add("DQN", DQNSpec)
-    assert "Overriding existing registration" in caplog.text
+    mock_logger.warning.assert_called_once_with(
+        "Overriding existing registration for algorithm %r",
+        "DQN",
+    )
 
 
 def test_resolve_algorithm_requires_name() -> None:

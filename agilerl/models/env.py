@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import pandas as pd
-from datasets import Dataset, load_dataset
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
 from pettingzoo import ParallelEnv
 from pydantic import (
@@ -32,8 +31,22 @@ from agilerl.vector import AsyncPettingZooVecEnv
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
+    from datasets import Dataset
 
     from agilerl.wrappers.llm_envs import PreferenceGym, ReasoningGym, SFTGym
+
+
+def _require_datasets() -> tuple[type[Dataset], Callable[[], Dataset]]:
+    """Import HuggingFace ``datasets`` (provided by the ``agilerl[llm]`` extra)."""
+    try:
+        from datasets import Dataset, load_dataset
+    except ImportError as exc:
+        msg = (
+            "The 'datasets' package is required for LLM environments. "
+            "Install with: pip install 'agilerl[llm]'"
+        )
+        raise ImportError(msg) from exc
+    return Dataset, load_dataset
 
 
 class LLMEnvType(str, Enum):
@@ -425,6 +438,7 @@ class LLMEnvSpec(BaseModel):
         :returns: A ``(train_dataset, test_dataset)`` tuple.
         :rtype: tuple[Dataset, Dataset]
         """
+        _, load_dataset = _require_datasets()
         ds = load_dataset(self.dataset, split="train").shuffle(seed=self.seed)
         if self.columns:
             ds = ds.rename_columns(self.columns)
@@ -438,6 +452,7 @@ class LLMEnvSpec(BaseModel):
         :returns: A ``(train_dataset, test_dataset)`` tuple.
         :rtype: tuple[Dataset, Dataset]
         """
+        Dataset, _ = _require_datasets()
         df = pd.read_parquet(self.dataset)
         if self.columns:
             df = df.rename(columns=self.columns)
