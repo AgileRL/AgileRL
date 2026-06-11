@@ -171,7 +171,6 @@ packages = ["agilerl"]
 exclude = ["tutorials"]
 
 [tool.ruff]
-src = ["agilerl", "agilerl-arena/agilerl"]
 target-version = "py310"
 line-length = 88
 extend-exclude = ["tests/assets/tiny_llm", "docs/_static/examples"]

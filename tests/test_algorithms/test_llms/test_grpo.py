@@ -1824,7 +1824,8 @@ class TestGRPOLigerLossDispatch:
         with (
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
-            patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),  # noqa: avoid touching the actor's forward
+            # Avoid calling the real actor forward; only wrap for attribute access.
+            patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
             patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
             patch.object(
                 LLMAlgorithm,
