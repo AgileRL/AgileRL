@@ -42,13 +42,11 @@ jobs:
               with:
                   enable-cache: true
                   python-version: ${{ matrix.python-version }}
-            - uses: taiki-e/install-action@just
-
             - name: Install dependencies
               run: |
                   pip install uv
                   uv sync --locked --all-groups --extra all
 
             - name: Test with pytest
-              run: |
-                  just test cov --exitfirst -m "not llm" --cov-report=term-missing --durations=0 --durations-min=1.0
+              shell: bash
+              run: bash scripts/run-tests.sh cov --exitfirst -m "not llm" --cov-report=term-missing --durations=0 --durations-min=1.0

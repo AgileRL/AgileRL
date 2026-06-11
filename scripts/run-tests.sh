@@ -43,7 +43,14 @@ rc=0
 if ((cov_enabled)); then
   # Collect core coverage quietly; print the merged report after arena tests.
   run_pytest tests "${pytest_args[@]}" "${flags[@]}" --cov-report= || rc=$?
-  flags+=("--cov-append" "--cov-report=term")
+  flags+=("--cov-append")
+  has_cov_report=0
+  for arg in "${pytest_args[@]}"; do
+    case "$arg" in --cov-report*) has_cov_report=1 ;; esac
+  done
+  if (( ! has_cov_report )); then
+    flags+=("--cov-report=term")
+  fi
 else
   run_pytest tests "${pytest_args[@]}" "${flags[@]}" || rc=$?
 fi
