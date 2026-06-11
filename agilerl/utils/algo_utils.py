@@ -1507,6 +1507,13 @@ class VLLMConfig:
         on the tiny test fixture; production deployments running a single
         vLLM should leave it unset.  Defaults to None.
     :type kv_cache_memory_bytes: int | None, optional
+    :param strip_multimodal_towers: Free the GPU memory held by a multimodal
+        base's unused towers after engine init (text-only RL). ``True`` strips
+        the standard HF attribute names (``vision_tower``, ``audio_tower``,
+        ``multi_modal_projector``, ``embed_vision``, ``embed_audio``); a list
+        of attribute names strips those instead, for models that mount
+        unwanted modalities elsewhere. Defaults to ``False``.
+    :type strip_multimodal_towers: bool | list[str], optional
     """
 
     # Colocate mode parameters
@@ -1524,7 +1531,7 @@ class VLLMConfig:
     max_lora_rank: int = 16
     max_loras: int = 1
     weight_sharing: bool | None = None
-    strip_multimodal_towers: bool = False
+    strip_multimodal_towers: bool | list[str] = False
     weight_sharing_multimodal: bool = False
     stop_sequences: list[str] | None = None
     presence_penalty: float = 0.0

@@ -55,7 +55,8 @@ Memory behavior of the Liger path depends on the importance-sampling level:
 * **Token-level** GRPO / CISPO / PPO / REINFORCE: the hidden states are
   token-flattened to ``(B*T, 1, H)`` so the fused kernel chunks **tokens** —
   each chunk materializes only ``(token_chunk, vocab)`` logits. Bounded.
-  ``AGILERL_LIGER_TOKEN_CHUNK`` (default 2048) sets the tokens-per-chunk.
+  The ``liger_token_chunk_size`` constructor argument (default 2048) sets the
+  tokens-per-chunk.
 * **Turn- and sequence-level** (e.g. GSPO): pooling couples a turn/sequence's
   tokens, so a token chunk would only see part of the pooled unit — the
   flatten trick cannot apply. The fused kernel processes one whole sequence

@@ -259,7 +259,7 @@ def collect_rollouts_llm(
     list[torch.Tensor],
     int,
     int,
-    list[torch.Tensor | None],
+    list[torch.Tensor | None] | None,
 ]:
     """Collect multi-turn rollouts for LLM on-policy algorithms.
 
@@ -275,8 +275,9 @@ def collect_rollouts_llm(
     :type group_seed: int
     :return: Episode tensors, masks, turn ids, rewards, counted batch steps,
         updated group seed, and per-trajectory vLLM sampling logprobs (one 1-D
-        tensor of generated-token logprobs each, or ``None``).
-    :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int, list[torch.Tensor | None]]
+        tensor of generated-token logprobs each, individual entries possibly
+        ``None``; ``None`` overall when none were captured this rollout).
+    :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int, list[torch.Tensor | None] | None]
     """
     prompts = env.reset(
         seed=group_seed,

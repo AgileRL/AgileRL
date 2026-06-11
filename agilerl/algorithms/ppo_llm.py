@@ -175,8 +175,8 @@ class PPO(LLMAlgorithm):
     :param torch_compiler: Optional torch compile mode.
     :type torch_compiler: str | None, optional
     :param liger_token_chunk_size: Tokens per chunk for token-level Liger fused
-        policy loss. ``None`` uses the legacy ``AGILERL_LIGER_TOKEN_CHUNK``
-        env-var fallback (default 2048).
+        policy loss. ``None`` uses
+        :data:`~agilerl.utils.llm_utils.DEFAULT_LIGER_TOKEN_CHUNK` (2048).
     :type liger_token_chunk_size: int | None, optional
     :param use_sequence_packing: Opt in to padding-free sequence packing for the
         gradient forward. The actor-critic value-head forward packs the actor

@@ -503,6 +503,7 @@ class TestLlmPpoLossFnTurnMode:
             turn_ids=turn_ids,
             full_turn_mask=turn_mask,
             max_turns=max_turns,
+            importance_sampling_level="turn",
         )
         assert torch.allclose(fused_loss, ref_loss, rtol=1e-6, atol=1e-6)
         assert metrics[0].item() == pytest.approx(ref_m["kl"], rel=1e-6, abs=1e-6)
@@ -536,6 +537,7 @@ class TestLlmPpoLossFnTurnMode:
             turn_ids=turn_ids,
             full_turn_mask=turn_mask,
             max_turns=max_turns,
+            importance_sampling_level="turn",
         )
         chunked_total = torch.zeros((), dtype=single.dtype)
         for s, e in [(0, 2), (2, 4), (4, 6)]:
@@ -551,6 +553,7 @@ class TestLlmPpoLossFnTurnMode:
                 turn_ids=turn_ids[s:e],
                 full_turn_mask=turn_mask,  # global turn denom
                 max_turns=max_turns,
+                importance_sampling_level="turn",
             )
             chunked_total = chunked_total + chunk_loss
         assert torch.allclose(single, chunked_total, rtol=1e-5, atol=1e-5)
@@ -603,6 +606,7 @@ class TestLlmPpoLossFnTurnMode:
             turn_ids=turn_ids,
             full_turn_mask=turn_mask,
             max_turns=max_turns,
+            importance_sampling_level="turn",
         )
         assert torch.allclose(fused_loss, ref_loss, rtol=1e-6, atol=1e-6)
 
@@ -620,6 +624,7 @@ class TestLlmPpoLossFnTurnMode:
                 old_per_token_logps=torch.randn(2, 4) * 0.05,
                 turn_ids=torch.tensor([[0, 0, 1, 1], [0, 1, 1, 1]]),
                 # full_turn_mask + max_turns missing
+                importance_sampling_level="turn",
             )
 
 

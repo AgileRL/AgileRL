@@ -53,6 +53,10 @@ _BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
 # submodule via regex (see https://github.com/huggingface/peft/issues/3129).
 _CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
 
+#: Default tokens-per-chunk for the token-flattened Liger fused-loss path,
+#: used when ``liger_token_chunk_size`` is not set on the algorithm.
+DEFAULT_LIGER_TOKEN_CHUNK = 2048
+
 
 def __getattr__(name: str) -> Any:
     """Lazy re-exports from ``llm_envs`` with a deprecation warning."""
@@ -243,7 +247,9 @@ def build_bnb_quantization_config(
 
     :param spec: Quantization preset name, ``BitsAndBytesConfig`` kwargs dict,
         or ``None``.
+    :type spec: str | dict[str, Any] | None
     :return: A configured ``BitsAndBytesConfig``, or ``None`` for no quantization.
+    :rtype: BitsAndBytesConfig | None
     """
     if spec is None:
         return None
@@ -665,8 +671,10 @@ def resolve_attn_implementation(requested: str | None = None) -> str:
 
     :param requested: An explicit choice from the caller. Anything other than
         ``None`` / ``"auto"`` is returned unchanged (caller stays authoritative).
+    :type requested: str | None
     :return: The attention implementation string for ``from_pretrained`` /
         ``from_config``.
+    :rtype: str
     """
     if requested is None or requested == "auto":
         env = os.environ.get("AGILERL_ATTN_IMPLEMENTATION")
@@ -705,6 +713,7 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
         block sizes, ``num_warps``, ``num_stages``). When given, the
         capability auto-skip is bypassed and the supplied options are
         installed unconditionally.
+    :type options: dict[str, Any] | None
     """
     try:
         from transformers.integrations.flex_attention import flex_attention_forward
@@ -852,12 +861,17 @@ def pool_by_turns(
     """Aggregate per-token values into per-turn scalars.
 
     :param token_values: [batch, seq_len] per-token scalars.
+    :type token_values: torch.Tensor
     :param turn_ids: [batch, seq_len] turn index per token, -1 for non-action.
+    :type turn_ids: torch.Tensor
     :param num_turns: Total number of turns (max turn_id + 1).
+    :type num_turns: int
     :param reduction: ``"mean"`` (default) for mean-pooling,
         ``"sum"`` for sum-pooling (e.g. to aggregate log-ratios),
         ``"final_value"`` to select the last token value per turn.
+    :type reduction: str
     :return: [batch, num_turns] aggregated values per turn.
+    :rtype: torch.Tensor
     """
     batch_size, seq_len = token_values.shape
     turn_values = torch.zeros(batch_size, num_turns, device=token_values.device)
@@ -907,7 +921,9 @@ def validate_importance_sampling_level(level: str, *, allow_auto: bool) -> None:
     additionally accepted when ``allow_auto`` is ``True``.
 
     :param level: The importance-sampling pooling level to validate.
+    :type level: str
     :param allow_auto: Whether ``"auto"`` is an accepted value.
+    :type allow_auto: bool
     :raises ValueError: If ``level`` is not in the valid set.
     """
     valid = {"token", "turn", "sequence"}
@@ -941,13 +957,19 @@ def pool_log_ratio_by_level(
     Operates only on ``(B, T)`` tensors (no vocab axis), so it is memory-bounded.
 
     :param token_log_ratio: ``(B, T)`` per-token ``log pi - log pi_old``.
+    :type token_log_ratio: torch.Tensor
     :param action_mask: ``(B, T)`` action-token mask.
+    :type action_mask: torch.Tensor
     :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action);
         required for the turn level.
+    :type turn_ids: torch.Tensor | None
     :param level: ``"token"`` / ``"turn"`` / ``"sequence"``.
+    :type level: str
     :param num_turns: Number of turns for the turn level; inferred from
         ``turn_ids`` when ``None``.
+    :type num_turns: int | None
     :return: ``(log_importance_weights, unit_mask)`` at the requested level.
+    :rtype: tuple[torch.Tensor, torch.Tensor]
     :raises ValueError: If ``level`` is unknown or turn ids are missing.
     """
     if level == "token":
@@ -1011,16 +1033,23 @@ def clipped_min_surrogate(
     surrogate over the active units.
 
     :param log_importance_weights: Per-unit pooled log-ratio.
+    :type log_importance_weights: torch.Tensor
     :param advantages: Per-unit advantages (same shape).
+    :type advantages: torch.Tensor
     :param unit_mask: Mask selecting active units (same shape).
+    :type unit_mask: torch.Tensor
     :param clip_min: Lower clip bound for the ratio (e.g. ``1 - clip_coef``).
+    :type clip_min: float
     :param clip_max: Upper clip bound for the ratio (e.g. ``1 + clip_coef``).
+    :type clip_max: float
     :param loss_weight: Optional per-unit, **detached**, non-negative weight that
         multiplies each unit's surrogate before the masked mean — e.g. the vLLM
         sampling-mismatch (truncated-IS) correction ratio. ``None`` leaves the
         surrogate unweighted. Since the weight is ``>= 0`` it commutes with the
         ``max`` (pessimistic) reduction, so it is a faithful per-unit reweight.
+    :type loss_weight: torch.Tensor | None
     :return: ``(pg_loss, clipfrac)`` scalars.
+    :rtype: tuple[torch.Tensor, torch.Tensor]
     """
     ratio = torch.exp(log_importance_weights)
     clipped_ratio = torch.clamp(ratio, clip_min, clip_max)
@@ -1058,13 +1087,20 @@ def clipped_is_surrogate(
     (no vocab axis), so it is memory-bounded.
 
     :param token_log_ratio: ``(B, T)`` per-token ``log pi - log pi_old``.
+    :type token_log_ratio: torch.Tensor
     :param advantages: ``(B, T)`` per-token advantages.
+    :type advantages: torch.Tensor
     :param action_mask: ``(B, T)`` action-token mask.
+    :type action_mask: torch.Tensor
     :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action);
         required for turn level.
+    :type turn_ids: torch.Tensor | None
     :param importance_sampling_level: ``"token"`` / ``"turn"`` / ``"sequence"``.
+    :type importance_sampling_level: str
     :param clip_coef: Symmetric clip coefficient (clip to ``[1-c, 1+c]``).
+    :type clip_coef: float
     :return: ``(pg_loss, clipfrac)`` scalars.
+    :rtype: tuple[torch.Tensor, torch.Tensor]
     """
     num_turns = (
         int(turn_ids.max().item()) + 1

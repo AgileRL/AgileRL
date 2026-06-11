@@ -204,7 +204,7 @@ class SyncMultiTurnVecEnv:
     def step(
         self,
         completion_ids: list[torch.Tensor],
-        sampling_logps: list[torch.Tensor] | None = None,
+        sampling_logps: list[torch.Tensor | None] | None = None,
     ) -> list[ReasoningPrompts] | None:
         """Step each active trajectory with its corresponding completion.
 
@@ -212,9 +212,10 @@ class SyncMultiTurnVecEnv:
         :type completion_ids: list[torch.Tensor]
         :param sampling_logps: Optional per-active-trajectory vLLM sampling
             logprobs (1-D, generated tokens only) for this turn, parallel to
-            ``completion_ids``. Accumulated per trajectory for the
+            ``completion_ids``; individual entries may be ``None`` when a row
+            captured nothing. Accumulated per trajectory for the
             sampling-mismatch correction; ignored when ``None``.
-        :type sampling_logps: list[torch.Tensor] | None
+        :type sampling_logps: list[torch.Tensor | None] | None
         :return: Next active prompt dictionaries after stepping.
         :rtype: list[ReasoningPrompts] | None
         """

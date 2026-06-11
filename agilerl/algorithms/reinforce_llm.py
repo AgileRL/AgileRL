@@ -154,8 +154,8 @@ class REINFORCE(LLMAlgorithm):
     :param torch_compiler: Torch compiler mode.
     :type torch_compiler: str | None
     :param liger_token_chunk_size: Tokens per chunk for token-level Liger fused
-        policy loss. ``None`` uses the legacy ``AGILERL_LIGER_TOKEN_CHUNK``
-        env-var fallback (default 2048).
+        policy loss. ``None`` uses
+        :data:`~agilerl.utils.llm_utils.DEFAULT_LIGER_TOKEN_CHUNK` (2048).
     :type liger_token_chunk_size: int | None, optional
     :param use_sequence_packing: Opt in to padding-free sequence packing for the
         gradient forward pass. Only honoured under a FlashAttention-2 backend;

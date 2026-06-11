@@ -124,6 +124,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from safetensors.torch import load_file
 
     from agilerl.utils.llm_utils import (
+        DEFAULT_LIGER_TOKEN_CHUNK,
         adapt_lora_config_for_model,
         create_model_from_name_or_path,
         format_colocated_vllm_oom_hint,
@@ -2627,7 +2628,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # (the fused kernel cannot apply a per-token importance weight).
         self._is_correction_liger_warned = False
         # Per-call token chunk size for the Liger fused-loss path. ``None``
-        # falls back to the AGILERL_LIGER_TOKEN_CHUNK env var (see
+        # resolves to DEFAULT_LIGER_TOKEN_CHUNK (see
         # :meth:`_resolve_liger_token_chunk`); set explicitly to trade
         # kernel-launch count vs the per-chunk activation footprint.
         if liger_token_chunk_size is not None and liger_token_chunk_size <= 0:
@@ -3770,12 +3771,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Token chunk size for the Liger fused-loss path.
 
         Returns the constructor override (``liger_token_chunk_size``) when set,
-        otherwise falls back to the ``AGILERL_LIGER_TOKEN_CHUNK`` env var
-        (default ``2048``).
+        otherwise :data:`~agilerl.utils.llm_utils.DEFAULT_LIGER_TOKEN_CHUNK`.
         """
-        return self.liger_token_chunk_size or int(
-            os.environ.get("AGILERL_LIGER_TOKEN_CHUNK", "2048")
-        )
+        return self.liger_token_chunk_size or DEFAULT_LIGER_TOKEN_CHUNK
 
     def _setup_actors(
         self,
@@ -5675,7 +5673,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 stacklevel=2,
             )
 
-        if getattr(self.vllm_config, "strip_multimodal_towers", False):
+        strip_towers = getattr(self.vllm_config, "strip_multimodal_towers", False)
+        if strip_towers:
             # Free GPU memory used by multimodal towers (vision/audio/connectors)
             # for text-only RL training. Gemma-4-MM and similar multimodal bases
             # otherwise keep ~1-3 GiB of SigLIP/USM encoder weights resident
@@ -5683,7 +5682,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             # the engine is constructed (so vLLM's init memory profile already
             # ran with the towers in place); checkpoints are unaffected because
             # only the LoRA adapter is saved and the base is referenced by name.
-            freed = patch_vllm_strip_multimodal_towers(self.llm)
+            # A list value supplies custom tower attribute names for models
+            # that mount unwanted modalities under non-standard attrs.
+            freed = patch_vllm_strip_multimodal_towers(
+                self.llm,
+                tower_attrs=strip_towers if isinstance(strip_towers, list) else None,
+            )
             if (
                 self.accelerator is None or self.accelerator.process_index == 0
             ) and freed:

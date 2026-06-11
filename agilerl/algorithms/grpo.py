@@ -456,8 +456,8 @@ class GRPO(LLMAlgorithm):
         self.adv_filter_eps = adv_filter_eps
         # ``liger_token_chunk_size`` (per-chunk token count for the Liger
         # fused-loss path) is validated and stored by ``super().__init__`` above;
-        # ``None`` falls back to the legacy ``AGILERL_LIGER_TOKEN_CHUNK`` env var
-        # (default 2048) via ``self._resolve_liger_token_chunk()``.
+        # ``None`` resolves to ``DEFAULT_LIGER_TOKEN_CHUNK`` (2048) via
+        # ``self._resolve_liger_token_chunk()``.
         if self.loss_type == "cispo" and self.beta != 0:
             warnings.warn(
                 "CISPO is typically used with beta=0; nonzero beta adds KL "
@@ -1676,8 +1676,8 @@ class GRPO(LLMAlgorithm):
                 else None
             )
             # Tokens per chunk: bounds the transient (chunk_tokens, vocab) logits.
-            # Prefers the constructor / INIT_HP value, falling back to the legacy
-            # ``AGILERL_LIGER_TOKEN_CHUNK`` env var (default 2048).
+            # Prefers the constructor / INIT_HP value, defaulting to
+            # ``DEFAULT_LIGER_TOKEN_CHUNK`` (2048).
             chunk_size = self._resolve_liger_token_chunk()
         else:
             # Sequence-level (GSPO): keep the padded layout and one-sequence-per-

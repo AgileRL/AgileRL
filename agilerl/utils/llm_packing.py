@@ -99,8 +99,11 @@ def pack_padded_batch(
     uses for real tokens.
 
     :param input_ids: ``(B, T)`` token ids.
+    :type input_ids: torch.Tensor
     :param attention_mask: ``(B, T)`` mask; non-zero marks real tokens.
+    :type attention_mask: torch.Tensor
     :return: A :class:`PackedBatch`.
+    :rtype: PackedBatch
     """
     if input_ids.dim() != 2:
         msg = (
@@ -212,8 +215,11 @@ def unpack_logprobs(
     the module docstring for the shared scatter semantics.
 
     :param packed_logprobs: ``(N - 1,)`` packed per-token logprobs.
+    :type packed_logprobs: torch.Tensor
     :param packed: The :class:`PackedBatch` the logprobs were computed from.
+    :type packed: PackedBatch
     :return: ``(B, T-1)`` per-token logprobs aligned to the dense frame.
+    :rtype: torch.Tensor
     """
     flat = packed_logprobs.reshape(-1)
     tm1 = packed.padded_seq_len - 1
@@ -247,8 +253,11 @@ def unpack_values(
 
     :param packed_values: ``(N,)`` (or ``(1, N)`` / ``(N, 1)``) packed per-token
         critic values.
+    :type packed_values: torch.Tensor
     :param packed: The :class:`PackedBatch` the values were computed from.
+    :type packed: PackedBatch
     :return: ``(B, T-1)`` per-token values aligned to the dense frame.
+    :rtype: torch.Tensor
     """
     flat = packed_values.reshape(-1)
     tm1 = packed.padded_seq_len - 1
@@ -275,8 +284,11 @@ def unpack_hidden_states(
     drop. See the module docstring for the shared scatter semantics.
 
     :param packed_hidden: ``(1, N, H)`` (or ``(N, H)``) packed last-hidden-states.
+    :type packed_hidden: torch.Tensor
     :param packed: The :class:`PackedBatch` the hidden states were computed from.
+    :type packed: PackedBatch
     :return: ``(B, T, H)`` hidden states aligned to the dense frame.
+    :rtype: torch.Tensor
     """
     hidden_dim = packed_hidden.shape[-1]
     flat = packed_hidden.reshape(-1, hidden_dim)  # (N, H)

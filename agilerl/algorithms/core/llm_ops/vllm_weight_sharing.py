@@ -54,9 +54,12 @@ __all__ = [
 ]
 
 
-# Submodule paths to free for text-only training of multimodal Gemma-4-style
-# bases. Includes both top-level and nested-under-``.model`` variants because
-# Gemma-4-MM mounts towers and connectors under both depending on submodule.
+# Default submodule attribute names to free for text-only training of a
+# multimodal base. ``vision_tower`` / ``audio_tower`` / ``multi_modal_projector``
+# are the standard HF transformers names for *ForConditionalGeneration wrappers;
+# ``embed_vision`` / ``embed_audio`` cover Gemma-4-style per-modality embedders.
+# Pass a custom list via ``VLLMConfig(strip_multimodal_towers=[...])`` for
+# models that mount their towers under other attribute names.
 _STRIPPABLE_TOWER_ATTRS: tuple[str, ...] = (
     "vision_tower",
     "audio_tower",
@@ -111,13 +114,16 @@ class _StrippedTower:
         )
 
 
-def _walk_tower_holders(model: nn.Module) -> Any:
+def _walk_tower_holders(
+    model: nn.Module,
+    tower_attrs: tuple[str, ...] = _STRIPPABLE_TOWER_ATTRS,
+) -> Any:
     """Yield ``(holder_module, attr_name, full_path)`` for every strippable
     tower attribute reachable on ``model`` or ``model.model``.
 
     Only the immediate-parent module is yielded so the caller can ``setattr``
     to swap the tower out and drop the GPU reference. Deeper traversal isn't
-    needed because Gemma-4-MM puts towers at the top or one level under
+    needed because multimodal wrappers put towers at the top or one level under
     ``model.``; expanding the search to arbitrary depth would risk catching
     something not intended for stripping.
     """
@@ -126,7 +132,7 @@ def _walk_tower_holders(model: nn.Module) -> Any:
     if inner is not None and inner is not model:
         holders.append((inner, "model."))
     for holder, prefix in holders:
-        for attr in _STRIPPABLE_TOWER_ATTRS:
+        for attr in tower_attrs:
             sub = getattr(holder, attr, None)
             if sub is None:
                 continue
@@ -135,15 +141,22 @@ def _walk_tower_holders(model: nn.Module) -> Any:
             yield holder, attr, f"{prefix}{attr}"
 
 
-def patch_vllm_strip_multimodal_towers(llm: Any) -> dict[str, int]:
+def patch_vllm_strip_multimodal_towers(
+    llm: Any,
+    tower_attrs: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, int]:
     """Free GPU memory used by the multimodal towers of a text-only-RL base.
 
-    Gemma-4-MM (and similar ``*ForConditionalGeneration`` classes) loads
-    vision + audio + connector submodules into GPU memory at engine init,
+    Multimodal ``*ForConditionalGeneration`` classes (Gemma-4-MM and similar)
+    load vision + audio + connector submodules into GPU memory at engine init,
     even when the RL rollout never feeds an image/audio token. Those towers
     are dead weight on a tight colocated budget — for Gemma-4-E4B the vision
     tower alone is a SigLIP-style encoder of ~16 layers and the audio tower
     is a similarly sized USM-style encoder, together typically 1-3 GiB.
+
+    ``tower_attrs`` overrides the default attribute names
+    (:data:`_STRIPPABLE_TOWER_ATTRS` — the standard HF naming convention) for
+    models that mount unwanted modalities under different attributes.
 
     This walks the live in-process model, replaces each tower attribute with a
     :class:`_StrippedTower` placeholder (so falsy checks like
@@ -161,16 +174,22 @@ def patch_vllm_strip_multimodal_towers(llm: Any) -> dict[str, int]:
     downstream loads pick up the original towers from the HF Hub model.
 
     :param llm: A constructed in-process ``vllm.LLM`` (external_launcher).
+    :type llm: vllm.LLM
+    :param tower_attrs: Attribute names to strip; ``None`` uses the standard
+        HF names in :data:`_STRIPPABLE_TOWER_ATTRS`.
+    :type tower_attrs: tuple[str, ...] | list[str] | None
     :return: Mapping ``{tower_full_path: param_count_freed}``. Empty if the
         model has no strippable towers or it could not be reached.
+    :rtype: dict[str, int]
     """
     try:
         model = get_vllm_internal_model(llm)
     except Exception:
         return {}
 
+    attrs = _STRIPPABLE_TOWER_ATTRS if tower_attrs is None else tuple(tower_attrs)
     freed: dict[str, int] = {}
-    for holder, attr, full_path in _walk_tower_holders(model):
+    for holder, attr, full_path in _walk_tower_holders(model, attrs):
         sub = getattr(holder, attr)
         try:
             n_params = sum(int(p.numel()) for p in sub.parameters())
@@ -215,7 +234,9 @@ def patch_vllm_lora_keep_resident(llm: Any) -> int:
     when LoRA is disabled or the model can't be reached (returns 0).
 
     :param llm: A constructed in-process ``vllm.LLM`` (external_launcher).
+    :type llm: Any
     :return: Number of LoRA layers neutralized.
+    :rtype: int
     """
     try:
         model = get_vllm_internal_model(llm)
@@ -358,8 +379,10 @@ def get_vllm_internal_model(llm: Any) -> nn.Module:
     tries the known layouts in order.
 
     :param llm: A constructed ``vllm.LLM`` instance.
+    :type llm: Any
     :return: The underlying model module (e.g. a ``*ForCausalLM`` or
         ``*ForConditionalGeneration``).
+    :rtype: nn.Module
     :raises RuntimeError: If the model cannot be located.
     """
     engine = getattr(llm, "llm_engine", getattr(llm, "engine", llm))
@@ -717,8 +740,11 @@ def extract_vllm_bnb_state_dict(
     graft directly onto an HF skeleton.
 
     :param llm: Constructed ``vllm.LLM`` (in-process engine).
+    :type llm: Any
     :param hf_config: The HF ``PretrainedConfig`` for the model.
+    :type hf_config: Any
     :return: Ordered dict of HF-named shared tensors / quant states.
+    :rtype: OrderedDict[str, Any]
     :raises RuntimeError: If a fused module's shards cannot be named.
     """
     return _extract_with_layout(llm, hf_config)[0]
@@ -746,19 +772,26 @@ def build_shared_hf_model(
     placeholders (never executed in a text forward).
 
     :param llm: Constructed ``vllm.LLM`` (in-process engine, base loaded).
+    :type llm: Any
     :param hf_config: The HF ``PretrainedConfig`` for the model.
+    :type hf_config: Any
     :param compute_dtype: Compute dtype for the bnb ``Linear4bit`` modules and
         the value head (e.g. ``torch.bfloat16``); should match the trainer recipe.
+    :type compute_dtype: torch.dtype
     :param bnb_config: The trainer's ``BitsAndBytesConfig`` when the base is
         quantized (used to construct matching ``Linear4bit`` / ``Params4bit``),
         or ``None`` for a dense base.
+    :type bnb_config: Any
     :param share_towers: Reserved toggle for sharing vision/audio towers too;
         not implemented in v1 (text-only).
+    :type share_towers: bool
     :param add_value_head: Wrap the shared causal-LM in
         ``AutoModelForCausalLMWithValueHead`` (PPO). The base stays shared and
         frozen; the value head is a small trainer-only module (not aliased,
         never used by vLLM rollout).
+    :type add_value_head: bool
     :return: An ``nn.Module`` ready for PEFT wrapping.
+    :rtype: nn.Module
     :raises NotImplementedError: If ``share_towers`` is True.
     """
     if share_towers:
@@ -1018,10 +1051,14 @@ def prepare_shared_base_for_kbit_training(
     the base bf16 and aliased.
 
     :param model: The shared HF base model (pre-PEFT).
+    :type model: nn.Module
     :param use_gradient_checkpointing: Enable gradient checkpointing.
+    :type use_gradient_checkpointing: bool
     :param gradient_checkpointing_kwargs: Forwarded to
         ``gradient_checkpointing_enable`` (e.g. ``{"use_reentrant": False}``).
+    :type gradient_checkpointing_kwargs: dict[str, Any] | None
     :return: The same model, frozen and (optionally) checkpointing-enabled.
+    :rtype: nn.Module
     """
     if gradient_checkpointing_kwargs is None:
         gradient_checkpointing_kwargs = {}
@@ -1054,8 +1091,10 @@ def assert_shared_storage(llm: Any, hf_model: nn.Module) -> None:
     equal the corresponding vLLM tensor's. Raises if any copy slipped in.
 
     :param llm: The vLLM ``LLM`` whose tensors were shared.
+    :type llm: Any
     :param hf_model: The model returned by :func:`build_shared_hf_model`
         (before PEFT wrapping; pass the unwrapped base if already wrapped).
+    :type hf_model: nn.Module
     :raises RuntimeError: If a checked parameter does not alias vLLM's storage.
     """
     shared = extract_vllm_bnb_state_dict(llm, hf_model.config)
