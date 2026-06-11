@@ -177,6 +177,11 @@ class TestParseBody:
         result = ArenaError._parse_body(raw)
         assert result == {"error": "failed"}
 
+    def test_ndjson_skips_status_line_and_blank_line_before_error(self):
+        raw = '{"kind": "status", "message": "ok"}\n\n{"error": "failed"}'
+        result = ArenaError._parse_body(raw)
+        assert result == {"error": "failed"}
+
     def test_ndjson_only_blank_lines_then_error(self):
         raw = '\n\n\n{"error": "failed"}'
         result = ArenaError._parse_body(raw)

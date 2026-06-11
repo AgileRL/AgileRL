@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 import yaml
 from agilerl.arena.models import (
@@ -10,7 +12,19 @@ from agilerl.arena.models import (
     TrainingManifest,
     TrainingSpec,
 )
-from agilerl.arena.models.env import EnvSpec
+from agilerl.arena.models.algorithms.dqn import DQNSpec
+from agilerl.arena.models.env import EnvSpec, LLMEnvType
+from agilerl.arena.models.manifest import (
+    _coerce_environment,
+    _normalize_network_arch,
+    _resolve_algorithm,
+    _resolve_network,
+)
+from agilerl.arena.models.networks import (
+    FinetuningNetworkSpec,
+    MlpSpec,
+    QNetworkSpec,
+)
 from generate_arena_manifests import (
     arena_algorithm_names,
     generate_arena_manifests,
@@ -167,3 +181,85 @@ def test_dqn_generated_manifest_omits_cudagraphs(tmp_path) -> None:
     _path, validated = write_arena_manifest("DQN", tmp_path)
     assert validated["algorithm"]["name"] == "DQN"
     assert "cudagraphs" not in validated["algorithm"]
+
+
+def test_llm_env_type_str() -> None:
+    assert str(LLMEnvType.REASONING) == "reasoning"
+
+
+def test_training_spec_rejects_invalid_eval_steps() -> None:
+    with pytest.raises(
+        ValueError, match="eval_steps must be greater than evaluation_interval"
+    ):
+        TrainingSpec(eval_steps=10, evaluation_interval=10)
+
+
+def test_training_spec_rejects_evo_steps_above_max_steps() -> None:
+    with pytest.raises(
+        ValueError, match="evo_steps .* must be less than or equal to max_steps"
+    ):
+        TrainingSpec(max_steps=100, evo_steps=200)
+
+
+def test_training_spec_rejects_eps_start_below_eps_end() -> None:
+    with pytest.raises(
+        ValueError, match="eps_start .* must be greater than or equal to eps_end"
+    ):
+        TrainingSpec(eps_start=0.1, eps_end=0.9)
+
+
+def test_registry_override_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING):
+        ARENA_REGISTRY.add("DQN", DQNSpec)
+    assert "Overriding existing registration" in caplog.text
+
+
+def test_resolve_algorithm_requires_name() -> None:
+    with pytest.raises(ValueError, match="must include a 'name' field"):
+        _resolve_algorithm({"lr": 1e-3})
+
+
+def test_resolve_algorithm_rejects_non_mapping() -> None:
+    with pytest.raises(TypeError, match="Expected a dict or AlgorithmSpec"):
+        _resolve_algorithm(42)
+
+
+def test_coerce_environment_rejects_invalid_type() -> None:
+    with pytest.raises(TypeError, match="Expected a dict or environment spec"):
+        _coerce_environment("not-an-env")
+
+
+def test_normalize_network_arch_passthrough_for_spec() -> None:
+    spec = MlpSpec(hidden_size=[64])
+    assert _normalize_network_arch(spec) is spec
+
+
+def test_normalize_network_arch_creates_encoder_from_top_level_arch() -> None:
+    normalized = _normalize_network_arch(
+        {"arch": "mlp", "head_config": {"hidden_size": [64]}}
+    )
+    assert normalized["encoder_config"]["arch"] == "mlp"
+
+
+def test_resolve_network_accepts_finetuning_spec() -> None:
+    spec = FinetuningNetworkSpec(
+        pretrained_model_name_or_path="gpt2",
+        max_context_length=512,
+    )
+    resolved = _resolve_network(spec)
+    assert resolved["pretrained_model_name_or_path"] == "gpt2"
+
+
+def test_python_manifest_accepts_network_spec_object() -> None:
+    manifest = TrainingManifest.model_validate(
+        {
+            "algorithm": {"name": "DQN"},
+            "environment": {"name": "CartPole-v1"},
+            "network": QNetworkSpec(
+                encoder_config=MlpSpec(hidden_size=[64]),
+                head_config=MlpSpec(hidden_size=[64]),
+            ),
+        }
+    )
+    assert manifest.network is not None
+    assert manifest.network["encoder_config"]["arch"] == "mlp"
