@@ -29,6 +29,11 @@ def _is_distribution_installed(distribution: str) -> bool:
 
 # Use these flags for lazy import checks
 HAS_LLM_DEPENDENCIES = all(_is_distribution_installed(pkg) for pkg in LLM_PACKAGES)
-HAS_LIGER_KERNEL = _is_distribution_installed("liger-kernel")
+# The pinned distribution is liger-kernel-nightly (stable releases lag the
+# chunked-loss API we consume); accept the stable distribution too since both
+# ship the same ``liger_kernel`` module.
+HAS_LIGER_KERNEL = _is_distribution_installed(
+    "liger-kernel-nightly"
+) or _is_distribution_installed("liger-kernel")
 HAS_VLLM = _is_distribution_installed("vllm")
 HAS_DEEPSPEED = _is_distribution_installed("deepspeed")

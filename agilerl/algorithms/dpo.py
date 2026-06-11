@@ -23,7 +23,7 @@ from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import get_experiences_samples
 
 if HAS_LIGER_KERNEL:
-    from agilerl.algorithms.core.llm_ops.fused_loss import LigerDPOWithAlpha
+    from liger_kernel.chunked_loss.dpo_loss import LigerFusedLinearDPOLoss
 
 
 class DPO(LLMAlgorithm):
@@ -599,23 +599,27 @@ class DPO(LLMAlgorithm):
         policy_hidden = policy_hidden[:, :-1, :].contiguous()
         ref_hidden = ref_hidden[:, :-1, :].contiguous()
 
-        loss, aux = LigerDPOWithAlpha.apply(
-            policy_hidden,
+        # Constructed per call: ``beta`` / ``nll_alpha`` are HPO-mutable, and
+        # the module is a stateless config holder (no parameters).
+        dpo_loss_fn = LigerFusedLinearDPOLoss(
+            ignore_index=-100,
+            beta=self.beta,
+            alpha=self.nll_alpha,  # scales NLL in the fused kernel
+            compute_nll_loss=self.nll_alpha > 0,
+            compiled=True,
+            use_ref_model=True,
+            average_log_prob=False,  # sum, matching _dpo_loss
+            chunk_size=self.fused_loss_chunk_rows or 1,  # sequences per chunk
+            loss_type="sigmoid",
+        )
+        loss, aux = dpo_loss_fn(
             lm_head_weight,
+            policy_hidden,
             stacked_target,
             lm_head_bias,  # bias (None for most LLMs)
             ref_hidden,  # ref_input
             lm_head_weight,  # ref_weight (lm_head is never LoRA-adapted, so is the same as the policy weight)
             lm_head_bias,  # ref_bias (same weight → same bias)
-            -100,  # ignore_index
-            self.beta,
-            self.nll_alpha,  # alpha — scales NLL in the fused kernel
-            self.nll_alpha > 0,  # compute_nll_loss
-            True,  # compiled
-            True,  # use_ref_model
-            False,  # average_log_prob (sum, matching _dpo_loss)
-            self.fused_loss_chunk_rows or 1,  # chunk_size (sequences per chunk)
-            "sigmoid",  # loss_type
         )
         # aux = (chosen_logps, rejected_logps, chosen_logits_mean, rejected_logits_mean,
         #        nll_loss, chosen_rewards, rejected_rewards)

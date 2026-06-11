@@ -97,7 +97,7 @@ all = [
     { name = "datasets" },
     { name = "deepspeed", marker = "sys_platform == 'linux'" },
     { name = "gymnasium", extra = ["box2d"], marker = "sys_platform != 'win32'" },
-    { name = "liger-kernel", marker = "sys_platform == 'linux'" },
+    { name = "liger-kernel-nightly", marker = "sys_platform == 'linux'" },
     { name = "peft" },
     { name = "swig", marker = "sys_platform != 'win32'" },
     { name = "transformers" },
@@ -111,7 +111,7 @@ llm = [
     { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
     { name = "datasets" },
     { name = "deepspeed", marker = "sys_platform == 'linux'" },
-    { name = "liger-kernel", marker = "sys_platform == 'linux'" },
+    { name = "liger-kernel-nightly", marker = "sys_platform == 'linux'" },
     { name = "peft" },
     { name = "transformers" },
     { name = "vllm", marker = "sys_platform == 'linux'" },
@@ -153,8 +153,8 @@ requires-dist = [
     { name = "h5py", specifier = ">=3.15.0" },
     { name = "hydra-core", specifier = ">=1.3.2" },
     { name = "jax", extras = ["cpu"], specifier = ">=0.4.31" },
-    { name = "liger-kernel", marker = "sys_platform == 'linux' and extra == 'all'", specifier = "==0.8.0" },
-    { name = "liger-kernel", marker = "sys_platform == 'linux' and extra == 'llm'", specifier = "==0.8.0" },
+    { name = "liger-kernel-nightly", marker = "sys_platform == 'linux' and extra == 'all'", specifier = "==0.8.0.dev20260611145756" },
+    { name = "liger-kernel-nightly", marker = "sys_platform == 'linux' and extra == 'llm'", specifier = "==0.8.0.dev20260611145756" },
     { name = "matplotlib", specifier = ">=3.9.4" },
     { name = "minari", extras = ["all"], specifier = ">=0.5.2" },
     { name = "numpy", specifier = ">=2.0.0,<3.0" },
@@ -2750,16 +2750,16 @@ wheels = [
 ]
 
 [[package]]
-name = "liger-kernel"
-version = "0.8.0"
+name = "liger-kernel-nightly"
+version = "0.8.0.dev20260611145756"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "torch", marker = "(python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32')" },
     { name = "triton", marker = "(python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/41/d6/85f032b40fc30c969e817f9f3527f987b508171b46d9958befd0868855fd/liger_kernel-0.8.0.tar.gz", hash = "sha256:f98b94faf018814a0757e7b72bb8ebaaf12a78782cd09b157732acca2791e72c", size = 3989670, upload-time = "2026-04-30T23:02:15.183Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/71/57/d226233e92cd917cb106f06c58f5b4096b19c15cf79f85b7b954eae2ec14/liger_kernel_nightly-0.8.0.dev20260611145756.tar.gz", hash = "sha256:029131dd31a0ffecb6a0f04482baa69d54ad197761fb52da0749e91b7d755347", size = 4063294, upload-time = "2026-06-11T14:58:05.43Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7c/6b/eb29b56f128a819e2cded552e293212c57daa949481206b82490b207deac/liger_kernel-0.8.0-py3-none-any.whl", hash = "sha256:e1f03eeb4ba6a6a413d585dacf92c4c15d164bab5844fa4ead2fede6bcac469c", size = 403120, upload-time = "2026-04-30T23:02:13.443Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/57/27a6f15165861793bbede3083a58535effcb7b121365d21a7f7bc6b2e539/liger_kernel_nightly-0.8.0.dev20260611145756-py3-none-any.whl", hash = "sha256:5a8100ad6d22d5fb59763fb2602f823b485c7fe84b100ff8d12088fc6b2143d8", size = 439284, upload-time = "2026-06-11T14:58:04.204Z" },
 ]
 
 [[package]]
