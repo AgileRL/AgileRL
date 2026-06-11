@@ -1030,6 +1030,61 @@ class TestPPOLearn:
         ppo.learn((completions, masks, rewards))
 
 
+class TestPPOFusedNoGradBaseRoutedReference:
+    """With ``use_separate_reference_adapter=False``, ``_fused_forward_no_grad``
+    routes the reference rows to PEFT's reserved ``"__base__"`` adapter inside
+    the same fused pass (no separate disable-adapter forward). The reference
+    log-probs must match the disable-adapter pass the previous implementation
+    ran separately.
+    """
+
+    def _perturbed_agent(self):
+        torch.manual_seed(0)
+        ppo = _cpu_llmppo(use_separate_reference_adapter=False)
+        # lora_B starts at zero, so adapter outputs equal the base output and
+        # any routing mistake would be invisible. Perturb the trainable LoRA
+        # weights so actor/critic rows genuinely differ from base rows.
+        with torch.no_grad():
+            for name, param in ppo.actor.named_parameters():
+                if "lora" in name:
+                    param.add_(torch.randn_like(param) * 0.5)
+        return ppo
+
+    def test_base_routed_reference_matches_disable_adapter_pass(self):
+        ppo = self._perturbed_agent()
+        vocab_size, seq_len, b = 100, 12, 4
+        ids = torch.randint(1, vocab_size - 1, (b, seq_len))
+
+        ref_lp, actor_lp, values = ppo._fused_forward_no_grad(ids, batch_size=2)
+
+        with torch.no_grad():
+            expected_ref = ppo._get_logprobs(
+                ids, batch_size=2, use_reference=True, eval_mode=True
+            )
+
+        assert ref_lp.shape == (b, seq_len - 1)
+        assert actor_lp.shape == (b, seq_len - 1)
+        assert values.shape == (b, seq_len - 1)
+        assert torch.allclose(ref_lp, expected_ref, rtol=1e-5, atol=1e-6)
+        # Sanity: per-row routing is live — actor rows carry the perturbed
+        # adapter, so they must differ from the base-routed reference rows.
+        assert not torch.allclose(ref_lp, actor_lp, rtol=1e-3, atol=1e-3)
+
+    def test_learn_runs_with_base_routed_reference(self):
+        ppo = self._perturbed_agent()
+        vocab_size = 100
+        inp, mtok = 10, 8
+        seq_len = inp + mtok
+        completions = [torch.randint(0, vocab_size, (1, seq_len)) for _ in range(2)]
+        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
+        rewards = torch.tensor([[0.5], [-0.5]], dtype=torch.float32)
+
+        metrics = ppo.learn((completions, action_masks, rewards))
+
+        for key in ("mean_loss", "mean_kl", "mean_pg_loss", "mean_vf_loss"):
+            assert torch.isfinite(torch.tensor(metrics[key]))
+
+
 def _minimal_reasoning_gym(device: str, vocab_size: int, input_size: int, bs: int):
     env = ReasoningGym.__new__(ReasoningGym)
 
