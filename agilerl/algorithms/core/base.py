@@ -4072,12 +4072,30 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     if hasattr(peft_target, "base_model")
                     else peft_target
                 )
-                try:
-                    _apply_liger_kernel_to_instance(model=inner_model)
+                # Idempotency guard: skip when the model was already patched —
+                # either by us (sentinel) or upstream (e.g. a caller that loaded
+                # it via AutoLigerKernelForCausalLM, whose swapped-in modules
+                # come from the liger_kernel package). Double-patching stacks
+                # monkey-patches with undefined behavior.
+                already_patched = getattr(
+                    inner_model, "_agilerl_liger_patched", False
+                ) or any(
+                    type(m).__module__.startswith("liger_kernel")
+                    for m in inner_model.modules()
+                )
+                if already_patched:
                     logger.info(
-                        "Liger Kernel instance-level patches applied to %s.",
+                        "Liger Kernel patches already present on %s; skipping.",
                         type(inner_model).__name__,
                     )
+                try:
+                    if not already_patched:
+                        _apply_liger_kernel_to_instance(model=inner_model)
+                        inner_model._agilerl_liger_patched = True
+                        logger.info(
+                            "Liger Kernel instance-level patches applied to %s.",
+                            type(inner_model).__name__,
+                        )
                 except (KeyError, AttributeError, TypeError):
                     logger.warning(
                         "Liger Kernel does not support %s; "
