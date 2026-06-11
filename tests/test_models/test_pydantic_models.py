@@ -287,7 +287,7 @@ class TestLLMEnvSpec:
             "test": "test_split",
         }
 
-        with patch("agilerl.models.env.load_dataset", return_value=mock_ds):
+        with patch("datasets.load_dataset", return_value=mock_ds):
             train, test = spec._load_dataset_hf()
 
         mock_ds.rename_columns.assert_called_once_with({"old": "new"})
@@ -309,7 +309,7 @@ class TestLLMEnvSpec:
 
         with (
             patch("agilerl.models.env.pd.read_parquet", return_value=mock_df),
-            patch("agilerl.models.env.Dataset.from_pandas", return_value=mock_hf_ds),
+            patch("datasets.Dataset.from_pandas", return_value=mock_hf_ds),
         ):
             train, test = spec._load_dataset_file()
 
