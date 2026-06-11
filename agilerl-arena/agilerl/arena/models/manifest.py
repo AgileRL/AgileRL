@@ -120,13 +120,14 @@ def _resolve_algorithm(data: Any) -> AlgoSpecT:
         msg = f"Expected a dict or AlgorithmSpec, got {type(data).__name__}"
         raise TypeError(msg)
 
-    name = data.pop("name", None)
+    payload = dict(data)
+    name = payload.pop("name", None)
     if name is None:
         msg = "Algorithm section must include a 'name' field, corresponding to the name of the algorithm class."
         raise ValueError(msg)
 
     entry = ARENA_REGISTRY.get(name)
-    return entry.spec_cls(**data)
+    return entry.spec_cls(**payload)
 
 
 def _coerce_environment(data: Any) -> dict[str, Any]:
