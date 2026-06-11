@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import agilerl.arena  # noqa: F401 — configure package logging before submodules
 import click
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig, build_client

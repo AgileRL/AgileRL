@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 console = Console()
 error_console = Console(stderr=True)
 
-_logger = logging.getLogger("arena")
+_logger = logging.getLogger("agilerl.arena")
 if not _logger.handlers:
     _logger.setLevel(logging.INFO)
     _logger.addHandler(

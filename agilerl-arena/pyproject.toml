@@ -8,7 +8,9 @@ readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "click>=8.3.0",
+    "lazy-loader>=0.4",
     "httpx>=0.27,<1",
+    "numpy>=2.0.0,<3.0",
     "packaging>=20.0",
     "pydantic>=2.0,<3",
     "python-keycloak>=4.0,<6",

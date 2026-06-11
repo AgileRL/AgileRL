@@ -233,6 +233,8 @@ source = { editable = "agilerl-arena" }
 dependencies = [
     { name = "click" },
     { name = "httpx" },
+    { name = "lazy-loader" },
+    { name = "numpy" },
     { name = "packaging" },
     { name = "pydantic" },
     { name = "python-keycloak" },
@@ -244,6 +246,8 @@ dependencies = [
 requires-dist = [
     { name = "click", specifier = ">=8.3.0" },
     { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "lazy-loader", specifier = ">=0.4" },
+    { name = "numpy", specifier = ">=2.0.0,<3.0" },
     { name = "packaging", specifier = ">=20.0" },
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "python-keycloak", specifier = ">=4.0,<6" },
