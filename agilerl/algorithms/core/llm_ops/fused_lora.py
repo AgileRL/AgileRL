@@ -27,12 +27,18 @@ so that routing survives gradient-checkpoint recomputation.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import torch.nn as nn
 
 try:
     from peft.tuners.lora.layer import LoraLayer
 except ImportError:  # pragma: no cover
     LoraLayer = None  # type: ignore[assignment, misc]
+
+#: PEFT's reserved adapter name: rows routed to it bypass every LoRA delta
+#: and see only the frozen base weights.
+BASE_ADAPTER_NAME = "__base__"
 
 
 def _fused_routing_pre_hook(
@@ -83,7 +89,7 @@ def _get_cached_lora_layers(model: nn.Module) -> list[nn.Module]:
 
 
 def patch_lora_for_fused_forward(model: nn.Module) -> None:
-    """Register permanent forward pre-hooks on all LoRA layers.
+    """Register forward pre-hooks on all LoRA layers.
 
     The hooks inject per-sample adapter routing into each layer's forward
     call when ``_fused_adapter_routing`` is set, triggering PEFT's
@@ -94,8 +100,10 @@ def patch_lora_for_fused_forward(model: nn.Module) -> None:
     Also caches the list of LoRA layers on the model for fast access
     by ``set_fused_adapter_routing`` / ``clear_fused_adapter_routing``.
 
-    Must be called **once** after the PEFT model is fully constructed
-    (all adapters added).
+    Idempotent: layers that already carry a fused-routing hook are skipped,
+    so it is safe (and required) to call again whenever adapters wrapping
+    **new** modules are added after the first call — only the new layers are
+    hooked, and the cached layer list is refreshed either way.
 
     :param model: A ``PeftModel`` (or any ``nn.Module`` containing
         ``LoraLayer`` sub-modules).
@@ -107,13 +115,20 @@ def patch_lora_for_fused_forward(model: nn.Module) -> None:
         return
     layers: list[nn.Module] = []
     for module in nn.Module.modules(model):
-        if isinstance(module, LoraLayer):
-            module._fused_adapter_routing = None  # type: ignore[attr-defined]
+        if not isinstance(module, LoraLayer):
+            continue
+        layers.append(module)
+        if hasattr(module, "_fused_adapter_routing"):
+            # Already patched (re-patch after adding adapters): keep the
+            # existing hook; double-registering would run it twice per forward.
+            continue
+        module._fused_adapter_routing = None  # type: ignore[attr-defined]
+        module._fused_routing_hook_handle = (  # type: ignore[attr-defined]
             module.register_forward_pre_hook(
                 _fused_routing_pre_hook,
                 with_kwargs=True,
             )
-            layers.append(module)
+        )
     try:
         model._fused_lora_layers = layers  # type: ignore[attr-defined]
     except (AttributeError, TypeError):
@@ -123,24 +138,99 @@ def patch_lora_for_fused_forward(model: nn.Module) -> None:
         pass
 
 
-def set_fused_adapter_routing(model: nn.Module, routing: list[str]) -> None:
+def unpatch_lora_for_fused_forward(model: nn.Module) -> None:
+    """Remove the hooks and per-layer state installed by ``patch_lora_for_fused_forward``.
+
+    Restores every LoRA layer to its pre-patch state (no routing attribute,
+    no pre-hook) and drops the cached layer list. After this,
+    ``set_fused_adapter_routing`` raises until the model is patched again.
+
+    :param model: The model to release from fused-routing control.
+    :type model: nn.Module
+    :return: ``None``
+    :rtype: None
+    """
+    for module in _get_cached_lora_layers(model):
+        handle = getattr(module, "_fused_routing_hook_handle", None)
+        if handle is not None:
+            handle.remove()
+            del module._fused_routing_hook_handle
+        if hasattr(module, "_fused_adapter_routing"):
+            del module._fused_adapter_routing
+    try:
+        del model._fused_lora_layers
+    except (AttributeError, TypeError):
+        pass
+
+
+def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
     """Activate fused adapter routing on all LoRA layers.
 
     :param model: The model whose LoRA layers should use fused routing.
     :type model: nn.Module
     :param routing: Adapter names, one per row of the fused batch (e.g.
         ``["actor"] * B + ["critic"] * B`` when the batch concatenates actor and
-        critic inputs).
-    :type routing: list[str]
+        critic inputs).  ``"__base__"`` routes a row through the frozen base
+        weights with no LoRA delta.
+    :type routing: Sequence[str]
+    :raises RuntimeError: If LoRA layers exist that
+        ``patch_lora_for_fused_forward`` has not hooked — without the hooks
+        the routing would be silently ignored and every row would run under
+        the currently active adapter.
+    :raises ValueError: If *routing* names an adapter that no LoRA layer
+        registers — PEFT's ``_mixed_batch_forward`` silently treats unknown
+        names as base-only rows, so a typo would corrupt training without
+        an error.
     :return: ``None``
     :rtype: None
     """
-    for module in _get_cached_lora_layers(model):
+    layers = _get_cached_lora_layers(model)
+    if not layers:
+        # Plain base model (no adapters) or PEFT not installed: nothing to
+        # route, and the unfused forward is already correct.
+        return
+
+    if any(not hasattr(m, "_fused_adapter_routing") for m in layers):
+        msg = (
+            "set_fused_adapter_routing called on a model with LoRA layers that "
+            "have no fused-routing hook; the routing would be silently ignored. "
+            "Call patch_lora_for_fused_forward(model) first (again, if adapters "
+            "were added after the last call)."
+        )
+        raise RuntimeError(msg)
+
+    routing = list(routing)
+    requested = set(routing) - {BASE_ADAPTER_NAME}
+    available: set[str] = set()
+    for module in layers:
+        for attr in getattr(module, "adapter_layer_names", ()):
+            container = getattr(module, attr, None)
+            if container is not None:
+                available.update(container.keys())
+        if requested <= available:
+            break
+    # Validation is best-effort: real PEFT layers always expose their adapter
+    # containers via ``adapter_layer_names``; if none are discoverable (e.g.
+    # test doubles), routing is applied unvalidated as before.
+    if available and not requested <= available:
+        unknown = sorted(requested - available)
+        msg = (
+            f"Unknown adapter name(s) in fused routing: {unknown}. Known "
+            f"adapters: {sorted(available)} (plus '{BASE_ADAPTER_NAME}' for "
+            "base-only rows)."
+        )
+        raise ValueError(msg)
+
+    for module in layers:
         module._fused_adapter_routing = routing  # type: ignore[attr-defined]
 
 
 def clear_fused_adapter_routing(model: nn.Module) -> None:
     """Deactivate fused routing, restoring standard single-adapter forward.
+
+    Lenient by design so it is safe to call from error-cleanup paths: layers
+    never patched are left untouched (rather than gaining a routing attribute
+    that would defeat ``set_fused_adapter_routing``'s patched-layer check).
 
     :param model: The model whose LoRA layers should clear fused routing.
     :type model: nn.Module
@@ -148,4 +238,5 @@ def clear_fused_adapter_routing(model: nn.Module) -> None:
     :rtype: None
     """
     for module in _get_cached_lora_layers(model):
-        module._fused_adapter_routing = None  # type: ignore[attr-defined]
+        if hasattr(module, "_fused_adapter_routing"):
+            module._fused_adapter_routing = None  # type: ignore[attr-defined]

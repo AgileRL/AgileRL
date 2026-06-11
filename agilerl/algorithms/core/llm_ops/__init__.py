@@ -10,9 +10,11 @@ fires.
 
 from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms.core.llm_ops.fused_lora import (
+    BASE_ADAPTER_NAME,
     clear_fused_adapter_routing,
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
+    unpatch_lora_for_fused_forward,
 )
 from agilerl.algorithms.core.llm_ops.vllm_weight_sharing import (
     assert_shared_storage,
@@ -37,6 +39,7 @@ else:
     llm_policy_loss_fn = None  # type: ignore[assignment]
 
 __all__ = [
+    "BASE_ADAPTER_NAME",
     "LigerFusedLinearPolicyLossFunction",
     "_LigerDPOWithAlpha",
     "apply_fused_policy_loss",
@@ -50,4 +53,5 @@ __all__ = [
     "patch_vllm_standby_sleep_mode",
     "prepare_shared_base_for_kbit_training",
     "set_fused_adapter_routing",
+    "unpatch_lora_for_fused_forward",
 ]
