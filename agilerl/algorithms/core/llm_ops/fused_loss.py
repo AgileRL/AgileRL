@@ -81,8 +81,8 @@ def llm_policy_loss_fn(
     * ``"sequence"`` — token log-ratios are mean-pooled over the whole
       completion (GSPO). ``advantages`` is ``(chunk_B, 1)``.
 
-    :param log_probs: ``(chunk_B, T, V)`` fp32 log-softmax (caller passes
-        the output of Liger's ``chunk_forward``).
+    :param log_probs: ``(chunk_B, T, V)`` fp32 log-softmax of the chunk's
+        logits (the fused Function computes this inline per chunk).
     :type log_probs: torch.Tensor
     :param selected_token_ids: ``(chunk_B, T)`` target token ids.
     :type selected_token_ids: torch.Tensor
@@ -250,13 +250,15 @@ def llm_policy_loss_fn(
 class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
     """Fused linear PPO-style policy loss with per-token or per-turn ratios.
 
-    Inherits ``chunk_forward`` (matmul + log-softmax) and ``backward``
-    (saved-grad plumbing) from
+    Inherits ``backward`` (saved-grad plumbing) from
     :class:`liger_kernel.chunked_loss.fused_linear_ppo.LigerFusedLinearPPOBase`,
     but overrides ``forward`` with our own chunk loop so we can slice
     ``turn_ids`` along dim 0 alongside the other chunked inputs —
     the base class hardcodes its chunked-arg list and doesn't expose
-    an injection point.
+    an injection point. The per-chunk logits + log-softmax are computed
+    inline (Liger >= 0.8.0 replaced the base ``chunk_forward`` with a
+    selective per-token-logp kernel that no longer exposes the full
+    ``(chunk, T, V)`` log_probs this loss consumes).
     """
 
     @classmethod
@@ -310,12 +312,21 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             old_per_token_logps_chunk=None,
             turn_ids_chunk=None,
         ):
-            log_probs, _ = LigerFusedLinearPPOBase.chunk_forward(
-                input_chunk,
-                weight_local,
-                bias=bias_local,
-                temperature=temperature,
-            )
+            # Liger 0.8.0 rewrote ``LigerFusedLinearPPOBase.chunk_forward`` as
+            # a selective per-token-logp kernel: it now requires
+            # ``selected_token_ids``, returns gathered ``(chunk, T)`` logps
+            # instead of the full ``(chunk, T, V)`` log_probs this loss
+            # consumes, and is built on a custom ``autograd.Function`` that
+            # does not compose with the ``torch.func.grad_and_value``
+            # transform used below. Inline the (numerically identical)
+            # 0.7.0 chunk_forward math instead: matmul + bias + temperature
+            # scaling + fp32 log-softmax.
+            logits = torch.matmul(input_chunk, weight_local.t())
+            if bias_local is not None:
+                logits = logits + bias_local
+            if temperature != 1.0:
+                logits = logits / temperature
+            log_probs = torch.log_softmax(logits.float(), dim=-1)
             return llm_policy_loss_fn(
                 log_probs=log_probs,
                 selected_token_ids=selected_token_ids_chunk,
