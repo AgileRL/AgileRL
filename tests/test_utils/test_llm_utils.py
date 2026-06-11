@@ -1020,7 +1020,6 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             import agilerl.utils.llm_utils as llm_utils_reloaded
 
             # Verify the fallback type aliases are set to Any
-            assert llm_utils_reloaded.AutoTokenizer is Any
             assert llm_utils_reloaded.PreTrainedModel is Any
             assert llm_utils_reloaded.Dataset is Any
             assert llm_utils_reloaded.AutoModelForCausalLM is Any

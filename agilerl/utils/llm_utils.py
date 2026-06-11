@@ -23,16 +23,12 @@ from agilerl.typing import ReasoningPrompts
 logger = logging.getLogger(__name__)
 
 if HAS_LLM_DEPENDENCIES:
-    # ``AutoTokenizer`` is re-exported as a no-deps fallback symbol (asserted by
-    # test_llm_utils_fallback_types_when_no_llm_dependencies); keep it imported
-    # so the with-deps and no-deps branches define the same names.
     from datasets import Dataset
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoModelForCausalLM, BitsAndBytesConfig
     from transformers.modeling_utils import PreTrainedModel
 
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 else:
-    AutoTokenizer = Any
     PreTrainedModel = Any
     Dataset = Any
     AutoModelForCausalLM = Any  # type: ignore[assignment,misc]
