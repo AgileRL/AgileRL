@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import gc
 import logging
-import os
 import random
 import re
 import shutil
@@ -663,11 +662,11 @@ def resolve_attn_implementation(requested: str | None = None) -> str:
     windowed-causal attention with O(T) memory and no TxT mask, so prefer it
     when installed; otherwise fall back to SDPA.
 
-    The ``AGILERL_ATTN_IMPLEMENTATION`` env var overrides the auto choice (but
-    not an explicit caller value), e.g. set it to ``"flex_attention"`` for
-    PyTorch's built-in FlexAttention — block-sparse masked attention with O(T)
-    memory and no TxT mask, which handles sliding-window models at long context
-    without needing the ``flash_attn`` package.
+    To force a specific backend, pass it explicitly — e.g.
+    ``model_config={"attn_implementation": "flex_attention"}`` on the algorithm
+    for PyTorch's built-in FlexAttention (block-sparse masked attention with
+    O(T) memory and no TxT mask, which handles sliding-window models at long
+    context without needing the ``flash_attn`` package).
 
     :param requested: An explicit choice from the caller. Anything other than
         ``None`` / ``"auto"`` is returned unchanged (caller stays authoritative).
@@ -676,10 +675,6 @@ def resolve_attn_implementation(requested: str | None = None) -> str:
         ``from_config``.
     :rtype: str
     """
-    if requested is None or requested == "auto":
-        env = os.environ.get("AGILERL_ATTN_IMPLEMENTATION")
-        if env:
-            requested = env
     if requested is not None and requested != "auto":
         return requested
     import importlib.util
@@ -1497,6 +1492,7 @@ def sample_eval_prompts(
     * Any other gym — both are ``None``.
 
     :param env: AgileRL gym environment with a ``test_dataloader`` attribute.
+    :type env: Any
     :param n: Number of samples to draw, defaults to 5.
     :type n: int, optional
     :param seed: Random seed for reproducible sampling, defaults to 0.
@@ -1552,6 +1548,7 @@ def compare_responses(
         ``agent.device``.
     :type agent: LLMAlgorithm
     :param tokenizer: HuggingFace tokenizer matching the model.
+    :type tokenizer: Any
     :param samples: ``(prompt, chosen, rejected)`` triples as returned by
         :func:`sample_eval_prompts`.  ``None`` fields are silently skipped.
     :type samples: list[tuple[str, str | None, str | None]]

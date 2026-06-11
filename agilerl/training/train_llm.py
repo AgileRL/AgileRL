@@ -98,20 +98,6 @@ def _grpo_sampling_kwargs(
     return {}
 
 
-_DEBUG_ROLLOUTS_ENV = "AGILERL_DEBUG_ROLLOUTS"
-
-
-def _debug_rollout_step_budget() -> int:
-    """Return how many training iterations should dump rollout debug info."""
-    raw = os.environ.get(_DEBUG_ROLLOUTS_ENV)
-    if not raw:
-        return 0
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        return 0
-
-
 def _trajectory_debug_summary(traj: Any, max_chars: int = 400) -> dict[str, Any]:
     """Decode the shared per-trajectory debug fields once.
 
@@ -156,9 +142,9 @@ def _print_multiturn_rollout_debug(
 ) -> None:
     """Dump per-trajectory rollout state for debugging multi-turn training.
 
-    Enable by setting ``AGILERL_DEBUG_ROLLOUTS=<N>``: prints during the first
-    N iterations on the main process only. Designed to surface issues like
-    early termination (e.g. GEM env returning ``terminated=True`` on a
+    Enabled via ``finetune_llm_multiturn(debug_rollouts=N)``: prints during the
+    first N iterations on the main process only. Designed to surface issues
+    like early termination (e.g. GEM env returning ``terminated=True`` on a
     format-error reward), abnormally short rollouts, or rewards that are
     all equal (which kills GRPO advantage signal).
     """
@@ -1576,6 +1562,7 @@ def finetune_llm_multiturn(
     accelerator: Accelerator | None = None,
     log_csv: bool = False,
     max_wall_seconds: float | None = None,
+    debug_rollouts: int = 0,
 ) -> PopulationType:
     """Finetune a population of LLMPPO agents on a multi-turn environment.
 
@@ -1631,6 +1618,10 @@ def finetune_llm_multiturn(
     :type accelerator: Accelerator, optional
     :param max_wall_seconds: Stop after this wall-clock duration (seconds); ``None`` disables.
     :type max_wall_seconds: float | None
+    :param debug_rollouts: Print a per-trajectory rollout debug dump for the
+        first N outer iterations (main process only); 0 disables. Surfaces
+        early termination, abnormally short rollouts, or all-equal rewards.
+    :type debug_rollouts: int, optional
     :return: The finetuned population (same list object, possibly mutated in place).
     :rtype: PopulationType
     """
@@ -1761,11 +1752,7 @@ def finetune_llm_multiturn(
             )
             rollout_seconds_acc += time.perf_counter() - rollout_t0
 
-            if (
-                _is_main_process(accelerator)
-                and agent_idx == 0
-                and i < _debug_rollout_step_budget()
-            ):
+            if _is_main_process(accelerator) and agent_idx == 0 and i < debug_rollouts:
                 _print_multiturn_rollout_debug(
                     iteration=i,
                     rollout_env=rollout_env,
@@ -2057,23 +2044,41 @@ def finetune_llm_sft(
     positions are masked with ``ignore_index=-100``).
 
     :param pop: Population of SFT agents.
+    :type pop: PopulationType
     :param env: Shared :class:`~agilerl.llm_envs.SFTGym` instance.
+    :type env: SFTGym | None, optional
     :param env_fn: Optional factory returning one ``SFTGym`` per agent.
+    :type env_fn: Callable[[], SFTGym] | None, optional
     :param init_hp: Hyperparameter dict forwarded to wandb, defaults to None.
+    :type init_hp: dict[str, Any] | None, optional
     :param save_elite: Save best agent to disk, defaults to None.
+    :type save_elite: bool | None, optional
     :param elite_path: Directory for checkpoints, defaults to None.
+    :type elite_path: str | None, optional
     :param wb: Weights & Biases logging, defaults to False.
+    :type wb: bool, optional
     :param evo_steps: Steps between HPO evolution rounds, defaults to None.
+    :type evo_steps: int | None, optional
     :param checkpoint_steps: Steps between non-HPO saves, defaults to None.
+    :type checkpoint_steps: int | None, optional
     :param tournament: Tournament selection object, defaults to None.
+    :type tournament: TournamentSelection | None, optional
     :param mutation: Mutation object, defaults to None.
+    :type mutation: Mutations | None, optional
     :param wandb_api_key: W&B API key, defaults to None.
+    :type wandb_api_key: str | None, optional
     :param evaluation_interval: Steps between eval passes, defaults to 10.
+    :type evaluation_interval: int, optional
     :param verbose: Print summary at end, defaults to True.
+    :type verbose: bool, optional
     :param accelerator: Distributed training handle, defaults to None.
+    :type accelerator: Accelerator | None, optional
     :param max_steps: Total samples to process (one epoch if None), defaults to None.
+    :type max_steps: int | None, optional
     :param num_epochs: Dataset passes; takes precedence over max_steps when set.
+    :type num_epochs: int | None, optional
     :param log_csv: If True and ``elite_path`` is set, log aggregate metrics to CSV.
+    :type log_csv: bool, optional
     """
     _validate_llm_evolution_args(evo_steps, tournament, mutation, checkpoint_steps)
     envs, uses_env_fn = _resolve_training_envs(pop=pop, env=env, env_fn=env_fn)

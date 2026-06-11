@@ -166,14 +166,20 @@ def _scatter_packed(
     Built with ``index_select`` / ``index_put`` so gradients flow back to ``flat``.
 
     :param flat: ``(N,)`` or ``(N, H)`` packed rows to scatter.
+    :type flat: torch.Tensor
     :param packed: The :class:`PackedBatch` whose ``cu_seqlens`` give segment
         offsets.
+    :type packed: PackedBatch
     :param tokens_per_seg: ``(B,)`` number of leading rows to take from each
         segment (e.g. ``L_b - 1`` for logprobs, ``L_b`` for hidden states).
+    :type tokens_per_seg: torch.Tensor
     :param row_stride: Output row stride per segment (``T - 1`` or ``T``).
+    :type row_stride: int
     :param trailing_dim: ``H`` for a ``(N, H)`` payload, else ``None`` for ``(N,)``.
+    :type trailing_dim: int | None
     :return: Flat ``(B * row_stride,)`` (or ``(B * row_stride, H)``) output, to be
         viewed into its final padded shape by the caller.
+    :rtype: torch.Tensor
     """
     device = flat.device
     cu = packed.cu_seqlens

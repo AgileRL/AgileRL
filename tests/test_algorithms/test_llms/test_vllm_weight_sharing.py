@@ -513,13 +513,11 @@ class TestResolveAttnImplementation:
         assert resolve_attn_implementation("flex_attention") == "flex_attention"
         assert resolve_attn_implementation("eager") == "eager"
 
-    def test_env_var_overrides_auto_but_not_explicit(self, monkeypatch):
+    def test_explicit_choice_wins_over_auto(self):
         from agilerl.utils.llm_utils import resolve_attn_implementation
 
-        monkeypatch.setenv("AGILERL_ATTN_IMPLEMENTATION", "flex_attention")
-        assert resolve_attn_implementation() == "flex_attention"
-        assert resolve_attn_implementation("auto") == "flex_attention"
-        # An explicit caller value still wins over the env var.
+        # Explicit values are returned unchanged, never auto-resolved.
+        assert resolve_attn_implementation("flex_attention") == "flex_attention"
         assert resolve_attn_implementation("sdpa") == "sdpa"
 
     def test_auto_prefers_flash_when_available_else_sdpa(self, monkeypatch):

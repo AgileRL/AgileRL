@@ -1041,6 +1041,7 @@ class GRPO(LLMAlgorithm):
         clipping, or one trajectory advantage with turn-level pooling).
 
         :return: ``"trajectory"`` or ``"turn"``.
+        :rtype: str
         """
         if self.advantage_granularity == "auto":
             return "turn" if self.importance_sampling_level == "turn" else "trajectory"
@@ -1060,9 +1061,13 @@ class GRPO(LLMAlgorithm):
           positions (optionally restricted to active samples).
 
         :param advantages: ``(B, 1)`` or ``(B, T-1)`` advantages.
+        :type advantages: torch.Tensor
         :param action_masks: ``(B, T-1)`` action-token mask.
+        :type action_masks: torch.Tensor
         :param active_adv_mask: Optional ``(B,)`` per-sample keep mask.
+        :type active_adv_mask: torch.Tensor | None
         :return: Whitened advantages with the same shape as ``advantages``.
+        :rtype: torch.Tensor
         """
         if advantages.dim() <= 1 or advantages.shape[-1] == 1:
             adv = advantages.squeeze(-1).clone()
@@ -1285,11 +1290,16 @@ class GRPO(LLMAlgorithm):
         the sequence pool, just restricted to a turn's tokens.
 
         :param token_log_ratio: ``(B, T)`` per-token ``log pi_theta - log pi_old``.
+        :type token_log_ratio: torch.Tensor
         :param mask: ``(B, T)`` action-token mask.
+        :type mask: torch.Tensor
         :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action) or
             ``None``.
+        :type turn_ids: torch.Tensor | None
         :param level: ``"token"`` / ``"turn"`` / ``"sequence"``.
+        :type level: str
         :return: ``(B, T)`` or ``(B, 1)`` log importance weights.
+        :rtype: torch.Tensor
         """
         # Token level is the identity; ``turn_ids=None`` at turn level degenerates
         # to one sequence-wide turn, so route it through the sequence pooling.
@@ -1334,15 +1344,24 @@ class GRPO(LLMAlgorithm):
         the masked reduction — is shape-agnostic and identical across levels.
 
         :param mask: ``(B, T)`` action-token mask.
+        :type mask: torch.Tensor
         :param log_probs: ``(B, T)`` current-policy log-probs.
+        :type log_probs: torch.Tensor
         :param old_log_probs: ``(B, T)`` old-policy log-probs.
+        :type old_log_probs: torch.Tensor
         :param reference_log_probs: ``(B, T)`` reference-policy log-probs.
+        :type reference_log_probs: torch.Tensor
         :param advantages: ``(B, 1)`` (per-trajectory) or ``(B, T)`` (per-turn,
             broadcast to tokens) advantages.
+        :type advantages: torch.Tensor
         :param turn_ids: ``(B, T)`` turn index per token, or ``None``.
+        :type turn_ids: torch.Tensor | None
         :param level: importance-sampling level.
+        :type level: str
         :param objective: ``"grpo"`` or ``"cispo"``.
+        :type objective: str
         :return: Mean loss and mean KL divergence.
+        :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         kl = calculate_k3_kl(log_probs, reference_log_probs)
         advantages = self._apply_kl_advantage_shaping(advantages, kl, mask)
@@ -1399,14 +1418,22 @@ class GRPO(LLMAlgorithm):
         ratio is pooled per turn / per sequence (the latter is GSPO).
 
         :param mask: Action-token mask.
+        :type mask: torch.Tensor
         :param log_probs: Current-policy log-probs.
+        :type log_probs: torch.Tensor
         :param old_log_probs: Old-policy log-probs.
+        :type old_log_probs: torch.Tensor
         :param reference_log_probs: Reference-policy log-probs.
+        :type reference_log_probs: torch.Tensor
         :param advantages: ``(B, 1)`` or ``(B, T)`` advantages.
+        :type advantages: torch.Tensor
         :param turn_ids: ``(B, T)`` turn indices (required for turn level).
+        :type turn_ids: torch.Tensor | None
         :param sampling_log_probs: Optional ``(B, T-1)`` vLLM sampling logprobs
             for the sampling-mismatch correction.
+        :type sampling_log_probs: torch.Tensor | None
         :return: Mean loss and mean KL divergence.
+        :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         return self._compute_policy_loss(
             mask,

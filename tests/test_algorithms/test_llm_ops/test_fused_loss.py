@@ -747,6 +747,7 @@ class TestLigerFusedLinearPolicyLossFunction:
             turn_ids,
             full_turn_mask,
             max_turns,
+            "turn",  # importance_sampling_level
         )
         loss.backward()
         assert hidden.grad is not None

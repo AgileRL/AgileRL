@@ -997,7 +997,9 @@ def _rewrite_buffers(model: nn.Module, fn: Any) -> int:
 
     :param fn: Callback ``(buf) -> tensor | None``; ``None`` leaves the buffer
         unchanged. Never invoked for ``None`` buffer slots.
+    :type fn: Any
     :return: Number of buffers actually replaced.
+    :rtype: int
     """
     count = 0
     for module in model.modules():

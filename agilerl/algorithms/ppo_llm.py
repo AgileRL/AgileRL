@@ -849,7 +849,9 @@ class PPO(LLMAlgorithm):
         set, else token-level. Explicit ``token``/``turn``/``sequence`` override.
 
         :param ppo_granularity: Resolved GAE advantage granularity (token/turn).
+        :type ppo_granularity: str
         :return: One of ``"token"``, ``"turn"``, ``"sequence"``.
+        :rtype: str
         """
         if self.importance_sampling_level == "auto":
             return ppo_granularity if self.turn_level_clip else "token"
@@ -873,14 +875,21 @@ class PPO(LLMAlgorithm):
         on ``(B, T)`` tensors, so it is memory-bounded.
 
         :param token_log_ratio: ``(B, T)`` per-token ``log pi - log pi_old``.
+        :type token_log_ratio: torch.Tensor
         :param advantages: ``(B, T)`` per-token advantages.
+        :type advantages: torch.Tensor
         :param action_mask: ``(B, T)`` action-token mask.
+        :type action_mask: torch.Tensor
         :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action).
+        :type turn_ids: torch.Tensor
         :param is_level: ``"token"`` / ``"turn"`` / ``"sequence"``.
+        :type is_level: str
         :param loss_weight: Optional ``(B, T)`` detached per-token weight (the
             truncated vLLM importance ratio) multiplied into the surrogate
             before the masked mean; ``None`` leaves the loss unchanged.
+        :type loss_weight: torch.Tensor | None, optional
         :return: ``(pg_loss, clipfrac)`` scalars.
+        :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         return clipped_is_surrogate(
             token_log_ratio,
@@ -1116,6 +1125,7 @@ class PPO(LLMAlgorithm):
         :return: ``(total_loss, metrics)`` with ``metrics`` keying scalar
             Python floats: ``kl``, ``pg_loss``, ``vf_loss``, ``clipfrac``,
             ``entropy``.
+        :rtype: tuple[torch.Tensor, dict[str, float]]
         """
         if not HAS_LIGER_KERNEL:
             msg = (

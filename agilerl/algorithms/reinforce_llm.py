@@ -734,14 +734,20 @@ class REINFORCE(LLMAlgorithm):
         returned as a logging metric.
 
         :param batch_ids: ``(B, seq_len)`` token IDs for this minibatch.
+        :type batch_ids: torch.Tensor
         :param batch_action_mask: ``(B, seq_len-1)`` bool mask of valid
             action positions.
+        :type batch_action_mask: torch.Tensor
         :param batch_old_log_probs: ``(B, seq_len-1)`` old-policy logprobs.
+        :type batch_old_log_probs: torch.Tensor
         :param batch_reference_log_probs: ``(B, seq_len-1)`` reference
             logprobs (used for the KL metric only).
+        :type batch_reference_log_probs: torch.Tensor
         :param batch_advantages: ``(B, seq_len-1)`` per-token advantages.
+        :type batch_advantages: torch.Tensor
         :return: ``(pg_loss, metrics)`` where ``metrics`` carries
             ``kl``, ``pg_loss``, ``entropy``, ``clipfrac`` Python floats.
+        :rtype: tuple[torch.Tensor, dict[str, float]]
         """
         if not HAS_LIGER_KERNEL:
             msg = (

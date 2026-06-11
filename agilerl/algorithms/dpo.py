@@ -189,7 +189,9 @@ class DPO(LLMAlgorithm):
         :param obs: The observation of the agent
         :type obs: LLMObsType
         :param args: Additional arguments (unused; for base contract compatibility)
+        :type args: Any
         :param kwargs: Additional keyword arguments (e.g. training; unused)
+        :type kwargs: Any
         :return: The action of the agent
         :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
         """

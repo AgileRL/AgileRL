@@ -399,6 +399,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :param kwargs: Additional keyword arguments to pass to the action function.
         :type kwargs: Any
         :return: The action to take.
+        :rtype: ActionType
         """
         raise NotImplementedError
 
@@ -1872,6 +1873,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :param agent_id: The agent ID
         :type agent_id: str
         :return: The group ID
+        :rtype: str
         """
         return agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
 
@@ -2033,7 +2035,9 @@ def _vllm_sampled_token_logprobs(output: Any) -> list[float]:
     token, since the correction multiplies the loss by ``exp(old - sampling)``).
 
     :param output: A vLLM ``CompletionOutput`` (``token_ids`` + ``logprobs``).
+    :type output: Any
     :return: One sampled-token logprob per generated token.
+    :rtype: list[float]
     """
     token_ids = output.token_ids
     logprobs = getattr(output, "logprobs", None)
@@ -2063,7 +2067,9 @@ def _resolve_fused_logprobs_chunk_rows(vocab_size: int) -> int:
     kwarg is left ``None``.
 
     :param vocab_size: lm_head vocabulary dimension ``V``.
+    :type vocab_size: int
     :return: rows of the flattened ``(B*T)`` workspace per chunk (128..4096).
+    :rtype: int
     """
     rows = _FUSED_LOGPROBS_WORKSPACE_BYTES // max(1, int(vocab_size) * 4)
     return int(min(max(rows, 128), 4096))
@@ -2085,12 +2091,19 @@ def _fused_logprob_chunk(
     is already numerically stable), keeping the body fusion-friendly.
 
     :param h_chunk: ``(chunk_rows, H)`` hidden states.
+    :type h_chunk: torch.Tensor
     :param lm_head_weight: ``(V, H)``.
+    :type lm_head_weight: torch.Tensor
     :param lm_head_bias: ``(V,)`` or ``None``.
+    :type lm_head_bias: torch.Tensor | None
     :param target_chunk: ``(chunk_rows,)`` target token ids.
+    :type target_chunk: torch.Tensor
     :param temperature: logits divided by this before log_softmax (skip at 1.0).
+    :type temperature: float
     :param cast_to_fp32: run the reduction in fp32.
+    :type cast_to_fp32: bool
     :return: ``(chunk_rows,)`` per-token logprobs.
+    :rtype: torch.Tensor
     """
     logits = h_chunk @ lm_head_weight.t()
     if lm_head_bias is not None:
@@ -2109,10 +2122,22 @@ def _fused_logprob_chunk(
 # as unsloth's chunked GRPO log-softmax), which is both faster and lower-peak
 # than eager. Compilation is attempted on first CUDA use; any failure (no
 # triton, unsupported backend, CPU/MPS) falls back to eager permanently.
-# ``AGILERL_DISABLE_FUSED_COMPILE=1`` forces the eager path.
+# Call :func:`disable_fused_logprob_compile` to force the eager path.
 # State held in a dict so the dispatch can mutate it without ``global``:
 # ``fn`` caches the compiled callable, ``disabled`` latches eager fallback.
 _FUSED_LOGPROB_COMPILE_STATE: dict[str, Any] = {"fn": None, "disabled": False}
+
+
+def disable_fused_logprob_compile() -> None:
+    """Force the eager fused-logprob path for the rest of the process.
+
+    Compilation (and this latch) is process-global — the compiled kernel is
+    shared by every agent in the process — so the escape hatch is a module
+    function rather than a per-algorithm argument. Use it if the compiled
+    kernel misbehaves on a particular torch/triton combination; compilation
+    failures themselves already fall back to eager automatically.
+    """
+    _FUSED_LOGPROB_COMPILE_STATE["disabled"] = True
 
 
 def _fused_logprob_chunk_dispatch(
@@ -2134,11 +2159,7 @@ def _fused_logprob_chunk_dispatch(
         temperature,
         cast_to_fp32,
     )
-    if (
-        device.type != "cuda"
-        or state["disabled"]
-        or os.environ.get("AGILERL_DISABLE_FUSED_COMPILE") == "1"
-    ):
+    if device.type != "cuda" or state["disabled"]:
         return _fused_logprob_chunk(*args)
     if state["fn"] is None:
         state["fn"] = torch.compile(_fused_logprob_chunk, dynamic=True)
@@ -2170,13 +2191,21 @@ def _fused_linear_logprobs_chunked(
     ``no_grad``/``inference_mode`` (it writes results in place).
 
     :param hidden: ``(B, T, H)`` last-hidden-state.
+    :type hidden: torch.Tensor
     :param lm_head_weight: ``(V, H)``.
+    :type lm_head_weight: torch.Tensor
     :param lm_head_bias: ``(V,)`` or ``None``.
+    :type lm_head_bias: torch.Tensor | None
     :param target_ids: ``(B, T)`` sampled token ids (caller does the shift).
+    :type target_ids: torch.Tensor
     :param temperature: logits divided by this before log_softmax (skipped at 1.0).
+    :type temperature: float, optional
     :param cast_to_fp32: run the per-chunk reduction in fp32 then cast back.
+    :type cast_to_fp32: bool, optional
     :param chunk_rows: rows of the flattened ``(B*T)`` workspace per iteration.
+    :type chunk_rows: int
     :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
+    :rtype: torch.Tensor
     """
     orig_dtype = hidden.dtype
     B, T, H = hidden.shape
@@ -3362,6 +3391,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         :return: Tuple of accelerator and scheduler
         :return: Accelerator
+        :rtype: tuple[Accelerator | None, SequentialLR | None]
         """
         if isinstance(lr, tuple):
             lr_actor, lr_critic = lr
@@ -3604,7 +3634,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         ``1`` so the rotary embedding sees a valid (ignored) index.
 
         :param mask: ``(B, T)`` attention mask (1 = real token, 0 = pad).
+        :type mask: torch.Tensor
         :return: ``(B, T)`` position ids in ``long``.
+        :rtype: torch.Tensor
         """
         position_ids = mask.long().cumsum(dim=-1) - 1
         position_ids.masked_fill_(mask=(mask == 0), value=1)
@@ -3623,6 +3655,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         stays bounded too; under no_grad the lighter static method is used.
 
         :return: ``(fused_fn, lm_head_weight, lm_head_bias)``.
+        :rtype: tuple[Callable, torch.Tensor, torch.Tensor | None]
         """
         fused_fn = (
             LLMAlgorithm._logprobs_from_hidden_fused_grad
@@ -3648,11 +3681,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         the resolved fused fn.
 
         :param hidden: ``(B, T, H)`` last-hidden-state (full; sliced internally).
+        :type hidden: torch.Tensor
         :param lm_head_weight: ``(V, H)``.
+        :type lm_head_weight: torch.Tensor
         :param lm_head_bias: ``(V,)`` or ``None``.
+        :type lm_head_bias: torch.Tensor | None
         :param targets: ``(B, T-1)`` already-shifted target token ids.
+        :type targets: torch.Tensor
         :param fused_fn: fused logprob fn from :meth:`_fused_logprob_fn_and_head`.
+        :type fused_fn: Callable
         :return: ``(B, T-1)`` per-token logprobs in ``hidden.dtype``.
+        :rtype: torch.Tensor
         """
         return fused_fn(
             hidden[:, :-1],
@@ -3680,8 +3719,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         (``once_attr``) so repeated calls emit the canonical message at most once.
 
         :param level: the importance-sampling level (e.g. ``"turn"``/``"sequence"``).
+        :type level: str
         :param algo_name: human-readable algorithm name for the message prefix.
+        :type algo_name: str
         :param once_attr: per-instance attribute used to suppress duplicates.
+        :type once_attr: str, optional
         """
         if getattr(self, once_attr, False):
             return
@@ -3714,10 +3756,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         correction) instead of crashing.
 
         :param sampling_logps: Per-row flat logprobs, or ``None``.
+        :type sampling_logps: list[torch.Tensor | None] | None
         :param action_masks: ``(B, T-1)`` action-token mask.
+        :type action_masks: torch.Tensor
         :param old_log_probs: ``(B, T-1)`` trainer old-policy logprobs (the
             fallback where data is missing → unit ratio).
+        :type old_log_probs: torch.Tensor
         :return: ``(aligned (B, T-1) or None, n_rows_skipped)``.
+        :rtype: tuple[torch.Tensor | None, int]
         """
         if not sampling_logps:
             return None, 0
@@ -3851,6 +3897,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :meth:`_initialize_actors` as ``base_model`` and PEFT-wrapped there.
 
         :return: An ``nn.Module`` aliasing vLLM's base, ready for PEFT wrapping.
+        :rtype: PreTrainedModelProtocol
         """
         from transformers import AutoConfig
 
@@ -4155,6 +4202,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: ``(log_probs, values)`` where *log_probs* has shape
             ``(fused_ids.shape[0], seq_len - 1)`` and *values* matches that
             batch dimension when ``use_value_head`` is set, else ``None``.
+        :rtype: tuple[torch.Tensor, torch.Tensor | None]
         """
         unwrapped = self._get_unwrapped_actor()
         total = fused_ids.shape[0]
@@ -4281,10 +4329,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
            minibatch loop (see ``learn()`` in ``ppo_llm.py``).
 
         :param ids: Token IDs ``(B, seq_len)``.
+        :type ids: torch.Tensor
         :param batch_size: Unused (kept for API symmetry).
+        :type batch_size: int
         :param attention_mask: Optional attention mask matching *ids*.
+        :type attention_mask: torch.Tensor | None, optional
         :return: ``(actor_log_probs, critic_values)`` with shapes ``(B, seq_len-1)``;
             *critic_values* is ``None`` when no value head is used.
+        :rtype: tuple[torch.Tensor, torch.Tensor | None]
         """
         B = ids.shape[0]
         if attention_mask is None:
@@ -4337,9 +4389,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         note).
 
         :param ids: Token IDs ``(B, seq_len)``.
+        :type ids: torch.Tensor
         :param attention_mask: Mask matching *ids* (non-zero marks real tokens).
+        :type attention_mask: torch.Tensor
         :return: ``(actor_log_probs, critic_values)`` each ``(B, seq_len - 1)``;
             *critic_values* is ``None`` when no value head is used.
+        :rtype: tuple[torch.Tensor, torch.Tensor | None]
         """
         unwrapped = self._get_unwrapped_actor()
         packed = pack_padded_batch(ids, attention_mask)
@@ -4409,10 +4464,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         gradient checkpoint recomputation is involved.
 
         :param ids: Token IDs ``(B, seq_len)``.
+        :type ids: torch.Tensor
         :param batch_size: Micro-batch size for memory-bounded iteration.
+        :type batch_size: int
         :param attention_mask: Optional attention mask matching *ids*.
+        :type attention_mask: torch.Tensor | None, optional
         :return: ``(reference_log_probs, actor_log_probs, critic_values)``
             each of shape ``(B, seq_len - 1)``.
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
         """
         B = ids.shape[0]
         if attention_mask is None:
@@ -4644,6 +4703,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Perform a backward pass and optimizer step.
 
         :param loss: Combined loss.
+        :type loss: torch.Tensor
         """
         if self._uses_deepspeed:
             self.accelerator.backward(loss)
@@ -4757,19 +4817,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             raise FileNotFoundError(msg)
 
-        if is_main_process and os.environ.get("AGILERL_DEBUG_LORA_SYNC") == "1":
+        if is_main_process and logger.isEnabledFor(logging.DEBUG):
             # Sum of L2 norms of the trained-from-zero LoRA-B weights; a value
             # that changes across syncs confirms the trainer is exporting
-            # updated weights into the rollout adapter.
+            # updated weights into the rollout adapter. Gated on the standard
+            # logging level (the norm reduction costs a GPU sync).
             lora_b_sq = sum(
                 float(p.detach().float().pow(2).sum().item())
                 for n, p in peft_ref.named_parameters()
                 if "lora_B" in n and VLLM_ROLLOUT_LORA_NAME in n
             )
-            print(
-                f"[agilerl lora-sync] actor lora_B L2={lora_b_sq**0.5:.6f} "
-                f"path={adapter_path}",
-                flush=True,
+            logger.debug(
+                "lora-sync: actor lora_B L2=%.6f path=%s",
+                lora_b_sq**0.5,
+                adapter_path,
             )
 
         # One-shot refresh of the resident slot. ``load_inplace`` forces vLLM to
@@ -5161,20 +5222,28 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         keeps the two paths bit-comparable.
 
         :param hidden: ``(B, T, H)`` last-hidden-state.
+        :type hidden: torch.Tensor
         :param lm_head_weight: ``(V, H)``.
+        :type lm_head_weight: torch.Tensor
         :param lm_head_bias: ``(V,)`` or ``None``.
+        :type lm_head_bias: torch.Tensor | None
         :param target_ids: ``(B, T)`` (caller does the ``[:, :-1]``/``[:, 1:]``
             shift before calling).
+        :type target_ids: torch.Tensor
         :param temperature: scalar; logits divided by this before log_softmax
             (skipped when ``1.0``).
+        :type temperature: float, optional
         :param cast_to_fp32: when True (default), run the per-chunk reduction
             in fp32 then cast back. Same semantics as
             :meth:`_logprobs_from_logits`.
+        :type cast_to_fp32: bool, optional
         :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per
             iteration; trades launch count vs ``_chunk_rows * V`` peak. When
             ``None`` (default) it is resolved from the vocab size via
             :func:`_resolve_fused_logprobs_chunk_rows`.
+        :type _chunk_rows: int | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
+        :rtype: torch.Tensor
         """
         if _chunk_rows is None:
             _chunk_rows = _resolve_fused_logprobs_chunk_rows(lm_head_weight.shape[0])
@@ -5211,15 +5280,23 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         ``log_softmax`` gradient.
 
         :param hidden: ``(B, T, H)`` last-hidden-state (typically requires grad).
+        :type hidden: torch.Tensor
         :param lm_head_weight: ``(V, H)``.
+        :type lm_head_weight: torch.Tensor
         :param lm_head_bias: ``(V,)`` or ``None``.
+        :type lm_head_bias: torch.Tensor | None
         :param target_ids: ``(B, T)`` (caller does the shift before calling).
+        :type target_ids: torch.Tensor
         :param temperature: logits divided by this before log_softmax.
+        :type temperature: float, optional
         :param cast_to_fp32: run the per-chunk reduction in fp32.
+        :type cast_to_fp32: bool, optional
         :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per chunk.
             When ``None`` (default) it is resolved from the vocab size via
             :func:`_resolve_fused_logprobs_chunk_rows`.
+        :type _chunk_rows: int | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
+        :rtype: torch.Tensor
         """
         if _chunk_rows is None:
             _chunk_rows = _resolve_fused_logprobs_chunk_rows(lm_head_weight.shape[0])
@@ -5758,6 +5835,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         — the latter is used by the no-grad fused-linear-logprob path.
 
         :return: ``(parent_module, attr_name)``.
+        :rtype: tuple[Any, str]
         :raises AttributeError: If no lm_head can be found.
         """
         model = self.actor

@@ -141,6 +141,7 @@ def main(init_hp, mut_p):
         max_reward=1.0,
         verbose=True,
         accelerator=accelerator,
+        debug_rollouts=init_hp.get("DEBUG_ROLLOUTS", 0),
     )
     if accelerator is not None:
         accelerator.end_training()

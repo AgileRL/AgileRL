@@ -32,13 +32,15 @@ Speed
 The per-chunk matmul + ``log_softmax`` reduction is compiled with
 ``torch.compile`` (Triton kernels) on the first CUDA call, with an automatic
 eager fallback when compilation is unavailable (CPU/MPS, no Triton, or an
-unsupported backend). Set ``AGILERL_DISABLE_FUSED_COMPILE=1`` to force the
+unsupported backend). Call
+``agilerl.algorithms.core.base.disable_fused_logprob_compile()`` to force the
 eager path.
 
 The chunk size (``chunk_rows`` of the flattened ``(B*T)`` workspace) is
 **vocab-aware**: it is sized so one fp32 ``(chunk_rows, V)`` slab stays near a
 fixed byte budget (large-vocab models get fewer rows per chunk, small-vocab
-models more). Override it with ``AGILERL_FUSED_LOGPROBS_CHUNK_ROWS``.
+models more). Override it with the ``fused_logprobs_chunk_rows`` constructor
+argument.
 
 The Liger loss
 --------------

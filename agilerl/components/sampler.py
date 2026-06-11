@@ -215,6 +215,7 @@ class Sampler:
         :param batch_size: Batch size for the DataLoader, defaults to None
         :type batch_size: int | None, optional
         :param kwargs: Additional arguments to pass to the DataLoader
+        :type kwargs: Any
         :return: DataLoader with tensordict_collate_fn
         :rtype: DataLoader
         """

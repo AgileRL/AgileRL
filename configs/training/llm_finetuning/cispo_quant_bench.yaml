@@ -90,7 +90,6 @@ INIT_HP:
     # sdpa. "flex_attention" is PyTorch's block-sparse masked attention with
     # O(T) memory — required for long-context Gemma (sliding-window models
     # break SDPA's flash backend when an explicit mask is present).
-    # Replaces the legacy AGILERL_ATTN_IMPLEMENTATION env var.
     ATTN_IMPLEMENTATION: flex_attention
     # Per-chunk token count for the Liger fused-loss path. Lower values cut
     # backward peak memory (smaller (chunk, vocab) logits tensor) at the cost

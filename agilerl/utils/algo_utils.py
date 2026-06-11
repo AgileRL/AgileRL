@@ -900,16 +900,22 @@ def preprocess_observation(
 
     :param observation_space: The observation space of the environment, defaults to the agent's observation space
     :type observation_space: spaces.Space
+    :type observation_space: spaces.Space
     :param observation: Observations of environment
+    :type observation: ObservationType
     :type observation: ObservationType
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to "cpu"
     :type device: str | torch.device, optional
+    :type device: str | torch.device, optional
     :param normalize_images: Normalize images from [0. 255] to [0, 1], defaults to True
+    :type normalize_images: bool, optional
     :type normalize_images: bool, optional
     :param placeholder_value: The value to use as placeholder for missing observations, defaults to None.
     :type placeholder_value: Any | None, optional
+    :type placeholder_value: Any | None, optional
 
     :return: Preprocessed observations
+    :rtype: TorchObsType
     :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
     """
     msg = f"AgileRL currently doesn't support {type(observation_space)} spaces."
@@ -929,11 +935,17 @@ def preprocess_dict_observation(
     """Preprocess dictionary observations.
 
     :param observation: Dictionary observation
+    :type observation: dict[str, np.ndarray | torch.Tensor]
     :param observation_space: Dictionary observation space
+    :type observation_space: spaces.Dict
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
     :return: Preprocessed dictionary observation
+    :rtype: dict[str, TorchObsType]
     """
     assert isinstance(
         observation,
@@ -964,11 +976,17 @@ def preprocess_tuple_observation(
     """Preprocess tuple observations.
 
     :param observation: Tuple observation
+    :type observation: tuple[np.ndarray | torch.Tensor, ...]
     :param observation_space: Tuple observation space
+    :type observation_space: spaces.Tuple
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
     :return: Preprocessed tuple observation
+    :rtype: tuple[TorchObsType, ...]
     """
     if isinstance(observation, TensorDict):
         # Convert to tuple with values ordered by index at the end of key
@@ -1004,11 +1022,17 @@ def preprocess_box_observation(
     """Preprocess box observations (continuous spaces).
 
     :param observation: Box observation
+    :type observation: np.ndarray | torch.Tensor
     :param observation_space: Box observation space
+    :type observation_space: spaces.Box
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
     :return: Preprocessed box observation
+    :rtype: torch.Tensor
     """
     # Convert to tensor
     observation = obs_to_tensor(observation, device)
@@ -1036,11 +1060,17 @@ def preprocess_discrete_observation(
     """Preprocess discrete observations.
 
     :param observation: Discrete observation
+    :type observation: np.ndarray | torch.Tensor
     :param observation_space: Discrete observation space
+    :type observation_space: spaces.Discrete
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
     :return: Preprocessed discrete observation (one-hot encoded)
+    :rtype: torch.Tensor
     """
     # Convert to tensor
     observation = obs_to_tensor(observation, device)
@@ -1073,11 +1103,17 @@ def preprocess_multidiscrete_observation(
     """Preprocess multi-discrete observations.
 
     :param observation: Multi-discrete observation
+    :type observation: np.ndarray | torch.Tensor
     :param observation_space: Multi-discrete observation space
+    :type observation_space: spaces.MultiDiscrete
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
     :return: Preprocessed multi-discrete observation (one-hot encoded)
+    :rtype: torch.Tensor
     """
     # Convert to tensor
     observation = obs_to_tensor(observation, device)
@@ -1112,11 +1148,17 @@ def preprocess_multibinary_observation(
     """Preprocess multi-binary observations.
 
     :param observation: Multi-binary observation
+    :type observation: np.ndarray | torch.Tensor
     :param observation_space: Multi-binary observation space
+    :type observation_space: spaces.MultiBinary
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
     :return: Preprocessed multi-binary observation
+    :rtype: torch.Tensor
     """
     # Convert to tensor
     observation = obs_to_tensor(observation, device)

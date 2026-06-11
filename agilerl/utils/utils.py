@@ -1387,6 +1387,7 @@ def init_wandb(
     :param wandb_api_key: Wandb API key, defaults to None
     :type wandb_api_key: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: accelerate.Accelerator(), optional
     :param addl_args: Additional kwargs to pass to wandb.init()
     :type addl_args: dict, optional
     """

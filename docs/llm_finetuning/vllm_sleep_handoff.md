@@ -153,7 +153,8 @@ were ruled out as a cause — eager still produced garbage on the reload path).
   ChatML markers, so multi-turn works for any chat-templated model (Gemma 3/4,
   Llama, Qwen, Mistral). Falls back to ChatML if rendering fails.
 - `benchmarking/benchmarking_llm_multiturn.py` — `--env-name` flag (env was
-  hardcoded), rollout debug dump gated behind `AGILERL_DEBUG_ROLLOUTS=N`
+  hardcoded), rollout debug dump gated behind `DEBUG_ROLLOUTS: N` in the YAML
+  config (the `finetune_llm_multiturn(debug_rollouts=N)` parameter)
   (per-trajectory turns, completion lengths, per-turn rewards, decoded gens,
   and the tokenized initial prompt + tail — invaluable for diagnosing
   chat-template / formatting issues).
@@ -351,7 +352,7 @@ Notes:
 
 ```bash
 cd ~/AgileRL && export PATH="$HOME/.local/bin:$PATH" && \
-AGILERL_DEBUG_ROLLOUTS=2 uv run python -m accelerate.commands.launch \
+uv run python -m accelerate.commands.launch \
   --config_file configs/accelerate/bench_accelerate_config.yaml \
   --main_process_port 0 \
   benchmarking/benchmarking_llm_multiturn.py \
