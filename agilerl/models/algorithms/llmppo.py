@@ -17,7 +17,7 @@ else:
     VLLMConfig = Any
 
 
-@register(arena=True)
+@register()
 class LLMPPOSpec(LLMAlgorithmSpec):
     """Specification for LLMPPO algorithm."""
 

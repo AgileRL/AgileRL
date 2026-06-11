@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from agilerl.models.env import LLMEnvType
 
 
-@register(arena=True)
+@register()
 class DPOSpec(LLMAlgorithmSpec):
     """Specification for DPO algorithm."""
 

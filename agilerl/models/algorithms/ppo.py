@@ -16,7 +16,7 @@ else:
     EvolvableModule = Any
 
 
-@register(arena=True)
+@register()
 class PPOSpec(RLAlgorithmSpec):
     """Specification for PPO algorithm."""
 

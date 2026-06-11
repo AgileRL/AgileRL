@@ -28,18 +28,13 @@ from agilerl.models.algorithms.ppo import PPOSpec
 from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
 from agilerl.models.algorithms.td3 import TD3Spec
 from agilerl.models.env import (
-    ArenaEnvSpec,
     BanditEnvSpec,
     GymEnvSpec,
     OfflineEnvSpec,
     PzEnvSpec,
 )
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
-from agilerl.models.manifest import ArenaManifest, TrainingManifest
-from tests.assets.generate_arena_manifests import (
-    arena_algorithm_names,
-    write_arena_manifest,
-)
+from agilerl.models.manifest import TrainingManifest
 from agilerl.models.networks import (
     CnnSpec,
     LstmSpec,
@@ -49,7 +44,7 @@ from agilerl.models.networks import (
     SimbaSpec,
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-from agilerl.training.trainer import ArenaTrainer, LocalTrainer, Trainer
+from agilerl.training.trainer import LocalTrainer, Trainer
 
 if HAS_LLM_DEPENDENCIES:
     from agilerl.models.algorithms.dpo import DPOSpec
@@ -84,8 +79,8 @@ def _make_manifest(algo: dict, env: dict | None = None, **sections) -> dict:
     return m
 
 
-def test_get_validated_json_inserts_empty_optional_sections() -> None:
-    """JSON for Arena includes `{}` for optional models omitted by ``exclude_none``."""
+def test_get_validated_json_omits_unset_optional_sections() -> None:
+    """JSON omits optional sections when they are not present."""
 
     raw = {
         "algorithm": {
@@ -99,15 +94,15 @@ def test_get_validated_json_inserts_empty_optional_sections() -> None:
         "training": {"max_steps": 1_000_000, "evo_steps": 10_000, "pop_size": 4},
     }
     out = TrainingManifest.get_validated(raw, mode="json")
-    assert out["mutation"] == {}
-    assert out["tournament_selection"] == {}
-    assert out["network"] == {}
+    assert "mutation" not in out
+    assert "tournament_selection" not in out
+    assert "network" not in out
 
 
 class TestNormalizeNetworkForPlatform:
-    """Tests for _normalize_network_for_platform via get_validated(mode='json')."""
+    """Tests for network normalization via get_validated(mode='json')."""
 
-    def test_arch_moved_to_top_level(self):
+    def test_arch_kept_under_encoder_config(self):
         raw = {
             "algorithm": {"name": "DQN"},
             "environment": {"name": "CartPole-v1"},
@@ -121,11 +116,10 @@ class TestNormalizeNetworkForPlatform:
         }
         out = TrainingManifest.get_validated(raw, mode="json")
         network = out["network"]
-        assert "arch" in network
-        assert network["arch"] == "mlp"
-        assert "arch" not in network.get("encoder_config", {})
+        assert "arch" in network.get("encoder_config", {})
+        assert network["encoder_config"]["arch"] == "mlp"
 
-    def test_name_field_added(self):
+    def test_name_field_not_added(self):
         raw = {
             "algorithm": {"name": "DQN"},
             "environment": {"name": "CartPole-v1"},
@@ -139,7 +133,7 @@ class TestNormalizeNetworkForPlatform:
         }
         out = TrainingManifest.get_validated(raw, mode="json")
         network = out["network"]
-        assert network["name"] == "EvolvableMLP"
+        assert "name" not in network
 
     def test_default_fields_filled_in(self):
         raw = {
@@ -956,71 +950,6 @@ class TestLocalTrainerLLM:
         )
 
 
-class TestArenaTrainerFromManifest:
-    """``ArenaTrainer.from_manifest()`` always produces an :class:`ArenaEnvSpec`."""
-
-    def test_from_dict(self):
-        mock_client = MagicMock()
-        trainer = ArenaTrainer.from_manifest(DQN_MANIFEST, client=mock_client)
-
-        assert isinstance(trainer, ArenaTrainer)
-        assert isinstance(trainer.algorithm_spec, DQNSpec)
-        assert isinstance(trainer.env_spec, ArenaEnvSpec)
-        assert trainer.env_spec.name == "LunarLander-v3"
-        assert trainer.env_spec.num_envs == 16
-
-    def test_env_defaults_version_to_latest(self):
-        data = _make_manifest(
-            algo={"name": "DQN"},
-            env={"name": "CartPole-v1", "num_envs": 4},
-        )
-        mock_client = MagicMock()
-        trainer = ArenaTrainer.from_manifest(data, client=mock_client)
-        assert trainer.env_spec.version == "latest"
-
-    def test_env_version_from_manifest(self):
-        data = _make_manifest(
-            algo={"name": "DQN"},
-            env={"name": "CartPole-v1", "num_envs": 4, "version": "2.1"},
-        )
-        mock_client = MagicMock()
-        trainer = ArenaTrainer.from_manifest(data, client=mock_client)
-        assert trainer.env_spec.version == "2.1"
-
-    def test_arena_env_missing_name_raises(self):
-        data = _make_manifest(
-            algo={"name": "DQN"},
-            env={"num_envs": 4},
-        )
-        mock_client = MagicMock()
-        with pytest.raises(ValueError, match="Environment name is required"):
-            ArenaTrainer.from_manifest(data, client=mock_client)
-
-    def test_from_yaml_file(self):
-        mock_client = MagicMock()
-        trainer = ArenaTrainer.from_manifest(
-            MANIFESTS_DIR / "dqn.yaml", client=mock_client
-        )
-        assert isinstance(trainer, ArenaTrainer)
-        assert isinstance(trainer.env_spec, ArenaEnvSpec)
-
-    @pytest.mark.parametrize(
-        "manifest, expected_algo_cls",
-        [
-            (PPO_MANIFEST, PPOSpec),
-            (DDPG_MANIFEST, DDPGSpec),
-            (MADDPG_MANIFEST, MADDPGSpec),
-            (IPPO_MANIFEST, IPPOSpec),
-        ],
-        ids=["PPO", "DDPG", "MADDPG", "IPPO"],
-    )
-    def test_all_algorithms_produce_arena_env(self, manifest, expected_algo_cls):
-        mock_client = MagicMock()
-        trainer = ArenaTrainer.from_manifest(manifest, client=mock_client)
-        assert isinstance(trainer.algorithm_spec, expected_algo_cls)
-        assert isinstance(trainer.env_spec, ArenaEnvSpec)
-
-
 # ============================================================================
 # TestFromConfigFiles – integration tests loading actual YAML configs
 # ============================================================================
@@ -1053,17 +982,6 @@ _MULTI_AGENT_CONFIGS = [
     ("multi_agent/matd3.yaml", MATD3Spec),
     ("multi_agent/ippo.yaml", IPPOSpec),
     ("multi_agent/ippo_pong.yaml", IPPOSpec),
-]
-
-_ARENA_CONFIG_PATHS = [
-    "dqn/dqn.yaml",
-    "dqn/dqn_rainbow.yaml",
-    "ppo/ppo.yaml",
-    "ddpg/ddpg.yaml",
-    "td3.yaml",
-    "multi_agent/ippo.yaml",
-    "multi_agent/maddpg.yaml",
-    "multi_agent/matd3.yaml",
 ]
 
 
@@ -1201,53 +1119,3 @@ class TestFromConfigFiles:
 
         manifest = TrainingManifest.model_validate(data)
         assert isinstance(manifest.algorithm, expected_algo_cls)
-
-    @pytest.mark.parametrize("rel_path", _ARENA_CONFIG_PATHS)
-    def test_arena_trainer_from_config(self, rel_path):
-        """Arena-eligible configs load through ``ArenaTrainer.from_manifest()``."""
-        config_path = CONFIGS_DIR / rel_path
-        if not config_path.exists():
-            pytest.skip(f"Config not found: {config_path}")
-
-        mock_client = MagicMock()
-        trainer = ArenaTrainer.from_manifest(config_path, client=mock_client)
-        assert isinstance(trainer.env_spec, ArenaEnvSpec)
-
-    def test_arena_trainer_from_manifest_rejects_non_arena_algorithm(self):
-        data = _make_manifest(
-            algo={"name": "CQN"},
-            env={"name": "CartPole-v1"},
-        )
-        mock_client = MagicMock()
-        with pytest.raises(ValueError, match="not available on Arena"):
-            ArenaTrainer.from_manifest(data, client=mock_client)
-
-
-class TestArenaManifestGeneration:
-    """Arena manifests built via :class:`ArenaTrainer` in ephemeral directories."""
-
-    def test_generates_one_manifest_per_arena_algorithm(self, tmp_path):
-        names = arena_algorithm_names()
-        paths = {name: write_arena_manifest(name, tmp_path) for name in names}
-        assert len(paths) == len(names)
-        assert {path.stem for path in paths.values()} == {
-            name.lower() for name in names
-        }
-
-    @pytest.mark.parametrize("algo_name", arena_algorithm_names())
-    def test_generated_manifest_validates_with_arena_manifest(
-        self, algo_name: str, tmp_path: Path
-    ):
-        path = write_arena_manifest(algo_name, tmp_path)
-        validated = ArenaManifest.get_validated(path, mode="json")
-        assert validated["algorithm"]["name"] == algo_name
-        assert validated["environment"]["name"]
-        assert "mutation" in validated
-        assert "tournament_selection" in validated
-
-    @pytest.mark.parametrize("algo_name", ["DQN"])
-    def test_dqn_arena_manifest_omits_cudagraphs(self, algo_name: str, tmp_path: Path):
-        path = write_arena_manifest(algo_name, tmp_path)
-        validated = ArenaManifest.get_validated(path, mode="json")
-        assert validated["algorithm"]["name"] == "DQN"
-        assert "cudagraphs" not in validated["algorithm"]

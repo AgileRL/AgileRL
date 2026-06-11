@@ -1,0 +1,53 @@
+"""Shared fixtures for Arena auth/client tests."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from agilerl.arena.auth import ArenaOAuth2
+
+
+@pytest.fixture
+def arena_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Temporary HOME with ``~/.arena`` created under it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    arena_dir = tmp_path / ".arena"
+    arena_dir.mkdir(parents=True, exist_ok=True)
+    return tmp_path
+
+
+@pytest.fixture
+def credentials_path(arena_home: Path) -> Path:
+    """Path to ``credentials.json`` in the isolated arena home."""
+    return arena_home / ".arena" / "credentials.json"
+
+
+@pytest.fixture
+def credentials_file(credentials_path: Path) -> Path:
+    """Write a minimal valid credentials file on the tmp arena home."""
+    payload: dict[str, Any] = {"access_token": "at", "refresh_token": "rt"}
+    credentials_path.write_text(json.dumps(payload), encoding="utf-8")
+    return credentials_path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_arena_credentials(
+    arena_home: Path,
+) -> None:
+    """Point ArenaOAuth2 at the tmp ``~/.arena/credentials.json`` for every test."""
+    arena_dir = arena_home / ".arena"
+    cred_file = arena_dir / "credentials.json"
+    orig_dir = ArenaOAuth2.CREDENTIALS_DIR
+    orig_file = ArenaOAuth2.CREDENTIALS_FILE
+    ArenaOAuth2.CREDENTIALS_DIR = arena_dir
+    ArenaOAuth2.CREDENTIALS_FILE = cred_file
+    yield
+    ArenaOAuth2.CREDENTIALS_DIR = orig_dir
+    ArenaOAuth2.CREDENTIALS_FILE = orig_file

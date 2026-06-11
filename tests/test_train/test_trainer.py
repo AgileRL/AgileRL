@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from gymnasium.spaces import Box, Discrete
 
-from agilerl import AgentType, HAS_LLM_DEPENDENCIES
+from agilerl import AgentType, HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
 from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -44,6 +44,10 @@ from agilerl.utils.trainer_utils import (
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
+)
+
+requires_arena = pytest.mark.skipif(
+    not HAS_ARENA_DEPENDENCIES, reason="agilerl-arena is not installed"
 )
 
 
@@ -455,6 +459,7 @@ class TestLocalTrainerTrain:
         assert result == (mock_pop, [[1.0]])
 
 
+@requires_arena
 class TestArenaTrainerConstruction:
     def test_string_algorithm_and_env(self, mock_client, training_spec):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
@@ -514,6 +519,7 @@ class TestArenaTrainerConstruction:
         assert trainer._client is not None
 
 
+@requires_arena
 class TestArenaTrainerManifest:
     def test_minimal_manifest_from_string_algo_and_env(
         self, mock_client, training_spec
@@ -666,6 +672,7 @@ class TestArenaTrainerManifest:
             trainer.to_manifest()
 
 
+@requires_arena
 class TestArenaTrainerTrain:
     @patch("agilerl.training.trainer.ArenaManifest.get_validated")
     def test_train_validates_with_arena_manifest(
@@ -727,6 +734,7 @@ class TestArenaTrainerTrain:
         assert submitted_manifest["training"]["max_steps"] == 500
 
 
+@requires_arena
 class TestArenaTrainerDelegation:
     """Tests for ArenaTrainer methods that delegate to the underlying client."""
 
@@ -769,6 +777,7 @@ class TestArenaTrainerDelegation:
         assert result == [{"step": 100}]
 
 
+@requires_arena
 class TestArenaTrainerFromManifest:
     """Tests for ArenaTrainer.from_manifest()."""
 
@@ -820,9 +829,7 @@ class TestAlgoRegistry:
     }
 
     def test_all_algorithms_registered(self):
-        available = set(ALGO_REGISTRY.arena_algorithms()) | set(
-            ALGO_REGISTRY.local_algorithms()
-        )
+        available = set(ALGO_REGISTRY._entries)
         assert self.EXPECTED_ALGOS.issubset(available)
 
     def test_registry_entries_have_spec_cls(self):
@@ -1881,6 +1888,7 @@ class TestStringEnvironmentResolution:
                 training=training_spec,
             )
 
+    @requires_arena
     def test_arena_trainer_string_env(self, mock_client, training_spec):
         """ArenaTrainer converts a plain string to ArenaEnvSpec."""
         trainer = ArenaTrainer(

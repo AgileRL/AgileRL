@@ -22,11 +22,13 @@ inference.
 Installation
 ------------
 
-To use the Arena client, you need to install the extra dependencies for Arena, available via:
+To use the Arena client, install the standalone package directly with lightweight dependencies, or use the AgileRL extra:
 
 .. code-block:: bash
 
-   pip install agilerl[arena]
+   pip install agilerl-arena
+   # or
+   pip install "agilerl[arena]"
 
 Authentication
 --------------

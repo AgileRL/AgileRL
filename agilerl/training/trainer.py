@@ -18,7 +18,6 @@ from agilerl.algorithms.core.base import (
 from agilerl.models import (
     ALGO_REGISTRY,
     AlgoSpecT,
-    ArenaManifest,
     FinetuningNetworkSpec,
     LLMAlgorithmSpec,
     MutationSpec,
@@ -53,8 +52,10 @@ PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
 if HAS_ARENA_DEPENDENCIES:
     from agilerl.arena import ArenaClient
+    from agilerl.arena.models import TrainingManifest as ArenaManifest
 else:
     ArenaClient = None
+    ArenaManifest = None
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import AutoTokenizer
@@ -616,8 +617,11 @@ class ArenaTrainer(Trainer):
         if client is not None:
             self._client = client
         else:
-            if ArenaClient is None:
-                msg = "Arena dependencies are not installed. Please install them using: pip install agilerl[arena]"
+            if not HAS_ARENA_DEPENDENCIES or ArenaClient is None:
+                msg = (
+                    "Arena dependencies are not installed. "
+                    "Please install them using: pip install agilerl-arena"
+                )
                 raise ImportError(msg)
 
             self._client = ArenaClient(api_key=api_key)
@@ -645,7 +649,6 @@ class ArenaTrainer(Trainer):
         :returns: A fully configured :class:`ArenaTrainer` instance.
         :rtype: ArenaTrainer
         """
-        # Validate manifest and resolve environment spec.
         validated_manifest = ArenaManifest.get_validated(manifest, mode="python")
         env_spec = cls._resolve_env_spec(validated_manifest)
 

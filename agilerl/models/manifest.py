@@ -1,8 +1,7 @@
-"""Training manifest model for deserializing YAML/JSON training configurations."""
+"""Training manifest model for local training configurations."""
 
 from __future__ import annotations
 
-import functools
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args
 
@@ -25,18 +24,12 @@ from agilerl.models.networks import (
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 
 if TYPE_CHECKING:
-    from agilerl.models.env import (
-        ArenaEnvSpec,
-        GymEnvSpec,
-        LLMEnvSpec,
-        OfflineEnvSpec,
-        PzEnvSpec,
-    )
+    from agilerl.models.env import GymEnvSpec, LLMEnvSpec, OfflineEnvSpec, PzEnvSpec
 
-    EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | ArenaEnvSpec
+    EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec
 
 
-def _resolve_algorithm(data: Any, *, arena_only: bool = False) -> AlgoSpecT:
+def _resolve_algorithm(data: dict[str, Any] | AlgoSpecT) -> AlgoSpecT:
     """Dispatch to the concrete algorithm spec using ``ALGO_REGISTRY``.
 
     Reads the ``name`` key from the raw dict (e.g. ``"DQN"``), looks up
@@ -44,9 +37,7 @@ def _resolve_algorithm(data: Any, *, arena_only: bool = False) -> AlgoSpecT:
     with the remaining fields.
 
     :param data: The raw dict or AlgorithmSpec to resolve.
-    :type data: Any
-    :param arena_only: If True, reject algorithms not eligible for Arena.
-    :type arena_only: bool
+    :type data: dict[str, Any] | AlgoSpecT
     :returns: The resolved AlgorithmSpec.
     :rtype: AlgoSpecT
     :raises TypeError: If the input is not a dict or AlgorithmSpec.
@@ -58,7 +49,6 @@ def _resolve_algorithm(data: Any, *, arena_only: bool = False) -> AlgoSpecT:
         msg = f"Expected a dict or AlgorithmSpec, got {type(data).__name__}"
         raise TypeError(msg)
 
-    data = dict(data)
     name = data.pop("name", None)
     if name is None:
         msg = "Algorithm section must include a 'name' field, corresponding to the name of the algorithm class."
@@ -66,17 +56,9 @@ def _resolve_algorithm(data: Any, *, arena_only: bool = False) -> AlgoSpecT:
 
     entry = ALGO_REGISTRY.get(name)
 
-    if arena_only and not entry.arena:
-        supported = ", ".join(sorted(ALGO_REGISTRY.arena_algorithms()))
-        msg = f"Algorithm {name!r} is not available on Arena. Available: {supported}"
-        raise ValueError(msg)
-
     if not HAS_LLM_DEPENDENCIES and issubclass(entry.spec_cls, LLMAlgorithmSpec):
         msg = "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`."
         raise ImportError(msg)
-
-    if arena_only:
-        _strip_arena_excluded_algo_fields(name, data)
 
     return entry.spec_cls(**data)
 
@@ -141,17 +123,6 @@ _ALGO_NON_SERIALIZABLE_FIELDS: set[str] = {
     "actor_networks",
 }
 
-# Algorithm fields accepted locally but omitted from Arena manifests.
-_ARENA_ALGO_FIELD_EXCLUSIONS: dict[str, frozenset[str]] = {
-    "DQN": frozenset({"cudagraphs"}),
-}
-
-
-def _strip_arena_excluded_algo_fields(name: str, data: dict[str, Any]) -> None:
-    """Remove Arena-ineligible algorithm fields from *data* in place."""
-    for field in _ARENA_ALGO_FIELD_EXCLUSIONS.get(name, ()):
-        data.pop(field, None)
-
 
 def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
     """Serialize an algorithm spec to a JSON-safe dict for manifest storage.
@@ -169,14 +140,6 @@ def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
     return dumped
 
 
-def _serialize_algorithm_for_arena(spec: AlgoSpecT) -> dict[str, Any]:
-    """Serialize an algorithm spec for Arena, omitting unsupported fields."""
-    dumped = _serialize_algorithm(spec)
-    for field in _ARENA_ALGO_FIELD_EXCLUSIONS.get(spec.name, ()):
-        dumped.pop(field, None)
-    return dumped
-
-
 # NOTE: Use of PlainSerializer here I believe results in not being able to serialize a
 # TrainingManifest's algorithm section in "python" mode i.e. the non-serializable fields
 # are lost. Not really an issue because we serialize the algo spec directly (not through
@@ -186,55 +149,10 @@ AlgorithmFromManifest = Annotated[
     BeforeValidator(_resolve_algorithm),
     PlainSerializer(_serialize_algorithm, return_type=dict[str, Any]),
 ]
-ArenaAlgorithmFromManifest = Annotated[
-    AlgoSpecT,
-    BeforeValidator(functools.partial(_resolve_algorithm, arena_only=True)),
-    PlainSerializer(_serialize_algorithm_for_arena, return_type=dict[str, Any]),
-]
 EnvironmentFromManifest = Annotated[
     dict[str, Any], BeforeValidator(_coerce_environment)
 ]
 NetworkFromManifest = Annotated[dict[str, Any], BeforeValidator(_resolve_network)]
-
-
-_ARCH_TO_NAME: dict[str, str] = {
-    "mlp": "EvolvableMLP",
-    "cnn": "EvolvableCNN",
-    "simba": "EvolvableSimBa",
-    "multi_input": "EvolvableMultiInput",
-    "lstm": "EvolvableLSTM",
-}
-
-
-def _normalize_network_for_platform(network: dict[str, Any]) -> None:
-    """Move ``arch`` from encoder_config to network top level and add ``name``."""
-    encoder = network.get("encoder_config")
-    if isinstance(encoder, dict):
-        arch = encoder.pop("arch", None)
-        if arch:
-            network.setdefault("arch", arch)
-
-    arch = network.get("arch")
-    if arch and "name" not in network:
-        network["name"] = _ARCH_TO_NAME.get(arch, "EvolvableMLP")
-
-
-def _ensure_platform_run_spec_keys(data: dict[str, Any]) -> None:
-    """Mutate *data* for Arena run-spec JSON.
-
-    Optional manifest sections use ``model_dump(..., exclude_none=True)``, so keys
-    for unset models are omitted. Rust ingest still applies ``NamedSpec`` defaults
-    when those keys exist (even as ``{}``).
-    """
-    if "mutation" not in data:
-        data["mutation"] = {}
-    if "tournament_selection" not in data:
-        data["tournament_selection"] = {}
-    if "network" not in data:
-        data["network"] = {}
-
-    if data["network"]:
-        _normalize_network_for_platform(data["network"])
 
 
 class TrainingManifest(BaseModel):
@@ -260,7 +178,7 @@ class TrainingManifest(BaseModel):
 
     @model_validator(mode="after")
     def _process_manifest(self) -> Self:
-        """Process the manifest for submission to Arena."""
+        """Resolve network fields into algorithm-specific objects."""
         # 'network' component of manifest corresponds to algorithm's underlying networks
         algo_spec_cls = type(self.algorithm)
         if self.network is not None:
@@ -328,16 +246,7 @@ class TrainingManifest(BaseModel):
         data = TrainingManifest._load_yaml(manifest)
         validated = cls.model_validate(data)
 
-        # NOTE: This path is meant for Arena submission.
         if mode == "json":
-            payload = validated.model_dump(mode="json", exclude_none=True)
-            _ensure_platform_run_spec_keys(payload)
-            return payload
+            return validated.model_dump(mode="json", exclude_none=True)
 
         return validated
-
-
-class ArenaManifest(TrainingManifest):
-    """Manifest variant that restricts algorithms to Arena-eligible ones."""
-
-    algorithm: ArenaAlgorithmFromManifest

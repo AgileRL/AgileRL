@@ -16,7 +16,7 @@ else:
     EvolvableModule = Any
 
 
-@register(arena=False)
+@register()
 @bandit()
 class NeuralTSSpec(RLAlgorithmSpec):
     """Specification for NeuralTS (Neural Thompson Sampling) algorithm."""

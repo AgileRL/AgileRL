@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from agilerl.models.env import LLMEnvType
 
 
-@register(arena=False)
+@register()
 class SFTSpec(LLMAlgorithmSpec):
     """Specification for SFT algorithm."""
 

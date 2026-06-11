@@ -16,7 +16,7 @@ else:
     ModuleDict = Any
 
 
-@register(arena=True)
+@register()
 @off_policy()
 class MADDPGSpec(MultiAgentRLAlgorithmSpec):
     """Specification for MADDPG algorithm."""

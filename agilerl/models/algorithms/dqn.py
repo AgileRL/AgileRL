@@ -16,7 +16,7 @@ else:
     EvolvableModule = Any
 
 
-@register(arena=True)
+@register()
 @off_policy()
 class DQNSpec(RLAlgorithmSpec):
     """Specification for DQN algorithm."""

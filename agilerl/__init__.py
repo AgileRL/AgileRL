@@ -1,11 +1,16 @@
 import warnings
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, metadata, version
+from pkgutil import extend_path
 from typing import TYPE_CHECKING
 
 import lazy_loader as lazy
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
+
+# Allow additional distributions (e.g. agilerl-arena) to contribute modules
+# under the shared `agilerl.*` namespace.
+__path__ = extend_path(__path__, __name__)
 
 if TYPE_CHECKING:
     from agilerl.training.trainer import ArenaTrainer, LocalTrainer

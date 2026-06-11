@@ -54,11 +54,9 @@ class RegistryEntry:
     """A single entry in the algorithm registry.
 
     :param spec_cls: The algorithm spec class.
-    :param arena: Whether the algorithm is available for training on Arena.
     """
 
     spec_cls: type[AlgorithmSpec]
-    arena: bool
 
 
 class AlgorithmRegistry:
@@ -71,20 +69,18 @@ class AlgorithmRegistry:
     def __init__(self) -> None:
         self._entries: dict[str, RegistryEntry] = {}
 
-    def add(self, name: str, spec_cls: type[AlgorithmSpec], *, arena: bool) -> None:
+    def add(self, name: str, spec_cls: type[AlgorithmSpec]) -> None:
         """Register a spec class under *name*.
 
         :param name: Algorithm name (e.g. ``"DQN"``).
         :type name: str
         :param spec_cls: The spec class to register.
         :type spec_cls: type[AlgorithmSpec]
-        :param arena: Whether the algorithm is available on Arena.
-        :type arena: bool
         """
         if name in self._entries:
             logger.warning("Overriding existing registration for algorithm %r", name)
 
-        self._entries[name] = RegistryEntry(spec_cls=spec_cls, arena=arena)
+        self._entries[name] = RegistryEntry(spec_cls=spec_cls)
 
     def get(self, name: str) -> RegistryEntry:
         """Look up an entry by algorithm name.
@@ -102,50 +98,29 @@ class AlgorithmRegistry:
             msg = f"No registry entry for algorithm {name!r}. Registered: {supported}"
             raise KeyError(msg) from err
 
-    def arena_algorithms(self) -> dict[str, RegistryEntry]:
-        """Return the Pydantic models for algorithms available on Arena.
-
-        :returns: The registry entries for Arena-eligible algorithms.
-        :rtype: dict[str, RegistryEntry]
-        """
-        return {k: v for k, v in self._entries.items() if v.arena}
-
-    def local_algorithms(self) -> dict[str, RegistryEntry]:
-        """Return the Pydantic models for algorithms available locally.
-
-        :returns: The registry entries for local-only algorithms.
-        :rtype: dict[str, RegistryEntry]
-        """
-        return {k: v for k, v in self._entries.items() if not v.arena}
-
 
 ALGO_REGISTRY = AlgorithmRegistry()
 
 
-def register(
-    arena: bool = False,
-) -> Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]:
+def register() -> Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]:
     """Class decorator that registers an algorithm spec.
 
     The registry key is derived from the spec class name by stripping
     the ``"Spec"`` suffix (e.g. ``DQNSpec`` -> ``"DQN"``).
-
-    :param arena: Whether the algorithm is available for training on Arena.
-    :type arena: bool
 
     :returns: The decorator function.
     :rtype: Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]
 
     Example::
 
-        @register(arena=True)
+        @register()
         class DQNSpec(RLAlgorithmSpec):
             ...
     """
 
     def decorator(spec_cls: type[AlgorithmSpec]) -> type[AlgorithmSpec]:
         name = spec_cls.__name__.removesuffix("Spec")
-        ALGO_REGISTRY.add(name, spec_cls, arena=arena)
+        ALGO_REGISTRY.add(name, spec_cls)
         return spec_cls
 
     return decorator

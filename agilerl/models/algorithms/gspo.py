@@ -9,7 +9,7 @@ from agilerl.models.algo import register
 from agilerl.models.algorithms.grpo import GRPOSpec
 
 
-@register(arena=True)
+@register()
 class GSPOSpec(GRPOSpec):
     """Specification for GSPO algorithm (GRPO with GSPO loss)."""
 

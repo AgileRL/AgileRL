@@ -58,9 +58,7 @@ llm = [
     "vllm==0.11.0; sys_platform == 'darwin'",
 ]
 arena = [
-    "httpx>=0.27,<1",
-    "python-keycloak>=4.0,<6",
-    "click>=8.3.0",
+    "agilerl-arena>=0.1.0",
 ]
 all = [
     "swig~=4.4.1; sys_platform != 'win32'",
@@ -73,13 +71,8 @@ all = [
     "vllm==0.13.0; sys_platform == 'linux'",
     "vllm==0.11.0; sys_platform == 'darwin'",
     "pydantic>=2.0,<3",
-    "httpx>=0.27,<1",
-    "python-keycloak>=4.0,<6",
-    "click>=8.3.0",
+    "agilerl-arena>=0.1.0",
 ]
-
-[project.scripts]
-arena = "agilerl.arena.cli:main"
 
 [dependency-groups]
 dev = [
@@ -100,6 +93,18 @@ docs = [
     "sphinx-toolbox~=4.1.2",
     "sphinxcontrib-googleanalytics~=0.5",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agilerl*"]
+exclude = ["agilerl.arena*"]
+namespaces = true
+
+[tool.uv.workspace]
+members = ["agilerl-arena"]
+
+[tool.uv.sources]
+agilerl-arena = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = [
@@ -130,8 +135,8 @@ markers = [
 ]
 
 [tool.coverage.run]
+source = ["agilerl", "agilerl-arena/agilerl"]
 parallel = true
-source = ["agilerl"]
 concurrency = ["multiprocessing", "thread"]
 sigterm = true
 
@@ -166,6 +171,7 @@ packages = ["agilerl"]
 exclude = ["tutorials"]
 
 [tool.ruff]
+src = ["agilerl", "agilerl-arena/agilerl"]
 target-version = "py310"
 line-length = 88
 extend-exclude = ["tests/assets/tiny_llm", "docs/_static/examples"]
@@ -192,7 +198,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"agilerl/**" = [
+"{agilerl,agilerl-arena/agilerl}/**" = [
     "D1",            # missing docstrings in public modules/classes/methods/packages
     "D205",          # 1 blank line between summary and description
     "D4",            # first line punctuation/period (conflicts with multi-line)
@@ -206,9 +212,9 @@ ignore = [
     "ERA001",        # commented-out code (kept for reference)
     "SLF001",        # private member access (torch/accelerate internals)
     "NPY002",        # legacy np.random
-    "TC001", "TC003",# type-checking block imports
+    "TC001", "TC002", "TC003",# type-checking block imports
     "A002",          # argument shadowing builtin (input)
     "PIE790",        # unnecessary ...
     "PD011",         # .values -> .to_numpy()
 ]
-"{tests,benchmarking,demos,tutorials}/**" = ["ALL"]
+"{tests,benchmarking,demos,tutorials,agilerl-arena/tests}/**" = ["ALL"]

@@ -16,7 +16,7 @@ else:
     EvolvableModule = Any
 
 
-@register(arena=True)
+@register()
 @off_policy()
 class TD3Spec(RLAlgorithmSpec):
     """Specification for TD3 algorithm."""

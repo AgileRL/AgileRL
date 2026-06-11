@@ -16,7 +16,7 @@ else:
     EvolvableModule = Any
 
 
-@register(arena=False)
+@register()
 @bandit()
 class NeuralUCBSpec(RLAlgorithmSpec):
     """Specification for NeuralUCB (Neural Upper Confidence Bound) algorithm."""

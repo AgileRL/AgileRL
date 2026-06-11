@@ -85,8 +85,8 @@ match the registered class name exactly.
      lr: 6.3e-4
      batch_size: 128
 
-:class:`~agilerl.models.manifest.ArenaManifest` rejects algorithms not marked ``arena=True`` in the
-registry (e.g. ``CQN``, ``NeuralUCB`` are not available for Arena training).
+Arena algorithm eligibility is validated by the manifest models in
+``agilerl-arena`` (``agilerl.arena.models``).
 
 2. ``environment``
 ^^^^^^^^^^^^^^^^^^
@@ -437,7 +437,7 @@ Training on Managed Cloud Infrastructure
 :class:`~agilerl.training.trainer.ArenaTrainer` submits the same
 manifest-based configuration to `Arena <https://arena.agilerl.com>`_, AgileRL's
 managed RLOps platform. The trainer validates the specified training configuration against the
-:class:`~agilerl.models.manifest.TrainingManifest`, then uses an
+:class:`~agilerl.arena.models.manifest.TrainingManifest`, then uses an
 :class:`~agilerl.arena.client.ArenaClient` to submit the job for training on a remote cluster.
 
 .. tip::
@@ -450,11 +450,13 @@ Pre-requisites
 Installation
 ^^^^^^^^^^^^
 
-Make sure you have the extra dependencies for Arena installed, available via:
+Make sure you have `agilerl-arena` installed, either directly or through the AgileRL extra:
 
 .. code-block:: bash
 
-  pip install agilerl[arena]
+  pip install agilerl-arena
+  # or
+  pip install "agilerl[arena]"
 
 
 Authentication

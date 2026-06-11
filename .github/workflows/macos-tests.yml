@@ -6,6 +6,7 @@ on:
         branches: [main, nightly]
         paths:
             - agilerl/**
+            - agilerl-arena/**
             - tests/**
             - .github/workflows/**
             - pyproject.toml
@@ -13,6 +14,7 @@ on:
         branches: [main, nightly]
         paths:
             - agilerl/**
+            - agilerl-arena/**
             - tests/**
             - .github/workflows/**
             - pyproject.toml
@@ -40,6 +42,7 @@ jobs:
               with:
                   enable-cache: true
                   python-version: ${{ matrix.python-version }}
+            - uses: taiki-e/install-action@just
 
             - name: Install dependencies
               run: |
@@ -47,4 +50,4 @@ jobs:
 
             - name: Test with pytest
               run: |
-                  uv run pytest --exitfirst --cov=agilerl --cov-report=term-missing --durations=0 --durations-min=1.0
+                  just test cov --exitfirst --cov-report=term-missing --durations=0 --durations-min=1.0

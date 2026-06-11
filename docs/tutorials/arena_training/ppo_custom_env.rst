@@ -13,12 +13,14 @@ Prerequisites
 Installation
 ~~~~~~~~~~~~
 
-Arena requires additional packages (``httpx``, ``rich``, etc.) that are not included in the
-base AgileRL installation. Install them with:
+Arena can be accessed through the `agilerl-arena` package, which requires additional packages (``httpx``, ``rich``, etc.) that are not included in the
+base AgileRL installation. Install it directly for lightweight dependencies, or through the AgileRL extra:
 
 .. code-block:: bash
 
-   pip install agilerl[arena]
+   pip install agilerl-arena
+   # or
+   pip install "agilerl[arena]"
 
 Authentication
 ~~~~~~~~~~~~~~
