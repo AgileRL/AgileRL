@@ -4407,9 +4407,29 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             ):
                 continue
             self._assert_not_sharded("Rebuilding LoRA adapters")
+            prior_dtypes = {
+                param_name: param.dtype
+                for param_name, param in peft_model.named_parameters()
+                if f".{name}." in param_name
+            }
             if name in peft_model.peft_config:
                 peft_model.delete_adapter(name)
             peft_model.add_adapter(adapter_name=name, peft_config=target_config)
+            # ``add_adapter`` creates weights in the base model's dtype;
+            # restore the fp32-adapter convention ``get_peft_model``
+            # established (match prior dtypes by name; fall back to fp32 for
+            # half-precision params of brand-new adapters).
+            for param_name, param in peft_model.named_parameters():
+                if f".{name}." not in param_name:
+                    continue
+                target_dtype = prior_dtypes.get(param_name)
+                if target_dtype is None and param.dtype in (
+                    torch.float16,
+                    torch.bfloat16,
+                ):
+                    target_dtype = torch.float32
+                if target_dtype is not None and param.dtype != target_dtype:
+                    param.data = param.data.to(target_dtype)
         if current_adapter in peft_model.peft_config:
             peft_model.set_adapter(current_adapter)
         else:
